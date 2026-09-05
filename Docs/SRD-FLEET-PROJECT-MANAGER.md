@@ -1,10 +1,12 @@
 # System Requirements Document — the fleet as the engineers, testers and reviewers of a `/ProjectManager` run
 
-**SRD-FLEET-PM-001 v0.2 — DRAFT FOR OWNER REVIEW**
-*v0.2 revises v0.1 after a review round that could not read the document (§0.8). Every incorporated
-finding was re-verified against the repository before acceptance; §0.9 lists what was accepted, what
-was rejected, and two errata in this document's own drafting. The most consequential change is §7.5:
-v0.1's coverage gate read a worker-authored number and said it was the host's.*
+**SRD-FLEET-PM-001 v0.3 — DRAFT FOR OWNER REVIEW**
+*v0.2 revised v0.1 after a review round that could not read the document (§0.8); its central
+correction was §7.5, where v0.1's coverage gate read a worker-authored number and called it the
+host's. **v0.3 revises v0.2 after the first review round with genuine 3-of-3 coverage** — verified
+host-side, by the method §7.5 now specifies. Its central correction is §6.2: v0.2's conflict
+resolution told a worker to rebase onto a commit its clone has no mechanism to reach. §0.9 carries
+the full review history, what was accepted, what was rejected, and this document's own errata.*
 Sits alongside `Docs/SRD.md` (SRD-PIFLEET-001) and `Docs/SRD-REVIEW-CONSOLE.md`
 (SRD-REVIEW-CONSOLE-001). It **consumes** the review console's collator dispatch rather than
 re-specifying it: §6.5 and §7.4 are readings of machinery that shipped in `2ccf851`, not
@@ -129,10 +131,17 @@ destructive verb**, and §8.2 makes checking it a precondition rather than a got
 **3. `tester` has no `write` tool and does not need one.** `fleet.yaml:659` gives the role
 `tools: [read, bash, grep, find, ls]`. A reader comparing it against `reviewer`'s
 `[read, write, grep, find, ls]` (`:588`) may conclude a second tester cannot write its result
-envelope. It can: `config/schema.ts` counts `{write, edit, bash}` as the writer set —
-`fleet.yaml:565-567` says so while explaining why `reviewer` needed `write` — and `bash` is how
-`tester` writes. This is recorded because getting it wrong would add a tool grant for no
-capability.
+envelope. It can, because `bash` can write files. This is recorded because getting it wrong would
+add a tool grant for no capability.
+
+> **v0.3 correction to this correction's evidence, and it is the sharper half.** v0.1 and v0.2
+> justified this by saying *"`config/schema.ts` counts `{write, edit, bash}` as the writer set"*.
+> **No such set exists in that file.** The phrase appears only as a claim inside a comment at
+> `fleet.yaml:566-567`, and this document repeated the comment as though it had read the code.
+> What `schema.ts` actually enforces is narrower: ISC-59's guard at `:1498-1536` refuses
+> `read_only: true` combined with **`bash` alone** — *"a shell can write; drop one"* — and it
+> checks neither `write` nor `edit`. The conclusion above survives unchanged; its stated grounds
+> did not, and the difference matters to anyone who goes looking for the set.
 
 **5. A `python` toolchain does not cost a worker `bun` — it is a strict superset of `node`.**
 `docker/Dockerfile:145` is `FROM toolchain-node AS toolchain-python` and `:118-119` installs bun in
@@ -149,8 +158,7 @@ bun until it is rebuilt — which is what makes §13's `image build` task load-b
 hygienic.
 
 **4. `run.max_concurrent: 1` does not serialise the console.** It bounds each **run**, and every
-attended pane is its own run (`operations-plan.ts:246-253`: *"N attended panes are therefore N
-runs"*). Four `development` seats are four runs of one worker each, so four seats generate
+attended pane is its own run (`operations-plan.ts:285`: *"N attended panes are therefore N runs"*). Four `development` seats are four runs of one worker each, so four seats generate
 concurrently. What actually bounds them is the vendor's rate limit and the operator's bill —
 `fleet.yaml:746-750` states it, and §5.3 keeps it out of scope.
 
@@ -217,7 +225,46 @@ to check the branch out in the operator's own checkout or to inline the text int
 collation's coverage is the collator's account, not the host's. And the round is the reason §12
 proposes a criterion that a review's target is reachable before the fan-out is issued.
 
-### 0.9 What v0.2 accepted from that review, and what it rejected
+### 0.9 Review history, and what each round changed
+
+**Round two had full coverage, and it is the first round of which that is true.** The document was
+checked out in the operator's own checkout, so all three lenses had both the SRD and the current code
+in `/workspace`. **Coverage was verified host-side by the method §7.5 specifies rather than by
+trusting the collation**: the journal at `<run>/relay/col-1/R-srd-fleet-pm-2.json` lists three
+children and three reply files exist. Host count and collator claim agreed — **§7.5's rewritten gate
+got its first live exercise and it held.**
+
+| Round | Coverage | What it produced |
+|---|---|---|
+| **1** (on v0.1) | **0 of 3 readable**, recorded as 1 of 3 — §0.8 | The §7.5 correction, the privilege widening, the staged-dispatch constraints, the concurrency gap. All verified by this author before acceptance |
+| **2** (on v0.2) | **3 of 3, verified host-side** | Four substantive findings, four citation errors, and an independent verification pass |
+
+**Round two also verified rather than only criticised**, which is worth recording because it is what
+a full-coverage round can do and a blind one cannot. `rev-ctx-1` re-checked this document's citations
+against the tree and confirmed §7.5's v0.2 correction as accurate and load-bearing, along with §2.1's
+worktree mechanism, §7.4's collation schema, §0.6's test-file citations, and §0.5 corrections 1 and 3.
+**The v0.2 self-correction of the `worktree.ts:852-855` miscitation was checked and upheld.** So the
+parts v0.2 fixed are holding, and the parts round two found are new ground rather than repeats.
+
+**On citation discipline, which round two made this document's most common defect.** Three of the
+findings were drifted line numbers — `operations-plan.ts:246-253` for text at `:285`, `up.ts:1045`
+for a call at `src/cli/commands/up.ts:1195`, and `fleet.yaml:80` for a key at `:79` — and a fourth
+was worse in kind: `config/schema.ts` was credited with a `{write, edit, bash}` writer set **that
+exists only as a claim inside a comment** (§0.5 correction 3). **A specification whose line numbers
+drift is one nobody can verify a second time**, and the fourth case shows the failure mode that
+matters most: repeating a comment's assertion as though the code had been read.
+
+**A fifth was reported and is false, and how it nearly landed is the point.** The claim that the
+tester's `tools:` grant sits at `fleet.yaml:660` rather than `:659` was accepted and patched in
+before it was checked; `awk` over the file shows `:659` is the grant and `:660` is `skills:`, so
+**v0.2's original citation was correct and the "fix" introduced the error.** It was caught by
+re-verifying every touched citation before commit and has been reverted. This is recorded because it
+is the same defect as the four above arriving from the opposite direction: **a correction accepted
+on authority is no better than a citation copied from a comment**, and the only remedy that works in
+either direction is opening the file. Every citation challenged in round two has been re-taken
+against the tree at `147b5d9`, and §14 carries the rule.
+
+### 0.9.1 What v0.2 accepted from round one, and what it rejected
 
 **Accepted, all verified against the repository before incorporation:** the coverage gate reads a
 worker-authored number (§7.5, the most consequential correction in this revision); the seat change is
@@ -244,6 +291,32 @@ re-layer as commit `2b96f8f`. **No such object exists in this repository.** The 
 *"Collator dispatch for the review console (ISC-431..ISC-521)"* — which is also this branch's base,
 so the re-layer is present in the tree this document sits on. A fabricated hash in a specification is
 worse than a missing one, and it is recorded here rather than silently replaced.
+
+### 0.9.2 What v0.3 accepted from round two, and what it rejected
+
+**Accepted, all re-verified against the tree before incorporation.**
+
+| Finding | Where it landed | What verification added |
+|---|---|---|
+| §6.2's conflict resolution is unimplementable | §6.2, §8.2 step 5 | **Stronger than reported.** The clone has no remotes at all, and `origin` is *deliberately* stripped (`worktree.ts:730-731`, rationale at `:54-59`) — confirmed on a live clone. So this is not a missing convenience, it is a confinement control the v0.2 text asked a worker to defeat |
+| §6.1.1 overstates the security argument | §6.1.1 bullet 4, §4.3 | Accepted and sharpened: the unmitigated part is that a `worktree` seat causes a write into the operator's own `.git/config`, opening a container-to-branch path `shared-ro` lacks — **the path §6.2 deliberately uses** |
+| §6.5 and §8.2 contradict each other on mount liveness | §6.5 | Accepted; §8.2 was right. `render.ts:471`/`:474` are bind mounts, so the view is live. This is what makes §8.2's precondition 7 a remedy rather than a console rebuild |
+| §6.4 step 7 rests on an unstated side effect | §6.4 | Accepted, and it earns its keep twice — the same re-clone is the mechanism §6.2's conflict recovery now uses |
+| Four citation errors, plus a fifth | §0.5, §2.4, §6.11, above | All four confirmed. The fifth (§0.5 correction 3) was the worst in kind and is now corrected to what `schema.ts` actually enforces |
+
+**Rejected from round two: one, and it is the smallest and most instructive of the set.** The claim
+that the tester's `tools:` line is at `fleet.yaml:660` is false — it is at `:659`, where v0.2 had it,
+and `:660` is `skills:`. **The claim was accepted and patched in before being verified**, then caught
+by the pre-commit re-check described above. Every one of the eight substantive findings held; the
+only thing that did not was a correction to a citation that was already right.
+
+**One item was accepted with its scope corrected rather than as stated.** The review framed the
+isolation change as "`shared-ro` to `worktree` IS a containment boundary", which reads as a
+straightforward loosening. §6.1.1 records something more specific: the two isolations are *differently*
+contained — `shared-ro` forbids writing but exposes the operator's real tree read-only, while
+`worktree` hides that tree and grants a writable copy. **The genuine, unmitigated widening is
+narrower and sharper than "less contained": it is the host-side `.git/config` write and the fetch
+path it creates.**
 
 ---
 
@@ -419,7 +492,8 @@ outbox, *"because `/outbox` is the directory the WORKER owns"* (`:45-62`).
 
 ### 2.4 The launch directory becomes the run's repository, and a restart cannot change it
 
-`resolveLaunchRepo` (`container/mounts.ts:393-398`, called from `up.ts:1045`) assigns the launch
+`resolveLaunchRepo` (`container/mounts.ts:393-398`, called from
+`src/cli/commands/up.ts:1195`) assigns the launch
 directory to `run.repo`, overriding `fleet.yaml`. Two cases fall back to the configured value:
 launching from inside the fleet's own repo, and launching from a directory that is not a git
 checkout. `~/.claude/skills/fleet/Workflows/Consoles.md:22-24` calls this *"the single most
@@ -575,11 +649,14 @@ and credentials already are, and §10 D3 records the alternative that was reject
 named it.** Isolation is per worker, so the console's exposure scales with its seat count and its
 seats' grants — and §6.1's seat change raises both. `rev-1` was `shared-ro` with no `bash` and no
 egress; `tst-2` inherits `run.isolation: worktree`, holds `bash`, and carries `egress_access: true`.
-**The console goes from three shell-capable seats to four, from one egress seat to two, and loses
-its only seat that could not run a shell.** §6.1.1 argues why that is acceptable — in short, a tool
-grant was never the boundary and the egress grant widens a route rather than a destination — but the
-widening is real, it is this section's second entry, and it should not be discovered later by
-someone counting containers.
+**The console goes from three shell-capable seats to four, from one egress seat to two, loses its
+only seat that could not run a shell, and — the axis v0.2 missed — replaces a `shared-ro` seat with a
+`worktree` one.** §6.1.1 argues the first three: a tool grant was never the boundary, and the egress
+grant widens a route rather than a destination. **It does not argue the fourth, because the fourth is
+not arguable away.** A `worktree` seat holds a writable clone and causes a remote to be written into
+the operator's own `.git/config`, opening a path from the container to the operator's branch that
+`shared-ro` does not have. That path is the one §6.2 uses deliberately, which makes it this
+document's clearest example of isolation being a cost rather than only a benefit.
 
 ### 4.4 §5.9 and `hosted_repo_consent` — the disclosure gate fires per repository
 
@@ -711,11 +788,16 @@ one.
 
 **The argument that it is nonetheless the right trade, in three parts.**
 
-1. **The lost read-only seat was never a boundary.** `Docs/SRD.md` §12.1 is explicit that *"Tool
-   scope is not a boundary — the container is"*, and `fleet.yaml:723-726` applies it to this exact
-   seat: a tool grant is not what bounds a worker. `rev-1` holding no `bash` made it a *weaker*
-   worker, not a *fenced* one; the container was doing the fencing either way. **Removing it forfeits
-   no containment.**
+1. **On the TOOL axis, the lost read-only seat was never a boundary.** `Docs/SRD.md` §12.1 is
+   explicit that *"Tool scope is not a boundary — the container is"*, and `fleet.yaml:723-726`
+   applies it to this exact seat: a tool grant is not what bounds a worker. `rev-1` holding no
+   `bash` made it a *weaker* worker, not a *fenced* one; the container was doing the fencing either
+   way. **Removing the tool grant forfeits no containment.**
+
+   > **v0.2 stopped there and overstated the result. The claim covers the tool axis only.** The seat
+   > change also moves the **isolation** axis — `shared-ro` to `worktree` — and that one is a real
+   > containment change rather than a tool grant. §6.1.1's third bullet now carries it as an
+   > unmitigated cost instead of letting this bullet absorb it.
 2. **The egress widening is a route, not a destination.** `egress_access: true` grants a path to the
    CONNECT proxy; `egress.allow` remains the ceiling and is unchanged (`fleet.yaml:661-672` says
    so: *"Widens no destination; the allowlist is still the ceiling"*). The set of reachable hosts is
@@ -725,10 +807,21 @@ one.
    job.** A tester that cannot run a test runner is not a tester. This is the same grant `tst-1`
    already holds, in the same console, on the same repository.
 
+4. **The isolation change is a real containment change, it is NOT mitigated, and it is the one this
+   design actively depends on.** `shared-ro` mounts the operator's checkout read-only
+   (`render.ts:474`) and produces no clone, no branch and no host-side side effect. `worktree`
+   mounts a private clone read-write (`:471`), widens it `a+rwX` (`mounts.ts:216`), and causes `up`
+   to **write a remote into the operator's own `.git/config`** (`registerWorkerRemote`). That last
+   one is the point: it opens a data path from inside the container to the operator's branch, which
+   `shared-ro` does not have at all. **§6.2's whole integration model is built on that path.** So
+   this is not a widening the design tolerates — it is a widening the design *uses*, and it cannot
+   be argued away on the §12.1 grounds that answer the tool axis.
+
 **What this costs, stated so it is not discovered later: the `development` console after this change
-has four containers that can each run a shell against a clone of the operator's repository, two of
-which can reach the package registries.** That is the blast radius, it is larger than before, and
-§4.3 now carries it as per-worker isolation's second real cost. **If the owner does not accept it,
+has four containers that can each run a shell against a writable clone of the operator's repository,
+two of which can reach the package registries, and each of which has a host-side fetch path into the
+operator's branch.** That is the blast radius, it is larger than before on three axes rather than
+two, and §4.3 carries it as per-worker isolation's second real cost. **If the owner does not accept it,
 the withdrawal is cheap and specific** — keep `rev-1`, take §6.1's other four requirements, and
 accept the two-review-mechanism problem this section opened with.
 
@@ -794,14 +887,48 @@ measured RCE). Neither is available and neither should be built for this.
 **Why not a shared branch.** Finding B. There is no shared checkout to hold one, and the branch name
 in an envelope is derived rather than read (`worktree.ts:488-530`).
 
-**Conflict resolution, which is the part a design can get wrong by not mentioning it.** A merge that
-conflicts is resolved **by dispatching a fix task to one of the engineers, not by the orchestrator
-editing the tree.** The orchestrator aborts the merge, and dispatches to the engineer whose branch
-merged *second* a brief naming the conflicting hunks and the other engineer's commit — that worker
-then rebases inside its own clone and the fetch is retaken. The orchestrator resolving it itself is
-available and is refused for one reason: **it makes the orchestrator an author, and every line it
-writes is a line no reviewer was told to look at.** §11 Q5 records that this is untested at more than
-two engineers.
+**Conflict resolution, and v0.2's answer here was not implementable.**
+
+> **v0.2 said the second engineer *"rebases inside its own clone"*. It cannot.** A worker's clone has
+> **no remotes at all** — `origin` is stripped immediately after the clone
+> (`worktree.ts:730-731`), and `:54-59` gives the reason: *"Nothing fetches or pushes through it, and
+> leaving it records the host's absolute repository path inside a config file the worker can read — a
+> gratuitous disclosure of the host layout to the confined party."* Verified on a live clone:
+> `git remote -v` returns nothing. So the other engineer's commit is not merely un-fetched, it is
+> **unreachable by construction**, and a fix brief telling a worker to rebase onto it describes an
+> operation with no available mechanism. The loop would stall with the worker reporting `blocked` at
+> best, and inventing a resolution at worst.
+
+**The mechanism that does work is one this document already relies on elsewhere: the re-clone.**
+A `--restart` produces a new run id and therefore a **fresh clone taken from the launch directory as
+it currently stands** (§6.4's note on step 7). So the host does not move a commit into a worker — it
+moves the **base** the worker starts from:
+
+1. The orchestrator aborts the conflicted merge (`git merge --abort`). The integration branch keeps
+   engineer 1's work and nothing else.
+2. It checks the integration branch out in the operator's own checkout, so the launch directory now
+   contains engineer 1's changes.
+3. It restarts engineer 2 (`scripts/development --restart eng-2 --task …`). **The fresh clone
+   contains engineer 1's work as ordinary history**, because it was cloned from a tree that has it.
+4. The brief re-states engineer 2's original partition, and adds the conflicting files by name so the
+   worker knows where the two changes meet.
+
+**Engineer 2 redoes its partition on a base that already contains the other half.** That is what a
+rebase would have achieved, performed by re-cloning rather than by giving a confined container a
+remote.
+
+**The cost, stated: engineer 2's original commits are discarded and its work is paid for twice.**
+That is real and it is the argument for §6.3's disjoint partition being the design rather than the
+optimisation.
+
+**One cheaper mechanism was considered and rejected.** The host owns the clone's path, so it could
+run `git -C <clone> fetch <parent-path> <branch>` and then dispatch a genuine rebase, preserving
+engineer 2's commits. It is rejected twice over: it writes the host's absolute repository path into
+a config file the worker can read, which is the exact disclosure `worktree.ts:54-59` strips `origin`
+to prevent; and it mutates a checkout underneath a live worker. **The orchestrator resolving the
+conflict itself is refused separately and for a different reason: it makes the orchestrator an
+author, and every line it writes is a line no reviewer was told to look at.** §11 Q5 records that
+none of this is tested at more than two engineers.
 
 **The split that makes conflicts rare is §6.3's, and it is the real mitigation.** Conflict resolution
 is the fallback; disjoint file ownership is the design.
@@ -854,12 +981,26 @@ does, and it would catch it after the tokens were already spent.
 | 4 | `scripts/development --restart eng-1 --task <env>` and the same for `eng-2` | **host → containers** | Recreate-then-dispatch, so each engineer starts on a fresh session (`fresh-dispatch.ts:1-17`'s measured reason) |
 | 5 | Wait for both, then `pifleet artifacts` each | **host** | §9.1 covers a stall |
 | 6 | Fetch and merge both engineer branches onto the integration branch | **host** | §6.2 |
-| 7 | `scripts/development --restart tst-1 --task <env>` and `tst-2` | **host → containers** | **After** the merge, so each tester's clone contains both engineers' work |
+| 7 | `scripts/development --restart tst-1 --task <env>` and `tst-2` | **host → containers** | **After** the merge — and it works only because of the re-clone below |
 | 8 | Wait, harvest, fetch and merge both tester branches | **host** | Same as 5-6 |
 | 9 | `cd <repo> && scripts/review` and dispatch `col-1` a review request naming the integration branch | **host → review console** | §6.5 |
 | 10 | Read the collation; branch on §7.5's verdict | **host** | CHANGES_REQUESTED loops to step 4 with a fix partition; `max_review_iterations` bounds it |
 | 11 | Push the integration branch; `gh pr create`; `gh pr checks --watch` | **host** | §6.7 |
 | 12 | Merge, version bump, docs, `/compact`, next phase | **host** | Under D2 (§10) the PR is opened once at the end, not per phase |
+
+**Step 7 rests on a side effect v0.2 never stated, and it is load-bearing in two places.**
+`--restart` tears the worker's run down and brings it back in a **new run id**
+(`fresh-dispatch.ts:213-234` waits for a run id not in the previous set), and `up` builds a worker's
+clone per run from the launch directory **as it currently stands**. So a restarted tester gets a
+**fresh clone that already contains whatever the host merged in step 6** — no fetch, no rebase, no
+remote. That same property is what makes §6.2's conflict recovery possible at all.
+
+> **And it says what a tester that is NOT restarted gets: its previous run's clone, taken at the
+> previous phase's base.** Such a worker tests code from before this phase's merges, reports
+> truthfully about what it ran, and is graded against a diff that looks correct — **a green result
+> about the wrong tree.** This is the same failure class as the launch-directory error in
+> `SKILL.md`'s gotchas, reached from the other direction, and it is the reason §8.2 dispatches
+> testers through `--restart … --task` rather than into an existing session.
 
 **Steps 4 and 7 are sequential and steps 4a/4b are parallel.** Two engineers are dispatched in one
 message and run concurrently; the testers wait because a tester dispatched before the merge tests
@@ -934,8 +1075,17 @@ a session that polls forever because the relay died is §9.3's failure with no t
 
 **The review target is a branch, and the lenses see it as a working tree.** Reviewers are
 `isolation: shared-ro` (`fleet.yaml:591`), so `/workspace` is the operator's checkout mounted `:ro`
-— **the checkout as it stands when `up` ran, at whatever ref it is on.** §6.7 resolves what that
-means for reviewing a *diff*.
+(`render.ts:474`) — **a live bind mount, showing whatever ref the checkout is on right now.**
+§6.7 resolves what that means for reviewing a *diff*.
+
+> **v0.2 said "as it stands when `up` ran". That is wrong and the correction is load-bearing.** A
+> bind mount is a view of the host directory, not a copy taken at launch, so a host-side `git
+> checkout` changes what every reviewer sees **without a restart**. Measured twice during this
+> document's own review rounds: the lenses saw `d70acf4` the moment #147 merged, and saw this SRD
+> the moment its branch was checked out — neither needed a pane restart. **This is precisely what
+> makes §8.2's precondition 7 work**: "check the branch out before dispatching the review" is a
+> remedy only because the mount is live. Under v0.2's reading the remedy would have required
+> recreating the console, which is the destructive verb.
 
 ### 6.6 Supervision and idempotency — the run tree is authoritative and the state file is a cursor
 
@@ -1204,7 +1354,7 @@ criterion.
 
 **The bound is absent for two independent reasons, and the second is stronger than "per-run".**
 
-1. **Scope.** `run.max_concurrent` and `run.budget` are per-run: the `BudgetManager` is *"ONE of
+1. **Scope.** `run.max_concurrent` and `run.budget` are per-run (`fleet.yaml:79`): the `BudgetManager` is *"ONE of
    these per run … not one per worker"* (`orchestrate/scheduler.ts:174-178`), its state file is
    `<run>/budget.json` (`paths.ts:210`), and it **refuses to adopt another run's spend** —
    *"budget.json belongs to run '…', not '…'"* (`safety/budget.ts:110`). Four attended panes are
@@ -1223,7 +1373,8 @@ fleet's own comments say the equivalent from the other direction (`operations-pl
 is six concurrent requests. That is a throughput decision the operator makes by opening this
 console"* — but those are observations, not limits.
 
-**The `tokens_ceiling: 6000000` in `fleet.yaml:80` therefore does not bound a ProjectManager run.**
+**The `tokens_ceiling: 6000000` at `fleet.yaml:79` therefore does not bound a ProjectManager
+run.**
 An operator reading that line as this feature's spending limit would be wrong, and that is worth
 stating because it is the natural reading.
 
@@ -1658,10 +1809,23 @@ cd <repo> && git fetch worker-eng-2 <branch> && git merge --no-ff FETCH_HEAD
 ```
 
 `commitsAhead: 0` means that worker committed nothing — check its envelope before
-merging nothing and calling it done. On a CONFLICT: `git merge --abort`, then dispatch a
-rebase task to the engineer whose branch merged second, naming the conflicting hunks and
-the other engineer's commit. **Do not resolve it yourself** — every line you write is a
-line no reviewer was told to look at.
+merging nothing and calling it done.
+
+**On a CONFLICT, move the BASE, not the commit.** A worker's clone has no remotes —
+`origin` is stripped at clone time — so it cannot fetch the other engineer's work and
+cannot rebase onto it. Telling it to is an instruction with no mechanism:
+
+```bash
+cd <repo> && git merge --abort
+cd <repo> && git checkout <integration-branch>     # now holds engineer 1's work
+cd <repo> && ~/repos/cmux-fleet/scripts/development --restart eng-2 --task <redo.json>
+```
+
+The restart re-clones from the checkout as it now stands, so engineer 2's fresh
+`/workspace` already contains engineer 1's changes. Re-state its original partition and
+name the conflicting files. Its earlier commits are discarded — that is the cost, and it
+is why the partition rule exists. **Do not resolve the conflict yourself** — every line
+you write is a line no reviewer was told to look at.
 
 Write the integration record. Then repeat steps 2-5 for `tst-1` and `tst-2` — AFTER the
 merge, so each tester's clone holds both engineers' work.
@@ -1725,6 +1889,14 @@ dispatch fixes exactly as in step 7.
   minutes the command refuses and the fleet is exactly as it was found. That is the safe
   outcome. Do not reach for a bare `--restart` to get around it — that one is
   destructive and needs the user's word.
+- **A worker's clone has NO remotes.** `origin` is stripped after the clone, deliberately,
+  so the host's path is not disclosed to the container. A worker therefore cannot fetch,
+  pull, rebase onto another worker's branch, or push. Any brief that assumes it can will
+  stall. Move the base by restarting the worker instead.
+- **A tester that is not restarted between phases tests the previous phase.** Its clone
+  is from its previous run, taken at the previous base, so it never saw this phase's
+  merge. It will report truthfully about the wrong tree and nothing will look wrong.
+  Always `--restart … --task` a tester after an integration merge.
 - **A lens cannot run git. It has no shell.** Reviewer seats are `shared-ro` with
   `[read, write, grep, find, ls]`, so `/workspace` is the operator's checkout at
   whatever ref it is on and nothing can move it. A brief saying "run `git show X`" gets
@@ -1880,7 +2052,7 @@ deferred until every dispatched lens has been read or declared unreadable"* — 
 
 ### 9.5 The review loop exceeds `max_review_iterations`, or CI fails
 
-**Review deadlock.** `max_review_iterations` defaults to 3 (`ProjectManager/SKILL.md:277`). On the
+**Review deadlock.** `max_review_iterations` defaults to 3 (`~/.claude/skills/ProjectManager/SKILL.md:278`). On the
 third CHANGES_REQUESTED the loop **stops and reports**, and it reports three specific things rather
 than "review failed": the findings that survived every round with their `raised_by` sets, the
 findings that appeared only in the last round (which are usually the fix's own defects), and the
@@ -2235,6 +2407,19 @@ Proposed new criteria, by area:
   over the generated envelopes; either would be refused by `graph.ts` at exit 2 or rejected as
   `pane_mode_tui_is_not_auto_schedulable`.*
 
+**The re-clone is a mechanism, not a coincidence (v0.3, §6.2, §6.4)**
+- A restarted worker's clone contains whatever the host merged before the restart. *Probe: merge a
+  commit into the launch directory, restart a worker, and assert the commit is an ancestor of that
+  worker's new clone's `HEAD`. **This is the property both the tester sequencing and the conflict
+  recovery depend on, and neither says so without it.***
+- **Anti: a worker's clone has no remotes.** *Probe: after `up`, `git -C <clone> remote` is empty for
+  every worker. This pins `worktree.ts:730-731`'s deliberate `origin` strip, and it is what makes a
+  brief telling a worker to fetch or rebase unimplementable — the defect v0.2's §6.2 contained.*
+- **Anti: a tester dispatched without a restart is refused or flagged.** *Probe: dispatch into an
+  existing tester session after an integration merge and assert the workflow reports the clone is
+  older than the merge. A green result about the previous phase's tree is the failure being
+  prevented.*
+
 **Identity and attribution**
 - Every commit a worker makes carries the configured identity — **asserted as an exact value, not as
   "a commit succeeded"**. *Probe: after a dispatched task, `git log -1 --format='%an <%ae>'` on the
@@ -2481,3 +2666,11 @@ rule.
   launch-directory rule and the gotchas this document extends.
 - `.claude/project-manager-state.json` on `feature/harvest-recovery` — the state file practice
   already reached.
+
+**A rule for maintaining this document, added in v0.3 because round two showed it was needed.**
+Four of that round's eight findings were drifted line numbers and a fifth credited a source file with
+a rule that exists only in a comment. **Whenever a section is edited, re-take every citation inside
+it against the current tree**, and cite the file the behaviour is *in* rather than the file a comment
+*says* it is in. Citations in this revision were re-taken at `147b5d9`. A specification whose
+references cannot be followed a second time is one whose claims cannot be rechecked, and this
+document's central correction in both v0.2 and v0.3 was found by following a citation.
