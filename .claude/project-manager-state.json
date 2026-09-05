@@ -334,5 +334,21 @@
     "pm_own_error": "0c21634 SHIPPED TWO DEAD MUTATION BATTERIES. It reformatted code that envelope-attribution and unrecognised-outbox anchor to, so their anchors had been matching nothing since; I reported that commit's suite green. Found only because today's edits made the guard fire again. Both re-anchored and RE-RUN in an isolated worktree: E12/E13/E14 and M18 all still kill. M16 remains the known pre-existing survivor \u2014 and it is the same TOCTOU class as finding A, at the listing call site.",
     "second_degenerate_probe": "My anchor-checking script matched ZERO anchors and then reported '0 bad'. Discarded. That is twice in one session that a probe of mine reported success by measuring nothing.",
     "isa_filed": "ISC-511..517 appended; frontmatter 489/501 -> 495/508, updated 2026-09-05. ISC-517 is the [~] tripwire for the lost lens, pinned to the ABSENCE of the harvest swallow so fixing it forces the re-grade."
+  },
+  "lost_lens_root_cause_2026_09_05": {
+    "STATUS": "ROOT-CAUSED AND FIXED. Proven by fixing and re-reading the real production run tree: rev-lang-1 goes verdict=unknown/envelopeRead=refused -> verdict=success/envelopeRead=ok with no other change, and the two control seats are unchanged.",
+    "cause": "rev-lang-1 declared artifacts:[{kind:'file',path:'files/review.md'}] \u2014 RELATIVE. rev-arch-1 and rev-ctx-1 declared '/outbox/<task-id>/files/review.md' \u2014 absolute. containerPathToHost matches only the mount table ('/outbox' -> workerOutboxDir), a relative path matches no mount, so artifactPathProblem returned 'outside the mount table' for a file that was inside the outbox.",
+    "amplifier": "harvest/outbox.ts:693 \u2014 `if (problem !== null) return {kind:'refused'}` inside the artifacts loop refuses the WHOLE envelope. One malformed pointer discarded the verdict, the summary and fourteen findings, two of them HIGH.",
+    "concealer": "The relay adapter mapped envelopeRead 'refused' to undefined, so missingLensNote took the envelope===null branch and printed 'settled unknown; no report reached the collator' \u2014 which reads as a reviewer that produced nothing. Closed hours earlier as finding D/ISC-515, and that fix is the only reason this was diagnosable.",
+    "fix": "artifactPathProblem resolves a relative artifact path against the task outbox before the mount-table lookup. Lexical; the escape check is unchanged, so traversal still refuses and now names the escape rather than the mount table. Two mutations, both killed \u2014 exempting relative paths from the escape check reddens exactly the traversal probe.",
+    "why_the_same_seat_twice": "Not the seat. Non-deterministic agent output: nothing in the contract forces the absolute spelling, the reviewer SKILL.md shows an absolute example but its prose says a path must 'resolve inside your outbox', which the relative form satisfies under its single reading.",
+    "hypotheses_falsified": [
+      "relay stdout buffering \u2014 bun flushes to a file immediately (probed)",
+      "envelope landing after the task record \u2014 measured backwards, envelope precedes it by 8/18/11s across the three seats",
+      "an artifact size cap \u2014 planInlineBudget truncates rather than throws",
+      "the Promise.allSettled harvest swallow \u2014 this was the ISA entry's original accusation and two reviewers' independent reading, and it was WRONG"
+    ],
+    "pm_own_error": "My first harvest probe called runPaths(root, runId) with the arguments reversed \u2014 the signature is runPaths(runId, root). It built a garbage path and returned the identical 'no dispatch record' for the seat that SUCCEEDED, which is why it was discarded as degenerate. Correcting the argument order produced the diagnosis in a single read. The degenerate probe cost roughly a day of wrong hypotheses.",
+    "still_open": "The harvest swallow at relay.ts:915-920 still discards a rejected transport.harvest with its reason. Never observed to lose anything; real on inspection. ISC-517 stays [~] and now names it as an open second route rather than as the diagnosis."
   }
 }

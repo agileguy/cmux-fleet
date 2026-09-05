@@ -494,9 +494,32 @@ function artifactPathProblem(p: string, loc: OutboxLocation): string | null {
   if (control !== null) return control;
   const separator = backslashProblem(p, "artifact path");
   if (separator !== null) return separator;
-  const host = containerPathToHost(p, loc);
-  if (host === null) return `artifact path ${p} is outside the mount table`;
   const taskOutbox = join(loc.workerOutboxDir, loc.taskId);
+  /**
+   * A RELATIVE ARTIFACT PATH IS RESOLVED AGAINST THE TASK OUTBOX, and this is
+   * the fix for a lost review rather than a convenience.
+   *
+   * **MEASURED.** Three reviewers wrote the same review to the same place. Two
+   * named it `/outbox/<task-id>/files/review.md` and were accepted; the third
+   * named it `files/review.md` and its ENTIRE envelope was refused — verdict,
+   * summary and fourteen findings, two of them HIGH, discarded over the
+   * spelling of one pointer. `containerPathToHost` matches only against the
+   * mount table, a relative path matches no mount, and the refusal that came
+   * back said "outside the mount table" of a file sitting inside the outbox.
+   *
+   * **This widens nothing that can be READ.** The resolution is lexical, and
+   * the escape check below is unchanged and still runs: `../../etc/passwd`
+   * resolves and is then refused by `resolvedWithin`, with the accurate message
+   * rather than the mount-table one. What changes is only which SPELLING of an
+   * in-outbox path is accepted — and the worker's own skill doc says the
+   * requirement is that a path "resolve inside your outbox", which this one
+   * does under the single reading a relative path has.
+   *
+   * The task outbox is the right base and not `/outbox`: `files/` is the
+   * directory the skill tells a worker to write into, and it is per-task.
+   */
+  const host = isAbsolute(p) ? containerPathToHost(p, loc) : join(taskOutbox, p);
+  if (host === null) return `artifact path ${p} is outside the mount table`;
   const inOutbox = resolvedWithin(taskOutbox, host);
   const inWorktree = loc.hostWorkdir !== null && resolvedWithin(loc.hostWorkdir, host);
   if (!inOutbox && !inWorktree) {

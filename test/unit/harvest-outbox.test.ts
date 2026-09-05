@@ -445,6 +445,42 @@ describe("readResultEnvelope — identity binding", () => {
 });
 
 describe("readResultEnvelope — ISC-120 path containment", () => {
+  /**
+   * THE LOST REVIEW, as a fixture.
+   *
+   * Three reviewers wrote the same review to the same directory. Two named it
+   * `/outbox/<task-id>/files/review.md`; the third named it `files/review.md`
+   * and its whole envelope was refused — verdict, summary and fourteen
+   * findings discarded, and the refusal said "outside the mount table" of a
+   * file that was inside the outbox. The mount table only knows absolute
+   * container paths, so a relative one matched nothing.
+   */
+  test("a relative artifact path resolves against the task outbox", async () => {
+    await writeEnvelope(envelopeJson({ artifacts: [{ kind: "file", path: "files/review.md" }] }));
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("ok");
+  });
+
+  /**
+   * THE ASYMMETRIC HALF, and the only reason the test above is worth running.
+   * Resolving a relative path must not become a way to leave the outbox: the
+   * escape check is unchanged and still runs, and the refusal it gives names
+   * the escape rather than the mount table.
+   */
+  test("a relative path that climbs out is still refused, and says so accurately", async () => {
+    await writeEnvelope(
+      envelopeJson({ artifacts: [{ kind: "file", path: "../../../../etc/passwd" }] }),
+    );
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("refused");
+    if (r.kind === "refused") {
+      expect(r.reason).toContain("escapes the task outbox");
+      // The old message would be actively misleading here: it was never about
+      // the mount table, and saying so sent a reader to the wrong question.
+      expect(r.reason).not.toContain("outside the mount table");
+    }
+  });
+
   // Would fail if artifact paths stopped being validated before use: the
   // §12.5 exfiltration primitive, verbatim.
   test("an artifact naming /Users/dan/.env is refused", async () => {
