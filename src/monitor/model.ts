@@ -176,6 +176,72 @@ export interface WorkerRow {
    * enclosing region carries.
    */
   readonly fence: FenceView | null;
+  /**
+   * WHICH WORKSPACE `up` BROUGHT THIS WORKER UP IN — `presentation.json`'s
+   * `workspace_ref`, carried verbatim.
+   *
+   * ## Why the record and not cmux
+   *
+   * The obvious source is cmux itself: enumerate workspaces, list their panes,
+   * map pane back to worker. **That source is wrong here, and the reason is
+   * this project's own operating rule** — *"the consoles are not the fleet.
+   * Workers survive a closed cmux window; `status --all` is the truth, a
+   * visible pane is not."* A worker whose window the operator closed an hour
+   * ago is still running, still holding an epoch, and still the row most worth
+   * finding; cmux no longer knows it exists. Grouping by what cmux can see
+   * would drop exactly those workers, at exactly the moment the monitor earns
+   * its keep.
+   *
+   * `presentation.json` is written once by `up` (`cli/commands/up.ts:2224`) and
+   * is IMMUTABLE thereafter (§2.7). It is a fact on disk, so a closed window, a
+   * quit cmux and an uninstalled cmux are all the same to it. It also costs
+   * nothing: `read/worker.ts` already parses that file for the activity
+   * ladder, so this field adds no read, no subprocess, and no import — which
+   * keeps ISC-469's pin at one spawning module rather than making the viewer
+   * shell out to a second tool.
+   *
+   * ## `null` is a real population, not a defensive branch
+   *
+   * MEASURED across the operator's own 226 run directories on 2026-09-04: of
+   * 183 `presentation.json` records, **81 carry `workspace_ref: null`** — a
+   * headless run, a record written before the field existed, or a
+   * presentation that could not be read at all. `null` means *no workspace was
+   * ever recorded for this worker*, which is a positive fact about the record
+   * and NOT a claim that the worker is detached, dead or unreachable.
+   *
+   * It is never defaulted. There is no permissive value to fall back to, and a
+   * worker filed under a console it was never in is worse than one filed under
+   * none — the same argument {@link DispatchVia} makes for refusing to default
+   * to `"rpc"`.
+   */
+  readonly workspace: string | null;
+  /**
+   * The workspace's HUMAN NAME — `presentation.json`'s `workspace_name`, which
+   * is cmux's `custom_title` and round-trips the `--name` pifleet created the
+   * workspace with.
+   *
+   * ## It LABELS, it never IDENTIFIES — and the split is the whole point
+   *
+   * {@link WorkerRow.workspace} is the group KEY: a UUID, unique and stable.
+   * This is the group's LABEL. Grouping on the name instead would merge two
+   * distinct workspaces that happen to share a title, and nothing stops an
+   * operator from having two called `review`. So identity stays the ref and the
+   * name is only ever what gets printed.
+   *
+   * ## `null` is the ordinary case today, and the view falls back to the ref
+   *
+   * Recorded only when pifleet created and named the workspace. On the
+   * `up --attach-here` path — which is EVERY run on the operator's disk
+   * (measured 2026-09-04: 179 of 179 carry `backend: headless` with
+   * `adopted_terminal: true`) — the workspace is one cmux already owned, and
+   * all pifleet learns is the UUID in `CMUX_WORKSPACE_ID`; the installed cmux
+   * exports no name variable at all. Every record written before the field
+   * existed is `null` too.
+   *
+   * **A name is never invented to fill this.** A UUID is obviously an
+   * identifier; a fabricated label reads as a fact.
+   */
+  readonly workspaceName: string | null;
 }
 
 /** One live run and the workers under it. */
@@ -194,7 +260,6 @@ export interface FleetModel {
   readonly runs: Region<readonly RunRow[]>;
   /** Container names `docker ps` reported, on the slow clock only (D7). */
   readonly containers: Region<readonly string[]>;
-  readonly git: Region<GitStrip>;
   /** Epoch millis the frame is being rendered at; the only paint-time value. */
   readonly now: number;
   /** Terminal width the frame must fit (D14, ISC-484, ISC-485). */
@@ -230,24 +295,6 @@ export interface FleetModel {
   readonly report: Region<readonly string[]>;
 }
 
-/**
- * The git strip's content (§6.8, D12, ISC-486).
- *
- * All five properties the incumbent had are carried. **Which half is shown by
- * default was REVERSED by the owner on 2026-09-02 (Q8): status first, commits
- * behind `[c]`** — dirty paths change and a commit list on an idle branch does
- * not. `commitsExpanded` is the view state that decides which; both halves are
- * always present in the model, so expanding costs no read.
- */
-export interface GitStrip {
-  /** `git status --short --branch`'s first line. The `--branch` flag is the point. */
-  readonly branchLine: string;
-  readonly statusLines: readonly string[];
-  readonly commitLines: readonly string[];
-  /** `watchDir` — the repository being watched, which need not be this one. */
-  readonly watchDir: string;
-  readonly commitsExpanded: boolean;
-}
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Views 2-4 and the selection model (§6.2, D8, §5.3).

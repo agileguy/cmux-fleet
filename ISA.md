@@ -3,11 +3,11 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 489/501
+progress: 499/512
 retired: 2
 mode: build
 started: 2026-07-27
-updated: 2026-09-03
+updated: 2026-09-05
 ---
 
 # cmux-fleet — Ideal State Artifact
@@ -1482,6 +1482,104 @@ the root-cause classification; this table is the index.
 
 ## Changelog
 
+- **conjectured:** an actor whose state is derived entirely from the run tree needs no
+  supervision beyond being started again — *"idempotency IS the supervision story"*. §6.5's
+  objection to a script-started process is that it has *"no story for what happens when it dies
+  mid-fan-out"*, and the journal answers that completely: nothing is recorded until the children
+  are dispatched, so a killed relay re-dispatches rather than losing a review.
+  **refuted by:** the lifecycle review, reading the code I had just written. The answer was to the
+  wrong question. **The failure is not the actor dying, it is the actor NOT dying.** `startRelay`
+  read its record and returned on `live` before it computed the run it should have been pointing
+  at, so "a live relay is left alone" compared nothing — it asked whether *a* relay was running,
+  never whether it was running against *this* console. Three steps inside the documented workflow
+  reach it: run the script, close the `review` workspace by hand to get the screen back, run it
+  again. Four new runs, and the script prints *"the relay is already running (pid N, run r-1)"*
+  about a process polling an inbox nothing will ever write to again. Four healthy workers, an
+  actor the script has just called healthy, and no route from a request to a review — §6.4's own
+  failure shape, reached THROUGH the idempotency mechanism built to close it.
+  **learned:** idempotency answers "can this be restarted", and supervision answers "should this
+  still be running" — and a design that supplies the first and calls it the second has a liveness
+  property it cannot state. The tell is grammatical and worth keeping: my own docblock said the
+  process *"needs no supervision beyond being started again"*, and the sentence has no subject.
+  Nothing was named as the thing that starts it again, so nothing was, and the mechanism that was
+  supposed to make restarting cheap became the mechanism that prevented it. The repair is two
+  properties neither of which is idempotency: the actor watches the console it serves and exits
+  when that console is gone (which is what makes `pifleet down` authoritative over a process it
+  has never heard of), and the record names the console so that "already running" is a comparison
+  rather than a head-count. Both were listed in §6.5's own table as reasons to PREFER this home —
+  *"correctly scoped to the console"*, *"dies with the console"* — and neither had been built. A
+  virtue claimed in a design table is not a property of the code.
+
+- **conjectured:** a mutation that survives its battery is either a semantic no-op or a declared
+  gap, and the two are told apart by argument. `H4` was filed as the first with a proof: the
+  ceiling is applied under `rank(verdict) > rank(cap)`, a verdict can only exceed `partial` when
+  it IS `success`, and `success` requires the claim to have been `success` — so passing a
+  fabricated claim can only differ where the guard already blocks.
+  **refuted by:** the test-integrity review, which built the fixture the argument said could not
+  exist. **The premise omits ISC-94.** A missing envelope is a NO-OP and not a downgrade, so a
+  task with green harvester-run acceptance and no envelope grades `success` with no claim at all —
+  and my own suite already asserted exactly that four hundred lines away. Measured on a `-collate`
+  task with a worktree and one passing acceptance command: `success` unmutated, `partial` mutated.
+  A document the worker never wrote clamping the one class of evidence a fabricating worker cannot
+  author. `H5` failed the same way in the other direction — filed under *"the mutation genuinely
+  changes nothing"* while its own body said *"untested rather than proven inert"*, which cannot
+  both be true.
+  **learned:** a survivor's classification is a CLAIM and needs the same evidence as a criterion,
+  because "no-op" and "gap" differ only in whether someone tried. The generalisable rule is that a
+  no-op argument must name the fixture that would separate the two branches and say why it cannot
+  be built — if that sentence cannot be written, the row is a gap. Both of mine reasoned forward
+  from the lattice instead, which is how an argument comes to be checked against itself. The
+  cheaper structural fix is to stop reasoning about unreachable expressions at all: `H4`'s guard
+  is now a named function with the ISC-94 argument inside it and eleven assertions on it, so the
+  policy is pinned by construction and only its one call site is left uncovered — a smaller gap,
+  declared, in the column for gaps.
+
+- **conjectured:** §6.8's structural census is a grading change, so its blast radius is the
+  harvester. The instrument reads a worker-authored document, produces a ceiling, and touches
+  nothing else — `adjudicate` gains a block, `reconcile` gains a selector, and the fact bundle
+  gains a field. Every one of those is inside `src/harvest/`, and the pins that could plausibly
+  break are the harvest suite's.
+  **refuted by:** ISC-468, on the shared tree. Grading a collation means `harvest/index.ts` must
+  consult `src/run/collation.ts`, which imports `collationTaskId` from `src/run/relay.ts`, which
+  names `cli/commands/relay.ts` in a type import and `import()`s `cli/commands/dispatch.ts` inside
+  `loadEffectModules`. The monitor reaches `harvest/index.ts` legitimately, through view 4's
+  `report/collect.ts` — so ONE import in the harvester put **all 27 CLI command modules** inside
+  the monitor's read-only closure. The jump was 1 to 27 rather than 1 to 1, which is the tell: an
+  edge that lands on a registry does not add a node, it adds a graph. `monitor-readonly.test.ts`
+  caught it; nothing in the harvest suite did, and nothing in it could have.
+  **learned:** the blast radius of a new IMPORT is not the module that writes it, it is every
+  closure that already reaches that module — and in a repository with an import-walk pin, adding a
+  dependency is a change to every root that transitively reaches you. The generalisable move is to
+  ask what is DOWNSTREAM of the thing you are importing before asking what is upstream of you: the
+  harvester was the wrong place to look, because the harvester was already in the monitor's closure
+  and had been for as long as view 4 has existed. The repair holds the seam rather than the pin —
+  `src/run/task-ids.ts` is a leaf with no relative imports at all, both `relay.ts` and
+  `collation.ts` take the ids from it, and `relay.ts` re-exports every name so no caller changed.
+  Weakening the assertion or allowlisting a module past it would have spent the one property that
+  makes the monitor a viewer rather than a control surface, to save a file move.
+
+- **conjectured:** §6.8's first rule can accept a workdir-relative finding path as well as an
+  absolute one, because `src/run/collation.ts` accepts both spellings and refusing a whole
+  collation over a spelling is *"a legal-document refusal presenting as a policy"*. The census
+  resolves either form against the real `container_workdir`, so both are checkable.
+  **refuted by:** the first fixture written against it. `join("/workspace", x)` maps EVERY string
+  without a leading `..` to somewhere inside the workdir, so the prose finding
+  `"the error handling could be tightened"` resolves to
+  `/workspace/the error handling could be tightened` and counted as LOCATED. The rule that §6.8
+  wrote to exclude prose was accepting prose, and the fixture that would have hidden it forever is
+  the obvious one — a bad path of `/etc/passwd`, which containment refuses for a reason that has
+  nothing to do with the relative arm.
+  **learned:** a containment check whose input space includes free text is not a containment check
+  for that half of its input, however correct the containment is. The asymmetric fixture is the
+  only thing that finds it: `/workspacex/a.ts` and `/workspace/../etc/passwd` separate `relative()`
+  from `startsWith`, and a plain-prose row separates the absolute arm from the relative one. The
+  same lesson landed twice more in the same battery — `/workspace\..\..\etc\passwd` is refused by
+  CONTAINMENT rather than by the backslash rule it was written for, so the backslash rule survived
+  its own mutation until a path that resolves INSIDE the workdir was added; and the adoption
+  guard's NUL turned out to prefix the `untitled` placeholder rather than separate elements, which
+  the battery found by reddening a mutation I had predicted green. Three times in one change, the
+  fixture agreed with the code for a reason unrelated to the rule under test.
+
 - **conjectured:** a defect whose mechanism is understood is fixed by the change that
   addresses the mechanism. `groupLeader()` returned a membership snapshot before the shell had
   finished forking, the mechanism was read off the CI output directly (`[6705, 6707, +6708]`, a
@@ -1959,6 +2057,443 @@ the root-cause classification; this table is the index.
   data lost. SRD §9.2 now carries this as a full erratum rather than a silent rewrite, and
   `pifleet worktrees` (new CLI command, §10) replaces the operator-visibility `git worktree list`
   used to provide, since an independent clone has no entry in the parent's worktree list at all.
+
+- **conjectured:** the workspace-name feature was proved. Four rounds carried a mutation battery
+  each — 16, 8, 8 and 10 arms, every one "as expected", every negative control green, every restore
+  verified by `shasum -a 256 -c` and (from round 4) `git diff --stat`. The write-up named exactly one
+  hop as proved only by reading source: `up`'s write site, unreachable from a unit test.
+  **refuted by:** an end-of-phase review, which found three surviving mutations and two red CI jobs.
+  Two of the three are hops the write-up had counted as CLOSED. `planPanes` has two callers and only
+  `createWorkspace` was read, so `restartConsolePane` -> `spec.panes(opts)` survived; the scripts'
+  `--dry-run` pass of `SPEC.name` is a third call site with no reader at all, so deleting it from
+  `scripts/operations` and `scripts/development` survived at 72/72; and `scripts/review` had never
+  been spawned by any test in any form. The third is worse than a gap: the palette control's own
+  docblock said *"`COLOUR.warn` is ALREADY yellow … had the heading reused `warn` instead of getting
+  its own entry, both assertions above would pass"* and then compared `workspace` against `heading`,
+  `dim` and `live` and never against `warn`. It named the one collision that mattered and omitted it,
+  so `p.workspace` -> `p.warn` survived unit AND integration.
+  **learned:** a battery proves the arms you wrote, and the arms you write are drawn from the same
+  understanding that wrote the code — so a battery is evidence about a mechanism and never a census
+  of its call sites. The durable check is cheap and was not done: **enumerate the callers of the
+  function under test and confirm one arm per caller.** `planPanes` had two and the batteries had
+  one; the scripts had a third nobody counted. Second, and sharper: **a control cannot discriminate
+  between two values a fixture makes equal.** `warn` and `workspace` are both `"yellow"` by design —
+  the owner asked for yellow — so no assertion over the real palette can separate them, and the
+  repair is not to assert they differ (they must not) but to pass an ASYMMETRIC palette to the
+  exported `workspaceHeadingStyle`. That is the degenerate-fixture rule this project already had,
+  applied to a palette instead of to a set. The same rule then paid again: `scripts/review`'s dry-run
+  was about to be written up as an unassertable limitation, because the tracked `fleet.example.yaml`
+  declares none of its workers and every pane degrades to non-attended. `--workers` overrides the
+  roster; the fixture could produce the value after all. **A limitation that has not survived one
+  attempt to build the fixture is a limitation nobody has earned the right to document.**
+  **criterion now:** the three hops each have a reader — `restartConsolePane` in
+  `test/unit/workspace-name-wiring.test.ts`, all three `--dry-run` passes in
+  `test/integration/operations-console.test.ts` (review via a documented roster override whose
+  premise is itself pinned, so the workaround announces its own expiry), and the palette read via an
+  asymmetric-palette discrimination. Battery of 8 arms below, run in a scratch `git worktree` rather
+  than the live tree — see the next entry for why that matters.
+
+  | # | mutation | result | killed by |
+  |---|---|---|---|
+  | Q1 | `p.workspace` -> `p.warn` in the heading style | red 1 | heading reads `workspace`, not `warn` |
+  | Q2 | restart site drops the `planPanes` fold | red 2 | `restartConsolePane` carries the flag |
+  | Q3 | create site drops the fold | red 4 | all three consoles' end-to-end argv |
+  | Q4 | `scripts/operations` drops its dry-run name | red 2 | operations previews its own name |
+  | Q5 | `scripts/development` drops its dry-run name | red 2 | development previews its own name |
+  | Q6 | `scripts/review` drops its dry-run name | red 2 | review previews its own name |
+  | Q7 | the fold hardcodes a title instead of `spec.name` | red 6 | cross-console anti-degeneracy |
+  | Q8 | **negative control** — rename a binding and all its uses | **GREEN 442/0** | nothing, as required |
+
+- **conjectured:** a mutation battery is safe to run in the working tree, because every arm restores
+  by full path and verifies the restore before the next one starts.
+  **refuted by:** the fleet. Round 4's battery ran in the live checkout while the coordinator was
+  recreating ten workers from it; arm P9 renames `--workspace-name` to `--workspace-title` and holds
+  that mutation for the length of a full suite run. A worker spawning inside that window died with
+  `error: unknown option '--workspace-name'`. The restore discipline worked exactly as designed —
+  `up.ts` was byte-identical to the pre-battery snapshot afterwards, which is itself the signature of
+  a mutation applied and reverted — and it is why the cost was one worker rather than ten.
+  **learned:** restore-verified is a recovery property, not an isolation property. It bounds how long
+  a tree is wrong; it cannot stop anything reading the tree DURING that window, and a working tree
+  that a fleet spawns from is read continuously by processes the battery has no relationship with.
+  A second, epistemic half: asked afterwards whether the window had been open, the answer given was
+  "the battery had run to completion before your message arrived" — inferred from seeing a finished
+  battery in a tool result, which establishes when it finished relative to READING it and nothing
+  about when it finished relative to anyone else's clock. The provable claim was "the tree is
+  pristine now"; the claim made was about ninety seconds ago.
+  **criterion now:** batteries run in a scratch `git worktree` seeded from the branch, never in the
+  checkout the fleet spawns from. Restores are verified by `shasum -a 256 -c` AND `git diff --stat`,
+  because bytes matching a manifest cannot distinguish "restored" from "restored to the wrong
+  baseline". And a battery's own negative control must be semantics-preserving: round 5's first
+  control renamed a binding without its uses, which is a syntax break, reddened 41 tests and proved
+  nothing — a control that fails is not a finding about the code, it is a defect in the control.
+
+- **conjectured:** `test/unit` is hermetic. `6f35f0d` enumerated three machine capabilities, removed
+  twenty-two dependencies on them, and the sweep was verified inside a worker container.
+  **refuted by:** a branch-new file, `test/unit/review-plan.test.ts`, whose module scope held
+  `await loadConfig(new URL("../../fleet.yaml", …))`. `fleet.yaml` is gitignored, so on any clean
+  checkout the await threw at IMPORT and the file reported `0 pass, 1 fail, 1 error` — all thirteen
+  tests, including the eight needing no config, and a red `test` job.
+  **learned:** the audit ran in a worker container, which bind-mounts the maintainer's checkout and
+  therefore HAS `fleet.yaml`. **The environment that verified hermeticity was the one environment
+  where this dependency is invisible** — precisely the relationship the operator's own machine had to
+  the first twenty-two. An audit inherits the blind spots of wherever it runs, so a hermeticity sweep
+  has to run somewhere with the repository and without the operator's untracked state: a fresh
+  `git worktree`, a `git archive` extraction, or CI. Measured incidentally while fixing it, and worth
+  recording because it bites pinned totals: `describe.skipIf` reports one MORE skip than the block
+  holds (13 collected with the config present; `8 pass, 6 skip, Ran 14` without, over five `it`s), so
+  a `skipIf` added to a file `probe-guard.sh` grades would move its total by n+1.
+  **criterion now:** the config load moved inside a `describe.skipIf(!existsSync(...))` with a
+  `beforeAll`, so the five config assertions skip by name where the file is absent and the eight
+  layout assertions now run in CI, which they never did.
+
+- **conjectured:** `TOTAL_EXPECTED: "158"` was correct, derived by the hand method against the
+  container job's file list.
+  **refuted by:** `probe-guard.sh:189` exiting 1 on every run of the branch. Measured on a clean
+  worktree with gates unset, the SIXTEEN paths the run step actually passes give `8 pass, 138 skip,
+  0 fail — 146 across 16 files`. The derivation claimed the missing 12 were `relay-script.test.ts`
+  and that it was "named in the run step above"; `ci.yml:1060` excludes it in as many words, and had
+  since before that derivation was written.
+  **learned:** the arithmetic was SELF-CONSISTENT — relay-script does collect exactly 12, and
+  146 + 12 = 158 — so the number checked out against itself while describing a command nobody runs.
+  The hand method's own rule is that a derivation must re-read the RUN STEP rather than the previous
+  comment; that rule was stated in the comment being written and broken by it, because the file list
+  was read back out of the derivation's own conclusion. A derivation that QUOTES its command and its
+  output cannot make that mistake silently, because the list sits beside the number.
+  **criterion now:** 146, with the command and its measured output written into the comment. Not
+  fixed by adding relay-script to the list: `ci.yml:29` is a bare `bun test test/integration`, so it
+  already runs ungated in the fast job, and `:1060`'s reasoning holds.
+
+- **conjectured:** `roles/collator.md` described the console the fleet actually has. It is mounted,
+  it is CI-built, it is the document ISC-364's audit found to be the CURRENT class of documentation,
+  and it had been read and edited alongside every phase of this branch.
+  **refuted by:** grepping the two paths it instructs. It told the collator to write its fan-out to
+  `/outbox/fanout.json` and to read three reports from `/outbox/reports/rev-<aspect>-1.md`, and
+  `grep -rn "outbox/fanout.json\|/outbox/reports" src/ test/ scripts/ Docs/ skills/` returns
+  **nothing at all** — no writer, no reader, no test, no design note. The mechanism that exists is
+  `/outbox/<task-id>/dispatch-request.json` (`dispatch-request.ts`) and `/replies/<child>.json`
+  (`replies.ts`), and both landed on this branch, in commits whose messages are about the request
+  plane, without the document that tells the only worker in the console how to use it being opened.
+  A collator following it writes a file no poller reads, reports `partial`, is never dispatched
+  again, and every layer downstream records a healthy console that reviewed nothing.
+  **learned:** ISC-364's finding was that documentation currency tracks PROXIMITY TO EXECUTING CODE,
+  and that is true of the files it measured and false as a general rule — what it actually tracks is
+  proximity to a TEST. `skills/pifleet-worker/SKILL.md` is current because
+  `worker-docs-currency.test.ts` names it in a two-element array and compares its container paths
+  against the renderer's mounts; `roles/collator.md` is mounted in exactly the same way, is read by
+  a model in exactly the same way, and was wrong for the whole of Phase 2 because nothing compared
+  it to anything. The generalisable tell is the ARRAY: a currency probe with a hard-coded list of
+  documents is a probe whose coverage is decided by whoever last edited the list, and the document
+  most likely to be missing from it is the newest one — which is also the one whose mechanism is
+  still moving. The same shape as the `TOTAL_EXPECTED: "158"` entry above: a derivation that
+  re-reads its own conclusion instead of the thing it describes.
+  **criterion now:** `test/unit/collator-role.test.ts` compares the document to the code rather than
+  to a reader's memory of it — the wire tags against `DISPATCH_REQUEST_SCHEMA` and
+  `COLLATION_SCHEMA`, the file names against `DISPATCH_REQUEST_FILE` and `COLLATION_ARTIFACT_NAME`,
+  the derived ids against `REVIEW_CONSOLE_ASPECTS` and `COLLATION_ASPECT`, the worker ids against
+  `REVIEW_CONSOLE_ROSTER`, and **both worked JSON examples parsed through the real schemas** rather
+  than eyeballed. The last of those is the part that generalises: an example is the fragment of a
+  prompt a model copies most literally, so an example the schema refuses teaches the exact shape the
+  fleet rejects, and there is no reason for a document with a fenced example to be checked more
+  weakly than the parser that will judge its output.
+
+- **conjectured:** a self-declared `finding_count` beside `findings[]` is a second source of truth
+  for one fact and should be refused. The only new failure it can catch — a truncated document — is
+  already caught by JSON, because a truncated array does not parse; what it newly ADMITS is a
+  collator claiming seven findings while listing none, which is the fabrication shape the contract
+  exists to bound. §6.8 says the artifact must "carry a finding count", and the array carries one.
+  **refuted by:** `harvest/collation-census.ts`, written in parallel against the same §6.8 and
+  landing in the same working tree, which records `declared` and `counted` as separate fields
+  precisely so that *"a document that says '4 findings' over a list of two is a visible disagreement
+  rather than a number nobody re-added"*. The disagreement is the signal, and it is one neither
+  number carries alone: a model that writes a prose report with four findings and a JSON list with
+  two has truncated ITSELF, which is a failure JSON cannot see because the document it produced is
+  perfectly well-formed. The original argument was sound about trust and wrong about what the field
+  is FOR — it read `finding_count` as a claim to be believed rather than as a measurement to be
+  compared.
+  **learned:** the test of a redundant field is not "can it lie" but "is the lie legible". A second
+  spelling that is silently preferred over the first is a hazard; a second spelling that is recorded
+  BESIDE the first and never trusted over it is an instrument. The distinction survives only if the
+  authority is written down and asserted — so `collationCeiling` counts the array, and the battery's
+  C22 mutates it to count the declared number and reddens. Two engineers reading one paragraph of an
+  SRD reached opposite designs from the same sentence, and the reconciliation was cheap only because
+  the census's header had written down the three fields it could not do without instead of assuming
+  the other half would guess them.
+  **criterion now:** `finding_count` is required, bounded by `MAX_ITEMS` rather than by the array's
+  own cap so a collator that honestly found more than the list can hold can still say so, and NOT
+  cross-checked — C21 mutates the contract to refuse a disagreement and reddens, because refusing it
+  would delete the evidence the census was built to record.
+
+- **conjectured:** a ceiling function that takes the document and the claimed status cannot be
+  misused, because §6.8's rule is stated over exactly those two things and the function refuses to
+  raise a verdict by construction.
+  **refuted by:** writing the `missing` arm. Every task in the fleet is missing a collation artifact,
+  so `collationCeiling(claimed, read)` handed a build task's `success` claim and a `{kind: "missing"}`
+  returns `partial` — and the caller asking would have been RIGHT to think it had asked a sensible
+  question, because there genuinely is no artifact. The specific caller that would be wrong is the
+  one this design creates: §6.6 makes a review TWO tasks, the fan-out `T` settles `success` the
+  moment it has issued the request and correctly has no collation, and both halves run on the same
+  worker and are graded by the same code. "Apply this only to the second one" was a rule that had to
+  hold in the caller's head on every future edit.
+  **learned:** a guard whose failure mode is CATASTROPHIC AND SILENT belongs inside the function
+  rather than in its docblock, and the tell that one is needed is a default-shaped input — `missing`,
+  `null`, `unknown` — that every non-participant supplies for free. The fix is not defensive
+  programming: `isCollationTaskId` already existed as the fleet's answer to "is this the collation
+  half?", used by `dispatch-request.ts` as T5's depth bound, so the guard is an import and the
+  function became unmisusable rather than merely documented as not-to-be-misused.
+  **criterion now:** the task id is the first parameter and the first check. The asymmetric pair is
+  asserted — `collationCeiling("T", "success", missing)` is untouched and
+  `collationCeiling("T-collate", "success", missing)` caps — which is the pair a fixture using only
+  `T-collate` would have hidden completely, and C27 mutates the guard away and reddens.
+
+- **conjectured:** the four probes the battery reported GREEN against a mutation expected RED were
+  four gaps in the tests.
+  **refuted by:** reading each one. Three were the SAME defect wearing three faces — a probe pinned
+  to a refusal rather than to a REASON, in a place where two rules can refuse the same document.
+  `raised_by: ["rev-sec-1"]` trips both "not a lens" and "did not report", so deleting the first left
+  the second catching it with a different sentence; `lenses: []` trips both `min(1)` and "no lens
+  reported"; a renamed `verified` key falls from its named refusal to `.strict()`'s generic
+  "unrecognized key: verified", which still contains the word the probe was looking for. The fourth
+  was scope: `T-collate` appears in the worked example as well as in the instruction, so an
+  assertion over the whole document survived the instruction being deleted.
+  **learned:** where two rules can refuse one document, the CODE is the assertion surface and the
+  prose is the explanation — `DispatchRefusal`'s division, which this contract inherited for
+  `readCollation` and did not apply to the schema's `superRefine`, where the issue message is the
+  only discriminator there is. So the rule is narrower than "assert messages": assert the message
+  exactly where two rules overlap, and leave it alone where only one can fire (NO2 mutates the
+  `not_json` wording and stays green, correctly). And an assertion over a whole document is scoped to
+  nothing: `indexOf` the section first.
+  **criterion now:** the four probes name their rule's own sentence or their section, and the battery
+  re-runs at 61 mutations, 0 unexpected, from a measured green baseline — which the battery now
+  refuses to run without, because a suite that is already red reports every mutation as caught.
+
+- **conjectured:** the collator-role defect was one document's problem, and `roles/reviewer.md`
+  — older, shorter, and carrying no paths or wire tags at all — was clean by inspection.
+  **refuted by:** grepping its two opening claims instead of reading them. *"Review the diff
+  against its stated intent. The task envelope says what the change was supposed to do."* is
+  false in **both halves**. The reviewer is `tools: [read, grep, find, ls]` with no bash, so it
+  cannot run `git diff`, and nothing in `render.ts`, `task-policy.ts` or `dispatch-policy.ts`
+  puts a diff anywhere a worker can reach; `renderPrompt` (`supervisor/index.ts`) emits the
+  title, the brief, the acceptance lines and four identity values, and never the envelope. The
+  same false premise stood a second time in `roles/review/cross-file-contracts.md`
+  (*"Read past the diff"*, *"If the task envelope states"*), which `load.ts` CONCATENATES onto the
+  role file — so the correction had to land in both or the reviewer would read one prompt
+  contradicting itself.
+  **learned:** the near-miss is the part worth recording. `/policy/task` **is** mounted, **is**
+  named for the task, and holds `task_id` and `epoch` for the verbgate's provenance line —
+  `writeTaskPolicy(path, task_id, epoch)`. A repair that pointed the reviewer there would have
+  read as MORE precise than the error it replaced and would have been wrong in the same way, and
+  it is the repair a careful reader arrives at. So the rule is not "grep the claim" but "grep the
+  claim and then read what the thing you found actually contains" — a mount whose name matches the
+  sentence is the strongest available evidence for a false belief. The battery carries it as RV11,
+  the plausible wrong fix, applied deliberately so the probe has to distinguish it.
+  **criterion now:** `test/unit/reviewer-role.test.ts` holds the whole CONCATENATED briefing —
+  role file plus all three aspect files — against the code, and RV9 mutates the aspect file alone
+  to prove the role file's correction cannot cover for it. RV15 grants the reviewer `bash` in
+  `fleet.yaml` and reddens, so "this document does not tell the reviewer to use tools it lacks"
+  is checked against the GRANT rather than against a comment claiming one.
+
+- **conjectured:** the reviewer's whole review reaches the collator, because the reply plane
+  publishes the entire `TaskHarvest` bundle and a review is one of the things a reviewer produces.
+  **refuted by:** reading `HarvestedArtifactSchema`, which is `{path, bytes, sha256}` — **no
+  contents** — and `render.ts`'s `-v <run>/outbox/<worker>:/outbox`, which is worker-scoped. A
+  reviewer that files its review at `/outbox/<task-id>/files/review.md` and writes a two-line
+  `summary` beside it has produced a document **nothing in this console can open**, and
+  `skills/pifleet-worker/SKILL.md` actively pushes reviewers that way: *"Keep the result envelope
+  itself small"* and *"Anything that is not a code change… goes in `/outbox/<task-id>/files/`"*.
+  Every status stays green while the findings evaporate — the same silent-success shape as the
+  invented `/outbox/fanout.json`, arriving through a document that is CORRECT.
+  **learned:** a wrong instruction and a right instruction pointed at a broken channel fail
+  identically and are found by different means. The first is caught by grepping a claim; the
+  second only by asking what CROSSES a boundary, field by field, and the tell is a schema with a
+  digest where a body should be — a digest is what you carry when the thing itself is somewhere
+  the reader can reach, and here it is not.
+  **criterion now — TAKE A SHIPPED, and the mitigation was kept beside it.** `relay.ts`'s
+  `harvest` inlines every artifact's contents into the reply as `inlined_artifacts[]`, beside the
+  digest that names it, under two caps the actor owns: `MAX_REPLY_ARTIFACT_BYTES` (64 KiB, twice
+  `MAX_DISPATCH_TEXT` — a review may say more than the brief that asked for it, and a quarter of
+  the reply budget so four artifacts always fit whole) and `MAX_REPLY_INLINE_BYTES` (256 KiB,
+  `MAX_DISPATCH_POLICY_BYTES`'s number, because this is the return leg of that same exchange).
+  A over B for the reasons already recorded: B reverses D6, which rejected exactly a directory the
+  collator enumerates; A needs no new mount, so nothing changed in `assertNoRunDirMount`, the
+  verbgate's integrity loop or the mount table; `replies.ts` reserved the payload decision for the
+  actor, so A filled a hole rather than opening one; and A's cap answered a question that module
+  already recorded as owed.
+  **A's cost is paid rather than hidden, and that is the load-bearing half.** A cap means
+  truncation, and a truncated review is worse than an absent one because it reads as a complete
+  review that found less — there is no gap in it to notice. So a cut reaches the collator as a
+  NAMED thing, `TRUNCATED: <aspect>'s artifact <path> is N bytes and only the first M reached
+  you`, the way §6.6 names a missing lens; an artifact that could not be read at all is named
+  separately as `UNREADABLE`, because "arrived short" and "did not arrive" are different facts and
+  one count over both would mean neither. The budget is split by **max-min fair allocation**, not
+  first-come-first-served: small artifacts are satisfied in full and large ones divide the
+  remainder, so which half of a review survives contention cannot depend on the order the
+  filesystem enumerated the files — the defect class this branch spent its time removing, which
+  the obvious greedy walk would have reintroduced through the fix for a different one.
+  **The two prompts stay** — `roles/reviewer.md` and `roles/collator.md` — no longer as the only
+  thing holding the console up but as the second defence for a failure that shows no red, and
+  because `notes` is the one channel with no cap on it. The probes that asserted the workaround
+  LABEL were rewritten rather than kept green: they now assert the cap, its consequence, and that
+  the design note records the gap as closed. A test still demanding the document call the plane
+  broken would have forced the docs to describe a defect the code no longer has.
+  **learned (second time):** closing a silent-channel defect is two changes, not one. The channel,
+  and the naming of what the channel now drops — because a bound without a named overflow converts
+  a loud absence into a quiet incompleteness, which is strictly harder to detect than the bug it
+  replaced.
+
+- **TENSION, recorded rather than resolved: §6.8's required `file:line` has no room for a
+  finding that is about the whole design.** `CollationFindingSchema` makes `file` and `line`
+  mandatory, on §10's probe — *"a collation whose findings carry no resolvable `file:line` is not
+  `success`"* — and that is the right reading of what was asked. **The cost is that "the whole
+  approach is wrong", "there is no test strategy" and "this abstraction was introduced before its
+  second caller" cannot enter the structural record at all.** Those are among the most valuable
+  things three senior readers produce, and they are exactly the findings with no line number.
+  The pressure this puts on a model is the part that makes it a tension rather than a limitation:
+  a collator that has such a finding and a schema that will not take it without a location is a
+  collator with a reason to INVENT a plausible one — which is the precise fabrication the
+  instrument exists to make expensive. **The workaround in place** is that
+  `roles/collator.md` sends location-free observations to the prose report at
+  `/outbox/<task-id>/files/review.md`, where an argument can be made, and tells the collator in as
+  many words not to manufacture a line number to get one into the JSON. That is honest and it is
+  weaker than it sounds: the prose report is not graded, so a review whose most important finding
+  is architectural is a review whose most important finding is invisible to every count in the
+  record. **What would resolve it**, and neither is this phase's to take: a second array for
+  located-less findings, graded separately and never counted toward the consensus bands — which
+  costs a schema change and a census change and re-opens what "a finding" means; or a `scope` on a
+  finding admitting `"design"` beside a file, which is cheaper and immediately becomes the value
+  every model reaches for when it cannot find a line. **The first is the one to take if it is
+  taken**, because the second's failure mode is that the located requirement quietly stops
+  applying. Revisit with §9 Q6, which is the same question about a different axis: whether a
+  datum belongs beside the verdict or folded into it.
+
+- **DECISION, and a capability widening that wants its own record: the `reviewer` role is
+  granted `write`, outbox-only.** `config/schema.ts` makes `{write, edit, bash}` the writer set,
+  and `reviewer` was the only role in `fleet.yaml` holding none of them. Nothing host-side writes
+  `result.json` — `harvest/outbox.ts` only reads it — so **the role could not write its envelope
+  at all**: `outbox.kind` is `missing`, `claimed` is null, `hasWorktree` is false so
+  `deriveRepoVerdict` returns `unknown`, all three lenses are missing, `relay.ts` answers
+  `not_collated`, **no `T-collate` is ever dispatched and no collation is ever graded** — while
+  the fan-out task settles `success` and `pifleet report` shows the review green. The console
+  could not have worked, and every prompt-level mitigation built on writing `notes` had never
+  been executable.
+  **What was granted and what deliberately was not.** `[read, write, grep, find, ls]`, matching
+  `collator`. **No `edit`**: it is for changing files that already exist, and the only files a
+  reviewer can see besides its own outbox are the operator's checkout at `/workspace`, mounted
+  `:ro` — so the grant would buy no capability and widen the writer set for nothing. **No
+  `bash`**, unchanged.
+  **The argument that distinguishes them, because §12.1 is what this could have been read as
+  reopening.** §12.1's case is about a SHELL: a shell is what turns a read-only reviewer into a
+  worker that can `cd /`, reach a socket, or `git push`. Write-to-outbox buys none of that.
+  `/outbox` is a worker-scoped bind mount holding only what that worker produced, nothing reads
+  it but the harvester, and it is already the untrusted-content boundary — which is how every
+  other worker in this fleet reports. `observer` carries `write` on exactly this justification
+  and so does `collator`. **The owner chose this over re-arguing §12.1 first**, and this entry is
+  what makes that choice reviewable later.
+  **What it costs, stated rather than implied.** Three hosted 397B-class workers on a third-party
+  vendor gain a writer tool. The exposure that changes is what they can PUT in their own outbox,
+  which the harvester already treats as untrusted input and schema-validates; the exposure that
+  does not change is what leaves the machine, which was already the whole repository under §5.9.
+  **criterion now:** the grant is asserted member by member against `fleet.example.yaml` — the
+  TRACKED config, so CI grades it — with `write` present, `bash` and `edit` absent as three
+  separate probes, and the live `fleet.yaml` checked for divergence behind an `existsSync` gate.
+  The battery pins the halves independently (RV15 adds `bash`, RV16 removes `write`) so neither
+  can stand in for the other.
+
+- **conjectured:** a probe that refuses the sentences which were wrong protects against the class
+  of error they came from. Nine probes across two role files were written that way, each pinned to
+  the exact prose a battery mutation had replaced.
+  **refuted by:** a review that wrote three FRESH false claims and watched all three pass.
+  `/outbox/reports-v2/<child-task-id>.json` passed because the path guard classified only a path's
+  FIRST SEGMENT and `/outbox` is a mount; `/policy/envelope.json` passed the same way; and
+  *"Start from the diff and work outwards"* passed because the diff guard was a three-string
+  denylist **whose first two entries were verbatim the battery's own replacement strings for RV7
+  and RV9.** The reviewer's phrase for that is the one worth keeping: the probe and the mutation
+  had been written to each other.
+  **learned:** a mutation battery and a denylist probe can be mutually satisfying and jointly
+  worthless. The battery proves the probe catches the mutation; the probe was written FROM the
+  mutation; and the pair says nothing about anything else. The tell is textual and cheap to look
+  for — if a probe's expected strings appear verbatim in the battery beside it, the probe is a
+  memory of one edit rather than a rule. The repair is to ask what the CLASS is and whether it can
+  be checked positively: "the document asserts something false about the runtime" becomes "every
+  path it names must be one the code produces", which is decidable and catches spellings nobody
+  predicted.
+  **criterion now:** paths are checked BY CONSTRUCTION against an allowlist derived from the
+  builders and constants that produce them (`test/support/role-docs.ts`), so an invented path
+  fails whatever it is called. Capability claims are checked by a SENTENCE-LEVEL NEGATION RULE — a
+  shell-only word may appear only in a sentence that denies having the thing — which catches any
+  wording rather than four. **Both limits are written into the table rather than glossed**: the
+  path rule sees everything; the negation rule cannot see a false claim expressed without those
+  words, and tone and advice are not checked at all, which U8/U9 measure rather than describe.
+
+- **conjectured:** blocking the INFLATION of a consensus count blocks the fabrication. The
+  collation schema refuses a finding credited to a lens marked `reported: false`, with the reason
+  spelled out — *"this is how a two-lens review records 3/3, which is the exact reading §6.8 exists
+  to make impossible."*
+  **refuted by:** a review pointing at the other direction. **Deleting the lens's ROW achieves the
+  identical reading and was permitted.** A collator writing only its two reporting rows produces
+  `{total: 2, reported: 2, missing: []}` — a clean 2/2 — and one row was legal, so 1/1 was
+  reachable. Every intra-document rule passed: the lenses were unique, at least one reported, and
+  every attribution named a lens that did.
+  **learned:** a numerator rule is not a denominator rule, and a schema that holds a ratio's top
+  half is not holding the ratio. The general form is that **a document cannot be its own witness
+  about the size of the world it describes** — and the same sentence covers the second hole the
+  same review found, where every id check was intra-document, so a collation declaring
+  `T-9-collate`/`T-9` while sitting in `T-1-collate`'s outbox was internally perfect and was
+  published as T-1's record. `dispatch-request.ts` had already solved exactly this on the OUTBOUND
+  half by binding the declared parent to the directory the file was found in; the return half
+  simply had not inherited it. When one half of a two-way exchange has a structural binding and the
+  other does not, that is the first place to look.
+  **criterion now:** `readCollation` takes a REQUIRED `CollationContext` carrying the task the
+  grader walked to and, optionally, the console's seats. The lens table is checked as a SET
+  EQUALITY against config in both directions, the task id is checked structurally BEFORE the
+  derivation (a document failing both reports the misfiling, which is the fault an operator acts
+  on), and the ordering has a fixture because the battery proved it was unasserted by reordering
+  the checks and staying green.
+
+- **conjectured:** "the collation cap may only ever lower a verdict" was a property of the design,
+  established by the lattice.
+  **refuted by:** a review finding it established by a `rank` comparison inside a conditional at a
+  call site, with no probe on it. A task clamped to `failed` by a malformed `ticket-ops.json` is
+  stopped from being RESCUED to `partial` by its own zero-finding collation only because
+  `rank("failed") < rank("partial")`. Delete the comparison and **a review rescues itself with a
+  document it wrote** — the exact independence failure the whole instrument is built to avoid —
+  and nothing was red.
+  **learned:** a property that lives in a comparison rather than in a name has no probe, because
+  there is nothing to call. Moving it into a function is not refactoring for tidiness; it is what
+  makes the property assertable at all. Two things fell out of doing it that the argument had not
+  reached: the ORDERING is part of the contract (the cap must be applied to the ALREADY-COMBINED
+  verdict, because a claim of `success` against a derived `unknown` yields `success` outright and
+  the cap would be silently skipped), and the no-op arm is load-bearing (when §6.8's rule is
+  silent the ceiling returns the CLAIM, which without an early return is applied as a cap — the
+  function doing `adjudicate`'s job a second time). The battery found the second; no argument had.
+  **criterion now:** `capCollationVerdict`, with an EXHAUSTIVE probe over all seven verdicts ×
+  seven claims × four read states asserting no combination raises, plus the H5 fixture at this
+  layer. One filed mutation came back a measured no-op and is recorded as one: `rank` returns `-1`
+  for `unknown`, `aborted` and `timed_out`, so `b >= a` already protects all three and the explicit
+  out-of-lattice guard can never be what saves them. It is kept anyway, because without it the
+  code's correctness rests on a `-1` coincidence rather than on the three verdict classes the
+  docblock names.
+
+- **conjectured:** this branch had paid for its hermeticity lesson. A changelog entry above
+  records `review-plan.test.ts` taking thirteen tests down on every clean checkout by reading the
+  gitignored `fleet.yaml`, and records the fix — `existsSync` plus `describe.skipIf`.
+  **refuted by:** `test/unit/reviewer-role.test.ts`, added ONE COMMIT after that fix, reading
+  `fleet.yaml` unconditionally inside a test. `ci.yml` is checkout → `bun install` →
+  `bun test test/unit`, with no step that creates it. Reproduced on a clean worktree: `ENOENT`,
+  `181 pass, 1 fail`. It was the only test under `test/` reading that file.
+  **learned:** writing the lesson down is not the same as being able to apply it, and the gap
+  between them is that a lesson recorded as a NARRATIVE about one file does not fire when a
+  different file makes the same mistake. What would have fired is a rule — "no test reads
+  `fleet.yaml` outside a gate" — and the cheap version of that rule is the grep the review ran.
+  The second-order cost is the one worth remembering: RV15 was the only mutation in either table
+  checking a role document's capability claim against the actual grant, and in CI it could not
+  execute at all, so the table's claim that the check ran "against the grant" held only on a
+  machine that happened to have the operator's config.
+  **criterion now:** the grading arm reads `fleet.example.yaml`, which is tracked and always
+  present, and the live file is a separate `describe.skipIf(existsSync)` probe asserting the two
+  agree. Verified by running the three role suites in a worktree with no `fleet.yaml` present —
+  147 pass, 0 fail — which is CI's condition rather than an argument about it. The capability
+  mutations moved to the tracked config for the same reason: a mutation in a gitignored file
+  proves nothing about a clean checkout.
 
 ## Verification
 
@@ -4180,3 +4715,21 @@ for want of one, and a block that inherited that wall would be a block that coul
 - [x] ISC-496: Q6 — a `down`-ed run reports its worker DEAD on the fast clock, and only the run's row waits for the slow walk. *Probe: a fixture run walked live, then `phase: "dead"` written to `state.json`, then `refreshKnownWorkers` with NO slow walk in between; and separately the slow walk itself, which drops the run entirely.* **THE STATED PROBE WAS NOT RUN, AND THAT IS DELIBERATE.** §9 Q6 says to "run `pifleet down` on one console run and time how long the pane keeps claiming it is alive" — which destroys a live worker on the operator's own fleet to measure a property of the SCHEDULER. The scheduler is measurable without destroying anything, and a fixture answers it deterministically rather than with one stopwatch reading. **The answer is NO, disappearance does not need to be faster than 30 s, and the reasoning Q6 assumed does not hold.** Q6's worry is that "a `down`-ed run can show as live for up to half a minute" because liveness sits on the slow clock. Both halves are true and the conclusion does not follow, because the two facts land on different clocks: **`phase: "dead"` reaches the frame in 500 ms** (the `workers` fast source re-reads `state.json` for every known worker twice a second), while **the run leaves the list in 30 s** (`liveRunIds` is the expensive walk and stays where §6.3 put it). So the operator is not told a lie for thirty seconds — they are told the truth in half a second and the run's ROW lingers, which §6.4 already permits because a row reading `phase dead` is not claiming to be alive. **§6.3's sketched mitigation is therefore unnecessary rather than deferred**, and that is worth recording as a decision: the fix Q6 proposes — putting `phase: "dead"` on the fast clock for known-live workers — is already what the fast source does. Machine-checked in CI's ordinary `bun test test/unit` step, ungated.
 - [x] ISC-497: The frame width follows the pane, and the monitor does not depend on `SIGWINCH` to make that true. *Probe: `frameColumns` over the three cases — no pin, pinned, non-terminal — plus a source-text guard that the paint calls it rather than closing over a startup value.* **THE DEFECT: `columns` WAS READ ONCE AT STARTUP AND NEVER AGAIN.** A frame stayed frozen at whatever width the pane measured when the command began. Widening left §6.5's ladder dropping columns it no longer needed to; narrowing left a frame WIDER than the terminal, which the terminal then wrapped — and avoiding that wrap is the entire purpose of dropping a column, so **the degradation ladder was defeated by the one event it exists to survive**. Nothing failed, and that is the instructive part: ISC-484 and ISC-485 both pass against an explicit `model.columns`, so the ladder was provably correct at every width and the command never gave it a second one. **THIS MAKES §9 Q4 INFORMATIONAL RATHER THAN BLOCKING, WHICH IS A BETTER OUTCOME THAN ANSWERING IT.** Q4 asks whether a program started by cmux's shell injection receives the signal, and says that if not, "the renderer must poll `process.stdout.columns`, which is a different and worse design". Polling is only worse when ADDED to a loop that lacks one; this loop already repaints on an interval, so re-reading a property it is about to use costs nothing measurable and is correct whichever way Q4 lands. The `resize` listener is kept so a signal that DOES arrive repaints at once rather than at the next tick — an optimisation, not the mechanism. A design that needed Q4's answer would carry a dependency on a terminal's behaviour, which is what ISC-491 spends the whole block avoiding. **A pinned `--columns` is never re-read**: that is a claim about what the operator wants rather than a measurement, and a pin that moved on the first resize would be a flag that does not do what it says. Three mutations, three kills: freezing the width fails 1; letting the terminal override the pin fails 1; **reverting the call site to the original defect fails ONLY the source-text guard** — and that guard exists because it had to. **STATED PLAINLY RATHER THAN DISGUISED: the call site is asserted as TEXT, not behaviour.** `frameColumns` being right is not the same as the paint calling it, and the original defect was precisely the call site — a correct width rule sitting unused beside a captured value. Driving the paint would need a real terminal, a scheduler and a live runs root, which ISC-491 forbids this block from requiring, so the trade is a weaker check that fails on exactly the regression that matters. Same technique, and same reason, as the import pin in `monitor-readonly.test.ts`. Restore checksum-verified after every mutation; machine-checked in CI's ordinary `bun test test/unit` step, ungated. **Q4 IS NOW ANSWERED (2026-09-03) AND THE ANSWER CHANGES NOTHING HERE, WHICH WAS THE POINT.** SIGWINCH IS delivered through cmux's shell injection: three pty resizes (209x60 -> 104x60 -> 104x29 -> 209x29), four signals, every size change preceded by its signal, measured by a poller watching the pty independently of the handler. The first probe was DEFECTIVE rather than informative — it split an UNFOCUSED window, cmux does not re-lay-out an unrendered one, and the pane never resized; zero signals against zero resizes measures nothing. **The design was made independent of that answer before it was known, and it stays independent now:** the frame follows the pane because every paint re-reads `process.stdout.columns`, and the `resize` listener remains an optimisation that removes up to one interval of lag. A criterion that had waited for Q4 would have waited on a probe defect.
 - [~] ISC-498: Q10 — the monitor's repaint RATE is bounded and measured, and the staleness markers are what set it. *Probe: render determinism, an ageing-only advance moving the frame, a sub-second advance moving nothing, and a source-text guard on the paint's skip; plus a 60-sample live measurement at the fast clock's period.* **GRADED `[~]` AND NOT `[x]`, BECAUSE ONLY ONE HALF OF Q10 IS ANSWERABLE WITHOUT A PERSON.** Q10 asks whether Ink's full-frame repaint FLASHES visibly in a cmux pane; the flash is perceptual and its probe is "watch". What is settled is the frequency, which decides whether the question matters at all — a flash nobody can trigger is not a defect. **THE FIRST MEASUREMENT WAS WRONG AND IS RECORDED RATHER THAN DELETED.** Sampling `composeFleet` — the `--once` path — gave 0.03 repaints/sec with 98% of paints skipped, and that number is false for the pane: `composeFleet` re-reads every region on every call, so every `readAt` is fresh, every marker renders `as of 0s` forever, and the frame cannot move. The pane runs the three-clock scheduler. **Re-measured on the scheduler path (`FleetClocks` + `modelFrom`), 60 samples at 500 ms over 32.7 s: 47 distinct frames, 1.44 repaints/sec, 22% skipped.** **The finding is a real tension rather than a defect: the staleness markers dominate, not the fleet data.** The fleet was entirely idle for the window — no dispatch, no transcript growth, no container change — and still repainted 47 times, because three regions on three clocks each tick their own `as of Ns` at 1 Hz, out of phase. That is §6.4 working as specified: "nothing on screen is stale without saying so" IS what produces the rate §9 Q10 worries about, and the two requirements pull against each other with neither being wrong. **The useful thing established before anyone reaches for the clock period:** the bound is ~1.4/sec on an idle fleet, the 500 ms clock contributes nothing on top of the 1 Hz markers, so if the perceptual half ever comes back positive the cheap lever is the MARKER'S GRANULARITY and not the clock. What is machine-checked in CI is the granularity property and the paint's skip; **what rests on a hand-run on this host is the 1.44/sec figure**, and what rests on nobody yet is whether one atomic overwrite flashes. **PERCEPTUAL HALF ANSWERED 2026-09-03 — NO FLASH.** Observed by the owner at a real operations-console pane running the shipping build, side by side with a calibrated control: a second pane doing `clear` + subprocess once a second, which is the incumbent's exact pattern and the one §6.6.1 identified as the source of the old flash. The control exists because "does it flash?" is not answerable against memory — a negative with no reference cannot distinguish "it does not flash" from "this display does not show flashes". Verdict: **no flash on the monitor.** **D2's one knowingly-accepted risk did not materialise, and §6.4's fast clock keeps its 500 ms period** rather than having to slow down; the memoised-static-regions fallback the question named is not needed. **THE GRADE STAYS `[~]` AND THIS IS THE POINT AT WHICH IT WOULD HAVE BEEN EASIEST TO MOVE IT.** The answer is now known and favourable, and still nothing REPRODUCIBLE re-checks it: an owner's eyeball verdict at one pane on one display is the least repeatable evidence this repository accepts, and the strictness rule does not bend for good news. What is machine-checked is the frequency half; what rests on one observation is the flash. **THE CONTROL IS CONFIRMED POSITIVE**, which is what makes the negative meaningful: the owner reported that the `clear`-based left pane WAS visibly flashing while the monitor beside it was not. So the comparison distinguishes "the monitor does not flash" from "this display does not show flashes" — the failure mode a negative with no reference cannot rule out — and both halves of the calibration are now observed rather than one being assumed.
+<!-- SRD-REVIEW-CONSOLE-001 — ISC-511..ISC-517, filed 2026-09-05 at the close of the
+     collator-dispatch branch. THE BRANCH RAN 82 COMMITS WITH NO CRITERIA AT ALL, which
+     is the gap this block closes rather than a set of new intentions: every sentence
+     below describes something already built, and the grade is what the evidence
+     supports on the MERGED tree. ISC-517 is the one that is not met, and it is filed
+     precisely because it is not — a console whose failure mode is a silently lost
+     review has to carry that failure where the document can see it. -->
+- [x] ISC-511: A seat that has stopped working is distinguishable from one that is thinking, without shelling out to the container runtime. *Probe: heartbeat minus transcript growth, both stamps taken from the same process and the same clock, over the warn and kill bands.* **[FILED AND CLOSED 2026-09-05.]** The number is the one the engineer who built it asked for. **The thresholds are borrowed from the run's own stall window rather than invented**, so a fleet that has retuned its patience does not acquire a second, disagreeing opinion about what "stuck" means. **NOT CLAIMED: `rpc` workers.** The rule infers from transcript growth and an `rpc` worker has no transcript to grow, so the criterion is silent there by construction rather than by oversight — a seat this cannot see is reported as `not_applicable`, which is the honest answer and is asserted as such.
+- [x] ISC-512: One dispatch rings one doorbell. *Probe: a staged dispatch counted at the trigger site, asserted to fire exactly once across the host and container paths.* **[FILED AND CLOSED 2026-09-05, out of a live re-delivery rather than a review.]** The cause was ONE dispatch and TWO triggers — the host's `STAGED_TRIGGER_LINE` and the container's `AUTO_TRIGGER_TEXT`, the second arriving as a queued follow-up — so a reviewer worked its brief and then worked it again. **The journal-after-dispatch hypothesis was ruled OUT across three runs before the real cause was found**, and that is recorded because it was the obvious suspect and cost the first day.
+- [x] ISC-513: `status` can see a review that nobody picked up. *Probe: an unconsumed dispatch request surfaced with its age, against a fixture where the request exists and no child was ever dispatched.* **[FILED AND CLOSED 2026-09-05.]** **The threshold is NOT poll-derived, and the first design of it was wrong.** Borrowing `DEFAULT_POLL_S` looked right and would have alarmed on every healthy review, because `recordDispatch` runs after a join that legitimately lasts up to `RELAY_SETTLE_DEADLINE_MS` — thirty minutes. A guard whose false-positive rate is 100% on the healthy path is not a guard.
+- [x] ISC-514: COVERAGE AND VERDICT ARE SEPARATE AXES. How many lenses reported is the host's count and is recorded whatever the collator writes; the collator's status describes only its own work. *Probe: a 2-of-3 fan-out asserting the brief carries the coverage as a fact and does NOT instruct a `partial`.* **[FILED AND CLOSED 2026-09-05; the split is the owner's decision, recorded and then implemented.]** **PROVED LIVE, not merely unit-checked**, on the first review this console ran against its own repository: two of three lenses reported, the brief carried `COVERAGE: 2 of 3 lenses reported`, and the collator wrote `success`. **The defect the split exposed is the reason it matters:** the old coverage-derived `partial` disabled `censusCeiling` on exactly the reviews that had lost a lens — the ones where a ceiling was most needed.
+- [x] ISC-515: Every outcome the harvester distinguishes for a result envelope reaches the sentence the collator reads. *Probe: each of `ok`, `missing`, `refused` mapped through the adapter to its own state, with `null` pinned as the silence that survives; plus the four sentences asserted not to borrow each other's wording.* **[FILED AND CLOSED 2026-09-05, in two commits a day apart, and the second one is the interesting half.]** `absent` was written, documented and probed while carrying NO production traffic — the adapter mapped a `null` to `undefined` and could not tell "no envelope exists" from "an envelope is fine". Closing that left `refused` doing the same thing one arm over, **and the argument for leaving it was in the code as a docblock**: a refusal is none of `present`, `absent` or `unreadable`, so the adapter declined. Correct about the taxonomy and wrong about the consequence — `undefined` is not a neutral "no arm fits", it is read downstream as NOTHING LOOKED, so the strongest signal the console has printed the weakest sentence it owns. **The answer to a fact that fits no arm is a new arm, not a new silence.** Six mutations across the two commits, six killed; restores checksum-verified.
+- [x] ISC-516: An artifact's path is resolved ONCE, so what is inlined into a brief is the file that was checked. *Probe: a symlink climbing to `control-auth.json` refused with the target's bytes asserted absent from the result; plus a structural assertion that the open carries `O_NOFOLLOW` and that nothing stats the NAME beforehand.* **[FILED AND CLOSED 2026-09-05, from the console's review of its own code.]** `readArtifact` did `lstat`-then-`open` on the same name, and the directory between the two calls belongs to the worker whose artifact it is. `isPathUnder` does not help: it checks the path the manifest NAMED, not what the name resolves to at open time. **The window cannot be narrowed into safety because the attacker sets the pace** — renaming in a loop costs a container nothing and it only has to win once — so it is removed instead, and every fact after the open comes from `fstat` on the handle. **THE PROBE'S LIMIT IS STATED RATHER THAN DISGUISED:** every STATIC input gives the old and new code the same answer, since a symlink is refused either way; the behavioural cases are regression cover and the structural assertion is what pins the fix, on `monitor-density.test.ts`'s precedent. Removing the flag makes the credential inline into the brief and reddens two tests, which is the pair working. **A SECOND SITE OF THE SAME CLASS IS KNOWN AND NOT CLAIMED:** `unrecognised-outbox.battery.ts`'s M16 is a standing survivor over the listing path's own type re-check.
+- [~] ISC-517: A lens that wrote a valid report is never lost. *Probe: an envelope whose artifact path is RELATIVE is accepted and resolved against the task outbox, and one that climbs out is still refused with the escape named rather than the mount table; plus the four envelope-read outcomes each reaching their own sentence (ISC-515).* **[FILED OPEN 2026-09-05, ROOT-CAUSED THE SAME DAY, AND THE FIRST VERSION OF THIS ENTRY PINNED THE WRONG MECHANISM — which is the part most worth keeping.]** It was filed against the `Promise.allSettled` harvest swallow, on two reviewers' independent reading of the code. **That was not the cause.** THE CAUSE, measured by fixing it and re-reading the real run tree: three seats wrote the same review to the same directory; two named it `/outbox/<task-id>/files/review.md` and one named it `files/review.md`. `containerPathToHost` matches only against the mount table, a relative path matches no mount, and `readResultEnvelope` refuses the WHOLE envelope on one bad artifact path — so a verdict, a summary and fourteen findings were discarded over the spelling of a pointer, and the refusal said "outside the mount table" of a file that was inside the outbox. **A three-link chain, and only the middle link was a real defence:** a benign spelling (the cause), refusal-of-the-whole-document (the amplifier), and `refused` mapping to a silence that downstream reads as NOTHING LOOKED (the concealer, closed by ISC-515 hours earlier and the reason this was diagnosable at all). **THE FIX WIDENS NOTHING THAT CAN BE READ:** resolution is lexical and the escape check is unchanged, so `../../etc/passwd` still refuses — the mutation that exempts relative paths from that check reddens exactly the traversal probe, which is what makes the accepting probe worth running. **GRADED `[~]` AND NOT `[x]`, because the sentence is universal and one route to losing a lens is now closed rather than all of them.** The harvest swallow this entry originally accused is HALF closed, and the half that remains is the half that matters: a rejected harvest no longer discards its reason — the note now names it, on the dispatch arm's precedent — but the lens is still LOST rather than recovered, so the route is quieter and not shut. Never observed to lose anything, real on inspection, and correctly described as an open second route rather than as the diagnosis. **THREE HYPOTHESES ARE RECORDED FALSIFIED rather than deleted** — relay stdout buffering (bun flushes to a file immediately, probed), an envelope landing after the task record (measured backwards: the envelope PRECEDES it in all three seats, by 8, 18 and 11 seconds), and an artifact size cap (`planInlineBudget` truncates). **AND A PROBE OF MY OWN WAS DEGENERATE TWICE OVER:** it passed `runPaths(root, runId)` with the arguments reversed, built a garbage path, and returned the identical "no dispatch record" for the seat that SUCCEEDED — it was discarded, and correcting the argument order is what produced the diagnosis in one read.
+- [x] ISC-518: A claimed artifact path is resolved by ONE rule, and every pass that reads one asks the same function. *Probe: a relative claim reconciles against the same file an absolute one names, producing no discrepancy; a relative claim that climbs out of `files/` is refused by containment with the escape named rather than the mount table; both die when the reconciler is narrowed back to absolute-only.* **[FILED AND CLOSED 2026-09-05, and it is the defect the FIX to ISC-517 introduced.]** Teaching `artifactPathProblem` that a relative path resolves against the task outbox left `reconcileArtifactClaims` still resolving through `containerPathToHost` alone, which answers `null` for anything non-absolute. **An ACCEPTED envelope then produced two false statements about one file:** the forward pass said the artifact was *"outside the container mount table"* for a file that was sitting in the outbox, and the reverse pass, finding it unmatched, said *"the outbox holds a file the envelope never mentioned"* about that same file. A report that contradicts itself twice about one artifact is worse than one that refuses it, because both halves read as findings. **The rule was never written down twice on purpose — it was written down twice because nothing forced it to be written once**, so the fix is `artifactClaimToHost`, shared, and the two passes can no longer disagree by construction. Found by the review console reading my own fix, hours after I shipped it.
+- [x] ISC-519: A DISCARDED DOCUMENT IS NEVER RENDERED AS SILENCE, on every surface that speaks about a lens. *Probe: `artifacts --json` carries `envelope_read`/`envelope_refusal`/`unreadable_envelope` with a clean control that must read `ok`; `report` emits a note naming the refusal with a clean control that must emit none; the collation brief emits a REFUSED block distinct from the UNREADABLE one, graded by five mutations including the one that hands the refused lens the unreadable wording — which deletes nothing and reads perfectly — against a reword control that stays green.* **[FILED AND CLOSED 2026-09-05, from the second dogfood run.]** ISC-515 closed this at the ONE surface it was measured at; the console then found the same silence at three more. A refusal's rendered form had been in `discrepancies` all along, which is why it looked closed: a person reading a terminal saw it, and every PROGRAM downstream saw `claimed: null` — the identical value a worker that wrote nothing produces. **The distinction that has to survive is operational, not descriptive:** an unreadable envelope may be damaged and its review partly unrecoverable; a refused one PARSED, so the whole review is legible on disk and the recovery is to open the file, and telling an operator it was "not readable" sends them hunting for corruption in an intact document. **One arm carries no production traffic and is here anyway:** `unreadable_unspecified` covers an envelope the harvester called unreadable whose structure did not arrive, which today's only producer cannot emit and any transport that serialises the verdict word across a wire can. It used to map to `undefined`, and `undefined` on that field means NOTHING LOOKED — the substitution that cost a day, waiting one refactor away.
+- [x] ISC-520: An error that is wrapped keeps the error it wrapped. *Probe: a `sendTask` that throws an `ENOENT` with a `syscall` reaches the caller as a `RelayDispatchError` whose `cause` is that same object — asserted by identity, not by a message substring, because a message can be reconstructed and an object cannot.* **[FILED AND CLOSED 2026-09-05.]** Of the five sites that raise `RelayDispatchError`, exactly one has an underlying throw, and it kept `err.message` and dropped the object — with it the `errno`, the `syscall`, the stack that says where, and any cause chain beneath. **`SocketRequestError` reads identically whether the socket path was wrong, the supervisor had gone, or the peer hung up mid-write**, and telling those three apart is the entire content of the diagnosis; the fleet skill already documents that this error means *wrong run* rather than *dead worker*, a distinction the discarded object carries and the sentence does not. Same failure the rest of this batch has: the paraphrase survives and the evidence does not.
+- [x] ISC-521: A refusal a caller must act on is recognisable as a RULE, not as a sentence. *Probe: a `writeReply` into a run whose collator has no replies directory rejects with a `RelayReplyError` carrying the collator, the child task id and the directory as FIELDS, with the original `ENOENT` as `cause` — asserted on the fields, so a rewrite of the message cannot break the test and cannot silently break a caller either.* **[FILED AND CLOSED 2026-09-05, from the second dogfood run's reading of the publish path.]** D6 has exactly one failure mode and the console is right to let it propagate: `pifleet up` creates the `/replies` source before `docker run` because **Docker CREATES a missing bind-mount source instead of refusing**, so an adapter that helpfully made the directory would deliver three reports into somewhere nothing is mounted from — the host would record a delivered fan-out, the collator would read an empty `/replies`, and every observable would say it worked. That reasoning is unchanged. What changed is that the refusal threw a bare `Error` carrying a paragraph, so the only way to recognise it was to substring-match the paragraph — **the exact practice `RelayDispatchError`'s own docblock forbids two hundred lines up**, in a module that states the rule and had not applied it to itself. The paragraph is the part most likely to be rewritten; the type and its three fields are not.

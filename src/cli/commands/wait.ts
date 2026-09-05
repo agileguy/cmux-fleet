@@ -14,6 +14,7 @@ import {
 import {
   readBudgetState,
   readTaskRecord,
+  readWorkerLaunch,
   readWorkerState,
   type TaskRecord,
 } from "../../run/state.ts";
@@ -22,6 +23,43 @@ import { processStartTime } from "../../run/registry.ts";
 import { Stopwatch } from "../../rpc/client.ts";
 
 const POLL_MS = 100;
+
+/**
+ * How long a stage on an AUTO-TRIGGERED worker may sit unpicked-up before
+ * `wait` stops believing the trigger is coming (see the staged branch below).
+ *
+ * It is a backstop and not a schedule. The observed gap between a staged
+ * dispatch and the transcript growth that clears `staged_task_id` is seconds —
+ * the supervisor polls the pane every `TUI_POLL_MS` and the agent's first
+ * message follows — so a healthy trigger never approaches this. What it bounds
+ * is the case the flag cannot see: the extension mounted and did nothing.
+ *
+ * Two orders of magnitude below the 10m default timeout, which is the property
+ * that matters. §6.5's objection to waiting was never "waiting is wrong", it
+ * was that a `wait` which consumes its whole deadline reports `wait_timeout` —
+ * a clock, not a cause. Settling here reports the cause.
+ */
+const STAGE_TRIGGER_GRACE_MS = 120_000;
+
+/**
+ * The grace, with the same env seam the runs directory and the Pi command
+ * already use — `PIFLEET_STAGE_TRIGGER_GRACE_MS`.
+ *
+ * Two minutes is the right backstop in a real run and the wrong one in a unit
+ * test, which would have to sleep through it to observe the stall arm at all.
+ * Without a seam that arm is untestable at unit speed and would have to be
+ * pinned structurally, which is how a branch that never executes gets to keep
+ * looking correct.
+ *
+ * Read per call rather than captured at import: the suite sets it around an
+ * invocation, exactly as it does `PIFLEET_RUNS_DIR`.
+ */
+function stageTriggerGraceMs(): number {
+  const raw = process.env["PIFLEET_STAGE_TRIGGER_GRACE_MS"];
+  if (raw === undefined) return STAGE_TRIGGER_GRACE_MS;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : STAGE_TRIGGER_GRACE_MS;
+}
 
 interface WaitedTask {
   task_id: string;
@@ -109,6 +147,23 @@ export function register(program: Command): void {
       const clock = new Stopwatch();
       const results = new Map<string, WaitedTask>();
       let timedOutWaiting = false;
+      /**
+       * Launch records are immutable for the life of a run, so this is read
+       * once per worker rather than once per 100ms poll. `null` is cached as
+       * eagerly as a record: the double-driven suites have no launch.json at
+       * all and would otherwise re-stat a missing file on every tick.
+       */
+      const launches = new Map<string, boolean>();
+      const autoTriggered = async (worker: string): Promise<boolean> => {
+        const cached = launches.get(worker);
+        if (cached !== undefined) return cached;
+        const launch = await readWorkerLaunch(workerPaths(run, worker));
+        const armed = launch?.auto_trigger ?? false;
+        launches.set(worker, armed);
+        return armed;
+      };
+      /** First tick at which each task was OBSERVED staged — see below. */
+      const stagedSince = new Map<string, number>();
 
       for (;;) {
         const taskIds = await targets();
@@ -191,6 +246,56 @@ export function register(program: Command): void {
              * would name the wrong remedy.
              */
             if (state !== null && state.staged_task_id === taskId) {
+              /**
+               * ...UNLESS SOMETHING IS ALREADY ON ITS WAY TO TRIGGER IT.
+               *
+               * The paragraphs above rest on one premise — "nothing will start
+               * until a person presses a key" — and that premise is false for
+               * the majority of this fleet. `auto_trigger` defaults TRUE
+               * (`config/load.ts`), so every `tui` worker is launched with the
+               * dispatch-trigger extension mounted and picks its own stage up
+               * seconds later, with nobody at the terminal.
+               *
+               * For those workers `staged_task_id === taskId` is not a resting
+               * state at all. It is the GAP between the stage landing and the
+               * transcript growth that clears it — and a `wait` issued in the
+               * same breath as its dispatch lands inside that gap every time.
+               * The observed shape: dispatch returns `via: staged`, `wait`
+               * returns `staged_untriggered` and exit 9 within seconds, and a
+               * concurrent `status` on the same run reports `phase: busy` with
+               * the transcript already growing. The task then succeeds. The
+               * verdict was wrong at the instant it was written, and it names a
+               * remedy — go press a key — for a worker nobody needs to visit.
+               *
+               * So the branch asks the launch record which kind of stage this
+               * is. Unattended: answer now, exactly as before. Auto-triggered:
+               * keep polling, and treat a stage that OUTLIVES
+               * the trigger grace as its own diagnosis rather than as
+               * either of the two lies available — `staged_untriggered` would
+               * send the reader to a keyboard, and falling through to the poll
+               * would report a clock.
+               *
+               * `readWorkerLaunch` returning `null` — the double-driven suites,
+               * and any run predating the field — resolves FALSE and therefore
+               * to the original behaviour, which is why ISC-445's sub-second
+               * probe is untouched by this.
+               */
+              if (await autoTriggered(worker)) {
+                const since = stagedSince.get(taskId) ?? clock.elapsedMs();
+                stagedSince.set(taskId, since);
+                if (clock.elapsedMs() - since <= stageTriggerGraceMs()) {
+                  pending++;
+                  continue;
+                }
+                results.set(taskId, {
+                  task_id: taskId,
+                  worker,
+                  epoch: state.epoch,
+                  verdict: "unknown",
+                  reason: "staged_trigger_stalled",
+                });
+                continue;
+              }
               results.set(taskId, {
                 task_id: taskId,
                 worker,
@@ -300,6 +405,14 @@ function exitFor(t: WaitedTask): ExitCode {
    * than requiring a reader to check that the arms are disjoint.
    */
   if (t.reason === "staged_untriggered") return EXIT.STAGED;
+  /**
+   * A stage whose trigger was armed and never fired is the SAME CLASS as one
+   * nobody pressed a key for — the epoch was allocated and no turn began — so
+   * it maps to the same code. Only the `reason` differs, and it has to: the
+   * remedy for this one is to look at why the extension did not fire, not to
+   * walk over to a terminal.
+   */
+  if (t.reason === "staged_trigger_stalled") return EXIT.STAGED;
   switch (t.verdict) {
     case "success":
       return EXIT.SUCCESS;

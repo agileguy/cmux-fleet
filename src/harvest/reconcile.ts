@@ -71,9 +71,21 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { ZodError } from "zod";
-import { parseTicketOpsArtifact, type ResultEnvelope, type Verdict } from "../contracts.ts";
 import {
-  containerPathToHost,
+  parseTicketOpsArtifact,
+  type CollationCensus,
+  type ResultEnvelope,
+  type Verdict,
+} from "../contracts.ts";
+import {
+  COLLATION_ARTIFACT_NAME,
+  readCollation,
+  type CollationRead,
+} from "../run/collation.ts";
+import { censusFromRead } from "./collation-census.ts";
+import {
+  OUTBOX_FILES_DIR,
+  artifactClaimToHost,
   resolvedWithin,
   safeForReport,
   type OutboxFile,
@@ -269,6 +281,41 @@ export interface ArtifactReconciliation {
    * and the cheapest place to stop that is here, where the cause is known.
    */
   verdictCeilingReason: string | null;
+  /**
+   * The STRUCTURAL CENSUS of a `collation.json` in this outbox, or `null` when
+   * there was none (SRD-REVIEW-CONSOLE §6.8, D8).
+   *
+   * A MEASUREMENT AND NOT A CEILING, which is the difference from the ticket-ops
+   * check beside it and the reason the two are not one mechanism. ISC-332's
+   * clamp has to happen here because it is keyed on artifact CONTENT, which the
+   * adjudicator structurally cannot see — it is handed derived facts and a claim,
+   * never a descriptor. A census is small, structured and serialisable, so it
+   * travels INTO the fact bundle and the adjudicator weighs it there like every
+   * other fact. That buys the ISC-153 property this module cannot give a clamp:
+   * the census is inside `facts_hash`, so a replay reaches the same verdict from
+   * the same evidence.
+   *
+   * The rules that turn it into a verdict live elsewhere and in two places, each
+   * because of what it can see: `censusCeiling` weighs the census as a FACT
+   * inside `adjudicate`, and `collationCeiling` weighs the parsed DOCUMENT and
+   * the task id inside `harvestTask`. This module counts; it does not grade.
+   */
+  collation: CollationCensus | null;
+  /**
+   * What `readCollation` said about the artifact, for `collationCeiling`.
+   *
+   * The census is the SERIALISABLE half and this is the half that is not: §6.8's
+   * third rule and its `missing`/`refused` siblings are `src/run/collation.ts`'s,
+   * and that function takes a `CollationRead` and a task id — neither of which
+   * survives into a fact bundle. Passed through in-process rather than
+   * reconstructed, because reconstructing a refusal from a census is a second
+   * spelling of one judgement.
+   *
+   * `{kind: "missing"}` when the outbox held no artifact at that name, which is
+   * every task in this fleet but a collation. `collationCeiling` is what makes
+   * that harmless: it refuses to act on any task id that is not a collation's.
+   */
+  collationRead: CollationRead;
 }
 
 /** What reading one held descriptor produced. */
@@ -508,6 +555,19 @@ export async function reconcileArtifactClaims(
   let verdictCeiling: Verdict | null = null;
   let verdictCeilingReason: string | null = null;
   /**
+   * FIRST IN PATH ORDER WINS, and a second `collation.json` anywhere in the tree
+   * is recorded as a defect on the first rather than replacing it.
+   *
+   * The scan walks `files/` recursively, so two collations in two directories is
+   * a reachable state. Letting the last one win would make the verdict depend on
+   * `readdir` order — which `ordered` below exists to stop mattering — and
+   * dropping the extras silently would let a collator publish a clean collation
+   * beside the real one and choose which gets counted.
+   */
+  let collationRead: CollationRead = { kind: "missing" };
+  /** Set once `collationRead` has been decided, so a second file cannot re-decide it. */
+  let collationSeen = false;
+  /**
    * Raise the ceiling and record its cause together, so neither can be set
    * without the other.
    *
@@ -532,7 +592,7 @@ export async function reconcileArtifactClaims(
   // worker may legitimately reference a file it edited — is a repository full
   // of things (`.env`, credentials a build wrote) that this module has no
   // business digesting into a report.
-  const filesRoot = resolve(join(loc.workerOutboxDir, loc.taskId, "files"));
+  const filesRoot = resolve(join(loc.workerOutboxDir, loc.taskId, OUTBOX_FILES_DIR));
 
   /**
    * The accepted set, keyed by resolved host path.
@@ -551,10 +611,22 @@ export async function reconcileArtifactClaims(
     // Rendered, never reproduced: the claim is worker-authored text on its way
     // into an operator's terminal (§12.6).
     const named = `${safeForReport(ref.path)} (kind ${ref.kind})`;
-    const host = containerPathToHost(ref.path, loc);
+    /**
+     * THE SAME RESOLUTION THE VALIDATOR USED, and it must stay the same one.
+     *
+     * These two passes disagreed once. `artifactPathProblem` learned that a
+     * relative artifact path means "relative to the task outbox"; this line
+     * still called `containerPathToHost`, which answers null for anything
+     * non-absolute. So an ACCEPTED claim fell into the branch below and the
+     * report said the file was outside the mount table — then the reverse pass,
+     * finding it unmatched, said the outbox held a file the envelope never
+     * mentioned. One artifact, two false statements, both about a file the
+     * envelope had named correctly.
+     */
+    const host = artifactClaimToHost(ref.path, loc);
     if (host === null) {
-      // Outside the mount table entirely — the §12.5 primitive. Nothing about
-      // this path has been or will be dereferenced.
+      // An absolute path outside the mount table — the §12.5 primitive.
+      // Nothing about this path has been or will be dereferenced.
       discrepancies.push(
         `envelope claims artifact ${named}, which is outside the container mount table; not read`,
       );
@@ -740,11 +812,38 @@ export async function reconcileArtifactClaims(
      * opt itself in or out by how it renders.
      */
     const isTicketOps = basename(f.path) === TICKET_OPS_ARTIFACT_NAME;
+    /**
+     * Selected on the raw basename for the identical reason, and the census
+     * needs the bytes for the identical reason: the document's content is the
+     * only place §6.8's three rules can be checked.
+     */
+    const isCollation = basename(f.path) === COLLATION_ARTIFACT_NAME;
     const outcome = await digestHeldArtifact(
       f,
       Math.min(MAX_ARTIFACT_BYTES, MAX_RECONCILED_BYTES - spent),
-      isTicketOps,
+      isTicketOps || isCollation,
     );
+    /**
+     * A collation the caps refused is a REPORTED gap, not a pass — the same
+     * suppression the ticket-ops arm below closes, and closed the same way. "Too
+     * large to check" and "checked and clean" are different answers, and a
+     * worker that could turn the census off by choosing a file size would be
+     * choosing whether it is graded.
+     */
+    if (isCollation && outcome.kind !== "ok" && !collationSeen) {
+      collationSeen = true;
+      discrepancies.push(
+        `collation artifact ${safeForReport(f.path)} could not be censused: ` +
+          `the harvester declined to read it (${outcome.kind})`,
+      );
+      collationRead = {
+        kind: "refused",
+        code: "too_large",
+        reason:
+          `the harvester declined to read ${safeForReport(f.path)} (${outcome.kind}), so the ` +
+          `collation was neither censused nor validated`,
+      };
+    }
     /**
      * A ticket-ops document the caps refused is a REPORTED gap, not a pass.
      *
@@ -770,7 +869,47 @@ export async function reconcileArtifactClaims(
     switch (outcome.kind) {
       case "ok": {
         spent += outcome.bytes;
-        if (outcome.retained !== null) {
+        if (isCollation && outcome.retained !== null) {
+          /**
+           * THE COLLATION, READ HERE AND GRADED ELSEWHERE.
+           *
+           * `readCollation` is `src/run/collation.ts`'s — the contract's own
+           * reader, with its bounds, its refusal codes and its attribution
+           * rules — so this module contributes no second opinion about whether a
+           * document is a collation. What it contributes is the BYTES, from the
+           * descriptor the scan is holding, which is the one thing that file
+           * cannot reach.
+           */
+          if (!collationSeen) {
+            collationSeen = true;
+            collationRead = readCollation(outcome.retained.toString("utf8"), { taskId: loc.taskId });
+            if (collationRead.kind === "refused") {
+              discrepancies.push(
+                `collation ${safeForReport(f.path)} was refused (${collationRead.code}): ` +
+                  `${safeForReport(collationRead.reason, 512)}`,
+              );
+            }
+          } else {
+            /**
+             * A SECOND `collation.json` anywhere in the tree is reported and
+             * ignored, never allowed to replace the first.
+             *
+             * The scan walks `files/` recursively, so two collations in two
+             * directories is a reachable state. Letting the last one win would
+             * make the verdict depend on `readdir` order — which `ordered` above
+             * exists to stop mattering — and dropping the extras silently would
+             * let a collator publish a clean collation beside the real one and
+             * choose which gets counted.
+             */
+            discrepancies.push(
+              `the outbox holds a second ${COLLATION_ARTIFACT_NAME} at ` +
+                `${safeForReport(f.path)}; the first in path order is the one read, because a ` +
+                `verdict must not depend on readdir order and a worker must not get to pick ` +
+                `which collation is graded`,
+            );
+          }
+        }
+        if (isTicketOps && outcome.retained !== null) {
           const problem = validateTicketOps(outcome.retained, secrets);
           if (problem !== null) {
             discrepancies.push(
@@ -813,7 +952,14 @@ export async function reconcileArtifactClaims(
         discrepancies.push(
           `artifact reconciliation stopped after ${spent} bytes; the per-task cap is ${MAX_RECONCILED_BYTES} — remaining artifacts were not digested`,
         );
-        return { discrepancies, artifacts, verdictCeiling, verdictCeilingReason };
+        return {
+    discrepancies,
+    artifacts,
+    verdictCeiling,
+    verdictCeilingReason,
+    collation: censusFromRead(collationRead, loc.containerWorkdir),
+    collationRead,
+  };
       case "unreadable":
         /**
          * THE DEFECT THIS CATCHES REACHED `main` ONCE ALREADY.
@@ -835,5 +981,12 @@ export async function reconcileArtifactClaims(
     }
   }
 
-  return { discrepancies, artifacts, verdictCeiling, verdictCeilingReason };
+  return {
+    discrepancies,
+    artifacts,
+    verdictCeiling,
+    verdictCeilingReason,
+    collation: censusFromRead(collationRead, loc.containerWorkdir),
+    collationRead,
+  };
 }

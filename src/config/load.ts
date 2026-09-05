@@ -458,6 +458,30 @@ export function providerBaseUrl(config: FleetConfig, provider: string): string {
   return block.base_url;
 }
 
+/**
+ * The context window to register for `model` on `provider`, or `null` for
+ * "say nothing and let the agent default".
+ *
+ * `null` rather than a number of our own, deliberately. A wrong window is worse
+ * than an absent one in both directions: too small silently wastes most of a
+ * model, and too large makes the provider reject whole requests once the history
+ * passes the real limit. The only correct source is the endpoint, so an
+ * unconfigured model keeps the agent's default and the operator sees the same
+ * behaviour they had before this field existed.
+ */
+export function providerContextWindow(
+  config: FleetConfig,
+  provider: string,
+  model: string,
+): number | null {
+  const providers = config.llm.providers;
+  // §6.1's shorthand fleet has no per-provider block to carry the map.
+  if (providers === undefined) return null;
+  const block = providers[provider];
+  if (block === undefined) return null;
+  return block.context_windows[model] ?? null;
+}
+
 export function providerApiKeyEnv(config: FleetConfig, provider: string): string {
   const providers = config.llm.providers;
   // §6.1's shorthand: with no map the flat keys ARE this provider's block, so

@@ -12,4 +12,6 @@ wins and you report `failed`.
 something adjacent is a `partial`, not a `success`. Look at what the change touched.
 
 You have read verbs only. Report `success`, `partial`, `blocked`, or `failed` with the
-command output that justifies it, as the `pifleet-worker` skill describes.
+command output that justifies it, as the `pifleet-worker` skill describes. Write `result.json`
+last: an envelope you never wrote does not fail your task, it removes you from the grading,
+and the cluster evidence you gathered then grades as unchecked.

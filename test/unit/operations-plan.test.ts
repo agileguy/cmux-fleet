@@ -25,9 +25,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { assertCmuxText } from "../../src/backends/cmux/client.ts";
-import { logArgv, statusArgv } from "../../src/monitor/read/git.ts";
 import {
   DEFAULT_OPERATIONS_WORKERS,
+  OPERATIONS_TOP_FRACTION,
   OPERATIONS_WORKSPACE,
   monitorPaneCommand,
   operationsPanes,
@@ -402,33 +402,25 @@ describe("the monitor pane — the eleven assertions that survived the merge", (
 
   // ---- from `the git-watch pane` ----------------------------------------
 
-  test("reports on the INVOCATION directory, never on cmux-fleet", () => {
-    // The requirement most easily got wrong, and unchanged by the merge: this
-    // console is a place to stand while working on some OTHER repository.
-    // Proved by mutation — passing `repoRoot` here reddens.
-    const cmd = monitorCmd();
-    expect(cmd).toContain(`'--repo' '${CWD}'`);
-    // `repoRoot` still appears, because that is where the CLI itself lives.
-    // What must not happen is it arriving as the watched repository.
-    expect(cmd).not.toContain(`'--repo' '${REPO}'`);
-  });
+  /*
+   * REMOVED 2026-09-04 with the monitor's git region: "reports on the
+   * INVOCATION directory, never on cmux-fleet", and the two tests that pinned
+   * git's argv through `statusArgv`/`logArgv`.
+   *
+   * All three were about `--repo`, which existed for exactly one consumer —
+   * `git -C <watchDir>` inside the strip that showed the invocation
+   * directory's `git status` beside the fleet table. The operator removed the
+   * region as answering a question nobody asked on that screen; the flag and
+   * the reader went with it, so there is no longer a watched directory for
+   * this console to get right or wrong.
+   *
+   * Deleted rather than adapted. Each one asserted a property of a feature
+   * that no longer exists, and the mechanical rewrite — assert the flag is
+   * ABSENT — would pin the absence of one flag among hundreds, which is not a
+   * property worth a test. What DOES survive is the quoting test at the
+   * bottom, rewritten onto the one value still injected into this command.
+   */
 
-  test("runs git with --no-pager, or the reader stops at (END) forever", () => {
-    /*
-     * MEASURED, not anticipated, and it now lives one layer down. On the first
-     * live run `git log` found a terminal on stdout, started `less`, and the
-     * pane sat at `(END)` waiting for a keypress — a plausible commit list that
-     * refreshed never, which is the failure a screenshot cannot tell from
-     * success.
-     *
-     * The pane text no longer contains git at all, so the assertion follows the
-     * subject into `read/git.ts` rather than being dropped. Asserted on the
-     * ARGV BUILDERS, which is stronger than the old string match: it covers
-     * every invocation by construction rather than the ones a regex found.
-     */
-    expect(statusArgv("/w")).toContain("--no-pager");
-    expect(logArgv("/w")).toContain("--no-pager");
-  });
 
   test("no watch(1), because macOS does not ship one", () => {
     /*
@@ -446,18 +438,6 @@ describe("the monitor pane — the eleven assertions that survived the merge", (
     expect(monitorCmd()).not.toMatch(/\bwatch\b/);
   });
 
-  test("shows branch and recent history, and the strip carries both halves", () => {
-    /*
-     * The content requirement, moved to the reader with the git invocation. D12
-     * keeps both halves and Q8 decided which is shown first; what the old
-     * assertion protected is that NEITHER is dropped at the source, and that is
-     * what these pin.
-     */
-    expect(statusArgv("/w")).toContain("--short");
-    expect(statusArgv("/w")).toContain("--branch");
-    expect(logArgv("/w")).toContain("--oneline");
-    expect(logArgv("/w")).toContain("-10");
-  });
 
   test("takes a poll interval and refuses a nonsensical one", () => {
     // Unchanged and still validated in the plan, because a zero or fractional
@@ -503,9 +483,23 @@ describe("quoting", () => {
   test("a directory containing a quote cannot break out of the command", () => {
     // `--command` text is shell-INJECTED, not exec'd (SRD §4.1), so an
     // unquoted path is command injection by construction.
+    /*
+     * The subject moved with `--repo`'s removal. `monitorPaneCommand` now
+     * injects exactly one caller-supplied path — `repoRoot`, where the CLI
+     * itself lives — so that is what this proves cannot break out. A test left
+     * pointed at the deleted argument would have been rewritten into a
+     * two-argument call that quoted nothing.
+     */
     const nasty = `/tmp/it's here; touch /tmp/pwned`;
-    const cmd = monitorPaneCommand("/r", nasty, 5);
-    expect(cmd).toContain(`'/tmp/it'"'"'s here; touch /tmp/pwned'`);
+    const cmd = monitorPaneCommand(nasty, 5);
+    // `repoRoot` reaches the command with `/src/cli/index.ts` appended, so the
+    // quoted argument is the whole path — assert the ESCAPING, which is the
+    // security property, rather than a literal prefix of it.
+    expect(cmd).toContain(`'/tmp/it'"'"'s here; touch /tmp/pwned/src/cli/index.ts'`);
+    // NOT asserted: that `; touch` is absent. It is present, and that is the
+    // correct outcome — it sits INSIDE the single-quoted argument, which is
+    // what "cannot break out" means. An absence assertion here would fail on
+    // correct code and pass on a build that dropped the path entirely.
     /*
      * Belt AND braces after the merge, because there are now TWO boundaries and
      * only one of them is this quoting. The pane text is shell-injected, so the
@@ -519,5 +513,40 @@ describe("quoting", () => {
     expect(pifleetCommand("/r", ["up", "--workers", "a b"])).toBe(
       `bun run '/r/src/cli/index.ts' 'up' '--workers' 'a b'`,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The bottom row's share of the height
+// ---------------------------------------------------------------------------
+
+/**
+ * The requirement is stated about the BOTTOM row and asserted about it here,
+ * even though the constant it constrains is the top one.
+ *
+ * `applyTopFraction` resizes the panes sharing the minimum `y`, so the top
+ * fraction is the number the code can act on and the one the module exports.
+ * Asserting that number alone would pin an implementation detail and leave the
+ * thing actually asked for — a bottom row of 35% — nowhere in the suite, so a
+ * later edit that "simplified" the complement back to a half would pass.
+ *
+ * `toBeCloseTo` rather than `toBe`: the value is a decimal fraction and the
+ * complement of one is not exactly representable, which is a property of
+ * binary floating point and not of the layout. Two decimal places is three
+ * orders of magnitude finer than a terminal row.
+ */
+describe("the operations console reserves 35% of the height for the bottom row", () => {
+  test("the bottom row's share is 35%", () => {
+    expect(1 - OPERATIONS_TOP_FRACTION).toBeCloseTo(0.35, 2);
+  });
+
+  /**
+   * The direction, asserted separately, because "the bottom row is 35%" is
+   * also satisfied by 0.35 written into the top constant by mistake — which
+   * would put the SMALL row where the agents are and hand the status table and
+   * the git log two thirds of the window.
+   */
+  test("the top row keeps the majority of the height", () => {
+    expect(OPERATIONS_TOP_FRACTION).toBeGreaterThan(0.5);
   });
 });

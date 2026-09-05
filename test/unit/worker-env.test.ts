@@ -10,6 +10,7 @@
  * fails on that, which is exactly why it is asserted here.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,6 +125,62 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
     );
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wf"), {});
     expect(Object.keys(plan.vars).filter((k) => k.startsWith("GIT_CONFIG"))).toEqual([]);
+  });
+});
+
+describe("a package manager has somewhere writable to cache", () => {
+  /**
+   * The read-only root's second casualty, after git's ownership guard above.
+   *
+   * npm's default cache is `$HOME/.npm` and bun's is `$HOME/.bun`. `$HOME` is
+   * `/home/pi`, which lives on the read-only root (SRD §5.6), so an install in
+   * a fresh worktree fails before it fetches anything:
+   *
+   *   mkdir: cannot create directory '/home/pi/.npm': Read-only file system
+   *
+   * MEASURED on a tester worker asked to run this repository's own unit suite.
+   * The agent recovered by passing `--cache ./npm-cache`, which is why this is
+   * worth fixing rather than leaving: the workaround works, costs the worker a
+   * chunk of its turn, and drops an untracked directory INSIDE `/workspace`,
+   * where it lands in the diff the harvest grades.
+   *
+   * Asserted on the env plan, like every other var here — a container probe
+   * would need a Docker daemon and would prove the same string.
+   */
+  test("npm and bun caches point at the writable tmpfs", async () => {
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    // `/tmp` is the tmpfs `render.ts` mounts rw for every worker. Anywhere
+    // under `$HOME` is the bug this replaces, and `/workspace` is the
+    // workaround it replaces — that one is writable but ends up in the diff.
+    expect(plan.vars["npm_config_cache"]).toBe("/tmp/.npm");
+    expect(plan.vars["BUN_INSTALL_CACHE_DIR"]).toBe("/tmp/.bun-cache");
+    expect(plan.vars["XDG_CACHE_HOME"]).toBe("/tmp/.cache");
+  });
+
+  /**
+   * NOT gated on `isolation`, unlike the git block above, and the contrast is
+   * the point.
+   *
+   * That block configures a repository and correctly says nothing when there
+   * is none. This one states where `$HOME`-bound caches go, and `$HOME` is
+   * read-only whether or not a workspace is mounted — a role with
+   * `isolation: none` still runs tools that want a cache directory.
+   */
+  test("a worker with no workspace gets them too", async () => {
+    const loaded = await load(
+      baseDoc({
+        roles: { eng: {}, cloudy: { cloud_access: true }, obs: { isolation: "none" } },
+        workers: [
+          { id: "w1", role: "eng" },
+          { id: "wc", role: "cloudy" },
+          { id: "wo", role: "obs" },
+        ],
+      }),
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wo"), {});
+    expect(plan.vars["GIT_CONFIG_COUNT"]).toBeUndefined();
+    expect(plan.vars["npm_config_cache"]).toBe("/tmp/.npm");
   });
 });
 
@@ -750,5 +807,209 @@ describe("a worker dials ITS OWN provider's endpoint, not the fleet default", ()
     const loaded = await load(baseDoc({ llm: { model: "TestModel" } }));
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
     expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
+  });
+});
+
+/**
+ * THE CONTEXT WINDOW IS THE FLEET'S TO SET, AND IT NEVER SET IT.
+ *
+ * `docker/entrypoint.sh` rendered each model into `models.json` as `{id, name}`
+ * and nothing else, so the Pi agent fell back to its own default — 128,000 — for
+ * every model in the fleet regardless of what the endpoint actually served.
+ * Measured against the provider on 2026-09-04: `deepseek-v4-pro:0813` and
+ * `kimi-k3` serve 1,048,576. `rev-arch-1` therefore auto-compacted at 152,447
+ * tokens having used 12% of its window, and then could not resume at all —
+ * "Cannot continue from message role: assistant" — losing a completed review.
+ *
+ * ## Why the fixture puts the SAME model id on BOTH providers
+ *
+ * Deliberately asymmetric, because the degenerate fixture is the one that would
+ * pass here by accident. A map keyed only by model id — fleet-wide rather than
+ * per-provider — returns the right answer for every fixture in which each id
+ * appears once, which is every obvious fixture. `SharedModel` at two different
+ * windows is the only shape that can tell the two designs apart, and it is the
+ * real case: the same weights behind two endpoints are served with whatever
+ * window each operator configured, and the one that matters is the endpoint's.
+ */
+describe("a worker's context window is its own provider's", () => {
+  const sharedModel = () =>
+    baseDoc({
+    llm: {
+      provider: "local",
+      model: "SharedModel",
+      providers: {
+        local: {
+          hosted: false,
+          base_url: "http://omlx.pifleet.internal:8000/v1",
+          api_key_env: "OMLX_API_KEY",
+          models_allowlist: ["SharedModel"],
+          context_windows: { SharedModel: 32768 },
+        },
+        vendor: {
+          hosted: true,
+          base_url: "https://vendor.example/v1",
+          relay_upstream: "203.0.113.7:443",
+          api_key_env: "VENDOR_API_KEY",
+          models_allowlist: ["SharedModel", "Unmeasured"],
+          context_windows: { SharedModel: 1048576 },
+        },
+      },
+    },
+    roles: {
+      eng: {},
+      remote: { model: "vendor/SharedModel" },
+      quiet: { model: "vendor/Unmeasured" },
+    },
+    workers: [
+      { id: "w1", role: "eng" },
+      { id: "wv", role: "remote" },
+      { id: "wq", role: "quiet" },
+    ],
+    });
+
+  test("the same model id on two providers resolves to two different windows", async () => {
+    const loaded = await load(sharedModel());
+    const local = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const remote = buildWorkerEnv(loaded, resolveWorker(loaded, "wv"), {});
+
+    expect(local.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).toBe("32768");
+    expect(remote.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).toBe("1048576");
+    // The arm that a fleet-wide map would fail: they are not the same answer.
+    expect(local.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).not.toBe(
+      remote.vars["PIFLEET_LLM_CONTEXT_WINDOW"],
+    );
+  });
+
+  /**
+   * An unmeasured model keeps the agent's default, and the variable is EMPTY
+   * rather than a number of ours. `entrypoint.sh` omits `contextWindow` on
+   * empty, so this is the "behave exactly as before" path — the one that must
+   * not acquire a guess, because too large makes the provider reject whole
+   * requests once the history passes the real limit.
+   */
+  test("a model with no measured window is left to the agent's default", async () => {
+    const loaded = await load(sharedModel());
+    const quiet = buildWorkerEnv(loaded, resolveWorker(loaded, "wq"), {});
+    expect(quiet.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).toBe("");
+  });
+
+  /** The variable is always present, so the entrypoint's `:-` never guesses. */
+  test("the variable is written for every worker, measured or not", async () => {
+    const loaded = await load(sharedModel());
+    for (const id of ["w1", "wv", "wq"]) {
+      const vars = buildWorkerEnv(loaded, resolveWorker(loaded, id), {}).vars;
+      expect(Object.keys(vars), `${id} has no window variable`).toContain(
+        "PIFLEET_LLM_CONTEXT_WINDOW",
+      );
+    }
+  });
+});
+
+/**
+ * A ROLE'S `thinking` HAS TO ARRIVE, and until 2026-09-05 it did not.
+ *
+ * `thinking` was resolved by `resolveWorker`, printed by `doctor` and `render`,
+ * carried in dispatch requests, and handed to no container: nothing under
+ * `src/run/` or `src/backends/` read the field. Every worker therefore ran at
+ * Pi's own `DEFAULT_THINKING_LEVEL`, and the review console's four hosted seats
+ * — all four configured `thinking: high` on the argument that a reviewer must
+ * think longest per token read — were measured opening their sessions at
+ * `thinkingLevel: "off"`, five live reviews in.
+ *
+ * ## Why the existing probe did not catch it, which is the part worth keeping
+ *
+ * `review-plan.test.ts` asserts `resolveWorker(id).thinking === "high"`. That is
+ * the value this module is supposed to CARRY; it is not evidence that anything
+ * carried it, and it passed for the whole time the field went nowhere. The same
+ * shape cost this fleet its context windows once already — resolved correctly
+ * host-side while two 1,048,576-token models ran at 128,000 — so the probes
+ * below assert the DELIVERED value, and the one after them reads the shell that
+ * consumes it.
+ *
+ * The fixture is asymmetric on purpose: two roles that both name a level name
+ * DIFFERENT levels, so an implementation that hardcodes one, or that hands
+ * every worker the fleet default, scores zero rather than half.
+ */
+describe("a worker's reasoning effort reaches its container", () => {
+  const efforts = () =>
+    baseDoc({
+      roles: {
+        deep: { thinking: "high" },
+        cheap: { thinking: "low" },
+        unset: {},
+      },
+      workers: [
+        { id: "wd", role: "deep" },
+        { id: "wc", role: "cheap" },
+        { id: "wu", role: "unset" },
+      ],
+    });
+
+  test("two roles at two levels arrive as two different values", async () => {
+    const loaded = await load(efforts());
+    const deep = buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), {});
+    const cheap = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {});
+
+    expect(deep.vars["PIFLEET_PI_THINKING"]).toBe("high");
+    expect(cheap.vars["PIFLEET_PI_THINKING"]).toBe("low");
+    // The arm a hardcoded level or a fleet-wide default would fail.
+    expect(deep.vars["PIFLEET_PI_THINKING"]).not.toBe(cheap.vars["PIFLEET_PI_THINKING"]);
+  });
+
+  /**
+   * EMPTY, not a guess. `settings.json` is Pi's own state file on a volume that
+   * outlives the run, so "" has to mean "config has no opinion, keep whatever
+   * the operator set with `/settings`" — the same rule `PIFLEET_PI_THEME`
+   * follows, and for the same reason: writing a default here would overwrite a
+   * hand-made choice on every restart.
+   */
+  test("a role that names no level leaves the pane's own setting alone", async () => {
+    const loaded = await load(efforts());
+    const unset = buildWorkerEnv(loaded, resolveWorker(loaded, "wu"), {});
+    expect(unset.vars["PIFLEET_PI_THINKING"]).toBe("");
+  });
+
+  test("the variable is written for every worker, levelled or not", async () => {
+    const loaded = await load(efforts());
+    for (const id of ["wd", "wc", "wu"]) {
+      const vars = buildWorkerEnv(loaded, resolveWorker(loaded, id), {}).vars;
+      expect(Object.keys(vars), `${id} has no thinking variable`).toContain("PIFLEET_PI_THINKING");
+    }
+  });
+
+  /**
+   * THE FAR END, read as text, because the delivery is only half the plumbing.
+   *
+   * A variable that reaches the container and is consumed by nothing is exactly
+   * the defect this block exists for, one layer along. `entrypoint.sh` is a
+   * shell script with no unit-testable seam, so the assertion is on its source:
+   * it must name the variable, and it must write Pi's own settings key.
+   *
+   * `defaultThinkingLevel` is that key — Pi's `settings-manager.js` reads
+   * `this.settings.defaultThinkingLevel` in `getDefaultThinkingLevel()` and
+   * falls back to `DEFAULT_THINKING_LEVEL` when it is absent. A misspelling
+   * here is silent: the file is still valid JSON, Pi still starts, and the
+   * level is still the default.
+   *
+   * ## The assertion is the jq OBJECT, and the first draft was degenerate
+   *
+   * It read `expect(entrypoint).toContain("defaultThinkingLevel")`. Misspelling
+   * the key in the jq expression left that GREEN, because the paragraph of
+   * comment above the code spells it correctly four times — the probe was
+   * matching the prose that explains the code rather than the code. Measured:
+   * the mutation survived, and it was the only survivor of five.
+   *
+   * So the string below is the object construction itself, `$k` included. That
+   * cannot be satisfied by a comment describing it, and it fails on exactly the
+   * edit that would break the plumbing while leaving every other test green.
+   */
+  test("the entrypoint consumes the variable and writes Pi's own settings key", () => {
+    const entrypoint = readFileSync(new URL("../../docker/entrypoint.sh", import.meta.url).pathname, "utf8");
+    expect(entrypoint, "entrypoint.sh never reads PIFLEET_PI_THINKING").toContain(
+      '--arg k "${PIFLEET_PI_THINKING:-}"',
+    );
+    expect(entrypoint, "entrypoint.sh does not write the key Pi reads").toContain(
+      "{defaultThinkingLevel: $k}",
+    );
   });
 });

@@ -51,7 +51,8 @@
 
 import { Box, Text } from "ink";
 
-import type { FleetModel, GitStrip, Region, RunRow, WorkerRow } from "../model.ts";
+import type { FleetModel, Region, RunRow, WorkerRow } from "../model.ts";
+import { workerContainerName } from "../../run/paths.ts";
 import {
   Bullet,
   Cell,
@@ -78,10 +79,22 @@ import type { Palette } from "./chrome.tsx";
  */
 const ID_COL = 8;
 const ACTIVITY_COL = 20;
-const PHASE_COL = 18;
+/**
+ * Widest `phaseCell` output is `Starting` (8), plus the gap to the next column.
+ *
+ * It was 18, sized for the dropped `phase ` prefix. The width the prefix gave
+ * back goes to the task id at the end of the row.
+ */
+const PHASE_COL = 10;
 const TASK_COL = 12;
-/** Widest `containerCell` output — `container not checked`. */
-const CONTAINER_COL = 21;
+/**
+ * Widest `containerCell` output is `Down` (4), plus the gap to the next column.
+ *
+ * It was 21, sized for `container not checked`. Shortening the values shortens
+ * the column, and the width the row gives back goes to the task id at the end
+ * of it — which is the column that was actually running out of room.
+ */
+const CONTAINER_COL = 6;
 
 /**
  * The narrowest pane this monitor will draw on, DERIVED rather than probed.
@@ -223,15 +236,193 @@ function activityColour(activity: WorkerRow["activity"], p: Palette): string | u
   }
 }
 
-function containerCell(present: boolean | null): string {
-  if (present === null) return "container not checked";
-  return present ? "container up" : "no container";
+/**
+ * The row's severity: `busy` is live, everything else is dim — and the
+ * transcript-write ladder does not get a vote.
+ *
+ * WHY NOT THE LADDER. `activity` measures TRANSCRIPT WRITES, which is a proxy
+ * for "is anything happening" that is wrong in both directions, and both were
+ * measured on the same worker within two minutes on 2026-09-04:
+ *
+ *   tst-1  wrote 1m ago   phase busy   -> `quiet`  -> white, same as four idle
+ *                                          workers, while running a 1120-test
+ *                                          suite. The one row worth finding was
+ *                                          styled to disappear.
+ *   tst-1  wrote 19s ago  phase idle   -> `active` -> green, having finished.
+ *                                          Nothing was happening.
+ *
+ * A long tool call writes nothing while doing the most work of the run, and a
+ * worker's last write lands just as it stops. `phase` is what `state.json`
+ * actually says about whether an epoch is being held, and it is what the
+ * colour should answer with, because the colour is what the eye reaches first.
+ *
+ * The activity CELL still reports the ladder in text, which is the right place
+ * for a proxy: readable when wanted, not shouting when not.
+ *
+ * WHAT BUSY DOES NOT OUTRANK, AND WHAT IDLE DOES NOT HIDE. `container-gone`
+ * and `no-transcript` are findings rather than states, and neither phase makes
+ * them less true — a worker whose container has vanished while `state.json`
+ * still says busy is exactly the row that must not be painted green, and one
+ * that never produced a transcript is worth flagging whether or not it happens
+ * to be holding an epoch. Those two keep their own severity.
+ */
+export function rowColour(row: WorkerRow, p: Palette): string | undefined {
+  if (row.activity === "container-gone" || row.activity === "no-transcript") {
+    return activityColour(row.activity, p);
+  }
+  return row.phase === "busy" ? p.live : p.dim;
+}
+
+/**
+ * The container column: `Up`, `Down`, or a dash.
+ *
+ * It read `container up` / `no container` / `container not checked` in a
+ * 21-wide column. The word `container` was the heading of a column whose every
+ * value repeated it, so nineteen of those characters said nothing the position
+ * did not already say — and the state, which is the whole point, was the last
+ * word rather than the first.
+ *
+ * `Up` and `Down` are bold green and bold red at the call site, which is where
+ * the eye should be able to stop.
+ *
+ * **The dash is the third state and it is not `Down`.** `null` means the slow
+ * clock has never completed (`activity.ts:99-107`) — an absence of fact, not a
+ * negative. Every worker is `null` for the first half-cycle after `up`, so
+ * rendering it as a bold red `Down` would put the monitor's most actionable
+ * finding on every row at startup, and teach the operator to ignore it by the
+ * second morning. It is dim and wordless because there is nothing to report
+ * yet.
+ */
+/**
+ * The phase column: `Idle`, `Busy`, and whatever else `state.json` says.
+ *
+ * It read `phase idle` in an 18-wide column. As with `container`, the word
+ * `phase` was a heading repeated on every value, and the value was the half a
+ * reader actually wanted.
+ *
+ * The string is CAPITALISED rather than mapped, so a phase this view has never
+ * heard of (`settling`, `stalled`, `dead`, or one added later) still renders
+ * as itself. A `switch` with a default would have to choose between inventing
+ * a label and rendering nothing; neither is better than the word the
+ * supervisor actually wrote.
+ */
+export function phaseCell(phase: string): string {
+  return phase === "" ? "—" : phase[0]!.toUpperCase() + phase.slice(1);
+}
+
+export function containerCell(present: boolean | null): string {
+  if (present === null) return "—";
+  return present ? "Up" : "Down";
+}
+
+/** Colour for the container cell. Bold green up, bold red down, dim unknown. */
+export function containerColour(present: boolean | null, p: Palette): string | undefined {
+  if (present === null) return p.dim;
+  return present ? p.live : p.alarm;
+}
+
+/**
+ * Containers `docker ps` reported that no worker row accounts for.
+ *
+ * The count was the whole region: `containers — as of 3s — 9 seen`. Six of
+ * those nine are the workers listed directly above it, each with its own `Up`
+ * cell — so the number's only real content was the OTHER three, and it stated
+ * them by arithmetic the reader had to do.
+ *
+ * The other three are the egress relays. They are the fleet's network, every
+ * worker's outbound traffic goes through one, and a worker whose relay has
+ * died is a worker that fails at its first `curl` with nothing on this screen
+ * to explain it. They were the least visible containers in the design and are
+ * the ones an operator cannot diagnose around.
+ *
+ * DERIVED, never a second list. `workerContainerName` is the single definition
+ * of a worker container's name and the same function `up` names them with, so
+ * a rename cannot leave this filter matching the old shape and quietly
+ * promoting every worker into this section.
+ */
+export function unclaimedContainers(model: FleetModel): readonly string[] {
+  if (model.containers.status !== "ok") return [];
+  /*
+   * A FAILED runs region lists NOTHING, and the guard belongs here rather than
+   * at the call site.
+   *
+   * With no worker rows every container is unclaimed, so the arithmetic answer
+   * is "all of them" under a heading that says `not a worker` — a lie told by
+   * a region already reporting a failure one line up. Keeping this in the
+   * component would make it a property of one caller instead of a property of
+   * the answer, and the next caller would get the lie.
+   */
+  if (model.runs.status !== "ok") return [];
+  const claimed = new Set<string>();
+  for (const run of model.runs.value) {
+    for (const w of run.workers) claimed.add(workerContainerName(run.runId, w.workerId));
+  }
+  return model.containers.value.filter((n) => !claimed.has(n));
+}
+
+/**
+ * The containers region: the count, then the ones no worker row explains.
+ *
+ * A failed `runs` region yields an empty list — see `unclaimedContainers`,
+ * which owns that rule — so the heading's own failure marker is left to say
+ * what happened.
+ */
+function ContainersRegion({ model }: { model: FleetModel }) {
+  const p = usePalette();
+  const others = unclaimedContainers(model);
+  return (
+    <Box flexDirection="column">
+      <RegionHeading
+        text={regionLine("containers", model.containers, model.now, (names) =>
+          names.length === 0
+            ? "none running"
+            : `${names.length} seen, ${others.length} not a worker`,
+        )}
+        failed={model.containers.status === "failed"}
+      />
+      {others.map((name) => (
+        /*
+         * STATE FIRST, NAME LAST AND UNBOUNDED — the same shape the task id
+         * needed, for the same reason.
+         *
+         * These rows do not align with the worker rows above and should not:
+         * they have no activity, no phase and no task, and padding them into
+         * those columns would invite the reader to compare cells that mean
+         * nothing here. What they have is a name and a state.
+         *
+         * The name goes last because these names share long prefixes —
+         * `pifleet-egress-relay-pifleet-egress`, `…-ollama-cloud`, `…-omlx` —
+         * so a fixed column truncates all three to the identical string
+         * `pifleet-egress-relay-piflee…`. Three rows that cannot be told apart
+         * are worse than the count they replaced.
+         */
+        <Box key={name}>
+          {/*
+           * A PLAIN INDENT, not a `Bullet`.
+           *
+           * The bullet is the worker-row marker: `monitor-render.test.ts`
+           * counts worker rows by it precisely because it is "on every worker
+           * row and on nothing else", which is how that test proves a failed
+           * runs region renders no rows rather than proving the rows never
+           * existed. Putting one here would have quietly made that count 8
+           * instead of 6 and cost the test its subject.
+           *
+           * Nothing is lost: the bullet carries severity, and severity here is
+           * already the bold green `Up` beside it.
+           */}
+          <Text>{"    "}</Text>
+          <Cell width={CONTAINER_COL} color={p.live} bold={p.on}>Up</Cell>
+          <Text wrap="truncate-end" bold={p.on}>{name}</Text>
+        </Box>
+      ))}
+    </Box>
+  );
 }
 
 /** One worker: activity, phase, task, container — §6.2's row, minus what the model does not carry. */
 function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
   const p = usePalette();
-  const severity = activityColour(row.activity, p);
+  const severity = rowColour(row, p);
   /*
    * The BULLET is the only glyph added to the row, and it earns its column by
    * carrying the severity where the eye lands first. It is a plain `*` when
@@ -246,20 +437,58 @@ function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
       <Cell width={ID_COL} bold={p.on}>{row.workerId}</Cell>
       <Cell width={ACTIVITY_COL} color={severity}>{activityCell(row)}</Cell>
       {plan.showPhase ? (
-        <Cell width={PHASE_COL} dimColor={p.on}>{`phase ${row.phase}`}</Cell>
-      ) : null}
-      {plan.showTask ? (
-        <Cell width={TASK_COL} dimColor={p.on}>
-          {row.taskId === null ? "no task" : `task ${row.taskId}`}
+        <Cell
+          width={PHASE_COL}
+          color={row.phase === "busy" ? p.busy : undefined}
+          bold={p.on && row.phase === "busy"}
+          dimColor={p.on && row.phase !== "busy"}
+        >
+          {phaseCell(row.phase)}
         </Cell>
       ) : null}
       {plan.showContainer ? (
-        <Text
-          wrap="truncate-end"
-          color={row.containerPresent === false ? p.alarm : undefined}
-          dimColor={p.on && row.containerPresent !== false}
+        <Cell
+          width={CONTAINER_COL}
+          color={containerColour(row.containerPresent, p)}
+          bold={p.on && row.containerPresent !== null}
+          dimColor={p.on && row.containerPresent === null}
         >
           {containerCell(row.containerPresent)}
+        </Cell>
+      ) : null}
+      {/*
+       * TASK IS LAST, AND THAT IS WHAT MAKES IT WHOLE.
+       *
+       * It used to sit between phase and container in a 12-wide `Cell`, which
+       * truncated every real id this fleet issues — `task T-rall…` for
+       * `T-rally-accept`. A task id is the one value on the row an operator
+       * has to read EXACTLY, because it is what they type into `wait`,
+       * `artifacts` and `unstage`; a truncated one is not a shorter answer,
+       * it is no answer.
+       *
+       * Last is the only position where widening it costs nothing. Every
+       * earlier column is fixed so that two frames of the same fleet line up
+       * character by character, and a variable-width cell in the middle would
+       * move everything to its right as tasks came and went. At the end it
+       * takes whatever the pane has left and truncates only when even that
+       * runs out.
+       *
+       * Position is not precedence: task is rendered last and still DROPPED
+       * first (`planColumns`), because on this fleet it is the column most
+       * often empty. The two orders answer different questions.
+       *
+       * Bold white when a task is actually held, dim otherwise. The row's
+       * bullet already says whether work is happening; this says what the work
+       * IS, and `no task` is the one value nobody needs to read quickly.
+       */}
+      {plan.showTask ? (
+        <Text
+          wrap="truncate-end"
+          bold={p.on && row.taskId !== null}
+          color={row.taskId === null ? undefined : p.quiet}
+          dimColor={p.on && row.taskId === null}
+        >
+          {row.taskId === null ? "no task" : `task ${row.taskId}`}
         </Text>
       ) : null}
     </Box>
@@ -296,50 +525,265 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
   );
 }
 
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * GROUPING BY WORKSPACE
+ *
+ * The owner's request was "break the workers down by workspace, with the
+ * workspace name in bold yellow". The heading is three lines of JSX. Everything
+ * argued below is about the half that can silently lose a worker.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
 /**
- * The git strip (§6.8, D12), with Q8's reversal applied: **status first, commits
- * behind `[c]`** — decided by the owner 2026-09-02 against the SRD's own first
- * proposal, because dirty paths change and a commit list on an idle branch does
- * not.
+ * The heading for workers whose record names no workspace.
  *
- * The half that is not shown is rendered as a COUNT rather than dropped. D12
- * refuses to drop anything the incumbent showed, and a silently absent commit
- * list is the dead-field shape `contracts.ts:86-118` records — the reader cannot
- * tell an empty list from one behind a key they have never heard of. A count and
- * the key that reveals it costs one line and says both.
+ * ## The wording is a claim about the RECORD, and it has to be
  *
- * `clean` for an empty status is the same distinction one level down: a strip
- * that rendered nothing would be indistinguishable from one that failed to read.
+ * `detached` was the obvious word and it is false: a headless run was never
+ * attached to anything, so calling it detached invents a history. `no console`
+ * is a claim about the world this monitor cannot check — cmux may well have a
+ * console open that pifleet simply never recorded. What is true, and all that
+ * is true, is that nothing on disk names a workspace for these workers.
+ *
+ * **Naming it honestly matters more here than it looks**, because this group is
+ * where a worker lands when the evidence is missing, and an operator who reads
+ * the heading as a verdict about the WORKER will draw exactly the wrong
+ * conclusion: these agents may be perfectly healthy, holding epochs, mid-task.
+ * The heading says what pifleet knows, not what the fleet is doing — the row's
+ * own cells already say that.
+ *
+ * MEASURED: 81 of 183 `presentation.json` records on the operator's disk sit
+ * here (2026-09-04). This is a populated group, not a fallback.
  */
-function GitStripView({ region, now }: { region: Region<GitStrip>; now: number }) {
-  const p = usePalette();
-  const head = regionLine(
-    "git",
-    region,
-    now,
-    (g) => `${g.branchLine} — ${g.watchDir}`,
-  );
-  if (region.status !== "ok") {
-    return <RegionHeading text={head} failed={region.status === "failed"} />;
+export const NO_WORKSPACE = "no workspace recorded";
+
+/**
+ * One group's heading line.
+ *
+ * The word `workspace` is carried in the TEXT rather than left to the colour,
+ * and that is the same rule the severity bullet follows: the plain frame is the
+ * one a pipe, a grep or a diff reads, and it has no yellow to carry meaning. A
+ * bare ref on its own line would be indistinguishable from a run id there.
+ *
+ * The ref is printed WHOLE and left to truncate. It needs no rung on §6.5's
+ * ladder because it is not a cell: `chrome.tsx` states the rule — full-width
+ * lines "truncate or wrap on their own and do not have to fit BESIDE
+ * anything", which is why they are excluded from every floor. Adding a tier for
+ * it would make the ladder longer and buy the row not one character.
+ */
+export function workspaceHeading(workspace: string | null, name: string | null = null): string {
+  if (workspace === null) return NO_WORKSPACE;
+  /*
+   * THE NAME WHEN THERE IS ONE, THE REF WHEN THERE IS NOT — and never anything
+   * derived from the ref to stand in for a name.
+   *
+   * `workspace development` is what the operator asked for and what cmux's own
+   * sidebar shows, so a name makes the heading cross-referenceable with the
+   * window they are looking at. `workspace 72D01454-…` is the fallback, and it
+   * is the COMMON path today rather than an edge case: `up` records a name only
+   * when it created the workspace itself, and every run on the operator's disk
+   * was adopted into a workspace cmux already owned (measured 2026-09-04, 179
+   * of 179), where the installed cmux exports no name to read.
+   *
+   * The fallback is the REF and not a shortened, prettified or otherwise
+   * invented label. A UUID announces itself as an identifier; a manufactured
+   * name reads as a fact, and this is a monitor.
+   *
+   * An empty string is treated as no name for the same reason `phaseCell("")`
+   * renders a dash: a heading reading `workspace ` with nothing after it is
+   * indistinguishable from one that failed to render.
+   */
+  return name === null || name === "" ? `workspace ${workspace}` : `workspace ${name}`;
+}
+
+/**
+ * How the heading is painted — extracted as a function of the palette for the
+ * reason `monitor-row-colour.test.ts` gives at length: whether an SGR escape
+ * reaches a frame depends on chalk's level, computed from the real
+ * `process.stdout`, so an assertion on escapes "would pass vacuously exactly
+ * where it is run". The DECISION is what can be pinned, so the decision is what
+ * is exported.
+ *
+ * `bold` is gated on `p.on` rather than always true, like every other bold in
+ * these views: the plain frame must differ from the painted one in escapes and
+ * nothing else.
+ */
+export function workspaceHeadingStyle(p: Palette): {
+  readonly color: string | undefined;
+  readonly bold: boolean;
+} {
+  return { color: p.workspace, bold: p.on };
+}
+
+/** One workspace and the runs whose workers belong to it. */
+export interface WorkspaceGroup {
+  /** `null` for workers whose record names no workspace. See {@link NO_WORKSPACE}. */
+  readonly workspace: string | null;
+  /**
+   * The group's LABEL — the first non-null `workspaceName` among its workers,
+   * or `null` when none of them carries one.
+   *
+   * ## Why "first non-null" rather than "the name" or "they must agree"
+   *
+   * A workspace outlives a run: 26 of the 29 workspaces on the operator's disk
+   * span more than one (measured 2026-09-04, one spans 14). So one group
+   * routinely holds workers written by several `up` invocations — and they can
+   * legitimately disagree, because the field is NEW. A run from yesterday
+   * carries `null`; one started after this change may carry `development`. Both
+   * describe the same workspace and neither is wrong.
+   *
+   * Refusing to label unless every worker agrees would therefore show a UUID
+   * for a workspace pifleet knows the name of, for as long as any old run
+   * survives — which is most of the time and exactly backwards. Taking the
+   * first non-null in model order upgrades the heading the moment one record
+   * knows the answer, and never downgrades it because an older one does not.
+   *
+   * **It is not a vote and not a merge**: the group's IDENTITY is
+   * {@link workspace}, always the ref. This only decides what gets printed.
+   */
+  readonly name: string | null;
+  readonly runs: readonly RunRow[];
+}
+
+/**
+ * Partition the runs by their workers' workspace — **a PARTITION, and the word
+ * is load-bearing.**
+ *
+ * ## What must be true, stated as the failure it prevents
+ *
+ * Every worker in appears exactly once out. Not "most workers", not "every
+ * worker cmux still knows about" — every worker, because the situation this
+ * monitor exists for is the one where something has gone wrong and a console
+ * window is gone, and a grouping that hid a live worker then would be worse
+ * than no grouping at all. `monitor-workspace.test.ts` asserts it as a
+ * conservation law over the rendered frame rather than as a spot-check,
+ * because the worker that gets dropped is the one nobody thought to name.
+ *
+ * ## Why per-WORKER and not per-run, though every real run is uniform
+ *
+ * MEASURED on the operator's disk 2026-09-04: all 179 runs holding presentation
+ * records have a single `workspace_ref` across their workers; zero are mixed.
+ * Taking the run's workspace from its first worker would therefore be correct
+ * on every run this machine has ever produced — and would be a latent lie,
+ * filing workers under a console they were never in the first time a run
+ * spanned two. Splitting the run costs a duplicated block header and cannot be
+ * wrong. **The header counts what its block LISTS**, so a split run reads `2
+ * workers` under one heading and `1 worker` under another rather than claiming
+ * three in both places.
+ *
+ * ## A workerless run is not nothing
+ *
+ * It has no worker to take a workspace from, so a loop driven purely by workers
+ * would drop the run entirely — taking with it the only line that says the run
+ * exists. It goes to the `null` group, which is where "nothing names a
+ * workspace for this" already means what it needs to mean.
+ *
+ * ## NO SORT. Not of groups, not of runs, not of workers
+ *
+ * The file header forbids it and gives the reason: §6.2 needs a stable
+ * `(run, worker)` selection for a later action key, and "a design whose rows
+ * are recomputed and re-sorted on every tick has no selection to attach an
+ * action to". So groups appear in order of first appearance — a function of the
+ * model's own order and nothing else — and runs and workers keep theirs. That
+ * includes NOT sinking the `null` group to the bottom, which looks like tidying
+ * and is a sort: it would also bury the group an operator most often wants.
+ *
+ * `Map` carries the ordering rather than an array of pairs, because a `Map`
+ * preserves insertion order by specification and a `find` over pairs would be
+ * the same behaviour written in a way a reader has to verify.
+ */
+export function groupByWorkspace(runs: readonly RunRow[]): readonly WorkspaceGroup[] {
+  const groups = new Map<string | null, RunRow[]>();
+  const push = (workspace: string | null, run: RunRow): void => {
+    const existing = groups.get(workspace);
+    if (existing === undefined) groups.set(workspace, [run]);
+    else existing.push(run);
+  };
+
+  for (const run of runs) {
+    if (run.workers.length === 0) {
+      // See the header: a run with nothing under it still has a heading worth
+      // printing, and no worker to say where it belongs.
+      push(null, run);
+      continue;
+    }
+    /*
+     * A second `Map`, per run, for the same ordering reason as the outer one —
+     * the run's slices come out in the order its workers named their
+     * workspaces, so a run split across two groups keeps its workers in the
+     * model's order inside each.
+     */
+    const slices = new Map<string | null, WorkerRow[]>();
+    for (const worker of run.workers) {
+      /*
+       * `?? null` NORMALISES `undefined` ONTO `null`, and it is not defensive
+       * clutter — it was put here by a test failure worth recording.
+       *
+       * `WorkerRow.workspace` is `string | null` and required, so the compiler
+       * names every construction site that omits it; four fixtures were caught
+       * that way. But a row reaching this function with `workspace: undefined`
+       * — a hand-built model, a JSON round-trip, an `as FleetModel` cast —
+       * would key a group of its own and print the heading `workspace
+       * undefined`, which is `phaseCell("")`'s failure exactly: a rendering
+       * indistinguishable from one that broke.
+       *
+       * The `??` is a normalisation and not a default. `undefined` and `null`
+       * denote the IDENTICAL fact here — nothing names a workspace for this
+       * worker — so mapping them to one key invents nothing; it is the same
+       * `?? null` `deriveWorkspace` performs at the read boundary, applied at
+       * the other boundary where an untyped value can enter.
+       */
+      const workspace = worker.workspace ?? null;
+      const existing = slices.get(workspace);
+      if (existing === undefined) slices.set(workspace, [worker]);
+      else existing.push(worker);
+    }
+    for (const [workspace, workers] of slices) push(workspace, { ...run, workers });
   }
-  const g = region.value;
-  const shown = g.commitsExpanded ? g.commitLines : g.statusLines;
-  const hidden = g.commitsExpanded
-    ? `${g.statusLines.length} changed path${g.statusLines.length === 1 ? "" : "s"}`
-    : `${g.commitLines.length} commit${g.commitLines.length === 1 ? "" : "s"}`;
+
+  return [...groups].map(([workspace, grouped]) => ({
+    workspace,
+    /*
+     * The LABEL, resolved from the group's own members — see
+     * `WorkspaceGroup.name`. First non-null in model order: a group whose older
+     * runs predate the field must still show the name a newer one knows, or the
+     * heading would sit on a UUID for as long as any old run survives.
+     *
+     * `?? null` again, for the same untyped-input reason as `workspace` above:
+     * a hand-built row missing the field would otherwise make this `undefined`
+     * and print `workspace undefined`.
+     */
+    name:
+      grouped
+        .flatMap((r) => r.workers)
+        .find((w) => (w.workspaceName ?? null) !== null)?.workspaceName ?? null,
+    runs: grouped,
+  }));
+}
+
+/** One workspace's heading and the run blocks beneath it. */
+function WorkspaceBlock({ group, plan }: { group: WorkspaceGroup; plan: LayoutPlan }) {
+  const p = usePalette();
+  const style = workspaceHeadingStyle(p);
   return (
     <Box flexDirection="column">
-      <RegionHeading text={head} failed={false} />
-      {shown.length === 0 ? (
-        <Text color={p.live}>{`  ${g.commitsExpanded ? "no commits" : "clean"}`}</Text>
-      ) : (
-        shown.map((line) => (
-          <Text key={line} wrap="truncate-end" color={g.commitsExpanded ? p.dim : p.warn}>
-            {`  ${line}`}
-          </Text>
-        ))
-      )}
-      <Text dimColor={p.on}>{`  [c] ${hidden}`}</Text>
+      {/*
+       * COLUMN 0, where the region heading also sits, with the run blocks at 2
+       * and the worker rows at 4 — a three-level indent that reads as a tree.
+       *
+       * Deliberately NOT indented with the run blocks pushed to 4. Doing it
+       * that way would have moved every existing run header one tier right and
+       * aligned it with the worker text, which changes lines the pinned frame
+       * in `monitor-render.test.ts` guards for no gain. As it is, grouping ADDS
+       * lines and moves none — the diff on that fixture is purely insertions,
+       * which is what makes it reviewable.
+       */}
+      <Text wrap="truncate-end" color={style.color} bold={style.bold}>
+        {workspaceHeading(group.workspace, group.name)}
+      </Text>
+      {group.runs.map((run) => (
+        <RunBlock key={`${group.workspace ?? ""}/${run.runId}`} run={run} plan={plan} />
+      ))}
     </Box>
   );
 }
@@ -383,18 +827,19 @@ export function Fleet({ model }: { model: FleetModel }) {
         )}
         failed={model.runs.status === "failed"}
       />
+      {/*
+       * Grouped by workspace, and the grouping is a PARTITION — see
+       * `groupByWorkspace`. A failed `runs` region still renders nothing, which
+       * is ISC-478 unchanged: an empty run list groups into no groups, so the
+       * reason on the header line remains the whole of what is known.
+       */}
       {model.runs.status === "ok"
-        ? model.runs.value.map((run) => <RunBlock key={run.runId} run={run} plan={plan} />)
+        ? groupByWorkspace(model.runs.value).map((group) => (
+            <WorkspaceBlock key={group.workspace ?? NO_WORKSPACE} group={group} plan={plan} />
+          ))
         : null}
       <Rule width={model.columns} />
-      <RegionHeading
-        text={regionLine("containers", model.containers, model.now, (names) =>
-          names.length === 0 ? "none running" : `${names.length} seen`,
-        )}
-        failed={model.containers.status === "failed"}
-      />
-      <Rule width={model.columns} />
-      <GitStripView region={model.git} now={model.now} />
+      <ContainersRegion model={model} />
     </Box>
   );
 }

@@ -200,6 +200,22 @@ export const ArtifactRefSchema = z.object({
   path: shortStr,
 });
 
+/**
+ * The filename every worker's result envelope must have, inside its task's
+ * outbox directory: `/outbox/<task-id>/result.json`.
+ *
+ * It is a constant rather than a literal at the one read site because a role
+ * document that never spells it is a worker that never writes it. `rev-ctx-1`
+ * was told to "put your whole review in the envelope's `notes`" by a document
+ * that named `result.json` ZERO times, and — holding `write` and no shell —
+ * resolved `notes` to a PATH: it wrote `/outbox/<task-id>/notes` and
+ * `/outbox/<task-id>/review.md`, produced no envelope at all, and its review
+ * graded as a lens that never reported. Exporting the name lets the role
+ * documents cite it and lets `role-docs.ts` derive it, so the doc, the reader
+ * and the probe all spell it once.
+ */
+export const RESULT_ENVELOPE_NAME = "result.json";
+
 export const ResultEnvelopeSchema = z.object({
   schema: z.literal("pifleet.result/v1"),
   task_id: shortStr,
@@ -692,6 +708,37 @@ export const WorkerLaunchSchema = z
      */
     pane_mode: z.enum(["rpc", "tui"]).default("rpc"),
     /**
+     * Whether this worker's staged briefs are TRIGGERED WITHOUT A HUMAN — the
+     * dispatch-trigger extension was mounted at launch (`render.ts`'s
+     * `paneMode === "tui" && autoTrigger` predicate).
+     *
+     * ## Why a reader needs this at all
+     *
+     * `staged_task_id` says a brief is staged. It cannot say whether anything
+     * is going to pick it up. Those are different facts for the same reason
+     * `pane_mode` and `phase` are: an unattended stage waits on a keypress and
+     * a stage on an auto-triggered worker waits on nothing at all — it is
+     * already on its way. `wait` settles the first immediately, because there
+     * is no event to wait for, and must NOT settle the second, because the
+     * only thing it has observed is the gap between staging and pickup.
+     *
+     * ## Why the record and not the argv
+     *
+     * `render.ts` pushes `--extension <DISPATCH_TRIGGER_PATH>` for exactly
+     * this predicate, so scanning the argv above would "work" — and it is
+     * refused here on `pane_mode`'s own argument, three fields up: a flag is
+     * evidence of a decision, not the decision. `up` is the only process that
+     * resolves `auto_trigger`, and this is its output.
+     *
+     * Defaulted FALSE, and the direction is deliberate. A launch record
+     * written before this field existed, and the `null` launch record every
+     * `PIFLEET_PI_COMMAND` double run has, both parse as "nobody will trigger
+     * this" — which restores the pre-existing behaviour exactly: answer the
+     * stage immediately rather than wait on it. The failure mode of the wrong
+     * default in the other direction is the hang §6.5 exists to prevent.
+     */
+    auto_trigger: z.boolean().default(false),
+    /**
      * This worker's DISCLOSURE row — the recorded answer to "did this worker's
      * context leave the machine, and to whom" — or `null` when it did not
      * (SRD §7.3, D10, ISC-416/417).
@@ -824,6 +871,47 @@ export const PresentationSchema = z.object({
   worker: workerId,
   backend: z.enum(["cmux", "tmux", "headless"]),
   workspace_ref: shortStr.nullable().default(null),
+  /**
+   * The workspace's HUMAN NAME — cmux's `custom_title`, which round-trips the
+   * `--name` pifleet passed to `workspace create` (SRD §4.1).
+   *
+   * ## Why a second field and not a parse of the first
+   *
+   * `workspace_ref` is a UUID. It is the right thing to GROUP by — it is
+   * stable, unique, and it is what every cmux verb addresses — and it is a poor
+   * thing to read: `72D01454-0368-4978-91B2-DD0B68BD8D3A` names nothing to an
+   * operator, while `development` does. The two answer different questions, so
+   * they are two fields rather than one that has to be interpreted.
+   *
+   * ## `.default(null)` IS LOAD-BEARING, not tidiness
+   *
+   * Every one of the 183 `presentation.json` records on the operator's disk
+   * predates this field (measured 2026-09-04). A required field would make all
+   * of them fail `PresentationSchema.parse`, which does not degrade to "no
+   * name" — it takes `via`, the activity ladder's `adopted_terminal`, and the
+   * workspace itself down with it, on every historical run at once. The
+   * default is what keeps this an additive change.
+   *
+   * ## `null` IS THE COMMON CASE TODAY, and honestly so
+   *
+   * It is recorded ONLY when pifleet itself created and named the workspace.
+   * On the `up --attach-here` path the workspace is one cmux already owned and
+   * the operator handed over; all pifleet learns of it is the UUID in
+   * `CMUX_WORKSPACE_ID`. **Probed against the installed cmux 0.64.x on
+   * 2026-09-04: the binary exports `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID` and
+   * `CMUX_PANE_ID`, and no variable carrying a workspace name or title.** The
+   * name exists only behind `cmux workspace list`, and reaching it from here
+   * would mean either importing a cmux symbol outside `src/backends/cmux/`
+   * (ISC-137 forbids it) or widening `FleetBackend` — and it would make
+   * `up --attach-here`, which needs no cmux socket today, newly depend on one
+   * for a cosmetic label.
+   *
+   * So the honest value is `null`, and the display layer falls back to the ref.
+   * **A name is never invented**: a guessed label on a workspace is worse than
+   * a UUID, because a UUID is obviously an identifier and a wrong name reads as
+   * a fact.
+   */
+  workspace_name: shortStr.nullable().default(null),
   surface_ref: shortStr.nullable().default(null),
   window_ref: shortStr.nullable().default(null),
   /**
@@ -949,6 +1037,121 @@ export const LedgerRecordSchema = z.object({
 export type LedgerRecord = z.infer<typeof LedgerRecordSchema>;
 
 // ---------------------------------------------------------------------------
+// The STRUCTURAL CENSUS of a collation (SRD-REVIEW-CONSOLE §6.8, D8).
+// ---------------------------------------------------------------------------
+
+/**
+ * What the harvester COUNTED in a collation document, and what it found wrong
+ * with the shape of it.
+ *
+ * ## THIS IS NOT ACCEPTANCE AND MUST NEVER BE SPELLED AS ACCEPTANCE
+ *
+ * `AcceptanceRunSchema` records the exit codes of commands THE HARVESTER
+ * re-ran, resolved from the base SHA, in a fresh clone, in a container the
+ * worker never touched — `adjudicate.ts` calls that *"the one piece of evidence
+ * in this function a fabricating worker cannot author"*. **A census has none of
+ * that.** Every number in this object is read out of a JSON file the worker
+ * wrote, in a directory the worker owns, describing findings the worker chose to
+ * report. It bounds the SHAPE of a claim; it does not verify the claim, and it
+ * cannot: §6.8 is explicit that there is no argv whose exit code is evidence
+ * that judgement happened, and that *"calling it acceptance would be claiming an
+ * independence it does not possess."*
+ *
+ * So the census sits BESIDE `acceptance` in the fact bundle rather than inside
+ * it, is named for counting rather than for certifying, and its clamp can only
+ * ever lower a verdict. A review's verdict remains substantially the worker's
+ * own claim; what this adds is that the claim has to have a checkable shape and
+ * that its consensus counts are on the record where a person can read them.
+ *
+ * ## What each number is a count OF
+ *
+ * `declared` is the document's own `finding_count` — the worker's arithmetic.
+ * `counted` is `findings.length` — the harvester's. They are separate fields
+ * precisely so a document that says "4 findings" over a list of two is a visible
+ * disagreement rather than a number nobody re-added.
+ *
+ * `located` and `attributed` are the two per-finding rules of §6.8, counted
+ * rather than asserted, so a partial failure ("seven findings, five located") is
+ * legible in the record instead of collapsing to a boolean.
+ */
+export const CollationCensusSchema = z.object({
+  /**
+   * Whether the artifact parsed as a collation document at all.
+   *
+   * `false` is a DIFFERENT state from an absent census, and both are reachable:
+   * a task with no collation artifact carries `null` here and no census, while a
+   * task whose `collation.json` is truncated, hostile, or some other document
+   * entirely carries a census with `readable: false`. Folding the two together
+   * would make "nobody wrote one" and "somebody wrote something unreadable"
+   * indistinguishable, which is the shape of silence §6.4 spends its header on.
+   */
+  readable: z.boolean(),
+  /** `CollationRefusal`'s code when the artifact was refused; `null` otherwise. */
+  refusal: shortStr.nullable().default(null),
+  /**
+   * The document's OWN `finding_count`; `null` when it could not be read.
+   *
+   * Published BESIDE `counted` and deliberately not reconciled with it.
+   * `src/run/collation.ts` requires the field and does not cross-check it, on
+   * the argument that this pair is the point: a collator that writes a prose
+   * report with four findings and a list with two has truncated itself, and
+   * neither number says so alone. Capping on the disagreement would make the
+   * datum cost something to record, which is how a field like that comes to be
+   * quietly omitted.
+   */
+  declared: z.number().int().nonnegative().nullable().default(null),
+  /** `findings.length` — the number every consumer counts. */
+  counted: z.number().int().nonnegative().default(0),
+  /** Findings whose `file`+`line` resolve inside the container workdir mount. */
+  located: z.number().int().nonnegative().default(0),
+  /**
+   * §6.8's DENOMINATOR: how many lenses the console had, how many reported, and
+   * which aspects did not.
+   *
+   * A count of readers who agreed is not `3/3` without it — a finding raised by
+   * two of three and one raised by two of two both read as `2`. Recorded as a
+   * DATUM and consulted by no ceiling: §9 Q6 has not settled whether coverage
+   * belongs on the verdict axis at all (*"a two-lens review is complete work
+   * with a missing lens"*), and this record is what lets that question stay open
+   * rather than being answered by a grader that had to pick something.
+   */
+  lenses_total: z.number().int().nonnegative().default(0),
+  lenses_reported: z.number().int().nonnegative().default(0),
+  lenses_missing: z.array(shortStr).max(MAX_ITEMS).default([]),
+  /**
+   * §6.8's second rule, MADE VISIBLE: findings grouped by how many reviewers
+   * raised them, ascending. `[{reviewers: 1, findings: 2}, {reviewers: 3,
+   * findings: 1}]` against `lenses_total: 3` is "two 1/3s and one 3/3".
+   *
+   * A histogram rather than a per-finding list because the record's job here is
+   * the consensus BAND — §1.3's arithmetic is over how many independent readers
+   * agreed — and the findings themselves are in the artifact, digested and
+   * hashed in `derived.artifacts`, for anyone who needs them.
+   */
+  agreement: z
+    .array(
+      z.object({
+        reviewers: z.number().int().nonnegative(),
+        findings: z.number().int().nonnegative(),
+      }),
+    )
+    .max(MAX_ITEMS)
+    .default([]),
+  /**
+   * Location defects, already escaped and safe to print. EMPTY means every
+   * finding resolved.
+   *
+   * Only §6.8's FIRST rule produces entries here. Rule 2 is enforced by
+   * `CollationSchema` — a document with an unattributed finding never parses —
+   * and rule 3 is `collationCeiling`'s, guarded on the task id. A census
+   * therefore reports the one class of defect that a schema structurally cannot
+   * see, and nothing it can.
+   */
+  defects: z.array(text).max(MAX_ITEMS).default([]),
+});
+export type CollationCensus = z.infer<typeof CollationCensusSchema>;
+
+// ---------------------------------------------------------------------------
 // Harvested artifact (SRD §8.4) — what `pifleet artifacts --json` returns.
 // ---------------------------------------------------------------------------
 
@@ -1040,6 +1243,24 @@ export const HarvestSchema = z.object({
   }),
   /** Claims contradicted by derived facts, e.g. a file the worker did not touch. */
   discrepancies: z.array(text).max(MAX_ITEMS).default([]),
+  /**
+   * The structural census of this task's collation artifact (§6.8, D8), or
+   * `null` when the outbox held none.
+   *
+   * TOP LEVEL, beside `claimed` and `derived` rather than inside either, and the
+   * placement is the honest one. It is not `claimed`: the worker did not write
+   * these numbers, the harvester counted them. It is not `derived` either, in
+   * the sense that block means — `derived` is git and the harvester's own exam,
+   * evidence that exists independently of anything the worker said, and this is
+   * a measurement OF what the worker said. A third kind of evidence gets a third
+   * place, so a reader of the report is never invited to weigh it as either.
+   *
+   * PUBLISHED rather than computed and dropped, on the ISC-153 precedent
+   * `facts_hash` records: §6.8's second rule is that *"`3/3` and `1/3` are
+   * visible in the record"*, and a consensus count that never reaches the record
+   * satisfies neither half of what it is for.
+   */
+  collation: CollationCensusSchema.nullable().default(null),
   session_path: shortStr.nullable().default(null),
   /**
    * sha256 over the canonical form of the fact bundle the verdict was reached
@@ -1370,6 +1591,35 @@ export const DerivedFactsSchema = z.object({
   branch: shortStr.nullable(),
   base_ref: sha40.nullable(),
   head_ref: sha40.nullable(),
+  /**
+   * Whether this task was REPOSITORY WORK AT ALL — i.e. whether the dispatch
+   * envelope named a `host_workdir` for the harvester to derive facts from.
+   *
+   * ## Why the field exists
+   *
+   * Every git fact below has a vacuous spelling and none of them can be told
+   * apart from a real observation. `base_is_ancestor: false` is the one that
+   * costs: it is BOTH "the base was rewritten, distrust the diff" (ISC-151, a
+   * finding) and "there was never a base" (a no-op), and the adjudicator
+   * clamps to `unknown` on it. A read-only inquiry task — a ticket query, a
+   * cluster read — has no repository by design, so it arrives with every fact
+   * at its vacuous default and is graded as though its diff had been tampered
+   * with. MEASURED: a task that returned a well-formed envelope with every
+   * acceptance criterion met was reported `verdict: unknown` alongside "the
+   * base was rewritten and the diff cannot be trusted", which is a sentence
+   * about a repository that does not exist.
+   *
+   * ## Why the default is TRUE
+   *
+   * Opposite in direction to the caution elsewhere in this file, and
+   * deliberately so: `true` means "grade this as repository work", which is
+   * what every fact bundle written before this field existed described and
+   * what every fixture that constructs one still means. The clamp is
+   * load-bearing — it is what stops a rewritten base from grading green — so
+   * the default has to be the one that KEEPS it, and only the one construction
+   * that knows there is no repository opts out.
+   */
+  repository: z.boolean().default(true),
   /** ISC-151: false when `git merge-base --is-ancestor base HEAD` failed. */
   base_is_ancestor: z.boolean(),
   commits: z.array(sha40).max(MAX_ITEMS).default([]),
@@ -1378,6 +1628,25 @@ export const DerivedFactsSchema = z.object({
   acceptance: z.array(AcceptanceRunSchema).max(MAX_ITEMS).default([]),
   acceptance_context: AcceptanceContextSchema.nullable().default(null),
   harness: HarnessSurfaceSchema,
+  /**
+   * The structural census of this task's collation artifact, or `null` when the
+   * outbox held none (SRD-REVIEW-CONSOLE §6.8, D8).
+   *
+   * IN THE FACT BUNDLE, so it is covered by `facts_hash` and an adjudication
+   * that reads it stays replayable — the ISC-153 property every other rule in
+   * `adjudicate` already has. The alternative was to clamp from the reconciler
+   * as ISC-332's ticket-ops check does; that check is keyed on a descriptor and
+   * genuinely cannot be a fact, whereas a census is a small structured
+   * measurement the harvester takes once and the adjudicator then only weighs.
+   *
+   * BESIDE `acceptance` AND NOT INSIDE IT, deliberately and permanently. See
+   * `CollationCensusSchema`: `acceptance` holds evidence a worker cannot author
+   * and this holds counts read out of a document a worker wrote, and the whole
+   * of D8 is that the second must not be able to borrow the first's word.
+   * `facts.acceptance` stays empty for a review task, which is the correct
+   * answer — a review has nothing to re-execute — and is asserted as such.
+   */
+  collation: CollationCensusSchema.nullable().default(null),
   /**
    * ISC-154: the worktree hash at quiesce and at harvest end. Differing values
    * mean something kept writing after the worker was supposed to be done, so

@@ -42,7 +42,8 @@
 
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { realExec, type Exec } from "./run.ts";
 
 /**
@@ -60,6 +61,79 @@ export function daemonScratchRoot(
 
 /** The uid the worker image runs as. Must track `USER` in `docker/Dockerfile`. */
 export const WORKER_UID = 10001;
+
+/** `HOME` inside the worker image. Must track `ENV HOME` in `docker/Dockerfile`. */
+export const WORKER_HOME = "/home/pi";
+
+/**
+ * The one writable place a worker may clone OTHER repositories into.
+ *
+ * `~/repos` inside the container, chosen because it is where an agent already
+ * reaches. Measured 2026-09-04: `tst-1`, asked to run the tests of a project
+ * at `~/repos/rally-cli`, ran
+ *
+ *   git clone https://github.com/…/rally-cli.git ~/repos/rally-cli
+ *   fatal: could not create leading directories of
+ *   '/home/pi/repos/rally-cli': Read-only file system
+ *
+ * — the right instinct into a read-only root. The path mirrors the operator's
+ * own host layout, so a brief that says `~/repos/rally-cli` names something
+ * real inside the container too.
+ *
+ * AN EARLIER VERSION OF THIS DOCBLOCK CLAIMED MORE THAN THAT, AND IT WAS
+ * WRONG. It said that putting the scratch where the agent already reached
+ * meant "the capability needs no prompt engineering to be discovered" — a
+ * prediction written as a finding. The next run falsified it: given the same
+ * brief with the mounts in place, `tst-1` did not reach for `~/repos` at all.
+ * It grepped its own `/workspace` for the string `rally-cli`, found unrelated
+ * source that mentions it, and wrote `{"success":true}` having cloned nothing
+ * and run no test. Harvest refused the envelope, which is the only reason the
+ * claim was caught.
+ *
+ * A mount nothing mentions does not exist as far as an agent is concerned.
+ * What makes this discoverable is `skills/pifleet-worker/SKILL.md`, which is
+ * mounted into every container and now names both paths in its "Where things
+ * are" table — the same place the outbox contract lives, so a role cannot opt
+ * out of knowing.
+ *
+ * NOT under `/workspace`. That is the run's git worktree, and harvest derives
+ * its authoritative facts from that tree's branch and diff (SRD §7.3); an
+ * unrelated clone inside it would show up as the worker's own changes, which
+ * is the difference between "cloned a dependency" and "committed a vendored
+ * copy of somebody else's repository".
+ *
+ * SAME FOR EVERY ROLE, by construction rather than by convention — it is a
+ * `docker:` setting, not a role field, so a tester, an engineer and a reviewer
+ * cannot drift apart on where a checkout lives or on whether they have one.
+ */
+export const WORKER_SCRATCH_DIR = `${WORKER_HOME}/repos`;
+
+/**
+ * Where a host git working directory is exposed, read-only, to be cloned FROM.
+ *
+ * Separate from {@link WORKER_SCRATCH_DIR} on purpose, and the separation is
+ * the design rather than tidiness: `/repos-src/<name>` is the operator's real
+ * repository and must never be written, `~/repos/<name>` is the worker's own
+ * clone and is meant to be dirtied. One path that was both would make "read
+ * the project" and "build the project" the same permission.
+ */
+export const WORKER_CLONE_SRC_ROOT = "/repos-src";
+
+/**
+ * Container path a host working directory at `hostPath` is mounted at.
+ *
+ * The BASENAME only — the host's absolute path is not reproduced inside the
+ * container. `/Users/someone/repos/rally-cli` becoming
+ * `/repos-src/rally-cli` keeps the operator's directory layout, and their
+ * username, out of a container an agent can read.
+ */
+export function cloneSourceMount(hostPath: string): string {
+  const base = hostPath.replace(/\/+$/, "").split("/").pop() ?? "";
+  if (base === "" || base === "." || base === "..") {
+    throw new Error(`pifleet: cannot expose ${hostPath} — it has no usable directory name`);
+  }
+  return `${WORKER_CLONE_SRC_ROOT}/${base}`;
+}
 
 /**
  * Open a host directory's permissions so the worker uid can use it.
@@ -272,4 +346,89 @@ export async function probeWriteThrough(
   } finally {
     await rm(host, { recursive: true, force: true });
   }
+}
+
+/**
+ * Should `dir` be exposed to workers as a clone source?
+ *
+ * `null` — expose nothing — in three cases, each for its own reason:
+ *
+ *  - `dir` is not a git working directory. The point is to clone a repository,
+ *    and mounting an arbitrary directory an operator happened to be standing
+ *    in would put unrelated files in front of an agent with no one having
+ *    decided to.
+ *  - `dir` IS `run.repo`. That repository already reaches the worker as its
+ *    `/workspace` worktree; a second mount under another name would give one
+ *    repository two identities in the container, one harvested and one not.
+ *  - `dir` is inside `run.repo`. Same repository, subdirectory spelling.
+ *
+ * A worktree or submodule has `.git` as a FILE rather than a directory, so the
+ * check is for existence and not for a directory — a linked worktree is a
+ * working directory and refusing it would be arbitrary.
+ */
+/**
+ * The repository the workers should actually work in: the launch directory.
+ *
+ * WHAT WAS BROKEN. `run.repo` in `fleet.yaml` is the fleet's own checkout, and
+ * `buildDockerArgv` mounts a worktree of it at `/workspace`. So a console
+ * launched from `~/repos/rally-cli` to test rally-cli handed every worker
+ * **cmux-fleet** as its workspace, and offered rally-cli only as a read-only
+ * side-mount under `/repos-src` that the worker had to be told to go and find.
+ *
+ * Measured twice, on two different images and two fresh sessions: the worker
+ * read the brief, thought *"Likely need to run tests in repository. Let's
+ * inspect repository"*, listed `/workspace`, found cmux-fleet's `package.json`
+ * and ran **cmux-fleet's** suite — the second time even noticing the brief said
+ * rally-cli and talking itself past it. It was not being careless. `/workspace`
+ * is the repository the fleet gave it; the side-mount was the anomaly.
+ *
+ * Documentation did not fix it and could not: the SKILL.md section naming
+ * `/repos-src` was mounted and present in both runs. **The launch directory
+ * has to BE the workspace**, not a second identity beside it.
+ *
+ * Returns `null` when the launch directory is the fleet's own repo (or inside
+ * it), which is the normal case and leaves `run.repo` exactly as configured,
+ * and when it is not a git checkout, because `up` builds worktrees from it.
+ */
+export async function resolveLaunchRepo(
+  loaded: { config: { run: { repo: string } }; dir: string },
+  cwd: string,
+): Promise<string | null> {
+  return resolveCloneSource(loaded, cwd);
+}
+
+export async function resolveCloneSource(
+  loaded: { config: { run: { repo: string } }; dir: string },
+  cwd: string,
+): Promise<string | null> {
+  const { expandPath } = await import("../config/load.ts");
+  /*
+   * REALPATH BOTH SIDES BEFORE COMPARING.
+   *
+   * `resolve()` cleans a path but does not follow symlinks, so the two
+   * operands could spell the same directory differently and the "is this
+   * already the workspace?" check would answer no. macOS is the case that
+   * caught it: `/var` and `/tmp` are symlinks into `/private`, and a shell's
+   * `process.cwd()` reports the resolved form while a config file spells the
+   * unresolved one. The launch-repo control test measured
+   * `/private/var/.../repo` against `/var/.../repo` and treated the fleet's
+   * OWN repository as a foreign launch directory — which would have mounted
+   * the fleet repo over itself under a second identity.
+   *
+   * `realpathSync` throws on a path that does not exist. `cwd` always does,
+   * but `run.repo` is operator-configured and may not, and a misconfigured
+   * repo must reach the config error that names it rather than an ENOENT
+   * from here — so the repo side falls back to its unresolved form.
+   */
+  const here = realpathSync(resolve(cwd));
+  const configured = resolve(expandPath(loaded.config.run.repo, loaded.dir));
+  let repo = configured;
+  try {
+    repo = realpathSync(configured);
+  } catch {
+    // Left as configured; the caller's own check reports a missing repo.
+  }
+  if (here === repo || here.startsWith(`${repo}/`)) return null;
+  if (!existsSync(join(here, ".git"))) return null;
+  return here;
 }

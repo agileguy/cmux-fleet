@@ -124,6 +124,13 @@ export const BUILD_CONTEXT_ASSETS = [
   // which is the same failure `fs.watch` would have caused and the reason its
   // own header spends a paragraph on it.
   "pi-extensions/dispatch-trigger.ts",
+  // The truncation-recovery extension. Also executed in-process, and stale in
+  // the same silent direction: it rewrites a tool result, so a copy that no
+  // longer matches Pi's `BashToolDetails` field names simply stops finding a
+  // `truncation` to report and every truncated result goes back to looking
+  // exactly as it did on the day a worker re-ran the same command twice and
+  // answered nothing. Nothing fails; the banner is just absent.
+  "pi-extensions/truncation-recovery.ts",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 

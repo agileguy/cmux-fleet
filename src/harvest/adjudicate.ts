@@ -17,7 +17,9 @@
  *   (SRD §8.2, class F5). A worker claiming a file the diff does not touch is
  *   flagged in `discrepancies` (ISC-92), and `success` with an empty diff is
  *   reported `failed` (ISC-93) — an envelope that describes work that did not
- *   happen is worse than no envelope at all.
+ *   happen is worse than no envelope at all. ISC-93 is gated on
+ *   `facts.repository`, as ISC-151's clamp is: a task that never had a
+ *   repository has no diff for "empty" to be a finding about.
  *
  * - **The harness-surface cap is applied AFTER combining with the claim**
  *   (ISC-150). Order matters: capped-derived `unknown` combined with claimed
@@ -34,6 +36,14 @@
  *   but a different verdict on replay = adjudicator bug; a different hash =
  *   harvester bug. Hashing the verdict into the bundle would collapse those
  *   two distinct failures into one undiagnosable blob.
+ *
+ * - **A collation's STRUCTURAL CENSUS can cap a verdict and can never lift one**
+ *   (SRD-REVIEW-CONSOLE §6.8, D8). The rules are in `collation-census.ts`; what
+ *   matters here is what the census is NOT. It counts a JSON document the worker
+ *   wrote, so it carries none of the independence the acceptance block below
+ *   carries, it is never spelled as acceptance, and it never writes to
+ *   `facts.acceptance` — which stays empty for a review task, correctly, because
+ *   a review has nothing to re-execute.
  */
 
 import { createHash } from "node:crypto";
@@ -47,6 +57,7 @@ import {
   type ResultEnvelope,
   type Verdict,
 } from "../contracts.ts";
+import { censusCeiling } from "./collation-census.ts";
 import { capFor, peakTier } from "./resolution-surface.ts";
 
 /** What the adjudicator returns; `facts_hash` makes it replayable. */
@@ -138,7 +149,16 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
   // ISC-151: a base that is not an ancestor of HEAD means the base was
   // rewritten, and `diff base...HEAD` can be shrunk to nothing by exactly that
   // move. The diff-derived facts are untrustworthy, so grading stops here.
-  if (!facts.base_is_ancestor) {
+  //
+  // `facts.repository` gates it, because `base_is_ancestor: false` is the
+  // VACUOUS default as well as the finding, and only one of the two is a
+  // reason to stop. A task dispatched without a `host_workdir` never had a
+  // base to rewrite; clamping it here reports a tampered diff to an operator
+  // who did not ask for a diff, and buries a result envelope that may be
+  // completely sound. Repository tasks are untouched — the clamp is what
+  // stops a rewritten base grading green, and it still runs for every one of
+  // them.
+  if (facts.repository && !facts.base_is_ancestor) {
     reasons.push(
       "base_ref is not an ancestor of HEAD: the base was rewritten and the diff cannot be trusted (ISC-151)",
     );
@@ -188,10 +208,91 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
       }
     }
 
-    // ISC-93 / SRD §7.2: "success" describing no work at all is `failed`.
-    if (claimed.status === "success" && emptyDiff) {
-      derived = "failed";
-      reasons.push("envelope claims success with an empty diff and no commits (ISC-93)");
+    /**
+     * ISC-93 / SRD §7.2: "success" describing no work at all is `failed`.
+     *
+     * UNLESS the harvester's own acceptance run says otherwise. An empty diff
+     * is not evidence of idleness — it is the NORMAL shape of a task whose
+     * deliverable is information rather than a change: run this suite, review
+     * this branch, find out whether X reproduces. `contracts.ts`'s lattice
+     * docstring already names the case ("a task with a clean diff and green
+     * acceptance commands must not be downgraded"); this check did not honour
+     * it, and graded every one of them `failed`.
+     *
+     * Measured 2026-09-04: a tester ran rally-cli's suite to
+     * `.venv/bin/pytest -q -> exit 0, 1120 passed`, reported success, changed
+     * nothing because nothing needed changing, and was graded `failed` for
+     * fabricating. The transcript corroborated the run completely.
+     *
+     * `acceptance.verdict === "success"` is not the worker's word for it.
+     * `facts.acceptance` holds the exit codes of the commands THE HARVESTER
+     * re-ran, in a fresh clone, in a container the worker never touched — the
+     * one piece of evidence in this function a fabricating worker cannot
+     * author. Where it exists and is green, it settles the question that the
+     * empty diff only raises.
+     *
+     * With no acceptance commands there is still nothing to weigh, and the
+     * verdict stays `failed` rather than softening to `unknown`: ISC-93 exists
+     * because a worker with no `bun` on PATH reported `bun test -> exit 0, 27
+     * pass`, and softening it would have let that through. What changes is the
+     * REASON, which now names the remedy — an information-shaped task is
+     * gradable exactly when it carries acceptance commands, and silently
+     * failing one whose operator did not know that is its own defect.
+     *
+     * GATED ON `facts.repository`, exactly as ISC-151's clamp 80 lines above
+     * is, and for the same reason: `emptyDiff` carries two meanings and this
+     * rule only wants one.
+     *
+     * For repository work it is a FINDING — the worker had a tree, touched
+     * nothing in it, and claimed success anyway. For a task dispatched without
+     * a `host_workdir` it is the VACUOUS DEFAULT. `harvest/index.ts:226-242`
+     * builds that bundle deliberately and says why in as many words: "NO
+     * WORKDIR IS A KIND OF TASK, NOT A DEGRADED HARVEST." There was never a
+     * tree, so `files_changed`, `commits` and `diff_bytes` are empty because
+     * there was nowhere for them to come from, and reading that as fabrication
+     * indicts a task for failing to produce an artifact nobody asked it for.
+     *
+     * MEASURED 2026-09-03, and why this is a prerequisite of the review console
+     * (SRD-REVIEW-CONSOLE §6.8, D9) rather than a tidy-up. The `reviewer` role
+     * is `isolation: shared-ro` (`fleet.yaml:461`), so no worktree is created,
+     * so `hasWorktree` is false, so `harvest/index.ts:569` never runs the
+     * acceptance exam, so `acceptance.verdict` can never be `success`. The
+     * exemption arm below was therefore UNREACHABLE BY CONSTRUCTION for the one
+     * role whose deliverable is, by definition, no diff at all: every honest
+     * review in the fleet was adjudicated as fabrication. Worse, the reason
+     * text offered a remedy — "give it acceptance commands" — that this role
+     * structurally cannot take, because acceptance needs a worktree to clone
+     * from and the absent worktree is the whole cause.
+     *
+     * REPOSITORY TASKS ARE UNTOUCHED, and that is the property a future edit
+     * must not spend. ISC-93 exists because a worker with no `bun` on PATH
+     * reported `bun test -> exit 0, 27 pass` behind an empty diff; that worker
+     * HAD a workdir, so `facts.repository` is true, so it still grades
+     * `failed`. Any widening of this gate — `!facts.repository || …`, or
+     * anything keyed on the acceptance list merely being empty — puts that
+     * case straight back.
+     *
+     * The gate skips the exemption arm along with the failure arm. That costs
+     * nothing today and is worth stating: acceptance cannot run without a
+     * worktree (`harvest/index.ts:569`), so a non-repository bundle's
+     * `acceptance` is empty by construction and there is no green run to exempt
+     * — but if that ever changes, note that a skipped ISC-93 needs no exemption
+     * from itself.
+     */
+    if (facts.repository && claimed.status === "success" && emptyDiff) {
+      if (acceptance.verdict === "success") {
+        reasons.push(
+          "empty diff, but the acceptance commands passed when the harvester re-ran them " +
+            "in a fresh clone: this is a task whose product is not a change (ISC-93 not applied)",
+        );
+      } else {
+        derived = "failed";
+        reasons.push(
+          "envelope claims success with an empty diff and no commits (ISC-93). If this task " +
+            "was not meant to change files, give it acceptance commands — the harvester " +
+            "re-runs those itself and they are what makes a no-diff task gradable",
+        );
+      }
     }
   }
 
@@ -208,6 +309,34 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
     );
   }
   let verdict = verdictBeforeCap;
+
+  /**
+   * THE STRUCTURAL CENSUS (SRD-REVIEW-CONSOLE §6.8, D8) — a ceiling, never an
+   * assignment, and deliberately not spelled as acceptance.
+   *
+   * §6.8's three rules, evaluated in `collation-census.ts` where they sit beside
+   * the counting that produces them. What lands here is a maximum, so ORDER
+   * AMONG THE CAPS DOES NOT MATTER and the guard is what makes that true:
+   * `rank(verdict) > rank(ceiling)` can only ever lower, so a verdict the
+   * ISC-150 or ISC-243 blocks below have already pinned to `unknown` (rank -1)
+   * is untouched, and a census can never excuse a diff the harness cap caught.
+   *
+   * WHAT IT DOES NOT DO, said here because the block reads like the acceptance
+   * block above and is nothing like it. `acceptance` holds exit codes THE
+   * HARVESTER produced in a fresh clone the worker never touched. `collation`
+   * holds counts read out of a file the worker WROTE. The census bounds the
+   * shape of that claim — a finding has to quote a file and a line, and say
+   * which reviewers raised it — and verifies none of its content. §6.8: *"calling
+   * it acceptance would be claiming an independence it does not possess."* It is
+   * therefore capable of only two answers, `failed` and `partial`; `success` is
+   * not in its range at all, so no route exists by which a worker's own document
+   * certifies the worker's own work.
+   */
+  const census = censusCeiling(facts.collation, claimed?.status);
+  if (census !== null) {
+    reasons.push(census.reason);
+    if (rank(verdict) > rank(census.ceiling)) verdict = census.ceiling;
+  }
 
   // ISC-150, applied LAST: a diff touching the harness surface makes every
   // positive result self-certified. Anything above `blocked` collapses to

@@ -42,7 +42,7 @@ import { renderFleet } from "../../monitor/render.ts";
  * ## Three clocks, one timer, and a paint rate that is neither
  *
  * The reads run on `FleetClocks` (§3.4, D4, D7): the 1777 ms run walk on the
- * 30 s clock, `docker ps` beside it, the git strip and the cheap run-name scan
+ * 30 s clock, `docker ps` beside it and the cheap run-name scan
  * on 5 s. `driveClocks` turns one 500 ms timer into all three, because 500
  * divides 5000 divides 30000 and three independent intervals would drift.
  *
@@ -56,7 +56,7 @@ import { renderFleet } from "../../monitor/render.ts";
  *
  * `--once` does NOT use the scheduler. A single frame wants every region read
  * now, and a scheduler's first tick reads them all anyway — but it would then
- * report the run walk as `readAt` = the walk's end and the git strip as its
+ * report the run walk as `readAt` = the walk's end and each region as its
  * own, which is correct and pointless for a one-shot. `composeFleet` reads
  * everything against one moment, which is what a snapshot on stdout means.
  */
@@ -283,14 +283,13 @@ export function register(program: Command): void {
       const colour = opts.colour !== false && process.stdout.isTTY === true;
 
       if (opts.once === true) {
-        const model = await composeFleet({ watchDir: opts.repo, columns, view });
+        const model = await composeFleet({ columns, view });
         process.stdout.write(`${renderFleet(model, { colour }).join("\n")}\n`);
         return;
       }
 
       const clocks: FleetClocks<ReturnType<typeof fleetSources>> = new FleetClocks(
         fleetSources({
-          watchDir: opts.repo,
           /*
            * A GETTER, closing over the scheduler's own snapshot. The container
            * set feeds the worker reader's `containerPresent`, and both live on

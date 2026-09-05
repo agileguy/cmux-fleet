@@ -14,6 +14,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
+
+import { CmuxBackend } from "../../src/backends/cmux/index.ts";
+import type { ExecResult } from "../../src/container/run.ts";
 import {
   STAGED_TRIGGER_LINE,
   assertPaneTypeableLine,
@@ -128,5 +131,81 @@ describe("the staged route types the trigger and nothing else", () => {
 
   test("the submit key comes from the closed vocabulary", () => {
     expect(PANE_KEYS).toContain("enter");
+  });
+});
+
+/**
+ * The trigger has to REACH the surface, and for months it did not.
+ *
+ * Everything above asserts what the trigger line is and which route sends it.
+ * None of it asks whether the send survives the pane id it is given, and that
+ * is where every staged dispatch on this machine actually died:
+ *
+ *   CmuxParseError: cmux: could not parse composed pane id:
+ *   5C9D22AC-543A-4B1A-A2E6-6555573DB407
+ *
+ * `up --attach-here` adopts `CMUX_SURFACE_ENV`, which cmux sets to a bare
+ * surface UUID. `sendText` split that through `splitPaneId`, which demanded
+ * two or three space-separated fields, and threw — while wanting nothing but
+ * the surface the string already was. The task stayed staged and durable, the
+ * ledger recorded `stage_trigger_deferred`, and the worker sat idle holding a
+ * task nobody had told it about. Measured in run `2026-09-04T02-28-00Z-e07e`.
+ *
+ * These are behavioural rather than source-shape assertions on purpose: the
+ * defect was not in which function was called, it was in what that function
+ * did with its argument.
+ */
+describe("the trigger reaches a surface adopted by --attach-here", () => {
+  const sends = async (paneId: string): Promise<string[][]> => {
+    const seen: string[][] = [];
+    const backend = new CmuxBackend({
+      exec: async (argv): Promise<ExecResult> => {
+        seen.push(argv);
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    });
+    await backend.sendText({ backend: "cmux", id: paneId }, STAGED_TRIGGER_LINE);
+    return seen;
+  };
+
+  test("a BARE surface id types the trigger at that surface", async () => {
+    const seen = await sends("5C9D22AC-543A-4B1A-A2E6-6555573DB407");
+    const send = seen.find((argv) => argv.includes("send-text") || argv.includes("send"));
+    expect(send).toBeDefined();
+    expect(send!).toContain("5C9D22AC-543A-4B1A-A2E6-6555573DB407");
+  });
+
+  test("a full composed id still types at the SURFACE, not the pane", async () => {
+    // The widening must not have changed which field a 3-part id sends to.
+    const seen = await sends("pane-1 surface-2 workspace-3");
+    const send = seen.find((argv) => argv.includes("send-text") || argv.includes("send"));
+    expect(send!).toContain("surface-2");
+    expect(send!).not.toContain("pane-1");
+  });
+
+  test("sendKey reaches a bare surface too, so the trigger can be submitted", async () => {
+    // Typing the line and never pressing enter leaves it unsent — both halves
+    // of the trigger have to survive the same id.
+    const seen: string[][] = [];
+    const backend = new CmuxBackend({
+      exec: async (argv): Promise<ExecResult> => {
+        seen.push(argv);
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    });
+    await backend.sendKey({ backend: "cmux", id: "surface-only" }, "enter");
+    expect(seen.some((argv) => argv.includes("surface-only"))).toBe(true);
+  });
+
+  test("focus refuses a bare surface BY NAME, rather than typing somewhere", async () => {
+    // `focus-pane` addresses a pane, and an adopted surface has none recorded.
+    // The refusal has to say that; a generic parse error is what sent this
+    // whole class of failure to the wrong layer for months.
+    const backend = new CmuxBackend({
+      exec: async (): Promise<ExecResult> => ({ code: 0, stdout: "", stderr: "", timedOut: false }),
+    });
+    await expect(backend.focus({ backend: "cmux", id: "surface-only" })).rejects.toThrow(
+      /--attach-here/,
+    );
   });
 });

@@ -378,7 +378,33 @@ export async function readRunBudgetPolicy(run: RunPaths): Promise<RunBudgetPolic
           max_concurrent: z.number().nullish(),
           budget: z
             .object({
-              tokens_ceiling: z.number().nullish(),
+              /**
+               * NON-NEGATIVE IS PART OF THE SHAPE, because otherwise a wrong
+               * value reads as an absent one.
+               *
+               * `tokens_ceiling: -1` parsed fine, and the resolution below
+               * answers `typeof ceiling === "number" && ceiling >= 0 ? ... :
+               * null` — so it fell to `null`, and `null` on this axis means
+               * UNBOUNDED. A run whose operator wrote a nonsense ceiling was
+               * therefore dispatched with NO ceiling and no `note`, which is
+               * the one outcome this reader's own header forbids: *"answering
+               * an unknown ceiling with 'no ceiling' is the one failure mode
+               * that spends real tokens."*
+               *
+               * Absence and wrongness are different facts and only absence is
+               * forgiven. A missing field means nobody budgeted and unbounded
+               * is honest; a present `-1` means the budget is UNKNOWN. Putting
+               * the bound in the SCHEMA routes it to the `catch` below, which
+               * already fails closed for exactly this reason and already names
+               * the offending path — rather than adding a second, quieter
+               * refusal beside the one that exists.
+               *
+               * The sibling axis is deliberately NOT treated this way:
+               * `max_concurrent` degrades to the default with a `note`,
+               * because a bad cap only delays work while a bad ceiling spends
+               * money.
+               */
+              tokens_ceiling: z.number().nonnegative().nullish(),
               per_task_reserve_tokens: z.number().nullish(),
             })
             .loose()

@@ -35,7 +35,6 @@ import { describe, expect, test } from "bun:test";
 import { failed, never, ok } from "../../src/monitor/model.ts";
 import type {
   FleetModel,
-  GitStrip,
   RunHistoryRow,
   RunRow,
   WorkerDetail,
@@ -63,17 +62,11 @@ const worker: WorkerRow = {
   taskId: "t-17",
   via: "rpc",
   fence: null,
+  workspace: null,
+  workspaceName: null,
 };
 
 const RUNS: readonly RunRow[] = [{ runId: RUN_A, workers: [worker] }];
-
-const GIT: GitStrip = {
-  branchLine: "## fleet-monitor...origin/fleet-monitor [ahead 2]",
-  statusLines: [" M src/monitor/render.ts"],
-  commitLines: ["a1b2c3d monitor: the render seam"],
-  watchDir: "/Users/op/repos/cmux-fleet",
-  commitsExpanded: false,
-};
 
 const HISTORY: readonly RunHistoryRow[] = [
   { runId: RUN_A, ageMs: 120_000, workerCount: 4, live: true, taskCount: 5, settledCount: 3 },
@@ -133,8 +126,7 @@ const REPORT_LINES: readonly string[] = [
 /** Every region `ok` at once — see the header for why that is the point. */
 const healthy: FleetModel = {
   runs: ok(RUNS, NOW - 2_000),
-  containers: ok(["pifleet-3906-eng-1"], NOW - 12_000),
-  git: ok(GIT, NOW - 5_000),
+  containers: ok(["pifleet-egress-relay-pifleet-egress"], NOW - 12_000),
   now: NOW,
   columns: 120,
   view: { kind: "fleet" },
@@ -208,7 +200,6 @@ describe("ISC-503: a view renders its own region and cannot reach another", () =
    */
   const MARKERS = {
     runs: "wrote 4s ago",
-    git: "## fleet-monitor...origin/fleet-monitor",
     containers: "containers — as of",
     history: "finished",
     detail: "tool_result ok",
@@ -216,7 +207,7 @@ describe("ISC-503: a view renders its own region and cannot reach another", () =
   } as const;
 
   const EXPECTED: Record<string, ReadonlyArray<keyof typeof MARKERS>> = {
-    fleet: ["runs", "git", "containers"],
+    fleet: ["runs", "containers"],
     worker: ["detail"],
     history: ["history"],
     report: ["report"],

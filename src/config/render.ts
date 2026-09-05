@@ -32,7 +32,7 @@
 
 import { join } from "node:path";
 import { imageTag } from "../container/image.ts";
-import { WORKER_UID } from "../container/mounts.ts";
+import { WORKER_SCRATCH_DIR, WORKER_UID, cloneSourceMount } from "../container/mounts.ts";
 import { assertNoHostGcloudMount, gcloudConfigTmpfsArgv } from "../security/adc.ts";
 import {
   assertNoRunDirMount,
@@ -42,12 +42,14 @@ import {
   runsRoot,
   workerOutboxDir,
   workerPaths,
+  workerRepliesDir,
   workerWorktree,
   workerContainerName,
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
 import { DISPATCH_POLICY_MOUNT, DISPATCH_TRIGGER_PATH } from "../run/dispatch-policy.ts";
+import { REPLIES_MOUNT } from "../run/replies.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
@@ -57,6 +59,18 @@ import { THEMES_DIR } from "./themes.ts";
 
 /** Container path the briefing file is mounted at. */
 export const BRIEFING_MOUNT = "/briefing/system-append.md";
+
+/**
+ * Container path of the truncation-recovery extension.
+ *
+ * Under `/opt/pifleet` for the reason `THEMES_DIR` is, and baked into the image
+ * as a root-owned 0444 layer rather than mounted, for the reason
+ * `DISPATCH_TRIGGER_PATH` is: Pi executes it IN-PROCESS with the full extension
+ * API, so a worker able to write it would be a worker able to rewrite its own
+ * tool results. A mount would carry that guarantee in a `:ro` flag one
+ * character from being dropped.
+ */
+export const TRUNCATION_RECOVERY_PATH = "/opt/pifleet/truncation-recovery.ts";
 
 /** Everything `render` prints and `up` will later execute. */
 export interface RenderedWorker {
@@ -96,6 +110,30 @@ export interface RenderedWorker {
 export interface RenderOptions {
   /** Names the run-dir and container; `render` is dry so there is no real run yet. */
   runId?: string;
+  /**
+   * A host git working directory to expose READ-ONLY, for the worker to clone
+   * from into its writable scratch. `null`/absent mounts nothing.
+   *
+   * CLONE FROM HERE, NOT FROM A REMOTE. A worker asked to test a project it
+   * does not have reaches for `git clone https://github.com/…`, and on this
+   * fleet that fails twice over: `egress.allow` is an allowlist and
+   * `github.com` is not on it, and the fetched copy would be the REMOTE's
+   * state rather than the working directory the operator is actually sitting
+   * in — no local branch, no unpushed commit, none of the change under test.
+   * A read-only bind of the working directory answers both: no egress, and the
+   * worker's clone starts from what the operator can see.
+   *
+   * Read-only, and a CLONE rather than direct use, because those are two
+   * different protections. `:ro` stops a worker writing the operator's
+   * repository; cloning is what still gives it a checkout it can branch,
+   * build and dirty — in the scratch, where losing it costs nothing.
+   *
+   * PASSED IN, never sensed here. `render` is the dry preview of what `up`
+   * will run, so a `process.cwd()` read inside this module would make the
+   * preview depend on where the preview was typed rather than on where the
+   * run will start (ISC-188 is the same rule for run paths).
+   */
+  cloneSource?: string | null;
 }
 
 /**
@@ -202,6 +240,20 @@ export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
   if (w.paneMode === "tui" && w.autoTrigger) {
     argv.push("--extension", DISPATCH_TRIGGER_PATH);
   }
+  /*
+   * Truncation recovery — UNCONDITIONAL, and the difference from the block
+   * above is the point.
+   *
+   * The auto-trigger is gated because a staged brief is a `tui`-only concept.
+   * A truncated tool result is not: every worker runs commands, Pi clips bash
+   * output at 50KB in both modes, and the rpc worker's operator is a program
+   * that will not read a footer. Measured 2026-09-04 — `tick-1` received the
+   * last 50KB of a 56KB JSON document, which is unparseable by construction
+   * because tail truncation drops the opening delimiter first, and it re-ran
+   * the identical command rather than reading the complete output Pi had
+   * already written to disk. The extension's own header carries the detail.
+   */
+  argv.push("--extension", TRUNCATION_RECOVERY_PATH);
   argv.push("--provider", w.provider);
   argv.push("--model", w.model);
   if (w.thinking !== undefined) argv.push("--thinking", w.thinking);
@@ -232,6 +284,8 @@ export function buildDockerArgv(
     image: string;
     piFlags: string[];
     hasBriefing: boolean;
+    /** See {@link RenderOptions.cloneSource}. */
+    cloneSource?: string | null;
   },
 ): string[] {
   // `loaded.config.run` is deliberately NOT destructured here, and no local is
@@ -309,6 +363,53 @@ export function buildDockerArgv(
     "--tmpfs",
     `/run:rw,noexec,nosuid,size=1m,uid=${WORKER_UID},gid=${WORKER_UID}`,
   );
+  /*
+   * The writable clone location, identical for every role (ISC — see
+   * `WORKER_SCRATCH_DIR` for why this path and not another).
+   *
+   * Without it a worker asked to test any repository that is not its own
+   * workspace fails at `git clone`, because `--read-only` above covers all of
+   * `/home/pi` and the `/tmp` tmpfs is `noexec`. Measured 2026-09-04: `tst-1`
+   * reported `blocked` with `fatal: could not create leading directories of
+   * '/home/pi/repos/rally-cli': Read-only file system`.
+   *
+   * `exec` IS THE POINT AND IT IS A WEAKENING. `/tmp` is `noexec` to stop
+   * "download a binary and run it"; a mount that is writable and executable
+   * gives that back within this directory. It is here because running a
+   * cloned project's tests means executing its runner, and `docker.scratch_exec`
+   * exists so a fleet that does not need that can say so. `nosuid` and `nodev`
+   * are unconditional on both branches — nothing legitimate here needs either,
+   * and `nodev` in particular closes the device-node route that would make the
+   * exec permission far more than it looks.
+   *
+   * `uid`/`gid` for the same measured reason the `/run` tmpfs above carries
+   * them: without them the tmpfs mounts root-owned 0755 and the worker cannot
+   * write, with no symptom but a failure at first use.
+   */
+  argv.push(
+    "--tmpfs",
+    `${WORKER_SCRATCH_DIR}:rw,${docker.scratch_exec ? "exec" : "noexec"},nosuid,nodev,` +
+      `size=${docker.scratch_size},uid=${WORKER_UID},gid=${WORKER_UID}`,
+  );
+  /*
+   * The working directory to clone FROM, read-only.
+   *
+   * `:ro` is the whole protection on the operator's side and it is not
+   * belt-and-braces: this is the one mount in the table that points at a
+   * directory pifleet did not create, so `makeWorkerAccessible`'s rule — never
+   * widen permissions on a user's repository — means the container must take
+   * it exactly as it is and be unable to write it.
+   */
+  if (opts.cloneSource != null && opts.cloneSource !== "") {
+    /*
+     * No assert here: the whole argv goes through `assertNoRunDirMount` at the
+     * end of this function, so a clone source pointed at the run directory is
+     * caught by the guard that already covers every other bind — rather than
+     * by a second, weaker copy of it that could drift.
+     */
+    const src = expandPath(opts.cloneSource, loaded.dir);
+    argv.push("-v", `${src}:${cloneSourceMount(src)}:ro`);
+  }
   // The image's baked CLOUDSDK_CONFIG is an ordinary directory on the root
   // filesystem, so `--read-only` above made it unwritable and every gcloud
   // call in a worker crashed with `[Errno 30] Read-only file system` — with a
@@ -378,6 +479,37 @@ export function buildDockerArgv(
   }
 
   argv.push("-v", `${workerOutboxDir(opts.run.root, w.id)}:/outbox`);
+  /*
+   * The REPLY PLANE, pinned IMMEDIATELY after the outbox because the two are the
+   * two directions of ONE exchange (SRD-REVIEW-CONSOLE §6.4, D6).
+   *
+   * The collator's request travels OUT through `/outbox` — which needs no new
+   * mount, is already worker-scoped, and is already the untrusted-content
+   * boundary — and each child's harvested result comes BACK through here. A
+   * reader debugging what a console was told reads the pair together, which is
+   * the same argument that puts `/policy/dispatch` beside `/policy/task` rather
+   * than at the end of the table.
+   *
+   * `:ro` IS THE WHOLE POINT and it is not decoration. The reply is the evidence
+   * the collator is graded against, and delivering it into the worker's own
+   * writable `/outbox` — the obvious symmetry — would let the subject edit the
+   * evidence before quoting it. That is exactly the inversion the verbgate
+   * policy comment above records ("it used to be read out of /outbox, which the
+   * worker owns"). The host directory is 0755 and each file 0444, and the macOS
+   * Docker VM squashes bind-mount ownership to the container user — so inside
+   * the container those files read as OWNED by uid 10001 and the mount flag is
+   * the only thing left. `docker/verbgate`'s integrity loop refuses every verb
+   * when a reply is writable, which means a dropped `:ro` costs the whole worker
+   * rather than one forged reply.
+   *
+   * UNCONDITIONAL, like `/policy/dispatch` and `/secrets` and for their reason.
+   * Only a collator is ever sent a reply, but the mount is not what decides that
+   * — the actor is (§6.5) — and a `-v` behind a predicate `materialize.ts` would
+   * have to spell a second time is the ISC-188 shape this file keeps closing. A
+   * worker that is never replied to reads an empty directory, which is a true
+   * statement and costs one inode.
+   */
+  argv.push("-v", `${workerRepliesDir(opts.run.root, w.id)}:${REPLIES_MOUNT}:ro`);
   argv.push("-v", `${opts.run.sessionsDir}:/sessions`);
   argv.push("-v", `${roleSkillsDir(opts.run.root, w.role)}:/skills:ro`);
   // The verbgate policy is mounted READ-ONLY and separately from /outbox. It
@@ -570,6 +702,7 @@ export async function renderWorker(
       image,
       piFlags: pi.slice(1),
       hasBriefing,
+      cloneSource: options.cloneSource ?? null,
     }),
     `docker argv for ${w.id}`,
   );

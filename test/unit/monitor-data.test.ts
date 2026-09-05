@@ -160,6 +160,18 @@ describe("ISC-499: the refusal surface and the fence are row properties", () => 
     await makeWorker(run, "w-1");
 
     const { row, evidence } = expectOk(await readWorkerRow(run, "w-1"));
+    /*
+     * `workspace` added 2026-09-04, deliberately, and it belongs in exactly
+     * this assertion for exactly this test's reason.
+     *
+     * View 1 groups workers by the workspace `up` recorded for them, and the
+     * argument for putting it on the ROW is the one this test already makes
+     * about `via` and `fence`: a grouping is a property of the row, so a field
+     * carried only in view 2's payload would leave view 1 with a set of rows
+     * none of which knows where it belongs. The value comes from
+     * `presentation.json`'s `workspace_ref` through `deriveWorkspace`, which is
+     * the single definition both the walk and the fast refresh call.
+     */
     expect(Object.keys(row).sort()).toEqual([
       "containerPresent",
       "fence",
@@ -169,6 +181,15 @@ describe("ISC-499: the refusal surface and the fence are row properties", () => 
       "transcriptAgeMs",
       "via",
       "workerId",
+      "workspace",
+      /*
+       * `workspaceName` added alongside `workspace`, and they are two fields on
+       * purpose. The ref IDENTIFIES the group (a UUID, unique and stable); the
+       * name only LABELS it. Merging them into one field would let two distinct
+       * workspaces that happen to share a `custom_title` collapse into one group
+       * on screen — nothing stops an operator having two called `review`.
+       */
+      "workspaceName",
     ]);
     // And the derived answers are NOT duplicated into the evidence bundle,
     // which would give the fast path a second place to read them from.
@@ -868,7 +889,6 @@ describe("ISC-502: an unentered view performs no read", () => {
     const { root } = await enterable("compose");
     const model = await composeFleet({
       root,
-      watchDir: root,
       columns: 120,
       // No `docker ps`: the container region is supplied, so this composes
       // with no subprocess at all.
@@ -918,7 +938,6 @@ describe("ISC-502: an unentered view performs no read", () => {
     const { root, run } = await enterable("leave");
     const base = await composeFleet({
       root,
-      watchDir: root,
       columns: 120,
       containers: { status: "never" },
     });
@@ -936,7 +955,7 @@ describe("ISC-502: an unentered view performs no read", () => {
     // …and the fleet regions came through untouched. Entering and leaving a
     // view must not re-walk the run tree.
     expect(left.runs).toBe(base.runs);
-    expect(left.git).toBe(base.git);
+    expect(left.containers).toBe(base.containers);
   });
 
   /**
@@ -959,10 +978,9 @@ describe("ISC-502: an unentered view performs no read", () => {
     }
     // The source map is PINNED, so a fourth source cannot arrive unnoticed.
     const root = await makeRoot("sources");
-    const sources = fleetSources({ root, watchDir: root, dockerRun: async () => ({ code: 0, stdout: "", stderr: "" }) });
+    const sources = fleetSources({ root, dockerRun: async () => ({ code: 0, stdout: "", stderr: "" }) });
     expect(Object.keys(sources).sort()).toEqual([
       "containers",
-      "git",
       "runNames",
       "runs",
       "workers",

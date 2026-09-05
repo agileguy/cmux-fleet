@@ -59,6 +59,17 @@ task_file="/policy/task"
 # report success on the one it wrote, and this loop's exit 78 is the only thing
 # enforcing that.
 drop_file="/policy/dispatch"
+# The REPLY PLANE: one file per child task, holding that child's harvested
+# result, mounted read-only for the collator that asked for the work
+# (SRD-REVIEW-CONSOLE §6.4, D6). Declared beside the three above, never READ
+# here, and named for the same reason the drop is — so the integrity loop can
+# hold it to the same read-only bar.
+#
+# It is a DIRECTORY where the three above are files, so it is checked beside the
+# loop rather than inside it — a directory needs its own write bit tested and
+# nothing else, where a file also needs its parent's. The measurement behind both
+# halves of that is recorded at the integrity check itself.
+replies_dir="/replies"
 # Line 1 task id, line 2 epoch. Every read is defensive: an unreadable or
 # truncated file must degrade to <none>/0, never to a broken ledger row. The
 # gate does not trust this file even though the host writes it — a gate that
@@ -141,14 +152,96 @@ log_ledger() {
 # for. Adding the path here is the one cost D4 records for the sibling mount,
 # and it is deliberately spelled as a THIRD element of a list rather than as a
 # second condition, so a fourth policy file is one word.
+#
+# The reply plane is the fourth (SRD-REVIEW-CONSOLE §6.4, D6). A reply says what
+# a child worker actually found; a collator that can rewrite one can put words in
+# another worker's mouth and then collate them — the drop's hazard aimed sideways
+# instead of backwards.
+#
+# THE PER-FILE GLOB IS GONE, which reverses this check's first version. That
+# version iterated `"${replies_dir}"/*` and justified the cost by claiming a bare
+# directory check "passes with every reply inside it at 0644". That claim named a
+# state this system cannot produce.
+# MEASURED 2026-09-04 inside the real worker image at uid 10001, using the modes
+# the host side actually writes — `createRepliesDir` gives the directory 0755,
+# `makeWorkerReadable` gives a reply 0444 or 0644, and nothing else writes there:
+#
+#   mount  platform   [ -w dir ]   [ -w reply@0444 ]  [ -w reply@0644 ]
+#   :ro    either     no           no                 no
+#   rw     macOS      YES          no                 YES
+#   rw     Linux      no           no                 no
+#
+# The per-file arm never fires in a row where the directory arm does not. Under
+# `:ro` both are EROFS. On a dropped `:ro` under the macOS VM the DIRECTORY arm
+# fires first and the verdict is identical. On Linux neither fires — and that row
+# is coherent rather than a hole, because host ownership passes through there, so
+# a dropped `:ro` does not grant the worker write in the first place and there is
+# nothing for the gate to catch. The single cell where a reply is writable and
+# its directory is not needs a group- or other-writable MODE (0666), which no
+# code path in this repository produces.
+#
+# So the glob bought no detection power, and it was not free: a `set +f` window
+# in a script whose header explains why globbing is off everywhere else, one
+# `dirname` fork per reply file on the refusal path of every gated verb in every
+# fleet, and a silent blind spot for dotfiles, which `*` does not match.
+#
+# `find` or `ls` piped into a loop stays rejected on its own separate ground: it
+# puts an external binary and a pipeline on the refusal path, in a script whose
+# whole posture is that it decides before it trusts anything.
+#
+# BUT THE REPLY PLANE IS NOT A FOURTH ELEMENT OF THAT LOOP EITHER, and this is
+# the part the glob was silently getting right for a reason nobody wrote down.
+# The loop checks each surface AND ITS PARENT, because a writable `/policy` lets
+# a worker replace a 0444 `cloud-allow` wholesale — the file's own mode is not
+# sufficient for a FILE. The dirname of /replies is `/`, and asking whether the
+# CONTAINER ROOT is writable is a different question that this gate has no
+# business answering. It answers "yes" whenever the process is root, which is
+# exactly what the image build's smoke-test layer is: `docker/Dockerfile` runs
+# `gcloud version`, `kubectl version --client` and friends through these shims
+# BEFORE its `USER 10001:10001` line. Adding `"${replies_dir}"` to the loop made
+# every one of them exit 78 and failed the build. MEASURED in the built image:
+#
+#   uid 0      [ -w / ] YES     <- the build's smoke-test layer
+#   uid 10001  [ -w / ] no      <- every production worker
+#
+# The unmatched glob had hidden this: with no `/replies` present, `/replies/*`
+# stays literal and its dirname is `/replies`, not `/`. So the glob's real and
+# undocumented function was keeping `dirname` off the root — not the per-file
+# detection it was justified by.
+#
+# The distinction is genuine rather than a workaround, so it is spelled as one:
+# a FILE surface is checked directly and through its parent, and a DIRECTORY
+# surface is checked directly and only directly. A directory's own write bit
+# already carries what the parent arm buys for a file — "can the worker put
+# something else here" — and a mount point cannot be unlinked out from under
+# itself the way a file can be replaced.
+#
+# WITH NO `/replies` MOUNT AT ALL — every fleet that is not a review console —
+# the path does not exist, `[ -w ]` is false, and this passes. Nothing here
+# refuses anything a fleet was not already refusing.
+
+# $1=the offending path, rest=original argv.
+refuse_writable() {
+  bad=$1
+  shift
+  log_ledger policy_writable "(policy-integrity)" "$@"
+  printf "verbgate: policy file %s is writable by uid %s — refusing every verb\n" \
+    "${bad}" "$(id -u)" >&2
+  exit 78
+}
+
+# The FILE surfaces: direct, and through the parent that could replace them.
 for policy_path in "${allow_file}" "${task_file}" "${drop_file}"; do
   if [ -w "${policy_path}" ] || [ -w "$(dirname "${policy_path}")" ]; then
-    log_ledger policy_writable "(policy-integrity)" "$@"
-    printf "verbgate: policy file %s is writable by uid %s — refusing every verb\n" \
-      "${policy_path}" "$(id -u)" >&2
-    exit 78
+    refuse_writable "${policy_path}" "$@"
   fi
 done
+
+# The DIRECTORY surface: direct only. See the block above for why the parent arm
+# is absent rather than forgotten.
+if [ -w "${replies_dir}" ]; then
+  refuse_writable "${replies_dir}" "$@"
+fi
 
 # --- collect leading non-flag tokens -----------------------------------------
 # The verb words come before the first flag in every sane invocation — with one

@@ -25,6 +25,7 @@ import { Deadline } from "../util/clock.ts";
 import {
   DerivedFactsSchema,
   HarvestSchema,
+  RESULT_ENVELOPE_NAME,
   TaskEnvelopeSchema,
   rank,
   type DerivedFacts,
@@ -38,14 +39,23 @@ import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.
 import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
+  OUTBOX_FILES_DIR,
+  describeUnreadableEnvelope,
   readResultEnvelope,
   safeForReport,
   withOutboxScan,
   type OutboxLocation,
   type OutboxRead,
+  type UnreadableEnvelope,
 } from "./outbox.ts";
 import { dispatchedTaskIds, unexplainedOutboxDirs } from "./layout.ts";
+import {
+  describeUnrecognisedEntry,
+  listTaskOutbox,
+  type TaskOutboxListing,
+} from "./task-outbox.ts";
 import { resolveWorkerNeedles } from "./needles.ts";
+import { collationCeilingFor } from "./collation-census.ts";
 import { reconcileArtifactClaims } from "./reconcile.ts";
 
 export interface HarvestOptions {
@@ -139,6 +149,105 @@ export interface TaskHarvest {
   /** The replayable fact bundle (ISC-153); E3 fields sit at schema defaults. */
   facts: DerivedFacts;
   harvestStatus: HarvestStatus;
+  /**
+   * The worker's envelope EXISTED and could not be read — or `null`.
+   *
+   * ## Why it is here and not inside `harvest`
+   *
+   * `harvest` validates against `HarvestSchema`, a versioned wire contract
+   * (`pifleet.artifacts/v1`) whose consumers parse it. This is a fact about the
+   * HARVEST rather than about the task — the same orthogonality `harvestStatus`
+   * has, and it sits beside it for the same reason: `harvestStatus` says
+   * whether the harvest is trustworthy, and this says whether the worker's own
+   * account of its work could be read at all.
+   *
+   * ## Null means two very different things, and the discrepancy tells them apart
+   *
+   * `null` covers both "the envelope parsed fine" and "there was no envelope".
+   * That is deliberate — this field's job is to carry the facts of the
+   * UNREADABLE case, which is the one that had nowhere to live. A consumer
+   * distinguishing absent from present reads `harvest.discrepancies`, where the
+   * absent case has had its own finding since ISC-347.
+   *
+   * ## What consumes it
+   *
+   * The rendered form is already in `harvest.discrepancies`, so `pifleet
+   * artifacts` and `pifleet report` show it with no further change. The
+   * STRUCTURED form is here for the relay and the collator, which must stop
+   * describing a lens in this state as one that "produced no report" — and
+   * which cannot be asked to recover the facts by substring-matching English
+   * out of a discrepancy line.
+   */
+  unreadableEnvelope: UnreadableEnvelope | null;
+  /**
+   * WHICH OUTCOME `readResultEnvelope` REACHED, by its own taxonomy's own name.
+   *
+   * ## The gap this closes, which was measured rather than predicted
+   *
+   * `unreadableEnvelope` answers exactly one question — *was there a document
+   * that would not parse?* — and its `null` deliberately spans two different
+   * worlds: an envelope that was never there, and one that read cleanly. Both
+   * consumers say so rather than hiding it. The field above calls that ambiguity
+   * a cost; `run/relay.ts` declines to guess and maps `null` to `undefined`.
+   *
+   * The consequence was not theoretical. `RelayEnvelopeState`'s `absent` arm —
+   * written, documented and probed — carried **no production traffic at all**,
+   * because nothing could ever say "looked, and there was none". So a lens whose
+   * reviewer wrote nothing and a lens whose envelope was perfectly fine were
+   * both described by the weaker `null` sentence, and the taxonomy that exists
+   * to tell those apart could not.
+   *
+   * ## Why a copy of `OutboxRead["kind"]` and not a boolean
+   *
+   * Because `refused` is neither `missing` nor `unreadable`, and a boolean would
+   * force whoever adds the next arm to pick which of two lies to tell. This
+   * carries the harvester's own answer and lets each consumer map it — which is
+   * the same reason `unreadableEnvelope` is a structure and not a sentence.
+   *
+   * `null` means NOTHING LOOKED, the same "this harvest never reached an outbox"
+   * its two neighbours here use, and it is not the same as `missing`.
+   */
+  envelopeRead: OutboxRead["kind"] | null;
+  /**
+   * WHY a `refused` envelope was refused — the harvester's own sentence.
+   *
+   * `envelopeRead` alone cannot carry this one arm. A refusal is raised AFTER a
+   * clean parse, so the document exists, is well-formed, and was rejected for
+   * what it SAYS — a task id that is not the one dispatched, a stale epoch, a
+   * path that climbs out of the outbox. Which of those it was is the whole
+   * content of the fact, and a consumer holding only the word `refused` can say
+   * that something was wrong and nothing about what.
+   *
+   * `null` for every other kind, including `refused`'s absence — this is the
+   * reason field for one arm, not a general note.
+   */
+  envelopeRefusal: string | null;
+  /**
+   * What `<outbox>/<task-id>/` holds that no reader here opens — names and
+   * sizes, never contents. See `harvest/task-outbox.ts` for the measurement.
+   *
+   * ## Why a harvest that read an envelope perfectly still carries this
+   *
+   * It is computed on EVERY harvest, not only the ones that came up empty, so
+   * that the field means one thing: *what is in the task root that the harvest
+   * does not read*. Making its presence depend on how the envelope went would
+   * turn `unlistable` into two different facts — "nothing could be listed" and
+   * "nobody bothered" — and a consumer would have to know which harvest it was
+   * holding to tell them apart. That is the ambiguity `unreadableEnvelope`'s
+   * own `null` documents as a cost; there is no reason to buy it twice.
+   *
+   * ## It is beside `harvest`, not inside it
+   *
+   * `harvest` validates against `HarvestSchema`, a versioned wire contract.
+   * This is a fact about the HARVEST — which regions were read — rather than
+   * about the task, which is exactly `harvestStatus`'s and
+   * `unreadableEnvelope`'s orthogonality, and it sits with them for that reason.
+   * The RENDERED form of the interesting case is published in
+   * `harvest.discrepancies`, so `pifleet artifacts` and `pifleet report` show it
+   * with no further change; the STRUCTURED form is here for the relay, which
+   * must not recover facts by substring-matching English out of a discrepancy.
+   */
+  taskOutbox: TaskOutboxListing;
 }
 
 /**
@@ -192,6 +301,22 @@ function unavailableHarvest(taskId: string, reason: string): TaskHarvest {
     }),
     facts,
     harvestStatus: "unavailable",
+    // Nothing was read, so nothing can be said about readability. `null` here
+    // is the honest answer and not a default: this harvest never reached an
+    // outbox.
+    unreadableEnvelope: null,
+    // Nothing looked, so this is `null` and NOT `"missing"`. The difference is
+    // the whole point of the field: `missing` asserts that an outbox was read
+    // and held no envelope, which is a claim about the WORKER. This harvest
+    // never got that far, so it has no claim to make about one.
+    envelopeRead: null,
+    envelopeRefusal: null,
+    // Same restraint, same reason. This harvest has no dispatch record, so it
+    // never learned which worker's outbox to look in — there is no directory it
+    // could have listed. `unlistable` claims nothing, which is the only claim
+    // available. It must NOT be `empty`: that would assert a reviewer left
+    // nothing behind, on the strength of a lookup that never happened.
+    taskOutbox: { kind: "unlistable" },
   };
 }
 
@@ -211,8 +336,33 @@ export async function harvestTask(
   try {
     const raw = (await Bun.file(inboxPath).json()) as unknown;
     envelope = TaskEnvelopeSchema.parse(raw);
-  } catch {
-    return unavailableHarvest(taskId, `no dispatch record at inbox/${taskId}.json`);
+  } catch (err) {
+    /**
+     * "NO RECORD" AND "A RECORD I COULD NOT READ" ARE DIFFERENT FACTS, and one
+     * catch used to report both as the first.
+     *
+     * This arm spans three outcomes: the file is absent (ENOENT), it is present
+     * and not JSON, and it is JSON that fails the schema. Saying "no dispatch
+     * record" of the last two is false in exactly the way this repository built
+     * the whole `unreadableEnvelope` apparatus to stop saying — a claim the
+     * data does not support, at a smaller seam.
+     *
+     * **MEASURED COST, on this repository's own review console.** A probe of
+     * the production harvest was handed a malformed path and got back "no
+     * dispatch record" for a task whose record was sitting on disk. That
+     * sentence sent the reader looking for a dispatch that never happened
+     * instead of at the path they had built wrong, and it took a day and three
+     * falsified hypotheses to come back from.
+     */
+    const code = (err as NodeJS.ErrnoException).code;
+    return unavailableHarvest(
+      taskId,
+      code === "ENOENT"
+        ? `no dispatch record at inbox/${taskId}.json`
+        : `the dispatch record at inbox/${taskId}.json could not be read (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+    );
   }
 
   const reasons: string[] = [];
@@ -223,16 +373,36 @@ export async function harvestTask(
   const git: GitFacts = hasWorktree
     ? await deriveGitFacts(envelope.host_workdir, envelope.base_ref)
     : {
+        /**
+         * NO WORKDIR IS A KIND OF TASK, NOT A DEGRADED HARVEST.
+         *
+         * `repository: false` is the whole point of this branch. Without it
+         * the bundle below is indistinguishable from a repository task whose
+         * facts all failed to derive — same nulls, same
+         * `base_is_ancestor: false` — and the adjudicator reads that vacuous
+         * default as ISC-151's finding and clamps to `unknown`. A ticket query
+         * or a cluster read has no repository BY DESIGN, and grading it as a
+         * tampered diff makes its verdict unusable no matter how good its
+         * evidence is.
+         *
+         * The reason string is rewritten for the same reason. "repository
+         * facts unavailable" describes a failed derivation; nothing failed
+         * here, and an operator scanning `reasons` should not be sent looking
+         * for a git problem that does not exist.
+         */
         facts: DerivedFactsSchema.parse({
           branch: null,
           base_ref: null,
           head_ref: null,
+          repository: false,
           base_is_ancestor: false,
           harness: {},
         }),
         diffText: null,
         ok: false,
-        reasons: ["task has no host_workdir; repository facts unavailable"],
+        reasons: [
+          "task has no host_workdir: not repository work, graded on its result envelope and artifacts",
+        ],
       };
   reasons.push(...git.reasons);
 
@@ -245,9 +415,55 @@ export async function harvestTask(
     hostWorkdir: hasWorktree ? envelope.host_workdir : null,
   };
   const outbox: OutboxRead = await readResultEnvelope(loc);
+  /**
+   * What the task root holds that neither reader above nor the scan below
+   * opens. One `readdir` and at most eight `lstat`s — see `task-outbox.ts`.
+   *
+   * Taken UNCONDITIONALLY and before the branches, so the field means the same
+   * thing on every harvest; the branches decide what to SAY about it, not
+   * whether to look.
+   */
+  const taskOutbox: TaskOutboxListing = await listTaskOutbox(loc);
+  /** Set only by the `unreadable` branch; published on `TaskHarvest`. */
+  let unreadableEnvelope: UnreadableEnvelope | null = null;
   if (outbox.kind === "refused") {
-    reasons.push(`result envelope refused: ${outbox.reason}`);
-    discrepancies.push(`result envelope refused: ${outbox.reason}`);
+    reasons.push(`result envelope refused: ${safeForReport(outbox.reason, 512)}`);
+    discrepancies.push(`result envelope refused: ${safeForReport(outbox.reason, 512)}`);
+  } else if (outbox.kind === "unreadable") {
+    /**
+     * THE STATEMENT THAT WAS MISSING (the `rev-lang-1` defect).
+     *
+     * `rev-lang-1` wrote a 3906-byte review whose `summary` quoted the regex
+     * `[\w\\-_]+`. `\w` is not a legal JSON escape, so the envelope would not
+     * parse — and the parse failure was recorded NOWHERE. The verdict settled
+     * `unknown`, the collation brief said the lens "produced no report", and
+     * the collation recorded `reported: false`. A reviewer that wrote a review
+     * was filed as one that wrote nothing.
+     *
+     * A DISCREPANCY, not merely a reason, for ISC-347's reason exactly:
+     * `reasons` is where the harvest explains HOW it graded and reads as
+     * procedural, while `discrepancies` is the channel §8.4 publishes for
+     * things that DISAGREE with the contract and is the one an operator scans.
+     * The absent case learned this; this case is the same lesson one step over.
+     *
+     * NO CLAMP, also for ISC-94's reason. An unparseable envelope says nothing
+     * about whether the WORK succeeded — the diff is still there and still
+     * speaks for it, and a reviewer whose review will not serialize may have
+     * reviewed perfectly. Lowering the verdict here would convert an encoding
+     * bug in the writer into a judgement about work this evidence never
+     * measured. The defect was never a missing verdict; it was a missing
+     * STATEMENT.
+     *
+     * The HOST path, unlike the missing case's container spelling. The missing
+     * case names `/outbox/<task>/result.json` because that is the path the
+     * worker was given and the only string it could be compared against — there
+     * is no file to open. Here there IS one, and the operator's next action is
+     * to open it, so the finding names where it actually is.
+     */
+    unreadableEnvelope = outbox.unreadable;
+    const line = describeUnreadableEnvelope(outbox.unreadable);
+    reasons.push(line);
+    discrepancies.push(line);
   } else if (outbox.kind === "missing") {
     // Not a failure (ISC-94): the repo facts stand on their own.
     reasons.push("no result envelope; verdict rests on derived facts alone");
@@ -284,6 +500,47 @@ export async function harvestTask(
         `/outbox/${safeForReport(taskId)}/result.json; the worker's own account of what it did ` +
         `is absent, so nothing it claims was checked`,
     );
+    /**
+     * AND WHETHER THE OUTBOX IS ACTUALLY EMPTY, which the line above cannot say.
+     *
+     * `rev-lang-1` wrote 12,759 bytes of review to
+     * `/outbox/<task>/artifact.json` — the task ROOT, under a name it invented —
+     * and no `result.json`. The finding above fired, correctly, and every word
+     * of it was true. It was also indistinguishable from the finding for a
+     * worker that wrote nothing at all, because the harvest's two readers look
+     * at `result.json` and `files/` and neither one can see a third name.
+     *
+     * ONLY IN THIS BRANCH. Where the envelope is unreadable, `refused`, or
+     * `ok`, the harvest HAS the worker's account and the operator's next action
+     * is about that file; a second inventory of the directory would be noise
+     * beside a finding that already names the thing to open. The structured
+     * field on `TaskHarvest` is carried in every one of those cases regardless,
+     * for a consumer that wants it — what is scoped here is the SENTENCE.
+     *
+     * ## What this line may and may not claim
+     *
+     * Names and sizes, and no interpretation. It must stay true of an outbox
+     * holding `notes.txt` and an outbox holding a complete review, because from
+     * here those two are identical — the bytes were never read and must not be.
+     * So it says what was found and explicitly does not say what it is.
+     *
+     * NO CLAMP, for the reason the line above does not clamp either (ISC-94): a
+     * missing envelope is not a failure, and a file of unknown content beside it
+     * is not evidence about the work. What was missing was never a verdict; it
+     * was a STATEMENT.
+     */
+    if (taskOutbox.kind === "unrecognised") {
+      const named = taskOutbox.named.map(describeUnrecognisedEntry).join(", ");
+      const more = taskOutbox.total - taskOutbox.named.length;
+      discrepancies.push(
+        `and its outbox is NOT EMPTY: /outbox/${safeForReport(taskId)}/ holds ` +
+          `${taskOutbox.total} entr${taskOutbox.total === 1 ? "y" : "ies"} that no reader here ` +
+          `opens — the harvest reads only ${RESULT_ENVELOPE_NAME} and ${OUTBOX_FILES_DIR}/. ` +
+          `Listed by name and size ONLY; nothing was opened, so nothing here can say what any ` +
+          `of it contains — a person has to look: ${named}` +
+          `${more > 0 ? `, and ${more} more not named` : ""}`,
+      );
+    }
   }
 
   /**
@@ -530,6 +787,18 @@ export async function harvestTask(
         git.facts.files_changed.map((f) => f.path),
         opts.harnessPatterns,
       ),
+      /**
+       * The collation census (SRD-REVIEW-CONSOLE §6.8, D8), from the reconciler
+       * that held the descriptor — a FACT, so it is inside `facts_hash` and an
+       * adjudication that reads it replays (ISC-153).
+       *
+       * `null` for every task whose outbox held no `collation.json`, which is
+       * every task in this fleet except a review console's collation. That is
+       * the correct shape rather than an omission: `censusCeiling` returns
+       * `null` for a null census, so nothing else in the pipeline changes for
+       * any other role.
+       */
+      collation: reconciled.collation,
     };
 
     /**
@@ -745,6 +1014,37 @@ export async function harvestTask(
       );
     }
 
+    /**
+     * §6.8's THIRD RULE and its two siblings — `src/run/collation.ts`'s
+     * `collationCeiling`, applied HERE and not in `adjudicate`.
+     *
+     * WHY HERE. It needs two things the fact bundle does not carry and should
+     * not: the parsed DOCUMENT (its `missing`/`refused`/`ok` arms are about the
+     * artifact, and the adjudicator never sees a descriptor) and the TASK ID.
+     * The task id is the load-bearing one. §6.6 makes a review two tasks — the
+     * fan-out `T`, which settles the moment the request is issued and correctly
+     * writes no collation, and `T-collate`, which is the one that reads three
+     * replies. Every other task in the fleet is also missing a collation. So a
+     * rule that fired on "no collation artifact" without that guard would cap
+     * every `success` in the fleet, and `isCollationTaskId` is what makes the
+     * function unmisusable rather than documented-as-not-to-be.
+     *
+     * WHY NOT DUPLICATED IN `adjudicate`. The census's own ceiling implements
+     * §6.8's FIRST rule only — the location check, which needs the run's
+     * `container_workdir` and which the collation schema explicitly delegates.
+     * Rules 2 and 3 have exactly one implementation each and neither is here:
+     * attribution is `CollationSchema`'s `superRefine`, and this is rule 3.
+     *
+     * A CEILING, and the `rank` guard is what makes that true rather than
+     * intended: `rank("unknown")` is -1, so a harvest ISC-154 or ISC-151 already
+     * refused to grade is untouched, and nothing this reads can raise a verdict.
+     */
+    const collationCap = collationCeilingFor(taskId, claimed, reconciled.collationRead);
+    if (collationCap !== null && rank(verdict) > rank(collationCap.status)) {
+      verdict = collationCap.status;
+      reasons.push(collationCap.reason);
+    }
+
     // The supervisor's terminal verdicts outrank derived evidence: `aborted`
     // and `timed_out` are facts about the RUN, not inferences from the tree
     // (§7.3), and no amount of clean diff makes an aborted task complete.
@@ -753,7 +1053,17 @@ export async function harvestTask(
     }
 
     // --- Harvest trustworthiness (§8.4), orthogonal to the verdict.
-    const envelopeDegraded = outbox.kind === "refused" || scan.refused.length > 0;
+    //
+    // `unreadable` counts, and naming it here is not a formality. Splitting it
+    // out of `refused` would otherwise have QUIETLY UPGRADED this line: an
+    // envelope that failed to parse used to be `refused` and made the harvest
+    // `partial`, and a two-state test would have gone on passing while every
+    // `rev-lang-1` came back `complete` — the harvest declaring itself
+    // trustworthy on the precise ground that it could not read the worker's
+    // account. Degradation is what `harvestStatus` is for, and an unreadable
+    // envelope degrades the harvest exactly as much as a refused one did.
+    const envelopeDegraded =
+      outbox.kind === "refused" || outbox.kind === "unreadable" || scan.refused.length > 0;
     const harvestStatus: HarvestStatus =
       !git.ok && outbox.kind !== "ok"
         ? "unavailable"
@@ -806,6 +1116,17 @@ export async function harvestTask(
         artifacts: reconciled.artifacts,
       },
       discrepancies,
+      /**
+       * §6.8's second rule made VISIBLE IN THE RECORD: the consensus bands, the
+       * finding counts, and every shape defect the census found, published
+       * beside the verdict they capped rather than only summarised into it.
+       *
+       * A reader of `pifleet artifacts --json` for a collation task can see
+       * `3/3` and `1/3` without opening the artifact. `facts_hash` covers the
+       * same numbers, so the published copy and the graded copy are provably
+       * the same measurement.
+       */
+      collation: factsWithHarness.collation,
       session_path: state?.session_path ?? null,
       facts_hash: adj.facts_hash,
     });
@@ -813,7 +1134,15 @@ export async function harvestTask(
     // The returned facts are the ones the verdict was actually reached from —
     // harness surface included. Returning `git.facts` here would hand callers a
     // bundle whose hash does not match the `facts_hash` beside it.
-    return { harvest, facts: factsWithHarness, harvestStatus };
+    return {
+      harvest,
+      facts: factsWithHarness,
+      harvestStatus,
+      unreadableEnvelope,
+      envelopeRead: outbox.kind,
+      envelopeRefusal: outbox.kind === "refused" ? outbox.reason : null,
+      taskOutbox,
+    };
   });
 }
 

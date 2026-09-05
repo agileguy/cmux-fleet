@@ -9,10 +9,11 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { stringify } from "yaml";
 import { exitCodeForError } from "../../src/cli/index.ts";
 import { imageStatus } from "../../src/cli/commands/doctor.ts";
@@ -49,9 +50,12 @@ import {
   roleSkillsDir,
   runPaths,
   runsRoot,
+  socketPath,
   workerOutboxDir,
-  workerPaths, workerWorktree,
+  workerPaths, workerRepliesDir, workerWorktree,
 } from "../../src/run/paths.ts";
+
+announceMissingHostDeps();
 
 /**
  * Run `fn` and hand back what it threw, or `null` if it did not throw.
@@ -521,7 +525,7 @@ describe("docker argv (SRD §5.6)", () => {
    * `buildDockerArgv` (§5.6's mount table) turns this red — see the ISA
    * close-out for the confirmed run.
    */
-  test("no rendered docker argv ever mounts the host gcloud config directory (ISC-44)", async () => {
+  test.if(hostHas("host-home"))("no rendered docker argv ever mounts the host gcloud config directory (ISC-44)", async () => {
     const { loaded } = await fixture((doc) => {
       doc["cloud"] = { adc: true, adc_mode: "token", kubeconfig: "./kube/filtered.yaml" };
       (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
@@ -1302,6 +1306,53 @@ describe("docker argv (SRD §5.6)", () => {
     }
   });
 
+  /**
+   * The reply plane, checked against the two guards it is a subdirectory of the
+   * run dir under (SRD-REVIEW-CONSOLE D1, D6).
+   *
+   * WHAT WOULD BREAK IF THIS WERE REMOVED: `/replies` is the one new mount the
+   * review console asks for, and it lands INSIDE the run directory — the same
+   * tree that holds `control-auth.json`, the ledger, the inbox and every other
+   * worker's state. `classifyRunDirExposure` deliberately returns `null` for a
+   * source strictly under the run dir, because the entire §5.5 mount table lives
+   * there, so the guarantee for this path is that it is a NAMED CHILD rather
+   * than the directory itself — which is an argument, not an enforcement. This
+   * is the enforcement, run against the argv `renderWorker` actually produces.
+   *
+   * The socket half is D1's posture stated as an absence: the console's whole
+   * design turns on the collator's intent travelling as DATA, so a `-v` naming
+   * a socket is the edit that reopens §4.3. `socketPath` is imported rather than
+   * re-derived, so a rename of the socket directory cannot make this vacuous.
+   */
+  test("the reply plane is a named child of the run dir, and no mount is a socket", async () => {
+    const { runsDir, loaded } = await fixture();
+    for (const id of ["eng-1", "rev-1"]) {
+      const r = await renderWorker(loaded, id);
+      const run = runPaths("dry", runsDir);
+      const expected = `${workerRepliesDir(run.root, id)}:/replies:ro`;
+      expect(r.docker, `worker ${id} has no read-only reply mount`).toContain(expected);
+
+      const sources = allBindMountSources(r.docker);
+      expect(sources).toContain(workerRepliesDir(run.root, id));
+
+      // ISC-127, on the finished argv. `buildDockerArgv` already asserts this
+      // internally, so what this line adds is a failure that NAMES the reply
+      // plane rather than one that names "a bind-mount source".
+      expect(() => assertNoRunDirMount(r.docker, run.root)).not.toThrow();
+      for (const s of sources) expect(classifyRunDirExposure(s, run.root)).toBeNull();
+
+      // D1: no socket, by construction and by name. `socketPath` is where every
+      // control socket in this system lives — under `os.tmpdir()`, deliberately
+      // outside the run tree (`run/paths.ts` rule 2) — so a mount that named one
+      // would name a path under that root.
+      const socketRoot = dirname(socketPath("dry", id));
+      for (const s of sources) {
+        expect(s.endsWith(".sock")).toBe(false);
+        expect(s === socketRoot || s.startsWith(`${socketRoot}/`)).toBe(false);
+      }
+    }
+  });
+
   test("pi argv equals the docker argv tail after the image", async () => {
     const { loaded } = await fixture();
     const r = await renderWorker(loaded, "eng-1");
@@ -1424,14 +1475,18 @@ describe("the run directory is computed once (ISC-188)", () => {
       [after, moved],
     ] as const) {
       const hostPaths = runStateHostPaths(rendered.docker);
-      // Or the loop below is vacuous: nine mounts plus the env file. The
+      // Or the loop below is vacuous: ten mounts plus the env file. The
       // seventh is /policy/task, added with ISC-362. The eighth is
       // /policy/dispatch, the task drop (SRD-TUI-DISPATCH D4), unconditional
       // for the same reason its sibling is. The ninth is /secrets, which D8
       // made unconditional — `eng-1` requests no `secrets:` and still gets the
       // store, because the Class 1 provider key is delivered as a file in it
-      // and no worker requests that.
-      expect(hostPaths.length).toBe(10);
+      // and no worker requests that. The tenth is /replies, the reply plane
+      // (SRD-REVIEW-CONSOLE D6), unconditional on the same argument again: only
+      // a collator is ever replied to, but the mount is not what decides that,
+      // and a `-v` behind a predicate `materialize.ts` would have to spell a
+      // second time is the ISC-188 shape.
+      expect(hostPaths.length).toBe(11);
       for (const p of hostPaths) expect(p.startsWith(join(root, "dry"))).toBe(true);
     }
 
@@ -1499,13 +1554,14 @@ describe("the run directory is computed once (ISC-188)", () => {
         const r = await renderWorker(loaded, "eng-1");
         expect(isAbsolute(r.runDir)).toBe(true);
         const hostPaths = runStateHostPaths(r.docker);
-        // Nine mounts plus the env file (the seventh is /policy/task, ISC-362;
+        // Ten mounts plus the env file (the seventh is /policy/task, ISC-362;
         // the eighth is /policy/dispatch, the task drop, SRD-TUI-DISPATCH D4;
-        // the ninth is /secrets, which D8 made unconditional).
+        // the ninth is /secrets, which D8 made unconditional; the tenth is
+        // /replies, the reply plane, SRD-REVIEW-CONSOLE D6).
         // Unresolved, they are not absolute and `runStateHostPaths` drops them
         // as named volumes — so this count is the assertion, and it read 0
         // before the root was canonicalized.
-        expect(hostPaths.length).toBe(10);
+        expect(hostPaths.length).toBe(11);
         for (const p of hostPaths) expect(isAbsolute(p)).toBe(true);
       } finally {
         if (saved === undefined) delete process.env["PIFLEET_RUNS_DIR"];
@@ -1847,6 +1903,12 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       "/tmp:rw,noexec,nosuid,size=256m",
       "--tmpfs",
       "/run:rw,noexec,nosuid,size=1m,uid=10001,gid=10001",
+      // The writable clone scratch, identical for every role. `exec` is
+      // deliberate and is the one mount in this table that has it — see
+      // `docker.scratch_exec`. No `-v` for a clone SOURCE here: this render
+      // passes no `cloneSource`, and its absence must mount nothing.
+      "--tmpfs",
+      "/home/pi/repos:rw,exec,nosuid,nodev,size=2g,uid=10001,gid=10001",
       "--tmpfs",
       "/home/pi/.config/gcloud:rw,noexec,nosuid,size=16m,uid=10001,gid=10001",
       "--pids-limit",
@@ -1863,6 +1925,16 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       `${workerWorktree(run.root, "eng-1")}:/workspace`,
       "-v",
       `${workerOutboxDir(run.root, "eng-1")}:/outbox`,
+      // The reply plane, pinned IMMEDIATELY after the outbox and BEFORE
+      // /sessions. Its position is asserted for the reason the task drop's is:
+      // the two are the outbound and inbound halves of one exchange
+      // (SRD-REVIEW-CONSOLE §6.4), and a `/replies` that drifted away from
+      // `/outbox` in the argv is the first sign the pair stopped being read as
+      // one. `:ro` is on the line because it is the whole control — the reply
+      // is the evidence the collator is graded against, and the macOS Docker VM
+      // squashes ownership so the host's 0444 says nothing inside the container.
+      "-v",
+      `${workerRepliesDir(run.root, "eng-1")}:/replies:ro`,
       "-v",
       `${run.sessionsDir}:/sessions`,
       "-v",
@@ -1904,6 +1976,11 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       "--no-context-files",
       "--theme",
       "/opt/pifleet/themes",
+      // Truncation recovery, loaded in BOTH modes — unlike the auto-trigger
+      // below, which is `tui`-only. A 50KB bash cap is not a pane concept, and
+      // an rpc worker's operator is a program that will not read a footer.
+      "--extension",
+      "/opt/pifleet/truncation-recovery.ts",
       "--provider",
       "omlx",
       "--model",
@@ -1938,6 +2015,11 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       "--no-context-files",
       "--theme",
       "/opt/pifleet/themes",
+      // Truncation recovery, loaded in BOTH modes — unlike the auto-trigger
+      // below, which is `tui`-only. A 50KB bash cap is not a pane concept, and
+      // an rpc worker's operator is a program that will not read a footer.
+      "--extension",
+      "/opt/pifleet/truncation-recovery.ts",
       "--provider",
       "omlx",
       "--model",
@@ -1987,6 +2069,12 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // extension — pifleet's, root-owned 0444 in the image — loads.
       "--extension",
       "/opt/pifleet/dispatch-trigger.ts",
+      // And truncation recovery after it, on every worker in both modes. Two
+      // `--extension` flags is the expected shape here, not a duplication:
+      // `--no-extensions` still denies DISCOVERY, so these two paths are the
+      // complete set of what executes in-process.
+      "--extension",
+      "/opt/pifleet/truncation-recovery.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2043,12 +2131,26 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
      * adds a legitimate second difference, and the way to keep the force is to
      * name it as a two-element insertion — not to relax the equality. A THIRD
      * difference still fails, which is the whole point.
+     *
+     * The insertion point is the truncation-recovery flag, NOT `--provider`.
+     * That extension loads in both modes, so it is already in the derived rpc
+     * argv, and `buildPiArgv` emits the auto-trigger BEFORE it. Splicing at
+     * `--provider` would put the two in the wrong order and assert a sequence
+     * the renderer does not produce — which is how this test failed when the
+     * second extension landed, and it failed correctly.
      */
-    const at = expected.indexOf("--provider");
-    expect(at).toBeGreaterThan(-1);
+    const at = expected.indexOf("/opt/pifleet/truncation-recovery.ts") - 1;
+    expect(expected[at]).toBe("--extension");
     expected.splice(at, 0, "--extension", "/opt/pifleet/dispatch-trigger.ts");
     expect(expected.slice(0, 5)).toEqual(["docker", "run", "-i", "-t", "--rm"]);
     expect(tui.docker).toEqual(expected);
+    /*
+     * The mode-invariant half, stated directly: truncation recovery is in BOTH
+     * argvs. The derivation above would be equally satisfied by an extension
+     * that had vanished from both, since `expected` is built from `rpc`.
+     */
+    expect(rpc.docker).toContain("/opt/pifleet/truncation-recovery.ts");
+    expect(tui.docker).toContain("/opt/pifleet/truncation-recovery.ts");
     /*
      * …and there is no `-v` for it, which the equality above would ALSO satisfy
      * if both argvs had grown one. The extension is baked into the image at

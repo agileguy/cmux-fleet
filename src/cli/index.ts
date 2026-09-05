@@ -102,6 +102,12 @@ async function main(argv: string[]): Promise<number> {
     import("./commands/monitor.ts"),
     import("./commands/worktrees.ts"),
     import("./commands/dispatch.ts"),
+    // Beside `dispatch` because it is the same verb with a different asker: the
+    // operator dispatches, and `relay` is what turns a COLLATOR's request into
+    // dispatches host-side (SRD-REVIEW-CONSOLE §6.5). An operator reading
+    // `--help` to find out how a review console causes work needs the two
+    // adjacent, because the answer is that one of them is the other's caller.
+    import("./commands/relay.ts"),
     import("./commands/steer.ts"),
     // Beside `abort` because the two are the pair an operator confuses, and
     // `--help` listing them adjacently is where the distinction is cheapest to

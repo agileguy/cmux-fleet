@@ -39,7 +39,13 @@ import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
 import { isBackendKind, loadBackend } from "../../backends/registry.ts";
 import type { PaneRef } from "../../backends/types.ts";
-import { makeWorkerAccessible } from "../../container/mounts.ts";
+import {
+  WORKER_SCRATCH_DIR,
+  cloneSourceMount,
+  makeWorkerAccessible,
+  resolveCloneSource,
+  resolveLaunchRepo,
+} from "../../container/mounts.ts";
 import { assertBindMountsVisible } from "../../container/mount-preflight.ts";
 import { assertImagesReady, requiredImages } from "../../container/image.ts";
 import { renderAllWorkers } from "../../config/render.ts";
@@ -61,6 +67,7 @@ import {
   formatDisclosureBanner,
   type DisclosureRow,
 } from "../../security/disclosure.ts";
+import { hostedRepoRefusal, originRemote } from "../../security/sensitive-repo.ts";
 import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
 import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
@@ -655,6 +662,129 @@ export function assertAttachHere(args: {
  * the `continue` for an undefined id is unreachable and every worker is checked.
  * It stays reachable only for ids an operator typed by hand.
  */
+
+/**
+ * WHICH WORKSPACE A WORKER'S `presentation.json` SHOULD NAME — the ref, and the
+ * human name when there is one to record.
+ *
+ * ## A pure function rather than three expressions at the write site
+ *
+ * The write site already carries `handedOver?.workspace ?? workspace.id`. A
+ * second and a third conditional beside it would put the whole rule in an
+ * argument list where nothing can reach it: `up` cannot be called without a
+ * config, a backend, a container runtime and a runs root, so a rule that lives
+ * only there is a rule that can only be tested by running the world. Every
+ * other guard in this file is exported for exactly this reason.
+ *
+ * ## THE INVARIANT, which is the reason this returns a PAIR
+ *
+ * **A name is never recorded without its ref.** The display layer groups on the
+ * ref and labels with the name, so a record carrying a name and no ref would be
+ * a label attached to nothing — it would either be dropped silently or, worse,
+ * merge with the "no workspace" group while claiming to be `development`.
+ * Returning both from one expression is what makes that checkable in one place
+ * instead of asserted about two independent fields.
+ *
+ * ## WHY THE ADOPTED PATH GETS `null`, AND IT IS NOT A SHORTCUT
+ *
+ * Three cases, and only the first has a name to record:
+ *
+ * | case | ref | name |
+ * |---|---|---|
+ * | pifleet created the workspace (`cmux`/`tmux`) | `created.id` | `createdName` |
+ * | `up --attach-here` into a workspace cmux owns | `CMUX_WORKSPACE_ID` | **null** |
+ * | headless, nothing handed over | null | null |
+ *
+ * On the adopted path pifleet did not name the workspace and cannot learn what
+ * it is called. **Probed against the installed cmux 0.64.x on 2026-09-04: the
+ * binary exports `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID` and `CMUX_PANE_ID`, and
+ * nothing carrying a name or title.** The name lives behind `cmux workspace
+ * list`'s `custom_title`, and reaching it from here is barred twice over —
+ * ISC-137 forbids importing a cmux symbol outside `src/backends/cmux/`, and the
+ * alternative of widening `FleetBackend` would make `up --attach-here` newly
+ * require a reachable cmux socket for a cosmetic label, on a path that today
+ * needs none. A run must not fail over a heading.
+ *
+ * So the answer is `null` and the view falls back to the ref. **It is never
+ * guessed.** A UUID reads as an identifier; a wrong name reads as a fact, and
+ * of the two the wrong name is the one that misleads.
+ *
+ * ## The third case is not the second
+ *
+ * `headless` returns `{id: null}` from `ensureWorkspace` (it has no
+ * workspaces), so a headless run with nothing handed over has no ref at all.
+ * `createdName` is still a perfectly good string in that scope — it is
+ * `pifleet-<runId>`, computed before the backend is asked — and recording it
+ * there would attach a name to a workspace that does not exist. Hence the
+ * `created.id === null` arm rather than a bare `handedOver === null` test.
+ */
+export function presentedWorkspace(
+  handedOver: { readonly workspace: string | null } | null,
+  created: { readonly id: string | null },
+  createdName: string,
+  /**
+   * `--workspace-name`: what the CALLER says this workspace is called.
+   *
+   * Only ever consulted on the ADOPTED path, and only as a name — never as a
+   * ref. A console script knows the title it asked cmux to create or match
+   * (`operations`, `development`, `review` are compile-time constants in
+   * `operations-plan.ts`), so it can state the name that `up`, running inside
+   * one of that workspace's panes, cannot discover for itself.
+   *
+   * `undefined` and `null` both mean "nobody said", which is the default and
+   * the honest answer for a hand-typed `up --attach-here`.
+   */
+  declaredName?: string | null,
+): { readonly ref: string | null; readonly name: string | null } {
+  if (handedOver !== null) {
+    /*
+     * AN ADOPTED WORKSPACE IS ONE PIFLEET DID NOT NAME, so the only name that
+     * can be recorded here is one the caller supplied.
+     *
+     * **`createdName` is deliberately not reachable from this arm.** It is a
+     * perfectly good string in scope — `pifleet-<runId>` — and writing it here
+     * would label the operator's `development` console with a title cmux never
+     * gave it. That is the single most tempting wrong answer in this function
+     * and it is pinned by its own test.
+     *
+     * **The name is gated on the REF, not on the flag.** A caller can pass
+     * `--workspace-name review` from a terminal that is not a cmux pane at all;
+     * there is then no `CMUX_WORKSPACE_ID`, no ref, and a name recorded against
+     * nothing would be a label the monitor groups under `no workspace
+     * recorded` while claiming to be `review`. So an absent ref takes the name
+     * with it, which keeps the invariant below true by construction rather than
+     * by the caller being careful.
+     */
+    if (handedOver.workspace === null) return { ref: null, name: null };
+    /*
+     * AN EMPTY DECLARED NAME IS NOT A NAME. `--workspace-name ""` and a shell
+     * expansion that produced nothing both arrive here as `""`, which `??`
+     * does not catch — so without this the record would carry `workspace_name:
+     * ""`, a value shaped like "there is a name and it is empty".
+     *
+     * The view already survives it: `workspaceHeading` treats `""` as absent
+     * and falls back to the ref, which is the safety net the fallback exists to
+     * be. This is the other half, and the two guard different things — the
+     * RECORD should be truthful about what was known, and the VIEW should be
+     * robust about what it is handed. A battery arm survived on exactly this
+     * gap, which is how it was found.
+     */
+    const declared = declaredName === undefined || declaredName === "" ? null : declaredName;
+    return { ref: handedOver.workspace, name: declared };
+  }
+  // No workspace was created, so there is nothing for a name to name.
+  if (created.id === null) return { ref: null, name: null };
+  /*
+   * PIFLEET CREATED IT, so pifleet's own name is authoritative and the flag
+   * does NOT override it. `ensureWorkspace(createdName)` is the call that set
+   * cmux's `custom_title`, so recording anything else here would put a name in
+   * `presentation.json` that contradicts the workspace it describes — and the
+   * flag exists to supply a name that is otherwise unknowable, not to rename a
+   * workspace pifleet just named itself.
+   */
+  return { ref: created.id, name: createdName };
+}
+
 export function register(program: Command): void {
   program
     .command("up")
@@ -671,9 +801,35 @@ export function register(program: Command): void {
       "--attach-clear",
       "with --attach-here, clear the screen at handover so only the agent remains",
     )
+    .option(
+      /*
+       * WHAT THE CALLER SAYS THIS WORKSPACE IS CALLED — for the adopted path,
+       * where `up` cannot find out for itself.
+       *
+       * `up --attach-here` runs inside a pane of a workspace cmux already owns.
+       * The pane's environment carries `CMUX_WORKSPACE_ID` and nothing else:
+       * probed against the installed cmux 0.64.x, the binary exports
+       * `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID` and `CMUX_PANE_ID`, and no
+       * variable carrying a title. The name lives behind `cmux workspace list`,
+       * which `up` must not call — ISC-137 confines cmux imports to
+       * `src/backends/cmux/`, and `--attach-here` needs no cmux socket today.
+       *
+       * The console scripts DO know it: `operations`, `development` and
+       * `review` are compile-time constants, and the script is what asked cmux
+       * to create or match that title. So the knowledge travels as an argument
+       * from the one place that holds it, rather than being rediscovered by the
+       * one place that cannot.
+       *
+       * Optional everywhere. Absent, the record carries no name and the monitor
+       * falls back to the ref — which is the behaviour every existing record
+       * already gets.
+       */
+      "--workspace-name <name>",
+      "with --attach-here, the title of the cmux workspace this pane belongs to",
+    )
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean; attachHere?: boolean; attachClear?: boolean }) => {
+    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean; attachHere?: boolean; attachClear?: boolean; workspaceName?: string }) => {
       /**
        * `--backend` carries NO commander default any more (ISC-271, and the
        * same shape as ISC-61 one option up).
@@ -914,6 +1070,13 @@ export function register(program: Command): void {
       let harnessPatterns: readonly string[] | null = null;
       let egressNetwork: string | null = null;
       let repoRoot: string | null = null;
+      /**
+       * The launch directory when it overrode `run.repo`, else `null`.
+       *
+       * Declared beside `repoRoot` and for the same reason: it is set inside
+       * the config-load block and read after it, by the side-mount decision.
+       */
+      let launchRepo: string | null = null;
       let loadedConfig: LoadedConfig | null = null;
 
       /**
@@ -1005,6 +1168,38 @@ export function register(program: Command): void {
         proseTurnsBeforeFail = effectiveProseTurnsBeforeFail(loadedConfig.config);
         harnessPatterns = effectiveHarnessPatterns(loadedConfig.config.harness);
         egressNetwork = loadedConfig.config.docker.network;
+
+        /**
+         * THE LAUNCH DIRECTORY IS THE REPOSITORY.
+         *
+         * A console launched from `~/repos/rally-cli` is a console whose
+         * workers work on rally-cli — `/workspace` is a worktree of it, the
+         * harvest reads its diff, and `bun test`/`pytest` in the obvious place
+         * is the right thing to run.
+         *
+         * Before this, `run.repo` won unconditionally, so those workers got
+         * cmux-fleet at `/workspace` and rally-cli only as a read-only
+         * side-mount they had to be instructed to find. Measured twice: they
+         * did not find it, and ran cmux-fleet's own suite instead. See
+         * `resolveLaunchRepo` for the evidence and why documenting the
+         * side-mount could not repair it.
+         *
+         * `null` — the launch directory IS the fleet repo, or is not a git
+         * checkout — leaves the configured value untouched, so the ordinary
+         * `cd ~/repos/cmux-fleet && ./scripts/development` is unchanged.
+         *
+         * Assigned BEFORE `repoRoot` and before the hazard scan, disclosure and
+         * ADC checks, all of which read `run.repo`: they must grade the
+         * repository that will actually be mounted, not the one in the file.
+         */
+        launchRepo = await resolveLaunchRepo(loadedConfig, process.cwd());
+        if (launchRepo !== null) {
+          loadedConfig.config.run.repo = launchRepo;
+          process.stderr.write(
+            `pifleet: launch directory ${launchRepo} is the workspace repository ` +
+              `for this run (fleet.yaml's run.repo is not used)\n`,
+          );
+        }
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
 
         /**
@@ -1101,6 +1296,32 @@ export function register(program: Command): void {
             const row = disclosureFor(loadedConfig, resolveWorker(loadedConfig, workerId));
             if (row !== null) disclosures.push(row);
           }
+          /*
+           * THE SENSITIVE-REPO GATE, and it runs BEFORE the banner because the
+           * banner's second line says "Nothing below is refused (SRD D10)" —
+           * true of an ordinary hosted run and false of this one. Printing that
+           * sentence immediately above a refusal would teach an operator to
+           * disbelieve whichever of the two they read second.
+           *
+           * Here rather than in a role file because the only previous copy of
+           * this refusal was a sentence in `roles/collator.md`, and it did not
+           * fire: three reviews of an AppNeta repository reached three hosted
+           * vendors while it sat in the collator's own briefing. It could not
+           * have fired — it named a condition and never named the probe, to a
+           * worker with no `bash` and no `git`. `sensitive-repo.ts` carries the
+           * argument in full.
+           */
+          {
+            const remote = await originRemote(repoRoot);
+            const refusal = hostedRepoRefusal({
+              repoRoot,
+              remote,
+              carriers: disclosures.map((d) => ({ workerId: d.workerId, provider: d.provider })),
+              consent: loadedConfig.config.run.hosted_repo_consent,
+            });
+            if (refusal !== null) throw new CliError(refusal, EXIT.USAGE);
+          }
+
           const banner = formatDisclosureBanner(disclosures);
           if (banner !== null) {
             if (opts.json === true) process.stderr.write(banner);
@@ -1947,6 +2168,40 @@ export function register(program: Command): void {
               "Pi double and NO containers are started; unset it to launch containers\n",
           );
         }
+      /*
+         * The working directory workers may clone FROM, decided ONCE here.
+         *
+         * `up`'s cwd is the directory the operator started the console in — the
+         * console scripts pass it to cmux as `--cwd`, so each agent pane's `up`
+         * inherits it. When that is a git working directory OTHER than
+         * `run.repo`, it is exposed read-only and a worker can clone it into its
+         * writable scratch.
+         *
+         * Not `run.repo`: that already arrives as the worker's own `/workspace`
+         * worktree, and mounting it a second time under another name would give
+         * the same repository two identities in one container — one harvested,
+         * one not.
+         *
+         * Resolved in `up` rather than in `render` because `render` is the dry
+         * preview and must describe the run that WILL happen, not the directory
+         * the preview was typed in (ISC-188).
+         */
+        /*
+         * `launchRepo` has already made this directory `/workspace`, and the
+         * docblock above says why mounting it a second time under another name
+         * is wrong: one repository, two identities in one container, only one
+         * of them harvested. So the side-mount survives only for the case it
+         * was actually for — a clone source that is NOT the workspace.
+         */
+        const cloneSource =
+          launchRepo !== null ? null : await resolveCloneSource(loadedConfig, process.cwd());
+        if (cloneSource !== null) {
+          process.stderr.write(
+            `pifleet: workers may clone ${cloneSource} from ` +
+              `${cloneSourceMount(cloneSource)} (read-only) into ${WORKER_SCRATCH_DIR}\n`,
+          );
+        }
+
         const materialized = await materializeWorkerInputs(loadedConfig, run, workers, async (m) => {
           await ledger.append("worker_inputs_materialized", {
             worker: m.workerId,
@@ -1963,7 +2218,7 @@ export function register(program: Command): void {
               kubeconfig_source: m.kubeconfigSource,
             },
           });
-        }, { writeLaunchRecord: !useDouble });
+        }, { writeLaunchRecord: !useDouble, cloneSource });
 
         /**
          * EVERY BIND-MOUNT SOURCE THIS RUN WILL USE IS ONE THE RUNTIME CAN SEE
@@ -2081,7 +2336,16 @@ export function register(program: Command): void {
           primary_failures: resolution.primaryFailures.map((c) => `${c.name}: ${c.detail ?? ""}`),
         },
       });
-      const workspace = await backend.ensureWorkspace(`pifleet-${runId}`);
+      /*
+       * ONE STRING, used to name the workspace and to record what it was
+       * named. A literal repeated at the write site would be a second spelling
+       * of the name — and the two would drift the first time this template
+       * changed, leaving `presentation.json` claiming a `custom_title` cmux
+       * never had. `presentedWorkspace` takes it as a parameter for the same
+       * reason.
+       */
+      const workspaceName = `pifleet-${runId}`;
+      const workspace = await backend.ensureWorkspace(workspaceName);
 
       const launched: Array<{ id: string; pid: number; pgid: number }> = [];
       /**
@@ -2138,11 +2402,18 @@ export function register(program: Command): void {
          */
         const adopted = attachHere && tuiWorkers.includes(workerId);
         const handedOver = adopted ? adoptedSurface(process.env) : null;
+        /*
+         * The ref and the name decided together — see `presentedWorkspace` for
+         * the invariant (a name is never recorded without its ref) and for why
+         * the adopted path records no name rather than resolving one.
+         */
+        const presented = presentedWorkspace(handedOver, workspace, workspaceName, opts.workspaceName);
         await writePresentation(wp, {
           schema: "pifleet.presentation/v1",
           worker: workerId,
           backend: backend.kind,
-          workspace_ref: handedOver?.workspace ?? workspace.id,
+          workspace_ref: presented.ref,
+          workspace_name: presented.name,
           surface_ref: handedOver?.surface ?? pane.id,
           window_ref: null,
           /*

@@ -15,4 +15,7 @@ have. After writing one, break the code deliberately and confirm the test goes r
 **Report the real numbers.** Quote the actual runner output — counts, names of failures, the
 assertion text. Do not summarize a suite you did not run.
 
-Report as the `pifleet-worker` skill describes.
+Report as the `pifleet-worker` skill describes — `result.json` written last, and `success`
+only when the numbers you quoted came from a run you actually performed. An envelope you
+never wrote does not fail your task; it removes you from the grading, so the run you did
+grades as unchecked.

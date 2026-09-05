@@ -396,6 +396,27 @@ describe("no file the headless suite reaches names provider spend (ISC-423)", ()
     /^(?:.*\.)?example\.(?:com|net|org)$/,
     /^(?:.*\.)?pifleet\.internal$/,
     /^host\.docker\.internal$/,
+    /**
+     * A SINGLE-LABEL name — no dot at all. It cannot be a paid endpoint for
+     * the same "by construction" reason as every line above it: a provider's
+     * API is a delegated FQDN, and a dotless name has no public delegation to
+     * be. `localhost` on the first line is already an instance of this rule;
+     * this generalises it rather than adding a new kind of exemption.
+     *
+     * ADDED FOR A REAL FIXTURE, and the docblock above predicted this: the
+     * captured `rev-lang-1` artifact under `test/fixtures/envelopes/` is a
+     * live reviewer's own words about credential redaction, and it quotes
+     * `https://user:p@ss@host` as an EXAMPLE of a URL whose userinfo a bad
+     * regex fails to elide. The host it names is the literal word `host`. That
+     * is a placeholder in prose, not an endpoint — but the file is a verbatim
+     * capture and editing it to satisfy this guard would forge the evidence
+     * the fixture exists to preserve.
+     *
+     * The guard is not weakened where it matters: `ollama.com` and
+     * `inference.agileguy.ca`, the two live endpoints named elsewhere in this
+     * tree, both have dots and both still fail.
+     */
+    /^[^.]+$/,
   ];
 
   /**

@@ -114,6 +114,60 @@ describe("reconcileArtifactClaims — the two directions of disagreement", () =>
   });
 
   /**
+   * THE VALIDATOR AND THE RECONCILER MUST READ A PATH THE SAME WAY.
+   *
+   * `artifactPathProblem` accepts a relative artifact path, resolving it
+   * against the task outbox; this pass used to resolve only through the mount
+   * table, which answers null for anything non-absolute. The result was an
+   * accepted envelope whose report contradicted itself twice about one file:
+   * "outside the container mount table" here, and "does not claim" from the
+   * reverse pass immediately after. Both assertions below fail on that code —
+   * the discrepancy list is not empty and the claim never matches.
+   */
+  test("a relative claim reconciles against the same file an absolute one names", async () => {
+    await writeFile(join(files, "review.md"), "the lost review\n");
+    const scan = await scanHeld();
+
+    const r = await reconcileArtifactClaims(
+      scan,
+      claims({ kind: "file", path: "files/review.md" }),
+      loc,
+    );
+
+    expect(r.discrepancies).toEqual([]);
+    expect(r.artifacts).toHaveLength(1);
+    expect(r.artifacts[0]!.path).toBe(join(files, "review.md"));
+    expect(r.artifacts[0]!.sha256).toBe(sha256("the lost review\n"));
+  });
+
+  /**
+   * The other half of reading it the same way: agreeing on a relative path
+   * does NOT mean agreeing to follow one out of `files/`. The containment
+   * check is unchanged and still refuses, and it must refuse with the reason
+   * that is true — the old mount-table sentence was accurate about neither
+   * where the path went nor why it was rejected.
+   */
+  test("a relative claim that climbs out of files/ is refused by containment, not by the mount table", async () => {
+    await writeFile(join(files, "review.md"), "the lost review\n");
+    const scan = await scanHeld();
+
+    const r = await reconcileArtifactClaims(
+      scan,
+      claims({ kind: "file", path: "../result.json" }),
+      loc,
+    );
+
+    expect(r.discrepancies).toHaveLength(2);
+    const claimLine = r.discrepancies.find((d) => d.includes("result.json"));
+    expect(claimLine).toContain("not under the task outbox files/ directory");
+    expect(claimLine).not.toContain("mount table");
+    // And the real artifact, unclaimed by this envelope, is still reported.
+    expect(r.discrepancies.some((d) => d.includes("review.md") && d.includes("does not claim"))).toBe(
+      true,
+    );
+  });
+
+  /**
    * The claim the harvester previously had no opinion about: a worker naming
    * an artifact it never wrote. `artifactPathProblem` accepts it — the path is
    * inside the outbox and lexically legal — so nothing before this rejected it.

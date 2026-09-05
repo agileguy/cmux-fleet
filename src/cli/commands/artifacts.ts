@@ -13,7 +13,42 @@ import { harvestAll, harvestTask, type TaskHarvest } from "../../harvest/index.t
  * is deliberately useless for distinguishing "no artifacts" from "tool broke".
  */
 function serialize(t: TaskHarvest): Record<string, unknown> {
-  return { ...t.harvest, harvest_status: t.harvestStatus, facts: t.facts };
+  return {
+    ...t.harvest,
+    harvest_status: t.harvestStatus,
+    facts: t.facts,
+    /**
+     * WHETHER THE WORKER'S OWN ACCOUNT COULD BE READ, in structure.
+     *
+     * The RENDERED form of each of these is already published: a refusal, an
+     * unreadable envelope and an absent one each push their own line into
+     * `harvest.discrepancies`, which is spread above and printed by
+     * `printHuman`. That is enough for a person reading a terminal and is not
+     * enough for a program, which would have to recover the fact by
+     * substring-matching English out of a discrepancy — the exact recovery
+     * every one of these fields is documented as existing to prevent.
+     *
+     * **The gap was measured.** A reviewer's entire envelope — verdict, summary
+     * and fourteen findings — was refused over one artifact path, and a
+     * consumer of this payload could see the verdict was missing without any
+     * machine-readable way to learn that a document had been thrown away
+     * rather than never written. `null` in `envelope_read` still means nothing
+     * looked; `missing` means it looked and there was none.
+     *
+     * Snake_case to match the wire contract's own convention, and riding
+     * alongside rather than inside it for the reason the doc comment above
+     * gives: `HarvestSchema` strips unknown keys, so a consumer validating
+     * against it is unaffected.
+     *
+     * `taskOutbox` deliberately stays out. It is bulk inventory rather than a
+     * fact about whether the envelope was legible, its interesting cases are
+     * likewise already in `discrepancies`, and its structured consumer is the
+     * relay, which holds the `TaskHarvest` directly.
+     */
+    envelope_read: t.envelopeRead,
+    envelope_refusal: t.envelopeRefusal,
+    unreadable_envelope: t.unreadableEnvelope,
+  };
 }
 
 function printHuman(t: TaskHarvest): void {

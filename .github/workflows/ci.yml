@@ -17,6 +17,13 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
       - name: Unit tests
+        # Fail on an absent host capability instead of skipping it. `test/unit`
+        # has tests that need `docker`, an executable temp dir and a real
+        # `$HOME`; they gate on probes (test/support/host-deps.ts) so they still
+        # run on every laptop. A probe that broke would skip them everywhere,
+        # silently and greenly — this is the lever that makes CI notice.
+        env:
+          PIFLEET_REQUIRE_HOST_DEPS: "1"
         run: bun test test/unit
       - name: Integration tests
         run: bun test test/integration
@@ -838,7 +845,61 @@ jobs:
           #         fails loudly here instead of silently skipping.
           #
           # 131 + 9 = 140.
-          TOTAL_EXPECTED: "140"
+          # 2026-09-04, re-derived and CORRECTED. The previous derivation at
+          # this date said 158 and was wrong by exactly 12; what follows is the
+          # measurement that replaces it, and then why the wrong one looked
+          # right, because that is the part worth keeping.
+          #
+          # MEASURED, on a clean `git worktree` checkout of this branch with
+          # every gate variable UNSET, by running the SIXTEEN paths the run
+          # step below actually passes to `probe-guard.sh` — copied from
+          # `:1044-1059`, not retyped from memory:
+          #
+          #     bun test test/integration/image.test.ts \
+          #       test/integration/verbgate.test.ts test/integration/egress.test.ts \
+          #       test/integration/adc.test.ts test/integration/relay.test.ts \
+          #       test/integration/probe-in-network.test.ts \
+          #       test/integration/container-env.test.ts \
+          #       test/integration/container-launch.test.ts \
+          #       test/integration/doctor-preflight.test.ts \
+          #       test/integration/control-socket-uid.test.ts \
+          #       test/integration/full-chain.test.ts \
+          #       test/integration/acceptance-container.test.ts \
+          #       test/integration/honeypot.test.ts test/integration/hostile-pi.test.ts \
+          #       test/integration/mount-preflight-remote.test.ts \
+          #       test/integration/relay-provider-containment.test.ts
+          #
+          #   -> 8 pass, 138 skip, 0 fail. Ran 146 tests across 16 files.
+          #
+          # 146 is therefore the constant. `probe-guard.sh:189` exits 1 when
+          # the collected total is BELOW it, so 158 failed this job on every
+          # run of this branch.
+          #
+          # HOW THE WRONG NUMBER SURVIVED REVIEW, recorded because the failure
+          # is in the METHOD and would otherwise recur. The 158 derivation
+          # claimed the missing 12 were `relay-script.test.ts` and asserted
+          # that file was "named in the run step above". It is not: `:1060`
+          # excludes it in as many words, and has since before that derivation
+          # was written. The arithmetic was self-consistent — relay-script does
+          # collect exactly 12, and 146 + 12 = 158 — so the number checked out
+          # against itself while describing a command nobody runs.
+          #
+          # The hand method's own rule is that a derivation must re-read the
+          # RUN STEP rather than the previous comment. That rule was stated in
+          # the comment being written and broken by the comment being written:
+          # the file list was read out of the derivation's own conclusion
+          # instead of off `:1044-1059`. A derivation that names its command
+          # and quotes its output — as this one does — cannot make that mistake
+          # silently, because the list is visible beside the number.
+          #
+          # NOT FIXED BY ADDING relay-script TO THE LIST, deliberately. `:1060`
+          # argues it already runs ungated in the fast `test` job, and that is
+          # true and checkable: `:29` is a bare `bun test test/integration`,
+          # which collects every file in that directory including this one. So
+          # adding it here would buy no coverage and pay for a second run
+          # inside the expensive job. The comment's reasoning holds; the
+          # derivation was what was wrong.
+          TOTAL_EXPECTED: "146"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

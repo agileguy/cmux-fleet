@@ -190,9 +190,18 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-There are zero `[ ]` criteria; every one has been attempted. Twelve are graded `[~]`
+There are zero `[ ]` criteria; every one has been attempted. Thirteen are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
-falls short of the standard: ISC-498 is the fleet monitor's one, where the repaint RATE is
+falls short of the standard — with one exception, added 2026-09-05 and worth stating plainly:
+**ISC-517 is `[~]` because it is FALSIFIED, not because its evidence is thin.** The review
+console lost a complete, valid lens report on two consecutive runs, and the criterion is filed
+open so the document carries the failure its own subject exists to prevent. It was root-caused
+the same day — a reviewer spelled its artifact path relatively, one bad pointer refuses the whole
+envelope, and a verdict, a summary and fourteen findings were discarded — and that route is now
+closed and re-checked. The criterion stays `[~]` because its sentence is universal and a second
+route is still open: a harvest that is rejected names its reason but still loses the lens rather
+than recovering it. A later run collated three of three lenses; every seat in it happened to
+spell its path absolutely, so that run exercises the loop working and not the fix. The rest: ISC-498 is the fleet monitor's one, where the repaint RATE is
 measured (1.44/sec on the scheduler path) but whether a repaint visibly FLASHES is perceptual and
 needs a person at the pane; ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped

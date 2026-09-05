@@ -202,7 +202,6 @@ describe("the swap is detectable at every site that could make it", () => {
        */
       const model = await composeFleet({
         root,
-        watchDir: process.cwd(),
         columns: 100,
         containers: never(),
       });

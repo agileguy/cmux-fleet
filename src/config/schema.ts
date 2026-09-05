@@ -230,6 +230,39 @@ export const DockerSchema = z
     cpus: z.number().positive().default(2),
     pids_limit: z.number().int().positive().default(512),
     read_only_root: z.boolean().default(true),
+    /**
+     * Size of the writable scratch at `WORKER_SCRATCH_DIR`, where a worker
+     * clones repositories that are not its own workspace.
+     *
+     * IT IS A tmpfs, therefore RAM. `docker.memory` (4g by default) is the
+     * container's limit and a tmpfs counts against it, so a scratch sized at
+     * or above `memory` converts "the clone was too big" into an OOM kill of
+     * the whole worker. 2g under a 4g default leaves the agent room to run
+     * what it cloned.
+     *
+     * It does NOT survive the container. A worker that clones here and is
+     * recreated has lost the clone — which is the intent: only `/workspace`
+     * is durable, and only what reaches a branch there is harvested.
+     */
+    scratch_size: z.string().regex(/^\d+[kmg]?$/i).default("2g"),
+    /**
+     * May the scratch execute?
+     *
+     * `true` by default, and this is a REAL WEAKENING stated plainly rather
+     * than buried: `/tmp` is mounted `noexec` specifically to block "download
+     * a binary and run it", and a writable exec-capable mount hands that back.
+     * The default is `true` anyway because the scratch exists so an agent can
+     * run a cloned project's TESTS, and a test suite executes things — its
+     * runner from `node_modules/.bin`, a compiled binary, a `./configure`. A
+     * scratch you cannot execute in serves the tidier half of the purpose and
+     * not the half that was asked for.
+     *
+     * `nosuid`/`nodev` are NOT configurable and ride on both settings: they
+     * cost a worker nothing it legitimately needs.
+     *
+     * Set `false` for a fleet whose workers only ever read other repositories.
+     */
+    scratch_exec: z.boolean().default(true),
     /** Extra OS packages appended as a final image layer (SRD §5.3). */
     apt_packages: z.array(shortStr).max(64).default([]),
   })
@@ -307,6 +340,19 @@ export const RunSchema = z
     repo: shortStr,
     isolation: IsolationSchema.default("worktree"),
     branch_prefix: shortStr.default("fleet"),
+    /**
+     * The remote this operator consents to send to a HOSTED provider, echoed
+     * exactly. `null` means no consent, which is the default and the safe one.
+     *
+     * A URL rather than a boolean, deliberately. The launch directory overrides
+     * `run.repo` on this fleet, so the same `fleet.yaml` sends whichever
+     * repository the operator happened to `cd` into — and a blanket `true`
+     * written once, for a repository they had thought about, would silently
+     * cover every repository they had not. An echoed URL cannot transfer.
+     *
+     * `sensitive-repo.ts` holds the gate and the reason it exists.
+     */
+    hosted_repo_consent: shortStr.nullable().default(null),
     /** Bounded by measured oMLX throughput, not pane count (SRD §5.9 / F40). */
     max_concurrent: z.number().int().positive().default(2),
     /**
@@ -702,6 +748,29 @@ export const ProviderSchema = z
     relay_upstream: shortStr.nullable().default(null),
     /** Empty means "no allowlist", exactly as the flat key does. */
     models_allowlist: z.array(shortStr).max(64).default([]),
+    /**
+     * Each model's REAL context window, by model id. Absent means the worker
+     * gets whatever the Pi agent defaults to.
+     *
+     * This exists because that default is 128,000 for every model, and the
+     * entrypoint's `models.json` writer emitted `{id, name}` and nothing else —
+     * so every model in this fleet ran at 128k regardless of what it could
+     * actually hold. Measured against the provider on 2026-09-04:
+     * `deepseek-v4-pro:0813` and `kimi-k3` are 1,048,576, so they were being
+     * run at 12% of capacity. `rev-arch-1` auto-compacted at 152,447 tokens on a
+     * model with a million, and then could not resume at all.
+     *
+     * PER PROVIDER rather than fleet-wide, because a model id says nothing about
+     * how the endpoint serving it is configured: the same weights behind two
+     * providers can be served with two different windows, and the one that
+     * matters is the endpoint's.
+     *
+     * Re-measure when a provider re-tags a model — the value is theirs, not ours:
+     *   curl -s https://<host>/api/show -H "Authorization: Bearer $KEY" \
+     *     -d '{"model":"<id>"}' | jq '.model_info | to_entries[]
+     *       | select(.key | endswith(".context_length"))'
+     */
+    context_windows: z.record(shortStr, z.number().int().positive()).default({}),
     /**
      * Turns off `decomposeModel`'s `:thinking` suffix stripping for models on
      * this provider (D12, ISC-405). Off by default, so oMLX is unaffected and

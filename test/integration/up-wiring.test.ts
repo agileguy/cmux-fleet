@@ -34,11 +34,13 @@
 import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { DISPATCH_POLICY_MOUNT } from "../../src/run/dispatch-policy.ts";
+import { REPLIES_MOUNT } from "../../src/run/replies.ts";
 import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
 import { SECRETS_MOUNT } from "../../src/run/worker-env.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
@@ -48,7 +50,8 @@ import {
   type LedgerRecord,
   WorkerLaunchSchema,
 } from "../../src/contracts.ts";
-import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
+import { runPaths, workerBranch, workerPaths, workerRepliesDir } from "../../src/run/paths.ts";
+import { relayJournalDir } from "../../src/run/relay-journal.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunBudgetPolicy, readRunWorktrees } from "../../src/run/state.ts";
 import { inspectCloneDirt } from "../../src/run/worktree.ts";
@@ -219,7 +222,13 @@ afterAll(async () => {
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(57));
+  //
+  // RE-COUNTED at 66 when the launch-repo block landed, by running
+  // `grep -c 'await makeRig('` on the merged tree rather than by adding 4 to
+  // 57. The command's answer is 66; an increment would have written 61, so the
+  // number had ALREADY drifted by one again before this block was touched.
+  // Fifth time. The instruction is still a command, not an increment.
+}, cliBudget(66));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -1503,6 +1512,37 @@ async function runCli(
       // depends on whatever the developer's machine happens to contain.
       ...(opts.home !== undefined ? { HOME: opts.home } : {}),
     } });
+}
+
+/**
+ * `runCli` with the child's UMASK pinned, and it goes through the same helper
+ * everything else does.
+ *
+ * **The umask is set on THIS process, not on a hand-built subprocess, and that
+ * is a correctness point rather than a style one.** A umask is inherited across
+ * fork and exec, so setting it here is what the child gets — while a second
+ * `Bun.spawn` built to carry it would be exactly the ambient-config trap
+ * `test/support/spawn-cli.ts` exists to close, and `hermetic-cli-spawn-guard.test.ts`
+ * would correctly refuse it. There is no version of this that both builds its
+ * own subprocess and stays hermetic.
+ *
+ * `try`/`finally` around one await, restoring the value `process.umask` itself
+ * returns. The window is a single call, and bun runs the tests in a file in
+ * order rather than concurrently, so nothing else in this file can observe the
+ * altered value — the same containment the `PIFLEET_RUNS_DIR` block below uses,
+ * for the same reason.
+ */
+async function runCliUnderUmask(
+  rig: Rig,
+  umask: number,
+  args: readonly string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const previous = process.umask(umask);
+  try {
+    return await runCli(rig, [...args]);
+  } finally {
+    process.umask(previous);
+  }
 }
 
 describe("up wires the security controls, in order (review finding 2)", () => {
@@ -3066,6 +3106,29 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // the interesting half of this row rather than the mode.
     [DISPATCH_POLICY_MOUNT]: { directory: false, mode: 0o444 },
     /*
+     * The reply plane, present for EVERY worker on the same argument the two
+     * rows above carry: the `-v` is unconditional, so the source has to be
+     * unconditional too, and only a collator will ever have anything in it
+     * (SRD-REVIEW-CONSOLE §6.4, D6).
+     *
+     * A DIRECTORY, which is the interesting half of this row — the mount is one
+     * `<child-task-id>.json` per child and the set of names is open-ended, so
+     * unlike the two policy files above there is no single inode to pin. What
+     * this row therefore proves is that `materialize.ts` created it: a source
+     * `createRepliesDir` never made would have Docker invent the directory at
+     * launch, with the daemon's ownership and mode rather than
+     * `makeWorkerAccessible`'s — and `stat` here is the only thing between that
+     * and a silently-wrong reply surface.
+     *
+     * 0755 and not the outbox's 0777, and the difference is the whole design:
+     * the execute bit lets uid 10001 traverse in and read a reply, the owner
+     * write bit lets the host actor deliver one, and the worker's inability to
+     * write is carried by `:ro` rather than by the mode — the macOS VM squashes
+     * ownership to the container user, so inside the container uid 10001 reads
+     * as this directory's owner and the mode says nothing at all.
+     */
+    [REPLIES_MOUNT]: { directory: true, mode: 0o755 },
+    /*
      * The secret store, present for EVERY worker since D8 — this rig's workers
      * request no `secrets:` and still carry it, because the Class 1 provider
      * key is delivered as a 0444 file in it and no worker requests that.
@@ -3136,9 +3199,14 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
 
           const unchecked: string[] = [];
           const seen = new Set<string>();
+          /** Every HOST source this worker mounts — the absence check below needs the whole set, not the classified ones. */
+          const allSources: string[] = [];
           for (let i = 0; i < r.docker.length; i++) {
             if (r.docker[i] !== "-v") continue;
             const [source, target] = (r.docker[i + 1] ?? "").split(":");
+            // Collected before any classification, so a mount this table does
+            // not recognise is still covered by the journal-absence check.
+            if (source !== undefined && source.startsWith("/")) allSources.push(source);
             if (target === NAMED_VOLUME_TARGET) {
               // A `-v` source with no leading `/` IS a named volume, which is
               // precisely why this one needs no host path.
@@ -3164,6 +3232,33 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
           // …and every mount it does know about was actually emitted, so a
           // render that stops emitting one cannot pass by producing less.
           expect([...seen].sort()).toEqual(Object.keys(EXPECTED).sort());
+
+          /**
+           * THE RELAY JOURNAL IS IN NO MOUNT (SRD-REVIEW-CONSOLE §6.5).
+           *
+           * `<run>/relay` is what stops the actor re-dispatching a request it
+           * has already performed, and it is only trustworthy while the WORKER
+           * cannot reach it — a collator that could delete its own journal entry
+           * could buy another three reviewer dispatches per deletion, which is
+           * the unbounded fan-out D7 refuses, reached through the filesystem
+           * instead of through the schema.
+           *
+           * What holds that up is an ABSENCE from this table, not a guard:
+           * `classifyRunDirExposure` deliberately returns `null` for a source
+           * strictly UNDER the run dir, because the whole §5.5 table lives
+           * there. So it is asserted here, against the argv render actually
+           * produces, exactly as `RunPaths.auditDir` says a run-dir absence must
+           * be. The obvious wrong edit is putting the journal beside the request
+           * it journals, under `<run>/outbox/<worker>` — which this catches.
+           */
+          const journal = relayJournalDir(run.root);
+          for (const s of allSources) {
+            expect(s, `${s} exposes the relay journal`).not.toBe(journal);
+            expect(s.startsWith(`${journal}/`), `${s} is inside the relay journal`).toBe(false);
+            expect(journal.startsWith(`${s}/`), `the relay journal is inside mounted ${s}`).toBe(
+              false,
+            );
+          }
 
           /**
            * `--env-file` USED to be the one deliberate exemption, and this
@@ -3219,6 +3314,97 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
     // measured idle is 1028 ms. Not reduced.
     90_000,
+  );
+
+  /**
+   * THE 0755 IN THE TABLE ABOVE IS SATISFIED BY THE AMBIENT UMASK, AND THIS IS
+   * THE TEST THAT MAKES IT AN ASSERTION ABOUT THE CODE.
+   *
+   * `mkdir` under the umask 022 that every developer shell and `ubuntu-latest`
+   * hands out already yields 0755. So `[REPLIES_MOUNT]: { mode: 0o755 }` in
+   * `EXPECTED` passes whether or not `createRepliesDir`'s
+   * `makeWorkerAccessible(dir, false)` ran at all — and CI shares the blind spot
+   * rather than covering it, because nothing in the workflow overrides the
+   * umask. Measured: umask 022 → 755, umask 077 → 700.
+   *
+   * `test/unit/replies.test.ts` closes the same hole one layer down by
+   * pre-creating the directory at 0700 and asserting `createRepliesDir` REPAIRS
+   * it. That pin cannot be reproduced here, and the reason is structural rather
+   * than a matter of effort: `up` MINTS the run id, so there is no run directory
+   * to pre-create anything in until after the command under test has finished.
+   *
+   * So the pin is inverted instead of relocated. The child runs under `umask
+   * 077`, where a bare `mkdir` yields 0700 and only an explicit chmod can yield
+   * 0755. That is umask-INDEPENDENT in the sense that matters — the value is set
+   * by this test rather than read from the runner — so it passes and fails
+   * identically on a laptop and on CI.
+   *
+   * **What this reaches that the unit test cannot.** The unit test pins the
+   * chmod INSIDE `createRepliesDir`. This pins that `materialize.ts` still CALLS
+   * it: a materializer that dropped the call and did its own `mkdir` would keep
+   * every unit test green and keep the `EXPECTED` row green too, because the
+   * directory would still exist at the right path with the right type. The two
+   * probes are the two halves of one property and neither implies the other.
+   *
+   * ONLY the reply directory is asserted here, and the reason is a MEASUREMENT
+   * rather than scope discipline. Under this same `umask 077` spawn every other
+   * materialized inode this rig produces came out at exactly the mode `EXPECTED`
+   * wants — `task-policy` 444, `dispatch-policy` 444, `cloud-allow` 444, `env`
+   * 600, `outbox` 777, `skills` 755 — because each of those is set by an
+   * explicit chmod that a umask cannot touch. So the reply directory was the
+   * ONLY row in the table that the ambient umask was standing in for, which is
+   * what makes one assertion the right size for this probe.
+   *
+   * Two rows are not covered either way and are named so the silence is not read
+   * as coverage: `BRIEFING_MOUNT` and the kubeconfig exist only under the
+   * mounts test's own config above (`append_system_prompt`, `cloud_access:
+   * true`) and are absent from this rig, so this spawn says nothing about them.
+   */
+  test(
+    "the reply directory's 0755 is a chmod, not the runner's umask",
+    async () => {
+      const rig = await makeRig();
+      const up = await runCliUnderUmask(rig, 0o077, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+      const run = runPaths(rig.runId, rig.root);
+
+      /**
+       * THE CONTROL, and without it this test is capable of passing vacuously.
+       *
+       * If the umask silently failed to reach the child — a spawn that reset
+       * it, a runtime that does not inherit it — `up` would run under the
+       * ambient 022 and the 0755 below would once again be free. The run
+       * directory is the cleanest
+       * witness available: `materialize.ts` deliberately chmods NOTHING above
+       * the mounted inodes ("Removed rather than tightened", :774-800), so its
+       * mode is whatever `mkdir` left, which is exactly the ambient umask made
+       * visible.
+       */
+      expect((await stat(run.root)).mode & 0o777).toBe(0o700);
+
+      // …and the mounted inode is 0755 anyway, which under this umask can only
+      // have come from `createRepliesDir`'s chmod.
+      const replies = workerRepliesDir(run.root, "eng-1");
+      expect((await stat(replies)).isDirectory()).toBe(true);
+      expect((await stat(replies)).mode & 0o777).toBe(0o755);
+      // Spelled as the two halves the mode is FOR, so a future edit that lands
+      // on some other 0755-adjacent value has to argue with both: group and
+      // other traverse and read, and neither writes.
+      expect((await stat(replies)).mode & 0o022).toBe(0);
+      expect((await stat(replies)).mode & 0o055).toBe(0o055);
+    },
+    // One `up` spawn, derived rather than chosen: cliBudget(1) = 11_400 ms.
+    cliBudget(1),
   );
 });
 
@@ -6161,4 +6347,149 @@ describe("the §5.9 spend gate is reachable on a config alone (ISC-430)", () => 
     // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`.
     cliBudget(1),
   );
+});
+
+/**
+ * THE LAUNCH DIRECTORY IS THE WORKSPACE REPOSITORY.
+ *
+ * ## What was broken, and how it was found
+ *
+ * `run.repo` in `fleet.yaml` won unconditionally, and `buildDockerArgv` mounts
+ * a worktree of it at `/workspace`. So a development console launched from
+ * `~/repos/rally-cli` — for the express purpose of testing rally-cli — handed
+ * every worker **cmux-fleet** as its workspace, and offered rally-cli only as a
+ * read-only side-mount at `/repos-src/rally-cli`.
+ *
+ * The worker was then asked to test rally-cli. Measured three times, across two
+ * images and three freshly recreated sessions, it did the same thing each time:
+ *
+ *     THINK : Likely need to run tests in repository. Let's inspect repository.
+ *     CALL  : ls /workspace
+ *     CALL  : read /workspace/package.json    -> "name": "cmux-fleet"
+ *     CALL  : bash bun test
+ *
+ * On the third run it even noticed — *"The task description says 'rally-cli
+ * tests'"* — and continued into cmux-fleet's suite anyway. That suite spawns
+ * fleets, so the worker recursively started nested pifleet runs inside its own
+ * container.
+ *
+ * ## Why this is a test and not a paragraph in a skill
+ *
+ * The first two repairs attempted were documentation: a `/repos-src` section in
+ * the mounted `skills/pifleet-worker/SKILL.md`, then a stronger one. Both were
+ * present and readable in the containers that failed — verified on disk in the
+ * run's own skills directory. **The worker was not disobeying.** `/workspace`
+ * was cmux-fleet, so cmux-fleet is what "the repository" meant; the side-mount
+ * was the anomaly, and no amount of prose makes an anomaly the obvious choice.
+ *
+ * A behaviour that three prompt revisions could not move, and one config line
+ * fixed, belongs where a config line can be checked.
+ */
+describe("the launch directory is the workspace repository", () => {
+  /**
+   * The repository a completed run actually used, from its own `run.json`.
+   *
+   * Realpathed, and so is every expectation compared against it: this suite's
+   * scratch lives under `/var/folders/...`, which on macOS is a symlink into
+   * `/private/var`, and `up` records the resolved form. Comparing the two
+   * spellings is the bug the control test below caught in production code —
+   * see `resolveCloneSource` — and a test that papered over it here would have
+   * hidden it.
+   */
+  async function repoOfRun(rig: Rig, runId: string): Promise<string | null> {
+    const { repo } = await readRunWorktrees(runPaths(runId, rig.root));
+    return repo === null ? null : realpathSync(repo);
+  }
+
+  /** The same normalisation, for the side of the comparison the test builds. */
+  function real(p: string): string {
+    return realpathSync(p);
+  }
+
+  /** `up` from `cwd`, asserted successful, returning its run id. */
+  async function upFrom(rig: Rig, cwd: string): Promise<{ runId: string; stderr: string }> {
+    const up = await runCli(
+      rig,
+      ["up", "--workers", "eng-1", "--config", rig.configPath, "--backend", "headless", "--json"],
+      { cwd },
+    );
+    expect(up.code, `up failed from ${cwd}:\n${up.stderr}`).toBe(EXIT.SUCCESS);
+    const parsed = JSON.parse(up.stdout.trim()) as { run_id: string };
+    rig.runId = parsed.run_id;
+    return { runId: parsed.run_id, stderr: up.stderr };
+  }
+
+  test("a run launched from another checkout uses THAT checkout, not fleet.yaml's", async () => {
+    const rig = await makeRig();
+    const launch = join(rig.base, "rally-cli");
+    await seedGitRepo(launch, { files: { "pyproject.toml": '[project]\nname = "rally-tui"\n' } });
+
+    const { runId, stderr } = await upFrom(rig, launch);
+
+    expect(await repoOfRun(rig, runId)).toBe(real(launch));
+    // The negative is the whole point: before this change the answer was
+    // `rig.repo` for every cwd, and an assertion that only named `launch`
+    // would still have read as a pass if both paths happened to coincide.
+    expect(await repoOfRun(rig, runId)).not.toBe(real(rig.repo));
+    // And it is announced, because an operator who typed `cd` somewhere
+    // deliberate should be told which repository that bought them.
+    expect(stderr).toContain(real(launch));
+  }, cliBudget(3));
+
+  test("the worktree really holds the launch checkout's files", async () => {
+    /*
+     * `run.json` records an intention. This reads the checkout the worker
+     * would have been handed, because the failure being pinned is about what
+     * `ls /workspace` answers — the recorded path and the mounted content
+     * disagreeing is precisely the shape that would keep the bug alive with
+     * the test above still green.
+     */
+    const rig = await makeRig();
+    const launch = join(rig.base, "rally-cli-2");
+    await seedGitRepo(launch, { files: { "pyproject.toml": "[project]\n", "tests/test_x.py": "" } });
+
+    const { runId } = await upFrom(rig, launch);
+    const tree = join(rig.root, runId, "worktrees", "eng-1");
+
+    expect(await Bun.file(join(tree, "pyproject.toml")).exists()).toBe(true);
+    // `makeRig` seeds run.repo with a root AGENTS.md hazard and nothing else
+    // seeds one here, so its absence is the fleet repo's absence.
+    expect(await Bun.file(join(tree, "AGENTS.md")).exists()).toBe(false);
+  }, cliBudget(3));
+
+  test("launching from a SUBDIRECTORY of run.repo still uses run.repo — the control", async () => {
+    /*
+     * The control against "always use cwd", which would break the ordinary
+     * `cd ~/repos/cmux-fleet && ./scripts/development`.
+     *
+     * It launches from a SUBDIRECTORY on purpose. The first version of this
+     * test launched from `rig.repo` itself and survived BOTH mutations —
+     * never-wins and always-wins — because when cwd IS run.repo the two
+     * answers coincide and the assertion cannot tell them apart. A control
+     * every mutation passes is not a control. From `scripts/`, "use cwd"
+     * answers `<repo>/scripts` and this test reddens.
+     */
+    const rig = await makeRig();
+    const sub = join(rig.repo, "scripts");
+    await mkdir(sub, { recursive: true });
+
+    const { runId } = await upFrom(rig, sub);
+    expect(await repoOfRun(rig, runId)).toBe(real(rig.repo));
+    expect(await repoOfRun(rig, runId)).not.toBe(real(sub));
+  }, cliBudget(2));
+
+  test("a launch directory that is not a git checkout is ignored, not refused", async () => {
+    /*
+     * `up` builds worktrees from `run.repo`, so a non-git cwd cannot become
+     * one — and the right answer is to fall back to the configured repository
+     * rather than to fail a console the operator opened from their downloads
+     * folder.
+     */
+    const rig = await makeRig();
+    const plain = join(rig.base, "not-a-repo");
+    await mkdir(plain, { recursive: true });
+
+    const { runId } = await upFrom(rig, plain);
+    expect(await repoOfRun(rig, runId)).toBe(real(rig.repo));
+  }, cliBudget(2));
 });

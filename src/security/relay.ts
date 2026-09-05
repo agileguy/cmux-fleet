@@ -2463,7 +2463,7 @@ export async function ensureEgressRelay(
    */
   await assertBindMountsVisible([runArgv], RELAY_IMAGE, exec);
 
-  await ensureUplinkNetwork(uplink);
+  await ensureUplinkNetwork(uplink, exec);
 
   if (existing.exists) {
     const removed = await docker(exec, relayRemoveArgv(containerName), 60_000);

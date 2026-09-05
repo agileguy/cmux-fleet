@@ -20,9 +20,12 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { mkdtemp, mkdir, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+announceMissingHostDeps();
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ENTRYPOINT = join(REPO_ROOT, "docker", "entrypoint.sh");
@@ -168,7 +171,7 @@ describe("PIFLEET_PI_THEME selects the Pi theme through settings.json", () => {
    * killed container leaves on the named volume, so this is a state the fleet
    * can actually reach.
    */
-  test("a corrupt settings.json is replaced rather than made fatal", async () => {
+  test.if(hostHas("exec-tmpdir"))("a corrupt settings.json is replaced rather than made fatal", async () => {
     const r = await runWithTheme("dracula", "{not json at all");
     expect(r.code).toBe(0);
     expect(JSON.parse(r.settings!)["theme"]).toBe("dracula");

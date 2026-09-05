@@ -1013,6 +1013,25 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
     const exec = async (argv: string[]) => {
       calls.push(argv);
       if (isMountProbe(argv)) return answerMountProbe(argv);
+      // The uplink preflight. `ensureUplinkNetwork` used to take no `exec` and
+      // ask the real daemon, so this call never reached the fake and these
+      // tests passed on a `pifleet-egress-uplink` bridge left behind by real
+      // fleet runs on the developer's machine. Non-internal because that is
+      // what `ensureUplinkNetwork` requires.
+      if (argv[1] === "network" && argv[2] === "inspect") {
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              Name: argv[3],
+              Id: "uplink0",
+              Internal: false,
+              IPAM: { Config: [{ Gateway: "172.30.0.1" }] },
+            },
+          ]),
+          stderr: "",
+        };
+      }
       if (argv[1] === "inspect") {
         inspects += 1;
         // First inspect: nothing there, so the CREATE path runs and its

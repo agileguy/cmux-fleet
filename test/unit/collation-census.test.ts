@@ -1,0 +1,724 @@
+/**
+ * The STRUCTURAL CENSUS — SRD-REVIEW-CONSOLE §6.8, D8.
+ *
+ * This file covers the half of §6.8 the census owns: the LOCATION rule and the
+ * published counts. The document contract, its attribution rules and §6.8's
+ * third rule are `src/run/collation.ts`'s and are covered by that module's own
+ * suite; what is asserted here is that the census CONSUMES them rather than
+ * re-deciding them, which is the seam the two halves of this phase agreed on.
+ *
+ * Every fixture is ASYMMETRIC about the rule it pins. That is not a stylistic
+ * preference: this repository has been bitten five times by a fixture in which
+ * both branches of a narrowing agree, so a mutation that deletes the narrowing
+ * survives while the suite stays green.
+ *
+ * The four that would otherwise be degenerate, and what each fixture does about
+ * it:
+ *
+ *  - **Containment.** A fixture whose only bad path is `/etc/passwd` cannot tell
+ *    `relative()` apart from `file.startsWith("/workspace")`. So the bad paths
+ *    here include `/workspacex/a.ts` (shares the prefix, is outside) and
+ *    `/workspace/../etc/passwd` (starts with it, climbs out), both of which a
+ *    prefix test accepts and containment refuses.
+ *  - **The phrase rule.** A fixture whose candidates are all ABSOLUTE proves
+ *    nothing about it: every one of them is settled by containment before the
+ *    shape is consulted. The separating pair is `src/a.ts` and
+ *    `the error handling could be tightened` — both workdir-relative, both
+ *    resolving inside `/workspace`, distinguished only by
+ *    `findingLocationProblem`'s own reading of the name. Each of the rule's
+ *    three conjuncts then gets the real path it exists to rescue: `Makefile`
+ *    (no whitespace), `docs/design notes` (a directory named it) and
+ *    `design notes.md` (an extension).
+ *  - **The ceiling's antecedent.** `censusCeiling` is a conjunction of three
+ *    conditions and dropping any of them has to redden: a fully-located
+ *    collation stays `success`, a claim that is not `success` is left alone, and
+ *    a task with no envelope at all is left alone even with an unlocatable
+ *    finding.
+ *  - **The division of labour.** A test that only asserted "a bad document does
+ *    not grade success" could not tell a census rule from a schema rule. So the
+ *    schema-owned cases are asserted as REFUSALS of the document, and the
+ *    census-owned case is asserted as a document that PARSES and is degraded.
+ *
+ * Nothing here needs a filesystem, a container, a model, or `fleet.yaml`.
+ * `harvest-collation-wiring.test.ts` re-checks the same rules through
+ * `harvestTask`, which is what proves they are wired rather than merely written.
+ */
+
+import { describe, expect, test } from "bun:test";
+import { z } from "zod";
+
+import {
+  AcceptanceRunSchema,
+  DerivedFactsSchema,
+  ResultEnvelopeSchema,
+  type CollationCensus,
+  type DerivedFacts,
+  type ResultEnvelope,
+  type Status,
+} from "../../src/contracts.ts";
+import { adjudicate } from "../../src/harvest/adjudicate.ts";
+import {
+  censusCeiling,
+  censusFromRead,
+  collationCeilingFor,
+  findingLocationProblem,
+} from "../../src/harvest/collation-census.ts";
+import { readCollation, type CollationRead } from "../../src/run/collation.ts";
+
+const SHA_BASE = "a".repeat(40);
+const SHA_HEAD = "b".repeat(40);
+const WORKDIR = "/workspace";
+const PARENT = "T-1";
+const COLLATE = "T-1-collate";
+
+interface FindingInput {
+  statement?: string;
+  file: string;
+  line: number;
+  raised_by?: string[];
+}
+
+/** The three lenses, all reported. The denominator §6.8 asks `3/3` against. */
+const LENSES = [
+  { aspect: "arch", worker: "rev-arch-1", reported: true },
+  { aspect: "context", worker: "rev-ctx-1", reported: true },
+  { aspect: "lang", worker: "rev-lang-1", reported: true },
+];
+
+/** A well-formed collation, as the JSON text `readCollation` takes. */
+function docText(over: Record<string, unknown> = {}): string {
+  const findings: FindingInput[] = (over["findings"] as FindingInput[] | undefined) ?? [
+    {
+      file: "/workspace/src/a.ts",
+      line: 42,
+      raised_by: ["rev-arch-1", "rev-ctx-1", "rev-lang-1"],
+    },
+    { file: "/workspace/src/b.ts", line: 7, raised_by: ["rev-ctx-1"] },
+  ];
+  return JSON.stringify({
+    schema: "pifleet.collation/v1",
+    task_id: COLLATE,
+    parent_task_id: PARENT,
+    lenses: LENSES,
+    finding_count: findings.length,
+    ...over,
+    findings: findings.map((f) => ({ statement: f.statement ?? "a finding", ...f })),
+  });
+}
+
+/** The census of a document, through the real reader. Throws on a bad fixture. */
+function census(over: Record<string, unknown> = {}): CollationCensus {
+  const read: CollationRead = readCollation(docText(over), { taskId: COLLATE });
+  if (read.kind !== "ok") {
+    throw new Error(
+      `fixture did not parse (${read.kind}${read.kind === "refused" ? `: ${read.reason}` : ""})`,
+    );
+  }
+  return censusFromRead(read, WORKDIR)!;
+}
+
+function envelope(status: Status): ResultEnvelope {
+  return ResultEnvelopeSchema.parse({
+    schema: "pifleet.result/v1",
+    task_id: COLLATE,
+    epoch: 1,
+    worker: "col-1",
+    status,
+    summary: "collated three reviews",
+  });
+}
+
+/**
+ * A review-shaped fact bundle: NO repository, no acceptance, and a census.
+ *
+ * `repository: false` is what a `shared-ro` collator actually produces — no
+ * worktree, so no diff and no exam — and it is the state §6.8's prerequisite
+ * (D9, the ISC-93 gate) made gradable. The verdict therefore rests on the
+ * claim, which is precisely the weakness the census is a partial answer to.
+ */
+function reviewFacts(over: Partial<z.input<typeof DerivedFactsSchema>> = {}): DerivedFacts {
+  return DerivedFactsSchema.parse({
+    branch: null,
+    base_ref: null,
+    head_ref: null,
+    repository: false,
+    base_is_ancestor: false,
+    harness: {},
+    ...over,
+  });
+}
+
+describe("the census counts a collation the contract already accepted", () => {
+  test("a well-formed collation counts findings, locations and lens coverage", () => {
+    const c = census();
+    expect(c.readable).toBe(true);
+    expect(c.refusal).toBeNull();
+    expect(c.declared).toBe(2);
+    expect(c.counted).toBe(2);
+    expect(c.located).toBe(2);
+    expect(c.lenses_total).toBe(3);
+    expect(c.lenses_reported).toBe(3);
+    expect(c.lenses_missing).toEqual([]);
+    expect(c.defects).toEqual([]);
+  });
+
+  /**
+   * §6.8's second rule is only worth anything if the bands reach the record.
+   * ASYMMETRIC ON PURPOSE: four findings at three different band sizes, so a
+   * histogram that collapsed every finding into one bucket, or that counted
+   * findings instead of reviewers, produces a different array.
+   */
+  test("the agreement histogram makes 3/3 and 1/3 visible in the record", () => {
+    const c = census({
+      findings: [
+        {
+          file: "/workspace/src/a.ts",
+          line: 1,
+          raised_by: ["rev-arch-1", "rev-ctx-1", "rev-lang-1"],
+        },
+        { file: "/workspace/src/b.ts", line: 2, raised_by: ["rev-ctx-1"] },
+        { file: "/workspace/src/c.ts", line: 3, raised_by: ["rev-arch-1", "rev-lang-1"] },
+        { file: "/workspace/src/d.ts", line: 4, raised_by: ["rev-lang-1"] },
+      ],
+    });
+    expect(c.defects).toEqual([]);
+    expect(c.agreement).toEqual([
+      { reviewers: 1, findings: 2 },
+      { reviewers: 2, findings: 1 },
+      { reviewers: 3, findings: 1 },
+    ]);
+    // The band is meaningless without the denominator: `2` is 2/3 here and
+    // would be 2/2 on a two-lens console. Both must be readable off one record.
+    expect(c.lenses_total).toBe(3);
+  });
+
+  /**
+   * §9 Q6's datum, surfaced and NOT folded into anything. A two-lens review is
+   * recorded as a two-lens review; whether that belongs on the verdict axis is
+   * an open question, and this record is what lets it stay open.
+   */
+  test("a lens that did not report is named, and changes no verdict", () => {
+    const c = census({
+      lenses: [
+        { aspect: "arch", worker: "rev-arch-1", reported: true },
+        { aspect: "context", worker: "rev-ctx-1", reported: true },
+        { aspect: "lang", worker: "rev-lang-1", reported: false, note: "the model timed out" },
+      ],
+      findings: [{ file: "/workspace/src/a.ts", line: 1, raised_by: ["rev-arch-1", "rev-ctx-1"] }],
+    });
+    expect(c.lenses_total).toBe(3);
+    expect(c.lenses_reported).toBe(2);
+    expect(c.lenses_missing).toEqual(["lang"]);
+    expect(c.agreement).toEqual([{ reviewers: 2, findings: 1 }]);
+    expect(censusCeiling(c, "success")).toBeNull();
+  });
+
+  /**
+   * `declared` beside `counted` — recorded, and deliberately NOT reconciled.
+   * `CollationSchema` requires the field and does not cross-check it, so that a
+   * collator which wrote four findings in prose and two in the list is legible.
+   * Capping on the disagreement would make the datum cost something to record.
+   */
+  test("a declared count that disagrees with the list is published, not punished", () => {
+    const c = census({ finding_count: 9 });
+    expect(c.declared).toBe(9);
+    expect(c.counted).toBe(2);
+    expect(c.defects).toEqual([]);
+    expect(censusCeiling(c, "success")).toBeNull();
+  });
+});
+
+describe("rule 1 — a finding resolves inside the container workdir, or it is not located", () => {
+  /**
+   * Every "outside" row is a path a PREFIX TEST would accept, which is the
+   * mutation this rule is most likely to lose to.
+   */
+  const cases: Array<{ what: string; file: string; line: number; ok: boolean }> = [
+    { what: "absolute, inside", file: "/workspace/src/a.ts", line: 1, ok: true },
+    { what: "absolute and deep", file: "/workspace/src/deep/nest/a.ts", line: 999, ok: true },
+    // Accepted by the contract's own decision to allow both spellings.
+    { what: "workdir-relative", file: "src/a.ts", line: 1, ok: true },
+    /**
+     * THE PROSE FINDING, and the row above is its asymmetric partner.
+     *
+     * Both are workdir-relative, so both reach `looksLikePhrase` through the
+     * same arm; containment accepts them both. A fixture whose only bad
+     * candidates were absolute could not tell the phrase rule from nothing at
+     * all, which is how this defect survived a green suite the first time.
+     */
+    { what: "a prose sentence", file: "the error handling could be tightened", line: 1, ok: false },
+    /**
+     * The same sentence in the OTHER spelling the contract accepts. It must get
+     * the same answer, or the refusal message names its own bypass — which is
+     * why the shape is judged on the name inside the workdir and not on the raw
+     * string, where this one carries two separators and would pass.
+     */
+    {
+      what: "a prose sentence spelled absolutely",
+      file: "/workspace/the error handling could be tightened",
+      line: 1,
+      ok: false,
+    },
+    // The three real paths the rule's three conjuncts exist to rescue. Each one
+    // is refused if the conjunct beside it is dropped.
+    { what: "an extensionless file at the root", file: "Makefile", line: 1, ok: true },
+    { what: "a name with a space, under a directory", file: "docs/design notes", line: 1, ok: true },
+    { what: "a name with a space and an extension", file: "design notes.md", line: 1, ok: true },
+    // Shares eleven characters with the workdir and is a different directory.
+    { what: "a sibling sharing the prefix", file: "/workspacex/a.ts", line: 1, ok: false },
+    // Starts with the workdir and resolves outside it.
+    { what: "absolute, climbing out", file: "/workspace/../etc/passwd", line: 1, ok: false },
+    { what: "relative, climbing out", file: "../etc/passwd", line: 1, ok: false },
+    { what: "elsewhere entirely", file: "/etc/passwd", line: 1, ok: false },
+    { what: "the workdir itself", file: "/workspace", line: 1, ok: false },
+    { what: "empty", file: "", line: 1, ok: false },
+    { what: "line 0", file: "/workspace/src/a.ts", line: 0, ok: false },
+    { what: "a negative line", file: "/workspace/src/a.ts", line: -3, ok: false },
+    {
+      what: "a backslash separator",
+      file: "/workspace\\..\\..\\etc\\passwd",
+      line: 1,
+      ok: false,
+    },
+    /**
+     * THE BACKSLASH RULE'S OWN CASE, and the row above cannot serve as it.
+     *
+     * `/workspace\..\..\etc\passwd` is ONE POSIX segment that does not begin
+     * with `..`, so containment refuses it on its own and the backslash check is
+     * never load-bearing — a mutation deleting that check survives against it.
+     * This row resolves squarely INSIDE the workdir under POSIX rules, so
+     * containment accepts it and only the backslash refusal stands between it
+     * and a `located` count. That is ISC-247's confusion exactly: one path to
+     * this validator, traversal to any consumer that normalizes separators.
+     */
+    {
+      what: "a backslash inside the workdir",
+      file: "/workspace/src\\..\\..\\etc\\passwd",
+      line: 1,
+      ok: false,
+    },
+  ];
+
+  for (const c of cases) {
+    test(`${c.what} is ${c.ok ? "located" : "NOT located"}`, () => {
+      const problem = findingLocationProblem(c.file, c.line, WORKDIR);
+      if (c.ok) expect(problem).toBeNull();
+      else expect(typeof problem).toBe("string");
+    });
+  }
+
+  /**
+   * Y3: the empty path and the containment arm BOTH refuse `""`, so a row
+   * asserting only `typeof problem === "string"` cannot tell them apart — the
+   * degenerate shape this file's own header says every fixture avoids. Asserting
+   * the SENTENCE separates them: deleting the empty-path guard leaves the
+   * containment message, which does not name an empty path.
+   */
+  test("an empty path is refused AS an empty path, not as a containment failure", () => {
+    expect(findingLocationProblem("", 1, WORKDIR)).toBe("finding carries an empty file path");
+  });
+
+  /**
+   * G2: the prose finding is refused AS PROSE, and the row table cannot say so.
+   *
+   * A row asserting only `typeof problem === "string"` records that SOMETHING
+   * refused the sentence, and two different mutations satisfy it: the phrase
+   * rule working, and a containment arm broken badly enough to reject every
+   * workdir-relative name. Quoting the sentence separates them — the containment
+   * message does not call anything a sentence — exactly as the empty-path probe
+   * below separates its two agreeing branches.
+   *
+   * The second assertion is the negative control and it is not optional: a
+   * phrase rule that fired on every relative name would satisfy the first line
+   * while destroying the spelling `src/run/collation.ts` deliberately accepted.
+   */
+  test("a prose finding is refused as a sentence, and a relative path beside it is not", () => {
+    expect(findingLocationProblem("the error handling could be tightened", 1, WORKDIR)).toContain(
+      "is a sentence, not a path",
+    );
+    expect(findingLocationProblem("src/a.ts", 1, WORKDIR)).toBeNull();
+  });
+
+  /**
+   * Y3: every other fixture's line is a whole number, so `!Number.isInteger(line)`
+   * was never exercised — `line: 12.5` counted as located. The function is
+   * exported and has callers beyond `censusCollation`, so the bound is its own.
+   */
+  test("a fractional line number is not a quotable line", () => {
+    expect(findingLocationProblem("/workspace/src/a.ts", 12.5, WORKDIR)).toContain("1-based");
+    expect(findingLocationProblem("/workspace/src/a.ts", Number.NaN, WORKDIR)).toContain("1-based");
+  });
+
+  test("a workdir other than /workspace is respected", () => {
+    // The check is against the ENVELOPE's container_workdir, not a constant.
+    expect(findingLocationProblem("/srv/code/a.ts", 1, "/srv/code")).toBeNull();
+    expect(findingLocationProblem("/workspace/a.ts", 1, "/srv/code")).not.toBeNull();
+  });
+
+  test("a path with a control character is refused without echoing the path", () => {
+    const problem = findingLocationProblem(`/workspace/a${String.fromCharCode(0)}.ts`, 1, WORKDIR);
+    expect(problem).toContain("control character (0x00)");
+    expect(problem).not.toContain(String.fromCharCode(0));
+  });
+
+  /**
+   * THE DIVISION OF LABOUR, asserted from this side. `CollationSchema` refuses a
+   * control character DOCUMENT-WIDE — a path nobody can print has no legitimate
+   * form — and refuses nothing else about a path. So an unlocatable path PARSES,
+   * and the census degrades one finding rather than discarding the good ones
+   * beside it.
+   */
+  test("an unlocatable path parses and degrades one finding", () => {
+    const read = readCollation(
+      docText({
+        findings: [
+          { statement: "real", file: "/workspace/src/a.ts", line: 5, raised_by: ["rev-arch-1"] },
+          { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-ctx-1"] },
+        ],
+      }),
+      { taskId: COLLATE },
+    );
+    expect(read.kind).toBe("ok");
+    const c = censusFromRead(read, WORKDIR)!;
+    expect(c.counted).toBe(2);
+    expect(c.located).toBe(1);
+    expect(c.defects.some((d) => d.includes("does not resolve inside /workspace"))).toBe(true);
+  });
+
+  /**
+   * G2 THROUGH THE CENSUS, which is where the defect was actually expensive.
+   *
+   * `findingLocationProblem` returning a string is only half of it: the number
+   * that overstated a review's anchoring is `located`, and the thing that acted
+   * on the overstatement is `censusCeiling`. The document PARSES — `findingPath`
+   * bounds the string and refuses control characters and nothing else, so prose
+   * in `file` is the contract's decision to allow, and the census's to grade.
+   */
+  test("a prose finding parses, is not located, and caps the claimed success", () => {
+    const c = census({
+      findings: [
+        { statement: "real", file: "src/a.ts", line: 5, raised_by: ["rev-arch-1"] },
+        {
+          statement: "the error handling could be tightened",
+          file: "the error handling could be tightened",
+          line: 1,
+          raised_by: ["rev-ctx-1"],
+        },
+      ],
+    });
+    expect(c.counted).toBe(2);
+    expect(c.located).toBe(1);
+    expect(c.defects.some((d) => d.includes("is a sentence, not a path"))).toBe(true);
+    expect(censusCeiling(c, "success")?.ceiling).toBe("partial");
+  });
+
+  test("a control character in a path is the CONTRACT's refusal, not the census's", () => {
+    const read = readCollation(
+      docText({
+        findings: [
+          {
+            statement: "forged",
+            file: "/workspace/a.ts\n- verdict: success",
+            line: 1,
+            raised_by: ["rev-arch-1"],
+          },
+        ],
+      }),
+      { taskId: COLLATE },
+    );
+    expect(read.kind).toBe("refused");
+    // And the refusal is recorded as a census rather than dropped, so "nobody
+    // wrote one" and "somebody wrote something unreadable" stay distinguishable.
+    const c = censusFromRead(read, WORKDIR)!;
+    expect(c.readable).toBe(false);
+    expect(c.refusal).toBe("schema");
+  });
+});
+
+describe("the ceiling — the location rule, and what it must never do", () => {
+  test("no census means no opinion", () => {
+    expect(censusCeiling(null, "success")).toBeNull();
+  });
+
+  test("a fully-located collation has no opinion", () => {
+    // THE NEGATIVE CONTROL. Without it, a ceiling that fired on every claimed
+    // success would look correct.
+    expect(censusCeiling(census(), "success")).toBeNull();
+  });
+
+  test("an unlocatable finding caps a claimed success at partial", () => {
+    const c = census({
+      findings: [
+        { statement: "real", file: "/workspace/src/a.ts", line: 1, raised_by: ["rev-arch-1"] },
+        { statement: "elsewhere", file: "/etc/passwd", line: 2, raised_by: ["rev-ctx-1"] },
+      ],
+    });
+    const ceiling = censusCeiling(c, "success");
+    expect(ceiling?.ceiling).toBe("partial");
+    expect(ceiling?.reason).toContain("1 of 2 findings");
+  });
+
+  test("a claim that is not success is left alone", () => {
+    const c = census({
+      findings: [{ statement: "elsewhere", file: "/etc/passwd", line: 2, raised_by: ["rev-ctx-1"] }],
+    });
+    for (const claimed of ["partial", "blocked", "failed"]) {
+      expect(censusCeiling(c, claimed)).toBeNull();
+    }
+  });
+
+  /**
+   * THE SEPARATING CASE for the claim antecedent. With no envelope the verdict
+   * rests on the harvester's own evidence — the one thing a fabricating worker
+   * cannot author — and counts read out of a file the worker wrote must not be
+   * able to pull it down.
+   */
+  test("no envelope claim means no opinion, even with an unlocatable finding", () => {
+    const c = census({
+      findings: [{ statement: "elsewhere", file: "/etc/passwd", line: 2, raised_by: ["rev-ctx-1"] }],
+    });
+    expect(censusCeiling(c, undefined)).toBeNull();
+  });
+
+  test("a zero-finding collation is not this ceiling's business", () => {
+    // §6.8's third rule is `collationCeiling`'s, guarded on the task id.
+    // Duplicating it here would put two implementations on one rule.
+    expect(censusCeiling(census({ findings: [], finding_count: 0 }), "success")).toBeNull();
+  });
+
+  /**
+   * Y3: `censusRefused`'s published fields were asserted only for `readable` and
+   * `refusal`, so `declared: null` — the field that says "this document never
+   * told us a count" — could become `0`, which is a DIFFERENT claim: a collation
+   * that declared zero findings.
+   */
+  test("a refused census publishes no counts at all, and declares nothing", () => {
+    const c = censusFromRead(readCollation("{", { taskId: COLLATE }), WORKDIR)!;
+    expect(c.readable).toBe(false);
+    expect(c.declared).toBeNull();
+    expect(c.counted).toBe(0);
+    expect(c.located).toBe(0);
+    expect(c.lenses_total).toBe(0);
+    expect(c.lenses_reported).toBe(0);
+    expect(c.lenses_missing).toEqual([]);
+    expect(c.agreement).toEqual([]);
+    expect(c.defects.length).toBe(1);
+  });
+
+  test("a refused document is not this ceiling's business either", () => {
+    const c = censusFromRead(readCollation("{", { taskId: COLLATE }), WORKDIR)!;
+    expect(c.readable).toBe(false);
+    expect(censusCeiling(c, "success")).toBeNull();
+  });
+});
+
+describe("adjudication — the census caps a review's verdict and cannot lift one", () => {
+  test("a clean collation leaves a claimed success alone", () => {
+    expect(adjudicate(reviewFacts({ collation: census() }), envelope("success")).verdict).toBe(
+      "success",
+    );
+  });
+
+  test("a finding with no resolvable file:line is not success", () => {
+    const adj = adjudicate(
+      reviewFacts({
+        collation: census({
+          findings: [
+            { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-arch-1"] },
+          ],
+        }),
+      }),
+      envelope("success"),
+    );
+    expect(adj.verdict).toBe("partial");
+    expect(adj.reasons.join(" ")).toContain("no resolvable file:line");
+  });
+
+  /**
+   * A CEILING AND NOT AN ASSIGNMENT, and the two are separable only here.
+   *
+   * Every other case in this block has the census declining (claim not
+   * `success`) or the verdict already at `unknown`, whose rank is -1 — and
+   * ISC-154's void RETURNS EARLY, before the census block runs at all. So an
+   * assignment and a maximum agree on all of them.
+   *
+   * This fixture puts a FIRING census against a verdict below `partial`:
+   * ISC-93's empty-diff failure on a repository task, with a claim of `success`
+   * so the census is awake. The cap must leave `failed` alone; an assignment
+   * would raise it to `partial` — a worker's own document promoting a verdict
+   * the diff already refused.
+   */
+  test("the census cannot RAISE a verdict the diff already failed", () => {
+    const adj = adjudicate(
+      DerivedFactsSchema.parse({
+        branch: "fleet/run-1/col-1",
+        base_ref: SHA_BASE,
+        head_ref: SHA_HEAD,
+        base_is_ancestor: true,
+        commits: [],
+        files_changed: [],
+        diff_bytes: 0,
+        harness: { patterns: [], touched: [] },
+        collation: census({
+          findings: [
+            { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-arch-1"] },
+          ],
+        }),
+      }),
+      envelope("success"),
+    );
+    // ISC-93: success over an empty diff on a repository task.
+    expect(adj.verdict).toBe("failed");
+  });
+
+  test("the census never lifts a verdict the worker already downgraded", () => {
+    expect(adjudicate(reviewFacts({ collation: census() }), envelope("failed")).verdict).toBe(
+      "failed",
+    );
+  });
+
+  test("the census never lifts an `unknown` the harvest already refused to grade", () => {
+    // ISC-154's voided tree: rank("unknown") is -1, below every ceiling.
+    const adj = adjudicate(
+      DerivedFactsSchema.parse({
+        branch: null,
+        base_ref: null,
+        head_ref: null,
+        base_is_ancestor: true,
+        harness: {},
+        tree_hash_quiesce: "tree-1",
+        tree_hash_harvest: "tree-2",
+        collation: census({
+          findings: [
+            { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-arch-1"] },
+          ],
+        }),
+      }),
+      envelope("success"),
+    );
+    expect(adj.verdict).toBe("unknown");
+  });
+
+  test("an unlocatable finding with NO envelope leaves derived evidence alone", () => {
+    const facts = DerivedFactsSchema.parse({
+      branch: "fleet/run-1/col-1",
+      base_ref: SHA_BASE,
+      head_ref: SHA_HEAD,
+      base_is_ancestor: true,
+      commits: [SHA_HEAD],
+      files_changed: [{ path: "src/a.ts", change: "modified" }],
+      diff_bytes: 120,
+      acceptance: [
+        AcceptanceRunSchema.parse({
+          cmd: "bun test",
+          source: "tree",
+          resolved_from: SHA_BASE,
+          outcome: "passed",
+          exit_code: 0,
+        }),
+      ],
+      harness: { patterns: [], touched: [] },
+      collation: census({
+        findings: [
+          { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-arch-1"] },
+        ],
+      }),
+    });
+    expect(adjudicate(facts, null).verdict).toBe("success");
+  });
+
+  /**
+   * D8's ANTI-CRITERION, asserted rather than documented: the structural result
+   * is carried in its own field and `facts.acceptance` stays empty. A review has
+   * nothing to re-execute, and the census must not be able to borrow the word.
+   */
+  test("a review task carries the census in its own field and no acceptance at all", () => {
+    const facts = reviewFacts({ collation: census() });
+    expect(facts.acceptance).toEqual([]);
+    expect(facts.acceptance_context).toBeNull();
+    expect(facts.collation?.counted).toBe(2);
+    expect(facts.collation?.agreement).toEqual([
+      { reviewers: 1, findings: 1 },
+      { reviewers: 3, findings: 1 },
+    ]);
+    const adj = adjudicate(facts, envelope("success"));
+    expect(adj.reasons.join(" ")).not.toContain("acceptance failed");
+  });
+
+  test("the census is inside the replay key, so two bundles that differ hash apart", () => {
+    const clean = reviewFacts({ collation: census() });
+    const degraded = reviewFacts({
+      collation: census({
+        findings: [
+          { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-arch-1"] },
+        ],
+      }),
+    });
+    expect(adjudicate(clean, envelope("success")).facts_hash).not.toBe(
+      adjudicate(degraded, envelope("success")).facts_hash,
+    );
+  });
+
+  test("a task with no collation artifact is graded exactly as before", () => {
+    const adj = adjudicate(reviewFacts(), envelope("success"));
+    expect(adj.verdict).toBe("success");
+    expect(adj.reasons.join(" ")).not.toContain("collation");
+  });
+});
+
+/**
+ * ISC-94's GUARD ON §6.8's THIRD RULE — Y1.
+ *
+ * `collationCeilingFor` exists because the guard used to be `claimed?.status ??
+ * "unknown"` at a call site, which no test could reach: separating it needs a
+ * task whose verdict EXCEEDS `partial` with no envelope, and that means green
+ * harvester-run acceptance, which means a worktree and an exam. The measurement
+ * that found it did exactly that and produced `success` unmutated against
+ * `partial` with the guard gone.
+ *
+ * A missing envelope must be a no-op and never a downgrade, and the one thing it
+ * must never pull down is the acceptance evidence a fabricating worker cannot
+ * author. Here the rule is a function, so the guard is one assertion.
+ */
+describe("ISC-94 — a task with no envelope has no claim for §6.8's third rule to refuse", () => {
+  const MISSING: CollationRead = { kind: "missing" };
+
+  test("no envelope means no ceiling, whatever the artifact says", () => {
+    expect(collationCeilingFor(COLLATE, null, MISSING)).toBeNull();
+    expect(
+      collationCeilingFor(COLLATE, null, readCollation("{", { taskId: COLLATE })),
+    ).toBeNull();
+    expect(
+      collationCeilingFor(COLLATE, null, readCollation(docText({ findings: [], finding_count: 0 }), { taskId: COLLATE })),
+    ).toBeNull();
+  });
+
+  test("a claim of success with no collation IS refused — the guard is not a mute", () => {
+    // The other half of the conjunction. Without this, deleting the rule
+    // entirely would pass the assertion above.
+    const c = collationCeilingFor(COLLATE, { status: "success" }, MISSING);
+    expect(c?.status).toBe("partial");
+    expect(c?.reason).toContain("collation.json");
+  });
+
+  test("a claim that is not success is left alone", () => {
+    for (const status of ["partial", "blocked", "failed"]) {
+      expect(collationCeilingFor(COLLATE, { status }, MISSING)).toBeNull();
+    }
+  });
+
+  test("a task that is not a collation is left alone even claiming success", () => {
+    // `isCollationTaskId` is the guard that stops this capping every success in
+    // the fleet, since every other task is also missing a collation.
+    expect(collationCeilingFor("T-1", { status: "success" }, MISSING)).toBeNull();
+    expect(collationCeilingFor("build-thing", { status: "success" }, MISSING)).toBeNull();
+  });
+
+  test("no opinion is spelled `null`, never a ceiling with a null reason", () => {
+    // The narrowing this wrapper performs: a caller must not have to re-check a
+    // field it has already decided.
+    const c = collationCeilingFor(COLLATE, { status: "success" }, MISSING);
+    expect(c).not.toBeNull();
+    expect(typeof c!.reason).toBe("string");
+  });
+});

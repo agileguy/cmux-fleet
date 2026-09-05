@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { MAX_ITEMS } from "../../src/contracts.ts";
-import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
   MAX_HELD_DESCRIPTORS,
   closeOutboxScan,
   containerPathToHost,
+  describeUnreadableEnvelope,
   readResultEnvelope,
   resolvedWithin,
   safeForReport,
@@ -149,25 +150,278 @@ describe("readResultEnvelope — ISC-94 missing", () => {
 describe("readResultEnvelope — ISC-102 schema before dereference", () => {
   // Would fail if any field were dereferenced before safeParse: `artifacts`
   // here is a string, and `.map`/iteration over it before validation throws
-  // instead of returning a refusal.
-  test("a wrong-shaped field is refused, not thrown on", async () => {
+  // instead of returning an answer.
+  test("a wrong-shaped field is answered, not thrown on", async () => {
     await writeEnvelope(envelopeJson({ artifacts: "not-an-array" }));
     const r = await readResultEnvelope(loc);
-    expect(r.kind).toBe("refused");
-    if (r.kind === "refused") expect(r.reason).toContain("schema");
+    expect(r.kind).toBe("unreadable");
+    if (r.kind === "unreadable") expect(r.unreadable.code).toBe("schema");
   });
 
-  test("an unknown status value is refused by the schema", async () => {
+  test("an unknown status value is caught by the schema", async () => {
     await writeEnvelope(envelopeJson({ status: "triumphant" }));
     const r = await readResultEnvelope(loc);
-    expect(r.kind).toBe("refused");
+    expect(r.kind).toBe("unreadable");
   });
 
-  test("non-JSON content is refused as invalid JSON", async () => {
+  test("non-JSON content is unreadable, not valid JSON", async () => {
     await writeEnvelope("}{ not json");
     const r = await readResultEnvelope(loc);
-    expect(r.kind).toBe("refused");
-    if (r.kind === "refused") expect(r.reason).toContain("JSON");
+    expect(r.kind).toBe("unreadable");
+    if (r.kind === "unreadable") expect(r.unreadable.code).toBe("not_json");
+  });
+});
+
+/**
+ * ABSENT vs UNREADABLE — the `rev-lang-1` defect, reproduced from the artifact.
+ *
+ * ## The measured failure
+ *
+ * A live three-lens review lost a whole lens to one backslash. `rev-lang-1` was
+ * asked to review REGEX CORRECTNESS, so it quoted a regex — `[\w\\-_]+` — into
+ * its `summary`. `\w` is not a legal JSON escape, `JSON.parse` refused the
+ * document at line 16 column 248, and every layer below behaved correctly:
+ * the harvest could not parse it, the verdict settled `unknown`, the collation
+ * brief said *"MISSING ASPECT: lang (rev-lang-1) — it settled `unknown` and
+ * produced no report"*, and the collation recorded `reported: false`.
+ *
+ * The record therefore says the reviewer produced NOTHING. It produced 3906
+ * bytes of genuine review that could not be read. Those are different facts,
+ * and until this block existed nothing in the system could tell them apart.
+ *
+ * ## THE FIXTURE IS THE REAL ARTIFACT, BYTE FOR BYTE
+ *
+ * `test/fixtures/envelopes/rev-lang-1-unparseable-result.json` is a verbatim
+ * copy of the file the live reviewer wrote, taken from the run directory and
+ * not modified. A hand-typed `"{\\w}"` would prove the parser rejects a bad
+ * escape — which was never in doubt — while saying nothing about a 3906-byte
+ * document whose bad escape is 250 characters into line 16 of a real review.
+ *
+ * ## WHAT THESE PROBES CAN SEE, AND WHAT THEY CANNOT
+ *
+ * CAN SEE: that an existing-but-unparseable envelope is a DIFFERENT return
+ * value from an absent one; that the value names the file, its size and the
+ * parser's own complaint; that a syntax failure and a schema failure are told
+ * apart; that nothing salvages content out of a document that did not parse.
+ *
+ * CANNOT SEE: whether anything downstream RENDERS any of it. These probes end
+ * at `readResultEnvelope`'s return value. The wiring — that `harvestTask`
+ * publishes a discrepancy an operator reads — is pinned in
+ * `harvest-outbox-contract.test.ts`, deliberately in a file that drives the
+ * production entry point, because a green unit suite over a value nothing
+ * consumes is precisely the shape this repo keeps finding.
+ *
+ * CANNOT SEE, second: the sanitisation of `detail` is only partly reachable.
+ * `ResultEnvelopeSchema` is NOT strict, so a hostile object KEY is stripped
+ * rather than named in a zod message, and Bun's JSON parse errors name a
+ * character class rather than echoing content. The one reachable path is the
+ * oversized-array count, which interpolates a worker-chosen key — that is what
+ * the sanitisation probe below uses, and it is the only one there is.
+ *
+ * ## THE ASYMMETRY, stated because this branch keeps losing it
+ *
+ * A fixture where absent and unreadable coincide would pass against an
+ * implementation that never distinguished them. Two guard against that:
+ *
+ *   - the ZERO-BYTE envelope. It exists, and it holds nothing. An
+ *     implementation that infers existence from content — or that treats an
+ *     empty read as "no envelope" — answers `missing` and fails. It also makes
+ *     `bytes: 0` a legal value, so no probe here may assert `bytes > 0`.
+ *   - the SAME LOCATION, read twice in one test, once with no file and once
+ *     with the real artifact. The two answers must differ. A constant-returning
+ *     implementation of either kind fails one half.
+ */
+describe("readResultEnvelope — an envelope that exists and cannot be read", () => {
+  /** The live artifact, verbatim. Read from disk so the bytes are never retyped. */
+  const REAL_ARTIFACT = join(
+    import.meta.dir,
+    "../fixtures/envelopes/rev-lang-1-unparseable-result.json",
+  );
+
+  /** A distinctive phrase from inside the review that never parsed. */
+  const REVIEW_TEXT = "Language-semantics review";
+
+  async function writeRealArtifact(): Promise<number> {
+    const bytes = await readFile(REAL_ARTIFACT);
+    await writeFile(join(loc.workerOutboxDir, "T-1", "result.json"), bytes);
+    return bytes.byteLength;
+  }
+
+  test("the real rev-lang-1 artifact is unreadable, and says so with the file's own facts", async () => {
+    const size = await writeRealArtifact();
+    const r = await readResultEnvelope(loc);
+
+    expect(r.kind).toBe("unreadable");
+    if (r.kind !== "unreadable") return;
+    const u = r.unreadable;
+
+    // The bytes are the file's ACTUAL size, asserted against the fixture rather
+    // than against a literal: an implementation reporting 0, or the size of some
+    // other file, fails. 3906 is what the live reviewer wrote.
+    expect(size).toBe(3906);
+    expect(u.bytes).toBe(size);
+
+    // A reader must be able to FIND the file, so the path is not merely
+    // asserted as a string — it is resolved. An implementation that returned
+    // the directory, or a container-side `/outbox/...` spelling the host has no
+    // way to open, fails here.
+    expect(u.path).toBe(join(loc.workerOutboxDir, "T-1", "result.json"));
+    const onDisk = await stat(u.path);
+    expect(onDisk.size).toBe(u.bytes);
+
+    // The parser's own complaint, not a generic word. "invalid" alone would
+    // pass against an implementation that discarded the error.
+    expect(u.code).toBe("not_json");
+    expect(u.detail).toContain("Invalid escape character w");
+  });
+
+  /**
+   * THE ASYMMETRIC FIXTURE. An empty file EXISTS; it just holds nothing.
+   *
+   * Would fail against any implementation that decides "is there an envelope?"
+   * by looking at content rather than at the directory entry — including the
+   * tempting `if (!text) return { kind: "missing" }`, which is exactly how a
+   * worker killed mid-`write` would be misfiled as one that never reported.
+   */
+  test("a zero-byte envelope is unreadable, not missing", async () => {
+    await writeEnvelope("");
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("unreadable");
+    if (r.kind === "unreadable") {
+      expect(r.unreadable.bytes).toBe(0);
+      expect(r.unreadable.code).toBe("not_json");
+    }
+  });
+
+  /**
+   * The two states, from ONE location, in one test.
+   *
+   * Split across two tests this is much weaker: each half passes against an
+   * implementation that answers its own kind unconditionally. Read back to
+   * back against the same `loc`, only an implementation that actually looks at
+   * the directory entry can satisfy both.
+   */
+  test("absent and unreadable are different answers from the same location", async () => {
+    const absent = await readResultEnvelope(loc);
+    expect(absent.kind).toBe("missing");
+
+    await writeRealArtifact();
+    const present = await readResultEnvelope(loc);
+    expect(present.kind).toBe("unreadable");
+
+    expect(present.kind).not.toBe(absent.kind);
+    // And `missing` carries nothing to report, which is the whole reason it is
+    // safe for ISC-94 to treat it as a non-failure.
+    expect("unreadable" in absent).toBe(false);
+  });
+
+  /**
+   * NO SALVAGE. The review is right there in the bytes and must stay unread.
+   *
+   * Re-parsing with a lenient reader, or regexing `summary` out of the text,
+   * would let a document that failed validation put worker-authored prose into
+   * an operator's report under the harvester's own authority — the fabrication
+   * class §7.2 exists to refuse. An envelope that did not parse is not a parsed
+   * envelope. This asserts on the WHOLE return value, so a salvaged field
+   * smuggled in under any name fails.
+   */
+  test("nothing is salvaged out of a document that did not parse", async () => {
+    await writeRealArtifact();
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("unreadable");
+    expect(JSON.stringify(r)).not.toContain(REVIEW_TEXT);
+  });
+
+  /**
+   * The two halves of "unreadable", told apart in ONE test.
+   *
+   * This is what justifies `code` existing at all. Asserted side by side
+   * because separately each assertion passes against an implementation that
+   * hard-codes one constant; together, only one that distinguishes "these bytes
+   * are not JSON" from "this JSON is not an envelope" survives.
+   */
+  test("a syntax failure and a schema failure carry different codes", async () => {
+    await writeRealArtifact();
+    const syntax = await readResultEnvelope(loc);
+
+    await writeEnvelope(envelopeJson({ status: "triumphant" }));
+    const schema = await readResultEnvelope(loc);
+
+    expect(syntax.kind).toBe("unreadable");
+    expect(schema.kind).toBe("unreadable");
+    if (syntax.kind !== "unreadable" || schema.kind !== "unreadable") return;
+
+    expect(syntax.unreadable.code).toBe("not_json");
+    expect(schema.unreadable.code).toBe("schema");
+    expect(syntax.unreadable.code).not.toBe(schema.unreadable.code);
+
+    // The schema half is still a real file with a real size, and the operator
+    // needs both — a schema failure that reported `bytes: 0` would send them
+    // looking for an empty file that is not what is on disk.
+    expect(schema.unreadable.bytes).toBeGreaterThan(0);
+    expect(schema.unreadable.path).toBe(join(loc.workerOutboxDir, "T-1", "result.json"));
+  });
+
+  /**
+   * `detail` carries worker-controlled text on exactly one reachable path, and
+   * that path is swept.
+   *
+   * The oversized-array count interpolates a KEY the worker chose. An ESC in
+   * that key, printed raw into a report, writes colour codes into the terminal
+   * of the operator judging the worker — the ISC-240 injection the sibling
+   * `refuse` choke point already closes for `files/`. Would fail if `detail`
+   * were stored as it arrived.
+   */
+  test("worker-chosen text in a detail is escaped, not passed through", async () => {
+    const esc = String.fromCharCode(27);
+    const key = `blo${esc}[31mckers`;
+    const body = `{"schema":"pifleet.result/v1","task_id":"T-1","epoch":1,"worker":"w1","status":"success",${JSON.stringify(key)}:[${"1,".repeat(MAX_ITEMS + 5)}1]}`;
+    await writeEnvelope(body);
+
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("unreadable");
+    if (r.kind !== "unreadable") return;
+    expect(r.unreadable.detail).not.toContain(esc);
+    expect(r.unreadable.detail).toContain("\\e");
+  });
+
+  /**
+   * THE BOUNDARY. Not everything that fails is "unreadable", and the line is
+   * load-bearing.
+   *
+   * `unreadable` means the bytes were in hand and could not be turned into an
+   * envelope. A symlinked or oversized `result.json` is refused BEFORE any byte
+   * is read — there is no parse error to report and no size that was parsed —
+   * and a traversal in `artifacts[]` is refused AFTER a perfectly good parse.
+   * Folding either into `unreadable` would describe a security refusal as a
+   * formatting problem. Would fail if a later widening reclassified them.
+   */
+  test("refusals that are not readability failures keep their own kind", async () => {
+    const outside = join(tmp, "outside.json");
+    await writeFile(outside, envelopeJson());
+    await symlink(outside, join(loc.workerOutboxDir, "T-1", "result.json"));
+    expect((await readResultEnvelope(loc)).kind).toBe("refused");
+
+    await rm(join(loc.workerOutboxDir, "T-1", "result.json"));
+    await writeEnvelope(
+      envelopeJson({ artifacts: [{ kind: "file", path: "/etc/passwd" }] }),
+    );
+    const traversal = await readResultEnvelope(loc);
+    expect(traversal.kind).toBe("refused");
+  });
+
+  /** The rendered sentence B's half publishes carries all three facts. */
+  test("the description names the path, the size and the parser's complaint", async () => {
+    await writeRealArtifact();
+    const r = await readResultEnvelope(loc);
+    if (r.kind !== "unreadable") throw new Error("expected unreadable");
+    const line = describeUnreadableEnvelope(r.unreadable);
+    expect(line).toContain(r.unreadable.path);
+    expect(line).toContain("3906");
+    expect(line).toContain("Invalid escape character w");
+    // It must not be sayable as "produced no report" — that is the sentence the
+    // live run printed and the one this whole change exists to replace.
+    expect(line).not.toContain("no report");
   });
 });
 
@@ -191,6 +445,42 @@ describe("readResultEnvelope — identity binding", () => {
 });
 
 describe("readResultEnvelope — ISC-120 path containment", () => {
+  /**
+   * THE LOST REVIEW, as a fixture.
+   *
+   * Three reviewers wrote the same review to the same directory. Two named it
+   * `/outbox/<task-id>/files/review.md`; the third named it `files/review.md`
+   * and its whole envelope was refused — verdict, summary and fourteen
+   * findings discarded, and the refusal said "outside the mount table" of a
+   * file that was inside the outbox. The mount table only knows absolute
+   * container paths, so a relative one matched nothing.
+   */
+  test("a relative artifact path resolves against the task outbox", async () => {
+    await writeEnvelope(envelopeJson({ artifacts: [{ kind: "file", path: "files/review.md" }] }));
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("ok");
+  });
+
+  /**
+   * THE ASYMMETRIC HALF, and the only reason the test above is worth running.
+   * Resolving a relative path must not become a way to leave the outbox: the
+   * escape check is unchanged and still runs, and the refusal it gives names
+   * the escape rather than the mount table.
+   */
+  test("a relative path that climbs out is still refused, and says so accurately", async () => {
+    await writeEnvelope(
+      envelopeJson({ artifacts: [{ kind: "file", path: "../../../../etc/passwd" }] }),
+    );
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("refused");
+    if (r.kind === "refused") {
+      expect(r.reason).toContain("escapes the task outbox");
+      // The old message would be actively misleading here: it was never about
+      // the mount table, and saying so sent a reader to the wrong question.
+      expect(r.reason).not.toContain("outside the mount table");
+    }
+  });
+
   // Would fail if artifact paths stopped being validated before use: the
   // §12.5 exfiltration primitive, verbatim.
   test("an artifact naming /Users/dan/.env is refused", async () => {
@@ -729,10 +1019,15 @@ describe("readResultEnvelope — oversized arrays are refused before the schema"
     await mkdir(join(loc.workerOutboxDir, "T-1"), { recursive: true });
     await writeFile(join(loc.workerOutboxDir, "T-1", "result.json"), body);
     const r = await readResultEnvelope(loc);
-    expect(r.kind).toBe("refused");
-    if (r.kind === "refused") {
-      expect(r.reason).toContain("blockers");
-      expect(r.reason).toContain("entries");
+    // `schema`, not `not_json`: the bytes ARE valid JSON, and this count check
+    // exists only because `.max(MAX_ITEMS)` inside the schema is too expensive
+    // to reach (see the module docblock). It is a hoisted schema bound, so it
+    // answers with the code the schema would have.
+    expect(r.kind).toBe("unreadable");
+    if (r.kind === "unreadable") {
+      expect(r.unreadable.code).toBe("schema");
+      expect(r.unreadable.detail).toContain("blockers");
+      expect(r.unreadable.detail).toContain("entries");
     }
   });
 
@@ -753,7 +1048,7 @@ describe("readResultEnvelope — oversized arrays are refused before the schema"
     const r = await readResultEnvelope(loc);
     const ms = performance.now() - t0;
 
-    expect(r.kind).toBe("refused");
+    expect(r.kind).toBe("unreadable");
     // Without the pre-schema count this took 1.2s and 2.66GB.
     expect(ms).toBeLessThan(600);
   });

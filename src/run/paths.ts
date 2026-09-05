@@ -454,6 +454,44 @@ export function workerOutboxDir(runRoot: string, workerId: string): string {
 }
 
 /**
+ * Host directory mounted READ-ONLY at `/replies` for a worker
+ * (SRD-REVIEW-CONSOLE §6.4, D6).
+ *
+ * The other direction of the exchange `workerOutboxDir` carries, and a SIBLING
+ * of it rather than a child, because the two differ in the one property that
+ * matters: the outbox is `rw` and this is `ro`. A reply written into the
+ * worker's own outbox would be evidence the subject of that evidence can edit
+ * before quoting it, which is the same inversion `render.ts` records for the
+ * verbgate policy — *"it used to be read out of /outbox, which the worker
+ * owns"*.
+ *
+ * Named here for the reason this module exists at all: three subsystems meet on
+ * it. `config/render.ts` emits the `-v`, `run/materialize.ts` creates the
+ * directory the mount points at, and `run/replies.ts` writes the files inside
+ * it. A bind mount whose two sides disagree does not fail — Docker creates the
+ * missing source and the worker comes up with an empty `/replies`, which is
+ * ISC-188's and ISC-231's shared failure shape and is silent by construction.
+ *
+ * **A sibling of `<run>/outbox/<id>` on disk too, and allowed by the same
+ * rule.** `assertNoRunDirMount` refuses a mount that IS the run dir or CONTAINS
+ * it; `classifyRunDirExposure` returns `null` for a source strictly UNDER it,
+ * which is what already lets the outbox, the worktree and the skill bundle be
+ * mounted. So this placement needs no relaxation of that guard, and it must not
+ * get one — `control-auth.json`, `ledger/`, `audit/` and `inbox/` are siblings
+ * of `replies/` and stay unmounted. Re-checked against the argv `renderWorker`
+ * actually produces, in `test/unit/render.test.ts`, because the guarantee for a
+ * run-dir path is an ABSENCE from the mount table and an absence has to be
+ * re-checked rather than assumed.
+ *
+ * Takes the run root as a string for the reason `workerOutboxDir` does: render
+ * works from paths it is handed, and requiring the full struct would keep a
+ * duplicate alive purely as a type accommodation.
+ */
+export function workerRepliesDir(runRoot: string, workerId: string): string {
+  return join(runRoot, "replies", workerId);
+}
+
+/**
  * Host directory mounted read-only at `/skills` (SRD §5.5).
  *
  * Keyed by ROLE, not worker: one host directory is shared by every worker of a

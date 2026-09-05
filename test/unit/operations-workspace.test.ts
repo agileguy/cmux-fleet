@@ -281,12 +281,12 @@ describe("creating the workspace", () => {
     expect(commands[2]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[1]}'`);
     /*
      * The third pane is the monitor, and both halves of what it replaced are
-     * asserted: it is the monitor command, and it still reports on the
-     * INVOCATION directory rather than on cmux-fleet — which was `git-watch`'s
-     * most easily-broken property and is now carried by `--repo`.
+     * asserted: it is the monitor command. The `--repo` half of this went with
+     * the monitor's git region on 2026-09-04 — the watched directory existed
+     * only for the git strip, so there is no longer an invocation directory
+     * for this pane to report on correctly or otherwise.
      */
     expect(commands[1]).toContain("'monitor'");
-    expect(commands[1]).toContain(`'--repo' '${CWD}'`);
   });
 });
 

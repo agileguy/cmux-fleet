@@ -96,10 +96,12 @@ import {
   skillsSourceRoot,
   workerOutboxDir,
   workerPaths,
+  workerRepliesDir,
   type RunPaths,
   workerContainerName,
 } from "./paths.ts";
 import { clearDispatchPolicy } from "./dispatch-policy.ts";
+import { createRepliesDir } from "./replies.ts";
 import { writeTaskPolicy } from "./task-policy.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import {
@@ -719,6 +721,11 @@ export async function materializeWorkerInputs(
      * what stops `down` reaping a name that never existed.
      */
     writeLaunchRecord?: boolean;
+    /**
+     * Host git working directory exposed read-only for workers to clone from.
+     * Threaded straight to `renderWorker`; see `RenderOptions.cloneSource`.
+     */
+    cloneSource?: string | null;
   } = {},
 ): Promise<MaterializedWorker[]> {
   const sourceRoot = skillsSourceRoot();
@@ -738,7 +745,10 @@ export async function materializeWorkerInputs(
 
   for (const w of workers) {
     const workerId = w.id;
-    const rendered = await renderWorker(loaded, workerId, { runId: run.runId });
+    const rendered = await renderWorker(loaded, workerId, {
+      runId: run.runId,
+      cloneSource: opts.cloneSource ?? null,
+    });
     /**
      * `render` resolves its own run dir from `runsRoot()` and so does `up`, so
      * these agree in every real invocation. Compared anyway because if they
@@ -790,6 +800,39 @@ export async function materializeWorkerInputs(
       await refuseSymlinkDestination(outboxDir);
       await mkdir(outboxDir, { recursive: true });
       await makeWorkerAccessible(outboxDir, true);
+    });
+
+    /**
+     * The REPLY PLANE's host directory, established empty so the bind mount has
+     * something to pin from launch (SRD-REVIEW-CONSOLE §6.4, D6).
+     *
+     * The other direction of the exchange the block above sets up, and it is
+     * created in its own `establishing` step rather than folded into that one
+     * because the two differ in the property that matters: the outbox is widened
+     * for WRITING and this is not. A copy-paste that carried `true` down here
+     * would hand the worker write permission on the evidence it is graded
+     * against, and — through the verbgate's integrity loop, which checks the
+     * containing directory as well as the file — would then refuse every verb
+     * the worker attempts. Loud, but nowhere near its cause.
+     *
+     * Established for EVERY worker, not only for a collator, for the reason the
+     * task drop above is: `config/render.ts` emits the `-v` unconditionally, and
+     * a mount whose source this module skipped would have Docker create the
+     * directory itself — the divergence ISC-188 keeps closing, and the one the
+     * `/secrets` gate was removed to stop reintroducing. Docker's version would
+     * also be created with the daemon's own ownership rather than through
+     * `makeWorkerAccessible`, so the mode this whole surface depends on would be
+     * whatever the runtime felt like.
+     *
+     * The symlink guards are the same pair the outbox gets and for the same
+     * reason: `mkdir -p` through a symlinked `<run>/replies` would build the
+     * directory inside the link's target and chmod THAT.
+     */
+    const repliesDir = workerRepliesDir(run.root, workerId);
+    await establishing(`the reply directory for ${workerId}`, async () => {
+      await refuseSymlinkDestination(dirname(repliesDir));
+      await refuseSymlinkDestination(repliesDir);
+      await createRepliesDir(repliesDir);
     });
 
     let skillsDir = skillsByRole.get(w.role);
@@ -1229,6 +1272,19 @@ export async function materializeWorkerInputs(
        * failure names `pane_mode`.
        */
       pane_mode: w.paneMode,
+      /*
+       * The SAME predicate `render.ts` mounts the dispatch-trigger extension
+       * on, written down so a reader does not have to re-derive it from an
+       * argv (`WorkerLaunchSchema.auto_trigger`).
+       *
+       * It is the conjunction and not `w.autoTrigger` alone because
+       * `autoTrigger` defaults TRUE on every worker (`config/load.ts`) while
+       * the extension is mounted for `tui` workers only — an rpc worker is
+       * dispatched down the control socket and has no staged brief to trigger.
+       * Recording the raw field would tell `wait` that an rpc worker's stage
+       * is on its way when nothing was armed to bring it.
+       */
+      auto_trigger: w.paneMode === "tui" && w.autoTrigger,
       /*
        * The disclosure row, recorded so a harvested run can be ASKED whether
        * this worker's context crossed to a vendor (SRD §7.3, ISC-416).

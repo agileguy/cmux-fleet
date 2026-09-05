@@ -50,7 +50,13 @@ import {
   DEVELOPMENT_WORKSPACE,
   developmentPanes,
 } from "../src/backends/cmux/operations-plan.ts";
-import { cmuxReachable, ensureDevelopment } from "../src/backends/cmux/operations.ts";
+import {
+  DEVELOPMENT_SPEC,
+  cmuxReachable,
+  ensureDevelopment,
+  restartConsolePane,
+} from "../src/backends/cmux/operations.ts";
+import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
 import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/development [options]
@@ -61,6 +67,10 @@ const USAGE = `Usage: scripts/development [options]
   --config <path>   fleet.yaml (default: <repo>/fleet.yaml)
   --dry-run         print the pane plan and exit without touching cmux
   --recreate        close an existing development workspace and rebuild it
+  --restart <id>    respawn ONE worker's pane, leaving the others running
+  --task <path>     with --restart: recreate the worker, then dispatch this
+                    task to the run it comes back in. Waits for any task it
+                    is already holding to finish; never recreates over work.
   -h, --help        this message
 `;
 
@@ -130,7 +140,9 @@ async function main(argv: string[]): Promise<number> {
 
   // Built before the cmux probe on purpose: a bad `--workers` is an argv
   // mistake, and diagnosing it must not depend on whether the GUI is running.
-  const panes = developmentPanes({ ...opts, tuiWorkers });
+  // See `scripts/operations`: the preview must print the command that will
+   // actually run, and the live path folds the title in at `planPanes`.
+   const panes = developmentPanes({ ...opts, tuiWorkers, workspaceName: DEVELOPMENT_SPEC.name });
 
   if (argv.includes("--dry-run")) {
     process.stdout.write(`workspace: ${DEVELOPMENT_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
@@ -171,6 +183,103 @@ async function main(argv: string[]): Promise<number> {
         "Start the cmux app, then run this again.\n",
     );
     return EXIT.BACKEND_UNAVAILABLE;
+  }
+
+  /*
+   * `--restart <worker>` — one pane, and nothing else touched.
+   *
+   * The narrow sibling of `--recreate`. `--recreate` is the only tool the
+   * console had for a worker that did not come back, and it costs the other
+   * three: it stops every run this console holds and rebuilds four panes to
+   * fix one. Measured 2026-09-04 — a `--recreate` returned eng-1, eng-2 and
+   * tst-1 and left rev-1 with no run and no container, and the only sanctioned
+   * repair was a second `--recreate` that would have torn down the three that
+   * had just come back.
+   *
+   * ORDER IS THE WHOLE OF IT: stop the run, THEN respawn the pane. Respawning
+   * first kills the pane's shell, and the supervisor it launched — which owns
+   * a detached container — is signalled by the dying shell rather than told to
+   * quiesce, leaving a container that no run refers to. `--recreate` above
+   * already stops runs before rebuilding for exactly this reason; this is the
+   * same order at one-worker scale.
+   */
+  const restartFlag = flag(argv, "--restart");
+  if (restartFlag !== undefined) {
+    const taskFlag = flag(argv, "--task");
+    const restartPane = async (): Promise<string> => {
+      const r = await restartConsolePane(
+        client,
+        DEVELOPMENT_SPEC,
+        { ...opts, tuiWorkers },
+        restartFlag,
+      );
+      return r.surfaceId;
+    };
+
+    /*
+     * `--task` makes this RECREATE-THEN-DISPATCH, which is a different
+     * operation from a restart that happens to be followed by one.
+     *
+     * A `pane_mode: tui` worker keeps its session across epochs, and a model
+     * handed "a task was staged for you" with the previous task still in its
+     * transcript can answer from that instead of opening the new envelope.
+     * Measured 2026-09-04: `tst-1` was staged `T-unit-tests-3` and reported on
+     * `T-unit-tests-2`, reciting the old envelope. Dispatching into a session
+     * that has never seen another task removes the thing it answered from.
+     *
+     * The waiting, the refusal and the ordering live in
+     * `src/run/fresh-dispatch.ts` so they are unit-tested; only the four side
+     * effects are supplied here. The load-bearing rule is that NOTHING is
+     * stopped until the worker is holding no task, staged ones included.
+     */
+    if (taskFlag !== undefined) {
+      const r = await recreateThenDispatch(
+        {
+          status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          down: async (runId) => {
+            process.stderr.write(`development: stopping run ${runId}\n`);
+            await runOutput(repoRoot, ["down", "--run", runId]);
+          },
+          restartPane: async () => {
+            process.stderr.write(`development: respawning the ${restartFlag} pane\n`);
+            await restartPane();
+          },
+          dispatch: (runId) =>
+            runOutput(repoRoot, [
+              "dispatch",
+              "--worker",
+              restartFlag,
+              "--run",
+              runId,
+              "--task",
+              taskFlag,
+              "--json",
+            ]),
+          sleep: (ms) => Bun.sleep(ms),
+          now: () => Date.now(),
+        },
+        { worker: restartFlag },
+      );
+      process.stdout.write(
+        `development: recreated ${restartFlag} into run ${r.runId} ` +
+          `(waited ${Math.round(r.settleWaitMs / 1000)}s for it to go idle, ` +
+          `stopped ${r.stopped.length === 0 ? "nothing" : r.stopped.join(", ")}) ` +
+          `and dispatched ${taskFlag}\n${r.dispatched}`,
+      );
+      return EXIT.SUCCESS;
+    }
+
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
+      process.stderr.write(`development: stopping run ${runId} before restarting ${restartFlag}\n`);
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+    const surfaceId = await restartPane();
+    process.stdout.write(
+      `development: respawned the ${restartFlag} pane (surface ${surfaceId}); ` +
+        `the other panes were not touched\n`,
+    );
+    return EXIT.SUCCESS;
   }
 
   const recreate = argv.includes("--recreate");

@@ -137,7 +137,6 @@ describe("ISC-507: every view is reachable, and only with the selection it needs
 
     const fleet = await composeFleet({
       root,
-      watchDir: root,
       columns: 100,
       containers: never(),
     });
@@ -148,7 +147,6 @@ describe("ISC-507: every view is reachable, and only with the selection it needs
 
     const history = await composeFleet({
       root,
-      watchDir: root,
       columns: 100,
       containers: never(),
       view: { kind: "history" },

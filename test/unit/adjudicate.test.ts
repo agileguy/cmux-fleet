@@ -152,6 +152,75 @@ const CASES: Case[] = [
     want: "failed",
     wantReason: "ISC-93",
   },
+  // The refusal has to name its own remedy. An operator reading "claims
+  // success with an empty diff" on a task that was NEVER going to change a
+  // file has no way from that sentence to the thing that would make it
+  // gradable, and the measured outcome was three re-runs of a task that had
+  // already passed.
+  {
+    name: "ISC-93's refusal names acceptance commands as the remedy",
+    facts: facts({ files_changed: [], commits: [], diff_bytes: 0, acceptance: [] }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "failed",
+    wantReason: "give it acceptance commands",
+  },
+  /*
+   * THE NO-DIFF TASK. An empty diff is the normal shape of a task whose
+   * product is information — run this suite, review this branch — and
+   * `contracts.ts`'s lattice docstring already said such a task "must not be
+   * downgraded". ISC-93 downgraded every one of them anyway.
+   *
+   * Measured: a tester ran rally-cli's suite to `1120 passed`, changed nothing
+   * because nothing needed changing, and was graded `failed` for fabricating.
+   *
+   * What makes this safe rather than a hole in ISC-93 is WHOSE evidence it is.
+   * `facts.acceptance` is the harvester's own re-run, in a fresh clone, in a
+   * container the worker never touched — the one input here a fabricating
+   * worker cannot author.
+   */
+  {
+    name: "an empty diff with harness-verified green acceptance is success, not fabrication",
+    facts: facts({
+      files_changed: [],
+      commits: [],
+      diff_bytes: 0,
+      acceptance: [run("passed", { cmd: "pytest -q" })],
+    }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "success",
+    wantReason: "task whose product is not a change",
+  },
+  // The control, and the reason the exemption is keyed on the harvester's
+  // result rather than on the diff being empty: an empty diff whose acceptance
+  // FAILED is the fabrication ISC-93 was written for, and must still fail.
+  {
+    name: "an empty diff whose acceptance failed is still failed",
+    facts: facts({
+      files_changed: [],
+      commits: [],
+      diff_bytes: 0,
+      acceptance: [run("failed", { cmd: "pytest -q" })],
+    }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "failed",
+    wantReason: "acceptance failed in the fresh clone",
+  },
+  // And the third arm: acceptance that TIMED OUT proves nothing either way, so
+  // the empty diff is unexplained and ISC-93 still applies. Without this the
+  // exemption could be written as "acceptance.verdict !== 'failed'" and pass
+  // every other case here.
+  {
+    name: "an empty diff whose acceptance was inconclusive is still failed",
+    facts: facts({
+      files_changed: [],
+      commits: [],
+      diff_bytes: 0,
+      acceptance: [run("timed_out", { cmd: "pytest -q" })],
+    }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "failed",
+    wantReason: "ISC-93",
+  },
   // ISC-92 — fails if the over-claim comparison is removed or compares the
   // envelope against itself rather than against the derived diff.
   {
@@ -518,3 +587,252 @@ function canonicalScramble(json: string): string {
   };
   return JSON.stringify(reorder(JSON.parse(json)));
 }
+
+// ---------------------------------------------------------------------------
+// A task with no repository is not a task with a rewritten one
+// ---------------------------------------------------------------------------
+
+/**
+ * What `harvest/index.ts:243-250` builds when the envelope names no workdir.
+ *
+ * Shared by the two describe blocks below rather than copied into each,
+ * deliberately. Both assert what the adjudicator does with THE BUNDLE THE
+ * HARVESTER ACTUALLY PRODUCES; two hand-maintained copies could drift apart —
+ * or drift away from `harvest/index.ts` — and the block whose copy went stale
+ * would keep passing while asserting nothing about production.
+ */
+function inquiryFacts(over: Partial<z.input<typeof DerivedFactsSchema>> = {}): DerivedFacts {
+  return DerivedFactsSchema.parse({
+    branch: null,
+    base_ref: null,
+    head_ref: null,
+    repository: false,
+    base_is_ancestor: false,
+    commits: [],
+    files_changed: [],
+    diff_bytes: 0,
+    acceptance: [],
+    acceptance_context: null,
+    harness: { patterns: [], touched: [] },
+    tree_hash_quiesce: null,
+    tree_hash_harvest: null,
+    ...over,
+  });
+}
+
+/**
+ * `base_is_ancestor: false` carries two meanings and the clamp only wants one.
+ *
+ * ISC-151 reads it as "the base was rewritten, so `diff base...HEAD` can be
+ * shrunk to nothing by exactly that move" — a finding, and grading rightly
+ * stops. It is ALSO the vacuous default on a fact bundle for a task that never
+ * had a base: `harvest/index.ts` builds one of those for every dispatch whose
+ * envelope names no `host_workdir`, which is every read-only inquiry — a
+ * ticket query, a cluster read.
+ *
+ * MEASURED, and this is why the field was added rather than the clamp merely
+ * loosened: a ticketing task returned `status: success` with both of its
+ * acceptance criteria met and its artifacts on disk, and was reported
+ * `verdict: unknown` with "the base was rewritten and the diff cannot be
+ * trusted" — a sentence about a repository that did not exist, attached to the
+ * one task in the run whose evidence was complete.
+ *
+ * `facts.repository` states which of the two meanings applies, so neither has
+ * to be inferred from a default.
+ */
+describe("the ISC-151 ancestry clamp applies to repository work only", () => {
+  /**
+   * THE REGRESSION. Fails against the ungated clamp, which returns early with
+   * the ancestry reason before it has looked at the envelope at all.
+   *
+   * The claim lists no files because the task changed none — asserting that
+   * explicitly, because ISC-92's over/under-claim rule compares the two lists
+   * and an inquiry task's agreement is that both are empty.
+   */
+  test("an inquiry task with an envelope is not clamped by a base it never had", () => {
+    const got = adjudicate(inquiryFacts(), claim("success", { files_changed: [], commits: [] }));
+
+    expect(got.reasons.join(" ")).not.toContain("ISC-151");
+    expect(got.reasons.join(" ")).not.toContain("the base was rewritten");
+  });
+
+  /**
+   * THE CONTROL ARM, and without it the test above is satisfied by deleting
+   * the clamp.
+   *
+   * A task that DOES have a repository and whose base is not an ancestor is
+   * the case ISC-151 was written for, and it must still stop grading. The only
+   * difference from the fixture above is the flag.
+   */
+  test("a repository task with a rewritten base still clamps", () => {
+    const got = adjudicate(facts({ base_is_ancestor: false }), claim("success"));
+
+    expect(got.verdict).toBe("unknown");
+    expect(got.reasons.join(" ")).toContain("ISC-151");
+  });
+
+  /**
+   * The envelope-less inquiry task still says so.
+   *
+   * Removing the clamp must not remove the STATEMENT that nothing was checked:
+   * a worker that wrote no `result.json` is exactly the case ISC-94's note and
+   * the harvester's discrepancy exist for, and an inquiry task has no diff to
+   * speak for it in the envelope's absence.
+   */
+  test("an inquiry task with no envelope is graded on derived facts and says so", () => {
+    const got = adjudicate(inquiryFacts(), null);
+
+    expect(got.reasons.join(" ")).not.toContain("ISC-151");
+    expect(got.reasons.join(" ")).toContain("no result envelope");
+  });
+
+  /**
+   * The DEFAULT's direction, asserted rather than assumed.
+   *
+   * Every fact bundle written before this field existed, and every fixture in
+   * this file that does not name it, must keep being graded as repository
+   * work — the clamp is what stops a rewritten base grading green, so the
+   * default has to be the one that keeps it.
+   */
+  test("a fact bundle that never names the field is repository work", () => {
+    const parsed = DerivedFactsSchema.parse({
+      branch: null,
+      base_ref: null,
+      head_ref: null,
+      base_is_ancestor: false,
+      harness: {},
+    });
+
+    expect(parsed.repository).toBe(true);
+    expect(adjudicate(parsed, null).reasons.join(" ")).toContain("ISC-151");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An empty diff is only a finding where a diff was possible
+// ---------------------------------------------------------------------------
+
+/**
+ * ISC-93's empty-diff rule, gated on `facts.repository` like the clamp above.
+ *
+ * The two blocks are the same defect found twice, eighty lines apart. ISC-151
+ * read the vacuous `base_is_ancestor: false` as a rewritten base; ISC-93 read
+ * the vacuous empty diff as fabricated work. In both, the field that says which
+ * of the two meanings applies is `facts.repository`, and in both, the task
+ * being punished is the one whose evidence was complete.
+ *
+ * MEASURED 2026-09-03. The `reviewer` role is `isolation: shared-ro`
+ * (`fleet.yaml:461`), so it is given no worktree; `harvest/index.ts:569` gates
+ * the acceptance exam on `hasWorktree`, so `facts.acceptance` stays empty; so
+ * the exemption arm keyed on `acceptance.verdict === "success"` is unreachable
+ * for this role BY CONSTRUCTION. Every honest review this fleet produced was
+ * graded `failed` for fabricating, and told to fix it with acceptance commands
+ * that a worktree-less role cannot run.
+ *
+ * SRD-REVIEW-CONSOLE §6.8 / D9 specifies the repair, and its stated probe is
+ * the first test below almost verbatim.
+ */
+describe("ISC-93's empty-diff rule applies to repository work only", () => {
+  /**
+   * THE REGRESSION, and the SRD's own probe: "harvest a task with
+   * `host_workdir: "unset"` claiming `success` with no diff, and assert the
+   * verdict is not `failed`; assert the reason names no diff at all."
+   *
+   * Both halves are load-bearing. Against the ungated rule the verdict is
+   * `failed`, so the grade assertion reddens on its own — but a repair that
+   * merely SOFTENED ISC-93 to `unknown` would satisfy "not failed" while still
+   * telling an operator their review fabricated an empty diff. The reason
+   * assertions pin the sentence as well as the grade.
+   *
+   * `toBe("success")` sits beside `not.toBe("failed")` because it is the
+   * substantive outcome D9 exists to unlock rather than a restatement of it:
+   * with no acceptance, `derived` is `unknown`, `unknown` is the lattice
+   * identity (ISC-94), and the review is therefore graded on its own claim —
+   * gradable at all, which is the whole point.
+   */
+  test("a no-workdir task claiming success with no diff is not graded as fabrication", () => {
+    const got = adjudicate(inquiryFacts(), claim("success", { files_changed: [], commits: [] }));
+
+    expect(got.verdict).not.toBe("failed");
+    expect(got.verdict).toBe("success");
+
+    const reasons = got.reasons.join(" ");
+    expect(reasons).not.toContain("ISC-93");
+    expect(reasons).not.toContain("empty diff");
+    expect(reasons).not.toContain("give it acceptance commands");
+  });
+
+  /**
+   * THE CONTROL ARM, and without it the test above is satisfied by deleting
+   * ISC-93 outright.
+   *
+   * This fixture differs from the one above in exactly one field. ISC-93 was
+   * written for a MEASURED worker that had no `bun` on PATH and reported `bun
+   * test -> exit 0, 27 pass` behind an empty diff; that worker had a workdir,
+   * so this is the case that must still fail. The remedy must still be named
+   * too — for a repository task acceptance commands are genuinely available,
+   * which is precisely what makes the sentence honest here and dishonest above.
+   */
+  test("a repository task claiming success with an empty diff still fails (ISC-93 intact)", () => {
+    const got = adjudicate(
+      facts({ files_changed: [], commits: [], diff_bytes: 0, acceptance: [] }),
+      claim("success", { files_changed: [], commits: [] }),
+    );
+
+    expect(got.verdict).toBe("failed");
+    expect(got.reasons.join(" ")).toContain("ISC-93");
+    expect(got.reasons.join(" ")).toContain("give it acceptance commands");
+  });
+
+  /**
+   * The exemption arm, co-located with the gate that could silence it.
+   *
+   * `CASES` already covers this, but not against THIS edit. The gate reads
+   * `facts.repository && …`, and an inverted or mis-scoped gate would skip the
+   * whole block — failure arm and exemption arm together — which no assertion
+   * on the failure arm can detect. Pinning it one test below the gate is what
+   * makes the three arms legible, and falsifiable, as a set.
+   */
+  test("a repository task's green harvester acceptance still exempts an empty diff", () => {
+    const got = adjudicate(
+      facts({
+        files_changed: [],
+        commits: [],
+        diff_bytes: 0,
+        acceptance: [run("passed", { cmd: "pytest -q" })],
+      }),
+      claim("success", { files_changed: [], commits: [] }),
+    );
+
+    expect(got.verdict).toBe("success");
+    expect(got.reasons.join(" ")).toContain("task whose product is not a change");
+  });
+
+  /**
+   * The DEFAULT's direction, asserted for ISC-93 as it already is for ISC-151.
+   *
+   * `repository` defaults to `true`, so every fact bundle written before the
+   * field existed — and every fixture in this file that does not name it —
+   * keeps ISC-93 live. Flipping that default to `false` would disable the rule
+   * fleet-wide while every other test in this block still passed, because each
+   * of them states the field explicitly.
+   *
+   * `base_is_ancestor: true` is named so ISC-151's clamp does not return first
+   * and grade this case on the wrong rule.
+   */
+  test("a fact bundle that never names the field still gets ISC-93", () => {
+    const parsed = DerivedFactsSchema.parse({
+      branch: null,
+      base_ref: null,
+      head_ref: null,
+      base_is_ancestor: true,
+      harness: {},
+    });
+
+    expect(parsed.repository).toBe(true);
+
+    const got = adjudicate(parsed, claim("success", { files_changed: [], commits: [] }));
+    expect(got.verdict).toBe("failed");
+    expect(got.reasons.join(" ")).toContain("ISC-93");
+  });
+});

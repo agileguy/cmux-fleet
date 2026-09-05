@@ -68,6 +68,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "honeypot.cjs",
         "ticket-cli",
         "pi-extensions/dispatch-trigger.ts",
+        "pi-extensions/truncation-recovery.ts",
       ]),
     );
   });
@@ -89,6 +90,12 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // stale copy stops firing silently, so it is the one asset here whose
       // absence from the hash would produce no error anywhere.
       "pi-extensions/dispatch-trigger.ts",
+      // Added 2026-09-04. The second in-process extension, and stale in the
+      // same silent direction: it reads Pi's `BashToolDetails`, so a copy that
+      // no longer matches those field names finds no truncation to report and
+      // every clipped result goes back to looking exactly as it did when a
+      // worker re-ran the same command twice and answered nothing.
+      "pi-extensions/truncation-recovery.ts",
     ]);
   });
 

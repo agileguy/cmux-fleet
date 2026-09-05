@@ -106,6 +106,7 @@ import {
   ConfigError,
   providerApiKeyEnv,
   providerBaseUrl,
+  providerContextWindow,
   providerIsHosted,
 } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
@@ -608,6 +609,24 @@ export function buildWorkerEnv(
      */
     PIFLEET_LLM_MODELS: w.model,
     /*
+     * The model's REAL context window, or "" for "let the agent default".
+     *
+     * Empty rather than absent because every value in this record is a string;
+     * the entrypoint treats empty as unset and omits `contextWindow` from
+     * `models.json`, which is exactly the behaviour every worker had before this
+     * line existed.
+     *
+     * It exists because that default is 128,000 for every model. `rev-arch-1`
+     * runs `deepseek-v4-pro:0813`, whose endpoint serves 1,048,576 — so it
+     * auto-compacted at 152,447 tokens having used 12% of the window, and then
+     * failed to resume with "Cannot continue from message role: assistant",
+     * losing a review it had already finished. The window was never the model's;
+     * it was ours, and we never set it.
+     */
+    PIFLEET_LLM_CONTEXT_WINDOW: String(
+      providerContextWindow(loaded.config, w.provider, w.model) ?? "",
+    ),
+    /*
      * Arms the escape-attempt honeypot (ISC-125). Unconditional: every worker
      * is watched, and there is no config switch to turn it off, because an
      * operator-visible "this run was not watched" state that an operator can
@@ -664,6 +683,35 @@ export function buildWorkerEnv(
      * apart from a pifleet that predated themes.
      */
     PIFLEET_PI_THEME: w.theme ?? "",
+    /*
+     * The reasoning effort this worker's role asked for, by name.
+     *
+     * ## It did not travel at all until 2026-09-05, and nothing noticed
+     *
+     * `thinking` was resolved by `resolveWorker`, printed by `doctor` and
+     * `render`, carried in dispatch requests — and never handed to a container.
+     * `grep -rn thinking src/run src/backends` found no consumer. So every seat
+     * ran at Pi's own `DEFAULT_THINKING_LEVEL`, and the review console's four
+     * hosted seats — all four configured `thinking: high` on the argument that
+     * a reviewer must think longest per token read — were measured starting
+     * their sessions at `thinkingLevel: "off"`, five live reviews deep.
+     *
+     * **The test that should have caught it asserted the wrong end.**
+     * `review-plan.test.ts` checks `resolveWorker(id).thinking === "high"`,
+     * which is the value this file is supposed to CARRY, not evidence that it
+     * arrived. It passed throughout. That is the same shape as the context
+     * window, which spent its own stretch resolving correctly host-side while
+     * two 1,048,576-token models ran at Pi's 128,000 default — and it is why
+     * the probe for this one reads `docker/entrypoint.sh` as well.
+     *
+     * EMPTY STRING when the role named no level, on exactly the argument
+     * `PIFLEET_PI_THEME` above makes: `settings.json` is Pi's OWN state file,
+     * persisted on a volume that outlives the run, so "" has to mean "config
+     * has no opinion, leave what is there" rather than "set it to the default".
+     * A worker whose role omits `thinking` keeps whatever the operator chose
+     * inside the pane; one whose role names it gets that value on every start.
+     */
+    PIFLEET_PI_THINKING: w.thinking ?? "",
     /*
      * WHICH of this file's entries are credentials, by name.
      *
@@ -737,6 +785,39 @@ export function buildWorkerEnv(
     vars["GIT_CONFIG_KEY_0"] = "safe.directory";
     vars["GIT_CONFIG_VALUE_0"] = "/workspace";
   }
+
+  /*
+   * WHERE A PACKAGE MANAGER MAY WRITE ITS CACHE — the same read-only-root
+   * problem as the block above, in the tool that hits it hardest.
+   *
+   * npm's default cache is `$HOME/.npm` and bun's is `$HOME/.bun`. `$HOME` is
+   * `/home/pi` on the read-only root (SRD §5.6), so the first thing either
+   * does on a fresh worktree is fail:
+   *
+   *   mkdir: cannot create directory '/home/pi/.npm': Read-only file system
+   *
+   * MEASURED on a tester worker asked to run this repository's own unit
+   * suite. It is not a fatal error — the agent improvised `npm install --cache
+   * ./npm-cache` and the install went through — and that is the argument for
+   * fixing it rather than leaving it. A worker that has to invent a workaround
+   * before it can start spends its turn on the harness instead of the task,
+   * and the workaround it invents lands INSIDE `/workspace`, where it becomes
+   * an untracked directory in the diff the harvest grades.
+   *
+   * `/tmp` because it is the writable tmpfs every worker already has
+   * (`config/render.ts` mounts it `rw,noexec,nosuid,size=256m`). `noexec` costs
+   * nothing here: a package cache stores archives, and anything that needs to
+   * execute is unpacked into `/workspace/node_modules`, which is a bind mount
+   * and not this tmpfs.
+   *
+   * Set for EVERY worker, not gated on `isolation` like the git block above.
+   * That block configures a repository and correctly says nothing when there
+   * is none; this one states where `$HOME`-bound caches go, and `$HOME` is
+   * read-only whether or not a workspace is mounted.
+   */
+  vars["npm_config_cache"] = "/tmp/.npm";
+  vars["BUN_INSTALL_CACHE_DIR"] = "/tmp/.bun-cache";
+  vars["XDG_CACHE_HOME"] = "/tmp/.cache";
 
   /*
    * Class 1 (SRD §12.4), delivered as a FILE under D8 — the rule kept, the

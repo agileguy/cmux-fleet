@@ -1129,6 +1129,39 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       const exec = async (argv: string[]) => {
         calls.push(argv);
         if (isMountProbe(argv)) return answerMountProbe(argv);
+        /*
+         * THE UPLINK NETWORK, which this fake did not used to answer.
+         *
+         * `ensureEgressRelay` calls `ensureUplinkNetwork` on the rebuild path,
+         * and that function took no `exec` — so this call went to the REAL
+         * docker binary and these tests passed on the strength of a
+         * `pifleet-egress-uplink` bridge left behind by actual fleet runs on
+         * the developer's machine. Not "docker is installed": docker installed
+         * AND a fleet already run. On a clean machine, or in a container, the
+         * whole rebuild path threw.
+         *
+         * Non-internal because that is the property `ensureUplinkNetwork`
+         * requires — the relay attaches here to reach host.docker.internal and
+         * cannot do so on an internal bridge — so a fake reporting `Internal:
+         * true` would test the refusal instead of the path.
+         */
+        if (argv[1] === "network" && argv[2] === "inspect") {
+          return {
+            code: 0,
+            stdout: JSON.stringify([
+              {
+                // `parseNetworkInspect` matches on `Name` and treats a missing
+                // one as "this answer is about some other network", so the
+                // echo is load-bearing rather than cosmetic.
+                Name: argv[3],
+                Id: "uplink0",
+                Internal: false,
+                IPAM: { Config: [{ Gateway: "172.30.0.1" }] },
+              },
+            ]),
+            stderr: "",
+          };
+        }
         if (argv[1] === "inspect" && argv[2] !== NET) {
           inspects += 1;
           // The post-start re-inspect must report a RUNNING relay, or `ensure`
@@ -1223,7 +1256,18 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       // `probe` sits between the inspect and the rm on purpose: the ISC-292
       // preflight refuses BEFORE anything is removed, so a bad checkout never
       // costs the operator the relay they already had.
-      expect(verbs(calls)).toEqual(["inspect", "probe", "rm", "run", "network connect", "inspect"]);
+      // `network inspect` is the uplink preflight. It was always in this
+      // sequence; it was invisible because `ensureUplinkNetwork` took no `exec`
+      // and asked the real daemon instead of the fake.
+      expect(verbs(calls)).toEqual([
+        "inspect",
+        "probe",
+        "network inspect",
+        "rm",
+        "run",
+        "network connect",
+        "inspect",
+      ]);
       // Asserted as an argv, not as a verb: `rm` without `-f` leaves a running
       // container in place and the whole change becomes a no-op.
       expect(calls.find((c) => c[1] === "rm")).toEqual([
@@ -1260,7 +1304,18 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       // `probe` sits between the inspect and the rm on purpose: the ISC-292
       // preflight refuses BEFORE anything is removed, so a bad checkout never
       // costs the operator the relay they already had.
-      expect(verbs(calls)).toEqual(["inspect", "probe", "rm", "run", "network connect", "inspect"]);
+      // `network inspect` is the uplink preflight. It was always in this
+      // sequence; it was invisible because `ensureUplinkNetwork` took no `exec`
+      // and asked the real daemon instead of the fake.
+      expect(verbs(calls)).toEqual([
+        "inspect",
+        "probe",
+        "network inspect",
+        "rm",
+        "run",
+        "network connect",
+        "inspect",
+      ]);
     });
 
     test("the drift removal names both postures when the daemon refuses it", async () => {
@@ -1272,6 +1327,25 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
         // answered truthfully here or the refusal under test never happens —
         // this test would then pass or fail on the wrong error entirely.
         if (isMountProbe(argv)) return answerMountProbe(argv);
+        // And so does the uplink preflight, for the same reason. It used to be
+        // answered by the real daemon because `ensureUplinkNetwork` took no
+        // `exec`; once it comes here, an unanswered `network inspect` throws
+        // `network create ... failed` and this test asserts against a message
+        // it was never written to see.
+        if (argv[1] === "network" && argv[2] === "inspect") {
+          return {
+            code: 0,
+            stdout: JSON.stringify([
+              {
+                Name: argv[3],
+                Id: "uplink0",
+                Internal: false,
+                IPAM: { Config: [{ Gateway: "172.30.0.1" }] },
+              },
+            ]),
+            stderr: "",
+          };
+        }
         if (argv[1] === "inspect") return { code: 0, stdout: liveRelay([T(LAN_OMLX)]), stderr: "" };
         if (argv[1] === "rm") return { code: 1, stdout: "", stderr: "daemon said no" };
         return { code: 0, stdout: "[]", stderr: "" };

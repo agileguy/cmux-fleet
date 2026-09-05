@@ -80,6 +80,7 @@ import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 import {
   TUI_POLL_MS,
   TUI_QUIET_MS,
+  quietWindowMsFor,
   attributedToStage,
   classifyTuiTurn,
   detachedDockerArgv,
@@ -2272,7 +2273,12 @@ async function main(): Promise<void> {
               tuiQuiet = new Stopwatch();
               return;
             }
-            if (tuiQuiet.elapsedMs() < TUI_QUIET_MS) return;
+            // An `error` stop waits longer than any other, because it is the one
+            // reading Pi can leave on its own: it retries, and a retry that
+            // produces a single entry resets this clock and clears the reading.
+            // `TUI_ERROR_GRACE_MS` carries the run that proved it.
+            const quietNeededMs = quietWindowMsFor(reading.stopReason);
+            if (tuiQuiet.elapsedMs() < quietNeededMs) return;
 
             /**
              * PRECEDENCE, and it is the rpc path's with one addition.
@@ -2307,7 +2313,7 @@ async function main(): Promise<void> {
               epoch: live.epoch,
               task_id: live.task_id,
               stop_reason: reading.stopReason,
-              quiet_ms: TUI_QUIET_MS,
+              quiet_ms: quietNeededMs,
               verdict,
             });
             tuiQuiet = null;

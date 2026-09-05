@@ -243,12 +243,51 @@ if [ -n "${api_key_file}" ]; then
   fi
 fi
 
+# `contextWindow` is OMITTED when PIFLEET_LLM_CONTEXT_WINDOW is empty, and that
+# is not cosmetic: Pi falls back to its own default (128,000) for a model with no
+# window, which is the behaviour every worker had before this variable existed.
+# Writing a zero or a guess instead would be worse than saying nothing — too
+# small wastes most of the model, too large makes the provider reject a request
+# outright once the history passes the real limit.
+#
+# WHY IT IS HERE AT ALL: this writer emitted `{id, name}` and nothing else, so
+# EVERY model in the fleet ran at Pi's 128k regardless of what its endpoint
+# served. Measured 2026-09-04: deepseek-v4-pro:0813 and kimi-k3 serve 1,048,576.
+# `rev-arch-1` therefore auto-compacted at 152,447 tokens — 12% of its window —
+# and then could not resume at all, losing a completed review.
+#
+# `reasoning: true` IS THE OTHER HALF OF THE THINKING LEVEL, and without it the
+# settings.json key below is inert. Pi's `getSupportedThinkingLevels(model)`
+# opens with `if (!model.reasoning) return ["off"]`, and every level is then run
+# through `clampThinkingLevel`, which can only return a level the model supports.
+# So a model entry that does not declare `reasoning` pins the session at `off`
+# no matter what `defaultThinkingLevel` says.
+#
+# MEASURED, and it is why this paragraph exists rather than a one-line fix:
+# `defaultThinkingLevel: "high"` was written into settings.json, confirmed
+# present in the container, and the very next session still opened at
+# `thinkingLevel: "off"`. The setting was correct and the model was not
+# eligible for it. Two facts, one of them silent.
+#
+# TIED TO THE SAME VARIABLE ON PURPOSE. The condition is "config asked for a
+# level above off", not a per-model capability table: the operator names
+# `thinking:` per role, the allowlist above already refuses a model whose vendor
+# does not attest `thinking` (that is what excluded mistral-large-3), and a
+# second source of truth here could disagree with the first. One variable
+# decides both halves, so they cannot drift apart.
+#
+# `xhigh` is the one level this does not fully buy. Pi keeps it only when the
+# model declares a `thinkingLevelMap` entry for it, which we do not write, so a
+# role asking `xhigh` is clamped down to `high` rather than refused. Recorded
+# rather than fixed: the fleet has no seat asking for it.
 if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
   jq -n \
     --arg provider "${PIFLEET_LLM_PROVIDER:-omlx}" \
     --arg baseUrl "${PIFLEET_LLM_BASE_URL}" \
     --arg apiKey "${api_key}" \
     --arg models "${PIFLEET_LLM_MODELS}" \
+    --arg contextWindow "${PIFLEET_LLM_CONTEXT_WINDOW:-}" \
+    --arg thinking "${PIFLEET_PI_THINKING:-}" \
     '{
       providers: {
         ($provider): {
@@ -256,7 +295,11 @@ if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
           baseUrl: $baseUrl,
           api: "openai-completions",
           apiKey: $apiKey,
-          models: ($models | split(",") | map(select(length > 0)) | map({id: ., name: .}))
+          models: ($models | split(",") | map(select(length > 0)) | map(
+            {id: ., name: .}
+            + (if $contextWindow == "" then {} else {contextWindow: ($contextWindow | tonumber)} end)
+            + (if $thinking == "" or $thinking == "off" then {} else {reasoning: true} end)
+          ))
         }
       }
     }' > "${agent_dir}/models.json"
@@ -287,15 +330,32 @@ fi
 # failure here would kill the worker before it started, which is a container
 # that does not boot because a colour scheme could not be applied. Losing the
 # malformed file's contents is the lesser harm and the only recoverable one.
-# TWO KEYS, TWO DIFFERENT OWNERSHIP RULES, and the difference is the reason
-# this is one block rather than two one-liners:
+# THREE KEYS, TWO DIFFERENT OWNERSHIP RULES, and the difference is the reason
+# this is one block rather than three one-liners:
 #
-#   theme         CONFIG IS AUTHORITATIVE. Written on every start when the
-#                 variable is non-empty, so a fleet.yaml edit takes effect on
-#                 the next `up` without anyone touching the volume.
-#   quietStartup  A SEEDED DEFAULT. Written only when settings.json does not
-#                 exist yet — i.e. once per worker volume — so an operator who
-#                 turns the listing back on inside the pane keeps it.
+#   theme                 CONFIG IS AUTHORITATIVE. Written on every start when
+#                         the variable is non-empty, so a fleet.yaml edit takes
+#                         effect on the next `up` without touching the volume.
+#   defaultThinkingLevel  CONFIG IS AUTHORITATIVE, same rule, same reason.
+#   quietStartup          A SEEDED DEFAULT. Written only when settings.json does
+#                         not exist yet — i.e. once per worker volume — so an
+#                         operator who turns the listing back on inside the pane
+#                         keeps it.
+#
+# defaultThinkingLevel IS WHY THIS BLOCK HAS A THIRD KEY, and it is worth the
+# paragraph because its absence was invisible for five live reviews. `thinking`
+# was resolved by `resolveWorker`, printed by `doctor`, carried in dispatch
+# requests, and handed to no container at all — so the review console's four
+# hosted seats, every one of them configured `thinking: high` on the argument
+# that a reviewer must think longest per token read, began their sessions at
+# `thinkingLevel: "off"`. Nothing in the suite disagreed, because the probe that
+# covers it asserts the RESOLVED CONFIG value rather than the delivered one.
+#
+# `defaultThinkingLevel` is the key Pi's own `settings-manager.js` reads
+# (`getDefaultThinkingLevel()` returns `this.settings.defaultThinkingLevel`),
+# and it falls back to `DEFAULT_THINKING_LEVEL` when absent. It is the GLOBAL
+# default rather than a per-model one, which is correct here: a worker has one
+# model, named by this same config.
 #
 # quietStartup is set at all because of what loading themes DOES to a pane. Pi
 # prints an inventory of loaded resources at startup, and it is skipped when
@@ -311,17 +371,24 @@ if [ ! -f "${settings}" ]; then
   echo '{"quietStartup":true}' > "${settings}" 2>/dev/null || true
 fi
 
-if [ -n "${PIFLEET_PI_THEME:-}" ]; then
+if [ -n "${PIFLEET_PI_THEME:-}" ] || [ -n "${PIFLEET_PI_THINKING:-}" ]; then
   existing='{}'
   if [ -f "${settings}" ]; then
     existing="$(jq '.' "${settings}" 2>/dev/null || echo '{}')"
   fi
+  # ONE read-modify-write for both keys, not two. Each key is applied only when
+  # its own variable is non-empty — the `if $x == "" then {} else {…} end` arms
+  # are what keep "config has no opinion" from becoming "config says empty
+  # string", which Pi would take as a level it does not recognise.
   if printf '%s' "${existing}" \
-     | jq --arg t "${PIFLEET_PI_THEME}" '. + {theme: $t}' > "${settings}.new" 2>/dev/null; then
+     | jq --arg t "${PIFLEET_PI_THEME:-}" --arg k "${PIFLEET_PI_THINKING:-}" \
+          '. + (if $t == "" then {} else {theme: $t} end)
+             + (if $k == "" then {} else {defaultThinkingLevel: $k} end)' \
+       > "${settings}.new" 2>/dev/null; then
     mv "${settings}.new" "${settings}"
   else
     rm -f "${settings}.new"
-    echo "pifleet: could not select theme ${PIFLEET_PI_THEME} (settings.json unwritable); the pane will use Pi's default" >&2
+    echo "pifleet: could not apply pane settings (theme=${PIFLEET_PI_THEME:-}, thinking=${PIFLEET_PI_THINKING:-}); settings.json is unwritable and the pane will use Pi's defaults" >&2
   fi
 fi
 

@@ -36,6 +36,7 @@ import {
   CmuxClient,
   assertCmuxValue,
   focusPaneArgv,
+  listPaneSurfacesArgv,
   listPanesArgv,
   newSplitArgv,
   pingArgv,
@@ -51,6 +52,7 @@ import {
   parseListPanes,
   parseNewSplit,
   parsePaneGeometry,
+  parsePaneSurfaces,
   parseWorkspaceCreate,
   parseWorkspaceList,
   type PaneListed,
@@ -60,8 +62,11 @@ import {
   DEVELOPMENT_WORKSPACE,
   OPERATIONS_TOP_FRACTION,
   OPERATIONS_WORKSPACE,
+  REVIEW_TOP_FRACTION,
+  REVIEW_WORKSPACE,
   developmentPanes,
   operationsPanes,
+  reviewPanes,
   type OperationsPane,
   type OperationsPlanOptions,
 } from "./operations-plan.ts";
@@ -90,6 +95,25 @@ export interface WorkspaceSpec {
   readonly topFraction: number | null;
 }
 
+/**
+ * A spec's panes, WITH THE WORKSPACE TITLE FOLDED IN.
+ *
+ * The one place `spec.panes` is reached, so the title the panes advertise to
+ * `up --workspace-name` is by construction the title `workspace create --name`
+ * used and `findWorkspace` matches on (`spec.name`, both). A caller passing its
+ * own `workspaceName` would be a second spelling of one fact, and the two would
+ * be identical the day they were written and only diverge afterwards — the same
+ * drift `agentSquarePanes` was extracted to prevent.
+ *
+ * It is a function rather than a spread at each call site because there are two
+ * call sites — `restartConsolePane` and `createWorkspace` — and one of them
+ * forgetting the fold is a console whose restarted pane silently stops naming
+ * its workspace while every other pane still does.
+ */
+function planPanes(spec: WorkspaceSpec, opts: OperationsPlanOptions): OperationsPane[] {
+  return spec.panes({ ...opts, workspaceName: spec.name });
+}
+
 /** The day-to-day console: one agent pair on top, status and git below. */
 export const OPERATIONS_SPEC: WorkspaceSpec = {
   name: OPERATIONS_WORKSPACE,
@@ -102,6 +126,22 @@ export const DEVELOPMENT_SPEC: WorkspaceSpec = {
   name: DEVELOPMENT_WORKSPACE,
   panes: developmentPanes,
   topFraction: DEVELOPMENT_TOP_FRACTION,
+};
+
+/**
+ * The multi-model review console: a collator top-left, three reviewers around
+ * it, each reviewer on a different vendor's model.
+ *
+ * The THIRD value in this file rather than a third builder, which is the point
+ * {@link WorkspaceSpec} was written to make: adding a console is a value here,
+ * so the BUILD-FIRST-CLOSE-SECOND order in `ensureWorkspace` — a measured
+ * lesson that cost a destroyed console once — is stated in exactly one place
+ * and cannot be got backwards a third time.
+ */
+export const REVIEW_SPEC: WorkspaceSpec = {
+  name: REVIEW_WORKSPACE,
+  panes: reviewPanes,
+  topFraction: REVIEW_TOP_FRACTION,
 };
 
 /**
@@ -132,6 +172,179 @@ export interface EnsureResult {
   /** False when an `operations` workspace was already there and was left alone. */
   readonly created: boolean;
   readonly workspaceId: string;
+}
+
+/** A console pane, resolved to the title `createWorkspace` gave it. */
+export interface TitledPane {
+  readonly paneId: string;
+  readonly surfaceId: string;
+  /** `null` when the pane carries no title — see {@link parsePaneSurfaces}. */
+  readonly title: string | null;
+}
+
+/**
+ * Every pane in a workspace, each carrying its title.
+ *
+ * One `list-panes` plus one `list-pane-surfaces` per pane. The second call is
+ * per-pane because the verb answers for ONE pane and defaults to the focused
+ * one, so a single call would describe whichever pane the operator last
+ * clicked and would look like an answer about all of them.
+ */
+export async function titledPanes(
+  client: CmuxClient,
+  workspaceId: string,
+): Promise<TitledPane[]> {
+  const panes = parseListPanes(await client.runOk(listPanesArgv(workspaceId)));
+  const out: TitledPane[] = [];
+  for (const p of panes) {
+    const surfaces = parsePaneSurfaces(
+      await client.runOk(listPaneSurfacesArgv(workspaceId, p.paneId)),
+    );
+    /*
+     * The SELECTED surface is the pane, and its absence is not a reason to
+     * skip the pane. A pane cmux reports with no selected surface still holds
+     * one, and dropping it here would turn "this console is in a state I did
+     * not expect" into "that worker has no pane", which reads as a typo and
+     * sends the operator to fix the wrong thing.
+     */
+    const chosen = surfaces.find((s) => s.selected) ?? surfaces[0];
+    if (chosen === undefined) continue;
+    out.push({ paneId: p.paneId, surfaceId: chosen.surfaceId, title: chosen.title });
+  }
+  return out;
+}
+
+/**
+ * Which surface holds `title`, or `null`.
+ *
+ * Title, never index — see {@link listPaneSurfacesArgv} for the measurement
+ * that makes the distinction load-bearing rather than stylistic.
+ */
+export function surfaceForTitle(panes: readonly TitledPane[], title: string): string | null {
+  return panes.find((p) => p.title === title)?.surfaceId ?? null;
+}
+
+/**
+ * WHY A WORKSPACE MAY NOT BE ADOPTED — SRD-REVIEW-CONSOLE §6.10, and `null` when
+ * it may.
+ *
+ * ## The measured hazard, not a hypothetical one
+ *
+ * §0.5 correction 5: **a `review` workspace already existed on this machine**
+ * before this console did, and `findWorkspaceByTitle` matches `custom_title`
+ * EXACTLY. So `ensureWorkspace` adopts it, `--recreate` closes it, and
+ * `--restart <id>` respawns one of its panes with a `pifleet up` command. Every
+ * one of those is destruction of a window somebody was working in, arrived at by
+ * a name collision, and §6.10 states the consequence in as many words: *"Silently
+ * adopting a person's workspace and respawning its panes is data loss."*
+ *
+ * ## Verify rather than refuse outright, which §6.10 offers as the alternative
+ *
+ * The bare refusal — "a `review` workspace exists, pass `--recreate`" — would
+ * also refuse the LEGITIMATE re-open, and `scripts/review`'s own docblock says
+ * re-running it *"is the expected way to get back to the console"*. Verifying is
+ * the arm that keeps that: a workspace whose panes are this console's panes is
+ * this console, and one whose panes are anything else is somebody's window.
+ *
+ * ## Titles as a MULTISET, and why not in order
+ *
+ * `createWorkspace` titles each pane with its worker id (`operations-plan.ts`,
+ * *"The id is also what `dispatch --worker` takes, so the title is the
+ * argument"*), so the planned titles are exactly what a console of ours holds. A
+ * multiset comparison catches a missing pane, an extra pane, an unfamiliar pane
+ * and a duplicated one.
+ *
+ * ORDER IS DELIBERATELY NOT CHECKED. `list-panes` does not promise creation
+ * order, so an order comparison would refuse a healthy console on a property
+ * cmux never guaranteed — a FALSE refusal, which here means telling an operator
+ * to `--recreate` a console that was fine, i.e. causing the exact destruction
+ * this guard exists to prevent. The layout is re-asserted by the plan on every
+ * rebuild and is checked structurally by the plan's own suite.
+ */
+export function adoptionRefusal(
+  workspaceName: string,
+  present: readonly (string | null)[],
+  planned: readonly string[],
+): string | null {
+  const key = (xs: readonly (string | null)[]): string =>
+    [...xs].map((t) => t ?? " untitled").sort().join("");
+  if (key(present) === key(planned)) return null;
+  return (
+    `${workspaceName}: a workspace already titled '${workspaceName}' is open and its panes are ` +
+    `not this console's. It holds ${
+      present.length === 0 ? "no panes" : present.map((t) => t ?? "(untitled)").join(", ")
+    }; this console plans ${planned.join(", ")}. It is NOT adopted: adopting it would respawn ` +
+    `those panes with pifleet commands and lose whatever is in them. Rename or close that ` +
+    `workspace, or pass --recreate to replace it deliberately.`
+  );
+}
+
+/** What {@link restartConsolePane} did, for the caller to report. */
+export interface RestartResult {
+  readonly workspaceId: string;
+  readonly surfaceId: string;
+  /** The titles the console actually holds, for a refusal message. */
+  readonly present: readonly (string | null)[];
+}
+
+/**
+ * Restart ONE console pane, leaving every other pane alone.
+ *
+ * This is the whole of "restart a single worker" in a console, and it is a
+ * pane operation rather than a container one for a reason worth stating: a
+ * worker's container is a CHILD of its supervisor (`supervisor/index.ts` —
+ * on the `rpc` path the supervisor's `child` IS a foreground `docker run`),
+ * and each agent pane runs its own `up --attach-here`, so the pane owns the
+ * run, the run owns the supervisor, and the supervisor owns the container.
+ * Replacing the container under a live supervisor would leave the supervisor
+ * holding a handle to a process that no longer exists. Respawning the pane
+ * re-enters at the top of that chain and lets the existing, tested `up` path
+ * rebuild all of it.
+ *
+ * The caller is responsible for stopping any run the worker still holds
+ * BEFORE calling this. Respawning a pane kills the pane's process tree, which
+ * is not the same as quiescing a run: the supervisor would be signalled by the
+ * shell rather than told to shut down, and the container it launched detached
+ * would outlive it as an orphan.
+ */
+export async function restartConsolePane(
+  client: CmuxClient,
+  spec: WorkspaceSpec,
+  opts: OperationsPlanOptions,
+  title: string,
+): Promise<RestartResult> {
+  const workspaceId = await findWorkspace(client, spec.name);
+  if (workspaceId === null) {
+    throw new Error(
+      `${spec.name}: no ${spec.name} workspace is open, so there is no pane to restart — ` +
+        `open the console first`,
+    );
+  }
+  const plan = planPanes(spec, opts);
+  const planned = plan.find((p) => p.title === title);
+  if (planned === undefined) {
+    throw new Error(
+      `${spec.name}: '${title}' is not a pane this console plans — it holds ` +
+        `${plan.map((p) => p.title).join(", ")}`,
+    );
+  }
+  const panes = await titledPanes(client, workspaceId);
+  const surfaceId = surfaceForTitle(panes, title);
+  if (surfaceId === null) {
+    /*
+     * The open console does not hold the pane the plan names. That is a real
+     * divergence — a `--workers` set that differs from the one the console was
+     * built with, or a pane closed by hand — and it is reported with what IS
+     * there rather than as "not found", because the two fixes differ.
+     */
+    throw new Error(
+      `${spec.name}: no pane titled '${title}' in the open console, which holds ` +
+        `${panes.map((p) => p.title ?? "(untitled)").join(", ")} — ` +
+        `rebuild it with --recreate if the worker set changed`,
+    );
+  }
+  await client.runOk(respawnPaneArgv(workspaceId, surfaceId, planned.command));
+  return { workspaceId, surfaceId, present: panes.map((p) => p.title) };
 }
 
 /**
@@ -175,7 +388,7 @@ export async function createWorkspace(
   spec: WorkspaceSpec,
   opts: OperationsPlanOptions,
 ): Promise<EnsureResult> {
-  const panes = spec.panes(opts);
+  const panes = planPanes(spec, opts);
 
   // `--cwd` is the INVOCATION directory: panes 2 and 3 are about where the
   // operator is working, not about where this repository happens to live.
@@ -250,15 +463,49 @@ export async function createWorkspace(
  * `new-split` has no size argument — it halves — so the shape is corrected here
  * against the geometry cmux reports rather than requested up front.
  *
- * EACH COLUMN IS RESIZED SEPARATELY, and that is a property of the layout
- * rather than caution: a 2x2 built by splitting each column downward has two
- * independent horizontal dividers, and moving one leaves the other where it
- * was. Measured — resizing a single top pane moved only its own column and left
- * the console visibly uneven.
+ * A RESIZE ADDRESSES A BORDER, NOT A PANE, and that is the fact this function
+ * got wrong for as long as it existed.
+ *
+ * `resize-pane --pane <id> -U` asks cmux to move the border ABOVE that pane. A
+ * pane in the top row has none, and cmux refuses:
+ *
+ *   Error: invalid_state: Pane has no adjacent border in direction up
+ *
+ * So a top row that is too TALL cannot be corrected by shrinking a top pane;
+ * the only border between the rows is the one below it, and the pane that can
+ * move it upward is the one UNDERNEATH. The two directions therefore address
+ * different rows:
+ *
+ *   divider DOWN  (grow the top row)    -> `-D` on a TOP pane
+ *   divider UP    (shrink the top row)  -> `-U` on a BOTTOM pane
+ *
+ * Both always name a border that exists. Choosing the row by the SIGN of the
+ * correction is what makes that true, and it is why this is not simply a loop
+ * over the top row with a signed direction — which is what stood here, and
+ * which threw `invalid_state` into the `catch` below on every console whose
+ * top row needed to shrink. The layout then kept whatever `new-split` had
+ * produced and nothing said so.
+ *
+ * THE GEOMETRY IS RE-READ BEFORE EVERY PANE, for the second half of the same
+ * problem. The console this function actually builds is two agent panes over
+ * ONE full-width monitor, so both top panes share a SINGLE divider. Computing
+ * every delta from one snapshot moves that divider once per pane in the row,
+ * each move starting where the last one left it.
+ *
+ * MEASURED 2026-09-03 against a 1052px container asked for a 65% top row: both
+ * top panes were 629.6px, each was told to grow by the same 54.2px, and the row
+ * ended at 737.6px — 70.1%, which is the target plus one extra application.
+ * Re-reading drops the second pane's delta under the sub-pixel skip in that
+ * layout, while a row with independent dividers per column still sees a real
+ * delta for each and is corrected exactly as before. One rule covers both
+ * shapes because it asks what the layout currently is instead of assuming
+ * which one it is.
  *
  * Best-effort on purpose. A console whose panes are all correct but evenly
  * split is fully usable; refusing to return one because a cosmetic resize
- * failed would trade the whole feature for a nicety.
+ * failed would trade the whole feature for a nicety. That restraint is also
+ * what hid both defects above for as long as it did, so the `catch` now says
+ * what it swallowed.
  */
 async function applyTopFraction(
   client: CmuxClient,
@@ -270,23 +517,69 @@ async function applyTopFraction(
   // keeps "no correction wanted" distinguishable from "correction computed to
   // nothing", which is the difference between a stated layout and a lucky one.
   if (fraction === null) return;
+  /**
+   * A geometry read that cannot be parsed is SILENT, and a resize that is
+   * REFUSED is not. The two failures say different things: the first means
+   * this backend did not report a `container_frame` — every test double, and
+   * any cmux whose `list-panes` shape moved — so there is nothing to correct
+   * and nothing an operator could do. The second means the correction was
+   * computed, attempted, and rejected, which is the case that went unreported
+   * through every rebuild until it was measured.
+   */
+  let first: ReturnType<typeof parsePaneGeometry>;
   try {
-    const geo: ReturnType<typeof parsePaneGeometry> = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
-    if (geo.panes.length < 2) return;
-    const topY = Math.min(...geo.panes.map((p) => p.y));
-    const target = geo.containerHeight * fraction;
-    for (const pane of geo.panes) {
-      if (pane.y !== topY) continue;
+    first = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+  } catch {
+    return;
+  }
+  try {
+    if (first.panes.length < 2) return;
+    const topY = Math.min(...first.panes.map((p) => p.y));
+    const topTarget = first.containerHeight * fraction;
+    const topHeight = Math.max(
+      ...first.panes.filter((p) => p.y === topY).map((p) => p.height),
+    );
+    // Already right, and neither row needs a command. Checked before the row is
+    // chosen because the sign of a sub-pixel delta is noise, and acting on it
+    // would pick a row to issue a no-op against.
+    if (Math.abs(topTarget - topHeight) < 1) return;
+    const growTop = topTarget > topHeight;
+    // The row that OWNS the border for this direction, and the direction that
+    // names it from there. See the docblock: the other row has no such border
+    // and the call is refused.
+    const movingIds = first.panes
+      .filter((p) => (growTop ? p.y === topY : p.y !== topY))
+      .map((p) => p.paneId);
+    const dir = growTop ? "D" : "U";
+    for (const paneId of movingIds) {
+      const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+      const pane = geo.panes.find((p) => p.paneId === paneId);
+      if (pane === undefined) continue;
+      // Expressed against the row being moved: the top row's target is the
+      // fraction, the bottom row's is its complement.
+      const target = geo.containerHeight * (growTop ? fraction : 1 - fraction);
       const delta = target - pane.height;
       // Sub-pixel deltas are what an already-correct layout produces; issuing
-      // them would be a no-op command per pane on every adoption.
+      // them would be a no-op command per pane on every adoption. With a shared
+      // divider this is also the arm that stops the second pane re-applying a
+      // correction the first one already made.
       if (Math.abs(delta) < 1) continue;
-      await client.runOk(
-        resizePaneArgv(pane.paneId, delta > 0 ? "D" : "U", Math.abs(delta)),
-      );
+      // Only ever the direction chosen above. A delta whose sign disagrees with
+      // it means the divider has already passed the target — the next pane's
+      // re-read will see that as sub-pixel or as an overshoot, and either way
+      // reversing here would fight the border from the row that cannot reach
+      // it.
+      if (delta < 0) continue;
+      await client.runOk(resizePaneArgv(paneId, dir, delta));
     }
-  } catch {
-    // See the docblock: layout is cosmetic, the console is not.
+  } catch (err) {
+    // See the docblock: layout is cosmetic, the console is not. But a silent
+    // catch is how `invalid_state` went unreported through every rebuild, so
+    // the operator gets a line and still gets a console.
+    process.stderr.write(
+      `operations: pane layout left as split ` +
+        `(${err instanceof Error ? err.message : String(err)})\n`,
+    );
   }
 }
 
@@ -346,9 +639,36 @@ export async function ensureWorkspace(
   spec: WorkspaceSpec,
   opts: OperationsPlanOptions,
   recreate = false,
+  /**
+   * §6.10's adoption guard, OPT-IN — `undefined` keeps this function's existing
+   * behaviour byte for byte.
+   *
+   * Opt-in rather than universal because the hazard is not universal. §6.10
+   * scopes the refusal to `scripts/review`, and it is scoped there because
+   * `review` is the console whose name collided with a workspace that was
+   * already open. `operations` and `development` have been adopting their own
+   * workspaces for months against consoles this repository created, and turning
+   * a guard on for them would convert every stale-but-mine console — the exact
+   * state the `--recreate` docblock above describes and tolerates — into a
+   * refusal. A guard that fires on the healthy case is one that gets deleted.
+   *
+   * The predicate is passed IN rather than derived from `spec`, so this function
+   * stays a workspace operation and the console-shaped policy stays with the
+   * console.
+   */
+  guard?: (panes: readonly TitledPane[]) => string | null,
 ): Promise<EnsureResult> {
   const existing = await findWorkspace(client, spec.name);
   if (existing !== null && !recreate) {
+    /**
+     * CHECKED BEFORE THE SELECT, not after. `selectWorkspaceArgv` raises
+     * somebody else's window to the front and steals their focus, which is a
+     * small harm and still one this refusal has no reason to cause.
+     */
+    if (guard !== undefined) {
+      const refusal = guard(await titledPanes(client, existing));
+      if (refusal !== null) throw new Error(refusal);
+    }
     await client.runOk(selectWorkspaceArgv(existing));
     return { created: false, workspaceId: existing };
   }
@@ -383,4 +703,32 @@ export async function ensureDevelopment(
   recreate = false,
 ): Promise<EnsureResult> {
   return ensureWorkspace(client, DEVELOPMENT_SPEC, opts, recreate);
+}
+
+/**
+ * {@link ensureWorkspace} for the four-agent multi-model review console, WITH
+ * §6.10's adoption guard.
+ *
+ * The one console that carries it, and the reason is `Docs/SRD-REVIEW-CONSOLE.md`
+ * §0.5 correction 5: a `review` workspace was already open on this machine
+ * before this feature existed. See {@link adoptionRefusal}.
+ *
+ * `--recreate` is deliberately NOT guarded. It is the operator saying "replace
+ * that workspace", which is the whole remedy the refusal names, and a flag whose
+ * own error message tells you to pass it and then refuses when you do is not a
+ * guard, it is a wall.
+ */
+export async function ensureReview(
+  client: CmuxClient,
+  opts: OperationsPlanOptions,
+  recreate = false,
+): Promise<EnsureResult> {
+  const planned = planPanes(REVIEW_SPEC, opts).map((p) => p.title);
+  return ensureWorkspace(client, REVIEW_SPEC, opts, recreate, (panes) =>
+    adoptionRefusal(
+      REVIEW_SPEC.name,
+      panes.map((p) => p.title),
+      planned,
+    ),
+  );
 }

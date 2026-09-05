@@ -725,3 +725,72 @@ describe("an inbox envelope this build cannot read", () => {
     expect(parsed.totals.tasks).toBeGreaterThan(0);
   });
 });
+
+/**
+ * `pifleet report` is what an operator runs when something went wrong, and a
+ * refused envelope is the case where the worker's own account of what it did
+ * was thrown away whole. The row for that task is otherwise indistinguishable
+ * from the row for a worker that wrote nothing — both are `unknown` — and that
+ * indistinguishability is what let a discarded review with fourteen findings
+ * read as silence.
+ */
+describe("collectRunReport — a discarded envelope is a note", () => {
+  async function runWithResult(
+    id: string,
+    taskId: string,
+    body: Record<string, unknown>,
+  ): Promise<string> {
+    const rp = runPaths(id, runsDir);
+    await mkdir(rp.inboxDir, { recursive: true });
+    await writeFile(rp.runJson, JSON.stringify({ run_id: id }), "utf8");
+    await writeFile(
+      join(rp.inboxDir, `${taskId}.json`),
+      JSON.stringify({ ...envelope(taskId, "w1", wtGood), run_id: id }),
+      "utf8",
+    );
+    await mkdir(join(runsDir, id, "outbox", "w1", taskId), { recursive: true });
+    await writeFile(
+      join(runsDir, id, "outbox", "w1", taskId, "result.json"),
+      JSON.stringify({ schema: "pifleet.result/v1", task_id: taskId, epoch: 1, worker: "w1", ...body }),
+    );
+    return id;
+  }
+
+  const collectOne = (id: string) =>
+    collectRunReport(runPaths(id, runsDir), { precheck: async () => [] });
+
+  test("a refused envelope is named, with the harvester's own reason", async () => {
+    // Refused for what it SAYS: the artifact points outside the mount table,
+    // which voids the whole document rather than that one claim.
+    const id = await runWithResult("refusednote", "t-ref", {
+      status: "success",
+      summary: "a good review, pointed somewhere it may not point",
+      files_changed: [{ path: "f.txt", change: "modified" }],
+      artifacts: [{ kind: "file", path: "/etc/passwd" }],
+    });
+
+    const { notes, report } = await collectOne(id);
+    const note = notes.find((n) => n.includes("t-ref")) ?? "";
+    expect(note).toContain("REFUSED");
+    expect(note).toContain("mount table");
+    // The report still exists and the row is still there: one discarded
+    // envelope degrades a row, it does not lose the run.
+    expect(RunReportSchema.parse(report)).toBeTruthy();
+  });
+
+  /**
+   * The control that makes the assertion above mean something. A clean
+   * envelope must produce NO such note — otherwise the note is decoration
+   * rather than a signal, and an operator learns to skip past it.
+   */
+  test("an envelope that read cleanly produces no such note", async () => {
+    const id = await runWithResult("cleannote", "t-ok", {
+      status: "success",
+      files_changed: [{ path: "f.txt", change: "modified" }],
+    });
+
+    const { notes } = await collectOne(id);
+    expect(notes.some((n) => n.includes("REFUSED"))).toBe(false);
+    expect(notes.some((n) => n.includes("could not be read"))).toBe(false);
+  });
+});

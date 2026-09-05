@@ -26,9 +26,8 @@
 
 import { monotonicMs } from "../util/clock.ts";
 import { deriveActivity } from "./activity.ts";
-import { type FleetModel, type GitStrip, type Region, type RunRow, type ViewState, type WorkerRow, failed, never, ok } from "./model.ts";
+import { type FleetModel, type Region, type RunRow, type ViewState, type WorkerRow, failed, never, ok } from "./model.ts";
 import { readDockerContainers } from "./read/docker.ts";
-import { readGit } from "./read/git.ts";
 import { readHistory } from "./read/history.ts";
 import { readRuns, type PartialRunRow } from "./read/runs.ts";
 import { readWorkerDetail } from "./read/detail.ts";
@@ -39,8 +38,6 @@ import { runPaths } from "../run/paths.ts";
 export interface ComposeOptions {
   /** Runs root. Defaults to `PIFLEET_RUNS_DIR` via `runsRoot()`. */
   readonly root?: string;
-  /** Repository the git strip watches. */
-  readonly watchDir: string;
   readonly columns: number;
   /** MONOTONIC, for every `readAt` and for `FleetModel.now`. */
   readonly now?: () => number;
@@ -92,16 +89,14 @@ export async function composeFleet(opts: ComposeOptions): Promise<FleetModel> {
    */
   const view = opts.view ?? { kind: "fleet" };
 
-  const [partial, git, payload] = await Promise.all([
+  const [partial, payload] = await Promise.all([
     readRuns({ root: opts.root, containers: containerSet, now, wallNow }),
-    readGit({ watchDir: opts.watchDir, now }),
     fetchForView(view, { root: opts.root, now, wallNow }),
   ]);
 
   return {
     runs: joinRuns(partial, wallNow()),
     containers,
-    git,
     // Views 2-4 are ENTERED, never composed into a fleet tick (D8, §5.3).
     // On the fleet view all three of these are `never()` — not read, as
     // distinct from read-and-empty (`model.ts:57-65`) — and `fetchForView`
@@ -215,7 +210,6 @@ export function modelFrom(
     /** The fast clock's per-worker refresh (§6.3). See {@link preferFresher}. */
     readonly workers?: Region<readonly PartialRunRow[]>;
     readonly containers: Region<readonly string[]>;
-    readonly git: Region<GitStrip>;
   },
   opts: {
     readonly now: number;
@@ -243,7 +237,6 @@ export function modelFrom(
     view: opts.view ?? { kind: "fleet" },
     ...(opts.payload ?? { history: never(), detail: never(), report: never() }),
     containers: snapshot.containers,
-    git: snapshot.git,
     now: opts.now,
     columns: opts.columns,
   };

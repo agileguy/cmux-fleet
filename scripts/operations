@@ -30,7 +30,13 @@ import {
   OPERATIONS_WORKSPACE,
   operationsPanes,
 } from "../src/backends/cmux/operations-plan.ts";
-import { cmuxReachable, ensureOperations } from "../src/backends/cmux/operations.ts";
+import {
+  OPERATIONS_SPEC,
+  cmuxReachable,
+  ensureOperations,
+  restartConsolePane,
+} from "../src/backends/cmux/operations.ts";
+import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
 import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/operations [options]
@@ -42,6 +48,10 @@ const USAGE = `Usage: scripts/operations [options]
   --poll <seconds>  git pane refresh interval (default: 5)
   --dry-run         print the pane plan and exit without touching cmux
   --recreate        close an existing operations workspace and rebuild it
+  --restart <title> respawn ONE pane by title, leaving the others running
+  --task <path>     with --restart: recreate the worker, then dispatch this
+                    task. Waits for work it already holds; never recreates
+                    over a running or staged task.
   -h, --help        this message
 `;
 
@@ -118,7 +128,18 @@ async function main(argv: string[]): Promise<number> {
   // Built before the cmux probe on purpose: a bad `--workers` or `--poll` is
   // an argv mistake, and diagnosing it must not depend on whether the GUI
   // happens to be running.
-  const panes = operationsPanes({ ...opts, tuiWorkers });
+  /*
+   * `workspaceName: OPERATIONS_SPEC.name` so `--dry-run` prints the command
+   * that will ACTUALLY run. The live path folds the title in at `planPanes`
+   * (`operations.ts`); this call bypasses that, so without it the preview would
+   * omit `--workspace-name` and quietly disagree with the pane it previews —
+   * which is the one thing a dry run must not do.
+   *
+   * Taken from the SPEC rather than from the `OPERATIONS_WORKSPACE` constant
+   * directly: `spec.name` is what `workspace create --name` uses and what
+   * `planPanes` folds in, so this reads the same field the live path does.
+   */
+  const panes = operationsPanes({ ...opts, tuiWorkers, workspaceName: OPERATIONS_SPEC.name });
 
   if (argv.includes("--dry-run")) {
     process.stdout.write(`workspace: ${OPERATIONS_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
@@ -201,6 +222,72 @@ async function main(argv: string[]): Promise<number> {
   // a console, so one whose panes have died, or whose commands were built by an
   // older version of this script, is adopted forever and reported as "already
   // in place — changed nothing", which is true and useless.
+  /*
+   * `--restart <title>` — one pane, and nothing else touched.
+   *
+   * TITLE, not worker id, because this console's panes are not all workers:
+   * `fleet-status` and the monitor are panes too, and a wedged watch pane is
+   * as worth restarting as a wedged agent. `restartConsolePane` resolves
+   * against the PLAN, so the set of legal values is whatever this console
+   * builds, and a title that is not one of them is refused with the list.
+   *
+   * The run teardown is scoped to a run actually holding that id, so naming a
+   * watch pane stops nothing and simply respawns it.
+   */
+  const restartFlag = flag(argv, "--restart");
+  if (restartFlag !== undefined) {
+    /*
+     * `--task` makes this recreate-then-dispatch. See the same branch in
+     * `scripts/development` and `src/run/fresh-dispatch.ts`: a tui worker
+     * keeps its session across epochs, so a dispatch can be answered from the
+     * PREVIOUS task's transcript. The waiting and the refusal are in the
+     * module; only the side effects are supplied here.
+     */
+    const taskFlag = flag(argv, "--task");
+    if (taskFlag !== undefined) {
+      const fresh = await recreateThenDispatch(
+        {
+          status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          down: async (runId) => {
+            process.stderr.write(`operations: stopping run ${runId}\n`);
+            await runOutput(repoRoot, ["down", "--run", runId]);
+          },
+          restartPane: async () => {
+            process.stderr.write(`operations: respawning the ${restartFlag} pane\n`);
+            await restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+          },
+          dispatch: (runId) =>
+            runOutput(repoRoot, [
+              "dispatch", "--worker", restartFlag, "--run", runId,
+              "--task", taskFlag, "--json",
+            ]),
+          sleep: (ms) => Bun.sleep(ms),
+          now: () => Date.now(),
+        },
+        { worker: restartFlag },
+      );
+      process.stdout.write(
+        `operations: recreated ${restartFlag} into run ${fresh.runId} ` +
+          `(waited ${Math.round(fresh.settleWaitMs / 1000)}s, stopped ` +
+          `${fresh.stopped.length === 0 ? "nothing" : fresh.stopped.join(", ")}) ` +
+          `and dispatched ${taskFlag}\n${fresh.dispatched}`,
+      );
+      return EXIT.SUCCESS;
+    }
+
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
+      process.stderr.write(`operations: stopping run ${runId} before restarting ${restartFlag}\n`);
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+    const r = await restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+    process.stdout.write(
+      `operations: respawned the ${restartFlag} pane (surface ${r.surfaceId}) ` +
+        `in workspace ${r.workspaceId}; the other panes were not touched\n`,
+    );
+    return EXIT.SUCCESS;
+  }
+
   const recreate = argv.includes("--recreate");
   const result = await ensureOperations(client, { ...opts, tuiWorkers }, recreate);
   process.stdout.write(
