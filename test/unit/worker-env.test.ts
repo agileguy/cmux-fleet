@@ -10,6 +10,7 @@
  * fails on that, which is exactly why it is asserted here.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -901,5 +902,102 @@ describe("a worker's context window is its own provider's", () => {
         "PIFLEET_LLM_CONTEXT_WINDOW",
       );
     }
+  });
+});
+
+/**
+ * A ROLE'S `thinking` HAS TO ARRIVE, and until 2026-09-05 it did not.
+ *
+ * `thinking` was resolved by `resolveWorker`, printed by `doctor` and `render`,
+ * carried in dispatch requests, and handed to no container: nothing under
+ * `src/run/` or `src/backends/` read the field. Every worker therefore ran at
+ * Pi's own `DEFAULT_THINKING_LEVEL`, and the review console's four hosted seats
+ * — all four configured `thinking: high` on the argument that a reviewer must
+ * think longest per token read — were measured opening their sessions at
+ * `thinkingLevel: "off"`, five live reviews in.
+ *
+ * ## Why the existing probe did not catch it, which is the part worth keeping
+ *
+ * `review-plan.test.ts` asserts `resolveWorker(id).thinking === "high"`. That is
+ * the value this module is supposed to CARRY; it is not evidence that anything
+ * carried it, and it passed for the whole time the field went nowhere. The same
+ * shape cost this fleet its context windows once already — resolved correctly
+ * host-side while two 1,048,576-token models ran at 128,000 — so the probes
+ * below assert the DELIVERED value, and the one after them reads the shell that
+ * consumes it.
+ *
+ * The fixture is asymmetric on purpose: two roles that both name a level name
+ * DIFFERENT levels, so an implementation that hardcodes one, or that hands
+ * every worker the fleet default, scores zero rather than half.
+ */
+describe("a worker's reasoning effort reaches its container", () => {
+  const efforts = () =>
+    baseDoc({
+      roles: {
+        deep: { thinking: "high" },
+        cheap: { thinking: "low" },
+        unset: {},
+      },
+      workers: [
+        { id: "wd", role: "deep" },
+        { id: "wc", role: "cheap" },
+        { id: "wu", role: "unset" },
+      ],
+    });
+
+  test("two roles at two levels arrive as two different values", async () => {
+    const loaded = await load(efforts());
+    const deep = buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), {});
+    const cheap = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {});
+
+    expect(deep.vars["PIFLEET_PI_THINKING"]).toBe("high");
+    expect(cheap.vars["PIFLEET_PI_THINKING"]).toBe("low");
+    // The arm a hardcoded level or a fleet-wide default would fail.
+    expect(deep.vars["PIFLEET_PI_THINKING"]).not.toBe(cheap.vars["PIFLEET_PI_THINKING"]);
+  });
+
+  /**
+   * EMPTY, not a guess. `settings.json` is Pi's own state file on a volume that
+   * outlives the run, so "" has to mean "config has no opinion, keep whatever
+   * the operator set with `/settings`" — the same rule `PIFLEET_PI_THEME`
+   * follows, and for the same reason: writing a default here would overwrite a
+   * hand-made choice on every restart.
+   */
+  test("a role that names no level leaves the pane's own setting alone", async () => {
+    const loaded = await load(efforts());
+    const unset = buildWorkerEnv(loaded, resolveWorker(loaded, "wu"), {});
+    expect(unset.vars["PIFLEET_PI_THINKING"]).toBe("");
+  });
+
+  test("the variable is written for every worker, levelled or not", async () => {
+    const loaded = await load(efforts());
+    for (const id of ["wd", "wc", "wu"]) {
+      const vars = buildWorkerEnv(loaded, resolveWorker(loaded, id), {}).vars;
+      expect(Object.keys(vars), `${id} has no thinking variable`).toContain("PIFLEET_PI_THINKING");
+    }
+  });
+
+  /**
+   * THE FAR END, read as text, because the delivery is only half the plumbing.
+   *
+   * A variable that reaches the container and is consumed by nothing is exactly
+   * the defect this block exists for, one layer along. `entrypoint.sh` is a
+   * shell script with no unit-testable seam, so the assertion is on its source:
+   * it must name the variable, and it must write Pi's own settings key.
+   *
+   * `defaultThinkingLevel` is that key — Pi's `settings-manager.js` reads
+   * `this.settings.defaultThinkingLevel` in `getDefaultThinkingLevel()` and
+   * falls back to `DEFAULT_THINKING_LEVEL` when it is absent. A misspelling
+   * here is silent: the file is still valid JSON, Pi still starts, and the
+   * level is still the default.
+   */
+  test("the entrypoint consumes the variable and writes Pi's own settings key", () => {
+    const entrypoint = readFileSync(new URL("../../docker/entrypoint.sh", import.meta.url).pathname, "utf8");
+    expect(entrypoint, "entrypoint.sh never reads PIFLEET_PI_THINKING").toContain(
+      "PIFLEET_PI_THINKING",
+    );
+    expect(entrypoint, "entrypoint.sh never writes defaultThinkingLevel").toContain(
+      "defaultThinkingLevel",
+    );
   });
 });

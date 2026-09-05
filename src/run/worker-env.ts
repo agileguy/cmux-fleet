@@ -684,6 +684,35 @@ export function buildWorkerEnv(
      */
     PIFLEET_PI_THEME: w.theme ?? "",
     /*
+     * The reasoning effort this worker's role asked for, by name.
+     *
+     * ## It did not travel at all until 2026-09-05, and nothing noticed
+     *
+     * `thinking` was resolved by `resolveWorker`, printed by `doctor` and
+     * `render`, carried in dispatch requests — and never handed to a container.
+     * `grep -rn thinking src/run src/backends` found no consumer. So every seat
+     * ran at Pi's own `DEFAULT_THINKING_LEVEL`, and the review console's four
+     * hosted seats — all four configured `thinking: high` on the argument that
+     * a reviewer must think longest per token read — were measured starting
+     * their sessions at `thinkingLevel: "off"`, five live reviews deep.
+     *
+     * **The test that should have caught it asserted the wrong end.**
+     * `review-plan.test.ts` checks `resolveWorker(id).thinking === "high"`,
+     * which is the value this file is supposed to CARRY, not evidence that it
+     * arrived. It passed throughout. That is the same shape as the context
+     * window, which spent its own stretch resolving correctly host-side while
+     * two 1,048,576-token models ran at Pi's 128,000 default — and it is why
+     * the probe for this one reads `docker/entrypoint.sh` as well.
+     *
+     * EMPTY STRING when the role named no level, on exactly the argument
+     * `PIFLEET_PI_THEME` above makes: `settings.json` is Pi's OWN state file,
+     * persisted on a volume that outlives the run, so "" has to mean "config
+     * has no opinion, leave what is there" rather than "set it to the default".
+     * A worker whose role omits `thinking` keeps whatever the operator chose
+     * inside the pane; one whose role names it gets that value on every start.
+     */
+    PIFLEET_PI_THINKING: w.thinking ?? "",
+    /*
      * WHICH of this file's entries are credentials, by name.
      *
      * Declared HERE, empty, and filled in at the bottom of this function once
