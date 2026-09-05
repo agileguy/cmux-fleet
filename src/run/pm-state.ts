@@ -77,14 +77,14 @@
  *     the difference is principled rather than lax: `base_sha` there is
  *     written by `mergeWorkerBranch` from `git rev-parse`, and this one is
  *     typed by an operator recording where a run started.
- *   - **It carries twelve fields §7.6 does not list** — `srd_version`,
+ *   - **It carries thirteen fields §7.6 does not list** — `srd_version`,
  *     `baseline_suite`, `review_at_end_of_each_phase`, `max_review_iterations`,
  *     `parallel_engineers`, `prior_run_state`, `decisions`, `measurements`,
- *     `pause_point`, `resume_from`, `verified_at_pause`, `review_round_status`.
- *     Accepted, because finding E's whole claim is that the file's shape leads
- *     the spec, and because SRD prose elsewhere already depends on two of them
- *     (§2.7 quotes `review_at_end_of_each_phase`; §6.4 step 10 bounds the
- *     review loop with `max_review_iterations`). They are listed explicitly
+ *     `pause_point`, `resume_from`, `verified_at_pause`, `review_round_status`,
+ *     `skill_install`. Accepted, because finding E's whole claim is that the
+ *     file's shape leads the spec, and because SRD prose already depends on two
+ *     of them (§2.7 quotes `review_at_end_of_each_phase`; §6.4 step 10 bounds
+ *     the review loop with `max_review_iterations`). They are listed explicitly
  *     rather than swept into a passthrough bag, so `.strict()` still catches a
  *     typo.
  *
@@ -481,6 +481,17 @@ export const PmStateDocumentSchema = z
     resume_from: text.default(""),
     verified_at_pause: text.default(""),
     review_round_status: text.default(""),
+    /*
+     * The THIRTEENTH, and the reason this list is worth more than a
+     * passthrough bag. It did not exist when the twelve above were
+     * enumerated: the run writing this file added it hours later, to record
+     * where the phase 5 skill install actually landed. The test below that
+     * reads the real document caught it on the first merge — which is the
+     * enumeration earning its keep, and §0.6 finding E ("§7.6 specifies the
+     * shape practice already reached") observed happening rather than
+     * quoted.
+     */
+    skill_install: text.default(""),
   })
   .strict()
   .superRefine((doc, ctx) => {

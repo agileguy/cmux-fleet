@@ -38,6 +38,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { opsBudget } from "../support/budget.ts";
 
 /** The subset of `pifleet worktrees --json` this criterion reads. */
 interface WorktreeRecord {
@@ -49,6 +50,29 @@ interface RunWorktrees {
   readonly repo: string;
   readonly worktrees: readonly WorktreeRecord[];
 }
+
+/*
+ * TIME BUDGETS (ISC-274). Every spawn below is `git` and nothing else — this
+ * file never invokes the pifleet CLI — so the derivation is `opsBudget({git:
+ * n})` rather than `cliBudget(n)`. `cliBudget` is calibrated to the ~1900 ms it
+ * costs to transpile and run the CLI entrypoint, and charging a bare `git init`
+ * at that rate would be, in `budget.ts`'s own words, a derivation in appearance
+ * only.
+ *
+ * The counts are of the body, not estimates: `makeRepo` spawns 3 (`init`,
+ * `add`, `commit`), `makeWorkerClone` spawns 4 (`clone`, `checkout`, `remote
+ * remove`, `remote add`), and `unreachableWorkers` spawns one `ls-remote` per
+ * worktree it is given.
+ *
+ * Every count here lands under `budget.ts`'s 5000 ms floor, which is correct
+ * rather than a shortfall: measured warm, the whole file runs in 1.96 s across
+ * four tests (~400 ms each at 13 spawns), so the floor is already ~12x the work
+ * and the guard exists to stop a budget being INHERITED, not to make it large.
+ * `git clone` is the one op here heavier than the `add`/`commit`/`rev-parse`
+ * mix PER_GIT_OP_MS was measured over; it is a local one-commit repository, so
+ * it hardlinks rather than packs, and the measured per-test time above is the
+ * evidence that it does not change the shape.
+ */
 
 let tmp: string;
 
@@ -153,6 +177,7 @@ afterAll(async () => {
 });
 
 describe("ISC-531: every worker's clone is reachable at the branch the run records", () => {
+    // 1 makeRepo (3) + 2 makeWorkerClone (8) + 2 ls-remote = 13.
   test("a correctly wired run passes", async () => {
     const repo = await makeRepo("launch-ok");
     const runId = "2026-09-05T10-00-00Z-aaaa";
@@ -163,7 +188,7 @@ describe("ISC-531: every worker's clone is reachable at the branch the run recor
     // Anti-vacuity: an empty roster passes any per-worker check.
     expect(worktrees.length).toBeGreaterThan(1);
     expect(await unreachableWorkers({ repo, worktrees })).toEqual([]);
-  });
+  }, opsBudget({ git: 13 }));
 
   /**
    * THE CASE THE CRITERION EXISTS FOR, and the reason it is written on
@@ -172,6 +197,7 @@ describe("ISC-531: every worker's clone is reachable at the branch the run recor
    * the remote points at a previous run's clone, which is exactly what three
    * remotes in this repository were doing when this was written.
    */
+    // 1 makeRepo (3) + 1 makeWorkerClone (4) + 1 direct ls-remote + 1 ls-remote = 9.
   test("a remote left pointing at a PREVIOUS run's clone is caught, though it resolves", async () => {
     const repo = await makeRepo("launch-stale");
     const oldRun = "2026-09-04T03-04-12Z-ce9f";
@@ -197,7 +223,7 @@ describe("ISC-531: every worker's clone is reachable at the branch the run recor
     expect(bad).toHaveLength(1);
     expect(bad[0]).toContain("eng-1");
     expect(bad[0]).toContain(`fleet/${newRun}/eng-1`);
-  });
+  }, opsBudget({ git: 9 }));
 
   /**
    * The other half of the same wiring failure: the console moved to a
@@ -206,6 +232,7 @@ describe("ISC-531: every worker's clone is reachable at the branch the run recor
    * console was launched from `~/repos/rally-cli` while `~/repos/cmux-fleet`
    * still carried the remotes.
    */
+    // 2 makeRepo (6) + 1 makeWorkerClone (4) + 2 ls-remote = 12.
   test("a run whose remotes were registered on a DIFFERENT repository is caught", async () => {
     const wrongRepo = await makeRepo("launch-other");
     const rightRepo = await makeRepo("launch-real");
@@ -220,8 +247,9 @@ describe("ISC-531: every worker's clone is reachable at the branch the run recor
     // ...and the same record against its own repo is clean, so the failure
     // above is about the repository and not about the record.
     expect(await unreachableWorkers({ repo: rightRepo, worktrees: [w] })).toEqual([]);
-  });
+  }, opsBudget({ git: 12 }));
 
+    // 1 makeRepo (3) + 1 makeWorkerClone (4) + 1 ls-remote = 8.
   test("the check is not vacuous — a missing branch on a present remote fails", async () => {
     const repo = await makeRepo("launch-nobranch");
     const w = await makeWorkerClone(repo, "2026-09-05T03-00-00Z-cccc", "eng-3");
@@ -231,5 +259,5 @@ describe("ISC-531: every worker's clone is reachable at the branch the run recor
     });
     expect(bad).toHaveLength(1);
     expect(bad[0]).toContain("does not hold");
-  });
+  }, opsBudget({ git: 8 }));
 });
