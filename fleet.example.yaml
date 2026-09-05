@@ -486,7 +486,7 @@ roles:
     isolation: shared-ro
   tester:
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
-    toolchain: node
+    toolchain: python
     tools: [read, bash, grep, find, ls]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/tester.md
@@ -602,7 +602,7 @@ workers:
   # a person's keyboard on Pi's own interface, not a widening of the agent's
   # tool grant. `pifleet shell` still reaches the container, because that is
   # the FLEET exec'ing in, not a tool the reviewer may call.
-  - {id: rev-1,  role: reviewer,  pane_mode: tui, theme: nord}
+  - {id: tst-2,  role: tester,   pane_mode: tui, theme: nord}
   # One, not two. A second concurrent writer against the same ticket system is
   # a way to interleave two workers' edits on one object, and nothing in the
   # fleet serialises them.

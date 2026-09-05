@@ -28,6 +28,8 @@ import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
+import { DEFAULT_DEVELOPMENT_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
+import { REVIEW_CONSOLE_ROSTER } from "../../src/run/dispatch-request.ts";
 import {
   BackendSchema,
   RESERVED_ENV_NAMES,
@@ -90,6 +92,27 @@ async function expectIssue(doc: unknown, path: string, messageFragment?: string)
   throw new Error(`expected validation failure at "${path}" but config loaded`);
 }
 
+/**
+ * ISC-527's assertion, as a value rather than an inline `expect` — so a
+ * fixture built to collide two themes can inspect what the failure SAYS
+ * instead of just failing the test that builds it.
+ *
+ * Throws naming the two worker ids, not just the theme, because a message
+ * that only lists theme values lets a reader count a duplicate without
+ * finding it among six-plus attended panes.
+ */
+function assertDistinctThemes(attended: readonly { id: string; theme?: string }[]): void {
+  const byTheme = new Map<string, string>();
+  for (const w of attended) {
+    if (w.theme === undefined) continue;
+    const prior = byTheme.get(w.theme);
+    if (prior !== undefined) {
+      throw new Error(`workers "${prior}" and "${w.id}" both use theme "${w.theme}"`);
+    }
+    byTheme.set(w.theme, w.id);
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 describe("worked example", () => {
@@ -116,7 +139,7 @@ describe("worked example", () => {
       "eng-1",
       "eng-2",
       "tst-1",
-      "rev-1",
+      "tst-2",
       "tick-1",
     ];
     expect(loaded.config.workers).toHaveLength(expected.length);
@@ -143,10 +166,90 @@ describe("worked example", () => {
     const attended = resolveAllWorkers(loaded).filter((w) => w.paneMode === "tui");
     // Anti-vacuity: an empty or single-element set passes any uniqueness check.
     expect(attended.length).toBeGreaterThan(1);
-    const themes = attended.map((w) => w.theme);
-    // Named in the failure, not just counted, so the message says WHICH pair.
-    expect(themes.filter((t) => t === undefined)).toEqual([]);
-    expect(new Set(themes).size, `themes were ${themes.join(", ")}`).toBe(themes.length);
+    expect(attended.filter((w) => w.theme === undefined)).toEqual([]);
+    // Named in the failure, not just counted, so the message says WHICH pair —
+    // see `assertDistinctThemes` and ISC-527 below.
+    expect(() => assertDistinctThemes(attended)).not.toThrow();
+  });
+
+  /**
+   * ISC-525 (§12 seat model, D10). The `development` console's roster is
+   * `eng-1`, `eng-2`, `tst-1`, `tst-2`, and — the actual regression this
+   * guards, since the id list alone would not catch a role left behind by a
+   * partial edit — no worker in it resolves to `role: reviewer`.
+   */
+  test("ISC-525: the development console's roster holds no reviewer", async () => {
+    expect([...DEFAULT_DEVELOPMENT_WORKERS]).toEqual(["eng-1", "eng-2", "tst-1", "tst-2"]);
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    for (const id of DEFAULT_DEVELOPMENT_WORKERS) {
+      const role = resolveWorker(loaded, id).role;
+      expect(role, `${id} resolved to role "${role}"`).not.toBe("reviewer");
+    }
+  });
+
+  /**
+   * ISC-526 (§0.5 correction 1). The seat rename retires nothing: three
+   * `review`-console workers still hold `role: reviewer`, and each still
+   * layers its lens file ON TOP OF `roles/reviewer.md` rather than replacing
+   * it — `resolveWorker(...).briefing` is `defaults -> role -> worker`
+   * concatenated (`src/config/load.ts`), so the chain drops the role file the
+   * moment a future edit removes the role rather than widens it.
+   *
+   * The `review` console's real workers exist only in the untracked
+   * `fleet.yaml` (SRD §13, 1.5's note) — `fleet.example.yaml` never declares
+   * `rev-arch-1`/`rev-ctx-1`/`rev-lang-1` — so this resolves a fixture shaped
+   * like that console instead of the shipped example.
+   */
+  test("ISC-526: roles/reviewer.md still reaches three workers", async () => {
+    const roleFile = join(REPO_ROOT, "roles", "reviewer.md");
+    const lensFiles: Record<string, string> = {
+      "rev-arch-1": join(REPO_ROOT, "roles", "review", "architecture-security.md"),
+      "rev-ctx-1": join(REPO_ROOT, "roles", "review", "cross-file-contracts.md"),
+      "rev-lang-1": join(REPO_ROOT, "roles", "review", "implementation-language.md"),
+    };
+    const doc = baseDoc();
+    doc["roles"] = { eng: {}, reviewer: { append_system_prompt_file: roleFile } };
+    doc["workers"] = [
+      { id: "w1", role: "eng" },
+      ...REVIEW_CONSOLE_ROSTER.reviewers.map((id) => ({
+        id,
+        role: "reviewer",
+        append_system_prompt_file: lensFiles[id],
+      })),
+    ];
+    const loaded = await writeAndLoad(doc);
+    for (const id of REVIEW_CONSOLE_ROSTER.reviewers) {
+      const files = resolveWorker(loaded, id)
+        .briefing.filter((f) => f.kind === "file")
+        .map((f) => f.value);
+      expect(files, `${id} briefing files: ${JSON.stringify(files)}`).toContain(roleFile);
+      expect(files).toContain(lensFiles[id]);
+    }
+  });
+
+  /**
+   * ISC-527 (anti). `assertDistinctThemes` above is what "no two attended
+   * workers share a theme" now runs — this proves that when two DO collide,
+   * the failure names the pair rather than only counting one.
+   */
+  test("ISC-527 (anti): a duplicated theme names the offending pair, not just the count", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const attended = resolveAllWorkers(loaded).filter((w) => w.paneMode === "tui");
+    expect(() => assertDistinctThemes(attended)).not.toThrow();
+
+    // Mutate one seat's theme onto another attended worker's — the exact
+    // shape a copy-pasted worker line or a wrong theme after a rename would
+    // produce.
+    const mutated = attended.map((w, i) => (i === 0 ? { ...w, theme: attended[1]!.theme } : w));
+    let caught: unknown;
+    try {
+      assertDistinctThemes(mutated);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(mutated[0]!.id);
+    expect((caught as Error).message).toContain(attended[1]!.id);
   });
 
   test("the ticketing role gets no Google identity and no worktree (ISC-326)", async () => {

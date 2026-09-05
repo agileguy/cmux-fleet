@@ -234,10 +234,10 @@ describe("render", () => {
    */
   test("different roles render different models", async () => {
     const sre = JSON.parse((await render()).stdout);
-    const rev = JSON.parse(
-      (await runCli(["render", "-c", "fleet.example.yaml", "--worker", "rev-1", "--json"])).stdout,
+    const obs = JSON.parse(
+      (await runCli(["render", "-c", "fleet.example.yaml", "--worker", "obs-1", "--json"])).stdout,
     );
     const modelOf = (d: { docker: string[] }) => d.docker[d.docker.indexOf("--model") + 1];
-    expect(modelOf(sre)).not.toBe(modelOf(rev));
+    expect(modelOf(sre)).not.toBe(modelOf(obs));
   }, cliBudget(2));
 });

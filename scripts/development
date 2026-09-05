@@ -2,7 +2,7 @@
 /**
  * `scripts/development` — open the standing four-pane development console.
  *
- *   ./scripts/development                          # eng-1, eng-2, tst-1, rev-1
+ *   ./scripts/development                          # eng-1, eng-2, tst-1, tst-2
  *   ./scripts/development --workers eng-1,eng-2
  *   ./scripts/development --dry-run                # print the plan, touch nothing
  *
@@ -13,7 +13,7 @@
  * +---------------+---------------+
  * |     eng-1     |     eng-2     |
  * +---------------+---------------+
- * |     tst-1     |     rev-1     |
+ * |     tst-1     |     tst-2     |
  * +---------------+---------------+
  * ```
  *
@@ -192,7 +192,7 @@ async function main(argv: string[]): Promise<number> {
    * console had for a worker that did not come back, and it costs the other
    * three: it stops every run this console holds and rebuilds four panes to
    * fix one. Measured 2026-09-04 — a `--recreate` returned eng-1, eng-2 and
-   * tst-1 and left rev-1 with no run and no container, and the only sanctioned
+   * tst-1 and left tst-2 with no run and no container, and the only sanctioned
    * repair was a second `--recreate` that would have torn down the three that
    * had just come back.
    *
