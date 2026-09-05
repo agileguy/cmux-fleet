@@ -1,9 +1,15 @@
 import type { Command } from "commander";
 import { readdir } from "node:fs/promises";
 import { CliError } from "../index.ts";
-import { EXIT, type WorkerState } from "../../contracts.ts";
-import { latestRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
-import { readWorkerState } from "../../run/state.ts";
+import { EXIT, type WorkerPhase, type WorkerState } from "../../contracts.ts";
+import {
+  latestRunId,
+  runPaths,
+  runsRoot,
+  workerPaths,
+  type RunPaths,
+} from "../../run/paths.ts";
+import { readRunBudgetPolicy, readWorkerState } from "../../run/state.ts";
 import {
   identityAlive,
   latestLiveRunId,
@@ -39,7 +45,19 @@ import {
 export function ago(iso: string, nowMs: number): string | null {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return null;
-  const s = Math.max(0, Math.round((nowMs - then) / 1_000));
+  return coarseDuration(nowMs - then);
+}
+
+/**
+ * `ago`'s unit rules, without the parsing — extracted so the wedge alarm below
+ * can render a span it computed rather than a stamp it read.
+ *
+ * One implementation, deliberately. Two would drift, and the drift would be
+ * invisible: `41m` from one and `41 minutes` from the other on the same status
+ * line reads as two different measurements of two different things.
+ */
+function coarseDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1_000));
   if (s < 60) return `${s}s`;
   if (s < 3_600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3_600)}h`;
@@ -77,6 +95,217 @@ export function transcriptNote(
   if (activity.last_growth_at === null) return "transcript no writes yet";
   const age = ago(activity.last_growth_at, nowMs);
   return age === null ? "transcript last write unreadable" : `transcript ${age} ago`;
+}
+
+// ---------------------------------------------------------------------------
+// The wedged seat — busy, heartbeating, and nothing behind it
+//
+// A NOTE ON THE PROSE BELOW, in the style `reaper.ts` uses for the same reason:
+// the container runtime's CLI is never named in this file, and that is
+// deliberate rather than coy. `monitor-density.test.ts:202` pins the claim that
+// `status` never shells out to it by grepping this source for the name — over
+// RAW text, not comment-stripped — so a docblock that spelled it out would
+// satisfy the probe with prose and leave it unable to notice the day the code
+// really did shell out. `run -d`, `ps -a` and `inspect` below all refer to that
+// CLI's subcommands.
+// ---------------------------------------------------------------------------
+
+/**
+ * The fleet's own opinion about how long silence is too long, in milliseconds.
+ *
+ * `stall.event_stall_warn` / `event_stall_kill` from `fleet.yaml`, carried into
+ * `run.json` by `runBudgetRecord` and read back by `readRunBudgetPolicy`. It is
+ * BORROWED and never defaulted here: a status line that invented a threshold
+ * would be a second opinion about the same question, and the first thing an
+ * operator does when the two disagree is stop believing both.
+ */
+export interface StallWindow {
+  readonly warnMs: number;
+  readonly killMs: number;
+}
+
+/** Every reason this rule can decline to answer. None of them is an alarm. */
+export type SilenceUnknown =
+  | "no_activity_record"
+  | "no_growth_yet"
+  | "no_window"
+  | "unreadable_stamp";
+
+/**
+ * What `status` can say about a busy worker's silence.
+ *
+ * The five verdicts are five different facts and the point of the type is that
+ * they never collapse into each other — the same discipline `transcriptNote`
+ * keeps three facts apart with, and `ReapReport.container` keeps five:
+ *
+ * - `not_applicable` — nothing here claims to be running a task, or the
+ *   supervisor is gone. There is no question to answer.
+ * - `unknown` — there IS a question and this rule cannot answer it. `why` says
+ *   which of the four ways, because "I have no threshold" and "this worker has
+ *   never spoken" want different things done about them.
+ * - `working` / `quiet` / `wedged` — answered, in the fleet's own bands.
+ */
+export type SilenceReading =
+  | { readonly verdict: "not_applicable" }
+  | { readonly verdict: "unknown"; readonly why: SilenceUnknown }
+  | { readonly verdict: "working" | "quiet" | "wedged"; readonly silentMs: number };
+
+export interface SilenceInput {
+  /** `null` when `state.json` could not be read at all. */
+  readonly phase: WorkerPhase | null;
+  /** The `(pid, start-time)` identity check the snapshot already performs. */
+  readonly supervisorAlive: boolean;
+  readonly heartbeatAt: string | null;
+  readonly activity: WorkerState["transcript_activity"];
+  readonly window: StallWindow | null;
+}
+
+/**
+ * Tell a worker that is BUSY AND WORKING from one that is BUSY AND WEDGED.
+ *
+ * ## The defect
+ *
+ * Aborting a task can leave a worker whose `state.json` says `phase: "busy"`,
+ * whose `heartbeat_at` is rewritten every 250 ms, and whose container is gone
+ * from the runtime entirely — absent even from a listing that includes stopped
+ * ones. The seat reads as working. There is nothing in it, and until this
+ * function existed no field on the status line said so; every one of them was
+ * individually true.
+ *
+ * ## Why nothing upstream catches it
+ *
+ * `supervisor/index.ts:1109-1143` states the asymmetry that causes it. On the
+ * `rpc` path `child` IS the worker, so a container that dies takes the child
+ * with it and `onChildExit` writes `phase: "dead"`. On the `tui` path `child`
+ * is a detached `run -d` CLIENT that returned a few hundred milliseconds after
+ * launch, and the supervisor holds no handle on the container at all. That
+ * docblock names an `inspect` on the recorded container name as the honest
+ * probe, records that it is NOT built, and nominates the transcript going quiet
+ * as the substitute.
+ *
+ * The substitute is measured and then DISCARDED, which is the hole this closes:
+ * `settleFromTranscript` runs `classifyTuiTurn` first and returns early unless
+ * the reading is `ended` (`supervisor/index.ts:2262-2265`), so `TUI_QUIET_MS`
+ * is consulted only AFTER an end marker has been seen. A container killed
+ * mid-turn writes no end marker, the quiet clock is never started, and `phase`
+ * stays `busy` for as long as the supervisor lives.
+ *
+ * ## The discriminator, and why this subtraction is legal
+ *
+ * `heartbeat_at` and `transcript_activity.last_growth_at` are written by the
+ * SAME process from the SAME wall clock. Their difference is how long that
+ * supervisor has watched the transcript stand still, measured entirely inside
+ * one clock. This is NOT the cross-clock subtraction `util/clock.ts` bans and
+ * `reaper.ts` goes to such lengths to avoid — there is no second clock in it —
+ * which is why the answer survives a host suspend, a reader whose clock is
+ * skewed, and a `--json` consumer on another machine. It also means this
+ * function takes no `now`, and a caller cannot accidentally give it one.
+ *
+ * ## The honest edge
+ *
+ * A worker genuinely thinking for a long time between tool calls has a stalled
+ * transcript too. The bands are therefore the fleet's, not this file's: under
+ * `warnMs` the operator's own config calls the silence healthy, between the two
+ * it calls for a warning and explicitly not a kill, and at `killMs` it kills a
+ * slot-holding worker outright. **This alarms exactly where the fleet would
+ * already kill**, so it cannot be stricter than the opinion the operator wrote
+ * down, and a reviewer thinking for ten minutes reaches `quiet` and stops.
+ *
+ * `phase === "busy"` is the analogue of `classifyStall`'s `holdsSlot`, on that
+ * field's own reasoning: silence alone is never grounds for an alarm, because a
+ * worker not claiming to run anything is silent by design.
+ *
+ * A DEAD supervisor is excluded rather than judged. Both stamps froze together
+ * when it died, so their difference is whatever it happened to be at that
+ * moment; the line already reads `supervisor=gone`, which is the actionable
+ * fact, and that is the reaper's business (`safety/reaper.ts`) rather than
+ * this one's.
+ */
+export function classifyWorkerSilence(input: SilenceInput): SilenceReading {
+  if (input.phase !== "busy") return { verdict: "not_applicable" };
+  if (!input.supervisorAlive) return { verdict: "not_applicable" };
+  if (input.activity === null) return { verdict: "unknown", why: "no_activity_record" };
+  /*
+   * MEASURED-AND-NEVER-GREW makes no claim about being stuck, and nothing
+   * derived from it may make one — `supervisor/index.ts:2007-2010` says so in
+   * the branch that writes it. A worker nobody has typed at yet carries exactly
+   * this value, and alarming about it would turn a fresh pane into a fault.
+   */
+  if (input.activity.last_growth_at === null) return { verdict: "unknown", why: "no_growth_yet" };
+  if (input.window === null) return { verdict: "unknown", why: "no_window" };
+
+  const beat = input.heartbeatAt === null ? Number.NaN : Date.parse(input.heartbeatAt);
+  const grew = Date.parse(input.activity.last_growth_at);
+  if (Number.isNaN(beat) || Number.isNaN(grew)) {
+    return { verdict: "unknown", why: "unreadable_stamp" };
+  }
+
+  // Clamped, on `ago`'s reasoning: the transcript poll can land microseconds
+  // after the heartbeat that shares its tick, and a negative span would read as
+  // a worker that wrote in the future rather than as sub-tick ordering.
+  const silentMs = Math.max(0, beat - grew);
+  if (silentMs >= input.window.killMs) return { verdict: "wedged", silentMs };
+  if (silentMs >= input.window.warnMs) return { verdict: "quiet", silentMs };
+  return { verdict: "working", silentMs };
+}
+
+/**
+ * What to put on the status line, or nothing at all.
+ *
+ * SPEAKS FOR TWO OF THE FIVE VERDICTS, and the silences are as deliberate as
+ * the words:
+ *
+ * - `wedged` is the alarm, and it is the only thing on this line printed in
+ *   capitals. It names the span so the reader can tell a seat that went five
+ *   minutes past the threshold from one that has been dead an hour, and it
+ *   names the likely cause because "check the container" is the action.
+ * - `working` and `quiet` say nothing. The line already carries `transcript
+ *   41m ago` from `transcriptNote`, so a second rendering of the same fact
+ *   would be noise — and printing `quiet` on every worker more than three
+ *   minutes into a model call is noise on most of a healthy fleet.
+ * - `unknown/no_window` DOES speak, because it is the one unknown with no other
+ *   trace on the line. Without it an operator cannot tell "no alarm because
+ *   healthy" from "no alarm because I have no threshold to judge against",
+ *   which is exactly the collapse the verdict type exists to prevent.
+ * - the other three unknowns stay quiet: `transcriptNote` has already printed
+ *   `transcript no writes yet`, `transcript last write unreadable`, or nothing
+ *   at all for a worker with no record.
+ */
+export function silenceNote(reading: SilenceReading): string | null {
+  if (reading.verdict === "wedged") {
+    return (
+      `WEDGED heartbeating but transcript silent ${coarseDuration(reading.silentMs)} ` +
+      `(container may be gone)`
+    );
+  }
+  if (reading.verdict === "unknown" && reading.why === "no_window") {
+    return "silence-window unknown";
+  }
+  return null;
+}
+
+/**
+ * The run's silence window, or `null` when it cannot be had.
+ *
+ * DEGRADES where `dispatch` REFUSES, and the asymmetry is deliberate.
+ * `readRunBudgetPolicy` throws `RunPolicyUnreadableError` on a `run.json` that
+ * is present and unparseable, because answering an unknown token ceiling with
+ * "unbounded" spends money that cannot be refunded. Nothing here spends
+ * anything: this is a read-only snapshot, and it is the operator's ONLY view of
+ * a fleet precisely when things have gone wrong. Refusing to print it because
+ * one field of one file would not parse would remove the view at the moment it
+ * is most needed.
+ *
+ * The degradation is not silent. With no window every busy worker reads
+ * `unknown/no_window`, `silenceNote` prints `silence-window unknown` beside it,
+ * and `--json` carries a null `window_ms`.
+ */
+async function readSilenceWindow(run: RunPaths): Promise<StallWindow | null> {
+  try {
+    return (await readRunBudgetPolicy(run)).stall;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -129,7 +358,23 @@ export function register(program: Command): void {
           workerIds = [];
         }
 
-        const workers: Array<{ state: WorkerState | null; id: string; alive: boolean }> = [];
+        /*
+         * ONCE per run, hoisted out of the worker loop.
+         *
+         * The window is a property of the RUN, so re-reading `run.json` for
+         * every worker would buy nothing and would let a fleet of 500 workers
+         * open 500 file descriptors for 500 copies of the same two numbers —
+         * the concern `monitor/read/worker.ts` already states for its own
+         * sequential reads.
+         */
+        const window = await readSilenceWindow(run);
+
+        const workers: Array<{
+          state: WorkerState | null;
+          id: string;
+          alive: boolean;
+          silence: SilenceReading;
+        }> = [];
         for (const id of workerIds.sort()) {
           const state = await readWorkerState(workerPaths(run, id));
           let alive = false;
@@ -142,7 +387,20 @@ export function register(program: Command): void {
                 ? await identityAlive({ pid: registered.pid, started: registered.started })
                 : (await processStartTime(state.pid)) !== null;
           }
-          workers.push({ id, state, alive });
+          /*
+           * Classified HERE and carried, not recomputed at each consumer. The
+           * text line and `--json` must never be able to disagree about whether
+           * a seat is wedged, and two call sites reading the same fields is how
+           * they would come to.
+           */
+          const silence = classifyWorkerSilence({
+            phase: state?.phase ?? null,
+            supervisorAlive: alive,
+            heartbeatAt: state?.heartbeat_at ?? null,
+            activity: state?.transcript_activity ?? null,
+            window,
+          });
+          workers.push({ id, state, alive, silence });
         }
 
         const snapshot = {
@@ -171,6 +429,34 @@ export function register(program: Command): void {
                 // console pane is one consumer, and a script asking "is the
                 // fleet doing anything" needs the same field the pane reads.
                 transcript_activity: w.state?.transcript_activity ?? null,
+                /**
+                 * The DERIVED verdict, beside the raw fields it was derived
+                 * from rather than instead of them.
+                 *
+                 * Both are carried on purpose. A caller that disagrees with the
+                 * bands — a dashboard with its own idea of "too long" — still
+                 * has `heartbeat_at` and `transcript_activity` to do its own
+                 * arithmetic on, and does not have to reverse-engineer this
+                 * one. A caller that just wants to know whether to page someone
+                 * reads `verdict` and stops.
+                 *
+                 * `why` and `silent_ms` are both present and both nullable
+                 * rather than the field changing shape between verdicts: a JSON
+                 * consumer that has to switch on a discriminator before it
+                 * knows which keys exist is a consumer that will index the
+                 * wrong one.
+                 */
+                silence: {
+                  verdict: w.silence.verdict,
+                  why: w.silence.verdict === "unknown" ? w.silence.why : null,
+                  silent_ms:
+                    w.silence.verdict === "working" ||
+                    w.silence.verdict === "quiet" ||
+                    w.silence.verdict === "wedged"
+                      ? w.silence.silentMs
+                      : null,
+                  window_ms: window === null ? null : { warn: window.warnMs, kill: window.killMs },
+                },
               })),
         };
 
@@ -212,8 +498,27 @@ export function register(program: Command): void {
              */
             const stagedId = w.state?.staged_task_id ?? null;
             const staged = stagedId === null ? "" : ` staged=${stagedId}`;
+            /**
+             * LAST on the line, and loud.
+             *
+             * Last because everything before it is a FACT read off disk and
+             * this is a JUDGEMENT made about them; a reader who distrusts the
+             * judgement can still see every input to it on the same line.
+             *
+             * Loud because the whole defect was a line that looked fine. `busy
+             * task=t-3 supervisor=up transcript 41m ago` is four true fields
+             * describing a seat with nothing in it, and an operator scanning a
+             * pane of ten workers reads the shape before the numbers.
+             *
+             * Empty when there is nothing to say, on `transcriptNote`'s rule:
+             * a healthy fleet's status output must be byte-identical to what it
+             * was before this column existed, or the column has cost every
+             * reader something to gain the few who needed it.
+             */
+            const wedge = silenceNote(w.silence);
+            const alarm = wedge === null ? "" : ` ${wedge}`;
             process.stdout.write(
-              `  ${w.id}: ${phase} task=${task}${staged} supervisor=${live}${suffix}\n`,
+              `  ${w.id}: ${phase} task=${task}${staged} supervisor=${live}${suffix}${alarm}\n`,
             );
           }
         }
