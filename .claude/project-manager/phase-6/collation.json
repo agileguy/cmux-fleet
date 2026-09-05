@@ -1,0 +1,73 @@
+{
+  "schema": "pifleet.collation/v1",
+  "task_id": "T-rv-p6-collate",
+  "parent_task_id": "T-rv-p6",
+  "lenses": [
+    {"aspect": "arch",    "worker": "rev-arch-1", "reported": true},
+    {"aspect": "context", "worker": "rev-ctx-1",  "reported": true},
+    {"aspect": "lang",    "worker": "rev-lang-1", "reported": true}
+  ],
+  "finding_count": 10,
+  "findings": [
+    {
+      "statement": "The amendment's claim that the merge runs 'with hooks and attribute drivers disabled' is false for the attribute-driver half: core.attributesFile=/dev/null does not suppress the base's tracked .gitattributes filter drivers, which still run on worker files during the merge checkout.",
+      "file": "/workspace/Docs/SRD.md",
+      "line": 1647,
+      "raised_by": ["rev-arch-1", "rev-lang-1"]
+    },
+    {
+      "statement": "The amendment's step 3 gives a bare 'git merge --no-ff' with no gate, and §9.1 never routes the operator to the gated mergeWorkerBranch (a library function with no CLI verb and no production caller).",
+      "file": "/workspace/Docs/SRD.md",
+      "line": 1645,
+      "raised_by": ["rev-arch-1"]
+    },
+    {
+      "statement": "The inspect step runs 'git diff --name-only' without -z, so git-quoted paths (non-ASCII or control bytes) defeat every startsWith/endsWith hazard rule and a hazard-class file is merged.",
+      "file": "/workspace/src/run/pm-integration.ts",
+      "line": 270,
+      "raised_by": ["rev-lang-1"]
+    },
+    {
+      "statement": "'Inspect before materialising' covers only six HAZARD_PATH_CLASSES; .mcp.json and .pi/settings.json are materialised and only neutralized after by part 4.",
+      "file": "/workspace/src/run/pm-integration.ts",
+      "line": 134,
+      "raised_by": ["rev-arch-1"]
+    },
+    {
+      "statement": "'Fetch freely' reasons only about the operator's side; a local-path fetch runs the server side against the worker's clone, whose .git/config the worker can rewrite all run, and nothing re-scans the clone before the fetch.",
+      "file": "/workspace/src/run/pm-integration.ts",
+      "line": 333,
+      "raised_by": ["rev-lang-1"]
+    },
+    {
+      "statement": "FETCH_HEAD is one mutable file shared by every fetch; a concurrent fetch between fetch and rev-parse swaps the SHA and the gate inspects/merges/records the wrong head.",
+      "file": "/workspace/src/run/pm-integration.ts",
+      "line": 333,
+      "raised_by": ["rev-lang-1"]
+    },
+    {
+      "statement": "The merge --abort cleanup swallows its own failure; if the abort fails the checkout can be left mid-conflict while the outcome reports merge_failed.",
+      "file": "/workspace/src/run/pm-integration.ts",
+      "line": 377,
+      "raised_by": ["rev-lang-1"]
+    },
+    {
+      "statement": "A failed rev-list --count becomes commits_ahead: 0 in the record, indistinguishable from zero commits ahead.",
+      "file": "/workspace/src/run/pm-integration.ts",
+      "line": 343,
+      "raised_by": ["rev-lang-1"]
+    },
+    {
+      "statement": "The 'must be sitting ON the integration branch' precondition is docblock-only; a dirty tree merges whenever paths do not overlap.",
+      "file": "/workspace/src/run/pm-integration.ts",
+      "line": 295,
+      "raised_by": ["rev-lang-1"]
+    },
+    {
+      "statement": "'The first outbound path in this system' is imprecise; the harvest/outbox path is also outbound and predates the merge.",
+      "file": "/workspace/Docs/SRD.md",
+      "line": 1647,
+      "raised_by": ["rev-arch-1"]
+    }
+  ]
+}
