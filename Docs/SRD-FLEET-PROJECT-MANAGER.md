@@ -1,6 +1,10 @@
 # System Requirements Document — the fleet as the engineers, testers and reviewers of a `/ProjectManager` run
 
-**SRD-FLEET-PM-001 v0.1 — DRAFT FOR OWNER REVIEW**
+**SRD-FLEET-PM-001 v0.2 — DRAFT FOR OWNER REVIEW**
+*v0.2 revises v0.1 after a review round that could not read the document (§0.8). Every incorporated
+finding was re-verified against the repository before acceptance; §0.9 lists what was accepted, what
+was rejected, and two errata in this document's own drafting. The most consequential change is §7.5:
+v0.1's coverage gate read a worker-authored number and said it was the host's.*
 Sits alongside `Docs/SRD.md` (SRD-PIFLEET-001) and `Docs/SRD-REVIEW-CONSOLE.md`
 (SRD-REVIEW-CONSOLE-001). It **consumes** the review console's collator dispatch rather than
 re-specifying it: §6.5 and §7.4 are readings of machinery that shipped in `2ccf851`, not
@@ -130,6 +134,20 @@ envelope. It can: `config/schema.ts` counts `{write, edit, bash}` as the writer 
 `tester` writes. This is recorded because getting it wrong would add a tool grant for no
 capability.
 
+**5. A `python` toolchain does not cost a worker `bun` — it is a strict superset of `node`.**
+`docker/Dockerfile:145` is `FROM toolchain-node AS toolchain-python` and `:118-119` installs bun in
+the node stage — with an explicit postinstall, without which bun is on `PATH` and non-functional — so
+every language toolchain contains node's. **Python was previously built `FROM base` and genuinely had
+no bun; the re-layer is commit `2ccf851`, which is this branch's own base.** The date is worth one
+line because two sources disagree: `docker/Dockerfile:132`'s comment says `2026-09-04`, the commit's
+author date is 2026-09-05. **`fleet.yaml:656-658` still carries the
+pre-fix comment** — *"SWITCHED 2026-09-04: rally-cli is a pytest project. Costs this role `bun`, so
+tst-1 can no longer run cmux-fleet's own suite"* — and it is stale. **v0.1 repeated it as fact in
+§6.8 and that was an error**; the corrected text is there. Two qualifications a reader must carry:
+this is a statement about the **Dockerfile**, and an *image* built before `2ccf851` genuinely lacks
+bun until it is rebuilt — which is what makes §13's `image build` task load-bearing rather than
+hygienic.
+
 **4. `run.max_concurrent: 1` does not serialise the console.** It bounds each **run**, and every
 attended pane is its own run (`operations-plan.ts:246-253`: *"N attended panes are therefore N
 runs"*). Four `development` seats are four runs of one worker each, so four seats generate
@@ -146,25 +164,86 @@ to matter. They are stated up front because each changes what a section downstre
 | **A** | **The integration mechanism already exists and is undocumented at the workflow level.** `up` registers `worker-<id>` as a git remote on the operator's own repository, pointing at that worker's clone (`worktree.ts:435`, `registerWorkerRemote` at `:465-470`), and `pifleet worktrees --json` reports each worker's branch, path, dirt and `commitsAhead` from the recorded `WorkerWorktree` (`cli/commands/worktrees.ts:33-45`). **Nothing in `~/.claude/skills/fleet/` mentions either.** The one line `Workflows/Observe.md:51-52` gives it — *"`worktrees` lists each worker's own git checkout"* — does not say the commits are fetchable. | Yes | §2.1, §6.2 |
 | **B** | **`/ProjectManager`'s "two engineers, one branch" is incoherent against `isolation: worktree` and would fail silently.** Each engineer writes `branch: "fleet/<run-id>/<worker-id>"` into its own envelope (`skills/pifleet-worker/SKILL.md:172`) regardless of what the brief said. A brief naming `phase-3-relay-actor` produces two workers that either ignore it or create that branch inside their own clone, where it is invisible to the other. Nothing goes red. | Yes | §1.2, §6.2 |
 | **C** | **A collated review is journalled, so a lens lost to a failed harvest never re-enters that collation.** This is ISC-517's hazard and it is the one a ProjectManager loop is most likely to mis-read, because a 2-of-3 collation is a valid `pifleet.collation/v1` document with a `reported: false` row in it and a `success` verdict on the collator's own task. `roles/collator.md:228-235` is explicit that the collator's status is *"about YOUR collation, never about how many lenses reported"*. **A loop that branches on the collator's verdict is therefore branching on the wrong number.** §7.5 makes coverage a separate gate. | Yes | §7.5, §9.4 |
-| **D** | **Renaming `rev-1` breaks two real pins and leaves seven fixture strings alone, and telling them apart matters.** `test/unit/development-plan.test.ts:47` and `:53` assert the roster literally; `test/unit/status-runs.test.ts:38` builds `DEV` from it. The other appearances — `monitor-workspace`, `verbgate-collect`, `operations-plan`, `status-live-run`, `fresh-dispatch` — use `rev-1` as an arbitrary worker label and are unaffected. `ISA.md:161` records a probe that *deliberately* uses `rev-1` on role `reviewer` so that "a gate that echoes the worker id and calls it the role cannot pass"; that probe's value comes from the id and the role differing, which a `tst-2`/`tester` pair does not supply. | Yes, on the first `bun test` after the rename | §6.1, §13 Phase 0 |
+| **D** | **Renaming `rev-1` touches ten functional locations, not two — and the config that matters most is not committable.** *(v0.1 said "two real pins"; that was measured with a gitignore-aware `grep` and was wrong.)* Two config files, one plan constant, one script and five test files, including `test/unit/config.test.ts:119`, `test/integration/cli-exit-codes.test.ts:238` and `test/integration/operations-console.test.ts:112`/`:206`. **`fleet.yaml` is gitignored (`.gitignore:9`)**, so the live seat change produces no diff and cannot be dispatched to a worker without tripping ISC-93. §13 Phase 1 splits on that line. Roughly sixty further `rev-1` strings are arbitrary fixture ids and must NOT be renamed. | Yes, on the first `bun test` after the rename | §6.1, §13 Phase 1 |
 | **E** | **There is already a `/ProjectManager` state file in this repository, and its shape has outgrown the skill that writes it.** `.claude/project-manager-state.json` on `feature/harvest-recovery` carries `branch_model: "long-lived"`, an `integration` block naming a console and a workspace id, an `answered_questions` map, per-phase commit lists, `out_of_band_commits`, and `pr_policy: "Do NOT open a PR"`. The skill's documented schema (`SKILL.md:240-252`) has none of those. **The skill is behind its own practice**, and §7.6 specifies the shape that practice already reached rather than the one the skill documents. | Observed | §2.7, §7.6 |
 
-### 0.7 This document is written against `main`, and a third of its machinery is in an open PR
+### 0.7 The dependency on PR #147 is satisfied — it merged as `d70acf4`
 
-`origin/main` is `2ccf851` — *"Collator dispatch for the review console (ISC-431..ISC-521)"*.
-**PR #147, `feature/harvest-recovery`, is open and unmerged**, and it carries three things this
-design leans on:
+**v0.1 held this open as its schedule-blocking question.** `origin/main` was `2ccf851` and PR #147
+(`feature/harvest-recovery`) was open, carrying three behaviours this design reads as present. **It
+merged as `d70acf4` and is on `origin/main` as of 2026-09-05.** The record is kept rather than
+deleted, because two of the three are still the reason a section is written the way it is:
 
-| In #147 | Why this document needs it |
+| Landed in #147 | What still depends on it |
 |---|---|
-| `fb38fc8` — *"A dispatch that did not land is no longer reported as one"* (`fresh-dispatch.ts:245-276`) | §6.4's phase lifecycle dispatches through `--restart … --task`. Without this fix a refused envelope prints *"recreated and dispatched"* and exits 0, and the orchestrator waits for work that never started. **This is the single most load-bearing dependency in the document.** |
-| ISC-522 — a failed harvest names the review it could not read (`f610761`) | §7.5's coverage gate reads that naming. Without it a lost lens is indistinguishable from a lens that found nothing. |
-| ISC-523 — the inlining had never carried a byte (`cf81f7d`) | §7.4 reads the review out of `inlined_artifacts`. If that field is empty the collation has no findings to carry. |
+| `fb38fc8` — *"A dispatch that did not land is no longer reported as one"* (`fresh-dispatch.ts`) | §6.4's lifecycle dispatches through `--restart … --task`. Without it a refused envelope prints *"recreated and dispatched"* and exits 0. §9.2's first row and §12's re-assertion of the property exist because this was once absent |
+| ISC-522 — a failed harvest names the review it could not read | §9.4 reads that naming to tell the two kinds of missing lens apart |
+| ISC-523 — the inlining had never carried a byte | §7.4 reads the review out of `inlined_artifacts` |
 
-**So the ordering is not a preference.** §13 Phase 0 is *"land #147 first"*, and it is a
-prerequisite rather than a task. Writing this SRD on a branch off `main` is deliberate — it
-should be reviewable without #147 — but **the first ProjectManager run cannot start until #147
-is merged**, and §11 Q1 asks the owner to confirm that ordering rather than assuming it.
+**What this changes downstream: §13 Phase 0 loses its merge task, Q1 is withdrawn, and nothing else
+moves.** The design was written to be correct once these landed and they have.
+
+**One consequence of the branch this document sits on.** `docs/srd-fleet-project-manager` is based on
+`2ccf851`, before the merge, and is deliberately not rebased — the commit history of a specification
+should not silently acquire code it was not written against. **Line citations to `fresh-dispatch.ts`
+and `relay.ts` in this document were re-taken against merged `main` on 2026-09-05**, so they are
+correct for the tree a reader will check out and may be off by a few lines against this branch's own
+parent.
+
+### 0.8 The review round that produced v0.2 did not read this document
+
+**Recorded here because a reader is entitled to know the coverage of the review that shaped a
+revision, and because this round is a worked example of the defect it found.**
+
+The `review` console was pointed at v0.1 and returned a collation recording **1 of 3 lenses
+reported**. The true coverage was **0 of 3**:
+
+- The document existed only on a branch whose sole worktree was host-side, and reviewer seats are
+  `isolation: shared-ro` — `/workspace` is the operator's checkout at whatever ref it stands on.
+- The seats hold `tools: [read, write, grep, find, ls]` and **no `bash`** (`fleet.yaml:588`), so the
+  brief's instruction to run `git show` was not something they could execute.
+- `rev-ctx-1` and `rev-lang-1` filed `blocked`. `rev-arch-1` reviewed from the commit message and
+  the brief, and was recorded `reported: true`.
+
+**So §§0.5, 0.7, 4.1, 7.5, 7.6, 9.7 and 13 have never been read by a reviewer.** Every finding
+incorporated into v0.2 was verified against the repository by this author before being accepted —
+§0.9 lists which were confirmed, which were rejected, and why — but none should be read as *"a
+reviewer read this section and disagreed."*
+
+**Three things follow, and each lands somewhere.** The failure is a missing precondition, so §8.2
+gains one and a gotcha: **a review target must be readable from `/workspace`**, and the remedies are
+to check the branch out in the operator's own checkout or to inline the text into the brief. The
+`reported: true` on a lens that read no source is §7.5's finding stated as an incident — the
+collation's coverage is the collator's account, not the host's. And the round is the reason §12
+proposes a criterion that a review's target is reachable before the fan-out is issued.
+
+### 0.9 What v0.2 accepted from that review, and what it rejected
+
+**Accepted, all verified against the repository before incorporation:** the coverage gate reads a
+worker-authored number (§7.5, the most consequential correction in this revision); the seat change is
+a privilege widening (§6.1, §4.3); removing `rev-1` leaves an in-loop review gap (§6.1); the
+development seats are `tui` and the loop must be written against staging (§6.10); nothing bounds the
+loop's concurrency across runs (§6.11); Q10 is answerable and is now D13 (§6.8); the seat rename is a
+five-surface edit (§13); the review round's trigger was under-specified (§6.5).
+
+**Rejected, with reasons.**
+
+| Rejected | Why |
+|---|---|
+| *"Testers cannot run this repository's `bun` suite."* | **False, and v0.1 repeated the same error from a stale config comment.** `docker/Dockerfile:145` is `FROM toolchain-node AS toolchain-python` and `:118` installs bun in the node stage, so `python` is a strict superset of `node`. Changed by `2ccf851`, *"Every toolchain includes node (ISC-405)"*, on 2026-09-04. §0.5 correction 5 states it and §6.8 is corrected |
+**One finding this author initially rejected and then confirmed, recorded because the mistake is
+instructive.** The claim that the tracked `fleet.example.yaml` has `tester` at `node` while the
+gitignored `fleet.yaml` says `python` is **TRUE** — `fleet.example.yaml:489` is `toolchain: node`,
+`fleet.yaml:656` is `toolchain: python`, and the tracked surface never received the switch. A draft
+of this section rejected it as false **before the verification it claimed had returned**. That is the
+same defect as §7.5's: asserting a check rather than performing one. It is left in the record rather
+than quietly corrected, and §13 Phase 1 gains a task because of it.
+
+**One erratum in v0.2's own drafting.** An earlier draft of §0.5 and §6.8 cited the toolchain
+re-layer as commit `2b96f8f`. **No such object exists in this repository.** The commit is `2ccf851`,
+*"Collator dispatch for the review console (ISC-431..ISC-521)"* — which is also this branch's base,
+so the re-layer is present in the tree this document sits on. A fabricated hash in a specification is
+worse than a missing one, and it is recorded here rather than silently replaced.
 
 ---
 
@@ -295,6 +374,14 @@ drift."*
 
 **`baseSha` is the floor.** It is *"the value `harvest` would grade a diff from"*
 (`worktree.ts:89-91`), which makes it the right base for an integration merge as well.
+
+**This is the one claim in the document that has been independently confirmed against a live tree,
+and it is worth recording as such.** The review round checked it three ways: the mechanism in code
+(`worktree.ts:435-437`, `:443-501`); the operator's own `.git/config`, which **already carries
+`worker-eng-1`, `worker-eng-2` and `worker-tst-1` remotes** left by runs on 2026-09-04; and
+`config/load.ts:770`, which confirms that a role declaring no `isolation` inherits `run.isolation` —
+so `engineer`, `tester` and a future `tst-2` all get clones and all get remotes. **§6.2's integration
+model therefore rests on a mechanism that is not merely documented but observably in use.**
 
 ### 2.2 The development console is four attended panes, four runs, and one hardcoded mount each
 
@@ -484,6 +571,16 @@ results were independent artifacts. This one dispatches N tasks whose results ar
 step someone has to perform. §6.2 performs it on the host, where the operator's own git identity
 and credentials already are, and §10 D3 records the alternative that was rejected.
 
+**And there is a second cost, added in v0.2 because the review round found it and v0.1 had not
+named it.** Isolation is per worker, so the console's exposure scales with its seat count and its
+seats' grants — and §6.1's seat change raises both. `rev-1` was `shared-ro` with no `bash` and no
+egress; `tst-2` inherits `run.isolation: worktree`, holds `bash`, and carries `egress_access: true`.
+**The console goes from three shell-capable seats to four, from one egress seat to two, and loses
+its only seat that could not run a shell.** §6.1.1 argues why that is acceptable — in short, a tool
+grant was never the boundary and the egress grant widens a route rather than a destination — but the
+widening is real, it is this section's second entry, and it should not be discovered later by
+someone counting containers.
+
 ### 4.4 §5.9 and `hosted_repo_consent` — the disclosure gate fires per repository
 
 `fleet.yaml:63-76` records the owner's Q1 decision as a **URL and not a `true`**, with the reason
@@ -590,10 +687,83 @@ uses for engineers applies unchanged: **each tester takes the files its paired e
 
 **What breaks, stated honestly.** Nothing at runtime for an existing run: run ids, worktrees and
 journals are keyed by worker id and a run that already exists keeps its own roster. What breaks is
-**the suite, immediately** — item 4 — and **any operator muscle memory** that types
-`scripts/development --restart rev-1`, which will refuse with an unknown pane title rather than doing
-something surprising. §11 Q8 asks whether the `reviewer` role's now-orphaned `model:` should be
-removed or left as documentation of the development console's history.
+**the suite, immediately** — item 4, and §13 has the full surface list — and **any operator muscle
+memory** that types `scripts/development --restart rev-1`, which will refuse with an unknown pane
+title rather than doing something surprising. §11 Q8 asks whether the `reviewer` role's now-orphaned
+`model:` should be removed or left as documentation of the development console's history.
+
+#### 6.1.1 This seat change is a privilege widening, and v0.1 did not say so
+
+**It is, it is accepted, and the reason it is acceptable is narrower than "a tester is like an
+engineer".** v0.1's §5.2 said *"no worker gains dispatch or GitHub egress"*, which is true, is about
+the orchestrator, and **does not address this at all.**
+
+| | `rev-1` (going) | `tst-2` (arriving) |
+|---|---|---|
+| `isolation` | `shared-ro` — the operator's checkout, read-only, no clone | `worktree` (inherited from `run.isolation`, `config/load.ts:770`) — its own clone and branch |
+| tools | `[read, write, grep, find, ls]` — **no `bash`** | `[read, bash, grep, find, ls]` — **`bash`** |
+| `egress_access` | absent | **`true`** (`fleet.yaml:661`) |
+| toolchain | `base` | `python` |
+
+**So the console goes from three `bash` seats to four, from one egress seat to two, and loses its
+only seat that could not run a shell.** That is a widening on three axes and it should be recorded as
+one.
+
+**The argument that it is nonetheless the right trade, in three parts.**
+
+1. **The lost read-only seat was never a boundary.** `Docs/SRD.md` §12.1 is explicit that *"Tool
+   scope is not a boundary — the container is"*, and `fleet.yaml:723-726` applies it to this exact
+   seat: a tool grant is not what bounds a worker. `rev-1` holding no `bash` made it a *weaker*
+   worker, not a *fenced* one; the container was doing the fencing either way. **Removing it forfeits
+   no containment.**
+2. **The egress widening is a route, not a destination.** `egress_access: true` grants a path to the
+   CONNECT proxy; `egress.allow` remains the ceiling and is unchanged (`fleet.yaml:661-672` says
+   so: *"Widens no destination; the allowlist is still the ceiling"*). The set of reachable hosts is
+   identical before and after. What widens is **how many containers can reach that fixed set**, which
+   is a real increase in exposure surface and a much smaller one than "a new egress seat" suggests.
+3. **The `bash` widening is the one with no mitigation, and it is the price of the seat doing its
+   job.** A tester that cannot run a test runner is not a tester. This is the same grant `tst-1`
+   already holds, in the same console, on the same repository.
+
+**What this costs, stated so it is not discovered later: the `development` console after this change
+has four containers that can each run a shell against a clone of the operator's repository, two of
+which can reach the package registries.** That is the blast radius, it is larger than before, and
+§4.3 now carries it as per-worker isolation's second real cost. **If the owner does not accept it,
+the withdrawal is cheap and specific** — keep `rev-1`, take §6.1's other four requirements, and
+accept the two-review-mechanism problem this section opened with.
+
+#### 6.1.2 It also removes the only in-loop reviewer, and that is a real gap
+
+**"Review happens in one place" is true and it hides this.** `rev-1` is the only seat that can
+review **per task, before integration**. The review console's lenses are `shared-ro` on the
+operator's checkout and read the **integrated** result at end of phase (§6.4 step 9). So after this
+change:
+
+> **A defect `eng-1` introduces is not seen by any reviewer until after the host has merged it onto
+> the integration branch.**
+
+**That is a genuine loss of a feedback edge and v0.1 did not name it.** The engineer's own test, the
+tester's suite and the harvest's diff grading all still run per task — but none of them is a
+*reader*, and §3.4 is clear that reading is the only instrument this system has for "is this the
+right change".
+
+**It is accepted, on three grounds, and the third is the one that decides it.**
+
+1. **The merge is local and nothing is published until the review passes.** §6.4 pushes at step 11,
+   after step 10's verdict. "Merged" here means merged into a branch on the operator's own machine
+   that no one else can see. A defect merged and then rejected costs a fix dispatch, not a bad
+   release.
+2. **A pre-integration review reviews code that is about to change.** `eng-1`'s branch reviewed alone
+   is reviewed without `eng-2`'s half, and §6.3's whole partition rule exists because the two halves
+   interact. The finding most worth having — *"these two changes disagree"* — is only visible after
+   the merge.
+3. **A per-task review by one seat is the weaker instrument, and preferring it would invert §6.1's
+   own argument.** One reading with no consensus arithmetic is what `rev-1` offered. Trading three
+   independent readings at end of phase for one reading per task is a trade this document declines.
+
+**What would change the decision.** If phases routinely produce integration merges that the review
+console then rejects wholesale, the feedback loop is too long and the right answer is smaller
+phases — not a fourth development seat. §11 Q5's measurement would show it.
 
 ### 6.2 The integration model — the host is the integrator, and the mechanism already exists
 
@@ -723,6 +893,32 @@ and the second fan-out would replay the first one's task instead of running."* *
 constraint on the ProjectManager run**: `T-review-p3` plus `-context` is 19 characters and safe, and
 a parent id built from a phase slug is not automatically so. §10 D6 fixes the id grammar.
 
+**How the round is actually triggered and waited on, because "consumed rather than re-specified" was
+doing too much work in v0.1.** The fan-out is not a library call the orchestrator makes; it is an
+exchange between three parties, and only the first and last steps are the calling session's:
+
+| # | Step | Who |
+|---|---|---|
+| 1 | The `review` console is up and its relay record names the live collator run | **session** — §8.2 precondition 6 |
+| 2 | A review-request envelope is staged to `col-1` (`scripts/review --restart col-1 --task …`) | **session** |
+| 3 | `col-1` turn one writes `/outbox/<T>/dispatch-request.json` and settles | collator |
+| 4 | The relay reads the host's inbox, fans out three lens dispatches, journals after dispatch | **relay** |
+| 5 | The relay waits for all three, harvests each, publishes surviving replies | **relay** |
+| 6 | The relay dispatches `col-1` turn two with a brief naming the reports | **relay** |
+| 7 | `col-1` writes `collation.json` and `review.md` | collator |
+| 8 | The session reads `artifacts --task <T>-collate` and applies §7.5 | **session** |
+
+**Steps 3-7 are not observable as a single call and there is no "wait for the review" verb.** The
+session waits by polling for the collate task's artifacts, with the run tree as its progress signal:
+the journal at `<run>/relay/col-1/<T>.json` appears when step 4 has happened, and reply files appear
+as step 5 completes. **`pifleet wait --task <T>` is the wrong thing to wait on** — that is the
+fan-out parent, which settles at step 3.
+
+**This is a long wait with several silent failure modes and §11 Q12 asks whether it should be a human
+step instead.** The honest position: the mechanism is automatic, the *supervision* of it is not, and
+a session that polls forever because the relay died is §9.3's failure with no timeout of its own.
+**The loop must bound its own wait** and report the run tree's state when it expires.
+
 **The three facts the loop must not get wrong.**
 
 1. **The parent task settles when the fan-out is issued, not when the review is done** — D5 of the
@@ -835,10 +1031,20 @@ root means Python, a `go.mod` means Go, a `package.json` means Node. A repositor
 ambiguous and the workflow **asks** rather than guessing. §11 Q9 records that the heuristic is
 untested and that `full` (python + go) exists as the escape hatch at the cost of image size.
 
-**Note the asymmetry that already exists and is easy to misread.** `tester` is `toolchain: python`
-and `engineer` is `node`, so *today's* development console already cannot run cmux-fleet's own
-`bun test` from `tst-1` (`fleet.yaml:656-658` says so outright). Two testers inherit that. The
-requirement above is what makes it visible before a phase is dispatched rather than after.
+**One asymmetry that looks like a problem and is not.** `tester` is `toolchain: python` and
+`engineer` is `node`, which reads as a tester that cannot run a node project's suite.
+**It is not**: `python` is built `FROM toolchain-node` (`docker/Dockerfile:145`) and bun is installed
+in that stage (`:118-119`), so a tester holds node's tools and Python's. **v0.1 said the opposite
+here, on the authority of a `fleet.yaml` comment that has been stale since `2ccf851`** — §0.5
+correction 5. A toolchain adds a platform; it never trades one away.
+
+**Three things remain true and narrower, and they are what the requirement above is for.** An image
+built before `2ccf851` lacks bun until rebuilt — and `src/container/image.ts:242-244` hashes the
+Dockerfile into the tag, so a stale python image cannot be silently reused, it is refused. The
+`engineer` seats at `node` genuinely cannot run pytest, **so the mismatch that matters is
+engineer-side, not tester-side.** And the tracked `fleet.example.yaml:489` still declares the tester
+at `toolchain: node`, so a `tst-2` added there without also switching the toolchain is a node
+tester — §13 Phase 1 carries both edits for that reason.
 
 **Identity.** A commit made inside a container is made by whatever git identity that container has.
 Nothing in `fleet.yaml`'s `secrets:` block delivers one, and `docker/entrypoint.sh` is not a
@@ -846,13 +1052,68 @@ credential channel. **The requirement: every worker container has `user.name` an
 before the first commit**, sourced from the run's own configuration rather than from the operator's
 `~/.gitconfig` — which is not mounted and must not be.
 
-Two dispositions, and §11 Q10 asks the owner to pick:
+**v0.2 closes this. It was Q10 and BLOCKING in v0.1; it is now D13, because the review round showed
+it is answerable from the code rather than requiring an owner preference.**
 
-1. **Set it at clone time**, in `worktree.ts` where the clone is prepared, from a new
-   `run.commit_identity: {name, email}` in `fleet.yaml`. One place, applies to every worker, and the
-   value is reviewable in config.
-2. **Set it per task** from the envelope, so a run against a work repository and a run against a
-   personal one can differ without editing `fleet.yaml`.
+**What is true today, and it was measured rather than reasoned.** Nothing supplies an identity:
+`docker/Dockerfile:400` sets only `git config --system --add safe.directory /workspace`, and
+`worker-env.ts:783-787` delivers only `GIT_CONFIG_COUNT=1` with `safe.directory` as key 0. Neither
+sets `user.name` or `user.email`, and a repository-wide grep finds no non-test occurrence of either.
+
+**A probe against the real image settles it.** Run against
+`pifleet/pi-worker:0.79.6-base-…` under `--read-only` as uid 10001 with exactly the env
+`worker-env.ts` delivers:
+
+```
+Author identity unknown
+*** Please tell me who you are.
+fatal: unable to auto-detect email address (got 'pi@4150f1e03ea1.(none)')
+COMMIT_EXIT=128
+```
+
+Auto-detection fails because `Dockerfile:369`'s `useradd` leaves an empty gecos and the container
+hostname has no domain. **So an uninstructed worker cannot commit at all, and every §6.4 step that
+depends on a worker's commits is currently unreachable.** That is sharper than v0.1's "the identity
+is unknown": the loop does not have a provenance problem, it has a hard stop.
+
+> **An erratum in v0.2's own drafting, recorded rather than corrected silently.** An earlier draft
+> cited `worktree.ts:852-855` — *"a commit would fail outright"* — as evidence for this. **That
+> passage is about the HOST**: it is `captureWorktreeBaseline`'s docblock explaining why `up` records
+> a baseline instead of committing the hazard-neutralisation rename, and "this module's hermetic
+> environment" is the host pifleet process, not the container. The conclusion survives; the citation
+> was wrong and the probe above replaces it.
+
+**Two further measured facts decide the arms below.** `git config --global` **fails** inside the
+container — `could not lock config file /home/pi/.gitconfig: Read-only file system` — because
+`render.ts:600` mounts a volume only at `/home/pi/.pi/agent` and `HOME` stays read-only. But the
+clone **is** writable: `mounts.ts:216` runs `chmod -R a+rwX` over the worker's worktree, and a live
+clone's `.git/config` is mode `-rw-rw-rw-`. So a worker **can** set a repository-local identity, and
+in the probe it did — committing as `eng-1 <eng-1@pifleet.invalid>`, **an identity it invented, that
+nothing in the fleet constrains or records.**
+
+**That is the real exposure and it is worse than "cannot commit":** an uninstructed worker is
+blocked, and an improvising one is unattributable.
+
+**Two arms, and D13 takes both in order:**
+
+1. **Interim, no code change — the brief instructs it.** Each engineer and tester envelope carries
+   `git config user.name …` / `user.email …` as its first step (repository-local; `--global` is
+   unavailable). This unblocks §13 Phase 2 immediately. **Its weakness is not that a worker might
+   skip it** — a skip fails loudly at the first commit — **but that a worker might improvise
+   instead**, which is what the probe did, and that failure is silent and lands on the integration
+   branch.
+2. **Durable — extend the `GIT_CONFIG_*` channel in `worker-env.ts:783-787`.** The precedent is in
+   that exact block, git's own mechanism needs no writable file, and no model can skip or override
+   it. **One implementation note that is easy to get wrong: `GIT_CONFIG_COUNT` is currently `"1"`,
+   so adding an identity means setting it to `"3"` and adding keys 1 and 2 — appending keys without
+   bumping the count leaves them silently unread.**
+
+**Arm 2 is the answer; arm 1 is what makes Phase 2 dispatchable before arm 2 exists.** Because
+arm 1's failure mode is an invented identity rather than a refusal, **§12's attribution criterion
+must assert the author's exact value, not merely that a commit succeeded.**
+
+**The interim arm is not a shortcut past the durable one**; it is what makes Phase 2 independent of
+Phase 2's own code change, and §13 sequences both.
 
 **Whichever is chosen, the identity must not be the operator's own.** A commit authored as the
 operator by a hosted model is a provenance claim nobody made, and the integration merge on the host
@@ -889,8 +1150,88 @@ is in flight are distinguishable without opening a container.
 
 **What the orchestrator reports to the operator per phase**, so progress is legible without asking:
 the partition, each worker's `task_id` and `phase`, `commitsAhead` per branch, and — after step 9 —
-the collation's coverage as `<reported>/<total>` lenses. That last number is the one §7.5 refuses to
-let it round up.
+the coverage as `<reported>/<dispatched>` **counted from the run tree**, never from the collation.
+That last number is the one §7.5 refuses to let it round up.
+
+### 6.10 The dispatch plane is staged, not RPC, and the loop must be written against that
+
+**Every seat in both consoles is `pane_mode: tui`, and that is not a detail of presentation — it
+changes which orchestration primitives exist.** v0.1's §6.3 partition happens to avoid every edge the
+dispatch plane refuses, and it should be recorded that this is **the shape the plane permits, not a
+preference this document arrived at independently.**
+
+| Constraint | Evidence | What the loop must do |
+|---|---|---|
+| A `tui` worker never takes the RPC route | `planDispatch`: `if (mode === "tui") return { kind: "pane" };` (`src/cli/commands/dispatch.ts:291-302`); the supervisor's own refusal reason is `pane_mode_tui_has_no_rpc_dispatch` (`src/supervisor/index.ts:2424`) | Expect `via: "staged"`. It is success, not a warning |
+| `depends_on` onto a `tui` worker is refused at graph construction, exit 2 | `orchestrate/graph.ts:49-73`, thrown at `:195-199` — *"a tui worker's completion cannot be waited on"* | **No cross-worker dependencies.** A phase cannot be expressed as a dependency graph across seats |
+| Auto-scheduling never targets a pane route | `orchestrate/graph.ts:97-100`; rejected `pane_mode_tui_is_not_auto_schedulable` at `dispatch.ts:1246-1261` | **No `--auto`.** Every task is pinned to a named worker |
+
+**And one constraint that is worse than the review round reported, which is why this subsection is
+not just a restatement.** The staged arm of the dispatch *function* does return
+`accepted: true` alongside an `error` field carrying `trigger.reason`
+(`src/cli/commands/dispatch.ts:1848-1856`) — the reason **nobody typed the trigger line**, which
+`:1862-1867` glosses as *"it means nobody is going to start this turn — a human must type the
+line."* **But `pifleet dispatch --json` does not emit that field.** Its accepted payload
+(`dispatch.ts:981-998`) is `accepted`, `task_id`, `worker`, `epoch`, `attempt_id`, `replayed`, `via`,
+`summary` — and no more. The only consumer that reads `error` is the relay
+(`relay.ts:2442-2451`, which turns it into `stage_trigger_deferred`).
+
+> **So a staged dispatch whose trigger was never typed prints `accepted: true`, `via: "staged"`, and
+> exits 0. The envelope is on disk, the worker has not been woken, and nothing in the JSON says
+> so.** The review round's advice — *"check `error` as well as `accepted`"* — is not available to a
+> CLI caller. This is the same failure shape as the one `fb38fc8` closed for a dispatch that did not
+> land, in a case that fix does not cover.
+
+**The remedy is the one the fleet skill already prescribes for a different reason, and this makes it
+load-bearing rather than hygienic:** confirm from `status`, not from the dispatch payload. §6.4 step 3
+polls at ~30s for `phase: busy` with growing `transcript_activity.entries`; a worker still `idle`
+with a `staged_task_id` set is precisely this case. **`pifleet dispatch --json` returning `accepted:
+true` is not evidence that a turn started, and the loop must not treat it as such.**
+
+**So the loop's shape is forced: tasks pinned per worker, no `depends_on`, no `--auto`, and dispatch
+acceptance confirmed from `status` rather than from the dispatch result.** §6.3's file-ownership
+partition satisfies the first three — each partition names its worker, and nothing declares a
+dependency — but it satisfies them because disjoint file ownership happens to be expressible without
+a graph, not because the partition was designed around the refusals.
+
+**The sequencing §6.4 needs is therefore the orchestrator's own, not the plane's.** "Testers after
+the merge" (step 7) is enforced by the calling session waiting, because `depends_on` is unavailable.
+**That is a correctness obligation on the loop and it has no mechanical backstop** — a session that
+dispatches a tester early gets a tester testing half a phase, and nothing refuses it. §12 makes it a
+criterion.
+
+### 6.11 Nothing in the fleet bounds this loop's concurrency — the loop counts its own budget
+
+**The bound is absent for two independent reasons, and the second is stronger than "per-run".**
+
+1. **Scope.** `run.max_concurrent` and `run.budget` are per-run: the `BudgetManager` is *"ONE of
+   these per run … not one per worker"* (`orchestrate/scheduler.ts:174-178`), its state file is
+   `<run>/budget.json` (`paths.ts:210`), and it **refuses to adopt another run's spend** —
+   *"budget.json belongs to run '…', not '…'"* (`safety/budget.ts:110`). Four attended panes are
+   four runs (`operations-plan.ts:620-631`: *"this console is four keyboards, so it is four runs"*).
+2. **Reachability — and this is the part that matters.** `admit()`, which enforces both the
+   concurrency cap (`budget.ts:293-299`) and the token ceiling (`:304-314`), has **exactly one
+   caller**: `scheduler.ts:812`, inside the `--auto` loop. **§6.10 establishes that this loop cannot
+   use `--auto` at all.** So the enforcement path is not merely scoped too narrowly — it is
+   unreachable from every dispatch this design makes. `wait.ts:343-345` states the consequence
+   plainly: *"a manual dispatch has no budget.json and no ceiling to cross."*
+
+**So two engineers generating at once are bounded by nothing but the inference server itself.** Add
+the review console and a phase's review round is four more hosted seats in four more runs. The
+fleet's own comments say the equivalent from the other direction (`operations-plan.ts:626-631`,
+`fleet.yaml:746-750`) — *"Admission control cannot queue across runs, so six panes generating at once
+is six concurrent requests. That is a throughput decision the operator makes by opening this
+console"* — but those are observations, not limits.
+
+**The `tokens_ceiling: 6000000` in `fleet.yaml:80` therefore does not bound a ProjectManager run.**
+An operator reading that line as this feature's spending limit would be wrong, and that is worth
+stating because it is the natural reading.
+
+**The requirement: the orchestrator counts its own spend and reports it per phase.** Concretely, it
+records how many seats it has in flight and stops dispatching a new phase while a previous phase's
+seats are unsettled — which §6.4's step ordering already produces, and which is here stated as the
+reason rather than left as a consequence. **This document does not propose a fleet-side bound**; a
+cross-run ceiling is a change to the run model and §11 Q7 is where the throughput question lives.
 
 ---
 
@@ -1003,17 +1344,73 @@ orchestrator derives it, and the derivation has two independent gates that must 
 <run>/outbox/col-1/<T>-collate/files/review.md          the prose
 ```
 
-**Gate 1 — coverage.** Read `lenses[]`. Let `total` be its length and `reported` the count of rows
-with `reported: true`. This is `LensCoverage` (`collation.ts:909-942`) and it is **the host's number,
-not the model's** — `RelayOutcome.coverage` is `{reported, dispatched}` counted by the relay
-(`relay.ts:791-804`), *"Counted here rather than asked of the model, because the host is the only
-party that knows it."*
+**Gate 1 — coverage, read from the run tree and NOT from the collation.**
+
+> **v0.2 correction, and it reversed this section's central claim.** v0.1 said the coverage numbers
+> in the collation were *"the host's number, not the model's"*. **That is false.** `lenses[]` is
+> collator-authored, and so are the census fields derived from it — `contracts.ts:1118-1120`'s
+> `lenses_total` / `lenses_reported` / `lenses_missing` are marked *"Recorded as a DATUM and
+> consulted by no ceiling"*. The relay does count coverage itself, and `relay.ts:1737` puts it in
+> the collation **brief** as text — *"COVERAGE: N of M lenses reported. That is the host's…"* — which
+> means it reaches the collator as a number it is asked to copy. **A number a worker is asked to
+> copy is a worker-authored number.** Reading it as the host's was the most consequential error in
+> v0.1, in the section that says the design turns on it.
+
+**Two facts make this worse than a wrong citation, and both are load-bearing.**
+
+1. **Nothing caps a `success` claimed over a partial fan-out.** `collationCeiling`
+   (`collation.ts:1046-1053`) names the gap in its own docblock: *"It does not cap a `success`
+   claimed over a partial fan-out… a collator that ignores its brief and claims `success` over two
+   lenses is capped by nothing here."*
+2. **A `partial` collation gets no structural check at all.** `censusCeiling`
+   (`collation-census.ts:488`) is `if (claimedStatus !== "success") return null;`. **So the one
+   instrument that bounds the shape of a collation is switched off for exactly the status that
+   triggers this gate.**
+
+**So the gate reads the run tree, where both numbers are host-written and no worker can reach
+them:**
+
+| Quantity | Host-side source | Why it cannot be forged |
+|---|---|---|
+| **Denominator** — lenses dispatched | `<run>/relay/<sender>/<parent>.json` → `children[]` (`RelayJournalEntry`, `relay-journal.ts:281-302`) | The journal is written by the relay after it dispatches. `/outbox` is the worker's; `<run>/relay/` is not mounted into any container |
+| **Numerator** — lenses whose report survived | the count of `<replies-dir>/<child-task-id>.json` files that exist | Each is written by the host's `publishReply`, once per survived child (`relay.ts:1180-1183`), and the mount is read-only to the collator (`replies.ts:204-206`) |
+
+```
+coverage_reported  = |{ c in journal.children : replyHostPath(dir, c) exists }|
+coverage_dispatched = |journal.children|
+```
 
 | Coverage | The loop's action |
 |---|---|
-| `reported === total` | Proceed to Gate 2 |
-| `reported < total` | **`REVIEW_INCOMPLETE`. Not APPROVED, and not CHANGES_REQUESTED either.** Report which lenses are missing and, for each, which of the two kinds it is (§9.4). Do **not** advance the phase and do **not** count the round against `max_review_iterations` |
-| `reported === 0` | The relay answered `not_collated` and no collation exists. §9.3 |
+| `reported === dispatched` | Proceed to Gate 2 |
+| `reported < dispatched` | **`REVIEW_INCOMPLETE`. Not APPROVED, and not CHANGES_REQUESTED either.** Report which lenses are missing and, for each, which of the two kinds it is (§9.4). Do **not** advance the phase and do **not** count the round against `max_review_iterations` |
+| no journal entry for `<parent>` | The fan-out was never issued. §9.3's `refused` or `none_landed` |
+| journal exists, no reply files | `not_collated` — lenses were dispatched and none survived. §9.3 |
+
+**The collation's own `lenses[]` is still read, and it is read as a CROSS-CHECK rather than as the
+count.** Where the collator's row set disagrees with the journal's `children[]` — a row missing, a
+row for a lens never dispatched, or `reported: true` on a lens with no reply file — **that
+disagreement is itself reportable**, and it is the only signal available that a collator is not
+copying its brief faithfully. §12 makes it a criterion.
+
+**This gate exists because of ISC-517 and it is the honest response to it.** ISA.md's entry is
+explicit: *"a fan-out that collates is journalled, so the lens is absent from that collation
+permanently and no later pass brings it back… The review is findable by a human and still missing
+from the document."* Its close condition is *"a re-harvest before the journal, or a collation
+deferred until every dispatched lens has been read or declared unreadable — and neither is built."*
+**A ProjectManager loop cannot fix that and must not paper over it.** Treating a 2-of-3 collation as
+a full review is the precise failure the criterion was filed to make visible, and §11 Q6 is where the
+fix belongs.
+
+**A worked example, and it is this document's own review round.** The collation for the review that
+produced v0.2 recorded **1 of 3 lenses reported**. The truth was **0 of 3**: the review target was a
+branch with no host-side checkout, the reviewer seats are `shared-ro` with no `bash`, and the brief
+told them to run `git show`, which they cannot. Two lenses filed `blocked`; the third reviewed from
+the commit message and the brief and was recorded `reported: true`. **Gate 1 as written in v0.1
+would have read `1 of 3` from the collation and called it `REVIEW_INCOMPLETE` — the right verdict
+for the wrong reason, and it would have been `3 of 3` and APPROVED had the third lens been joined by
+two more that read no more than it did.** §0.8 records the round; §8.2 adds the precondition that
+prevents it.
 
 **This gate exists because of ISC-517 and it is the honest response to it.** ISA.md's entry is
 explicit: *"a fan-out that collates is journalled, so the lens is absent from that collation
@@ -1144,7 +1541,7 @@ Two, and the first is not what it looks like.
   read it from the host. Workers never see it: they see `/workspace`, and the SRD's
   content reaches them only as the `brief` fields you copy out of it.
 
-## Preconditions — check all seven, in order, and stop at the first failure
+## Preconditions — check all eight, in order, and stop at the first failure
 
 1. **The repo is a git checkout with a clean tree.**
    `git -C <repo> status --porcelain` is empty. A dirty tree becomes every worker's
@@ -1177,7 +1574,24 @@ Two, and the first is not what it looks like.
    `workers`. A record whose `run_id` names a dead run is a relay polling nothing.
    `./scripts/review` restarts it idempotently; `--relay-stop` stops one.
 
-7. **No worker is holding work.**
+7. **THE REVIEW TARGET IS READABLE FROM `/workspace`.**
+   Reviewer seats are `isolation: shared-ro` — `/workspace` is the operator's checkout
+   at whatever ref it currently stands on — and they hold NO `bash`. They cannot run
+   `git show`, `git diff`, `git log`, or anything else. **A branch that is not checked
+   out in the operator's own checkout is invisible to them.**
+
+   Before dispatching any review, confirm the integration branch is the checked-out ref:
+
+   ```bash
+   git -C <repo> rev-parse --abbrev-ref HEAD    # must be the integration branch
+   ```
+
+   If it is not, either check it out, or inline the text to be reviewed into the brief.
+   Do NOT tell a lens to run a git command. **This precondition exists because it was
+   skipped**: a review of this document returned a collation claiming one of three
+   lenses reported, when in truth none of the three could read the file at all.
+
+8. **No worker is holding work.**
    `cd ~/repos/cmux-fleet && bun run src/cli/index.ts status --all --json`. Any non-null
    `task_id` or `staged_task_id` — name the worker and what it is doing before you
    touch anything.
@@ -1216,9 +1630,15 @@ the SRD's words. `acceptance` must survive tokenizing — no shell metacharacter
 `"bun test passes"` is prose that tokenizes to a three-word argv and exits non-zero.
 Write the runner and its arguments, or commit a script.
 
-**3. Confirm both started.** After ~30s, `status --run <id> --json` per worker. `busy`
-with growing `transcript_activity.entries` is working. `idle` with a `staged_task_id` is
-staged and untriggered — say so rather than waiting silently.
+**3. Confirm both started — from `status`, NOT from the dispatch output.** After ~30s,
+`status --run <id> --json` per worker. `busy` with growing
+`transcript_activity.entries` is working. `idle` with a `staged_task_id` set is staged
+and UNTRIGGERED — say so rather than waiting silently.
+
+**This step is not a courtesy check.** These seats are `tui`, so every dispatch is
+staged, and `dispatch --json`'s accepted payload carries no `error` field: a staged
+envelope whose trigger line was never typed prints `accepted: true`, `via: "staged"` and
+exits 0. **The JSON cannot tell you the turn never started. Only `status` can.**
 
 **4. Wait, then harvest.**
 
@@ -1305,9 +1725,28 @@ dispatch fixes exactly as in step 7.
   minutes the command refuses and the fleet is exactly as it was found. That is the safe
   outcome. Do not reach for a bare `--restart` to get around it — that one is
   destructive and needs the user's word.
+- **A lens cannot run git. It has no shell.** Reviewer seats are `shared-ro` with
+  `[read, write, grep, find, ls]`, so `/workspace` is the operator's checkout at
+  whatever ref it is on and nothing can move it. A brief saying "run `git show X`" gets
+  you a `blocked` from a careful lens and an invented review from an incautious one —
+  **and the incautious one is counted as having reported.** Check the branch out first,
+  or inline the text. Measured: a review of this SRD came back "1 of 3 reported" when
+  the true figure was 0 of 3.
+- **`accepted: true` does not mean the worker woke up.** Every development and review
+  seat is `tui`, so every dispatch is staged, and the accepted JSON payload has no
+  `error` field even though the underlying result does. Confirm from `status`.
 - **Read the collate task, not the review request.** The parent settles as soon as the
   fan-out is issued, and it claims `success` for having written a request. A loop that
   reads it will approve a review that has not happened.
+- **Count coverage from the run tree, not from the collation.** `lenses[]` and the
+  census counts derived from it are written by the collator. The host's own numbers are
+  the journal's `children[]` at `<run>/relay/<sender>/<parent>.json` and the reply files
+  that exist beside it. Nothing caps a collator claiming `success` over a partial
+  fan-out, and a `partial` collation gets no structural check at all.
+- **The token ceiling in `fleet.yaml` does not bound this loop.** Budget admission is
+  reached only from `dispatch --auto`, which cannot target these seats. Two engineers
+  generating at once are bounded by the inference server and nothing else. Count your
+  own spend.
 - **A 2-of-3 collation is a valid document.** It parses, the collator's verdict is
   `success`, and one `lenses[]` row says `reported: false`. Nothing goes red. Count the
   rows.
@@ -1400,6 +1839,13 @@ envelope and its artifact — which is exactly why ISC-517 is about lenses and n
 | `not_collated` | Some lenses landed, **none survived** to be harvested | No replies were published and no collation was dispatched. The reviews, if any, are on disk. **Report and stop the phase** |
 | `collation_failed` | Children were journalled and the collation dispatch threw | **The children are journalled, so a retry re-issues nothing.** The reviews exist as replies and no collator turn two was dispatched. Recovering means dispatching the collation by hand |
 
+> **One retry semantic is genuinely unsettled and this table takes the conservative arm.**
+> `relay.ts:2438-2451` treats a deferred stage trigger as re-stageable on a later pass — a replay —
+> while this repository's own triage holds that a journalled fan-out plus `already_done` means the
+> retry never happens. **This document did not probe which is true**, and the rows above assume the
+> pessimistic reading: that nothing is re-issued. **§11 Q11 holds it, and no recovery path here
+> should be built on the optimistic reading until it is settled.**
+
 **And the request itself can be refused before any of that.** `DispatchRefusal` has twelve codes
 (`dispatch-request.ts:669-681`); the four a ProjectManager run can actually provoke are
 `parent_task_mismatch` (the request's `parent_task_id` does not match the directory it was written
@@ -1467,7 +1913,10 @@ and removes none.**
 
 | | Cost |
 |---|---|
-| **A seat change** | `rev-1` → `tst-2`. One `fleet.yaml` row, one plan constant, three test assertions, one image build. **The cheapest thing in this document and it blocks the console coming up correctly** |
+| **A seat change** | `rev-1` → `tst-2`. Ten functional locations across two config files, a plan constant, a script and five test files, plus an image build — v0.1 costed this at "two pins" and was wrong (§0.6 Finding D). **Still cheap, and it blocks the console coming up correctly** |
+| **A privilege widening** | The `development` console gains a fourth shell-capable seat and a second egress seat, and loses its only seat that could not run a shell. Argued in §6.1.1, recorded in §4.3 as per-worker isolation's second cost |
+| **A lost feedback edge** | No reviewer reads a task before it is merged onto the integration branch. §6.1.2 accepts it on the grounds that the merge is local and unpublished until the review passes |
+| **An unbounded spend** | Budget admission is reachable only from `dispatch --auto`, which this loop cannot use, so `tokens_ceiling` bounds nothing here. **The orchestrator is the only thing counting.** §6.11 |
 | **A host-side integration step** | Four git commands per phase, on the operator's own repository, performed by a Claude Code session. **It is the first time this system writes to the operator's branch as part of an automated loop**, and the mitigation is that it only ever merges — it never authors |
 | **A second console in the loop** | Four more hosted seats per phase, billed, on a vendor rate limit. §11 Q7 |
 | **A state file with a partition in it** | One more thing that can be stale. §7.6 bounds it to advisory-in-one-direction, which is the smallest useful guarantee |
@@ -1508,6 +1957,9 @@ them.
 | **D10** | `rev-1` becomes `tst-2`; `roles/reviewer.md` and the `reviewer` role stay, because the three lenses are that role | §6.1, §0.5 |
 | **D11** | No worker gets GitHub egress. Every `gh` verb stays on the host | §6.7, §5.2 |
 | **D12** | The run tree is authoritative; the state file is advisory in one direction only | §6.6, §7.6 |
+| **D13** | **Closed in v0.2 — was Q10.** Worker git identity: brief-supplied repository-local config as the interim, a `GIT_CONFIG_*` channel in `worker-env.ts` as the durable answer | §6.8 |
+| **D14** | The loop is written against a staged dispatch plane: pinned tasks, no `depends_on`, no `--auto`, and acceptance confirmed from `status` rather than from `dispatch --json` | §6.10 |
+| **D15** | The seat change is accepted as a privilege widening — three shell seats become four, one egress seat becomes two — and the in-loop per-task reviewer is given up with it | §6.1.1, §6.1.2, §4.3 |
 
 ### The eight that need no argument
 
@@ -1613,38 +2065,53 @@ carried on would be the mechanism by which a `[~]` criterion silently stops matt
 
 ### D9 — where a container's git identity comes from
 
-**OPEN. No recommendation, and that is deliberate.**
+**CLOSED IN v0.2 as D13. v0.1 left this open on the reasoning below, which the review round showed
+was answering the wrong question.**
 
-§6.8 gives two dispositions — a `run.commit_identity` in `fleet.yaml`, or a per-task identity in the
-envelope — and the choice turns on something this document cannot see: whether the operator intends
-one fleet to serve repositories under different identities. `CLAUDE.md` records three distinct git
-identities for three remote families, which is evidence for the per-task arm; a single value in
-config is evidence for nothing going wrong quietly, which is the argument for the other.
+v0.1 framed it as an owner preference between a `run.commit_identity` in `fleet.yaml` and a per-task
+identity in the envelope, on the grounds that `CLAUDE.md` records three distinct git identities for
+three remote families. **That framing assumed a worker could commit at all.** A probe against the
+real image shows it cannot — exit 128, *"unable to auto-detect email address"* — and that the clone
+is writable enough for a worker to invent one instead (§6.8). So the question was never "which
+configured value" but "is there any value, and what happens when there is not".
 
-**What is NOT open:** the identity must not be the operator's own (§6.8), and no commit, comment or
-PR body carries an AI or assistant attribution line. Both are constraints on either arm.
+**D13 is the answer: brief-supplied repository-local config as the interim, a `GIT_CONFIG_*` channel
+as the durable fix.** The per-repository-identity question v0.1 raised is real and survives into the
+durable arm's design — the channel's value is per run, and a run's launch directory already
+determines its repository — but it is a detail of arm 2, not a blocker.
+
+**What is NOT open, and was not in v0.1 either:** the identity must not be the operator's own, and no
+commit, comment or PR body carries an AI or assistant attribution line. Both are constraints on
+either arm, and §12's criterion now asserts the author's exact value because an invented identity is
+the measured failure mode.
 
 **The cost of leaving it open: nothing can be dispatched until it is answered.** A worker with no
 configured identity either refuses to commit or invents one from its uid and hostname, and **this
 document did not probe which** — the container runs as uid 10001 (`render.ts:309`), and whether git
 can auto-detect an address for it depends on the image's `/etc/passwd` and on `user.useConfigOnly`.
 **Both outcomes are failures and the second is the worse one**: a refusal stops a phase visibly,
-while an auto-detected `10001@<container-id>.(none)` lands on every commit and reaches the operator's
-branch through §6.2's merge. **§11 Q10 is BLOCKING for this reason**, it carries the one-line probe
-that settles which of the two happens, and it is the cheapest of the blocking questions to answer.
+while an invented identity lands on every commit and reaches the operator's branch through §6.2's
+merge. **v0.1 held this open as a BLOCKING question; v0.2 closes it as D13** (§6.8), because the
+probe settled which of the two happens and both arms of the fix were already available in the tree.
 
 ---
 
 ## 11. Open questions
 
-**Q1 and Q10 block. Q1 blocks the schedule and Q10 blocks the first dispatch, and they are
-independent** — Q1 could be answered "merge #147 today" and Q10 would still stop a worker from
-committing. The rest do not block the shape. Where a section depends on a question, it says so.
+**v0.2 status: Q1 withdrawn, Q10 answered and promoted to D13, Q11 and Q12 added by the review
+round.** Q11 blocks one mechanism and nothing else. Where a section depends on a question, it says
+so.
+
+**Two of v0.1's questions are closed in v0.2 and are kept as rows so a reader is not left looking for
+them.** **Q1 (does #147 land first) is WITHDRAWN** — it merged as `d70acf4`, §0.7. **Q10 (the git
+identity) is ANSWERED and promoted to D13** — the review round showed it was decidable from the code,
+and a probe against the real image settled the symptom (§6.8). **No question blocks the design's
+shape any more. Q11 is the only one that blocks work, and it blocks one narrow mechanism.**
 
 | # | Question | Probe that settles it | Blocks |
 |---|---|---|---|
-| **Q1** | **BLOCKING.** Does PR #147 land before the first ProjectManager run? §0.7 names three behaviours this design reads as present — a dispatch that did not land being reported as such (`fb38fc8`), a failed harvest carrying a pointer (ISC-522), and artifact inlining that carries bytes (ISC-523). The first is the one that silently breaks the loop: without it a refused envelope prints *"recreated … and dispatched"* and exits 0, and the orchestrator waits on work that never started | **Not a probe — a scheduling decision.** The alternative is to build §13 Phase 0 against `main` and accept that step 4 of every phase can lie, which this document does not recommend | **The schedule, and §13's ordering.** Nothing about the design's shape |
-| **Q10** | **BLOCKING.** Where does a worker container's git identity come from — `run.commit_identity` in `fleet.yaml`, or a per-task field in the envelope? §6.8, D9. A container with no `user.email` cannot commit at all, so this stops the first engineer dispatch rather than degrading it | **Not a probe — an owner decision**, and D9 lists the two dispositions. What *is* probeable and should be done first: `docker exec -u 10001 <container> git -C /workspace config --get user.email` on a live development seat, to confirm the value is absent rather than inherited from somewhere unnoticed | **§6.8, and the first dispatch of §13 Phase 2** |
+| **Q11** | **BLOCKING for anything built on relay retry semantics.** `relay.ts:2438-2451` treats a deferred stage trigger as re-stageable on a later pass — a REPLAY — while this repository's own triage holds that a journalled fan-out plus an `already_done` verdict means the retry never happens. **One of the two is wrong and this document did not settle it.** §9.3's `collation_failed` row and §6.5's step 4 both sit next to it | A run where a stage trigger is forced to defer, followed by a second relay pass, observing whether the child is re-dispatched or reported done. **Until that is taken, build on neither reading** | Any recovery path that assumes a second relay pass will re-issue a deferred lens. §9.3 currently assumes it will NOT, which is the conservative arm |
+| **Q12** | Should the review round be driven by the calling session at all, or is it a human step? §6.5's step table shows only steps 1-2 and 8 are the session's; steps 3-7 are the collator and the relay, there is no "wait for the review" verb, and a session polling for the collate artifact has no timeout of its own | Run three review rounds and record how often the session's poll ends in something other than a collation. **If the answer is "never", the automation is fine; if it is "sometimes", the failure is silent and expensive** | Nothing structurally. It decides whether §8.2's step 6-7 is a loop or an instruction to the operator |
 | **Q2** | Should the long-lived integration branch be rebased onto `base_branch` between phases? D2 accepts one branch for the whole run, which means it can diverge for eight phases. A rebase between phases would keep it current and would invalidate every worker's clone base | Run two phases with a deliberate upstream commit between them and measure whether the phase-2 merge conflicts. **Cheap, and it decides whether D2 needs a step 0 per phase** | **Nothing structurally.** It adds a step to §6.4 or it does not |
 | **Q3** | What does a ProjectManager run do when the calling session is compacted or lost mid-phase? §6.6 makes recovery derivable and §7.6 makes the partition recoverable, but nothing *restarts* the orchestrator the way `./scripts/review` restarts the relay | Kill a session mid-phase with two engineers running, then resume from the state file and confirm §6.6's five-step recovery reaches the same integration branch. **This is the honest test of D1's cost** | **Nothing in the design.** It bounds how much of a phase an interruption costs |
 | **Q4** | Should `engineer` gain `egress_access: true`, or is dependency installation the tester's job? §2.6 — a fresh clone has no `node_modules`, `bun install` hangs against the deny-all policy rather than failing, and `engineer` has no route to the proxy while `tester` does | Dispatch an engineer a task in a repository whose tests need an install, and observe. **The measured symptom is already recorded** (`fleet.yaml:295-299`): 1.6% CPU, 34.9kB of network, 0B written, until the tool timeout | **Nothing structurally**, and it decides whether an engineer can run the suite it was told to keep green |
@@ -1743,10 +2210,39 @@ Proposed new criteria, by area:
   runner that returns empty, and assert the workflow reports a failure. This is `fb38fc8`'s property
   re-asserted at the workflow layer, and it is the one #147 dependency worth grading twice.*
 
+**Coverage is the host's count (v0.2, §7.5)**
+- The loop's coverage numbers come from the run tree, never from the collation. *Probe: a fixture in
+  which `collation.json` claims three lenses reported while the run tree holds a journal with three
+  `children[]` and only two reply files; assert the verdict is `REVIEW_INCOMPLETE`. **A gate reading
+  `lenses[]` passes this fixture and is exactly the defect being pinned.***
+- **Anti: a collator's `lenses[]` disagreeing with the journal is reported, not silently preferred.**
+  *Probe: the same fixture asserts the report names the disagreement.*
+- **Anti: the gate does not depend on `censusCeiling`.** *Probe: a `partial` collation still yields a
+  verdict. `collation-census.ts:488` returns null unless the claim is `success`, so a gate that leant
+  on the census would be blind for exactly the status this gate exists to handle.*
+
+**The review target is reachable (v0.2, §0.8, §8.2)**
+- A review is not dispatched unless its target is readable from `/workspace`. *Probe: with the
+  operator's checkout on a different ref than the integration branch, the workflow refuses rather
+  than dispatching. **This is the criterion the round that reviewed v0.1 would have failed.***
+
+**Staged dispatch (v0.2, §6.10, D14)**
+- A dispatch is confirmed started from `status`, never from `dispatch --json`. *Probe: a fixture
+  where the dispatch payload is `{accepted: true, via: "staged"}` and the worker remains `idle` with
+  a `staged_task_id`; assert the workflow reports the turn as not started. **The accepted payload
+  carries no `error` field, so a loop reading only the dispatch result cannot distinguish these.***
+- **Anti: no task in a phase declares `depends_on`, and `--auto` is never invoked.** *Probe: assert
+  over the generated envelopes; either would be refused by `graph.ts` at exit 2 or rejected as
+  `pane_mode_tui_is_not_auto_schedulable`.*
+
 **Identity and attribution**
-- Every commit a worker makes carries the configured identity and not the operator's. *Probe: after
-  a dispatched task, `git log -1 --format=%ae` on the worker's branch equals the configured value.
-  **Cannot be phrased until Q10 is answered** — the criterion's subject is the source.*
+- Every commit a worker makes carries the configured identity — **asserted as an exact value, not as
+  "a commit succeeded"**. *Probe: after a dispatched task, `git log -1 --format='%an <%ae>'` on the
+  worker's branch equals the configured value. **The exactness is the point: the measured failure is
+  not a refusal but an invented identity — a probe worker committed as `eng-1 <eng-1@pifleet.invalid>`
+  — and a criterion asserting only that a commit exists passes that.***
+- **Anti: no worker commits under the operator's own address.** *Probe: the same `%ae` is not the
+  operator's.*
 - **Anti: no commit message, code comment, PR body or generated document produced by this system
   contains an AI or assistant attribution.** *Probe: grep every commit on the integration branch and
   the PR body for `Co-Authored-By`, `Claude`, `AI-generated`, `Generated with`; any hit fails.
@@ -1766,7 +2262,7 @@ naming no file cannot be partitioned and will serialise.
 
 | Phase | Deliverable | Depends on | Exit criteria |
 |---|---|---|---|
-| **0 — Prerequisites** | PR #147 merged; the python image built; Q10 answered | — | `git log origin/main` contains `cf81f7d`; `pifleet image build --toolchain python` exits 0; D9 has a chosen arm recorded in `ISA.md` |
+| **0 — Prerequisites** | The python image built and the identity symptom recorded | — | `pifleet image build --toolchain python` exits 0; the probe's output is in `ISA.md` |
 | **1 — The seat model** | `rev-1` → `tst-2` across config, plan and tests | 0 | `bun test` green; `./scripts/development --dry-run` prints four panes titled `eng-1 eng-2 tst-1 tst-2` |
 | **2 — Container identity** | A worker commits under a configured identity | 0 (Q10) | A dispatched task's commit shows the configured author, and it is not the operator's address |
 | **3 — The integration path** | The host can fetch and merge a worker's branch, recorded | 1 | Two workers' branches reach one integration branch; `integration.json` re-derives the merge |
@@ -1779,18 +2275,26 @@ container's git config; a host-side JSON reader) and may proceed alongside 1 and
 
 ### Phase 0 — Prerequisites
 
-**Intent.** Remove the three dependencies that make every later phase's evidence unreliable.
+**Intent.** Remove the dependencies that make every later phase's evidence unreliable.
 
-**Does not.** Change any behaviour. This phase merges and builds; it writes no new code.
+**Does not.** Change any behaviour. This phase builds and measures; it writes no product code.
 
-- **0.1** Merge PR #147 (`feature/harvest-recovery` → `main`). Touches: nothing in this tree.
-  *Acceptance: `git merge-base --is-ancestor cf81f7d origin/main` exits 0.*
-- **0.2** Build the python toolchain image so `tester` can take a fourth seat.
-  Touches: nothing — `docker/Dockerfile` is unchanged; the tag is a hash over the existing context.
-  *Acceptance: `bun run src/cli/index.ts image build --toolchain python` exits 0.*
-- **0.3** Record D9's chosen arm. Touches: `ISA.md` (`## Decisions`).
-  *Acceptance: `ISA.md` contains a decision entry naming one of D9's two arms; "revisit later" is not
-  an arm.*
+> **v0.1's task 0.1 was "merge PR #147". It merged as `d70acf4` and the task is gone** (§0.7).
+> v0.1's 0.3 was "record D9's chosen arm"; D9 is now closed as D13 (§6.8), so the remaining task is
+> to record the *symptom*, not the decision.
+
+- **0.1** Build the python toolchain image so `tester` can take a fourth seat, and so any image
+  predating the `2ccf851` re-layer is replaced. Touches: nothing — `docker/Dockerfile` is unchanged;
+  the tag is a hash over the existing build context, so a stale image is refused rather than run
+  (`src/container/image.ts:242-244`).
+  *Acceptance: `bun run src/cli/index.ts image build --toolchain python` exits 0, and
+  `docker run --rm <tag> bun --version` prints a version — which is what proves the re-layer, since
+  `:118-119`'s explicit postinstall is what makes bun functional rather than merely present.*
+- **0.2** Record the git-identity symptom so D13's two arms are anchored to a measurement rather than
+  to this document's prose. Touches: `ISA.md`.
+  *Acceptance: `ISA.md` carries the observed failure — a commit in a worker container exits 128 with
+  "unable to auto-detect email address" — and the observation that a worker CAN self-configure a
+  repository-local identity because `mounts.ts:216` widens the clone `a+rwX`.*
 
 ### Phase 1 — The seat model
 
@@ -1799,19 +2303,57 @@ container's git config; a host-side JSON reader) and may proceed alongside 1 and
 **Does not.** Touch `roles/reviewer.md`, the `reviewer` role, or any `review` console seat. §0.5
 correction 1.
 
-- **1.1** Replace the `rev-1` worker entry with `tst-2` on `role: tester`, `pane_mode: tui`,
-  `theme: nord`. Correct the `reviewer` role's comment, which names `rev-1` as the worker its model
-  default reaches. Touches: `fleet.yaml`.
-  *Acceptance: `bun run src/cli/index.ts config validate` exits 0.*
-- **1.2** Update the development roster constant. Touches:
-  `src/backends/cmux/operations-plan.ts` (`DEFAULT_DEVELOPMENT_WORKERS`).
-- **1.3** Update the two real pins and leave the fixture labels alone. Touches:
-  `test/unit/development-plan.test.ts`, `test/unit/status-runs.test.ts`.
-  *Acceptance: `bun test test/unit/development-plan.test.ts test/unit/status-runs.test.ts` green.*
-- **1.4** Add the roster and role criteria from §12's seat-model block. Touches:
+> **v0.1 said this was "two real pins". It is not — it is ten functional locations across two
+> config files, one plan constant, one script and five test files, plus roughly twenty prose
+> mentions.** The fuller list below came from the review round and was re-verified. v0.1's own
+> `grep` missed four of them because it was gitignore-aware and silently skipped `fleet.yaml`,
+> `fleet-development.yaml` and the extensionless `scripts/development`.
+
+**And one interaction that is not obvious and bites this very phase.** `fleet.yaml` is **gitignored**
+(`.gitignore:9`); `fleet.example.yaml` is the only tracked config. So an engineer dispatched to "edit
+`fleet.yaml`" produces **no diff** — and a task with a `success` claim and an empty diff is graded
+`failed` under ISC-93 as a fabrication. **The live config must be edited by the operator by hand, and
+only `fleet.example.yaml` may be given to a worker.** Task 1.1 is split on that line.
+
+- **1.1a** *(operator, not dispatchable)* In the untracked live `fleet.yaml`: replace the `rev-1`
+  worker entry (`:727`) with `tst-2` on `role: tester`, `pane_mode: tui`, `theme: nord`, and correct
+  the stale `reviewer` role comment at `:551` and the stale toolchain comment at `:656-658`
+  (§0.5 correction 5). Touches: `fleet.yaml`, `fleet-development.yaml:129`.
+  *Acceptance: `config validate` exits 0. **Not dispatchable — produces no diff.***
+- **1.1b** In the tracked example: `fleet.example.yaml:605` becomes `tst-2` on `role: tester`, **and
+  the `tester` role's `toolchain` at `:489` changes `node` → `python`** — without the second edit the
+  example declares a node tester, and the two files stay out of step (§0.9). Touches:
+  `fleet.example.yaml`.
+- **1.2** Update the development roster constant at `src/backends/cmux/operations-plan.ts:636`, and
+  the 2×2 diagram at `:611` that names the seat. Touches: `src/backends/cmux/operations-plan.ts`.
+- **1.3** Update the script's own header diagram and its `--restart` docstring. Touches:
+  `scripts/development:5`, `:16`, `:195`.
+- **1.4** Update the assertions that pin the roster. Touches:
+  `test/unit/development-plan.test.ts:47`, `:53` (and `:96`, `:134`, which v0.1 missed);
+  `test/unit/status-runs.test.ts:38`; `test/unit/config.test.ts:119` (asserts the exact id list of
+  `fleet.example.yaml`); `test/integration/cli-exit-codes.test.ts:238`
+  (`render -c fleet.example.yaml --worker rev-1`).
+  *Acceptance: `bun test` green.*
+- **1.5** Update the two integration assertions that depend on the example config's roster. Touches:
+  `test/integration/operations-console.test.ts:112` (whose `:117` requires all four seats to resolve
+  as `tui`) and `:206`.
+  *Note the mechanism at `:206`, because it is not obvious: it passes
+  `--workers eng-1,eng-2,tst-1,rev-1` to `scripts/review` as a stand-in roster, and that works ONLY
+  because the example config declares those four. The review console's real seats exist only in the
+  untracked `fleet.yaml`, so under `--config fleet.example.yaml` they degrade to non-attended and the
+  assertion's value cannot be produced. If `rev-1` leaves the example without this line changing,
+  worker resolution throws, `scripts/development:130-139` swallows it, panes go non-attended, and the
+  test fails on a missing `--workspace-name` rather than on anything about rosters.*
+- **1.6** Add the roster and role criteria from §12's seat-model block. Touches:
   `test/unit/config.test.ts`, `ISA.md`.
-- **1.5** Update the example config so a copy of it does not resurrect the seat. Touches:
-  `fleet.example.yaml`, `README.md`.
+- **1.7** *(prose, no behaviour)* Correct the seat name where it is documented. Touches:
+  `README.md:52`, `src/backends/cmux/client.ts:108`, `:111`, `src/monitor/views/fleet.tsx:77`,
+  `src/run/registry.ts:93`, `test/unit/console-restart.test.ts:11`, `:14`.
+  *Do NOT touch the ~60 remaining `rev-1` strings in `test/unit/render.test.ts`,
+  `test/integration/up-wiring.test.ts`, `down-prune`, `no-diff-gradability`, `monitor-render`,
+  `monitor-workspace`, `operations-plan.test.ts`, `replies.test.ts` or `verbgate-collect.test.ts`:
+  those build their own inline configs and use `rev-1` as an arbitrary worker id. Renaming them is
+  churn that hides the real edits in review.*
 
 ### Phase 2 — Container identity
 
@@ -1825,14 +2367,18 @@ symptom a reader will have seen.**
 - **2.0** Probe what a worker's identity is today. Touches: nothing.
   *Acceptance: `docker exec -u 10001 <container> git -C /workspace config --get user.email` and a
   throwaway `git commit --allow-empty` in the same container, with both outputs recorded in `ISA.md`.
-  This is §11 Q10's probe and it settles whether the current symptom is a refusal or a bad author.*
-- **2.1** Implement D9's chosen arm: a `run.commit_identity` schema field and its application at
-  clone preparation, or an envelope field and its application at dispatch. Touches:
-  `src/config/schema.ts`, `src/run/worktree.ts` (arm 1) **or** `src/contracts.ts`,
-  `src/run/dispatch.ts` (arm 2).
-- **2.2** Add the identity criterion from §12. Touches: `test/unit/worktree.test.ts` or
-  `test/unit/dispatch.test.ts`, `ISA.md`.
-- **2.3** Add the attribution anti-criterion as a grep-based probe over an integration branch.
+  This re-takes D13's probe on this operator's own image and settles whether the symptom here is a
+  refusal or a bad author.*
+- **2.1** *(D13 arm 1, no code)* Add the repository-local identity commands to the engineer and
+  tester brief template, so Phase 2 is dispatchable before 2.2 exists. Note `--global` is
+  unavailable — `/home/pi` is read-only. Touches: the envelope template used by §8.2 step 2.
+- **2.2** *(D13 arm 2, the durable fix)* Extend the `GIT_CONFIG_*` block to deliver an identity.
+  **`GIT_CONFIG_COUNT` is currently `"1"` and must become `"3"`** — appending keys 1 and 2 without
+  bumping the count leaves them silently unread. Touches: `src/run/worker-env.ts:783-787`,
+  `src/config/schema.ts` (the configured value).
+- **2.3** Add the identity criteria from §12, asserting the exact author value. Touches:
+  `test/unit/worker-env.test.ts`, `ISA.md`.
+- **2.4** Add the attribution anti-criterion as a grep-based probe over an integration branch.
   Touches: `test/unit/attribution.test.ts` (new), `ISA.md`.
 
 ### Phase 3 — The integration path
