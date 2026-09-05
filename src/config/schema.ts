@@ -1884,6 +1884,39 @@ export function unknownThemeWorkers(cfg: FleetConfig): { id: string; theme: stri
  * the overwhelmingly likely cause is a spelling — `catppuccin` alone, say,
  * where the bundle distinguishes `catppuccin-mocha` from `catppuccin-latte`.
  */
+/**
+ * ISC-529's anti-criterion, made observable (SRD §6.8).
+ *
+ * "No worker commits under the operator's own address" is a rule about what
+ * the fleet CANNOT do, and until this existed nothing checked it: the two
+ * `run.git_identity` fields are free strings, so a config that names the
+ * operator's own address is accepted and every worker then commits as them.
+ * The review round raised it as a consensus finding across two lenses.
+ *
+ * A WARNING, not a refusal, and the distinction is deliberate. The fleet
+ * cannot know that a given address is "the operator's" — it can only compare
+ * against the host's `git config user.email`, which is a good proxy and not a
+ * fact. An operator who genuinely wants worker commits under their own name
+ * is making a provenance decision, not a mistake, and a hard refusal would
+ * make that unreachable rather than deliberate. What matters is that it can
+ * never happen SILENTLY, which is what this closes.
+ *
+ * `operator` is `null` when the host has no `user.email` configured — a
+ * legitimate state (CI, a fresh machine), and one where there is nothing to
+ * collide with, so there is nothing to say.
+ */
+export function operatorIdentityWarning(configured: string, operator: string | null): string | null {
+  if (operator === null || operator.trim().length === 0) return null;
+  if (configured.trim().toLowerCase() !== operator.trim().toLowerCase()) return null;
+  return (
+    `warning: run.git_identity.email is the operator's own address (${configured})\n` +
+    `  Every worker's commits will be authored by you (SRD §6.8): a hosted model's work becomes ` +
+    `indistinguishable from yours in git log, and the integration merge — the one place your ` +
+    `authorship legitimately enters — stops being distinguishable from the commits it merges. ` +
+    `Set run.git_identity to a fleet address, or keep this deliberately.\n`
+  );
+}
+
 export function unknownThemeWarning(
   workers: readonly { id: string; theme: string }[],
 ): string | null {

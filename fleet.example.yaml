@@ -605,7 +605,9 @@ workers:
   # than none. What changed, read off the two roles IN THIS FILE:
   #
   #   isolation   shared-ro -> unset, so `run.isolation` at :49 = worktree
-  #   tools       write     -> bash      (a shell writes AND executes)
+  #   tools       write REMOVED, bash ADDED — not a substitution: the seat
+  #               loses the write tool and gains a shell, which both writes
+  #               and executes
   #   toolchain   base      -> python    (and every toolchain includes node)
   #
   # So this console goes from three bash seats to four. NOT an egress change

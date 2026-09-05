@@ -37,6 +37,8 @@ import {
   kubeconfigScopeWarning,
   observerTuiEpochWarning,
   observerTuiWorkers,
+  DEFAULT_GIT_IDENTITY,
+  operatorIdentityWarning,
   unknownThemeWarning,
   unknownThemeWorkers,
   parseDuration,
@@ -2439,5 +2441,40 @@ describe("models_allowlist resolves per provider (ISC-404)", () => {
       llm: { model: "other", models_allowlist: ["m"] },
     });
     expect(() => assertModelAllowed(bad, resolveWorker(bad, "w1"))).toThrow();
+  });
+});
+
+/**
+ * ISC-529's anti-criterion, from the review round's consensus finding 10:
+ * "must never be the operator's own address" was a rule with no enforcement.
+ * These pin the warning that makes it observable, in both directions.
+ */
+describe("ISC-529: a configured identity that is the operator's own is not silent", () => {
+  test("a colliding address warns, and the message names it", () => {
+    const w = operatorIdentityWarning("dan@example.com", "dan@example.com");
+    expect(w).not.toBeNull();
+    expect(w).toContain("dan@example.com");
+    expect(w).toContain("run.git_identity.email");
+  });
+
+  test("case and surrounding space do not let a collision through", () => {
+    expect(operatorIdentityWarning("  Dan@Example.COM ", "dan@example.com")).not.toBeNull();
+  });
+
+  test("a distinct address is silent — otherwise the warning means nothing", () => {
+    expect(operatorIdentityWarning("pifleet@pifleet.invalid", "dan@example.com")).toBeNull();
+  });
+
+  test("a host with no configured email has nothing to collide with", () => {
+    expect(operatorIdentityWarning("pifleet@pifleet.invalid", null)).toBeNull();
+    expect(operatorIdentityWarning("pifleet@pifleet.invalid", "   ")).toBeNull();
+  });
+
+  test("the shipped default cannot collide with any real address", () => {
+    // The reserved-TLD property doing its job: there is no operator address
+    // this could equal, because RFC 2606 guarantees .invalid resolves to
+    // nobody. Asserted so a future default that drops .invalid fails here.
+    expect(DEFAULT_GIT_IDENTITY.email.endsWith("@pifleet.invalid")).toBe(true);
+    expect(operatorIdentityWarning(DEFAULT_GIT_IDENTITY.email, "dan@example.com")).toBeNull();
   });
 });
