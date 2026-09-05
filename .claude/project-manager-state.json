@@ -72,5 +72,7 @@
   "phase3-pm-integration": "2bbe464 \u2014 tasks 3.1-3.3 complete, 35 tests, six-class mutation battery. NOT merged. Tasks 3.4 (ISC-531 in worker-remote.test.ts) and 3.5 (SRD amendment) were not dispatched and remain open.",
   "phase4-pm-verdict": "3083972 \u2014 tasks 4.1-4.3 complete, 14 tests, three mutations. NOT merged."
  },
- "resume_from": "Merge phase3-pm-integration, then phase4-pm-verdict, each behind the same hazard inspect used in phases 1-2. Then phase 5 (the skill), then phase 6 (dogfood) which is BLOCKED on owner permission to repoint the development console from ~/repos/rally-cli."
+ "resume_from": "Merge phase3-pm-integration, then phase4-pm-verdict, each behind the same hazard inspect used in phases 1-2. Then phase 5 (the skill), then phase 6 (dogfood) which is BLOCKED on owner permission to repoint the development console from ~/repos/rally-cli.",
+ "verified_at_pause": "2026-09-05 on c27c503: unit 4071 pass / 0 fail / 194 files; integration 647 pass / 0 fail / 796 tests (149 skip) / 74 files; e2e 17 pass / 0 fail / 3 files. Total 4735 pass / 0 fail / 271 files vs the ca13812 baseline's 4718 / 270 \u2014 +17 tests, +1 file (test/unit/attribution.test.ts). tsc --noEmit clean. Same 149 skips as baseline.",
+ "review_round_status": "NOT RUN. review_at_end_of_each_phase is true and the review console is up (col-1 + three lenses, containers live), but dispatching it costs four hosted-model runs, so it is held for the owner's word at the pause."
 }
