@@ -74,7 +74,7 @@ import type { Palette } from "./chrome.tsx";
  * width depends on the longest value in it MOVES when an unrelated worker
  * appears, and a monitor whose columns shift under the operator's eye every 30
  * seconds is harder to read than one that occasionally truncates. `ID_COL` is
- * sized for the ids this fleet actually issues (`eng-1`, `rev-1`, `w-0`); the
+ * sized for the ids this fleet actually issues (`eng-1`, `tst-2`, `w-0`); the
  * cost of the choice is stated at `Cell` below, where it is paid.
  */
 const ID_COL = 8;

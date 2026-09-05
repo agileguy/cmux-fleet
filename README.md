@@ -49,7 +49,7 @@ died · `4` timeout · `7` partial · `0` success.
 ## A run, end to end
 
 ```bash
-pifleet up --workers eng-1,rev-1 --backend headless   # build the run dir, start supervisors
+pifleet up --workers eng-1,tst-2 --backend headless   # build the run dir, start supervisors
 pifleet dispatch --worker eng-1 --task task.json      # send a typed envelope
 pifleet wait --all --timeout 20m --json               # block until every task settles
 pifleet artifacts --all --json                        # adjudicated results

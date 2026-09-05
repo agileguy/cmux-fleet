@@ -8,10 +8,10 @@
  *
  * The answer is not the index, and that is what most of this file is about.
  * Measured on the live development console 2026-09-04, whose `--workers` order
- * is `eng-1,eng-2,tst-1,rev-1`:
+ * is `eng-1,eng-2,tst-1,tst-2`:
  *
  *   cmux index 0 -> eng-1     cmux index 1 -> tst-1
- *   cmux index 2 -> eng-2     cmux index 3 -> rev-1
+ *   cmux index 2 -> eng-2     cmux index 3 -> tst-2
  *
  * `developmentPanes` builds a 2x2 using `splitFrom`, so creation order and
  * cmux's reported index disagree, and index 1 is the THIRD worker. A restart
