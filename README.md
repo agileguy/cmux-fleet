@@ -197,7 +197,7 @@ harvest sweep's needle set without `secret_names` claiming it was ever granted, 
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
 The only `[ ]` criteria are ISC-547 and ISC-555, filed ahead of their build; every criterion
-outside that block has been attempted. Twenty-four are graded `[~]`
+outside that block has been attempted. Twenty-five are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard — with one exception, added 2026-09-05 and worth stating plainly:
 **ISC-517 is `[~]` because it is FALSIFIED, not because its evidence is thin.** The review
