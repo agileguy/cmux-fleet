@@ -1636,6 +1636,16 @@ pifleet report --run <run-id> --md
 
 `shared-ro` is the one place the isolation guarantee is deliberately pierced, and it is pierced read-only.
 
+> **Amendment (2026-09-05, Phase 3) — per-worker isolation means several workers' changes are combined by the operator, not by the fleet.**
+>
+> The `worktree` row above gives each worker its own independent clone (§9.2 erratum), with `origin` stripped and no remotes of its own. That is the isolation guarantee working as designed — and it is also why several workers producing one change do not produce one change on their own. Every prior use of the fleet dispatched independent tasks whose results were independent artifacts; this is the first whose tasks are meant to *combine*, and the isolation that makes each worker safe is exactly what makes combining them a step someone has to perform. `pifleet` never merges (§9.3), and a worker's clone has no remote through which it could fetch a sibling's branch, so the combine step is the operator's, on the host, where the operator's own git identity and credentials already are. The mechanism already exists and needs no new verb:
+>
+> 1. After `up`, the operator's repository carries one `worker-<id>` remote per worker, pointing at that worker's clone (§9.2 erratum).
+> 2. `pifleet worktrees --json` names each worker's branch.
+> 3. `git -C <repo> fetch worker-<id> <branch>` brings the worker's commits into the operator's own checkout, and `git merge --no-ff` lands them on an integration branch.
+>
+> **The merge is the first outbound path in this system, and it lands in the operator's own working tree.** Isolation was only ever asked to protect the inside — a worker from a hostile repository, via `neutralizeRepoHazards` on the way in. The fetch-and-merge path is the first time worker-authored files move back out, into the checkout read by the process holding the operator's git identity and credentials, so the merge is gated: fetch freely, inspect the incoming tree before materialising it, merge with hooks and attribute drivers disabled, and re-scan the operator's checkout after every merge. The gate is specified in `SRD-FLEET-PM-001` §6.2.1 and implemented in `src/run/pm-integration.ts`.
+
 ### 9.2 Worktree preflight
 
 Before creating any worktree: `git worktree prune`; refuse a branch already checked out elsewhere; **serialize `worktree add` per repo** to avoid `.git/index.lock` contention across concurrent workers; fail fast with a named error when submodules or LFS are present (shared object/cache paths across worktrees are a known hazard).
