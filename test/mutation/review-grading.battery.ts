@@ -455,8 +455,8 @@ const MUTATIONS: M[] = [
     id: "W8",
     what: "LOCK: two invocations may both start a relay",
     file: CONSOLE,
-    find: '      handle = await open(path, "wx");',
-    replace: '      handle = await open(path, "w");',
+    find: "      await link(tmp, path);",
+    replace: "      await rename(tmp, path);",
     expect: "red",
   },
   // ── I: ISC-468, the pin this change broke once. ──────────────────────────
