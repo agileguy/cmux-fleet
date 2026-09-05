@@ -168,6 +168,14 @@ const BATTERIES = batteryPaths();
  * for: a battery is re-anchored in the same commit as the code it measures, and
  * enforcing it is what makes that true next time rather than this time only.
  *
+ * `wedged-seat.battery.ts` joined on 2026-09-05, the moment it became readable
+ * at all. It had shipped naming its target in a module constant rather than per
+ * entry, which parsed to ZERO anchors — so it was not merely unenforced, it was
+ * unwatched, and it failed the vacuity check above for every battery in the
+ * tree. Enforcing it in the same commit that made it parseable is the point: a
+ * battery that is only *reported* on the day it is fixed is a battery that
+ * quietly rots from the next day.
+ *
  * **Being on this list is a claim about the anchors, not about the battery.**
  * It says every `find` still matches its target exactly once. It does not say
  * the battery still measures the right thing — only running it says that, and
@@ -176,6 +184,7 @@ const BATTERIES = batteryPaths();
 const ENFORCED = new Set([
   "test/mutation/review-grading.battery.ts",
   "test/mutation/collation-contract.battery.ts",
+  "test/mutation/wedged-seat.battery.ts",
 ]);
 
 describe("every mutation battery still anchors to the code it claims to mutate", () => {
