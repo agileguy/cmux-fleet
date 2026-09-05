@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,7 +29,9 @@ import {
   integrationRecordPath,
   mergeWorkerBranch,
   readIntegrationRecord,
+  restoreAfterFailedMerge,
   toIntegrationWorkerRow,
+  workerCloneLocalPath,
   writeIntegrationRecord,
   type IntegrationRecord,
 } from "../../src/run/pm-integration.ts";
@@ -116,6 +118,17 @@ async function checkoutFingerprint(repo: string): Promise<{ head: string; status
   const head = (await git(repo, "rev-parse", "HEAD")).trim();
   const status = await git(repo, "status", "--porcelain", "--untracked-files=all");
   return { head, status };
+}
+
+/** Is the checkout mid-merge? The state finding 7 is about, asked directly. */
+async function mergeHeadPresent(repo: string): Promise<boolean> {
+  const p = Bun.spawn(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "MERGE_HEAD"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+  });
+  await new Response(p.stdout).text();
+  return (await p.exited) === 0;
 }
 
 async function writeFileDeep(path: string, content: string): Promise<void> {
@@ -859,5 +872,363 @@ describe("the hazard listing is NUL-delimited, because the path is worker-contro
     if (result.outcome.kind !== "refused_hazard") throw new Error("expected a refusal");
     expect(result.outcome.hazards.map((h) => h.path)).toEqual([ACCENTED]);
     expect(await checkoutFingerprint(operator.repo)).toEqual(before);
+  });
+});
+
+// ===========================================================================
+// Phase 6 review, findings 5 / 7 / 8 — the three defects in the merge path.
+// ===========================================================================
+
+describe("the worker's clone is scanned before the fetch, because git runs its server side there (review finding 5)", () => {
+  /*
+   * Measured before this block was written, against git 2.50.1:
+   *
+   *   trace: run_command: … GIT_PROTOCOL=version=2 'git-upload-pack <clone>'
+   *   trace: built-in: git upload-pack <clone>
+   *
+   * A local-path fetch spawns git's SERVER side inside the worker's clone.
+   * `up.ts` scanned that clone once, at creation, before the worker existed.
+   * Nothing has looked at it since — and the worker has had write access to
+   * its `.git/config` for the whole run.
+   *
+   * What the same measurement REFUTED is recorded in the source docblock and
+   * repeated here because it decides the shape of these assertions: the key
+   * the review named, `uploadpack.packObjectsHook`, is ignored at repository
+   * scope by git's own design. So these tests assert that the hazard is SEEN
+   * and RECORDED. They deliberately do not assert a refusal, because the
+   * evidence does not support one.
+   */
+  test("a hazard the worker wrote into its own .git/config is recorded on the merge row", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-1", async (dir) => {
+      await writeFile(join(dir, "src", "feature.ts"), "export const feature = 1;\n");
+    });
+    // The worker configures its clone to name a program. This is a write the
+    // worker can make at any point in the run, long after `up` looked.
+    await git(w.workerDir, "config", "core.pager", "/tmp/pifleet-test-pager");
+
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-1",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-1-1",
+    });
+
+    expect(result.preFetchHazards.length).toBeGreaterThan(0);
+    expect(JSON.stringify(result.preFetchHazards)).toContain("pager");
+    // Recorded, not refused — see the block comment.
+    expect(result.outcome.kind).toBe("merged");
+    const row = toIntegrationWorkerRow(result);
+    expect(row.pre_fetch_hazards.length).toBeGreaterThan(0);
+  });
+
+  /*
+   * ANTI-DEGENERATE. A signal present on every row is not a signal, and a
+   * scan that reported the ordinary case would be turned off inside a week.
+   * Measured directly before this test was written: `detectRepoHazards` on a
+   * plain `git clone` returns 0 hazards.
+   */
+  test("a clean worker clone records no pre-fetch hazards, so the signal is not constant", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-2", async (dir) => {
+      await writeFile(join(dir, "src", "plain.ts"), "export const plain = 1;\n");
+    });
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-2",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-1-2",
+    });
+    expect(result.preFetchHazards).toEqual([]);
+    expect(result.outcome.kind).toBe("merged");
+  });
+
+  /*
+   * The scan runs `detectRepoHazards`, never `neutralizeRepoHazards`. The
+   * worker's clone belongs to the run, not to this module, and a gate that
+   * silently rewrote the thing it was inspecting would destroy the evidence
+   * an operator needs to understand what the worker did.
+   */
+  test("the scan is read-only — the worker's config is byte-identical afterwards", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-3", async (dir) => {
+      await writeFile(join(dir, "src", "ro.ts"), "export const ro = 1;\n");
+    });
+    await git(w.workerDir, "config", "core.pager", "/tmp/pifleet-test-pager");
+    const before = await readFile(join(w.workerDir, ".git", "config"), "utf8");
+
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-3",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-1-3",
+    });
+    expect(result.preFetchHazards.length).toBeGreaterThan(0);
+
+    const after = await readFile(join(w.workerDir, ".git", "config"), "utf8");
+    expect(after).toBe(before);
+  });
+
+  /*
+   * The scan must never become a second, worse-worded source of "your remote
+   * is broken". git's own fetch error is the one an operator can search for.
+   */
+  test("a remote whose directory is gone leaves the error to git, not to the scan", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-4", async (dir) => {
+      await writeFile(join(dir, "src", "gone.ts"), "export const gone = 1;\n");
+    });
+    await rm(w.workerDir, { recursive: true, force: true });
+
+    await expect(
+      mergeWorkerBranch({
+        repoRoot: operator.repo,
+        worker: "eng-4",
+        remote: w.remote,
+        branch: w.branch,
+        taskId: "T-1-4",
+      }),
+    ).rejects.toThrow(/git fetch/);
+  });
+
+  test("only a bare local path is treated as a clone to scan", async () => {
+    const operator = await setupOperatorRepo();
+    await git(operator.repo, "remote", "add", "worker-local", "/tmp/some/clone");
+    await git(operator.repo, "remote", "add", "worker-https", "https://example.invalid/x.git");
+    await git(operator.repo, "remote", "add", "worker-ssh", "git@example.invalid:x/y.git");
+    await git(operator.repo, "remote", "add", "worker-file", "file:///tmp/some/clone");
+
+    expect(await workerCloneLocalPath(operator.repo, "worker-local")).toBe("/tmp/some/clone");
+    expect(await workerCloneLocalPath(operator.repo, "worker-https")).toBeNull();
+    expect(await workerCloneLocalPath(operator.repo, "worker-ssh")).toBeNull();
+    expect(await workerCloneLocalPath(operator.repo, "worker-file")).toBeNull();
+    expect(await workerCloneLocalPath(operator.repo, "worker-nonexistent")).toBeNull();
+  });
+});
+
+describe("a failed merge reports whether the checkout was actually restored (review finding 7)", () => {
+  /*
+   * The review asked for `merge --abort`'s result to be inspected. Measured
+   * against real git, that is the wrong value to inspect — there are two
+   * merge-failure shapes and the abort's exit code disagrees with the one
+   * that matters:
+   *
+   *   content conflict          → merge 1, MERGE_HEAD present, abort exit 0
+   *   refused before starting   → merge 2, MERGE_HEAD ABSENT,  abort FAILS
+   *
+   * The second row is a healthy outcome — git never began, so the tree was
+   * never dirtied — and a guard keyed on the abort's exit code would fire on
+   * every one of them. MERGE_HEAD after the abort answers both correctly.
+   * The three tests below are exactly those two shapes plus the real failure.
+   */
+  test("a conflicting merge is aborted, and the row records the tree restored", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-5", async (dir) => {
+      await writeFile(join(dir, "README.md"), "worker version\n");
+    });
+    // The operator moves the same file, so the merge must conflict.
+    await writeFile(join(operator.repo, "README.md"), "operator version\n");
+    await git(operator.repo, "commit", "-qam", "operator edit");
+
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-5",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-2-1",
+    });
+
+    expect(result.outcome.kind).toBe("merge_failed");
+    if (result.outcome.kind !== "merge_failed") throw new Error("unreachable");
+    expect(result.outcome.treeRestored).toBe(true);
+    expect(result.outcome.cleanupDetail).toBe("");
+    // The state itself, not the report of it.
+    expect(await mergeHeadPresent(operator.repo)).toBe(false);
+    expect(toIntegrationWorkerRow(result).tree_restored).toBe(true);
+  });
+
+  /*
+   * THE FALSE-POSITIVE GUARD, and the reason this fix is not the one the
+   * review proposed. Here `git merge --abort` FAILS ("fatal: There is no
+   * merge to abort"), and the correct verdict is still `treeRestored: true`,
+   * because git refused before touching anything.
+   *
+   * Delete the MERGE_HEAD probe and key this on the abort's exit code
+   * instead, and this test goes red while every other test in the block
+   * stays green — which is the whole argument for the probe.
+   */
+  test("a merge git refused before starting leaves the tree restored, though the abort itself fails", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-6", async (dir) => {
+      await writeFile(join(dir, "src", "collide.ts"), "export const collide = 1;\n");
+    });
+    // An UNTRACKED file at the incoming path: git refuses the merge outright
+    // rather than starting it, so MERGE_HEAD is never written.
+    await writeFile(join(operator.repo, "src", "collide.ts"), "operator's untracked file\n");
+
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-6",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-2-2",
+    });
+
+    expect(result.outcome.kind).toBe("merge_failed");
+    if (result.outcome.kind !== "merge_failed") throw new Error("unreachable");
+    expect(result.outcome.treeRestored).toBe(true);
+    expect(await mergeHeadPresent(operator.repo)).toBe(false);
+    // The operator's own untracked file is still theirs, untouched.
+    expect(await readFile(join(operator.repo, "src", "collide.ts"), "utf8")).toBe("operator's untracked file\n");
+  });
+
+  /*
+   * The state the finding named: "the checkout can be left mid-conflict with
+   * a live MERGE_HEAD while the outcome reports merge_failed and the note
+   * says nothing." Forced with the contention the finding also named — a held
+   * `.git/index.lock`, which is what a concurrent git in the same checkout
+   * leaves behind.
+   */
+  test("when the abort cannot run and MERGE_HEAD survives, the tree is reported NOT restored", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-7", async (dir) => {
+      await writeFile(join(dir, "README.md"), "worker version\n");
+    });
+    await writeFile(join(operator.repo, "README.md"), "operator version\n");
+    await git(operator.repo, "commit", "-qam", "operator edit");
+
+    // Drive the checkout into the real mid-merge state with real git. The
+    // objects have to arrive first — this test bypasses `mergeWorkerBranch`
+    // precisely because it needs the mid-merge state to already exist when
+    // the cleanup is asked to run.
+    await git(operator.repo, "fetch", w.remote, w.branch);
+    const merge = Bun.spawn(["git", "-C", operator.repo, "merge", "--no-ff", "--no-edit", w.workerHead], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    await merge.exited;
+    expect(await mergeHeadPresent(operator.repo)).toBe(true);
+
+    // Now make the abort impossible, exactly as index.lock contention does.
+    await writeFile(join(operator.repo, ".git", "index.lock"), "");
+    const cleanup = await restoreAfterFailedMerge(operator.repo);
+
+    expect(cleanup.treeRestored).toBe(false);
+    expect(cleanup.detail).toContain("MERGE_HEAD is still present");
+    expect(cleanup.detail).toContain("by hand");
+    expect(await mergeHeadPresent(operator.repo)).toBe(true);
+
+    await rm(join(operator.repo, ".git", "index.lock"), { force: true });
+  });
+
+  test("a merge_failed row whose tree was not restored carries that in the record, not only in prose", async () => {
+    const row = toIntegrationWorkerRow({
+      worker: "eng-8",
+      remote: "worker-eng-8",
+      branch: "fleet/testrun/eng-8",
+      taskId: "T-2-4",
+      head: "a".repeat(40),
+      commitsAhead: 1,
+      preFetchHazards: [],
+      outcome: {
+        kind: "merge_failed",
+        detail: "CONFLICT (content): Merge conflict in README.md",
+        treeRestored: false,
+        cleanupDetail: "git merge --abort exited 128 and MERGE_HEAD is still present",
+      },
+    });
+    expect(row.tree_restored).toBe(false);
+    expect(row.note).toContain("MERGE_HEAD is still present");
+    // A reader must not have to parse prose to learn this.
+    expect(typeof row.tree_restored).toBe("boolean");
+  });
+});
+
+describe("an undetermined commit count is never rendered as a determinate one (review finding 8)", () => {
+  const resultWithCount = (commitsAhead: number | null) =>
+    ({
+      worker: "eng-9",
+      remote: "worker-eng-9",
+      branch: "fleet/testrun/eng-9",
+      taskId: "T-3-1",
+      head: "b".repeat(40),
+      commitsAhead,
+      preFetchHazards: [],
+      outcome: { kind: "merged" as const, mergeCommit: "c".repeat(40), postMergeHazards: [] },
+    }) satisfies Parameters<typeof toIntegrationWorkerRow>[0];
+
+  /*
+   * The defect, in the review's words: "A git failure on the count is
+   * indistinguishable in the record from 'zero commits ahead'." `0` is a
+   * claim about the branch; a failed `rev-list` is the absence of one.
+   * `worktree.ts`'s `inspectCloneDirt` already refuses this exact shape, and
+   * `worktrees.ts:52` already spells an undetermined count `null` — so this
+   * is the repository's existing convention reaching the one place that had
+   * not adopted it.
+   */
+  test("an undetermined count lands as null, not as 0", () => {
+    expect(toIntegrationWorkerRow(resultWithCount(null)).commits_ahead).toBeNull();
+  });
+
+  /*
+   * ANTI-DEGENERATE. `commits_ahead: null` for everything would satisfy the
+   * test above and destroy the field. A real count must still be itself, and
+   * a genuine zero must still be a genuine zero — distinguishable from the
+   * unknown, which was the entire complaint.
+   */
+  test("a real count is still itself, and a real zero is still zero", () => {
+    expect(toIntegrationWorkerRow(resultWithCount(3)).commits_ahead).toBe(3);
+    expect(toIntegrationWorkerRow(resultWithCount(0)).commits_ahead).toBe(0);
+    expect(toIntegrationWorkerRow(resultWithCount(0)).commits_ahead).not.toBeNull();
+  });
+
+  test("null survives the record round-trip rather than being laundered into a number", async () => {
+    const operator = await setupOperatorRepo();
+    const record: IntegrationRecord = {
+      schema: "pifleet.pmintegration/v1",
+      run_id: "2026-09-05T00-00-00Z-test",
+      integration_branch: "integration",
+      base_sha: operator.baseSha,
+      workers: [toIntegrationWorkerRow(resultWithCount(null))],
+    };
+    await writeIntegrationRecord(operator.repo, 7, record);
+    const read = await readIntegrationRecord(operator.repo, 7);
+    expect(read.workers[0]?.commits_ahead).toBeNull();
+  });
+
+  /*
+   * Nullable, never defaulted. A default would let a row that simply omits
+   * the count read back as a confident number — the same lie in a new place.
+   */
+  test("the schema refuses to invent a count for a row that carries none", () => {
+    const row = {
+      worker: "eng-9",
+      remote: "worker-eng-9",
+      branch: "fleet/testrun/eng-9",
+      task_id: "T-3-1",
+      head: "b".repeat(40),
+      merged: true,
+      merge_commit: "c".repeat(40),
+    };
+    expect(() => IntegrationWorkerRowSchema.parse(row)).toThrow();
+    expect(IntegrationWorkerRowSchema.parse({ ...row, commits_ahead: null }).commits_ahead).toBeNull();
+  });
+
+  test("a negative count is still refused — null is the only non-count accepted", () => {
+    const row = {
+      worker: "eng-9",
+      remote: "worker-eng-9",
+      branch: "fleet/testrun/eng-9",
+      task_id: "T-3-1",
+      head: "b".repeat(40),
+      merged: true,
+      merge_commit: "c".repeat(40),
+      commits_ahead: -1,
+    };
+    expect(() => IntegrationWorkerRowSchema.parse(row)).toThrow();
   });
 });

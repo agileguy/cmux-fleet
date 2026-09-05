@@ -97,7 +97,7 @@ import {
   type RepoHazard,
 } from "../contracts.ts";
 import { MAX_RELAY_TASK_ID_CHARS } from "./task-ids.ts";
-import { neutralizeRepoHazards } from "../security/repo-hazards.ts";
+import { detectRepoHazards, neutralizeRepoHazards } from "../security/repo-hazards.ts";
 
 const shortStr = z.string().max(MAX_SHORT);
 const text = z.string().max(MAX_TEXT);
@@ -333,7 +333,17 @@ export interface MergeWorkerBranchInput {
 
 export type MergeWorkerBranchOutcome =
   | { kind: "refused_hazard"; hazards: HazardTouch[] }
-  | { kind: "merge_failed"; detail: string }
+  | {
+      kind: "merge_failed";
+      detail: string;
+      /**
+       * Whether the checkout was actually left OUT of the merge — not whether
+       * `merge --abort` exited zero. See `restoreAfterFailedMerge`.
+       */
+      treeRestored: boolean;
+      /** Why the tree could not be restored, or `""` when it was. */
+      cleanupDetail: string;
+    }
   | { kind: "merged"; mergeCommit: string; postMergeHazards: RepoHazard[] };
 
 export interface MergeWorkerBranchResult {
@@ -343,8 +353,131 @@ export interface MergeWorkerBranchResult {
   taskId: string;
   /** The SHA `git fetch` brought in — captured immediately, never re-read from `FETCH_HEAD` later. */
   head: string;
-  commitsAhead: number;
+  /**
+   * How many commits the fetched head is ahead of the base — or `null` when
+   * git could not say. Never `NaN`, and never `0` standing in for "unknown"
+   * (finding 8). `worktrees.ts:52` already spells an undetermined count this
+   * way; this is that convention, not a new one.
+   */
+  commitsAhead: number | null;
+  /**
+   * Hazards found in the WORKER's clone, read before the fetch — the state
+   * that existed while git ran its server side there (finding 5).
+   */
+  preFetchHazards: RepoHazard[];
   outcome: MergeWorkerBranchOutcome;
+}
+
+/**
+ * The local filesystem path a `worker-<id>` remote points at, or `null` when
+ * the remote is not a plain local path.
+ *
+ * Only a local path has a clone on THIS machine to scan. A `scheme://` URL or
+ * an scp-style `host:path` is somebody else's filesystem, and this module has
+ * no business guessing at it.
+ */
+export async function workerCloneLocalPath(repoRoot: string, remote: string): Promise<string | null> {
+  const res = await spawnGit(repoRoot, ["remote", "get-url", remote]);
+  if (res.code !== 0) return null;
+  const url = res.stdout.trim();
+  if (url.length === 0) return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return null; // scheme://host/... (file:// included — not a bare path)
+  if (/^[^/]+:/.test(url)) return null; // scp-style host:path
+  return url;
+}
+
+/**
+ * Read-only hazard scan of the worker's own clone, run BEFORE the fetch
+ * (§6.2.1 part 0 — finding 5 from phase 6's review round).
+ *
+ * ## What a local-path fetch actually does, measured
+ *
+ * `git fetch <path> <branch>` is not a one-sided read. Traced against git
+ * 2.50.1, the operator's fetch spawns `git-upload-pack <clone path>` and then
+ * `trace: built-in: git upload-pack /…/worker`. **Git runs its SERVER side as
+ * a subprocess inside the worker's clone**, a directory whose `.git/config`
+ * the worker has held write access to for the whole run. `up.ts` scans the
+ * checkout at creation time, before the worker exists; nothing has looked at
+ * the clone since. That timing gap is certain.
+ *
+ * ## What that gap does NOT currently buy an attacker, also measured
+ *
+ * The review named `uploadpack.packObjectsHook` (`repo-hazards.ts:163`) as the
+ * key class. It was worth checking rather than assuming, and the check
+ * refutes it: a clone with `uploadpack.packObjectsHook` set to a marker script
+ * was fetched from, `git-upload-pack` ran, and **the hook did not**. git's own
+ * documentation says why:
+ *
+ * > Note that this configuration variable is only respected when it is
+ * > specified in protected configuration … This is a safety measure against
+ * > fetching from untrusted repositories.
+ *
+ * Protected scope is system, global and `-c` — never the repository's own
+ * config, which is the only scope a worker can write. `core.alternateRefsCommand`
+ * was tried the same way (with a real separate alternate object store) and
+ * also did not fire on fetch; it serves `receive-pack`, not this path.
+ *
+ * ## So why scan at all
+ *
+ * Because the two keys we could name being covered by git's current hardening
+ * is not the same claim as "the clone is safe", and this module must not rest
+ * on the second when it only measured the first. `repo-hazards.ts` states the
+ * standing reason directly: *"Detection is also what makes a hazard VISIBLE to
+ * the operator, which suppression alone never does."*
+ *
+ * The scan therefore RECORDS and does not refuse. A worker whose clone config
+ * names a program is a fact the operator should see next to that worker's
+ * merge; it is not, on the evidence above, grounds for this loop to reject the
+ * branch on its own.
+ */
+async function scanWorkerCloneBeforeFetch(repoRoot: string, remote: string): Promise<RepoHazard[]> {
+  const clonePath = await workerCloneLocalPath(repoRoot, remote);
+  if (clonePath === null) return [];
+  // A remote whose directory is gone is the FETCH's error to report, with
+  // git's own wording — not something this scan should pre-empt with a
+  // worse-phrased throw of its own.
+  const st = await lstat(clonePath).catch(() => null);
+  if (st === null || !st.isDirectory()) return [];
+  return detectRepoHazards(clonePath);
+}
+
+/**
+ * Put the checkout back after a merge that failed, and report whether that
+ * actually happened (finding 7 from phase 6's review round).
+ *
+ * ## Why the abort's exit code is the WRONG thing to inspect
+ *
+ * The review's own suggested fix was to stop ignoring `merge --abort`'s
+ * result. Measured against real git, that fix would fire constantly on a
+ * healthy path. There are two merge-failure shapes and they differ exactly
+ * here:
+ *
+ * | failure | merge exit | MERGE_HEAD | `merge --abort` |
+ * |---|---|---|---|
+ * | content conflict | 1 | present | exit 0, clears it |
+ * | refused before starting (untracked file would be overwritten) | 2 | **absent** | **fatal: There is no merge to abort** |
+ *
+ * In the second shape git never began the merge, so there is nothing to abort
+ * and the abort failing is the CORRECT outcome — the tree was never dirtied.
+ * A guard that alarmed on a non-zero abort would cry wolf on every one of
+ * those, and a guard that cries wolf gets turned off.
+ *
+ * The state that actually matters is the one the finding named: *"the checkout
+ * can be left mid-conflict with a live MERGE_HEAD"*. So MERGE_HEAD is what is
+ * asked, AFTER the abort attempt. It answers both shapes correctly, and it is
+ * the state itself rather than a proxy for it.
+ */
+export async function restoreAfterFailedMerge(repoRoot: string): Promise<{ treeRestored: boolean; detail: string }> {
+  const abort = await spawnGit(repoRoot, ["merge", "--abort"]);
+  const midMerge = await spawnGit(repoRoot, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
+  if (midMerge.code !== 0) return { treeRestored: true, detail: "" };
+  return {
+    treeRestored: false,
+    detail:
+      `git merge --abort exited ${abort.code} and MERGE_HEAD is still present, so ${repoRoot} is ` +
+      `left mid-merge and must be cleaned up by hand before anything else is merged into it` +
+      (abort.stderr.trim() ? `: ${abort.stderr.trim()}` : ""),
+  };
 }
 
 /**
@@ -360,6 +493,9 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
   const { repoRoot, worker, remote, branch, taskId } = input;
   const baseRef = input.baseRef ?? "HEAD";
 
+  // ---- Part 0: look at the clone git is about to run its SERVER side inside. ----
+  const preFetchHazards = await scanWorkerCloneBeforeFetch(repoRoot, remote);
+
   // ---- Part 1: fetch freely. ----
   const fetchRes = await spawnGit(repoRoot, ["fetch", remote, branch]);
   if (fetchRes.code !== 0) {
@@ -372,7 +508,13 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
   const head = headRes.stdout.trim();
 
   const countRes = await spawnGit(repoRoot, ["rev-list", "--count", `${baseRef}..${head}`]);
-  const commitsAhead = countRes.code === 0 ? Number.parseInt(countRes.stdout.trim(), 10) : Number.NaN;
+  // `null`, not `NaN`, and emphatically not `0`: the undetermined value is
+  // killed HERE, at the point it enters the module, rather than rendered into
+  // a determinate-looking `0` three hundred lines downstream (finding 8). A
+  // successful-but-unparseable count is the same unknown as a failed one and
+  // takes the same answer.
+  const parsedAhead = Number.parseInt(countRes.stdout.trim(), 10);
+  const commitsAhead = countRes.code === 0 && Number.isFinite(parsedAhead) ? parsedAhead : null;
 
   // ---- Part 2: inspect BEFORE materialising. ----
   const changed = await incomingTreeChanges(repoRoot, baseRef, head);
@@ -385,6 +527,7 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
       taskId,
       head,
       commitsAhead,
+      preFetchHazards,
       outcome: { kind: "refused_hazard", hazards },
     };
   }
@@ -404,8 +547,7 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
     head,
   ]);
   if (mergeRes.code !== 0) {
-    // Best-effort cleanup: leave the tree as it was found rather than mid-conflict.
-    await spawnGit(repoRoot, ["merge", "--abort"]).catch(() => {});
+    const cleanup = await restoreAfterFailedMerge(repoRoot);
     return {
       worker,
       remote,
@@ -413,7 +555,13 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
       taskId,
       head,
       commitsAhead,
-      outcome: { kind: "merge_failed", detail: mergeRes.stderr.trim() || mergeRes.stdout.trim() },
+      preFetchHazards,
+      outcome: {
+        kind: "merge_failed",
+        detail: mergeRes.stderr.trim() || mergeRes.stdout.trim(),
+        treeRestored: cleanup.treeRestored,
+        cleanupDetail: cleanup.detail,
+      },
     };
   }
   const mergeCommitRes = await spawnGit(repoRoot, ["rev-parse", "HEAD"]);
@@ -432,6 +580,7 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
     taskId,
     head,
     commitsAhead,
+    preFetchHazards,
     outcome: { kind: "merged", mergeCommit, postMergeHazards },
   };
 }
@@ -469,11 +618,32 @@ export const IntegrationWorkerRowSchema = z
     task_id: taskIdField,
     /** The SHA `git fetch` brought in, captured once and never re-read from a ref. */
     head: gitSha40,
-    commits_ahead: z.number().int().nonnegative(),
+    /**
+     * How far ahead the fetched head was — or `null` when git could not say
+     * (finding 8). Nullable rather than defaulted, because a default is a
+     * value somebody chose and "we do not know" is not a value somebody
+     * chose. `worktrees.ts:52` already carries an undetermined commit count
+     * as `null`; a second spelling of the same unknown would be worse than
+     * either spelling alone.
+     */
+    commits_ahead: z.number().int().nonnegative().nullable(),
     merged: z.boolean(),
     merge_commit: gitSha40.nullable(),
     hazard_refusal: z.array(HazardRefusalSchema).max(MAX_ITEMS).default([]),
     post_merge_hazards: z.array(RepoHazardSchema).max(MAX_ITEMS).default([]),
+    /**
+     * Hazards standing in the WORKER's clone at the moment git ran its server
+     * side inside it (finding 5). Recorded, never a refusal — see
+     * `scanWorkerCloneBeforeFetch` for what was measured and what was refuted.
+     */
+    pre_fetch_hazards: z.array(RepoHazardSchema).max(MAX_ITEMS).default([]),
+    /**
+     * For a row whose merge FAILED: whether the checkout was actually left out
+     * of the merge (finding 7). `null` on every other row — the question does
+     * not arise when no merge was attempted or the merge landed. `false` means
+     * MERGE_HEAD survived the abort and the checkout needs a human.
+     */
+    tree_restored: z.boolean().nullable().default(null),
     /** Free text: a merge-failed detail, or blank. Never load-bearing. */
     note: text.default(""),
 
@@ -549,7 +719,11 @@ export function toIntegrationWorkerRow(result: MergeWorkerBranchResult): Integra
     branch: result.branch,
     task_id: result.taskId,
     head: result.head,
-    commits_ahead: Number.isFinite(result.commitsAhead) ? result.commitsAhead : 0,
+    // No `Number.isFinite(...) ? ... : 0` here any more. `commitsAhead` is
+    // already `number | null` by the time it arrives, because the unknown is
+    // killed where it enters (finding 8).
+    commits_ahead: result.commitsAhead,
+    pre_fetch_hazards: result.preFetchHazards,
   };
   switch (result.outcome.kind) {
     case "merged":
@@ -559,6 +733,7 @@ export function toIntegrationWorkerRow(result: MergeWorkerBranchResult): Integra
         merge_commit: result.outcome.mergeCommit,
         hazard_refusal: [],
         post_merge_hazards: result.outcome.postMergeHazards,
+        tree_restored: null,
         note: "",
       });
     case "refused_hazard":
@@ -568,6 +743,7 @@ export function toIntegrationWorkerRow(result: MergeWorkerBranchResult): Integra
         merge_commit: null,
         hazard_refusal: result.outcome.hazards,
         post_merge_hazards: [],
+        tree_restored: null,
         note: "",
       });
     case "merge_failed":
@@ -577,7 +753,13 @@ export function toIntegrationWorkerRow(result: MergeWorkerBranchResult): Integra
         merge_commit: null,
         hazard_refusal: [],
         post_merge_hazards: [],
-        note: result.outcome.detail,
+        tree_restored: result.outcome.treeRestored,
+        // The cleanup verdict is carried by `tree_restored`, which is a
+        // boolean a reader can act on. This note is the human sentence beside
+        // it, and stays non-load-bearing.
+        note: result.outcome.cleanupDetail
+          ? `${result.outcome.detail}\n${result.outcome.cleanupDetail}`
+          : result.outcome.detail,
       });
   }
 }
