@@ -84,6 +84,7 @@ import {
   harvestFailureNote,
   planInlineBudget,
   productionRelayEffects,
+  RelayReplyError,
   relayFanOut,
   resolveConsoleRuns,
   type InlinedArtifact,
@@ -2143,6 +2144,40 @@ describe("truncation in the collation brief", () => {
  * a weaker check that fails on exactly the regression that matters, chosen
  * deliberately over a stronger one that cannot be written.
  */
+/**
+ * D6's ONE failure mode, recognisable as a RULE rather than as a paragraph.
+ *
+ * The publish path deliberately does not create a missing `/replies` source —
+ * Docker would make an empty directory rather than refuse, so three reports
+ * would be delivered somewhere the collator's mount can never see, and every
+ * observable would say it worked. That refusal is right and it PROPAGATES.
+ *
+ * What it did not do was let a caller tell it apart from any other write
+ * failure without matching English, which is the practice this module's own
+ * `RelayDispatchError` docblock forbids in as many words. The paragraph is the
+ * part most likely to be rewritten; the type and its three fields are not.
+ */
+describe("writeReply refuses a missing replies mount, by type", () => {
+  test("a missing replies directory throws RelayReplyError carrying the facts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-replies-"));
+    // No `up`, so nothing created the collator's replies directory.
+    const p = productionRelayEffects.writeReply({ root } as RunPaths, "col-1", "T1-arch", {
+      verdict: "success",
+    });
+
+    await expect(p).rejects.toBeInstanceOf(RelayReplyError);
+    const err = (await p.catch((e: unknown) => e)) as RelayReplyError;
+    // Fields, not substrings: which collator, which report, which directory.
+    expect(err.collator).toBe("col-1");
+    expect(err.childTaskId).toBe("T1-arch");
+    expect(err.repliesDir.startsWith(root)).toBe(true);
+    // The original ENOENT is kept, so the errno survives the wrap.
+    expect((err.cause as NodeJS.ErrnoException | undefined)?.code).toBe("ENOENT");
+    // And the sentence still tells an operator whose job the directory is.
+    expect(err.message).toContain("pifleet up");
+  });
+});
+
 describe("readArtifact resolves the path once", () => {
   const outboxFor = async (): Promise<{ root: string; dir: string }> => {
     const root = await mkdtemp(join(tmpdir(), "pifleet-artifact-"));

@@ -1922,6 +1922,39 @@ export class RelayDispatchError extends Error {
   }
 }
 
+/**
+ * A REPORT COULD NOT BE DELIVERED INTO THE COLLATOR'S `/replies` MOUNT.
+ *
+ * Typed for `RelayDispatchError`'s reason, which this module states as a rule
+ * and had not applied here: *"a caller — or a test — that had to match English
+ * to tell one refusal from another would be pinning a sentence rather than a
+ * rule."* The publish path threw a bare `Error` carrying a paragraph, so the
+ * only way to recognise the one failure mode D6 has was to substring-match that
+ * paragraph — and the paragraph is the part most likely to be rewritten.
+ *
+ * The fields are what a caller would otherwise reconstruct from the message:
+ * WHICH collator, WHICH report, and WHICH directory was missing. `cause` keeps
+ * the original `ENOENT`.
+ *
+ * It still PROPAGATES, and nothing about the typing changes that. `fanOut` does
+ * not catch it, `relayPass` lets it through without journalling, and the next
+ * pass retries — see `writeReply`, where the argument for not repairing the
+ * mount lives.
+ */
+export class RelayReplyError extends Error {
+  constructor(
+    readonly collator: string,
+    readonly childTaskId: string,
+    /** The host directory the collator's `/replies` is mounted from. */
+    readonly repliesDir: string,
+    detail: string,
+    options?: { readonly cause?: unknown },
+  ) {
+    super(detail, options);
+    this.name = "RelayReplyError";
+  }
+}
+
 /** The join gave up on a child. See `RELAY_SETTLE_DEADLINE_MS`. */
 export class RelaySettleTimeoutError extends Error {
   constructor(
@@ -2953,7 +2986,10 @@ export const productionRelayEffects: RelayEffects = {
        * them looking in the wrong place.
        */
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new Error(
+        throw new RelayReplyError(
+          collator,
+          childTaskId,
+          dir,
           `the collator "${collator}" has no replies directory at ${dir}, so the report for ` +
             `"${childTaskId}" could not be delivered (SRD-REVIEW-CONSOLE D6). That directory is ` +
             `created by \`pifleet up\` before the container starts, and it is NOT created here on ` +
