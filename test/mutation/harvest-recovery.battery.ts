@@ -124,9 +124,9 @@ const MUTATIONS: M[] = [
     what: "NOTE: the empty arm stops pointing at the usual places, so a person is told not to look",
     file: CORE,
     find:
-      "  if (outbox.kind === \"empty\") {\n    return `. Its task outbox holds no unexpected entries. ${usual}`;\n  }",
+      "  if (outbox.kind === \"empty\") {\n    return (\n      `. Its task outbox holds no entries outside the usual names. ${unopened} \u2014 look in the ` +\n      `usual places, ${usualPlaces}`\n    );\n  }",
     replace:
-      "  if (outbox.kind === \"empty\") {\n    return \". Its task outbox holds no unexpected entries\";\n  }",
+      "  if (outbox.kind === \"empty\") {\n    return \". Its task outbox holds no entries outside the usual names\";\n  }",
     expect: "red",
   },
   {
@@ -134,7 +134,7 @@ const MUTATIONS: M[] = [
     what: "NOTE: a listing that failed is dropped, so two failed reads read as a silent reviewer",
     file: CORE,
     find:
-      "  if (outbox.kind === \"unlistable\") {\n    return `. Its task outbox could not be listed either, so nothing here can say what is in it. ${usual}`;\n  }",
+      "  if (outbox.kind === \"unlistable\") {\n    return (\n      `. Its task outbox could not be listed either, so nothing here can say what is in it. ` +\n      `${unopened} \u2014 look in the usual places, ${usualPlaces}`\n    );\n  }",
     replace:
       "  if (outbox.kind === \"unlistable\") {\n    return \"\";\n  }",
     expect: "red",
