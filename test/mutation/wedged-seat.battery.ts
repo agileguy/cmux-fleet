@@ -58,6 +58,23 @@ interface M {
   what: string;
   /** The assertion this mutation exists to prove is load-bearing. */
   catches: string;
+  /**
+   * The file this mutation edits, as one of the `${W}` constants above.
+   *
+   * Every entry here names `STATUS`, so this looks redundant and is not. The
+   * shared drift guard in `test/unit/mutation-anchors.test.ts` parses batteries
+   * WITHOUT executing them, and the shape it reads is `file: CONST,` followed by
+   * `find:`. A battery that carried its target only in a module constant parsed
+   * to ZERO anchors — which failed that guard's own vacuity check for every
+   * battery in the tree, not just this one, and would otherwise have left these
+   * anchors free to rot unwatched. Naming the target per entry is what puts them
+   * under the guard.
+   *
+   * It is also read at RUNTIME below rather than being decoration the parser
+   * alone consumes: a field that only a regex believes is a field that drifts
+   * from what the runner actually mutates.
+   */
+  file: string;
   find: string;
   replace: string;
   expect: "red" | "green";
@@ -69,6 +86,7 @@ const MUTATIONS: M[] = [
     id: "B1",
     what: "the alarm fires at WARN instead of KILL",
     catches: "a reviewer ten minutes into one model call is quiet, NOT wedged",
+    file: STATUS,
     find: '  if (silentMs >= input.window.killMs) return { verdict: "wedged", silentMs };',
     replace: '  if (silentMs >= input.window.warnMs) return { verdict: "wedged", silentMs };',
     expect: "red",
@@ -77,6 +95,7 @@ const MUTATIONS: M[] = [
     id: "B2",
     what: "the warn band is deleted — everything under kill reads as working",
     catches: "one millisecond under warn is working; warn itself is quiet",
+    file: STATUS,
     find: '  if (silentMs >= input.window.warnMs) return { verdict: "quiet", silentMs };',
     replace: '  if (false) return { verdict: "quiet", silentMs };',
     expect: "red",
@@ -85,6 +104,7 @@ const MUTATIONS: M[] = [
     id: "B3",
     what: "the boundary is exclusive, so the configured threshold itself never fires",
     catches: "one millisecond under kill is quiet; kill itself is wedged",
+    file: STATUS,
     find: "  const silentMs = Math.max(0, beat - grew);\n  if (silentMs >= input.window.killMs)",
     replace: "  const silentMs = Math.max(0, beat - grew);\n  if (silentMs > input.window.killMs)",
     expect: "red",
@@ -95,6 +115,7 @@ const MUTATIONS: M[] = [
     id: "G1",
     what: "the busy gate is widened — an idle worker can be called wedged",
     catches: "an idle worker with the same dead transcript is not applicable",
+    file: STATUS,
     find: '  if (input.phase !== "busy") return { verdict: "not_applicable" };',
     replace: '  if (input.phase === "dead") return { verdict: "not_applicable" };',
     expect: "red",
@@ -103,6 +124,7 @@ const MUTATIONS: M[] = [
     id: "G2",
     what: "the dead-supervisor gate is dropped — 231 dead runs on this host would alarm",
     catches: "supervisor=gone is not_applicable however stale the transcript",
+    file: STATUS,
     find: '  if (!input.supervisorAlive) return { verdict: "not_applicable" };',
     replace: "  void input.supervisorAlive;",
     expect: "red",
@@ -113,6 +135,7 @@ const MUTATIONS: M[] = [
     id: "U1",
     what: "a transcript that never grew is called wedged (the claim the supervisor forbids)",
     catches: "a watched transcript that has never grown makes no claim either way",
+    file: STATUS,
     find:
       '  if (input.activity.last_growth_at === null) return { verdict: "unknown", why: "no_growth_yet" };',
     replace:
@@ -123,6 +146,7 @@ const MUTATIONS: M[] = [
     id: "U2",
     what: "an rpc worker with no activity record is treated as measured-and-healthy",
     catches: "an rpc worker carries no activity record at all",
+    file: STATUS,
     find: '  if (input.activity === null) return { verdict: "unknown", why: "no_activity_record" };',
     replace: '  if (input.activity === null) return { verdict: "working", silentMs: 0 };',
     expect: "red",
@@ -131,6 +155,7 @@ const MUTATIONS: M[] = [
     id: "U3",
     what: "two unknown reasons collapse onto one string",
     catches: "no two of the four unknowns share a reason string",
+    file: STATUS,
     find: '  if (input.window === null) return { verdict: "unknown", why: "no_window" };',
     replace: '  if (input.window === null) return { verdict: "unknown", why: "no_activity_record" };',
     expect: "red",
@@ -139,6 +164,7 @@ const MUTATIONS: M[] = [
     id: "U4",
     what: "an unparseable stamp is reported as a quiet worker rather than a corruption",
     catches: "a stamp that will not parse is a corruption, not a quiet worker",
+    file: STATUS,
     find: '    return { verdict: "unknown", why: "unreadable_stamp" };',
     replace: '    return { verdict: "quiet", silentMs: 0 };',
     expect: "red",
@@ -149,6 +175,7 @@ const MUTATIONS: M[] = [
     id: "C1",
     what: "the span is measured against the READER's wall clock instead of the supervisor's",
     catches: "the same state read at two different real instants gives one answer",
+    file: STATUS,
     find: "  const beat = input.heartbeatAt === null ? Number.NaN : Date.parse(input.heartbeatAt);",
     replace: "  const beat = Date.now();",
     expect: "red",
@@ -157,6 +184,7 @@ const MUTATIONS: M[] = [
     id: "C2",
     what: "the clamp is dropped — sub-tick ordering renders as negative silence",
     catches: "growth stamped after the heartbeat clamps to zero rather than going negative",
+    file: STATUS,
     find: "  const silentMs = Math.max(0, beat - grew);",
     replace: "  const silentMs = beat - grew;",
     expect: "red",
@@ -167,6 +195,7 @@ const MUTATIONS: M[] = [
     id: "R1",
     what: "the alarm also shouts for `quiet` — the slow reviewer becomes a false alarm",
     catches: "the slow-but-live worker gets NOTHING, which is the false alarm avoided",
+    file: STATUS,
     find: '  if (reading.verdict === "wedged") {',
     replace: '  if (reading.verdict === "wedged" || reading.verdict === "quiet") {',
     expect: "red",
@@ -175,6 +204,7 @@ const MUTATIONS: M[] = [
     id: "R2",
     what: "the missing-window case goes quiet — no alarm is indistinguishable from healthy",
     catches: "a busy worker with no recorded window says the window is unknown",
+    file: STATUS,
     find: '  if (reading.verdict === "unknown" && reading.why === "no_window") {',
     replace: '  if (false) {',
     expect: "red",
@@ -183,6 +213,7 @@ const MUTATIONS: M[] = [
     id: "R3",
     what: "the alarm drops the span, so a seat 5m past reads like one dead an hour",
     catches: "the wedged worker gets a loud line naming the silence and the cause",
+    file: STATUS,
     find: "      `WEDGED heartbeating but transcript silent ${coarseDuration(reading.silentMs)} ` +",
     replace: "      `WEDGED heartbeating but transcript silent ` +",
     expect: "red",
@@ -193,6 +224,7 @@ const MUTATIONS: M[] = [
     id: "W1",
     what: "the alarm is computed and never printed",
     catches: "the text line appends the note, and appends nothing when there is none",
+    file: STATUS,
     find: "            const wedge = silenceNote(w.silence);",
     replace: "            const wedge = null;",
     expect: "red",
@@ -201,6 +233,7 @@ const MUTATIONS: M[] = [
     id: "W2",
     what: "the threshold is hard-coded instead of read from the run",
     catches: "the window is read from the run rather than hard-coded",
+    file: STATUS,
     find: "    return (await readRunBudgetPolicy(run)).stall;",
     replace: "    void readRunBudgetPolicy;\n    return { warnMs: 180_000, killMs: 1_500_000 };",
     expect: "red",
@@ -209,6 +242,7 @@ const MUTATIONS: M[] = [
     id: "W3",
     what: "`--json` drops the verdict, leaving machine readers to parse the human line",
     catches: "`--json` carries the verdict too",
+    file: STATUS,
     find: "                silence: {",
     replace: "                silence_omitted: {",
     expect: "red",
@@ -219,6 +253,7 @@ const MUTATIONS: M[] = [
     id: "N1",
     what: "NEGATIVE CONTROL: rename the `grew` local without changing behaviour",
     catches: "nothing — proves the battery is aimed, not merely destructive",
+    file: STATUS,
     find:
       "  const grew = Date.parse(input.activity.last_growth_at);\n" +
       "  if (Number.isNaN(beat) || Number.isNaN(grew)) {\n" +
@@ -236,6 +271,7 @@ const MUTATIONS: M[] = [
     id: "N2",
     what: "NEGATIVE CONTROL: reword the alarm's parenthetical, keeping every fact it states",
     catches: "nothing — proves the alarm probe asserts facts, not one exact string",
+    file: STATUS,
     find: "      `(container may be gone)`",
     replace: "      `(its container may already be gone)`",
     expect: "green",
@@ -273,6 +309,26 @@ async function runTests(): Promise<Run> {
   });
 }
 
+/**
+ * Every target has a pristine copy, or the run refuses before it edits anything.
+ *
+ * `PRISTINE` is built above from `STATUS` alone, because that is the only file
+ * these mutations touch today. Now that each entry names its own target, a
+ * second one can be added without noticing that `restore()` has no copy of it —
+ * and the symptom of that is the worst one this harness has: a mutation left
+ * APPLIED, every later arm measuring a file nobody reverted, and the final
+ * `allOk` hash check comparing only the file it did know about. Loud, once, up
+ * front.
+ */
+for (const m of MUTATIONS) {
+  if (!(m.file in PRISTINE)) {
+    throw new Error(
+      `mutation ${m.id} targets ${m.file}, which has no pristine copy — add it to PRISTINE, ` +
+        `or restore() would leave this mutation applied and every later arm would measure it`,
+    );
+  }
+}
+
 let findings = 0;
 restore();
 
@@ -281,7 +337,7 @@ process.stdout.write(`----+--------+---------+---------+------------------------
 
 for (const m of MUTATIONS) {
   restore();
-  const src = readFileSync(STATUS, "utf8");
+  const src = readFileSync(m.file, "utf8");
   const count = src.split(m.find).length - 1;
   if (count !== 1) {
     process.stdout.write(`${m.id.padEnd(3)} | ANCHOR MATCHED ${count}x — NOT APPLIED: ${m.what}\n`);
@@ -289,7 +345,7 @@ for (const m of MUTATIONS) {
     restore();
     continue;
   }
-  writeFileSync(STATUS, src.replace(m.find, m.replace));
+  writeFileSync(m.file, src.replace(m.find, m.replace));
   const run = await runTests();
   restore();
 
