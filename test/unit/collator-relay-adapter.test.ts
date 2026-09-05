@@ -81,6 +81,7 @@ import {
   makeConsoleFanOut,
   MAX_REPLY_ARTIFACT_BYTES,
   MAX_REPLY_INLINE_BYTES,
+  harvestFailureNote,
   planInlineBudget,
   productionRelayEffects,
   relayFanOut,
@@ -2134,5 +2135,31 @@ describe("readArtifact resolves the path once", () => {
     // after the open must come from the HANDLE.
     expect(body).not.toContain("lstat");
     expect(body).toContain("handle.stat()");
+  });
+});
+
+
+/**
+ * A harvest that THREW must say so, on the dispatch arm's precedent.
+ *
+ * The dispatch failure path captures its rejection into the child's note. The
+ * harvest path emitted one fixed sentence and dropped the reason, so a torn
+ * `state.json` was reported with strictly less information than a refused
+ * dispatch. This does not change which lenses are lost — only whether the
+ * operator is told why.
+ */
+describe("a failed harvest carries its reason", () => {
+  test("a reason is named", () => {
+    const note = harvestFailureNote("StateReadError: state.json is not JSON");
+    expect(note).toContain("StateReadError: state.json is not JSON");
+    expect(note).toContain("FAILED");
+  });
+
+  test("no reason still reads as a whole sentence, and claims nothing extra", () => {
+    // `undefined` means the harvest RESOLVED and produced no entry, which is a
+    // different fact from one that threw — so it must not borrow the wording.
+    const note = harvestFailureNote(undefined);
+    expect(note).toBe("it was dispatched but could not be harvested");
+    expect(note).not.toContain("FAILED");
   });
 });

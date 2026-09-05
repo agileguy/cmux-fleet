@@ -159,10 +159,11 @@
  * more careful and change nothing about the failure mode.
  */
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { EXIT, SESSION_ID_RE } from "../contracts.ts";
+import { writeJsonAtomic } from "../util/jsonl.ts";
 import type { DispatchRequest } from "./dispatch-request.ts";
 
 /** The wire tag, so a reader can refuse a shape it does not know. */
@@ -496,7 +497,26 @@ export async function recordDispatch(
     dispatched_at: now.toISOString(),
   };
   await mkdir(relayJournalSenderDir(runRoot, sender), { recursive: true });
-  await writeFile(file, `${JSON.stringify(entry, null, 2)}\n`);
+  /**
+   * ATOMIC, because a TORN JOURNAL FAILS CLOSED.
+   *
+   * This was a bare `writeFile`. A crash or a full disk partway through leaves
+   * a truncated entry, and this journal is read by a reader that refuses on
+   * anything it cannot parse — so a half-written file does not degrade the
+   * console, it BLOCKS the collator until a person deletes the file by hand.
+   * The cost of the failure is therefore paid by the operator, not by the pass.
+   *
+   * `writeJsonAtomic` renders the identical bytes and lands them by
+   * `rename(2)` from a temp file in the SAME directory, so a reader sees either
+   * the previous entry or the whole new one and never a prefix of it.
+   *
+   * **Rename is safe HERE and is forbidden on the reply plane**, which is the
+   * distinction worth stating beside the call: `replies/` is bind-mounted and a
+   * rename swaps the inode the mount pinned, which is why `replies.ts` writes
+   * in place. The journal is host-side state under `relay/` and is mounted into
+   * nothing, so it has no inode anyone is holding.
+   */
+  await writeJsonAtomic(file, entry);
   await chmod(file, JOURNAL_MODE);
   return file;
 }

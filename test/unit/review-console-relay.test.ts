@@ -485,6 +485,77 @@ describe("the record is durable, comparable, and singly held", () => {
     expect((await readRelayStatus(path)).kind).toBe("unverifiable");
   });
 
+  /**
+   * THE CRASHED HOLDER, which is the case the lock was blind to.
+   *
+   * `acquireRelayLock` answered `EEXIST` with `null` and never opened the file,
+   * so the pid it writes was read by nobody. One hard crash left the lock on
+   * disk and no relay could ever start again until a person deleted it — the
+   * permanently-actorless console the module exists to prevent.
+   */
+  /**
+   * TWO DIFFERENT CONSOLES THAT MUST NOT COMPARE EQUAL, and a probe filed
+   * against a defect that turned out not to exist.
+   *
+   * A reviewer read `servesConsole` as joining on `""` and filed it as a
+   * collision: `["ab", "c"]` and `["a", "bc"]` both render `"abc"`, and every
+   * character is legal in a worker id. The reading was reasonable and the
+   * conclusion was wrong — the separator was there all along as a literal 0x01
+   * byte, invisible in an editor, a diff and a terminal. It is now written as
+   * `\u0001`, and this test stays because the property is worth pinning
+   * whatever the spelling: replacing the separator with `""` makes it red.
+   */
+  test("worker sets that concatenate alike are not the same console", () => {
+    const rec = {
+      schema: "pifleet.relayrecord/v1" as const,
+      pid: 1,
+      started: "x",
+      run_id: "R",
+      workers: ["ab", "c"],
+    } as unknown as Parameters<typeof servesConsole>[0];
+    expect(servesConsole(rec, { runId: "R", workers: ["ab", "c"] })).toBe(true);
+    expect(servesConsole(rec, { runId: "R", workers: ["a", "bc"] })).toBe(false);
+  });
+
+  test("a lock left by a dead process is taken over", async () => {
+    const env = await tempRunsDir();
+    const lockPath = join(env["PIFLEET_RUNS_DIR"]!, "..", "lock-dead");
+    // A really-dead pid: spawn something, wait for it, then reuse its number.
+    const proc = Bun.spawn(["true"]);
+    await proc.exited;
+    await writeFile(lockPath, `${proc.pid}\nunverifiable\n`);
+
+    const taken = await acquireRelayLock(lockPath);
+    expect(taken).not.toBeNull();
+    await taken!.release();
+  });
+
+  /**
+   * THE ASYMMETRIC HALF. Taking over a dead holder's lock must not become
+   * taking over ANY lock — without this, "always steal it" passes the test
+   * above and reintroduces the concurrent-starter bug the lock exists for.
+   */
+  test("a lock held by a LIVE process is still refused", async () => {
+    const env = await tempRunsDir();
+    const lockPath = join(env["PIFLEET_RUNS_DIR"]!, "..", "lock-live");
+    const held = await acquireRelayLock(lockPath);
+    expect(held).not.toBeNull();
+    // This process is alive and its identity matches what was written.
+    expect(await acquireRelayLock(lockPath)).toBeNull();
+    await held!.release();
+  });
+
+  /**
+   * UNREADABLE IS NOT STALE — `readRelayRecord`'s posture, and `down.ts`'s
+   * before it. A lock we cannot parse names a holder we cannot rule out.
+   */
+  test("a lock whose contents make no sense is refused, not stolen", async () => {
+    const env = await tempRunsDir();
+    const lockPath = join(env["PIFLEET_RUNS_DIR"]!, "..", "lock-junk");
+    await writeFile(lockPath, "not-a-pid\n");
+    expect(await acquireRelayLock(lockPath)).toBeNull();
+  });
+
   test("only one starter at a time, and the loser is told", async () => {
     const env = await tempRunsDir();
     const lockPath = join(env["PIFLEET_RUNS_DIR"]!, "..", "lock");

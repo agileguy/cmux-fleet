@@ -946,9 +946,28 @@ async function fanOut<R>(
   );
 
   const result = new Map<string, RelayHarvest>();
+  /**
+   * WHY A REJECTED HARVEST IS RECORDED RATHER THAN ONLY ABSENT.
+   *
+   * The dispatch arm twenty lines up captures its rejection into the child's
+   * note; this one used to check `status === "fulfilled"` and let the reason
+   * fall on the floor, so every harvest failure printed one fixed sentence. A
+   * `StateReadError` from a torn `state.json` — which `readTaskRecord` really
+   * does throw — was reported with strictly LESS information than a refused
+   * dispatch, and the asymmetry read as an oversight because it was one.
+   *
+   * This does not change which lenses are lost. It changes whether the operator
+   * is told why, which is the difference this console spent a branch learning.
+   */
+  const failedHarvest = new Map<string, string>();
   landed.forEach((p, i) => {
     const h = harvests[i];
-    if (h?.status === "fulfilled") result.set(p.seat.aspect, h.value);
+    if (h?.status === "fulfilled") {
+      result.set(p.seat.aspect, h.value);
+      return;
+    }
+    const err: unknown = h?.reason;
+    failedHarvest.set(p.seat.aspect, err instanceof Error ? err.message : String(err));
   });
 
   // ── The lattice, and what is NOT put into it ──────────────────────────────
@@ -1009,7 +1028,7 @@ async function fanOut<R>(
         inlined: [],
         envelope: null,
         outbox: null,
-        note: "it was dispatched but could not be harvested",
+        note: harvestFailureNote(failedHarvest.get(seat.aspect)),
       };
     }
     const envelope = harvested.envelope ?? null;
@@ -1182,6 +1201,19 @@ async function fanOut<R>(
  *     the worker's account and already names the file to open. A second
  *     inventory beside it would dilute the one actionable path.
  */
+/**
+ * What to say about a lens whose harvest did not return.
+ *
+ * A reason is included when there is one, and the sentence stays whole when
+ * there is not: `undefined` here means the harvest resolved and produced no
+ * entry, which is a different fact from a harvest that threw.
+ */
+export function harvestFailureNote(reason: string | undefined): string {
+  return reason === undefined
+    ? "it was dispatched but could not be harvested"
+    : `it was dispatched and its harvest FAILED: ${reason}`;
+}
+
 function missingLensNote(
   verdict: Verdict,
   envelope: RelayEnvelopeState | null,

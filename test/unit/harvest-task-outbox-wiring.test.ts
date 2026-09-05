@@ -195,3 +195,42 @@ describe("harvestTask reports what a silent task's outbox actually holds", () =>
     }
   });
 });
+
+/**
+ * "NO RECORD" AND "A RECORD I COULD NOT READ" ARE DIFFERENT FACTS.
+ *
+ * One catch used to report both as the first, so a present-but-malformed
+ * dispatch record was described as absent. That sentence has a measured cost:
+ * a probe of the production harvest on this repository's own review console got
+ * back "no dispatch record" for a task whose record was on disk, and it sent
+ * the reader hunting a dispatch that never happened instead of the malformed
+ * path they had actually built.
+ */
+describe("an unreadable dispatch record is not an absent one", () => {
+  test("a malformed inbox record says it could not be READ", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-inbox-unreadable-"));
+    const run = runPaths(RUN_ID, join(root, "runs"));
+    await mkdir(run.inboxDir, { recursive: true });
+    // Valid JSON prefix, cut mid-token: what a lost disk actually leaves.
+    await writeFile(join(run.inboxDir, "T-torn.json"), '{"schema":"pifleet.task/v1","task_i');
+
+    const { harvest } = await harvestTask(run, "T-torn");
+    const reasons = harvest.reasons.join(" ");
+    expect(reasons).toContain("could not be read");
+    // The claim the data does not support, and the one it used to make.
+    expect(reasons).not.toContain("no dispatch record");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a genuinely ABSENT record still says no dispatch record", async () => {
+    // The control. Distinguishing the two must not rename the case that was
+    // already correct, which is also the only case the old sentence fitted.
+    const root = await mkdtemp(join(tmpdir(), "pifleet-inbox-absent-"));
+    const run = runPaths(RUN_ID, join(root, "runs"));
+    await mkdir(run.inboxDir, { recursive: true });
+
+    const { harvest } = await harvestTask(run, "T-nothing");
+    expect(harvest.reasons.join(" ")).toContain("no dispatch record");
+    await rm(root, { recursive: true, force: true });
+  });
+});

@@ -336,8 +336,33 @@ export async function harvestTask(
   try {
     const raw = (await Bun.file(inboxPath).json()) as unknown;
     envelope = TaskEnvelopeSchema.parse(raw);
-  } catch {
-    return unavailableHarvest(taskId, `no dispatch record at inbox/${taskId}.json`);
+  } catch (err) {
+    /**
+     * "NO RECORD" AND "A RECORD I COULD NOT READ" ARE DIFFERENT FACTS, and one
+     * catch used to report both as the first.
+     *
+     * This arm spans three outcomes: the file is absent (ENOENT), it is present
+     * and not JSON, and it is JSON that fails the schema. Saying "no dispatch
+     * record" of the last two is false in exactly the way this repository built
+     * the whole `unreadableEnvelope` apparatus to stop saying — a claim the
+     * data does not support, at a smaller seam.
+     *
+     * **MEASURED COST, on this repository's own review console.** A probe of
+     * the production harvest was handed a malformed path and got back "no
+     * dispatch record" for a task whose record was sitting on disk. That
+     * sentence sent the reader looking for a dispatch that never happened
+     * instead of at the path they had built wrong, and it took a day and three
+     * falsified hypotheses to come back from.
+     */
+    const code = (err as NodeJS.ErrnoException).code;
+    return unavailableHarvest(
+      taskId,
+      code === "ENOENT"
+        ? `no dispatch record at inbox/${taskId}.json`
+        : `the dispatch record at inbox/${taskId}.json could not be read (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+    );
   }
 
   const reasons: string[] = [];

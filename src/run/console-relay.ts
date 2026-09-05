@@ -352,10 +352,27 @@ export function servesConsole(
   console_: { runId: string; workers: readonly string[] },
 ): boolean {
   if (record.run_id !== console_.runId) return false;
-  // Order-insensitive: `--workers` is a list the operator types and the pane
-  // plan is what fixes the order, not this record.
-  const a = [...record.workers].sort().join("");
-  const b = [...console_.workers].sort().join("");
+  /**
+   * Order-insensitive: `--workers` is a list the operator types and the pane
+   * plan is what fixes the order, not this record.
+   *
+   * **THE SEPARATOR IS LOAD-BEARING, and it is spelled as an ESCAPE because it
+   * was previously a raw byte.** Joining a sorted set on `""` is not an
+   * encoding of it — `["ab", "c"]` and `["a", "bc"]` both render `"abc"`, and
+   * every character there is legal in a worker id — so two DIFFERENT consoles
+   * would compare equal and a live relay serving one would be adopted as
+   * serving the other. U+0001 is the right separator precisely because
+   * `SESSION_ID_RE` cannot produce it.
+   *
+   * It used to sit in the file as a literal 0x01. That is invisible in an
+   * editor, a diff and a terminal, so the line READ as `join("")` — and a
+   * reviewer filed this function as a collision bug on exactly that misreading,
+   * correctly describing a defect the code did not have. The escape costs
+   * nothing at runtime and is the difference between code that is right and
+   * code that can be SEEN to be right.
+   */
+  const a = [...record.workers].sort().join("\u0001");
+  const b = [...console_.workers].sort().join("\u0001");
   return a === b;
 }
 
@@ -374,19 +391,96 @@ export function servesConsole(
  * record behind. The caller releases it in a `finally`.
  */
 export async function acquireRelayLock(path: string): Promise<{ release: () => Promise<void> } | null> {
-  try {
-    const handle = await open(path, "wx");
-    await handle.writeFile(`${process.pid}\n`);
+  const claim = async (): Promise<{ release: () => Promise<void> } | null> => {
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(path, "wx");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
+      throw err;
+    }
+    /**
+     * THE HANDLE IS CLOSED ON A FAILED WRITE, and it was not before.
+     *
+     * `open` succeeded, so a throw from `writeFile` — a full disk is the
+     * ordinary one — used to escape past the only reference to the descriptor.
+     * The file it leaks is also the LOCK, so the leak and the stale lock below
+     * are the same incident: the section is abandoned holding a lock nothing
+     * can release.
+     */
+    try {
+      const started = await processStartTime(process.pid).catch(() => null);
+      await handle.writeFile(`${process.pid}\n${started ?? ""}\n`);
+    } catch (err) {
+      await handle.close().catch(() => {});
+      await (await import("node:fs/promises")).rm(path, { force: true }).catch(() => {});
+      throw err;
+    }
     return {
       release: async () => {
         await handle.close().catch(() => {});
         await (await import("node:fs/promises")).rm(path, { force: true }).catch(() => {});
       },
     };
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
-    throw err;
+  };
+
+  const first = await claim();
+  if (first !== null) return first;
+
+  /**
+   * A LOCK WHOSE HOLDER IS GONE IS TAKEN OVER, and refusing to look was a
+   * defect this module's own header describes.
+   *
+   * The old code answered `EEXIST` with `null` and never opened the file — so
+   * the pid it wrote on the line above was read by nobody, and ONE hard crash
+   * (SIGKILL, a panic, a lost machine) left `review-relay.lock` behind forever.
+   * From then on `scripts/review` could not start an actor until a person
+   * deleted the file by hand: the *"permanently, silently actorless"* console
+   * this file exists to prevent, reached through the guard meant to prevent it.
+   *
+   * **The identity is `(pid, start time)`, not a bare pid**, for the reason the
+   * relay RECORD already carries that pair: pids are recycled, and a lock
+   * broken because some unrelated process inherited the number is worse than
+   * the stale lock it replaces.
+   *
+   * **UNREADABLE IS NOT STALE.** A lock we cannot parse, or a `ps` we cannot
+   * run, leaves the refusal exactly where it was — the same posture
+   * `readRelayRecord` takes with `unverifiable`, and `down.ts` before it. Only
+   * a holder positively established as gone loses its lock.
+   *
+   * The takeover is a REMOVE AND RE-CLAIM, so the winner is decided by the
+   * kernel: two processes may both judge the lock stale, and only one of them
+   * can then succeed at `open(path, "wx")`.
+   */
+  let holder: { pid: number; started: string } | null = null;
+  try {
+    const fh = await open(path, "r");
+    const text = await fh.readFile("utf8");
+    await fh.close().catch(() => {});
+    const [pidLine = "", startedLine = ""] = text.split("\n");
+    const pid = Number.parseInt(pidLine.trim(), 10);
+    if (Number.isInteger(pid) && pid > 0) holder = { pid, started: startedLine.trim() };
+  } catch {
+    return null;
   }
+  if (holder === null) return null;
+
+  let live: string | null;
+  try {
+    live = await processStartTime(holder.pid);
+  } catch {
+    // The measuring instrument is broken; say nothing about the holder.
+    return null;
+  }
+  if (live !== null) {
+    // Present. Stale only if this is a DIFFERENT process wearing the pid, and
+    // that is answerable only when both sides are comparable.
+    if (!isPinnedIdentity(holder.started) || !isPinnedIdentity(live)) return null;
+    if (holder.started === live) return null;
+  }
+
+  await (await import("node:fs/promises")).rm(path, { force: true }).catch(() => {});
+  return await claim();
 }
 
 /** Where the start lock lives. Beside the record, and removed with it. */
