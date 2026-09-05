@@ -90,7 +90,8 @@ import { processStartTime } from "../safety/procstart.ts";
  * A run from 2026-09-01 was still being reported LIVE by `liveRunIds`. Its
  * `tick-1` recorded pid 10251 and wrote `phase: "dead"`; its `registry.json`
  * had `workers: {}`. The OS had since recycled 10251, and it belonged to a
- * `tst-2` supervisor started two days later — so `processStartTime(10251)`
+ * `rev-1` supervisor started two days later (that seat is now `tst-2`; this
+ * paragraph is a dated incident record, so it keeps the id that was live) — so `processStartTime(10251)`
  * returned a time, the fallback read that as "alive", and a two-day-old dead
  * run reappeared in `pifleet status`, in `wait`, and in the console's
  * `--recreate` scoping. **The monitor found it on its first real deployment**,

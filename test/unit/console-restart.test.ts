@@ -7,8 +7,9 @@
  * `--recreate` never had to ask: WHICH pane is this worker?
  *
  * The answer is not the index, and that is what most of this file is about.
- * Measured on the live development console 2026-09-04, whose `--workers` order
- * is `eng-1,eng-2,tst-1,tst-2`:
+ * Measured on the live development console 2026-09-04, when the `--workers`
+ * order was `eng-1,eng-2,tst-1,rev-1`; the fourth seat is now `tst-2` and the
+ * rename moved no pane, so the mapping is reproduced with the current id:
  *
  *   cmux index 0 -> eng-1     cmux index 1 -> tst-1
  *   cmux index 2 -> eng-2     cmux index 3 -> tst-2
