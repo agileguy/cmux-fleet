@@ -2201,6 +2201,32 @@ export const productionRelayEffects: RelayEffects = {
    * between the dispatch and the journal REPLAYS instead of running the review
    * twice; on the staged plane `sendTaskEnvelope` derives its own for the same
    * reason, and the two agree by construction.
+   *
+   * ## `partial` MUST stay `{title, brief}`, and this is the load-bearing part
+   *
+   * `relay-journal.ts` journals AFTER the dispatch and says so — *"a crash in
+   * the window repeats the work: on restart the request is unjournalled and the
+   * fan-out is issued again"* — and it accepts that cost on the grounds that the
+   * duplicate is absorbed rather than merely tolerated. THAT ABSORPTION IS THIS
+   * OBJECT. On the staged plane `sendTaskEnvelope` derives the attempt id as
+   * `attemptIdFor(JSON.stringify(partial))`, so a re-issue replays only while
+   * these two bytes-identical fields are the whole of it. Add a timestamp, a
+   * nonce, a `dispatched_at`, a retry counter — anything that differs between
+   * two passes — and the hash differs, the supervisor allocates a FRESH epoch,
+   * `stageForAdoptedTerminal` rewrites the drop and types the trigger, and the
+   * reviewer runs the whole review a second time. The journal's chosen failure
+   * silently stops being bounded.
+   *
+   * Checked against the recorded corpus on 2026-09-04: across 289 runs in
+   * `~/.pifleet/runs` there is not one duplicate `dispatched` ledger event for
+   * any `(worker, task_id)`, no run started a second relay process, and no
+   * worker's `events.jsonl` records a task staged or triggered more than once.
+   * So the window has never opened in anything recorded — the mechanism is
+   * latent, and the field list above is what keeps it that way.
+   *
+   * It is NOT the cause of the duplicate turns seen on `rev-arch-1`; that was
+   * one allocation with two doorbells, and it is written up on
+   * `sendStagedTrigger` in `cli/commands/dispatch.ts`.
    */
   async sendTask(run, worker, d) {
     const m = await loadEffectModules();

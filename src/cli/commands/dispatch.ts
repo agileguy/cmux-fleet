@@ -1808,8 +1808,27 @@ async function stageForAdoptedTerminal(args: {
     },
   });
 
-  // STEP 7. The trigger, and nothing else, reaches the terminal.
-  const trigger = await sendStagedTrigger(worker, presentation);
+  // STEP 7. The trigger, and nothing else, reaches the terminal — and on a
+  // worker that triggers itself, not even that. See `sendStagedTrigger`.
+  const trigger = await sendStagedTrigger(
+    worker,
+    presentation,
+    await readWorkerLaunch(wp).catch(() => null),
+  );
+  if (trigger.delegated) {
+    await args.ledger.append("stage_trigger_delegated", {
+      worker,
+      task_id: envelope.task_id,
+      epoch,
+      detail: {
+        reason: "auto_trigger",
+        detail:
+          `${worker} was launched with the dispatch-trigger extension mounted, which fires on ` +
+          `the drop within ${DISPATCH_TRIGGER_POLL_BUDGET_MS}ms. Typing the line as well would ` +
+          `start the turn TWICE for one allocation.`,
+      },
+    });
+  }
   if (!trigger.sent) {
     await args.ledger.append("stage_trigger_deferred", {
       worker,
@@ -1838,6 +1857,34 @@ async function stageForAdoptedTerminal(args: {
 }
 
 /**
+ * What became of the trigger, in the three shapes that are NOT the same fact.
+ *
+ * `sent: false` is the one the relay turns into a `stage_trigger_deferred`
+ * rejection (`run/relay.ts`), and it means *nobody* is going to start this turn
+ * — a human must type the line. `delegated: true` is the opposite claim wearing
+ * a similar shape: pifleet typed nothing ON PURPOSE because the worker's own
+ * dispatch-trigger extension is mounted and will fire within a second. Both
+ * "pifleet did not type" — and conflating them would either stall a healthy
+ * dispatch or report a wedged one as fine.
+ */
+type StagedTriggerOutcome =
+  | { sent: true; delegated: boolean; reason: null }
+  | { sent: false; delegated: false; reason: string };
+
+/**
+ * The window inside which a mounted dispatch-trigger extension fires, quoted in
+ * the ledger so a reader can tell a delegated trigger from a lost one.
+ *
+ * `docker/pi-extensions/dispatch-trigger.ts` polls the drop every 500ms and
+ * requires TWO IDENTICAL consecutive reads before firing — its guard against a
+ * torn read of a file the host rewrites in place. So the worst case is a tick
+ * that lands mid-write plus the two it then needs: three intervals. This is a
+ * number for a human reading a ledger line, not a timeout anything enforces;
+ * `wait`'s `PIFLEET_STAGE_TRIGGER_GRACE_MS` is the enforced one.
+ */
+const DISPATCH_TRIGGER_POLL_BUDGET_MS = 1_500;
+
+/**
  * Type `STAGED_TRIGGER_LINE` at the surface the operator handed over.
  *
  * ## One line, and the whole reason it is only one line
@@ -1858,6 +1905,59 @@ async function stageForAdoptedTerminal(args: {
  * all. `surface_backend` is the field that answers "who owns this surface", and
  * it exists precisely because those two questions had one field between them.
  *
+ * ## IT DOES NOT TYPE AT A WORKER THAT TRIGGERS ITSELF, and that is the fix
+ *
+ * `docker/pi-extensions/dispatch-trigger.ts` opens with "The keystroke, removed
+ * — a staged task starts its own turn". It was written to REPLACE this send,
+ * and this send was never removed. Both survived because they could not both
+ * land: `sendStagedTrigger` threw `CmuxParseError: could not parse composed pane
+ * id` on every adopted surface, so the extension was in practice the only
+ * trigger and the arrangement looked correct for two days. Widening the pane id
+ * (`test/unit/staged-trigger.test.ts`) armed the second sender, and from
+ * 2026-09-04T02:50Z every `tui` session in `~/.pifleet/runs` carries TWO
+ * triggers per allocation.
+ *
+ * The second one is not discarded, which is what makes it expensive. The
+ * extension sends `{ deliverAs: "followUp" }` — correct in isolation, since
+ * `steer` would interrupt a running turn — so the message QUEUES behind the
+ * turn this line just started and is delivered the moment that turn ends. The
+ * drop still holds the same task, so the worker reads back a task it has
+ * already filed. `rev-arch-1` said so itself in run `2026-09-04T22-10-12Z-b851`
+ * (transcript entry 109): *"This is the same task I already completed. The
+ * dispatch is identical (same task_id, epoch, worker, outbox)."* That session
+ * reached 3,480,664 cumulative input tokens, 455,266 of them spent after the
+ * re-delivery, on a `tui` session that keeps its context across dispatches.
+ *
+ * Nothing downstream could catch it. The relay's `already_done` ledger keys on
+ * `(sender, taskId)` and correctly stages nothing on a repeat pass — there IS no
+ * repeat dispatch. `EpochManager` is not consulted, because the epoch was
+ * allocated once, at stage time, and both triggers point at it. `already_done`
+ * and `already_completed` are answers to a second DISPATCH, and this is one
+ * dispatch with two doorbells.
+ *
+ * So the sender that is kept is the extension, on three grounds beyond its
+ * being first in the design: it never touches a terminal that may have become a
+ * shell (§4.3's hazard is absent rather than mitigated), `supervisor/tui.ts`'s
+ * `attributedToStage` recognises only `AUTO_TRIGGER_TEXT` — so with this line
+ * suppressed a staged turn is attributed exactly instead of falling back to §9
+ * Q1's "APPROXIMATE" growth heuristic, which is what every run tree logged —
+ * and `wait` already knows how to sit out an armed stage and how to name one
+ * that never fires (`staged_trigger_stalled`).
+ *
+ * ## The launch record, and why `delegated` is not `sent: false`
+ *
+ * `auto_trigger` is `up`'s recorded answer to "was the extension mounted"
+ * (`contracts.ts`), written from the same predicate `config/render.ts` mounts
+ * on, and `wait.ts` already reads it here for the same question. It defaults
+ * FALSE for an absent or legacy record, so a `PIFLEET_PI_COMMAND` double run —
+ * which has no launch record at all — keeps being typed at exactly as before.
+ *
+ * The suppressed case must NOT return `sent: false`. `run/relay.ts` reads a
+ * non-null `error` out of `stageForAdoptedTerminal` as a
+ * `stage_trigger_deferred` rejection and DROPS the lens rather than waiting out
+ * its deadline for a keystroke — which is right for a trigger nobody will send,
+ * and would be a discarded review here. Hence a third shape.
+ *
  * ## Not sending is a REPORTED outcome, not a failure
  *
  * There is no cmux surface when the operator adopted a Terminal.app window, an
@@ -1866,15 +1966,27 @@ async function stageForAdoptedTerminal(args: {
  * this point, so the honest answer is to hand the operator the line and say why
  * — never to throw away six writes because one convenience was unavailable.
  */
-async function sendStagedTrigger(
+export async function sendStagedTrigger(
   worker: string,
   presentation: Presentation,
-): Promise<{ sent: true; reason: null } | { sent: false; reason: string }> {
+  launch: WorkerLaunch | null,
+  loadBackendFn: typeof loadBackend = loadBackend,
+): Promise<StagedTriggerOutcome> {
+  /*
+   * Checked BEFORE the surface, because it is not a fallback for a send that
+   * could not happen — it is a decision not to send. Reversing the order would
+   * report a delegated trigger as "no addressable surface" on exactly the
+   * Terminal.app / ssh seats where that sentence is already the confusing one.
+   */
+  if (launch?.auto_trigger === true) {
+    return { sent: true, delegated: true, reason: null };
+  }
   const kind = presentation.surface_backend;
   const surface = presentation.surface_ref;
   if (kind === null || surface === null) {
     return {
       sent: false,
+      delegated: false,
       reason:
         `no addressable surface for ${worker} — the adopted terminal announced no pane id, ` +
         `which is what a Terminal.app window, an ssh session or a bare tmux pane does. The ` +
@@ -1884,20 +1996,22 @@ async function sendStagedTrigger(
   }
   try {
     assertPaneTypeableLine("staged trigger", STAGED_TRIGGER_LINE);
-    const backend = await loadBackend(kind);
+    const backend = await loadBackendFn(kind);
     if (backend.sendText === undefined || backend.sendKey === undefined) {
       return {
         sent: false,
+        delegated: false,
         reason: `backend ${kind} cannot type into a pane; type this at ${worker}'s terminal:\n  ${STAGED_TRIGGER_LINE}`,
       };
     }
     const pane = { backend: kind, id: surface };
     await backend.sendText(pane, STAGED_TRIGGER_LINE);
     await backend.sendKey(pane, SUBMIT_KEY);
-    return { sent: true, reason: null };
+    return { sent: true, delegated: false, reason: null };
   } catch (err) {
     return {
       sent: false,
+      delegated: false,
       reason:
         `could not type the trigger at ${worker}'s surface (${String(err)}). The task is ` +
         `staged and durable; type this at that terminal to start it:\n  ${STAGED_TRIGGER_LINE}`,
