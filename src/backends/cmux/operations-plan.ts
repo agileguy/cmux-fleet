@@ -608,7 +608,7 @@ export const DEVELOPMENT_WORKSPACE = "development";
  * +---------------+---------------+
  * |     eng-1     |     eng-2     |
  * +---------------+---------------+
- * |     tst-1     |     rev-1     |
+ * |     tst-1     |     tst-2     |
  * +---------------+---------------+
  * ```
  *
@@ -633,7 +633,7 @@ export const DEFAULT_DEVELOPMENT_WORKERS: readonly string[] = [
   "eng-1",
   "eng-2",
   "tst-1",
-  "rev-1",
+  "tst-2",
 ];
 
 /**
