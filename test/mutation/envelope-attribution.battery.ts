@@ -250,9 +250,9 @@ const MUTATIONS: M[] = [
     what: "NEGATIVE CONTROL: a seat never dispatched keeps `null`, which is already its value",
     file: CORE,
     find:
-      "        issued: false,\n        inlined: [],\n        envelope: null,\n        outbox: null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
+      "        issued: false,\n        harvestFailed: false,\n        inlined: [],\n        envelope: null,\n        outbox: null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
     replace:
-      "        issued: false,\n        inlined: [],\n        envelope: null as RelayEnvelopeState | null,\n        outbox: null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
+      "        issued: false,\n        harvestFailed: false,\n        inlined: [],\n        envelope: null as RelayEnvelopeState | null,\n        outbox: null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
     expect: "green",
   },
   {
