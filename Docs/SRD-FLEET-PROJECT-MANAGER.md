@@ -1,6 +1,11 @@
 # System Requirements Document — the fleet as the engineers, testers and reviewers of a `/ProjectManager` run
 
-**SRD-FLEET-PM-001 v0.3 — DRAFT FOR OWNER REVIEW**
+**SRD-FLEET-PM-001 v0.4 — DRAFT FOR OWNER REVIEW**
+***v0.4 answers the first review round that read the whole document rather than named sections, and
+it returned this design's only security finding: §6.2's integration merge carried worker-authored
+files into the operator's own checkout with none of the hazard neutralisation the fleet already runs
+inbound. §6.2.1 is the gate. §6.5 gains a pinned ref, and §14 replaces v0.3's citation-sweep claim
+with a script that actually opens the cited lines.***
 *v0.2 revised v0.1 after a review round that could not read the document (§0.8); its central
 correction was §7.5, where v0.1's coverage gate read a worker-authored number and called it the
 host's. **v0.3 revises v0.2 after the first review round with genuine 3-of-3 coverage** — verified
@@ -77,8 +82,13 @@ This document names two things it cannot avoid and that are already in the tree:
 provider `ollama-cloud` and the three models the review console runs on, because
 `fleet.yaml:248-251` already publishes them; and the fact that a repository's remote decides
 whether the fleet will review it at all, because `run.hosted_repo_consent`
-(`fleet.yaml:76`) turns on it. No employer, ticket system, cloud project or credential value is
-named. This follows §0.3 of `Docs/SRD-REVIEW-CONSOLE.md`.
+(`fleet.yaml:76`) turns on it. No ticket system, cloud project or credential value is named.
+
+> **v0.3 said "No employer … is named" and that was literally false**, since §8.2's precondition 3
+> names the two remote families the disclosure gate refuses, and §4.4 turns on them. Nothing leaks —
+> both are already published in `fleet.yaml` and in `sensitive-repo.ts` — but a disclosure statement
+> that overclaims is worse than one that is narrow, so the sentence is narrowed rather than defended.
+> This follows §0.3 of `Docs/SRD-REVIEW-CONSOLE.md`.
 
 **One consequence belongs here rather than in §4, because it constrains the feature's
 audience.** A `/ProjectManager` run puts the target repository's code in front of four hosted
@@ -172,7 +182,7 @@ to matter. They are stated up front because each changes what a section downstre
 | **A** | **The integration mechanism already exists and is undocumented at the workflow level.** `up` registers `worker-<id>` as a git remote on the operator's own repository, pointing at that worker's clone (`worktree.ts:435`, `registerWorkerRemote` at `:465-470`), and `pifleet worktrees --json` reports each worker's branch, path, dirt and `commitsAhead` from the recorded `WorkerWorktree` (`cli/commands/worktrees.ts:33-45`). **Nothing in `~/.claude/skills/fleet/` mentions either.** The one line `Workflows/Observe.md:51-52` gives it — *"`worktrees` lists each worker's own git checkout"* — does not say the commits are fetchable. | Yes | §2.1, §6.2 |
 | **B** | **`/ProjectManager`'s "two engineers, one branch" is incoherent against `isolation: worktree` and would fail silently.** Each engineer writes `branch: "fleet/<run-id>/<worker-id>"` into its own envelope (`skills/pifleet-worker/SKILL.md:172`) regardless of what the brief said. A brief naming `phase-3-relay-actor` produces two workers that either ignore it or create that branch inside their own clone, where it is invisible to the other. Nothing goes red. | Yes | §1.2, §6.2 |
 | **C** | **A collated review is journalled, so a lens lost to a failed harvest never re-enters that collation.** This is ISC-517's hazard and it is the one a ProjectManager loop is most likely to mis-read, because a 2-of-3 collation is a valid `pifleet.collation/v1` document with a `reported: false` row in it and a `success` verdict on the collator's own task. `roles/collator.md:228-235` is explicit that the collator's status is *"about YOUR collation, never about how many lenses reported"*. **A loop that branches on the collator's verdict is therefore branching on the wrong number.** §7.5 makes coverage a separate gate. | Yes | §7.5, §9.4 |
-| **D** | **Renaming `rev-1` touches ten functional locations, not two — and the config that matters most is not committable.** *(v0.1 said "two real pins"; that was measured with a gitignore-aware `grep` and was wrong.)* Two config files, one plan constant, one script and five test files, including `test/unit/config.test.ts:119`, `test/integration/cli-exit-codes.test.ts:238` and `test/integration/operations-console.test.ts:112`/`:206`. **`fleet.yaml` is gitignored (`.gitignore:9`)**, so the live seat change produces no diff and cannot be dispatched to a worker without tripping ISC-93. §13 Phase 1 splits on that line. Roughly sixty further `rev-1` strings are arbitrary fixture ids and must NOT be renamed. | Yes, on the first `bun test` after the rename | §6.1, §13 Phase 1 |
+| **D** | **`grep -rln rev-1 test/` returns SEVENTEEN files, of which SIX are functional and eleven are arbitrary fixture ids that must NOT be renamed.** *(v0.1 said "two real pins"; v0.3 said five test files. Both were undercounts, and this is the third round in which this number has grown — so the classification below is by MECHANISM rather than by count.)* **Hard-fail** — `config.test.ts:119` and `cli-exit-codes.test.ts:238` assert against the tracked `fleet.example.yaml`, and `operations-console.test.ts:112`/`:206` drive the real console scripts. **Stale-but-passing** — `development-plan.test.ts` asserts the roster literally, and `status-runs.test.ts:38` and `console-restart.test.ts` model the console with hand-written fixtures that keep passing while describing a console that no longer exists. **The eleven others define `rev-1` inline** and are unaffected; `up-wiring.test.ts:3743-3763` must be left alone deliberately, because its probe's whole value is that the worker id and the role differ. **`fleet.yaml` is gitignored (`.gitignore:9`)**, so the live seat change produces no diff and cannot be dispatched to a worker without tripping ISC-93. | Yes, on the first `bun test` after the rename | §6.1, §13 Phase 1 |
 | **E** | **There is already a `/ProjectManager` state file in this repository, and its shape has outgrown the skill that writes it.** `.claude/project-manager-state.json` on `feature/harvest-recovery` carries `branch_model: "long-lived"`, an `integration` block naming a console and a workspace id, an `answered_questions` map, per-phase commit lists, `out_of_band_commits`, and `pr_policy: "Do NOT open a PR"`. The skill's documented schema (`SKILL.md:240-252`) has none of those. **The skill is behind its own practice**, and §7.6 specifies the shape that practice already reached rather than the one the skill documents. | Observed | §2.7, §7.6 |
 
 ### 0.7 The dependency on PR #147 is satisfied — it merged as `d70acf4`
@@ -238,6 +248,12 @@ got its first live exercise and it held.**
 |---|---|---|
 | **1** (on v0.1) | **0 of 3 readable**, recorded as 1 of 3 — §0.8 | The §7.5 correction, the privilege widening, the staged-dispatch constraints, the concurrency gap. All verified by this author before acceptance |
 | **2** (on v0.2) | **3 of 3, verified host-side** | Four substantive findings, four citation errors, and an independent verification pass |
+| **3** (on v0.3) | **3 of 3, verified host-side** | 17 findings — the most of any round, and the first round in which the lenses read the WHOLE document rather than the sections the brief pointed at. Two are structural: §6.2.1's outbound hazard gap, and §6.5's unpinned ref |
+
+**Round three found the most because it was asked for the least.** Rounds one and two were briefed at
+named sections; round three was not, and it returned the document's only security finding. That is
+worth recording as a fact about briefing rather than about the reviewers: **a brief that names where
+to look is a brief that says where not to.**
 
 **Round two also verified rather than only criticised**, which is worth recording because it is what
 a full-coverage round can do and a blind one cannot. `rev-ctx-1` re-checked this document's citations
@@ -291,6 +307,35 @@ re-layer as commit `2b96f8f`. **No such object exists in this repository.** The 
 *"Collator dispatch for the review console (ISC-431..ISC-521)"* — which is also this branch's base,
 so the re-layer is present in the tree this document sits on. A fabricated hash in a specification is
 worse than a missing one, and it is recorded here rather than silently replaced.
+
+### 0.9.3 What v0.4 accepted from round three, and what it rejected
+
+**Accepted, all re-verified against the tree at `b2cdb66` before incorporation.** The outbound hazard
+gap (§6.2.1, §4.3 — **the most serious finding of the three rounds**, and the design had no answer at
+all); the unpinned review ref (§6.5, §7.5's Gate 0); missing zod schemas for two of three new
+contracts (§7.2, §7.6); the unspecified changed-file format (§7.3); no recovery for a failed
+`worktrees --json` (§8.2); §6.4 step 7's unstated branch precondition and the run-id correlation
+problem; §6.6's idempotency overstatement — true of outcome files, false of billing inside the crash
+window; orphaned run directories and clones (§6.11); the byte-for-byte `hosted_repo_consent`
+comparison (§8.2); §0.3's literally false disclosure sentence; the `rev-1` surface, now classified by
+mechanism rather than counted (§0.6 Finding D); and four citation drifts.
+
+**Rejected from round three: nothing substantive.** Two reported citations were checked and found
+**correct as written**, so they are not changed: `worktree.ts:488-530` genuinely contains
+`assertValidBranchName` (`:519`), and `fleet.yaml:746-750` genuinely is the hosted-console throughput
+and billing block — it is cited correctly in §0.5 and §5.3 and was cited wrongly only in §6.11, which
+is the one place it has been changed. **The reviewer's own citation for the security finding also
+drifted** (`repo-hazards.ts:202` is the `ATTRIBUTE_DRIVER` regex; `neutralizeRepoHazards` is at
+`:215`), which is recorded not as a criticism but as evidence that this defect class is not this
+author's alone — it is what happens when a large document and a large codebase are read together.
+
+**And the finding about the findings, which is the one that changed a process rather than a
+sentence.** v0.3 asserted a mechanical sweep of 142 citations; four drifts survived it, including one
+already corrected once. The sweep checked file existence and EOF bounds and **never opened the cited
+lines**. §14 now ships a script that checks content, and states plainly that it verifies 42 of ~175
+citations and reports the other 124 as unverifiable-by-machine. **It catches one of round three's
+four drifts.** That is a weak instrument honestly described, which is better than a strong claim that
+was never true.
 
 ### 0.9.2 What v0.3 accepted from round two, and what it rejected
 
@@ -462,7 +507,8 @@ model therefore rests on a mechanism that is not merely documented but observabl
 (`operations-plan.ts:632`), `DEVELOPMENT_WORKSPACE` is `"development"` (`:602`), and
 `developmentPanes` delegates to the shared `agentSquarePanes` (`:685`). All four workers are
 `pane_mode: tui` (`fleet.yaml:712-727`), so each pane runs its own `up --attach-here` and the
-console is **four runs**, not one (`operations-plan.ts:246-253`). `status --all` reports them
+console is **four runs**, not one (`operations-plan.ts:620-631`: *"this console is four
+keyboards, so it is four runs"*). `status --all` reports them
 together; `--recreate` tears them all down; `--restart <id>` respawns exactly one
 (`scripts/development`, `restartConsolePane`).
 
@@ -526,7 +572,7 @@ dispatch a fix engineer cannot have it.
 |---|---|---|
 | The operator's own repository | **No.** Only its own clone at `/workspace` | `render.ts` mount table; `worktree.ts:1-3` |
 | Another worker's clone | **No** | same |
-| The run directory | **No, and refusing is enforced on the finished argv** | `assertNoRunDirMount`, `paths.ts:827-836` |
+| The run directory | **No, and refusing is enforced on the finished argv** | `assertNoRunDirMount` (`paths.ts:865`); `RunDirMountError` at `:812` |
 | GitHub | **No.** `egress.allow` (`fleet.yaml:283-336`) names the model relay, the ticket system, npm, PyPI and one GKE master. **`github.com` is not in it** | `fleet.yaml:284-336` |
 | The package registries | **Yes, for a role with `egress_access: true`** — `tester` has it (`:661`), `engineer` does not | `fleet.yaml:661-672` |
 | Its own `/outbox` | **Yes, read-write**, and a host-side reader already polls it | `render.ts:453`; `registry.ts:922-936` |
@@ -644,6 +690,16 @@ results were independent artifacts. This one dispatches N tasks whose results ar
 *combine*, and the isolation that makes each worker safe is exactly what makes combining them a
 step someone has to perform. §6.2 performs it on the host, where the operator's own git identity
 and credentials already are, and §10 D3 records the alternative that was rejected.
+
+**There is a THIRD cost, and it is the one the third review round found: isolation is enforced
+INBOUND ONLY.** `neutralizeRepoHazards` runs on each clone as it is built (`up.ts:2043`), so a
+worker is protected from a hostile repository. Nothing runs in the other direction, because until
+§6.2 nothing ever moved a worker's commits back to the host. **The integration merge is the first
+outbound path in this system, and it lands in the operator's own working tree** — where a
+worker-authored `CLAUDE.md`, `.pi/extensions` file or `core.hooksPath` reaches the orchestrating
+session, which holds the credentials no container has. §6.2.1 specifies the gate; it is recorded here
+because the shape of the cost is general: **a per-worker isolation model that was only ever asked to
+protect the inside now has an outside to protect too.**
 
 **And there is a second cost, added in v0.2 because the review round found it and v0.1 had not
 named it.** Isolation is per worker, so the console's exposure scales with its seat count and its
@@ -880,12 +936,14 @@ current checkout and records `baseSha` per worker (`worktree.ts:89-91`), so a br
 `up` is a branch no worker's clone contains. §6.4 sequences it.
 
 **Why not an integrator seat.** A worker that merges other workers' branches needs their clones
-mounted, which is `assertNoRunDirMount`'s refusal (`paths.ts:827-836`); or it needs the operator's
+mounted, which is `assertNoRunDirMount`'s refusal (`paths.ts:865`); or it needs the operator's
 repository mounted read-write, which is the mount `isolation: worktree` exists to avoid (§2.1's
 measured RCE). Neither is available and neither should be built for this.
 
 **Why not a shared branch.** Finding B. There is no shared checkout to hold one, and the branch name
-in an envelope is derived rather than read (`worktree.ts:488-530`).
+in an envelope is derived rather than read — `workerBranch` (`paths.ts:603`) builds it from the
+prefix, the run id and the worker id, and `assertValidBranchName` (`worktree.ts:519`) validates it
+before any clone exists.
 
 **Conflict resolution, and v0.2's answer here was not implementable.**
 
@@ -932,6 +990,61 @@ none of this is tested at more than two engineers.
 
 **The split that makes conflicts rare is §6.3's, and it is the real mitigation.** Conflict resolution
 is the fallback; disjoint file ownership is the design.
+
+#### 6.2.1 The merge carries untrusted content back out, and v0.3 had no gate on it
+
+**This is the most serious finding of the three review rounds, and the design had no answer at all.**
+
+The fleet neutralises repository hazards **on the way IN**. `neutralizeRepoHazards`
+(`src/security/repo-hazards.ts:215`) is called at `src/cli/commands/up.ts:2043` on each finished
+clone, and `worktree.ts:69` records why it runs there: a clone has a real `.git` directory, so
+*"every scanner in that module applies to it completely (ISC-249)"*. What it defuses is exactly the
+class that matters here — `AGENTS.md` and `CLAUDE.md` instruction files (`repo-hazards.ts:73`),
+`.pi/extensions` (*"TypeScript executed in-process by Pi"*, `:102`), `.pi/skills`, `.pi/prompts` and
+`.agents/skills` discovery roots (`:103-105`), `core.hooksPath` (`:133`), and `.gitattributes`
+`diff=`/`filter=` drivers (`ATTRIBUTE_DRIVER`, `:202`).
+
+**§6.2 brings those same commits back OUT with no equivalent pass.** `git fetch worker-eng-1 …`
+followed by `git merge` materialises worker-authored files into **the operator's own working tree**,
+which is the tree the orchestrating session then reads, and which §8.2 precondition 7 deliberately
+checks out so three reviewers can read it. `Docs/SRD.md` §12.2 holds that repository content is
+untrusted input and §12.6 that worker-authored prose is data, never instruction — **and a `CLAUDE.md`
+landing in the orchestrator's checkout is worker-authored prose arriving as instruction, in the one
+process that holds `gh` credentials and the operator's git identity.**
+
+**The asymmetry stated plainly: workers are protected from the repository and the orchestrator is
+not protected from the workers.** `fleet.yaml:429`'s `no_context_files: true` exists for exactly this
+threat on the container side. The host side has no equivalent because, until this design, nothing
+ever moved commits outward.
+
+**The gate, in four parts. It reuses the fleet's own scanner rather than inventing a second one.**
+
+1. **Fetch freely; treat the merge as the boundary.** `git fetch` moves objects and updates a remote
+   ref. It writes no working-tree file, runs no filter and activates no `.gitattributes`. **The
+   exposure begins at merge**, so the gate belongs between the two rather than before the fetch.
+2. **Inspect the incoming tree before materialising it.** `git diff --name-only <base>..FETCH_HEAD`
+   lists what the merge would write, without writing it. **Refuse the merge** when it touches any
+   hazard path — `AGENTS.md`, `CLAUDE.md`, `.pi/**`, `.agents/skills/**`, `.gitattributes`, or
+   anything under `.github/workflows/` — and report the worker, the path and the commit. A phase task
+   that legitimately edits one of these is a task the operator approves by hand; **it must not be
+   approved by the loop's silence.**
+3. **Merge with drivers and hooks disabled**, so a `.gitattributes` already in the base cannot act
+   during checkout: `git -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null merge --no-ff`.
+4. **Run `neutralizeRepoHazards` on the operator's checkout after every merge and before the
+   orchestrator reads any file from it.** Part 2 is a refusal on a known list and part 4 is the
+   fleet's own scanner on the merged result; keeping both is deliberate, because part 2 is a
+   host-side list this document maintains and part 4 is the list the security module maintains, and
+   the second is the one that will be updated when a new hazard class is found.
+
+**What this does not claim.** It does not make worker output trustworthy — §3.4 stands, and nothing
+here inspects intent. It bounds one specific path: worker-authored files reaching the orchestrator's
+context and the operator's git configuration. **And it is a refusal-shaped gate, so its failure mode
+is a stopped phase rather than a silent merge**, which is the correct direction for a control whose
+job is to stop something.
+
+**§13 Phase 3 gains this as a task**, and §12 gains the anti-criterion. It is not optional and it is
+not deferred: without it, §6.2's integration model is a supply chain from a hosted model's output
+into the operator's own shell.
 
 ### 6.3 Task decomposition — the SRD splits it, the orchestrator assigns it, and the unit is a file
 
@@ -987,6 +1100,20 @@ does, and it would catch it after the tokens were already spent.
 | 10 | Read the collation; branch on §7.5's verdict | **host** | CHANGES_REQUESTED loops to step 4 with a fix partition; `max_review_iterations` bounds it |
 | 11 | Push the integration branch; `gh pr create`; `gh pr checks --watch` | **host** | §6.7 |
 | 12 | Merge, version bump, docs, `/compact`, next phase | **host** | Under D2 (§10) the PR is opened once at the end, not per phase |
+
+**Step 7 carries a precondition v0.3 stated only in §6.2: the launch directory must be ON the
+integration branch when the restart happens.** The re-clone copies whatever the checkout currently
+holds, so restarting a tester while the operator's checkout sits on `main` produces a clone without
+the phase's merges — the same green-result-about-the-wrong-tree failure, reached by forgetting a
+`git checkout` rather than by forgetting a restart. **§8.2's step 5 therefore checks out the
+integration branch before step 7 dispatches, and §12 makes it a criterion.**
+
+**And the restart changes the run id, which the loop must not lose track of.** `--restart` waits for a
+run id not in the previous set (`fresh-dispatch.ts:213-234`), so a worker's `--run` argument is stale
+the moment it is restarted. **Every later `status`, `wait` and `artifacts` call for that worker must
+use the NEW run id**, re-read from `status --all --json` by matching `workers[].id`. The stable key
+across a restart is the `task_id`, not the run — which is why §7.6's state file records both and why
+§8.2 re-reads the run id after every restart rather than caching it per phase.
 
 **Step 7 rests on a side effect v0.2 never stated, and it is load-bearing in two places.**
 `--restart` tears the worker's run down and brings it back in a **new run id**
@@ -1078,6 +1205,20 @@ a session that polls forever because the relay died is §9.3's failure with no t
 (`render.ts:474`) — **a live bind mount, showing whatever ref the checkout is on right now.**
 §6.7 resolves what that means for reviewing a *diff*.
 
+**Because the view is live, the ref must be PINNED for the round, and v0.3 did not say so.** Three
+lenses read over minutes; nothing holds the checkout still while they do. A host-side `git checkout`
+before or during a round silently changes what they are reading, and **there is no detection**: the
+collation comes back well-formed, coverage is 3 of 3, and the lenses reviewed two different trees.
+This is demonstrated rather than hypothetical — the operator moved the checkout between rounds one
+and two of this document's own review, which is what made round two possible at all.
+
+**So the round records the ref it read.** The orchestrator captures `git rev-parse HEAD` immediately
+before dispatching the review request, puts that SHA in the brief (§7.3), and re-reads it after the
+collation lands. **If the two differ, the review is void and must be re-run** — the findings may be
+about code that is no longer there, and a `file:line` in a collation is meaningless against a
+different tree. §8.2's precondition 7 gains "and it stays there for the round"; §7.5's verdict
+carries the SHA so a mismatch is visible afterwards rather than only during.
+
 > **v0.2 said "as it stands when `up` ran". That is wrong and the correction is load-bearing.** A
 > bind mount is a view of the host directory, not a copy taken at launch, so a host-side `git
 > checkout` changes what every reviewer sees **without a restart**. Measured twice during this
@@ -1121,6 +1262,16 @@ absent.
 **Re-dispatching a task id that already ran is the one thing this must not do**, and the reason is
 the epoch: an envelope whose `epoch` does not match is refused and the work harvests as though the
 container produced nothing (`skills/pifleet-worker/SKILL.md:184-196`). Step 3 is what prevents it.
+
+**One overstatement corrected.** v0.3 said flatly that *"a re-issued review fan-out is idempotent"*.
+That is true of the OUTCOME FILES on a journalled repeat — derived child ids rewrite the same replies
+and the same journal entry — and **it is not true inside the crash window.** `relay-journal.ts:141-146`
+journals after dispatch and takes the duplicate deliberately, so a relay killed between dispatching
+the children and writing the journal leaves a fan-out that the next pass re-issues: the lenses run
+again, and they are **re-billed**. The journal's own words are that the cost is *"largely absorbed"*,
+which is an honest hedge rather than a guarantee. **So: idempotent in what it leaves on disk, not in
+what it spends.** For a ProjectManager run that fans out once per phase per round, that window is
+entered more often than for an operator asking for one review.
 
 **What is NOT idempotent, said plainly.** A re-issued *review* fan-out is idempotent — derived child
 ids rewrite the same reply files and the same journal entry. A re-issued *engineer* dispatch is not:
@@ -1369,7 +1520,7 @@ criterion.
 **So two engineers generating at once are bounded by nothing but the inference server itself.** Add
 the review console and a phase's review round is four more hosted seats in four more runs. The
 fleet's own comments say the equivalent from the other direction (`operations-plan.ts:626-631`,
-`fleet.yaml:746-750`) — *"Admission control cannot queue across runs, so six panes generating at once
+`operations-plan.ts:626-631`) — *"Admission control cannot queue across runs, so six panes generating at once
 is six concurrent requests. That is a throughput decision the operator makes by opening this
 console"* — but those are observations, not limits.
 
@@ -1377,6 +1528,17 @@ console"* — but those are observations, not limits.
 run.**
 An operator reading that line as this feature's spending limit would be wrong, and that is worth
 stating because it is the natural reading.
+
+**And there is a second unbounded resource, which is disk rather than tokens.** Every `--restart`
+stops the old run and brings up a new one, and `down` prunes worktrees only when given `--prune`
+(`src/cli/commands/down.ts:117`). **The loop restarts every seat every phase and never runs the
+reaper**, so a twelve-phase run leaves twelve run directories and twelve clones per seat — four
+seats, forty-eight checkouts of the target repository. This is already visible on this machine, where
+run directories from 2026-08-30 onward still hold worker clones. **The requirement: the orchestrator
+prunes the previous phase's runs once their branches are merged**, and prunes nothing before the
+merge, because `pruneWorkerWorktree` is what stands between a stale clone and a lost commit. §9.2's
+recovery path reads those clones, so the pruning is safe only after §7.2's integration record shows
+`merged: true` for that worker.
 
 **The requirement: the orchestrator counts its own spend and reports it per phase.** Concretely, it
 records how many seats it has in flight and stops dispatching a new phase while a previous phase's
@@ -1435,6 +1597,14 @@ naming a model, a container, a mount, or a host path outside the repository.** T
 purpose is to make step 6 of §6.4 re-derivable, and a path into `~/.pifleet` would make it a second
 spelling of the run tree.
 
+**Both this record and §7.6's state file need a zod schema, and v0.3 gave them only prose.**
+`CollationSchema` (§7.4) is validated on every read; these two are not, so a hand-edited or
+half-written record is discovered by whatever reads it next rather than at the boundary. **§13 Phase 3
+and Phase 5 each gain a schema task**, defined beside the code that writes them —
+`src/run/pm-integration.ts` and `src/run/pm-state.ts` — and validated on read, so a resumed run
+refuses a malformed cursor instead of acting on it. This is a real gap: §6.6 lets the state file say a
+phase was never started, and an unvalidated file can say that by corruption as easily as by intent.
+
 **It is written AFTER each merge, never before**, on `relay-journal.ts:117-151`'s own reasoning
 transposed: a record written first turns a crash into a merge that silently never happens, and a
 record written last turns it into one that is attempted twice — and a re-attempted merge of an
@@ -1448,10 +1618,17 @@ the collator cannot derive:
 
 1. **The integration branch and its base ref**, so the review's subject is a range and not a tree.
 2. **The changed-file list**, from the merge the orchestrator just performed. §6.7 — the lenses hold
-   no `bash` and cannot compute it.
-3. **The phase's name and its SRD section**, so a lens can ask whether the change does what the
+   no `bash` and cannot compute it. **Format, because v0.3 left it to taste and a collator has to
+   parse it:** one path per line, repo-relative, no globs and no ranges, under a literal
+   `CHANGED FILES:` heading, terminated by a blank line — the same shape the relay already uses for
+   `REPORTS —` and `MISSING ASPECT:` lines, so the collator's existing habits carry over. A list
+   longer than 200 entries is truncated with an explicit `… and N more` line rather than silently,
+   because a lens that cannot see the truncation will report on the wrong scope.
+3. **The base ref AND the exact SHA the lenses will read** — `git rev-parse HEAD` taken immediately
+   before dispatch (§6.5). It is recorded so the round can be voided if the checkout moves.
+4. **The phase's name and its SRD section**, so a lens can ask whether the change does what the
    phase said it would.
-4. **Nothing about the development run.** Not its run id, not its workers, not its envelopes. The
+5. **Nothing about the development run.** Not its run id, not its workers, not its envelopes. The
    review console reviews code, not a fleet.
 
 **`task_id` must survive child derivation.** `childTaskId` concatenates (`task-ids.ts:135-176`) and
@@ -1530,6 +1707,14 @@ them:**
 coverage_reported  = |{ c in journal.children : replyHostPath(dir, c) exists }|
 coverage_dispatched = |journal.children|
 ```
+
+**Gate 0 — the tree did not move.** Before either coverage or findings, compare `git rev-parse HEAD`
+against the SHA recorded in the review request (§6.5, §7.3). **A mismatch voids the round**: the
+lenses read a tree that is no longer checked out, so their `file:line` findings point into a
+different history. Void is not `REVIEW_INCOMPLETE` — it is a round that must be re-run, and like
+`REVIEW_INCOMPLETE` it does not count against `max_review_iterations`, because the operator moved the
+checkout and the reviewers did nothing wrong. **The verdict record carries the SHA either way**, so a
+mismatch nobody noticed live is still visible afterwards.
 
 | Coverage | The loop's action |
 |---|---|
@@ -1707,6 +1892,12 @@ Two, and the first is not what it looks like.
    does not, STOP and tell the user — do not launch and let `up` refuse four containers
    in.
 
+   **"Equal" means BYTE-FOR-BYTE.** The comparison is an exact string match, so an
+   `ssh://git@…` remote will not match an `https://…` consent value, a trailing `.git`
+   or a trailing slash will not match its absence, and a case difference will not match.
+   A refusal here is far more often a spelling mismatch than a policy decision — say
+   which of the two it is rather than reporting "not consented".
+
 4. **The toolchains match the repository's language.**
    `pyproject.toml`/`setup.py` -> python, `go.mod` -> go, `package.json` -> node. The
    engineer seats are `node` and the tester seats are `python`. A mismatch is a
@@ -1807,6 +1998,16 @@ cd ~/repos/cmux-fleet && bun run src/cli/index.ts worktrees --run <id> --json   
 cd <repo> && git fetch worker-eng-1 <branch> && git merge --no-ff FETCH_HEAD
 cd <repo> && git fetch worker-eng-2 <branch> && git merge --no-ff FETCH_HEAD
 ```
+
+**If `worktrees --json` fails or omits a worker, STOP — do not merge what it did
+return.** A missing worker record means the run directory is incomplete, and the branch
+name is the one thing the merge cannot guess: it is derived from the run id, which a
+partial record may not carry. Re-read `status --all --json` for that worker's current
+run and retry; if the run is gone, the worker's clone may still exist under
+`~/.pifleet/runs/<run>/worktrees/<id>` and its branch is
+`fleet/<run-id>/<worker-id>` — verify with `git -C <path> branch --show-current` before
+fetching from it. **A partial integration that reports success is worse than a refused
+one**, because the phase's review then reads half the work as though it were all of it.
 
 `commitsAhead: 0` means that worker committed nothing — check its envelope before
 merging nothing and calling it done.
@@ -2001,7 +2202,7 @@ envelope and its artifact — which is exactly why ISC-517 is about lenses and n
 
 ### 9.3 The review round does not produce a collation
 
-`relayFanOut` returns one of five arms (`relay.ts:742-838`), and three of them mean no collation:
+`relayFanOut` (`relay.ts:869`) returns one of five arms (`RelayOutcome`, `relay.ts:742-838`), and three of them mean no collation:
 
 | Arm | Meaning | The loop's action |
 |---|---|---|
@@ -2420,6 +2621,25 @@ Proposed new criteria, by area:
   older than the merge. A green result about the previous phase's tree is the failure being
   prevented.*
 
+**The outbound hazard gate (v0.4, §6.2.1) — the highest-value criteria in this document**
+- **Anti: a merge whose incoming tree adds `CLAUDE.md`, `AGENTS.md`, `.pi/extensions/*`, a
+  `.gitattributes` `filter=` driver or a `core.hooksPath` is REFUSED, not merged.** *Probe: one
+  fixture per hazard class, each a worker branch carrying that file; assert the merge is refused and
+  the operator's checkout is unchanged. **A fixture per class, because a gate that catches
+  `CLAUDE.md` and misses `.pi/extensions` is the gate that matters least catching the thing that
+  matters most.***
+- The operator's checkout is hazard-scanned after every merge. *Probe: assert
+  `neutralizeRepoHazards` ran against the checkout and its findings are recorded in the integration
+  record.*
+- **Anti: the merge runs with hooks and attribute drivers disabled.** *Probe: a base tree carrying a
+  `.gitattributes` `filter=` driver and a `core.hooksPath` script that writes a sentinel file; merge
+  and assert the sentinel does not exist.*
+
+**The review reads a pinned tree (v0.4, §6.5, §7.5 Gate 0)**
+- A review round records the SHA its lenses read, and a moved checkout voids the round. *Probe: a
+  fixture where `HEAD` differs between dispatch and collation; assert the verdict is `VOID`, that it
+  is neither APPROVED nor `REVIEW_INCOMPLETE`, and that the iteration counter is unchanged.*
+
 **Identity and attribution**
 - Every commit a worker makes carries the configured identity — **asserted as an exact value, not as
   "a commit succeeded"**. *Probe: after a dispatched task, `git log -1 --format='%an <%ae>'` on the
@@ -2534,11 +2754,14 @@ only `fleet.example.yaml` may be given to a worker.** Task 1.1 is split on that 
 - **1.7** *(prose, no behaviour)* Correct the seat name where it is documented. Touches:
   `README.md:52`, `src/backends/cmux/client.ts:108`, `:111`, `src/monitor/views/fleet.tsx:77`,
   `src/run/registry.ts:93`, `test/unit/console-restart.test.ts:11`, `:14`.
-  *Do NOT touch the ~60 remaining `rev-1` strings in `test/unit/render.test.ts`,
-  `test/integration/up-wiring.test.ts`, `down-prune`, `no-diff-gradability`, `monitor-render`,
-  `monitor-workspace`, `operations-plan.test.ts`, `replies.test.ts` or `verbgate-collect.test.ts`:
-  those build their own inline configs and use `rev-1` as an arbitrary worker id. Renaming them is
-  churn that hides the real edits in review.*
+  *Do NOT touch the eleven fixture files — `render.test.ts` (20 refs), `up-wiring.test.ts` (23),
+  `monitor-render`, `monitor-workspace`, `operations-plan.test.ts`, `replies.test.ts`,
+  `verbgate-collect.test.ts`, `status-live-run.test.ts`, `fresh-dispatch.test.ts` (a comment),
+  `down-prune` and `no-diff-gradability`: each defines `rev-1` in its own inline config and uses it
+  as an arbitrary worker id. **`up-wiring.test.ts:3743-3763` must be left alone on purpose** — its
+  comment says the `--workers` name is `rev-1` while the ROLE is `reviewer`, so "a gate that echoed
+  the worker id and called it the role cannot pass". Renaming it to a `tst-2`/`tester` pair destroys
+  the probe. Renaming the rest is churn that hides the real edits in review.*
 
 ### Phase 2 — Container identity
 
@@ -2576,9 +2799,17 @@ the orchestrator runs them; what this phase adds is the record and the criteria.
 - **3.1** Define and write the integration record. Touches:
   `src/run/pm-integration.ts` (new), `test/unit/pm-integration.test.ts` (new).
   *Acceptance: a record round-trips and refuses a host path outside the repository.*
-- **3.2** Add the three integration criteria from §12. Touches: `ISA.md`,
+- **3.2** **Implement §6.2.1's outbound hazard gate.** Refuse a merge whose incoming tree touches
+  `AGENTS.md`, `CLAUDE.md`, `.pi/**`, `.agents/skills/**`, `.gitattributes` or
+  `.github/workflows/**`; merge with `core.hooksPath` and `core.attributesFile` disabled; run
+  `neutralizeRepoHazards` on the operator's checkout after every merge. Touches:
+  `src/run/pm-integration.ts`, reusing `src/security/repo-hazards.ts` rather than re-implementing a
+  scanner. **This is the phase's highest-priority task; §6.2 is unsafe to run without it.**
+- **3.3** Add a zod schema for the integration record and validate it on read (§7.2). Touches:
+  `src/run/pm-integration.ts`, `test/unit/pm-integration.test.ts`.
+- **3.4** Add the integration and hazard-gate criteria from §12. Touches: `ISA.md`,
   `test/integration/worker-remote.test.ts` (new).
-- **3.3** Document the fetch-and-merge path where an operator will find it. Touches:
+- **3.5** Document the fetch-and-merge path where an operator will find it. Touches:
   `Docs/SRD.md` (§9.1's amendment — what per-worker isolation means when several workers produce one
   change).
 
@@ -2609,7 +2840,10 @@ rule.
 - **5.3** Add the review-console seats to the skill's tables — they are absent today, and that gap
   is closed by this change whether or not Phase 1 is taken. Touches:
   `~/.claude/skills/fleet/SKILL.md`, `~/.claude/skills/fleet/Workflows/Consoles.md`.
-- **5.4** Add the brief-is-a-substring criterion. Touches: `ISA.md`.
+- **5.4** Add a zod schema for the run state file and validate it on read (§7.6), so a resumed run
+  refuses a malformed cursor rather than acting on one. Touches: `src/run/pm-state.ts` (new),
+  `test/unit/pm-state.test.ts` (new).
+- **5.5** Add the brief-is-a-substring criterion. Touches: `ISA.md`.
 
 ### Phase 6 — The dogfood run
 
@@ -2667,10 +2901,52 @@ rule.
 - `.claude/project-manager-state.json` on `feature/harvest-recovery` — the state file practice
   already reached.
 
-**A rule for maintaining this document, added in v0.3 because round two showed it was needed.**
-Four of that round's eight findings were drifted line numbers and a fifth credited a source file with
-a rule that exists only in a comment. **Whenever a section is edited, re-take every citation inside
-it against the current tree**, and cite the file the behaviour is *in* rather than the file a comment
-*says* it is in. Citations in this revision were re-taken at `147b5d9`. A specification whose
-references cannot be followed a second time is one whose claims cannot be rechecked, and this
-document's central correction in both v0.2 and v0.3 was found by following a citation.
+**A rule for maintaining this document — rewritten in v0.4, because v0.3's version did not work.**
+
+v0.3 said *"whenever a section is edited, re-take every citation inside it"* and claimed a mechanical
+sweep of all 142 citations. **Four drifts survived that sweep, one of them a citation an earlier
+round had already corrected once.** The reason is worth stating because it is the whole lesson: the
+v0.3 script checked that the file existed and the line number was below EOF. **It never opened the
+cited lines.** A citation pointing at the wrong function in the right file passes that check every
+time.
+
+**So the rule is now a script, and the script checks content:**
+
+```bash
+python3 Docs/tools/check-srd-citations.py Docs/SRD-FLEET-PROJECT-MANAGER.md --root .
+```
+
+For each `` `file:line` `` it takes a **tight anchor** — the backticked identifier immediately
+before the citation, or the quoted phrase immediately after it — and asserts that anchor appears
+within the cited range widened by a few lines. It exits non-zero on a miss.
+
+**It is mutation-proved against the real drifts, which is the only evidence worth having here.**
+Each of round three's four drifts was re-introduced into this document and the script re-run, with
+the document restored byte-identically after each (`diff -q` clean):
+
+| Re-introduced drift | Caught? |
+|---|---|
+| `assertNoRunDirMount` moved from `paths.ts:865` to `:812` | **yes** |
+| the four-runs quote moved to `operations-plan.ts:246-253` | **yes** |
+| `workerBranch` moved from `paths.ts:603` to `worktree.ts:488-530` | **yes** |
+| the admission-control quote moved to `fleet.yaml:746-750` | **NO** |
+
+**The miss is instructive and is left in rather than tuned away.** `fleet.yaml:746-750` is the hosted
+console's billing block and it happens to contain the phrase *"panes generating at once"*, which the
+admission-control quote also contains — so the fragment match succeeds against the wrong file. **A
+content checker can only be as sharp as the content is distinctive**, and two passages about the same
+subject will always be able to fool one.
+
+**What it does NOT do, stated so nobody trusts it further than it goes.** It verifies only the
+citations carrying a tight anchor: **53 of roughly 200 here, with 142 reported `unanchored`** — a
+citation naming a module docblock, or a concept rather than a token, cannot be checked this way and
+is reported rather than passed. So the honest summary is: **it catches three of four known drifts and
+leaves three-quarters of the document's citations to a human.** An earlier, looser version flagged 50
+citations and was wrong about most of them; it was made conservative because a checker that cries
+wolf is a checker nobody runs, and being ignored is exactly how the v0.3 sweep failed.
+
+**The standing rules, unchanged in substance:** cite the file the behaviour is *in*, never the file a
+comment *says* it is in; and re-open the cited lines when editing the section around them. **Do not
+assert that citations have been verified unless the script above has been run and its output
+recorded.** This document's central correction in v0.2 and again in v0.3 was found by following a
+citation, which is the argument for all of it.
