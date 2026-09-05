@@ -341,6 +341,42 @@ export const RunSchema = z
     isolation: IsolationSchema.default("worktree"),
     branch_prefix: shortStr.default("fleet"),
     /**
+     * The identity a worker's commits carry (SRD §6.8, D13 arm 2 — ISC-528).
+     *
+     * Sourced from the run's OWN configuration and delivered through the
+     * `GIT_CONFIG_*` channel in `worker-env.ts:783-787` — never from
+     * `~/.gitconfig`, which is not mounted into the container and must not be
+     * (§6.8: "Does not. Mount the operator's `~/.gitconfig`, or use the
+     * operator's address"). Nested, not two flat keys, so the pair defaults
+     * and travels together — the same shape `timers` and `budget` above use.
+     *
+     * The measured alternative to this field existing is not a refusal, it is
+     * an invention: a worker with no configured identity and a writable clone
+     * self-configures one to get past git's identity check, and the probe
+     * behind D13 caught one doing exactly that — committing as
+     * `eng-1 <eng-1@pifleet.invalid>`, a value nothing in the fleet
+     * constrained or recorded. This field is what the fleet constrains and
+     * records it WITH instead.
+     *
+     * The default is deliberately not a person's name or a plausible one —
+     * `pifleet`, not `pi-worker` or a role name — so a reviewer reading
+     * `git log` sees unambiguously that the fleet made the commit, and
+     * `@pifleet.invalid` uses the domain suffix reserved by RFC 2606 for
+     * exactly this: an address guaranteed never to resolve or belong to
+     * anyone, so it can never collide with an operator's or a real
+     * person's own address. It must never be the operator's own address
+     * (§6.8) — `test/unit/worker-env.test.ts`'s ISC-529 asserts the two
+     * differ, and a fixture where they coincide would not be able to fail
+     * that assertion even if the check were removed.
+     */
+    git_identity: z
+      .object({
+        name: shortStr.default("pifleet"),
+        email: shortStr.default("pifleet@pifleet.invalid"),
+      })
+      .strict()
+      .prefault({}),
+    /**
      * The remote this operator consents to send to a HOSTED provider, echoed
      * exactly. `null` means no consent, which is the default and the safe one.
      *
@@ -401,6 +437,22 @@ export const RunSchema = z
  * neighbours.
  */
 export const DEFAULT_BRANCH_PREFIX: string = RunSchema.shape.branch_prefix.parse(undefined);
+
+/**
+ * The git identity a worker's commits carry when no config is reachable (SRD
+ * §6.8, D13 arm 2 — ISC-528).
+ *
+ * Same construction and the same reason as `DEFAULT_BRANCH_PREFIX` above: a
+ * literal `{ name: "pifleet", email: "pifleet@pifleet.invalid" }` restated in
+ * `worker-env.ts` would be correct today and silently wrong the first time
+ * the schema default moves — precisely the drift `branch_prefix` sat unread
+ * through before it gained a reader. `worker-env.ts` reads the *configured*
+ * value off `loaded.config.run.git_identity` for a real run; this constant is
+ * for callers with no `LoadedConfig` to read it from — a test fixture, or a
+ * run directory assembled by hand.
+ */
+export const DEFAULT_GIT_IDENTITY: { name: string; email: string } =
+  RunSchema.shape.git_identity.parse(undefined);
 
 /**
  * The in-flight cap a run gets when no config is reachable.
