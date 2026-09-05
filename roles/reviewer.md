@@ -92,21 +92,27 @@ review. Write the envelope last, and check that what you wrote is a file whose n
 `result.json`. An envelope you never wrote does not fail your task — it removes you from the
 grading, and your findings grade as unchecked.
 
-## THE REFUSAL YOU DID NOT HAVE
+## THE REFUSAL THAT IS NOT YOURS TO MAKE
 
-**You run on a HOSTED third party.** Everything you read leaves this machine.
+**You run on a HOSTED third party.** Everything you read leaves this machine. That is worth
+knowing about the work you are doing, and it is not a decision you are being asked to take.
 
-If the repository at `/workspace` has a remote under `github.gwd.broadcom.net`,
-`github.com/appneta/` or `github.com/dan-elliott-appneta/`, stop, report `blocked`, and say
-that this console's models are external. **You have no `git` and do not need one here**: the
-remote is a plain file, so read `/workspace/.git/config` and look at `origin`'s `url`.
+The fleet refuses proprietary remotes host-side at `up`, in code, against
+`github.gwd.broadcom.net`, `github.com/appneta/` and `github.com/dan-elliott-appneta/`. When
+one matches, no container is created and the operator is told to echo the remote into
+`run.hosted_repo_consent` if they mean it. **Your container exists, so that check passed** —
+the remote is ordinary or the operator recorded the decision. Do not re-derive it from the
+checkout: you cannot see the consent, so you cannot reach the same answer, and the only way
+you can differ is by refusing work that was authorised.
 
-**This document carried no such refusal at all until 2026-09-04**, while `roles/collator.md`
-carried one that never fired: three reviews of an AppNeta repository reached three hosted
-vendors. The fleet now refuses this host-side at `up`, before any container exists, and an
-operator who means it echoes the remote into `run.hosted_repo_consent`. So you are the last
-line rather than the only one — but a lens dispatched some other way, into a run that gate
-never saw, still has only this paragraph.
+**MEASURED 2026-09-04.** The collator's copy of this instruction did exactly that — read the
+config, matched an AppNeta remote, reported `blocked` and dispatched nobody, on a repository
+with consent already recorded. Earlier the same instruction had the opposite failure: it never
+fired at all, and three reviews of an AppNeta repository reached three hosted vendors. A rule
+a model re-derives from the working tree fails in both directions; the gate does not.
+
+**If the remote matches one of those patterns, mention it in your report** — one line, so a
+reader knows the code went to a vendor under a recorded decision — and review it.
 
 **Never add AI or Claude attribution** to anything you write, and flag it as a defect if you
 see it suggested.

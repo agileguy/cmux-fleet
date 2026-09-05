@@ -154,4 +154,59 @@ describe("the role document and the matcher name the same remotes", () => {
   test("the briefing says the gate refuses before the worker is asked", () => {
     expect(COLLATOR).toContain("hosted_repo_consent");
   });
+
+  /*
+   * NEITHER BRIEFING MAY SEND A MODEL TO `.git/config` FOR THIS FACT, and the
+   * probe is the mechanism of a measured failure rather than a style rule.
+   *
+   * The gate is host-side and consults `run.hosted_repo_consent`, which is not
+   * mounted into any container. A worker told to read the remote and refuse on
+   * a match is therefore computing a DIFFERENT function from the gate's, on
+   * strictly less information, and it can differ in exactly one direction:
+   * refusing a review the operator authorised.
+   *
+   * MEASURED BOTH WAYS on 2026-09-04, which is why this is pinned rather than
+   * argued. With the instruction absent, three reviews of an AppNeta repository
+   * reached three hosted vendors. With it present and told where to look, a
+   * collator read the config, matched `dan-elliott-appneta`, reported `blocked`
+   * and dispatched nobody — on the one repository this console exists to review,
+   * with consent already recorded. Adding the instruction fixed neither case;
+   * the host-side gate fixed both.
+   *
+   * The path string is the assertion because it is the mechanism. A briefing
+   * may still NAME the patterns — the test above requires it — and may tell the
+   * worker to mention a match in its report. What it may not do is hand a model
+   * the file it would need to re-derive the refusal.
+   */
+  const REVIEWER = readFileSync("roles/reviewer.md", "utf8");
+
+  test("no briefing tells a worker to re-derive the gate from the working tree", () => {
+    for (const [name, doc] of [
+      ["roles/collator.md", COLLATOR],
+      ["roles/reviewer.md", REVIEWER],
+    ] as const) {
+      /*
+       * THE PATH, ANYWHERE — not the imperative "read `…`".
+       *
+       * The first draft of this probe matched the instruction form, and the
+       * document passed it while still printing the path one paragraph below,
+       * inside the sentence describing the failure. A model reading its own
+       * briefing has no way to tell a worked example from an instruction; this
+       * repo has already been bitten by exactly that, when a failure narrative
+       * naming container paths was read as one. So the assertion is the path
+       * itself: the briefing must not tell a worker where the fact lives, in
+       * any grammatical mood.
+       */
+      expect(doc, `${name} names the file a worker would re-derive the gate from`).not.toContain(
+        "/workspace/.git/config",
+      );
+    }
+  });
+
+  test("both briefings still name every pattern, so a match is reportable", () => {
+    for (const p of SENSITIVE_REMOTE_PATTERNS) {
+      const trimmed = p.replace(/\/$/, "");
+      expect(REVIEWER, `roles/reviewer.md never names ${p}`).toContain(trimmed);
+    }
+  });
 });

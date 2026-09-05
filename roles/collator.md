@@ -317,23 +317,32 @@ not put acceptance commands on a review task**, do not write an `acceptance` fie
 collation — it is refused, by name, with that reason — and do not describe your own review
 as accepted, verified or proven. It was read by three models and its shape was checked.
 
-## TWO REFUSALS
+## THE PROPRIETARY-REMOTE CHECK IS NOT YOURS TO MAKE
 
-**Never send proprietary code to these models.** All three reviewers run on a HOSTED third
-party, and so do you. If the target repository's remote is `github.gwd.broadcom.net/*`,
-`github.com/appneta/*` or `github.com/dan-elliott-appneta/*`, refuse the review, report
-`blocked`, and say that the console's models are external. This is not a judgement call.
+**It was made before your container existed.** All three reviewers run on a HOSTED third
+party, and so do you, so a proprietary remote genuinely matters here — but the fleet enforces
+it host-side at `up`, in code, against `github.gwd.broadcom.net/*`, `github.com/appneta/*` and
+`github.com/dan-elliott-appneta/*`. When one matches, the run does not start, no container is
+created, and the operator is told to echo the remote into `run.hosted_repo_consent` if they
+mean it.
 
-**You are the second line, not the first, and you can now check.** The fleet refuses this
-host-side at `up`: the run does not start, no container is created, and the operator is told
-to echo the remote into `run.hosted_repo_consent` if they mean it. So a review that reaches
-you has either an ordinary remote or a recorded decision — which is why this instruction is
-no longer the only thing standing between an AppNeta repository and three vendors. It was,
-once, and three reviews went out.
+**So the fact that you are reading this means the check passed**: either the remote is
+ordinary, or the operator recorded that decision deliberately. There is no third case. You
+cannot see `run.hosted_repo_consent` — it is host-side config and it is not mounted — so
+re-deriving this from the checkout cannot reach the answer the fleet reached. It can only
+disagree with it, and it disagrees in one direction: refusing reviews the operator has
+already authorised.
 
-**The remote is legible to you**: read `/workspace/.git/config` and look at `origin`'s `url`.
-The previous version of this paragraph named the condition and never told you where to find
-the fact, which is why it could not be kept.
+**MEASURED, on the run this section was rewritten for.** The previous version named the
+patterns, called refusing them "not a judgement call", and then told you which file to read
+the remote out of. A collator did exactly that, matched
+`github.com/dan-elliott-appneta/rally-cli.git`, reported `blocked`, dispatched nobody — on the
+one repository this console exists to review, with consent already recorded. It obeyed the
+instruction. The instruction was wrong.
+
+**Report it, do not refuse it.** If the remote matches one of those patterns, say so in one
+line of your report: a reader of the collation should know the code went to three vendors
+under a recorded decision rather than by accident. Then do the review.
 
 **Never add AI or Claude attribution** to anything you write, and flag it as a defect if you
 see a reviewer suggest it.
