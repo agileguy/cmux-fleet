@@ -77,7 +77,10 @@ function harness(reads: string[]): Harness {
       },
       dispatch: async (runId) => {
         calls.push(`dispatch:${runId}`);
-        return `accepted into ${runId}`;
+        // The real payload's shape, not a placeholder sentence. `dispatch
+        // --json` answers with `accepted`, and this function now READS it —
+        // a fixture that returned prose was the reason it could not have.
+        return JSON.stringify({ accepted: true, task_id: "T-1", via: "staged", run_id: runId });
       },
       sleep: async (ms) => {
         clock += ms;
@@ -86,6 +89,77 @@ function harness(reads: string[]): Harness {
     },
   };
 }
+
+/**
+ * ── THE DISPATCH THAT WAS REPORTED AND NEVER HAPPENED ──────────────────────
+ *
+ * MEASURED on the live console. `scripts/review` wires the `dispatch` dep to a
+ * helper whose own docblock says it runs a subcommand "swallowing failure",
+ * with `stderr: "ignore"` so the reason goes too. A task envelope was refused
+ * by the validator — a short SHA where a 40-character one is required —
+ * `dispatch` exited 2, the helper returned `""`, and the console printed
+ * "recreated col-1 into run <id> ... and dispatched <path>" and exited 0.
+ * Nothing reached the inbox and the operator waited for a review that could
+ * never run.
+ *
+ * The check lives in this function rather than in the caller's wrapper for the
+ * reason the relay's dispatch path already records: `accepted` alone does not
+ * answer whether it happened, and neither does a caller's choice of subprocess
+ * helper. Any caller wiring any runner gets the guarantee here.
+ */
+describe("recreateThenDispatch refuses to report a dispatch that did not land", () => {
+  const landed = async (dispatchOut: string) => {
+    const { deps } = harness([status([]), FRESH]);
+    return await recreateThenDispatch(
+      { ...deps, dispatch: async () => dispatchOut },
+      { worker: "tst-1", pollMs: 1, readyTimeoutMs: 1000 },
+    ).then(
+      (r) => ({ ok: true as const, r }),
+      (e: unknown) => ({ ok: false as const, msg: e instanceof Error ? e.message : String(e) }),
+    );
+  };
+
+  test("empty output — what a runner that discards a failing exit returns", async () => {
+    const got = await landed("");
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.msg).toContain("DID NOT LAND");
+    expect(got.msg).toContain("no output at all");
+    // The refusal names what was ALREADY done: by this point the old runs are
+    // stopped and the pane has been respawned, and an operator told only
+    // "dispatch failed" would not know whether the fleet had been touched.
+    expect(got.msg).toContain("was recreated into run run-new");
+  });
+
+  test("a supervisor refusal exits 0 and is caught anyway", async () => {
+    // The arm a non-zero exit check would miss entirely: the CLI succeeded and
+    // the SUPERVISOR declined — a stale epoch, an id already held.
+    const got = await landed(JSON.stringify({ accepted: false, reason: "stale_epoch" }));
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.msg).toContain("refused");
+    expect(got.msg).toContain("stale_epoch");
+  });
+
+  test("output that is not JSON is named as such, with the text", async () => {
+    const got = await landed("pifleet: invalid task envelope: base_ref must be a full 40-char SHA");
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.msg).toContain("not the JSON --json promises");
+    expect(got.msg).toContain("40-char SHA");
+  });
+
+  test("an accepted dispatch passes through unchanged", async () => {
+    // The control. Without it every assertion above is satisfied by a function
+    // that refuses everything.
+    const payload = JSON.stringify({ accepted: true, task_id: "T-1", via: "staged" });
+    const got = await landed(payload);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.r.dispatched).toBe(payload);
+    expect(got.r.runId).toBe("run-new");
+  });
+});
 
 describe("reading one worker's activity out of a fleet status", () => {
   test("a worker in no run has no activity", () => {
