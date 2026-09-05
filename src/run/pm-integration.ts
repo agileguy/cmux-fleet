@@ -615,5 +615,18 @@ export async function readIntegrationRecord(repoRoot: string, phase: number): Pr
   } catch (err) {
     throw new Error(`integration record at ${path} is not valid JSON: ${String(err)}`);
   }
-  return IntegrationRecordSchema.parse(parsedJson);
+  /*
+   * Wrapped, like every other durable reader in this repository
+   * (`report/collect.ts:473`, `security/control-auth.ts`, `attended/mode.ts`)
+   * and for the reason `test/unit/durable-reader-wrapping.test.ts` scans for:
+   * a bare `.parse` on FILE BYTES surfaces a raw ZodError whose message names
+   * a field path and no file, so the operator learns a record is malformed
+   * without learning WHICH record. This one is read on resume, when the run
+   * that wrote it is over and its author is not around to ask.
+   */
+  try {
+    return IntegrationRecordSchema.parse(parsedJson);
+  } catch (err) {
+    throw new Error(`integration record at ${path} is malformed: ${String(err)}`);
+  }
 }

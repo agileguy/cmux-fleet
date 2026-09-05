@@ -238,7 +238,18 @@ describe("the integration record schema refuses forbidden fields (§7.2, task 3.
     await mkdir(join(repo, ".claude", "project-manager", "phase-1"), { recursive: true });
     await writeFile(path, JSON.stringify({ schema: "pifleet.pmintegration/v1", run_id: "r", workers: [] }));
     // missing integration_branch and base_sha — a half-written record.
-    await expect(readIntegrationRecord(repo, 1)).rejects.toThrow();
+    //
+    // Asserted on the MESSAGE, not merely that something threw. A bare
+    // `.rejects.toThrow()` passes on the raw ZodError an unwrapped
+    // `Schema.parse` produces — and that error names a field path and no
+    // file, so an operator resuming a run learns a record is malformed
+    // without learning which one. `durable-reader-wrapping.test.ts` scans
+    // src/ for exactly that shape; this is the same guard from the caller's
+    // side, and it is what makes the wrapping in `readIntegrationRecord`
+    // load-bearing rather than decorative.
+    await expect(readIntegrationRecord(repo, 1)).rejects.toThrow(
+      /integration record at .*phase-1.*is malformed/,
+    );
   });
 });
 
