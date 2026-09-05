@@ -1,77 +1,78 @@
 {
- "srd_path": "Docs/SRD-FLEET-PROJECT-MANAGER.md",
- "srd_version": "v0.4",
- "repo_path": "/Users/de895996/repos/cmux-fleet",
- "branch_model": "long-lived",
- "branch": "feat/fleet-project-manager",
- "base_branch": "docs/srd-fleet-project-manager",
- "baseline_commit": "ca13812",
- "baseline_suite": "4718 pass / 149 skip / 0 fail / 270 files / 714s, measured 2026-09-05 on ca13812",
- "pr_policy": "Do NOT open a PR. Ask the owner when all phases are complete.",
- "review_at_end_of_each_phase": true,
- "max_review_iterations": 3,
- "parallel_engineers": 2,
- "total_phases": 7,
- "current_phase": 5,
- "completed_phases": [
-  0,
-  1,
-  2,
-  3,
-  4
- ],
- "status": "in_progress",
- "prior_run_state": ".claude/project-manager-state-review-console.json \u2014 the SRD-REVIEW-CONSOLE run this file's shape is copied from; \u00a72.7 cites it, so it was moved rather than overwritten",
- "decisions": {
-  "base_branch": "Based on docs/srd-fleet-project-manager rather than main: the SRD is unmerged, and the review console's /workspace is a live read-only mount of this checkout, so the spec must be present on the branch for a lens to read it.",
-  "isa_is_orchestrator_owned": "ISA.md is never in an engineer's partition. Every branch in this repo edits it, so it is the whole conflict surface; the orchestrator writes it after each phase's merge.",
-  "fleet_yaml_is_not_dispatchable": "fleet.yaml and fleet-development.yaml are gitignored (.gitignore:9). A worker told to edit them produces an empty diff, which ISC-93 grades as a fabrication. Task 1.1a is the operator's by hand.",
-  "engineer_isolation": "Parallel engineers work in git worktrees and the orchestrator merges each branch. This is \u00a76.2's model, so phases 1-5 exercise the integration path rather than deferring it to Phase 6."
- },
- "measurements": {
-  "identity_symptom_2026_09_05": "docker exec -u 10001 <eng-1> git commit --allow-empty exits 128: 'fatal: unable to auto-detect email address (got pi@edf6548c4eca.(none))'. HOME=/home/pi is READ-ONLY so --global is unavailable. GIT_CONFIG_COUNT=1. /workspace is drwxrwxrwx, so a repository-local identity IS self-configurable. NOTE: \u00a712 records the symptom as an invented identity (eng-1 <eng-1@pifleet.invalid>); on this operator's image it is a refusal.",
-  "stale_worker_remotes_2026_09_05": "~/repos/cmux-fleet carries worker-eng-1, worker-eng-2 and worker-tst-1 pointing at 2026-09-04 run directories. The live development console is launched from ~/repos/rally-cli, which holds the correct remotes. Both sets resolve under ls-remote, so \u00a712's integration probe as written passes the broken state; it must assert equality with the live run's branch."
- },
- "phases": [
-  {
-   "n": 0,
-   "slug": "prerequisites",
-   "name": "The python image and the identity symptom"
+  "srd_path": "Docs/SRD-FLEET-PROJECT-MANAGER.md",
+  "srd_version": "v0.4",
+  "repo_path": "/Users/de895996/repos/cmux-fleet",
+  "branch_model": "long-lived",
+  "branch": "feat/fleet-project-manager",
+  "base_branch": "docs/srd-fleet-project-manager",
+  "baseline_commit": "ca13812",
+  "baseline_suite": "4718 pass / 149 skip / 0 fail / 270 files / 714s, measured 2026-09-05 on ca13812",
+  "pr_policy": "Do NOT open a PR. Ask the owner when all phases are complete.",
+  "review_at_end_of_each_phase": true,
+  "max_review_iterations": 3,
+  "parallel_engineers": 2,
+  "total_phases": 7,
+  "current_phase": 6,
+  "completed_phases": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "status": "in_progress",
+  "prior_run_state": ".claude/project-manager-state-review-console.json \u2014 the SRD-REVIEW-CONSOLE run this file's shape is copied from; \u00a72.7 cites it, so it was moved rather than overwritten",
+  "decisions": {
+    "base_branch": "Based on docs/srd-fleet-project-manager rather than main: the SRD is unmerged, and the review console's /workspace is a live read-only mount of this checkout, so the spec must be present on the branch for a lens to read it.",
+    "isa_is_orchestrator_owned": "ISA.md is never in an engineer's partition. Every branch in this repo edits it, so it is the whole conflict surface; the orchestrator writes it after each phase's merge.",
+    "fleet_yaml_is_not_dispatchable": "fleet.yaml and fleet-development.yaml are gitignored (.gitignore:9). A worker told to edit them produces an empty diff, which ISC-93 grades as a fabrication. Task 1.1a is the operator's by hand.",
+    "engineer_isolation": "Parallel engineers work in git worktrees and the orchestrator merges each branch. This is \u00a76.2's model, so phases 1-5 exercise the integration path rather than deferring it to Phase 6."
   },
-  {
-   "n": 1,
-   "slug": "seat-model",
-   "name": "rev-1 becomes tst-2 across config, plan and tests"
+  "measurements": {
+    "identity_symptom_2026_09_05": "docker exec -u 10001 <eng-1> git commit --allow-empty exits 128: 'fatal: unable to auto-detect email address (got pi@edf6548c4eca.(none))'. HOME=/home/pi is READ-ONLY so --global is unavailable. GIT_CONFIG_COUNT=1. /workspace is drwxrwxrwx, so a repository-local identity IS self-configurable. NOTE: \u00a712 records the symptom as an invented identity (eng-1 <eng-1@pifleet.invalid>); on this operator's image it is a refusal.",
+    "stale_worker_remotes_2026_09_05": "~/repos/cmux-fleet carries worker-eng-1, worker-eng-2 and worker-tst-1 pointing at 2026-09-04 run directories. The live development console is launched from ~/repos/rally-cli, which holds the correct remotes. Both sets resolve under ls-remote, so \u00a712's integration probe as written passes the broken state; it must assert equality with the live run's branch."
   },
-  {
-   "n": 2,
-   "slug": "container-identity",
-   "name": "A worker commits under a configured identity"
-  },
-  {
-   "n": 3,
-   "slug": "integration-path",
-   "name": "Fetch, hazard-gate and merge a worker's branch"
-  },
-  {
-   "n": 4,
-   "slug": "verdict-mapping",
-   "name": "collation.json to APPROVED / CHANGES_REQUESTED / REVIEW_INCOMPLETE / VOID"
-  },
-  {
-   "n": 5,
-   "slug": "the-skill",
-   "name": "Workflows/ProjectManager.md, the routing row, the corrected tables"
-  },
-  {
-   "n": 6,
-   "slug": "dogfood",
-   "name": "One phase run through the workflow it specifies"
-  }
- ],
- "pause_point": "OWNER INSTRUCTION 2026-09-05, revised: pause at the end of phase 2. Phase 1 = integrate 1A + 1B; phase 2 = integrate the container-identity branch. Verify both, run the review round, then STOP and report. Do not begin phase 3 integration without the owner's word. Phases 3/4 engineers were already in flight when the instruction arrived; they run to completion and their branches are PARKED unmerged, reported as staged work.",
- "resume_from": "Phase 5: the skill \u2014 ~/.claude/skills/fleet/Workflows/ProjectManager.md (SRD \u00a78.2 is its content), the SKILL.md routing row and corrected tables, plus src/run/pm-state.ts + test (\u00a77.6). Then phase 6 (dogfood), BLOCKED on owner permission to repoint the development console from ~/repos/rally-cli. Also outstanding: tasks 3.4 (ISC-531) and 3.5 (SRD amendment), never dispatched.",
- "verified_at_pause": "2026-09-05 on c27c503: unit 4071 pass / 0 fail / 194 files; integration 647 pass / 0 fail / 796 tests (149 skip) / 74 files; e2e 17 pass / 0 fail / 3 files. Total 4735 pass / 0 fail / 271 files vs the ca13812 baseline's 4718 / 270 \u2014 +17 tests, +1 file (test/unit/attribution.test.ts). tsc --noEmit clean. Same 149 skips as baseline.",
- "review_round_status": "Phase 1-2 round RUN 2026-09-05, run 2026-09-05T20-32-27Z-3e93. Gate 0 not VOID, Gate 1 3/3 coverage from the run tree, Gate 2 CHANGES_REQUESTED with 10 findings (2 consensus). Iteration 1 of 3. Nine of ten addressed; the tenth (scripts/development's bad --workers id framing) predates this work and is recorded in ISA.md rather than fixed.",
- "skill_install": "Tasks 5.1-5.3 installed to ~/.claude/skills/fleet on 2026-09-05: Workflows/ProjectManager.md (new, 512 lines), SKILL.md (routing row first, fleet table corrected, frontmatter worker list), Workflows/Consoles.md (review console added). ~/.claude is a symlink into ~/repos/paisley/.claude, where the skill tree is UNTRACKED \u2014 the files are not under version control. Backup of the pre-install state is in this session's scratchpad at skill-backup/. The skill's cardinal rule is byte-identical."
+  "phases": [
+    {
+      "n": 0,
+      "slug": "prerequisites",
+      "name": "The python image and the identity symptom"
+    },
+    {
+      "n": 1,
+      "slug": "seat-model",
+      "name": "rev-1 becomes tst-2 across config, plan and tests"
+    },
+    {
+      "n": 2,
+      "slug": "container-identity",
+      "name": "A worker commits under a configured identity"
+    },
+    {
+      "n": 3,
+      "slug": "integration-path",
+      "name": "Fetch, hazard-gate and merge a worker's branch"
+    },
+    {
+      "n": 4,
+      "slug": "verdict-mapping",
+      "name": "collation.json to APPROVED / CHANGES_REQUESTED / REVIEW_INCOMPLETE / VOID"
+    },
+    {
+      "n": 5,
+      "slug": "the-skill",
+      "name": "Workflows/ProjectManager.md, the routing row, the corrected tables"
+    },
+    {
+      "n": 6,
+      "slug": "dogfood",
+      "name": "One phase run through the workflow it specifies"
+    }
+  ],
+  "pause_point": "OWNER INSTRUCTION 2026-09-05, revised: pause at the end of phase 2. Phase 1 = integrate 1A + 1B; phase 2 = integrate the container-identity branch. Verify both, run the review round, then STOP and report. Do not begin phase 3 integration without the owner's word. Phases 3/4 engineers were already in flight when the instruction arrived; they run to completion and their branches are PARKED unmerged, reported as staged work.",
+  "resume_from": "Phase 6, the dogfood run \u2014 BLOCKED ON OWNER PERMISSION. It needs the development console repointed from ~/repos/rally-cli to ~/repos/cmux-fleet, which is a console recreate: four running containers stopped. CLAUDE.md puts that behind explicit approval and it has not been given. Also outstanding: task 3.5, the SRD amendment (\u00a76.2.1 corrections plus \u00a712's missing state-file criterion, now allocated as ISC-557), never dispatched. ISC-547..556 remain [ ] and most need the live run. No PR: D2's pr_policy says ask the owner when all phases are complete. Branch feat/fleet-project-manager is unpushed.",
+  "verified_at_pause": "2026-09-05 on the merged tree at phase 5: unit 4173 / integration 651 pass (149 skip, unchanged from baseline) / e2e 17 = 4841 pass, 0 fail. tsc --noEmit clean. Baseline was 4718 across 270 files; now 275 files.",
+  "review_round_status": "Phase 1-2 round RUN 2026-09-05, run 2026-09-05T20-32-27Z-3e93. Gate 0 not VOID, Gate 1 3/3 coverage from the run tree, Gate 2 CHANGES_REQUESTED with 10 findings (2 consensus). Iteration 1 of 3. Nine of ten addressed; the tenth (scripts/development's bad --workers id framing) predates this work and is recorded in ISA.md rather than fixed. No second round was run on phases 3-5; the phase 1-2 round's iteration count stands at 1 of 3.",
+  "skill_install": "Tasks 5.1-5.3 installed 2026-09-05. THE FILES NOW LIVE IN THIS REPO: cmux-fleet/.claude/skills/fleet/ (tracked, commit 9a96450), with ~/.claude/skills/fleet a symlink to them. Previously they were untracked in ~/repos/paisley/.claude \u2014 which is also why the phase 5 engineer could not write to the live path and its files had to be carried out of its worktree by hand. Not placed under cmux-fleet/skills/, which is the WORKER tree mounted at /skills:ro; a root SKILLS/ is impossible on a case-insensitive filesystem. Cardinal rule byte-identical across the move (sha256 a5aef928bc68d772). Pre-move backup in the session scratchpad."
 }

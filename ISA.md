@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 521/547
+progress: 522/548
 retired: 2
 mode: build
 started: 2026-07-27
@@ -4845,6 +4845,7 @@ written on the equality, not on the resolution.
 - [ ] ISC-554: **Anti: a worker's clone has no remotes.** *Probe: after `up`, `git -C <clone> remote` is empty for every worker.* Pins `worktree.ts:730-731`'s deliberate `origin` strip — which is what makes a brief telling a worker to fetch or rebase unimplementable, the defect v0.2's §6.2 contained. **Confirmed live on 2026-09-05: `git -C /workspace remote` in the eng-1 container returns nothing.**
 - [ ] ISC-555: **Anti: a tester dispatched without a restart is refused or flagged.** *Probe: dispatch into an existing tester session after an integration merge and assert the workflow reports the clone is older than the merge.* A green result about the previous phase's tree is the failure being prevented.
 - [ ] ISC-556: **Anti: no criterion in the SRD-FLEET-PM-001 block requires a real terminal, a real model, or the network.** *Probe: the criteria above run under `bun test` with no `PIFLEET_DOCKER`, no live console and no egress; a criterion that cannot be graded in CI is graded `[~]` under this ISA's strictness rule rather than counted.*
+- [x] ISC-557: **Anti: the state file cannot say a phase finished.** *Probe: a cursor claiming phase N complete resolves to `complete` only when run-tree evidence covers every task the phase's partition assigns; with the evidence withheld the same cursor resolves to `stale_file`, and the two fixtures differ ONLY in the evidence passed.* **Allocated here, on 2026-09-05, because §12 allocated none** — §13 task 5.4 exists, §7.6 states the rule in prose ("it may say a phase was never started, and it may not say a phase was finished") and §6.6 names the defect by name ("a phase listed in `completed_phases` whose artifacts do not exist is a stale file, not a completed phase, and the run tree wins"), yet no criterion in the 525..556 block grades any of it. A property this design describes three times and checks nowhere is the shape ISC-530 was filed over: an instruction is not a mechanism. **[x] 2026-09-05 — `src/run/pm-state.ts` + `test/unit/pm-state.test.ts`, and the enforcement is in the TYPES rather than in a comment**, because the misuse is one property access. `readPmState` returns a cursor with `completed_phases` REMOVED and re-exposed as `phases_claimed_complete_unverified`, so `state.completed_phases.includes(n)` is a type error and `undefined` at runtime; `phaseCompletionClaim`'s union has no arm meaning finished, pinned by a compile-time `Extract<…, {kind:"complete"}> extends never` assertion that `bun run typecheck` grades; and `resolvePhaseCompletion` — the only function here that can return `complete` — takes run-tree evidence as a required parameter with no default and no overload, so "resolve it without looking" is not spellable. The run tree wins in BOTH directions: evidence covering an unclaimed phase returns `complete` too, which is what stops the rule being a one-way distrust of the file. Mutation-proved three ways — resolving from the claim instead of the evidence returns `complete` where `stale_file` is expected and reddens exactly one half of the paired fixture; deleting §6.3's file-overlap narrowing makes the overlapping fixture parse while its disjoint twin stays green; and unwrapping the reader's schema parse reddens both the message test and `durable-reader-wrapping`. **The second half is `partition`, and it is graded here because §7.6 calls it "the one thing §6.6's table cannot derive from the run tree"** — so it is a required key with no default, a phase that was dispatched or is claimed complete may not carry an empty one, and a dispatch no partition entry assigns is refused by name. **What is NOT graded: nothing calls this module.** `pm-state.ts` is imported by no file in `src/`, exactly as `pm-integration.ts` and `pm-verdict.ts` are not — the workflow tells the orchestrator to call them from a scratchpad script. The schema is graded; that a resumed run actually reads through it is Phase 6's to show.
 
 ## 2026-09-05 — SRD-FLEET-PM-001 Phases 1 and 2: what integration cost the SRD
 
@@ -4926,3 +4927,60 @@ not a footer. The finding was right and the proposed fix was wrong, and taking
 the fix on the strength of the finding would have re-broken the thing the
 narrowing existed to fix. **A consensus finding is evidence about the defect,
 not about the remedy.**
+
+---
+
+## 2026-09-05 — SRD-FLEET-PM-001 Phase 5: the skill, and the file that could lie
+
+Phase 5 is the phase whose output is not code. Tasks 5.1-5.3 write the
+`/fleet` skill's `ProjectManager` workflow; 5.4 is the state file's schema; 5.5
+is the criterion for it. Three things came out of it worth keeping.
+
+**The skill had no history, and finding that out was the phase's real product.**
+`~/.claude/skills/fleet` was six files and 1212 lines, untracked, on one
+machine. The workflow that tells an operator how to run this fleet was the only
+artefact of the fleet that could not be reviewed, reverted or explained — and
+the phase 5 engineer could not write to it at all, because `~/.claude` is a
+symlink into `~/repos/paisley/.claude` and the agent was worktree-isolated, so
+its files landed in a mirror and had to be carried across by hand. Both problems
+have the same cause and the same fix: the skill now lives at
+`cmux-fleet/.claude/skills/fleet` and `~/.claude/skills/fleet` is a symlink to
+it. Editing it through the `~/.claude` path now shows up in `git status` here.
+
+Two locations were rejected and both reasons are worth the sentence. The repo
+root's `skills/` is the WORKER tree — `render.ts:514` mounts it at `/skills:ro`
+in every container — and an operator skill placed there is one `fleet.yaml` edit
+from being handed to a container. A root `SKILLS/` matching this operator's
+other symlinked skills is not available at all: the filesystem is
+case-insensitive, so it IS `skills/`. Probed rather than assumed — `test -d
+SKILLS` succeeds in a tree containing no such name.
+
+**5.4's engineer refused to reproduce a finding, and that is the second time
+this run that refusing was right.** §8.1's proposed fleet table said testers
+have "egress to the registries". True of the live `fleet.yaml`; false of the
+tracked `fleet.example.yaml`, which declares no `egress_access` on `tester`.
+That is the same defect the phase 1-2 review round raised as Finding 1 against
+the `tst-2` seat comment — a claim copied from the untracked config into the
+tracked one. It found two more of the same shape. The lesson is not about
+egress: **a document describing "the fleet" is describing one of two configs,
+and the one an operator can read is the example.**
+
+**§12 allocated no criterion for §7.6's state file.** The rule is stated three
+times in the SRD — §7.6 in prose, §6.6 as a named defect, §13 as a task — and
+graded nowhere, which is ISC-530's shape exactly: an instruction is not a
+mechanism. ISC-557 is allocated here for it. What the module does with it is the
+part worth copying: the asymmetry is spent on the TYPES rather than a comment,
+because the misuse is one property access (`state.completed_phases.includes(n)`)
+and no comment survives a caller in a hurry. The cursor has no
+`completed_phases`; the claim union has no arm meaning finished; and only a
+function taking run-tree evidence as a required parameter can say `complete`.
+
+**Three integration-only breaks, on a run that has now had one per phase.**
+`skill_install` — a thirteenth field the live state file grew hours after 5.4's
+worktree was cut, caught by the test that reads the real document, which is the
+enumeration earning its keep against a passthrough bag that would have accepted
+a typo just as readily. And four spawning tests in the ISC-531 file inheriting
+bun's 5000 ms default, seen only once the integration tree and the unit guard
+that reads it were in the same tree. Neither contributor's suite could see
+either. **The count that matters is not three defects; it is that a per-branch
+green has now been wrong at every single phase of this run.**
