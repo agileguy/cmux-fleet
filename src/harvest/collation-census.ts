@@ -75,12 +75,33 @@
  * harvester grades against.
  *
  * So the check is LEXICAL and its subject is the container path: does it resolve
- * under the container workdir without climbing out of it, and is the line a
- * positive integer? **It does not open the file, does not stat it, and therefore
- * does not establish that the file exists or that the line is inside it.** That
- * is a real limit and it is stated here rather than left to be discovered from a
- * green verdict — the same stance `reconcile.ts` takes on "too large to check"
- * versus "checked and clean".
+ * under the container workdir without climbing out of it, is it shaped like a
+ * name rather than a sentence, and is the line a positive integer? **It does not
+ * open the file, does not stat it, and therefore does not establish that the
+ * file exists or that the line is inside it.** That is a real limit and it is
+ * stated here rather than left to be discovered from a green verdict — the same
+ * stance `reconcile.ts` takes on "too large to check" versus "checked and clean".
+ *
+ * ## AND STATTING IS NOT THE MISSING HALF — IT IS A WORSE INSTRUMENT
+ *
+ * The obvious strengthening is to open the file, and it is refused twice over.
+ *
+ * **It is unavailable where it matters.** Everything above is the reason: the
+ * collator is `shared-ro`, `host_workdir` is `"unset"`, `hostWorkdir` is `null`,
+ * and the `/workspace` the reviewers actually read is a bind mount this process
+ * has no path to. An existence check for the review console would be an
+ * existence check that never runs, which is `harvest/index.ts`'s "tested
+ * mechanism with no live call site" wearing the opposite disguise.
+ *
+ * **And where it IS available it measures the wrong thing.** A review's most
+ * valuable finding is frequently about a file the change DELETED — the review
+ * this console was built for removed 3742 lines — and every one of those
+ * findings quotes a path that no longer exists in the tree. Statting would file
+ * them as unlocated and cap the review at `partial` for being right. `located`
+ * overstating how much of a review is anchored is a defect; `located`
+ * understating it, on exactly the reviews that did the most work, is a worse
+ * one. The rule below is chosen to move the first number without touching the
+ * second.
  *
  * ## AND IT DEGRADES A FINDING RATHER THAN REFUSING A DOCUMENT
  *
@@ -106,9 +127,9 @@ import { safeForReport } from "./outbox.ts";
 export { COLLATION_ARTIFACT_NAME };
 
 /**
- * Lexical containment inside the container workdir — `outbox.ts`'s
- * `resolvedWithin`, restated rather than imported because its subject here is a
- * CONTAINER path and its argument is the same one.
+ * The candidate's NAME INSIDE the container workdir, or `null` when it has none
+ * — `outbox.ts`'s `resolvedWithin`, restated rather than imported because its
+ * subject here is a CONTAINER path and its argument is the same one.
  *
  * `relative`, not `startsWith`: a prefix test accepts `/workspacex/a.ts` because
  * the strings share eleven characters, and accepts `/workspace/../etc/passwd`
@@ -116,41 +137,110 @@ export { COLLATION_ARTIFACT_NAME };
  * `rel.startsWith("..")` is `resolvedWithin`'s own note — a directory honestly
  * named `..cache` yields `rel === "..cache"`, which a `startsWith` check would
  * refuse.
+ *
+ * **It returns the relative name rather than a boolean because the caller has a
+ * SECOND question to ask of it**, and `rel` is the only spelling that question
+ * can be asked in. `src/a.ts` and `/workspace/src/a.ts` are two spellings of one
+ * file — `src/run/collation.ts` decided the document accepts both — and they
+ * produce the same `rel`. Any judgement made on the RAW string would answer
+ * differently for the two, which is how a rule acquires a spelling that launders
+ * whatever it refuses. See `looksLikePhrase`.
  */
-function withinWorkdir(containerWorkdir: string, candidate: string): boolean {
+function workdirRelative(containerWorkdir: string, candidate: string): string | null {
   const root = resolve(containerWorkdir);
   const target = resolve(isAbsolute(candidate) ? candidate : join(root, candidate));
   const rel = relative(root, target);
-  if (rel === "") return false; // the workdir itself is not a file to quote
-  if (isAbsolute(rel)) return false;
-  return rel.split(sep)[0] !== "..";
+  if (rel === "") return null; // the workdir itself is not a file to quote
+  if (isAbsolute(rel)) return null;
+  return rel.split(sep)[0] === ".." ? null : rel;
+}
+
+/**
+ * Is this name inside the workdir a SENTENCE rather than a path?
+ *
+ * ## The hole it closes
+ *
+ * `findingLocationProblem`'s docblock used to confess this defect against
+ * itself and stop there: `join("/workspace", x)` maps every string without a
+ * leading `..` to somewhere inside the workdir, so the prose finding
+ * `"the error handling could be tightened"` resolved to
+ * `/workspace/the error handling could be tightened`, counted as located, and
+ * `located` therefore overstated how much of a review was anchored to real code.
+ * Containment cannot close it — the string really does resolve inside — so the
+ * shape of the name has to.
+ *
+ * ## The rule, and why all three conjuncts
+ *
+ * A name is a phrase when it carries **whitespace**, contains **no directory
+ * separator**, and its final component carries **no file extension**. All three,
+ * because the cost of the two errors is not symmetric. A miss leaves `located`
+ * overstated, which is the defect being closed; a FALSE POSITIVE marks a real
+ * file unlocated and caps an honest review at `partial`, which is the
+ * understatement the module header refuses to trade for. So this fires only when
+ * every available signal says "sentence", and each conjunct is the one that
+ * rescues a real path the others would condemn:
+ *
+ *  - whitespace rescues `Makefile`, `LICENSE`, and every other extensionless
+ *    single-segment file at the root of a checkout;
+ *  - the separator rescues `docs/design notes` — a directory named it, which no
+ *    sentence does;
+ *  - the extension rescues `design notes.md`, a single-segment file whose name
+ *    has a space in it.
+ *
+ * ## IT IS ASKED OF `rel`, WHICH IS WHAT MAKES IT UNSPELLABLE-AROUND
+ *
+ * Asked of the raw `file`, the rule would have a bypass and the bypass would be
+ * the remedy printed in its own refusal message:
+ * `/workspace/the error handling could be tightened` carries separators, so it
+ * would pass while the bare sentence failed. Asked of `rel`, both spellings of
+ * one name get one answer, which is the property the contract's decision to
+ * accept both spellings promised and this defect broke.
+ *
+ * ## WHAT SURVIVES, NAMED RATHER THAN COUNTED
+ *
+ * No lexical rule separates a ONE-WORD prose finding (`"unclear"`) from an
+ * extensionless file at the root (`Makefile`); they are the same string shape,
+ * and refusing the second to catch the first is the trade above, made the wrong
+ * way. A sentence that QUOTES a path (`"we should refactor src/a.ts"`) carries
+ * both a separator and an extension and survives for the same reason. This rule
+ * catches a finding that points at nothing; it does not catch every finding
+ * written badly, and `statement` remains where prose belongs.
+ */
+function looksLikePhrase(rel: string): boolean {
+  if (!/\s/.test(rel)) return false;
+  if (rel.includes(sep)) return false;
+  return !/\.[^.\s]+$/.test(rel);
 }
 
 /**
  * Why one finding's location is not usable, or `null` when it is.
  *
- * ## BOTH SPELLINGS RESOLVE, AND ONE OF THEM COSTS SOMETHING
+ * ## BOTH SPELLINGS RESOLVE, AND CONTAINMENT ALONE COULD NOT TELL A PATH FROM A
+ * ## SENTENCE
  *
  * `/workspace/src/a.ts` and `src/a.ts` both resolve, because
  * `src/run/collation.ts` decided the document accepts both and made the
  * argument: refusing a whole collation over a spelling is *"a legal-document
- * refusal presenting as a policy"*. That decision has a price HERE and it is
- * worth naming rather than discovering, because it was found by a fixture that
- * did not have it: **`join("/workspace", x)` maps every string without a leading
- * `..` to somewhere inside the workdir**, so the prose finding
- * `"the error handling could be tightened"` resolves to
- * `/workspace/the error handling could be tightened` and counts as located.
+ * refusal presenting as a policy"*. That decision had a price HERE, and this
+ * docblock recorded it against itself for a while before it was paid:
+ * **`join("/workspace", x)` maps every string without a leading `..` to
+ * somewhere inside the workdir**, so the prose finding
+ * `"the error handling could be tightened"` resolved to
+ * `/workspace/the error handling could be tightened` and counted as located —
+ * `located` claiming an anchor for a finding that points at nothing.
  *
- * So the relative arm cannot, on its own, tell a path from a sentence. What
- * stands behind it is the rest of the document's shape — a `statement` field
- * that is where prose belongs, and a `line` that must be a whole number and, at
- * this check, a positive one. `line: 0` and `line: -3` are the shapes a model
- * emits when it has nothing to point at, and they are refused here rather than
- * in the schema for the same degrade-don't-refuse reason.
+ * **`looksLikePhrase` is the answer**, and it is a SHAPE rule on the name inside
+ * the workdir rather than an existence check on the file: the module header
+ * argues at length why statting is both unavailable to a `shared-ro` collator
+ * and, where available, a worse instrument that would file a review's findings
+ * about DELETED files as unlocated. The rule's own conjuncts, the paths each one
+ * rescues, and what still gets through are argued where it is defined.
  *
- * **The absolute arm is the one that carries real weight**, and the refusal
- * message says so, so a collator reading its own defect learns the spelling that
- * makes the check mean something rather than the one that merely passes.
+ * Two things stand behind it, unchanged. `statement` is where prose belongs, and
+ * `line` must be a whole number and, at this check, a positive one — `line: 0`
+ * and `line: -3` are the other shapes a model emits when it has nothing to point
+ * at, and they are refused here rather than in the schema for the same
+ * degrade-don't-refuse reason.
  *
  * Control characters and backslashes are checked again here even though
  * `findingPath` refuses the first document-wide: this function is exported and
@@ -173,11 +263,19 @@ export function findingLocationProblem(
   const bs = file.indexOf("\\");
   if (bs !== -1) return `finding path contains a backslash (0x5c) at index ${bs}`;
   if (file === "") return "finding carries an empty file path";
-  if (!withinWorkdir(containerWorkdir, file)) {
+  const rel = workdirRelative(containerWorkdir, file);
+  if (rel === null) {
     return (
       `finding path ${safeForReport(file)} does not resolve inside ${containerWorkdir}. ` +
-      `An absolute path under ${containerWorkdir} is the spelling that makes this check mean ` +
-      `something: a workdir-relative one resolves inside it whatever it says`
+      `A finding names a file in the tree that was reviewed, either as an absolute path under ` +
+      `${containerWorkdir} or relative to it`
+    );
+  }
+  if (looksLikePhrase(rel)) {
+    return (
+      `finding path ${safeForReport(file)} is a sentence, not a path: inside ${containerWorkdir} ` +
+      `it names ${safeForReport(rel)}, which carries whitespace, no directory and no file ` +
+      `extension. Prose belongs in this finding's \`statement\`; \`file\` is the path it points at`
     );
   }
   if (!Number.isInteger(line) || line < 1) {

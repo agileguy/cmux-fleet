@@ -77,35 +77,76 @@ const MUTATIONS: M[] = [
     file: CENSUS,
     find:
       "  const rel = relative(root, target);\n" +
-      '  if (rel === "") return false; // the workdir itself is not a file to quote\n' +
-      "  if (isAbsolute(rel)) return false;\n" +
-      '  return rel.split(sep)[0] !== "..";',
-    replace: "  return target.startsWith(root);",
+      '  if (rel === "") return null; // the workdir itself is not a file to quote\n' +
+      "  if (isAbsolute(rel)) return null;\n" +
+      '  return rel.split(sep)[0] === ".." ? null : rel;',
+    replace: "  return target.startsWith(root) ? relative(root, target) : null;",
     expect: "red",
   },
   {
     id: "C2",
     what: "CONTAINMENT: a path that climbs out of the workdir is accepted",
     file: CENSUS,
-    find: '  return rel.split(sep)[0] !== "..";',
-    replace: "  return true;",
+    find: '  return rel.split(sep)[0] === ".." ? null : rel;',
+    replace: "  return rel;",
     expect: "red",
   },
   {
     id: "C3",
     what: "CONTAINMENT: the workdir itself counts as a quotable file",
     file: CENSUS,
-    find: '  if (rel === "") return false; // the workdir itself is not a file to quote',
-    replace: '  if (rel === "") return true;',
+    find: '  if (rel === "") return null; // the workdir itself is not a file to quote',
+    replace: '  if (rel === "") return "";',
     expect: "red",
   },
   {
     id: "C3b",
     what: "CONTAINMENT: the absolute-`rel` arm is removed (dead on POSIX)",
     file: CENSUS,
-    find: "  if (isAbsolute(rel)) return false;",
-    replace: "  if (false) return false;",
+    find: "  if (isAbsolute(rel)) return null;",
+    replace: "  if (false) return null;",
     expect: "green",
+  },
+  // ── G2: the phrase rule, and each conjunct's own separating fixture. ──────
+  {
+    id: "C13",
+    what: "PHRASE: the shape check is removed, so a sentence counts as located again",
+    file: CENSUS,
+    find: "  if (looksLikePhrase(rel)) {",
+    replace: "  if (false) {",
+    expect: "red",
+  },
+  {
+    id: "C14",
+    what: "PHRASE: the whitespace conjunct is dropped, condemning `Makefile`",
+    file: CENSUS,
+    find: "  if (!/\\s/.test(rel)) return false;",
+    replace: "  if (false) return false;",
+    expect: "red",
+  },
+  {
+    id: "C15",
+    what: "PHRASE: the separator conjunct is dropped, condemning `docs/design notes`",
+    file: CENSUS,
+    find: "  if (rel.includes(sep)) return false;",
+    replace: "  if (false) return false;",
+    expect: "red",
+  },
+  {
+    id: "C16",
+    what: "PHRASE: the extension conjunct is dropped, condemning `design notes.md`",
+    file: CENSUS,
+    find: "  return !/\\.[^.\\s]+$/.test(rel);",
+    replace: "  return true;",
+    expect: "red",
+  },
+  {
+    id: "C17",
+    what: "PHRASE: the shape is judged on the SPELLING rather than on the name inside the workdir",
+    file: CENSUS,
+    find: "  if (looksLikePhrase(rel)) {",
+    replace: "  if (looksLikePhrase(file)) {",
+    expect: "red",
   },
   {
     id: "C10",
@@ -293,7 +334,7 @@ const MUTATIONS: M[] = [
     find: "    const collationCap = collationCeilingFor(taskId, claimed, reconciled.collationRead);",
     replace:
       "    const collationCap = collationCeilingFor(taskId, claimed ?? { status: \"success\" }, reconciled.collationRead);",
-    expect: "green",
+    expect: "red",
   },
   // ── S: the worker→run map the script hands the relay (§6.5). ─────────────
   {
@@ -443,6 +484,15 @@ const MUTATIONS: M[] = [
     file: CENSUS,
     find: '  if (bs !== -1) return `finding path contains a backslash (0x5c) at index ${bs}`;',
     replace: '  if (bs !== -1) return `finding path holds a backslash at ${bs}`;',
+    expect: "green",
+  },
+  {
+    id: "NC3",
+    what: "NEGATIVE CONTROL: reword the unquoted half of the phrase refusal",
+    file: CENSUS,
+    find: '      `it names ${safeForReport(rel)}, which carries whitespace, no directory and no file ` +',
+    replace:
+      '      `it names ${safeForReport(rel)}, which holds whitespace, sits in no directory and has no file ` +',
     expect: "green",
   },
 ];

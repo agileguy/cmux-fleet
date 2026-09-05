@@ -44,7 +44,31 @@ import { join } from "node:path";
 
 import { harvestTask } from "../../src/harvest/index.ts";
 import { runPaths, workerOutboxDir, type RunPaths } from "../../src/run/paths.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
+
+/** A git subprocess against a fixture repository, with a hermetic identity. */
+async function git(cwd: string, ...args: string[]): Promise<void> {
+  const p = Bun.spawn(["git", ...args], {
+    cwd,
+    stdout: "ignore",
+    stderr: "ignore",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@e",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@e",
+    },
+  });
+  await p.exited;
+}
+
+/** `git rev-parse HEAD` in a fixture repository. */
+async function headSha(cwd: string): Promise<string> {
+  return (
+    await new Response(Bun.spawn(["git", "rev-parse", "HEAD"], { cwd, stdout: "pipe" }).stdout).text()
+  ).trim();
+}
 
 const RUN_ID = "r-collation";
 const WORKER = "col-1";
@@ -409,22 +433,6 @@ describe("harvestTask applies §6.8's rules (the three wires)", () => {
  * acceptance exam, no network.
  */
 describe("the collation ceiling cannot RAISE a verdict the diff already failed", () => {
-  async function git(cwd: string, ...args: string[]): Promise<void> {
-    const p = Bun.spawn(["git", ...args], {
-      cwd,
-      stdout: "ignore",
-      stderr: "ignore",
-      env: {
-        ...process.env,
-        GIT_AUTHOR_NAME: "t",
-        GIT_AUTHOR_EMAIL: "t@e",
-        GIT_COMMITTER_NAME: "t",
-        GIT_COMMITTER_EMAIL: "t@e",
-      },
-    });
-    await p.exited;
-  }
-
   test(
     "a -collate repository task with an empty diff and no collation stays failed",
     async () => {
@@ -491,5 +499,139 @@ describe("the collation ceiling cannot RAISE a verdict the diff already failed",
       }
     },
     cliBudget(3),
+  );
+});
+
+/**
+ * H6 — THE ISC-94 GUARD'S CALL SITE, and the fixture the mutation table said it
+ * would take.
+ *
+ * ## What was uncovered, and why nothing cheaper reached it
+ *
+ * `collationCeilingFor`'s POLICY is pinned exhaustively in
+ * `collation-census.test.ts`: no claim, no ceiling. Its USE — the argument
+ * `harvestTask` actually passes it — was not. The mutation that names the gap is
+ * `H6` in `review-grading.mutations.md`: rewrite the call site as
+ * `collationCeilingFor(taskId, claimed ?? { status: "success" }, …)` and the
+ * wrapper is handed a claim for a task that made none, which is precisely what
+ * the wrapper exists to refuse.
+ *
+ * It survived every probe in this file because all of them give the task a
+ * result envelope, or leave the verdict at or below `partial`. A ceiling of
+ * `partial` applied to a verdict of `partial` changes nothing, and with no
+ * envelope at all the verdict was `unknown`, whose rank is -1 and below every
+ * ceiling. So the fabricated claim was real and unobservable at once.
+ *
+ * Separating it needs a task with NO ENVELOPE whose verdict nonetheless EXCEEDS
+ * `partial`, and ISC-94 says where that comes from: a missing claim is a no-op,
+ * so the verdict rests on derived evidence, and the only derived evidence that
+ * reaches `success` is a green harvester-run acceptance — `adjudicate.ts`'s
+ * *"the one piece of evidence in this function a fabricating worker cannot
+ * author"*. That is the fixture below, and it is exactly the asymmetry H6
+ * needed: a census ceiling pulling down the one class of evidence a census is
+ * not entitled to touch.
+ *
+ * ## The cost, and why it is a unit test anyway
+ *
+ * A real repository, a real clone, and one real command. No container: no
+ * `launch.json` is written, so `readWorkerLaunch` returns null and the exam runs
+ * as host processes — the same route `no-diff-gradability.test.ts` takes. No
+ * network, and the whole tree is one file.
+ *
+ * `base_ref` is HEAD, so `base..HEAD` is empty by construction. With no envelope
+ * that costs nothing — ISC-93 lives inside the `claimed !== null` branch — and
+ * it buys an empty `files_changed`, which keeps the ISC-150 harness cap and the
+ * ISC-243 graded surface out of a fixture that is about neither.
+ *
+ * The scratch root is a SIBLING of the worktree (ISC-149) and is supplied
+ * explicitly, so nothing is allocated under `$HOME/.pifleet/scratch` and
+ * `harvestTask` — which only removes a root it allocated itself — leaves it to
+ * the `finally` here.
+ */
+describe("ISC-94 at the CALL SITE — a task with no envelope and evidence above partial", () => {
+  test(
+    "a -collate task with green harvester-run acceptance and no envelope stays success",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "pifleet-collation-isc94-"));
+      try {
+        const work = join(root, "work");
+        await mkdir(work, { recursive: true });
+        await git(work, "init", "-q", "-b", "main");
+        await writeFile(join(work, "marker.txt"), "alpha\n");
+        await git(work, "add", "-A");
+        await git(work, "commit", "-qm", "base");
+        const head = await headSha(work);
+
+        const scratch = join(root, "scratch");
+        await mkdir(scratch, { recursive: true });
+
+        const run = runPaths(RUN_ID, join(root, "runs"));
+        await mkdir(run.inboxDir, { recursive: true });
+        await writeFile(
+          join(run.inboxDir, `${COLLATE_TASK}.json`),
+          JSON.stringify({
+            schema: "pifleet.task/v1",
+            task_id: COLLATE_TASK,
+            run_id: RUN_ID,
+            epoch: 1,
+            attempt: 1,
+            worker: WORKER,
+            dispatched_at: new Date().toISOString(),
+            title: COLLATE_TASK,
+            brief: "ISC-94 call-site fixture",
+            repo: work,
+            host_workdir: work,
+            container_workdir: "/workspace",
+            branch: "main",
+            base_ref: head,
+            // Metacharacter-free, so `tokenize` runs it rather than filing it
+            // `not_run`; it reads a file committed at the base sha, so a green
+            // result means the clone really was populated.
+            acceptance: ["grep -q -F alpha marker.txt"],
+            outbox: `/outbox/${COLLATE_TASK}`,
+            deadline_s: 1500,
+          }),
+        );
+
+        // The outbox EXISTS and holds no `result.json`. That is the whole
+        // fixture: a worker that produced evidence and wrote no claim.
+        await mkdir(join(workerOutboxDir(run.root, WORKER), COLLATE_TASK, "files"), {
+          recursive: true,
+        });
+
+        const { harvest, facts } = await harvestTask(run, COLLATE_TASK, {
+          runAcceptance: true,
+          acceptanceScratch: scratch,
+        });
+
+        // THREE CONTROLS, each one a way this fixture could be green for a
+        // reason that has nothing to do with the guard.
+        //
+        // 1. There really is no claim, so `claimed === null` reaches the call.
+        expect(harvest.claimed).toBeNull();
+        // 2. The exam really ran and really passed — `not_run` or `failed` would
+        //    leave the verdict below `partial`, where the ceiling is invisible.
+        expect(facts.acceptance.map((a) => a.outcome)).toEqual(["passed"]);
+        // 3. There really is no collation, so the `missing` arm is what a
+        //    fabricated claim would be applied to.
+        expect(harvest.collation).toBeNull();
+
+        // THE ASSERTION. Unmutated, the guard declines and derived evidence
+        // stands. With a claim fabricated at the call site, §6.8's third rule
+        // fires on the `missing` arm and caps this at `partial` — a document the
+        // worker never wrote pulling down an acceptance run it never touched.
+        expect(harvest.verdict).toBe("success");
+        expect(harvest.reasons.join(" ")).not.toContain("collation.json");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    /**
+     * Four git spawns in the fixture, plus `deriveGitFacts` and the acceptance
+     * clone inside `harvestTask` — 24 covers both generously. The `grep` is one
+     * cheap read-only spawn, which is the `probe` term's shape rather than
+     * `git`'s.
+     */
+    opsBudget({ git: 24, probe: 1 }),
   );
 });

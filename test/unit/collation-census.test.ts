@@ -12,7 +12,7 @@
  * both branches of a narrowing agree, so a mutation that deletes the narrowing
  * survives while the suite stays green.
  *
- * The three that would otherwise be degenerate, and what each fixture does about
+ * The four that would otherwise be degenerate, and what each fixture does about
  * it:
  *
  *  - **Containment.** A fixture whose only bad path is `/etc/passwd` cannot tell
@@ -20,6 +20,15 @@
  *    here include `/workspacex/a.ts` (shares the prefix, is outside) and
  *    `/workspace/../etc/passwd` (starts with it, climbs out), both of which a
  *    prefix test accepts and containment refuses.
+ *  - **The phrase rule.** A fixture whose candidates are all ABSOLUTE proves
+ *    nothing about it: every one of them is settled by containment before the
+ *    shape is consulted. The separating pair is `src/a.ts` and
+ *    `the error handling could be tightened` — both workdir-relative, both
+ *    resolving inside `/workspace`, distinguished only by
+ *    `findingLocationProblem`'s own reading of the name. Each of the rule's
+ *    three conjuncts then gets the real path it exists to rescue: `Makefile`
+ *    (no whitespace), `docs/design notes` (a directory named it) and
+ *    `design notes.md` (an extension).
  *  - **The ceiling's antecedent.** `censusCeiling` is a conjunction of three
  *    conditions and dropping any of them has to redden: a fully-located
  *    collation stays `success`, a claim that is not `success` is left alone, and
@@ -229,6 +238,32 @@ describe("rule 1 — a finding resolves inside the container workdir, or it is n
     { what: "absolute and deep", file: "/workspace/src/deep/nest/a.ts", line: 999, ok: true },
     // Accepted by the contract's own decision to allow both spellings.
     { what: "workdir-relative", file: "src/a.ts", line: 1, ok: true },
+    /**
+     * THE PROSE FINDING, and the row above is its asymmetric partner.
+     *
+     * Both are workdir-relative, so both reach `looksLikePhrase` through the
+     * same arm; containment accepts them both. A fixture whose only bad
+     * candidates were absolute could not tell the phrase rule from nothing at
+     * all, which is how this defect survived a green suite the first time.
+     */
+    { what: "a prose sentence", file: "the error handling could be tightened", line: 1, ok: false },
+    /**
+     * The same sentence in the OTHER spelling the contract accepts. It must get
+     * the same answer, or the refusal message names its own bypass — which is
+     * why the shape is judged on the name inside the workdir and not on the raw
+     * string, where this one carries two separators and would pass.
+     */
+    {
+      what: "a prose sentence spelled absolutely",
+      file: "/workspace/the error handling could be tightened",
+      line: 1,
+      ok: false,
+    },
+    // The three real paths the rule's three conjuncts exist to rescue. Each one
+    // is refused if the conjunct beside it is dropped.
+    { what: "an extensionless file at the root", file: "Makefile", line: 1, ok: true },
+    { what: "a name with a space, under a directory", file: "docs/design notes", line: 1, ok: true },
+    { what: "a name with a space and an extension", file: "design notes.md", line: 1, ok: true },
     // Shares eleven characters with the workdir and is a different directory.
     { what: "a sibling sharing the prefix", file: "/workspacex/a.ts", line: 1, ok: false },
     // Starts with the workdir and resolves outside it.
@@ -284,6 +319,27 @@ describe("rule 1 — a finding resolves inside the container workdir, or it is n
   });
 
   /**
+   * G2: the prose finding is refused AS PROSE, and the row table cannot say so.
+   *
+   * A row asserting only `typeof problem === "string"` records that SOMETHING
+   * refused the sentence, and two different mutations satisfy it: the phrase
+   * rule working, and a containment arm broken badly enough to reject every
+   * workdir-relative name. Quoting the sentence separates them — the containment
+   * message does not call anything a sentence — exactly as the empty-path probe
+   * below separates its two agreeing branches.
+   *
+   * The second assertion is the negative control and it is not optional: a
+   * phrase rule that fired on every relative name would satisfy the first line
+   * while destroying the spelling `src/run/collation.ts` deliberately accepted.
+   */
+  test("a prose finding is refused as a sentence, and a relative path beside it is not", () => {
+    expect(findingLocationProblem("the error handling could be tightened", 1, WORKDIR)).toContain(
+      "is a sentence, not a path",
+    );
+    expect(findingLocationProblem("src/a.ts", 1, WORKDIR)).toBeNull();
+  });
+
+  /**
    * Y3: every other fixture's line is a whole number, so `!Number.isInteger(line)`
    * was never exercised — `line: 12.5` counted as located. The function is
    * exported and has callers beyond `censusCollation`, so the bound is its own.
@@ -327,6 +383,33 @@ describe("rule 1 — a finding resolves inside the container workdir, or it is n
     expect(c.counted).toBe(2);
     expect(c.located).toBe(1);
     expect(c.defects.some((d) => d.includes("does not resolve inside /workspace"))).toBe(true);
+  });
+
+  /**
+   * G2 THROUGH THE CENSUS, which is where the defect was actually expensive.
+   *
+   * `findingLocationProblem` returning a string is only half of it: the number
+   * that overstated a review's anchoring is `located`, and the thing that acted
+   * on the overstatement is `censusCeiling`. The document PARSES — `findingPath`
+   * bounds the string and refuses control characters and nothing else, so prose
+   * in `file` is the contract's decision to allow, and the census's to grade.
+   */
+  test("a prose finding parses, is not located, and caps the claimed success", () => {
+    const c = census({
+      findings: [
+        { statement: "real", file: "src/a.ts", line: 5, raised_by: ["rev-arch-1"] },
+        {
+          statement: "the error handling could be tightened",
+          file: "the error handling could be tightened",
+          line: 1,
+          raised_by: ["rev-ctx-1"],
+        },
+      ],
+    });
+    expect(c.counted).toBe(2);
+    expect(c.located).toBe(1);
+    expect(c.defects.some((d) => d.includes("is a sentence, not a path"))).toBe(true);
+    expect(censusCeiling(c, "success")?.ceiling).toBe("partial");
   });
 
   test("a control character in a path is the CONTRACT's refusal, not the census's", () => {
