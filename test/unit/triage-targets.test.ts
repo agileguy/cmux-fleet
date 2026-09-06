@@ -1,0 +1,617 @@
+/**
+ * `triage/targets.yaml` — the schema, the loader, and D11's fence
+ * (SRD-TRIAGE-CONSOLE §7.1, §6.2, §6.10, D11; §13 tasks 3.1 and 3.2).
+ *
+ * ## Every fence fixture here is ASYMMETRIC, and that is the whole point
+ *
+ * §6.10's kubeconfig-subset check is a set narrowing, and this repository's
+ * MEMORY carries the defect that makes a narrowing untestable: *"a filter or
+ * intersection survives mutation whenever every fixture makes the two sets
+ * equal"*. A subset assertion where the targets file names exactly the
+ * contexts the kubeconfig carries passes for EVERY implementation, including
+ * `return []`, including `return available.size > 0`, and including the
+ * direction-inverted one that asks whether the kubeconfig is a subset of the
+ * targets file.
+ *
+ * So the fence fixtures below never make the two sets equal. The load-bearing
+ * one names two environments against a kubeconfig carrying two contexts, and
+ * the sets OVERLAP without either containing the other:
+ *
+ *     kubeconfig carries : {gke-cni-dev, gke-cni-verify}
+ *     targets file names : {gke-cni-dev, gke-cni-prod}
+ *
+ * That fixture separates four implementations at once:
+ *
+ *  - a check that always passes returns no issue → RED on the `prod` half;
+ *  - a check that always fails returns two → RED on the `dev` half, which is
+ *    asserted BY NAME rather than by count, so "one issue" cannot be reached
+ *    by refusing the wrong one;
+ *  - a check comparing SIZES sees 2 against 2 and passes → RED;
+ *  - a check asking `available ⊆ named` refuses `gke-cni-verify` and misses
+ *    `gke-cni-prod` → RED on both halves.
+ *
+ * And the degenerate arm is asserted directly, because it is the arm D11
+ * exists for: an UNDECLARED reach (`cloud.kubeconfig: null`) refuses a targets
+ * file that is otherwise perfect, and a DECLARED reach carrying zero contexts
+ * refuses everything rather than admitting everything. A fence whose empty set
+ * means "unbounded" is not a fence, and those two tests are what say so.
+ *
+ * ## The type split is asserted at runtime, not trusted at the type level
+ *
+ * `parseTriageTargets` returns an object with no `environments` property —
+ * `pm-state.ts`'s pattern, where the reader that cannot know a thing does not
+ * return a field claiming it. A type-level guarantee is invisible to a test
+ * that only typechecks, so the absence of the key and the presence of its
+ * renamed twin are both asserted on the VALUE.
+ *
+ * No subprocess is spawned anywhere in this file and nothing touches the real
+ * filesystem — every read is an injected dep — so no `budget.ts` allowance
+ * applies.
+ */
+
+import { describe, expect, test } from "bun:test";
+
+import { ConfigValidationError } from "../../src/config/load.ts";
+import {
+  DEFAULT_TRIAGE_TARGETS_DEPS,
+  MAX_SERVICES_PER_ENVIRONMENT,
+  TRIAGE_CHECKS,
+  TRIAGE_TARGETS_SCHEMA,
+  declaredReach,
+  fenceTriageTargets,
+  kubeContextIssues,
+  loadTriageTargets,
+  parseKubeContexts,
+  parseTriageTargets,
+  sweepDeadlineIssue,
+  undeclaredReach,
+  windowIssues,
+  type ConsoleReach,
+  type TriageFence,
+  type UnfencedTriageTargets,
+} from "../../src/run/triage-targets.ts";
+
+const TARGETS_PATH = "triage/targets.yaml";
+const CONSOLE_PATH = "triage/console.yaml";
+const KUBECONFIG_PATH = "/home/op/.kube/fleet-filtered.yaml";
+
+/** The commission's own example (§6.2), with a second environment added. */
+const GOOD_YAML = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    default_window: 5m
+    services:
+      - {name: mia,            namespace: ns-mia,  workload: mia-api, checks: [rollout, logs]}
+      - {name: authorization,  namespace: ns-auth, workload: authz,   checks: [rollout, logs, sink]}
+      - {name: authentication, namespace: ns-auth, checks: [rollout, logs, sink]}
+  cni-verify:
+    kube_context: gke-cni-verify
+    services:
+      - {name: mia, namespace: ns-mia, workload: mia-api, checks: [endpoint], window: 60}
+`;
+
+/** Overlapping-but-unequal: the fixture the whole fence rests on. */
+const OVERLAP_YAML = `
+version: 1
+environments:
+  dev:
+    kube_context: gke-cni-dev
+    services:
+      - {name: mia, namespace: ns-mia, checks: [rollout]}
+  prod:
+    kube_context: gke-cni-prod
+    services:
+      - {name: mia, namespace: ns-mia, checks: [rollout]}
+`;
+
+const REACHES_DEV_AND_VERIFY: ConsoleReach = declaredReach(KUBECONFIG_PATH, [
+  "gke-cni-dev",
+  "gke-cni-verify",
+]);
+
+function fence(over: Partial<TriageFence> = {}): TriageFence {
+  return {
+    reach: REACHES_DEV_AND_VERIFY,
+    cadenceS: 300,
+    sweepDeadlineS: 240,
+    files: { targets: TARGETS_PATH, console: CONSOLE_PATH },
+    ...over,
+  };
+}
+
+function parsed(yaml: string = GOOD_YAML): UnfencedTriageTargets {
+  return parseTriageTargets(yaml, TARGETS_PATH);
+}
+
+function envsOf(doc: UnfencedTriageTargets) {
+  return doc.environments_unchecked_against_kubeconfig;
+}
+
+/** The issues a refusal carried, or a failure if it did not refuse at all. */
+function issuesFrom(fn: () => unknown): { path: string; message: string }[] {
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof ConfigValidationError) return err.issues;
+    throw err;
+  }
+  throw new Error("expected a ConfigValidationError; the document was accepted");
+}
+
+// ---------------------------------------------------------------------------
+// 3.1 — the schema
+// ---------------------------------------------------------------------------
+
+describe("the schema tag and the closed check vocabulary", () => {
+  test("the schema tag is the one §7.1 names", () => {
+    expect(TRIAGE_TARGETS_SCHEMA).toBe("pifleet.triagetargets/v1");
+  });
+
+  test("checks[] is exactly §7.1's four, so a targets file cannot carry a command", () => {
+    expect([...TRIAGE_CHECKS]).toEqual(["rollout", "logs", "sink", "endpoint"]);
+  });
+});
+
+describe("a fixture round-trips (task 3.1's acceptance)", () => {
+  test("every declared field survives the parse", () => {
+    const envs = envsOf(parsed());
+    expect(Object.keys(envs).sort()).toEqual(["cni-dev", "cni-verify"]);
+
+    const dev = envs["cni-dev"]!;
+    expect(dev.kube_context).toBe("gke-cni-dev");
+    expect(dev.services.map((s) => s.name)).toEqual(["mia", "authorization", "authentication"]);
+    expect(dev.services[1]).toMatchObject({
+      name: "authorization",
+      namespace: "ns-auth",
+      workload: "authz",
+      checks: ["rollout", "logs", "sink"],
+    });
+  });
+
+  test("default_window parses through the fleet's own duration rule, into seconds", () => {
+    expect(envsOf(parsed())["cni-dev"]!.default_window).toBe(300);
+  });
+
+  test("an omitted default_window takes §6.2's 5m default rather than being absent", () => {
+    expect(envsOf(parsed())["cni-verify"]!.default_window).toBe(300);
+  });
+
+  test("an omitted workload is null — §7.1 makes it optional for selector-resolved services", () => {
+    const authn = envsOf(parsed())["cni-dev"]!.services[2]!;
+    expect(authn.name).toBe("authentication");
+    expect(authn.workload).toBeNull();
+  });
+
+  test("window is null when unset and seconds when set, so no consumer re-parses units", () => {
+    expect(envsOf(parsed())["cni-dev"]!.services[0]!.window).toBeNull();
+    expect(envsOf(parsed())["cni-verify"]!.services[0]!.window).toBe(60);
+  });
+
+  test("a fenced document round-trips to the same environments under the usable name", () => {
+    const reach = declaredReach(KUBECONFIG_PATH, ["gke-cni-dev", "gke-cni-verify"]);
+    const targets = fenceTriageTargets(parsed(), fence({ reach }));
+    expect(targets.version).toBe(1);
+    expect(targets.source_path).toBe(TARGETS_PATH);
+    expect(Object.keys(targets.environments).sort()).toEqual(["cni-dev", "cni-verify"]);
+    expect(targets.environments["cni-dev"]!.services[0]!.checks).toEqual(["rollout", "logs"]);
+  });
+});
+
+describe(".strict() refuses an unknown key with a FIELD-LEVEL error (task 3.1's acceptance)", () => {
+  test("at the root", () => {
+    const issues = issuesFrom(() =>
+      parseTriageTargets(`${GOOD_YAML}\nnotify: {}\n`, TARGETS_PATH),
+    );
+    expect(issues).toEqual([{ path: "notify", message: "unrecognized key" }]);
+  });
+
+  test("inside an environment — the path names the environment and the key", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    cadence_s: 300
+    services:
+      - {name: mia, namespace: ns, checks: [rollout]}
+`;
+    expect(issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH))).toEqual([
+      { path: "environments.cni-dev.cadence_s", message: "unrecognized key" },
+    ]);
+  });
+
+  test("inside a service — the path carries the array index", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    services:
+      - {name: mia, namespace: ns, checks: [rollout]}
+      - {name: authz, namespace: ns, checks: [rollout], command: "kubectl delete ns ns"}
+`;
+    expect(issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH))).toEqual([
+      { path: "environments.cni-dev.services.1.command", message: "unrecognized key" },
+    ]);
+  });
+
+  /**
+   * The twin. A `.strict()` assertion that only ever shows the refusal cannot
+   * tell "the rule fired" from "the document was broken anyway" — this pair
+   * differs in exactly the one key.
+   */
+  test("and the twin without the stray key parses", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    services:
+      - {name: mia, namespace: ns, checks: [rollout]}
+      - {name: authz, namespace: ns, checks: [rollout]}
+`;
+    expect(envsOf(parseTriageTargets(yaml, TARGETS_PATH))["cni-dev"]!.services).toHaveLength(2);
+  });
+});
+
+describe("the vocabulary is closed, so a targets file cannot smuggle a procedure", () => {
+  test("a check outside the enum is refused, naming the element", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    services:
+      - {name: mia, namespace: ns, checks: [rollout, "bash -c 'curl evil'"]}
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.path).toBe("environments.cni-dev.services.0.checks.1");
+  });
+
+  test("an empty checks[] is refused — a service nothing checks is a service nobody watches", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    services:
+      - {name: mia, namespace: ns, checks: []}
+`;
+    expect(issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH))[0]!.path).toBe(
+      "environments.cni-dev.services.0.checks",
+    );
+  });
+
+  test("a duplicated check is refused — §6.10 rule 1 counts reads, and a duplicate doubles them", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    services:
+      - {name: mia, namespace: ns, checks: [logs, logs]}
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues[0]!.path).toBe("environments.cni-dev.services.0.checks.1");
+    expect(issues[0]!.message).toContain("logs");
+  });
+});
+
+describe("the shape rules §7.1 states", () => {
+  test("version is the literal 1", () => {
+    const issues = issuesFrom(() =>
+      parseTriageTargets(GOOD_YAML.replace("version: 1", "version: 2"), TARGETS_PATH),
+    );
+    expect(issues[0]!.path).toBe("version");
+  });
+
+  test("at least one environment is required", () => {
+    expect(issuesFrom(() => parseTriageTargets("version: 1\nenvironments: {}\n", TARGETS_PATH))[0]!
+      .path).toBe("environments");
+  });
+
+  test("at least one service is required", () => {
+    const yaml = "version: 1\nenvironments:\n  cni-dev:\n    kube_context: c\n    services: []\n";
+    expect(issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH))[0]!.path).toBe(
+      "environments.cni-dev.services",
+    );
+  });
+
+  test(`no more than ${MAX_SERVICES_PER_ENVIRONMENT} services in one environment`, () => {
+    const rows = Array.from(
+      { length: MAX_SERVICES_PER_ENVIRONMENT + 1 },
+      (_, i) => `      - {name: svc-${i}, namespace: ns, checks: [rollout]}`,
+    ).join("\n");
+    const yaml = `version: 1\nenvironments:\n  cni-dev:\n    kube_context: c\n    services:\n${rows}\n`;
+    expect(issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH))[0]!.path).toBe(
+      "environments.cni-dev.services",
+    );
+  });
+
+  test("service names are unique WITHIN an environment, and the message names the first", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    services:
+      - {name: mia, namespace: ns-a, checks: [rollout]}
+      - {name: mia, namespace: ns-b, checks: [logs]}
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues[0]!.path).toBe("environments.cni-dev.services.1.name");
+    expect(issues[0]!.message).toContain("services.0");
+  });
+
+  test("and the twin: the SAME name in a DIFFERENT environment is fine", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    services: [{name: mia, namespace: ns-a, checks: [rollout]}]
+  cni-verify:
+    kube_context: gke-cni-verify
+    services: [{name: mia, namespace: ns-b, checks: [logs]}]
+`;
+    expect(Object.keys(envsOf(parseTriageTargets(yaml, TARGETS_PATH)))).toHaveLength(2);
+  });
+
+  /**
+   * §7.1: the environment key *"becomes part of a path under
+   * `~/.pifleet/triage/`"*, so `SESSION_ID_RE` here is a traversal refusal and
+   * not a style rule.
+   */
+  test("an environment key that is not a SESSION_ID_RE token is refused", () => {
+    for (const bad of ["../../etc", "cni dev", ".hidden", "cni/dev"]) {
+      const yaml = `version: 1\nenvironments:\n  "${bad}":\n    kube_context: c\n    services: [{name: mia, namespace: ns, checks: [rollout]}]\n`;
+      const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+      expect(issues.some((i) => i.path === `environments.${bad}`)).toBe(true);
+    }
+  });
+
+  test("YAML that is not YAML is refused naming the file, not thrown raw", () => {
+    const issues = issuesFrom(() => parseTriageTargets("version: 1\n  : : :\n", TARGETS_PATH));
+    expect(issues[0]!.message).toContain("not valid YAML");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.2 — D11's fence. The phase's highest-priority task.
+// ---------------------------------------------------------------------------
+
+describe("the kubeconfig-subset check (D11, §6.10)", () => {
+  /**
+   * THE fixture. The two sets overlap and neither contains the other, so the
+   * assertion is about narrowing rather than about equality — see the header.
+   */
+  test("refuses ONLY the environment naming a context the kubeconfig does not carry", () => {
+    const issues = kubeContextIssues(
+      envsOf(parseTriageTargets(OVERLAP_YAML, TARGETS_PATH)),
+      REACHES_DEV_AND_VERIFY,
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.path).toBe("environments.prod.kube_context");
+    expect(issues[0]!.message).toContain("gke-cni-prod");
+    // The permitted half is not named — a check that refused both would
+    // otherwise reach "one issue" by refusing the wrong one on a longer file.
+    expect(issues[0]!.message).not.toContain("environments.dev");
+  });
+
+  test("the refusal names the kubeconfig and what it DOES carry, so the fix is visible", () => {
+    const [issue] = kubeContextIssues(
+      envsOf(parseTriageTargets(OVERLAP_YAML, TARGETS_PATH)),
+      REACHES_DEV_AND_VERIFY,
+    );
+    expect(issue!.message).toContain(KUBECONFIG_PATH);
+    expect(issue!.message).toContain("gke-cni-verify");
+  });
+
+  test("and the twin: a PROPER subset passes, so the check is not refusing everything", () => {
+    const reach = declaredReach(KUBECONFIG_PATH, [
+      "gke-cni-dev",
+      "gke-cni-verify",
+      "gke-cni-prod",
+      "gke-saas-prod",
+    ]);
+    expect(kubeContextIssues(envsOf(parseTriageTargets(OVERLAP_YAML, TARGETS_PATH)), reach)).toEqual(
+      [],
+    );
+  });
+
+  /**
+   * The degenerate arm, asserted directly. D11 makes `cloud.kubeconfig` a
+   * REQUIREMENT for this console: unset, `kubectl` falls through to whatever
+   * the image carries (`schema.ts:1756-1772`), which is the "environment
+   * nobody wrote down" the fence exists to prevent.
+   */
+  test("an UNDECLARED reach refuses a targets file that is otherwise perfect", () => {
+    const issues = kubeContextIssues(envsOf(parsed()), undeclaredReach());
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.path).toBe("");
+    expect(issues[0]!.message).toContain("cloud.kubeconfig");
+  });
+
+  test("a DECLARED reach carrying ZERO contexts refuses everything, never admits everything", () => {
+    const issues = kubeContextIssues(envsOf(parsed()), declaredReach(KUBECONFIG_PATH, []));
+    expect(issues.map((i) => i.path).sort()).toEqual([
+      "environments.cni-dev.kube_context",
+      "environments.cni-verify.kube_context",
+    ]);
+  });
+
+  test("fenceTriageTargets throws with the kubeconfig issue rather than returning a document", () => {
+    const issues = issuesFrom(() =>
+      fenceTriageTargets(parseTriageTargets(OVERLAP_YAML, TARGETS_PATH), fence()),
+    );
+    expect(issues.map((i) => i.path)).toEqual(["environments.prod.kube_context"]);
+  });
+});
+
+describe("the two duration refusals (§6.10 rule 1, §7.8's cross-file note)", () => {
+  const wide = (window: string) =>
+    envsOf(
+      parseTriageTargets(
+        `version: 1\nenvironments:\n  cni-dev:\n    kube_context: gke-cni-dev\n    default_window: ${window}\n    services: [{name: mia, namespace: ns, checks: [logs]}]\n`,
+        TARGETS_PATH,
+      ),
+    );
+  const files = { targets: TARGETS_PATH, console: CONSOLE_PATH };
+
+  test("default_window greater than the cadence is refused", () => {
+    const issues = windowIssues(wide("6h"), 300, files);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.path).toBe("environments.cni-dev.default_window");
+  });
+
+  /** §12: *"a refusal naming one file when two disagree sends the operator to the wrong editor."* */
+  test("and the message names BOTH files", () => {
+    const [issue] = windowIssues(wide("6h"), 300, files);
+    expect(issue!.message).toContain(TARGETS_PATH);
+    expect(issue!.message).toContain(CONSOLE_PATH);
+    expect(issue!.message).toContain("cadence_s");
+  });
+
+  test("and the twin: a window EQUAL to the cadence is fine — §6.2's own worked example", () => {
+    expect(windowIssues(wide("5m"), 300, files)).toEqual([]);
+    expect(windowIssues(wide("60"), 300, files)).toEqual([]);
+  });
+
+  test("a per-service window override is fenced too — the override is the same 72x read", () => {
+    const envs = envsOf(
+      parseTriageTargets(
+        `version: 1\nenvironments:\n  cni-dev:\n    kube_context: gke-cni-dev\n    default_window: 5m\n    services:\n      - {name: mia, namespace: ns, checks: [logs]}\n      - {name: authz, namespace: ns, checks: [logs], window: 6h}\n`,
+        TARGETS_PATH,
+      ),
+    );
+    const issues = windowIssues(envs, 300, files);
+    expect(issues.map((i) => i.path)).toEqual(["environments.cni-dev.services.1.window"]);
+  });
+
+  /**
+   * §7.8 property 1 makes `sweep_deadline_s ≥ cadence_s` unreachable by
+   * construction. This predicate is what says so rather than a comment
+   * claiming it — the loader that holds both files applies it.
+   */
+  test("sweep_deadline_s >= cadence_s is refused, naming both files", () => {
+    const issue = sweepDeadlineIssue(300, 300, files);
+    expect(issue).not.toBeNull();
+    expect(issue!.message).toContain(TARGETS_PATH);
+    expect(issue!.message).toContain(CONSOLE_PATH);
+    expect(sweepDeadlineIssue(420, 300, files)).not.toBeNull();
+  });
+
+  test("and the twin: the computed 240 against a 300 cadence passes", () => {
+    expect(sweepDeadlineIssue(240, 300, files)).toBeNull();
+  });
+
+  test("fenceTriageTargets carries both duration refusals, not just the first", () => {
+    const issues = issuesFrom(() =>
+      fenceTriageTargets(
+        parseTriageTargets(
+          `version: 1\nenvironments:\n  cni-dev:\n    kube_context: gke-cni-dev\n    default_window: 6h\n    services: [{name: mia, namespace: ns, checks: [logs]}]\n`,
+          TARGETS_PATH,
+        ),
+        fence({ sweepDeadlineS: 300 }),
+      ),
+    );
+    expect(issues.map((i) => i.path).sort()).toEqual(["", "environments.cni-dev.default_window"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The type split — pm-state.ts's pattern, asserted on the value
+// ---------------------------------------------------------------------------
+
+describe("a parsed-but-unfenced document cannot be mistaken for a fenced one", () => {
+  test("parseTriageTargets returns NO `environments` property at all", () => {
+    const doc = parsed();
+    expect(Object.hasOwn(doc, "environments")).toBe(false);
+    expect(Object.hasOwn(doc, "environments_unchecked_against_kubeconfig")).toBe(true);
+  });
+
+  test("only fenceTriageTargets produces the usable name", () => {
+    const targets = fenceTriageTargets(parsed(), fence());
+    expect(Object.hasOwn(targets, "environments")).toBe(true);
+    expect(Object.hasOwn(targets, "environments_unchecked_against_kubeconfig")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The loader, and its injected reads
+// ---------------------------------------------------------------------------
+
+describe("parseKubeContexts", () => {
+  test("takes the names out of a kubeconfig's contexts[]", () => {
+    const kc = `
+apiVersion: v1
+kind: Config
+contexts:
+  - name: gke-cni-dev
+    context: {cluster: a, user: b}
+  - name: gke-cni-verify
+    context: {cluster: c, user: d}
+current-context: gke-cni-dev
+`;
+    expect(parseKubeContexts(kc, KUBECONFIG_PATH)).toEqual(["gke-cni-dev", "gke-cni-verify"]);
+  });
+
+  test("a kubeconfig with no contexts[] yields the EMPTY set, which refuses everything", () => {
+    expect(parseKubeContexts("apiVersion: v1\nkind: Config\n", KUBECONFIG_PATH)).toEqual([]);
+  });
+});
+
+describe("loadTriageTargets", () => {
+  const deps = (yaml: string | null, contexts: readonly string[]) => ({
+    readText: async () => yaml,
+    readKubeContexts: async () => contexts,
+  });
+
+  const opts = {
+    targetsPath: TARGETS_PATH,
+    consolePath: CONSOLE_PATH,
+    kubeconfigPath: KUBECONFIG_PATH,
+    cadenceS: 300,
+    sweepDeadlineS: 240,
+  };
+
+  test("reads, parses and fences through injected deps — no disk", async () => {
+    const targets = await loadTriageTargets({
+      ...opts,
+      deps: deps(GOOD_YAML, ["gke-cni-dev", "gke-cni-verify", "gke-saas-prod"]),
+    });
+    expect(Object.keys(targets.environments).sort()).toEqual(["cni-dev", "cni-verify"]);
+  });
+
+  test("a MISSING targets file is an error naming it — unlike console.yaml, §7.8", async () => {
+    await expect(
+      loadTriageTargets({ ...opts, deps: deps(null, ["gke-cni-dev"]) }),
+    ).rejects.toThrow(TARGETS_PATH);
+  });
+
+  test("kubeconfigPath null is D11's refusal, and the kubeconfig is never read", async () => {
+    let read = 0;
+    await expect(
+      loadTriageTargets({
+        ...opts,
+        kubeconfigPath: null,
+        deps: {
+          readText: async () => GOOD_YAML,
+          readKubeContexts: async () => {
+            read += 1;
+            return ["gke-cni-dev", "gke-cni-verify"];
+          },
+        },
+      }),
+    ).rejects.toThrow(/cloud\.kubeconfig/);
+    expect(read).toBe(0);
+  });
+
+  test("the real deps exist and are the ones used when none are injected", () => {
+    expect(typeof DEFAULT_TRIAGE_TARGETS_DEPS.readText).toBe("function");
+    expect(typeof DEFAULT_TRIAGE_TARGETS_DEPS.readKubeContexts).toBe("function");
+  });
+});
