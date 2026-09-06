@@ -54,6 +54,7 @@ import {
   DEVELOPMENT_SPEC,
   cmuxReachable,
   ensureDevelopment,
+  plannedPane,
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
 import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
@@ -206,6 +207,17 @@ async function main(argv: string[]): Promise<number> {
    */
   const restartFlag = flag(argv, "--restart");
   if (restartFlag !== undefined) {
+    /*
+     * REFUSE BEFORE DESTROYING.
+     *
+     * Everything after this line is irreversible — the run teardown below,
+     * and the title was not resolved until the respawn at the very end, so an
+     * unplannable one stopped a live worker and THEN refused. `plannedPane` is
+     * pure and does that resolution here, where refusing still costs nothing.
+     * The gap is not hypothetical: see its docblock for the measurement.
+     */
+    plannedPane(DEVELOPMENT_SPEC, { ...opts, tuiWorkers }, restartFlag);
+
     const taskFlag = flag(argv, "--task");
     const restartPane = async (): Promise<string> => {
       const r = await restartConsolePane(

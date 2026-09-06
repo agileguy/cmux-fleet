@@ -288,6 +288,46 @@ export interface RestartResult {
 }
 
 /**
+ * The pane this console plans under `title`, or a refusal naming the ones it
+ * does plan.
+ *
+ * Pure — no cmux call, no run lookup, no side effect — and that is the whole
+ * point of it being separate from {@link restartConsolePane}. A `--restart`
+ * has to stop the run the worker holds BEFORE the pane is respawned (see that
+ * function's contract), so every script's restart path is an irreversible
+ * teardown followed by a rebuild. Resolving the title inside the rebuild puts
+ * the only check AFTER the only destruction.
+ *
+ * Measured 2026-09-06: `./scripts/operations --restart obs-1` stopped
+ * `obs-1`'s run and then refused, because the teardown keys on WORKER ID
+ * (`runsHoldingAny`) while the respawn keys on PANE TITLE, and this console's
+ * agent panes are titled `observer` and `ticketing`. Both operations workers
+ * were left down with nothing respawned. The general shape is worse than the
+ * instance: any live worker id a console does not plan is reachable this way,
+ * including a development or review console asked for another console's
+ * worker, and on `review` the relay is stopped first as well.
+ *
+ * So the scripts call this FIRST, before they stop anything, and
+ * `restartConsolePane` calls it too — one spelling of "is this a pane here",
+ * because two would be identical the day they were written.
+ */
+export function plannedPane(
+  spec: WorkspaceSpec,
+  opts: OperationsPlanOptions,
+  title: string,
+): OperationsPane {
+  const plan = planPanes(spec, opts);
+  const planned = plan.find((p) => p.title === title);
+  if (planned === undefined) {
+    throw new Error(
+      `${spec.name}: '${title}' is not a pane this console plans — it holds ` +
+        `${plan.map((p) => p.title).join(", ")}`,
+    );
+  }
+  return planned;
+}
+
+/**
  * Restart ONE console pane, leaving every other pane alone.
  *
  * This is the whole of "restart a single worker" in a console, and it is a
@@ -320,14 +360,7 @@ export async function restartConsolePane(
         `open the console first`,
     );
   }
-  const plan = planPanes(spec, opts);
-  const planned = plan.find((p) => p.title === title);
-  if (planned === undefined) {
-    throw new Error(
-      `${spec.name}: '${title}' is not a pane this console plans — it holds ` +
-        `${plan.map((p) => p.title).join(", ")}`,
-    );
-  }
+  const planned = plannedPane(spec, opts, title);
   const panes = await titledPanes(client, workspaceId);
   const surfaceId = surfaceForTitle(panes, title);
   if (surfaceId === null) {

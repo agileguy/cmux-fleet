@@ -23,16 +23,25 @@
  * than passing on a fixture that happened to agree.
  */
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { CmuxClient, listPaneSurfacesArgv } from "../../src/backends/cmux/client.ts";
 import type { ExecResult } from "../../src/container/run.ts";
 import { parsePaneSurfaces } from "../../src/backends/cmux/parse.ts";
 import {
   DEVELOPMENT_SPEC,
+  OPERATIONS_SPEC,
+  REVIEW_SPEC,
+  plannedPane,
   restartConsolePane,
   surfaceForTitle,
   titledPanes,
 } from "../../src/backends/cmux/operations.ts";
+import {
+  DEFAULT_OPERATIONS_WORKERS,
+  operationsPanes,
+} from "../../src/backends/cmux/operations-plan.ts";
 
 const REPO = "/Users/x/repos/cmux-fleet";
 const CWD = "/Users/x/repos/somewhere-else";
@@ -250,4 +259,93 @@ describe("a restart that cannot name its pane refuses, and says what is there", 
     );
     expect(calls.map((c) => c[0])).not.toContain("respawn-pane");
   });
+});
+
+/**
+ * REFUSING BEFORE DESTROYING — measured 2026-09-06.
+ *
+ * `./scripts/operations --restart obs-1` printed, in this order:
+ *
+ *   operations: stopping run 2026-09-04T18-03-52Z-e2fc before restarting obs-1
+ *   operations: 'obs-1' is not a pane this console plans — it holds observer, monitor, ticketing
+ *
+ * Both operations workers were left DOWN with nothing respawned. The refusal
+ * above was already correct and already tested; it just arrived after the only
+ * irreversible step. The two lookups key on different things — the teardown on
+ * WORKER ID via `runsHoldingAny`, the respawn on PANE TITLE via the plan — and
+ * on this console those namespaces do not overlap.
+ *
+ * The instance is narrow, the shape is not: any live worker id a console does
+ * not plan reaches it, including one console asked for another console's
+ * worker, and on `review` the relay is stopped first as well.
+ */
+describe("a restart resolves its title before it stops anything", () => {
+  test("the operations console does not plan its own workers by id", () => {
+    /*
+     * The premise the bug stands on, asserted rather than assumed. If these
+     * ever converge — panes retitled to worker ids — this test is the thing
+     * that says the trap has moved, rather than the ordering tests quietly
+     * passing on a fixture where both lookups agree.
+     */
+    const titles = operationsPanes({ ...OPTS, workspaceName: "operations" }).map((x) => x.title);
+    expect(titles).toContain("observer");
+    for (const worker of DEFAULT_OPERATIONS_WORKERS) {
+      expect(titles).not.toContain(worker);
+    }
+  });
+
+  test("plannedPane returns the pane, and its command, for a title the console builds", () => {
+    expect(plannedPane(DEVELOPMENT_SPEC, OPTS, "tst-2").title).toBe("tst-2");
+    expect(plannedPane(OPERATIONS_SPEC, OPTS, "observer").command).toContain("up");
+  });
+
+  test("the measured case refuses, naming what operations does hold", () => {
+    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-1")).toThrow(
+      /not a pane this console plans/,
+    );
+    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-1")).toThrow(/observer/);
+  });
+
+  test("a console asked for another console's live worker refuses too", () => {
+    expect(() => plannedPane(DEVELOPMENT_SPEC, OPTS, "obs-1")).toThrow(
+      /not a pane this console plans/,
+    );
+    expect(() => plannedPane(REVIEW_SPEC, OPTS, "eng-1")).toThrow(
+      /not a pane this console plans/,
+    );
+  });
+});
+
+/*
+ * The scripts run `main()` at import, so no test can call their restart path —
+ * the reason `review-console-relay.test.ts` states for keeping decisions in
+ * modules. `plannedPane` is that module. What no module can hold is WHERE the
+ * scripts call it, and that placement is the entire fix, so it is re-checked
+ * here against the source: inside the `--restart` branch, ahead of every
+ * irreversible thing that branch does.
+ */
+describe("every console script guards its --restart branch first", () => {
+  const BRANCH = 'const restartFlag = flag(argv, "--restart");';
+  const DESTRUCTIVE = ["runsHoldingAny(", "recreateThenDispatch(", "stopRelay("];
+
+  for (const script of ["operations", "development", "review"]) {
+    test(`scripts/${script} calls plannedPane before it stops anything`, async () => {
+      const src = await readFile(join(import.meta.dir, "..", "..", "scripts", script), "utf8");
+
+      const branch = src.indexOf(BRANCH);
+      expect(branch).toBeGreaterThan(-1);
+
+      const guard = src.indexOf("plannedPane(", branch);
+      expect(guard).toBeGreaterThan(-1);
+
+      for (const marker of DESTRUCTIVE) {
+        const at = src.indexOf(marker, branch);
+        if (at === -1) continue;
+        expect(guard).toBeLessThan(at);
+      }
+
+      // And the respawn, which needs the run already stopped, still comes last.
+      expect(guard).toBeLessThan(src.indexOf("restartConsolePane(", branch));
+    });
+  }
 });
