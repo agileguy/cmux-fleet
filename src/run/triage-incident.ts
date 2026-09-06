@@ -832,8 +832,30 @@ function onUnobserved(
    * permanently invisible and permanently silent. `>=` escalates it on the next
    * sweep, which is the direction a console whose whole job is noticing absence
    * has to fail in.
+   *
+   * **`flapping` was NOT in this guard until task 5.4c, and its absence was the
+   * same oversight as the missing `flapping → firing` row.** Both came from a
+   * table that treated `flapping` as terminal. A flapping service that goes
+   * invisible is exactly what this escalation is for — *"I could not see enough
+   * to tell you"* — and routing it here rather than through the settle edge is
+   * what lets the notification say `coverage` instead of repeating the record's
+   * last observed reason. Announcing `unhealthy` when the fact is *"we could not
+   * see it"* is §6.7 rule 3's misdiagnosis family in miniature, and this console
+   * exists to distinguish the two.
+   *
+   * Adding one state to a threshold that was already chosen is **not a new
+   * judgement**, which is what made it safe to add here rather than defer.
+   *
+   * The oscillation record is dropped on the way out, for the reason
+   * `flapping → clear` drops it: carrying a finished episode's timestamps into
+   * the next state would let one later round trip re-trip a threshold that four
+   * round trips earned. A `clear` or `provisional` record keeps its partial
+   * history, because nothing there is finished.
    */
-  if (blind >= COVERAGE_THRESHOLD && (record.state === "clear" || record.state === "provisional")) {
+  if (
+    blind >= COVERAGE_THRESHOLD &&
+    (record.state === "clear" || record.state === "provisional" || record.state === "flapping")
+  ) {
     return {
       record: {
         ...base,
@@ -841,6 +863,7 @@ function onUnobserved(
         reason: "coverage",
         since: at,
         sweep_count: 0,
+        flap_transitions: record.state === "flapping" ? [] : transitions,
         last_notified_at: at,
       },
       notifications: [
@@ -861,22 +884,26 @@ function onUnobserved(
   }
 
   /*
-   * §6.8's `flapping → firing`, reached through blindness rather than through a
-   * bad sweep — and it fires, because the table's condition is *"no transitions,
-   * and no observed clear"* and a window of blindness is both.
+   * **There is deliberately NO `flapping → firing` edge here, and task 5.4c
+   * removed the one there was.**
    *
-   * **This is the conservative direction and the only one available.** The record
-   * already holds an issue; §6.8 keeps a `firing` record firing across blind
-   * sweeps for exactly this reason; and requiring the settling sweep to have SEEN
-   * something would leave a service that flaps and then goes invisible silent
-   * forever — a hole of the identical shape to the one this edge closes. Nothing
-   * was seen, so nothing is cited: `null`, on the coverage escalation's rule
-   * above that an issue naming an artifact it never read is naming one that does
-   * not exist.
+   * The literal reading of §6.8's row — *"no transitions, and no observed
+   * clear"* — is satisfied by a window in which nothing was seen at all, so
+   * settling on blindness was defensible and shipped first. What it could not do
+   * is say the true thing: `settleFlappingIntoFiring` carries the record's last
+   * observed reason, so a service that flapped and then went INVISIBLE was
+   * announced as `unhealthy`.
+   *
+   * The escalation above now covers that case with the right word and sooner —
+   * `COVERAGE_THRESHOLD` sweeps rather than a full `flap_window`, which at the
+   * shipped defaults is fifteen minutes rather than an hour. **Removing this
+   * branch closes no hole**, and the two paths no longer overlap: blindness
+   * escalates as `coverage`, an observed issue settles with what was seen.
+   *
+   * Requiring the settling sweep to have SEEN something is therefore not the
+   * silent-forever risk it looked like when 5.4b weighed it. It was, until the
+   * guard above admitted `flapping`.
    */
-  if (record.state === "flapping" && transitions.length === 0) {
-    return settleFlappingIntoFiring(base, observation, null);
-  }
 
   /*
    * Everything else HOLDS. `provisional` does not fall back to `clear` on a blind

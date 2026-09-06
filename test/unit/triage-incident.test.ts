@@ -974,7 +974,24 @@ describe("flapping → firing — the service that flaps and then goes hard down
    * coverage escalation's rule that *"a coverage issue that named an artifact
    * would be naming one that does not exist"*.
    */
-  test("a flapping record blind for a full window settles to firing, citing nothing", () => {
+  /**
+   * TASK 5.4c. A flapping service that goes blind escalates as COVERAGE, and it
+   * does so through `onUnobserved`'s threshold rather than through the settle
+   * edge.
+   *
+   * This test replaces one that asserted the opposite, and the reason is the
+   * WORD in the notification rather than its existence. `settleFlappingIntoFiring`
+   * carries the record's last observed reason, so the previous behaviour
+   * announced `unhealthy` for a service whose true state was *"we could not see
+   * it"* — §6.7 rule 3's misdiagnosis family, in the one console built to tell
+   * those apart.
+   *
+   * It also fires SOONER, and that is worth asserting rather than merely noting:
+   * `COVERAGE_THRESHOLD` sweeps against a full `flap_window` is fifteen minutes
+   * against an hour at the shipped defaults. **Removing the blind settle closed
+   * no hole**, which is the whole argument for removing it.
+   */
+  test("a flapping record that goes blind escalates as COVERAGE, not as its old reason", () => {
     const { record, notifications } = drive(
       24,
       (n) => (n <= FLAPPED_AT ? alternating(n) : unobserved),
@@ -982,9 +999,19 @@ describe("flapping → firing — the service that flaps and then goes hard down
     );
 
     expect(kinds(notifications)).toEqual(["flapping", "opened"]);
-    expect(notifications[1]!.at).toBe(T0 + SETTLED_AT * CADENCE_MS);
+    expect(notifications[1]!.reason).toBe("coverage");
     expect(notifications[1]!.evidenceRef).toBe(null);
     expect(record.state).toBe("firing");
+    expect(record.reason).toBe("coverage");
+
+    /*
+     * The instant, BY VALUE, and it is the assertion that separates the two
+     * designs. The blind settle fired at `SETTLED_AT`, one `flap_window` after
+     * the flapping notice; the escalation fires `COVERAGE_THRESHOLD` blind sweeps
+     * after the last observed one. A test asserting only "an opened arrives"
+     * passes under both.
+     */
+    expect(notifications[1]!.at).toBe(T0 + (FLAPPED_AT + COVERAGE_THRESHOLD) * CADENCE_MS);
 
     /*
      * ZERO OBSERVED SWEEPS, and it is the twin of the hard-down fixture's twelve.
@@ -994,6 +1021,71 @@ describe("flapping → firing — the service that flaps and then goes hard down
      * absence-as-evidence mistake §6.8 spends its longest paragraph on.
      */
     expect(notifications[1]!.sweepCount).toBe(0);
+
+    /*
+     * The finished episode's timestamps are dropped, on `flapping → clear`'s own
+     * rule: carrying them would let one later round trip re-trip a threshold that
+     * four round trips earned.
+     */
+    expect(record.flap_transitions).toEqual([]);
+  });
+
+  /**
+   * THE ASYMMETRIC FIXTURE, and it exists because the test above could not see
+   * the property it asserted.
+   *
+   * That test ends its alternation at `FLAPPED_AT` and then goes blind, so by the
+   * time the escalation fires its `flap_transitions[]` is empty for reasons that
+   * have nothing to do with the code under test — and `toEqual([])` passes
+   * whether the episode is dropped or carried. **Measured: the mutation
+   * `flap_transitions: transitions` survived it.** A fixture in which the two
+   * arms agree grades nothing, which is the defect this branch has now recorded
+   * seven times.
+   *
+   * Here the alternation continues four sweeps PAST the flapping notice, so
+   * clears keep being appended by §6.8's not-yet-stable branch and the list is
+   * genuinely live when the blindness starts. The blind stretch is
+   * `COVERAGE_THRESHOLD` sweeps, far inside the twelve-sweep window, so nothing
+   * ages out on its own either.
+   */
+  test("the finished episode is DROPPED, on a fixture where the list is live", () => {
+    const ALTERNATE_UNTIL = FLAPPED_AT + 4;
+    const timeline = (n: number): IncidentSignal =>
+      n <= ALTERNATE_UNTIL ? alternating(n) : unobserved;
+    /** `drive`'s first sweep is the zeroth, so the escalating sweep is one past. */
+    const ESCALATES_AT = ALTERNATE_UNTIL + COVERAGE_THRESHOLD + 1;
+    const { record, notifications } = drive(ESCALATES_AT, timeline, NO_RENOTIFY);
+
+    /*
+     * THE PREMISE, ASSERTED RATHER THAN ASSUMED, and it is the half that makes
+     * this fixture different from the one it supplements: one sweep before the
+     * escalation the record is still `flapping` and its window is genuinely
+     * NON-EMPTY. Without this line the test could pass by the same accident —
+     * an empty list compared against an empty expectation.
+     */
+    const before = drive(ESCALATES_AT - 1, timeline, NO_RENOTIFY).record;
+    expect(before.state).toBe("flapping");
+    expect(before.flap_transitions.length).toBeGreaterThan(0);
+
+    expect(kinds(notifications)).toEqual(["flapping", "opened"]);
+    expect(notifications[1]!.reason).toBe("coverage");
+    expect(record.state).toBe("firing");
+    expect(record.flap_transitions).toEqual([]);
+  });
+
+  /**
+   * ANTI, and it is what makes the test above mean something. The escalation must
+   * not fire on ONE blind sweep — a machine that escalated any blind flapping
+   * record immediately passes every assertion above except the instant.
+   */
+  test("ANTI: fewer than COVERAGE_THRESHOLD blind sweeps compose nothing", () => {
+    const { record, notifications } = drive(
+      FLAPPED_AT + COVERAGE_THRESHOLD - 1,
+      (n) => (n <= FLAPPED_AT ? alternating(n) : unobserved),
+      NO_RENOTIFY,
+    );
+    expect(kinds(notifications)).toEqual(["flapping"]);
+    expect(record.state).toBe("flapping");
   });
 
   /**
@@ -1149,12 +1241,21 @@ describe("the re-notify floor speaks only while firing", () => {
 
     /*
      * And the twin, so the silence above is the FLOOR being scoped rather than
-     * the new edge swallowing everything: the same record with nothing live in
-     * its window settles, and what it composes is an `opened` — never a
-     * `reminder`, which would be the floor reaching a state §6.8 says it does not
-     * reach.
+     * the edge swallowing everything: the same record with nothing live in its
+     * window settles, and what it composes is an `opened` — never a `reminder`,
+     * which would be the floor reaching a state §6.8 says it does not reach.
+     *
+     * The settling sweep is an OBSERVED issue, because after task 5.4c that is
+     * the only route to `flapping → firing`. A blind sweep here now escalates
+     * through the coverage threshold instead, and using one would test the wrong
+     * edge while looking identical.
      */
-    const settled = sweep({ ...flapping, flap_transitions: [] }, 0, unobserved, DEFAULTS);
+    const settled = sweep(
+      { ...flapping, flap_transitions: [] },
+      0,
+      issue("unhealthy"),
+      DEFAULTS,
+    );
     expect(kinds(settled.notifications)).toEqual(["opened"]);
     expect(settled.record.state).toBe("firing");
   });

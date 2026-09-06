@@ -1174,7 +1174,8 @@ because it must outlive a run; not a history, because §5.2 refuses one.
 | `firing → clear` | **yes — the recovery notification** | and see the recovery rule below |
 | `firing → flapping` | **yes, once** | see below |
 | `flapping → clear` | **yes**, after `flap_window` of stability | |
-| `flapping → firing` | **yes, once** | after `flap_window` with no observed clear. **Added 2026-09-06 — see below** |
+| `flapping → firing` | **yes, once** | after `flap_window` with no observed clear, **on OBSERVED issues only**. Added 2026-09-06 |
+| `flapping → firing` (blind) | **yes, once**, as `coverage` | §6.7 row 5's escalation, widened to `flapping` by 5.4c. `COVERAGE_THRESHOLD` blind sweeps, `evidenceRef: null` |
 
 **`flapping → firing` was MISSING, and the hole it left is the worst shape a notifier has — found
 2026-09-06 while implementing task 5.4, from the state machine rather than from a fixture.** A service
@@ -1193,8 +1194,7 @@ spent on stability in one direction and on instability in the other.
 | `flapping → clear` | no transitions, and the state observed is healthy | the recovery notification |
 | `flapping → firing` | no transitions, and no observed clear | the open notification, **once**, and the re-notify floor restarts |
 
-**What a window of BLINDNESS does, ruled 2026-09-06 after task 5.4b implemented the literal
-reading.** The condition column says *"no transitions, and no observed clear"*, and a window in which
+**What a window of BLINDNESS does — ruled and SHIPPED 2026-09-06 as task 5.4c.** The condition column says *"no transitions, and no observed clear"*, and a window in which
 nothing was seen at all satisfies both — so 5.4b fires, with `evidenceRef: null`, and argues the case
 in the code. That was the right call **given the escalation guard as it stands**, because refusing
 would leave a service that flaps and then goes invisible silent forever, which is the identical hole
@@ -1208,7 +1208,22 @@ never reaches it. Widening it to `flapping` is the same `COVERAGE_THRESHOLD` app
 state — **not a new judgement, and the same oversight family as the missing edge itself**, since both
 come from a table that treated `flapping` as terminal. With that widened, the edge can require an
 OBSERVED issue and the two paths stop overlapping: blind escalates as `coverage`, hard-down opens
-with what was seen. Task 5.4c.
+with what was seen.
+
+**Built, and the removal costs nothing** — which was the argument and is now measured. The escalation
+fires at `COVERAGE_THRESHOLD` sweeps where the settle edge needed a full `flap_window`: **fifteen
+minutes rather than an hour** at the shipped defaults. So the blind branch was deleted rather than
+narrowed, and the notification finally says the true word.
+
+**One thing the fixture had to earn.** The first test written for this asserted the finished
+oscillation record is dropped — `flap_transitions` empty after the escalation — and the mutation
+that carries it forward instead **SURVIVED**. The timeline stopped alternating at the flapping
+notice, so the list was already empty by the time the escalation fired and the assertion compared
+empty against empty. The fixture now alternates four sweeps PAST the notice, so §6.8's
+not-yet-stable branch keeps appending clears and the list is genuinely live, **with the premise
+asserted rather than assumed** — one sweep before the escalation, the record is flapping and its
+window is non-empty. That is the seventh appearance of the degenerate-fixture defect on this branch
+and the first in the orchestrator's own test.
 
 The symmetry is the argument: a window of unbroken *anything* means the service has stopped flapping,
 and which state it settled into decides which notification is owed. Task 5.4b.
