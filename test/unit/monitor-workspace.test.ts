@@ -617,7 +617,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
         },
       ]),
     ).join("\n");
-    expect(frame).toContain("workspace development");
+    expect(frame).toContain("development");
     expect(frame).not.toContain(WS_DEV);
   });
 
@@ -632,13 +632,13 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
    * label reads as a fact.
    */
   test("a nameless workspace falls back to its ref", () => {
-    expect(workspaceHeading(WS_OPS, null)).toBe(`workspace ${WS_OPS}`);
+    expect(workspaceHeading(WS_OPS, null)).toBe(WS_OPS);
     const frame = renderFleet(
       model([
         { runId: RUN_A, workers: [row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: null })] },
       ]),
     ).join("\n");
-    expect(frame).toContain(`workspace ${WS_OPS}`);
+    expect(frame).toContain(WS_OPS);
   });
 
   /**
@@ -655,10 +655,12 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
   test("a nameless record never renders undefined, null or an empty heading", () => {
     for (const name of [null, undefined as unknown as null, ""]) {
       const heading = workspaceHeading(WS_OPS, name);
-      expect(heading).toBe(`workspace ${WS_OPS}`);
+      expect(heading).toBe(WS_OPS);
       expect(heading).not.toContain("undefined");
       expect(heading).not.toContain("null");
-      expect(heading.trim()).not.toBe("workspace");
+      // The word itself is gone (owner's request, 2026-09-05), so the empty
+      // heading to guard against is a blank line, not a dangling `workspace `.
+      expect(heading.trim()).not.toBe("");
     }
 
     const frame = renderFleet(
@@ -673,9 +675,9 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
       ]),
     ).join("\n");
     expect(frame).not.toContain("undefined");
-    expect(frame).not.toContain("workspace null");
-    expect(frame).toContain(`workspace ${WS_OPS}`);
-    expect(frame).toContain(`workspace ${WS_DEV}`);
+    expect(frame).not.toContain("null");
+    expect(frame).toContain(WS_OPS);
+    expect(frame).toContain(WS_DEV);
   });
 
   /**
@@ -721,7 +723,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
     ]);
     expect(groups).toHaveLength(1);
     expect(groups[0]!.name).toBe("operations");
-    expect(workspaceHeading(groups[0]!.workspace, groups[0]!.name)).toBe("workspace operations");
+    expect(workspaceHeading(groups[0]!.workspace, groups[0]!.name)).toBe("operations");
   });
 
   /**
@@ -1027,7 +1029,7 @@ describe("the heading says what it is, in both frames", () => {
    * a piped frame, which is the frame a grep or a diff reads.
    */
   test("a known workspace is labelled and named", () => {
-    expect(workspaceHeading(WS_OPS)).toBe(`workspace ${WS_OPS}`);
+    expect(workspaceHeading(WS_OPS)).toBe(WS_OPS);
   });
 
   /**

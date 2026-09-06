@@ -513,14 +513,27 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
    * heading.
    */
   const label = plan.runIdFull ? run.runId : (run.runId.split("-").pop() ?? run.runId);
+  /*
+   * WORKERS FIRST, RUN ID SECOND (owner's request, 2026-09-05).
+   *
+   * The run id used to head the block. It now follows the rows it describes,
+   * because on this fleet a "run" is usually ONE worker — every console seat is
+   * `pane_mode: tui` and therefore its own run — so a heading above a single row
+   * pushed the thing an operator actually reads (the worker, what it is doing,
+   * what phase it is in) down a line for a value they need only when they are
+   * about to type it into `dispatch --run`.
+   *
+   * The id keeps its two-space indent so the block still reads as owned by the
+   * group heading above it, and the em-dash worker count stays with it.
+   */
   return (
     <Box flexDirection="column">
-      <Text wrap="truncate-end" color={p.heading}>
-        {`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}
-      </Text>
       {run.workers.map((w) => (
         <WorkerLine key={w.workerId} row={w} plan={plan} />
       ))}
+      <Text wrap="truncate-end" color={p.heading}>
+        {`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}
+      </Text>
     </Box>
   );
 }
@@ -560,10 +573,13 @@ export const NO_WORKSPACE = "no workspace recorded";
 /**
  * One group's heading line.
  *
- * The word `workspace` is carried in the TEXT rather than left to the colour,
- * and that is the same rule the severity bullet follows: the plain frame is the
- * one a pipe, a grep or a diff reads, and it has no yellow to carry meaning. A
- * bare ref on its own line would be indistinguishable from a run id there.
+ * The word `workspace` USED to be carried in the text, on the argument that a
+ * plain frame has no yellow to carry meaning and a bare ref on its own line
+ * would be indistinguishable from a run id. The owner asked for it removed
+ * (2026-09-05) and the argument does not survive the current layout: run lines
+ * begin with two spaces and the literal `run `, group headings begin at column
+ * zero, so the two are still distinguishable in a pipe by indent and prefix
+ * without spending eleven characters of every heading saying so.
  *
  * The ref is printed WHOLE and left to truncate. It needs no rung on §6.5's
  * ladder because it is not a cell: `chrome.tsx` states the rule — full-width
@@ -593,7 +609,7 @@ export function workspaceHeading(workspace: string | null, name: string | null =
    * renders a dash: a heading reading `workspace ` with nothing after it is
    * indistinguishable from one that failed to render.
    */
-  return name === null || name === "" ? `workspace ${workspace}` : `workspace ${name}`;
+  return name === null || name === "" ? workspace : name;
 }
 
 /**
