@@ -711,17 +711,25 @@ function onUnobserved(
    * THE COVERAGE ESCALATION. §6.7: *"fifteen minutes of not being able to see a
    * service is a finding about the console, and it must not be silent"*.
    *
-   * It fires on the sweep the counter REACHES the threshold and on no later one
-   * — `=== ` rather than `>=` — so a service that stays invisible for a day is
-   * one notification and then the `renotify_after` floor, on the same rule that
-   * turns 288 into 1.
+   * **The STATE guard is what makes this fire once, and the comparison is
+   * deliberately `>=` rather than `===`.** A record already `firing` on
+   * `unhealthy` is not re-announced as a coverage issue: it is one incident, §6.8
+   * says it *"stays `firing` with its coverage gap recorded"*, and the gap is
+   * recorded in `consecutive_indeterminate` above. That guard alone turns a day
+   * of invisibility into one notification, so `===` buys nothing on any record
+   * this machine wrote — a MUTATION BATTERY confirmed the two spellings
+   * indistinguishable across every fixture, which is what sent this comment back
+   * to be rewritten.
    *
-   * Only from the two states that are not already open. A record already `firing`
-   * on `unhealthy` is not re-announced as a coverage issue: it is one incident,
-   * §6.8 says it *"stays `firing` with its coverage gap recorded"*, and the gap
-   * is recorded in `consecutive_indeterminate` above.
+   * It is not indistinguishable on a record this machine did NOT write. Task
+   * 5.5 reads these from disk, and a record carrying `state: "clear"` with a
+   * counter already past the threshold — an older build, a partial write, a hand
+   * edit — is one that `===` would step over forever, leaving a service
+   * permanently invisible and permanently silent. `>=` escalates it on the next
+   * sweep, which is the direction a console whose whole job is noticing absence
+   * has to fail in.
    */
-  if (blind === COVERAGE_THRESHOLD && (record.state === "clear" || record.state === "provisional")) {
+  if (blind >= COVERAGE_THRESHOLD && (record.state === "clear" || record.state === "provisional")) {
     return {
       record: {
         ...base,

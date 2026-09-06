@@ -240,11 +240,34 @@ describe("confirmation — §6.7 rule 1, one observation is not a finding", () =
     expect(step.record.last_notified_at).toBeNull();
   });
 
-  test("a second consecutive unhealthy notifies exactly once", () => {
+  /**
+   * The `evidenceRef` assertion was added after a mutation survived: dropping it
+   * from the `opened` notification changed nothing any fixture could see.
+   *
+   * It is load-bearing rather than decorative. §6.9's composer renders the
+   * evidence into the fenced block that is the ONLY place worker prose is
+   * allowed to appear (§4.3), so an `opened` carrying none announces an incident
+   * with nothing behind it — which is SRD-OBSERVER-001 §11.2's dominant failure
+   * inverted: *"you told me it was broken but didn't say what you saw."*
+   */
+  test("a second consecutive unhealthy notifies exactly once, carrying its evidence", () => {
     const { record, notifications } = drive(2, () => issue("unhealthy"), NO_RENOTIFY);
     expect(kinds(notifications)).toEqual(["opened"]);
+    expect(notifications[0]!.evidenceRef).toBe("a/1");
     expect(record.state).toBe("firing");
     expect(record.sweep_count).toBe(2);
+    expect(record.last_artifact_ref).toBe("a/1");
+  });
+
+  /**
+   * And the asymmetric half: an issue observed with NO artifact still opens, and
+   * says so by carrying `null` rather than inventing a reference. Without this
+   * the assertion above is satisfied by a composer that hard-codes a string.
+   */
+  test("an issue with no artifact still opens, and cites nothing", () => {
+    const { notifications } = drive(2, () => issue("unhealthy", null), NO_RENOTIFY);
+    expect(kinds(notifications)).toEqual(["opened"]);
+    expect(notifications[0]!.evidenceRef).toBeNull();
   });
 
   /**
@@ -422,6 +445,35 @@ describe("the coverage escalation — §6.7 row 5", () => {
     const { record, notifications } = drive(20, () => unobserved, NO_RENOTIFY);
     expect(kinds(notifications)).toEqual(["opened"]);
     expect(record.consecutive_indeterminate).toBe(20);
+  });
+
+  /**
+   * A record that arrives ALREADY past the threshold still escalates.
+   *
+   * **This fixture exists because a mutation survived.** `===` and `>=` are
+   * indistinguishable on any record this machine wrote — the state guard fires
+   * the escalation at exactly three and then blocks every later sweep — so
+   * changing one to the other passed the whole file. They are not
+   * indistinguishable on a record task 5.5 READ FROM DISK: an older build, a
+   * partial write or a hand edit can produce `state: "clear"` with the counter
+   * already past three, and `===` steps over it forever. A service that is
+   * permanently invisible and permanently silent is the exact failure this
+   * console exists to prevent, so the comparison fails in the other direction and
+   * this is what says so.
+   */
+  test("a record read back with the counter already past three escalates anyway", () => {
+    const stale: IncidentRecord = {
+      ...freshIncidentRecord(SERVICE),
+      consecutive_indeterminate: COVERAGE_THRESHOLD + 4,
+    };
+    const step = sweep(stale, 0, unobserved, NO_RENOTIFY);
+    expect(kinds(step.notifications)).toEqual(["opened"]);
+    expect(step.notifications[0]!.reason).toBe("coverage");
+    expect(step.record.state).toBe("firing");
+
+    // And it still fires ONCE: the next blind sweep finds it already open.
+    const next = sweep(step.record, 1, unobserved, NO_RENOTIFY);
+    expect(next.notifications).toEqual([]);
   });
 
   /** Any sweep that could see the service resets the counter, either way round. */
@@ -654,6 +706,91 @@ describe("the flap window is a filter, and the fixture straddles it", () => {
     );
     expect(step.record.state).toBe("flapping");
     expect(kinds(step.notifications)).toEqual(["flapping"]);
+  });
+});
+
+/**
+ * THE RE-NOTIFY FLOOR IS SCOPED TO `firing`, and this block exists because a
+ * mutation survived the first battery.
+ *
+ * §6.8 scopes the floor in three words — *"While `firing`"* — and every fixture
+ * above either disables the floor or holds a record `firing` for its whole
+ * timeline, so widening the guard to "anything that is not clear" changed nothing
+ * any of them could see. Two states are reachable with an old
+ * `last_notified_at` and neither may speak:
+ *
+ *  - **`provisional`**, which would announce an UNCONFIRMED issue — §6.7 rule 1
+ *    is that a notification fires on confirmation and never on a first
+ *    observation, and a reminder for something never confirmed is that rule
+ *    broken by the one mechanism designed to work around silence.
+ *  - **`flapping`**, which §6.8 says *"goes quiet"*. A reminder there is the
+ *    damping undone six hours at a time.
+ */
+describe("the re-notify floor speaks only while firing", () => {
+  const OLD = T0 - 24 * HOUR_MS;
+
+  /**
+   * Reachable with nothing constructed: ninety sweeps of strict alternation at
+   * the SHIPPED defaults, floor included. It is the §12 alternating criterion
+   * run long enough for the floor to reach, and against the policy the console
+   * actually runs rather than a disabled one.
+   */
+  test("ninety alternating sweeps at the shipped defaults still emit exactly one", () => {
+    const { record, notifications } = drive(
+      90,
+      (n) => (n % 2 === 0 ? issue("unhealthy") : clear()),
+      DEFAULTS,
+    );
+    expect(notifications.length).toBe(1);
+    expect(notifications[0]!.kind).toBe("flapping");
+    expect(record.state).toBe("flapping");
+    // Long enough for the 6h floor to have fired had it applied here: the
+    // flapping notice landed on sweep 7 and this timeline runs to sweep 89.
+    expect(T0 + 89 * CADENCE_MS - notifications[0]!.at).toBeGreaterThan(
+      DEFAULTS.renotify_after_s * 1_000,
+    );
+  });
+
+  /**
+   * `provisional` cannot be held for six hours by sweeping — the coverage
+   * escalation takes it at three blind sweeps — so this is a record as task
+   * 5.5's validated read would hand one back. That is the whole reason the
+   * machine is a pure function over a record rather than over a timeline.
+   */
+  test("a provisional record with an old notification says nothing", () => {
+    const stale: IncidentRecord = {
+      ...freshIncidentRecord(SERVICE),
+      state: "provisional",
+      reason: "unhealthy",
+      since: OLD,
+      last_seen: OLD,
+      sweep_count: 1,
+      last_notified_at: OLD,
+    };
+    expect(sweep(stale, 0, unobserved, DEFAULTS).notifications).toEqual([]);
+  });
+
+  /**
+   * THE POSITIVE CONTROL, and without it the two assertions above are satisfied
+   * by a floor that never fires at all. The same record, the same stale
+   * timestamp, the same sweep — differing only in the state — DOES remind.
+   */
+  test("the same record, firing, does remind — so the silences above are the scope", () => {
+    const firing: IncidentRecord = {
+      ...freshIncidentRecord(SERVICE),
+      state: "firing",
+      reason: "unhealthy",
+      since: OLD,
+      last_seen: OLD,
+      sweep_count: 40,
+      last_notified_at: OLD,
+    };
+    const step = sweep(firing, 0, unobserved, DEFAULTS);
+    expect(kinds(step.notifications)).toEqual(["reminder"]);
+    expect(step.record.last_notified_at).toBe(T0);
+
+    const flapping: IncidentRecord = { ...firing, state: "flapping" };
+    expect(sweep(flapping, 0, unobserved, DEFAULTS).notifications).toEqual([]);
   });
 });
 

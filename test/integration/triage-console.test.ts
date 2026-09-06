@@ -220,7 +220,7 @@ async function plantActor(
   rig: Rig,
   console_: "triage" | "review",
   runId: string,
-): Promise<{ pid: number; path: string }> {
+): Promise<{ pid: number; path: string; proc: Bun.Subprocess }> {
   const sleeper = Bun.spawn(["sleep", "600"], { stdout: "ignore", stderr: "ignore" });
   sleepers.push(sleeper);
   const record: RelayRecord = {
@@ -238,7 +238,12 @@ async function plantActor(
   const path = relayRecordPath(console_, rig.env);
   await writeRelayRecord(path, record);
   expect((await readRelayStatus(path)).kind).toBe("live");
-  return { pid: sleeper.pid, path };
+  return { pid: sleeper.pid, path, proc: sleeper };
+}
+
+/** Did this process actually die, within a bound a test can afford? */
+async function diedWithin(proc: Bun.Subprocess, ms: number): Promise<boolean> {
+  return await Promise.race([proc.exited.then(() => true), Bun.sleep(ms).then(() => false)]);
 }
 
 /** A run tree in which `worker` is holding a task, and nothing else exists. */
@@ -532,14 +537,30 @@ describe("the actor's books are this console's, never the review console's", () 
       expect(r.err).toContain("signalled");
       expect(r.err).not.toContain(`pid ${theirs.pid}`);
 
-      // The signalled process is gone and its record with it.
+      /*
+       * THE PROCESS, NOT ONLY THE FILE — added after a mutation survived.
+       * Replacing `signalRelay(pid)` with the string `"signalled"` still removes
+       * the record, still prints the pid, and still prints the word: every
+       * file-and-stderr assertion passes while the actor keeps running with
+       * nothing on disk naming it. That is `console-relay.ts`'s own statement of
+       * the real objection — *"a background process nobody can name"* — and it
+       * is only reachable by asking the process.
+       */
+      expect(
+        await diedWithin(mine.proc, 3_000),
+        "the record was removed but the process was never signalled",
+      ).toBe(true);
       expect((await readRelayStatus(mine.path)).kind).toBe("absent");
+
       // The review console's actor is untouched, and it is asserted on the
       // PROCESS as well as on the file: a stop that removed the record without
       // signalling, or signalled without removing, is a different bug each way.
       const survivor = await readRelayStatus(theirs.path);
       expect(survivor.kind).toBe("live");
       if (survivor.kind === "live") expect(survivor.record.pid).toBe(theirs.pid);
+      expect(await diedWithin(theirs.proc, 250), "the review console's actor was killed").toBe(
+        false,
+      );
     },
     cliBudget(1),
   );
