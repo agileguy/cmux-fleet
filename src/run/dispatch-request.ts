@@ -87,6 +87,11 @@
  * 5. **The same reviewer twice** — §6.9's second argument. The consensus
  *    arithmetic counts independent readers, and two reports from one model are
  *    one reader with two transcripts.
+ * 6. **A service share that does not match the console** — SRD-TRIAGE-CONSOLE
+ *    §7.3. Absent where an environment is declared, or present where none is.
+ *    The two halves are one rule: a field merely optional everywhere makes the
+ *    host's completeness check unreachable by the cheapest failure a model has,
+ *    which is omitting it.
  *
  * **Any of them refuses the WHOLE FILE.** §6.4 is explicit and the reason is
  * not tidiness: a validator that dropped the offending entry would turn a
@@ -191,13 +196,27 @@ export const MAX_DISPATCH_REQUEST_ITEMS = 8;
  * Everything else in the document is held to `SESSION_ID_RE`, which is ASCII
  * that never escapes: eight `worker` ids and one `parent_task_id` at 64
  * characters each, the schema tag, and the punctuation — together under 1 KiB.
- * So the worst schema-legal document is under 3.01 MiB against a 4.00 MiB cap,
- * with a full MiB of headroom. `dispatch-request.test.ts` builds that exact
+ *
+ * **SRD-TRIAGE-CONSOLE §7.3 added a second ASCII term and it is large enough to
+ * be worked rather than waved at.** `services` is up to
+ * `MAX_DISPATCH_SERVICES` names of `MAX_DISPATCH_ID_CHARS` characters, in every
+ * entry:
+ *
+ *     MAX_DISPATCH_REQUEST_ITEMS x MAX_DISPATCH_SERVICES x (MAX_DISPATCH_ID_CHARS + 3)
+ *       = 8 x 64 x 67 = 34,304 bytes = 33.5 KiB
+ *
+ * — the `+ 3` being the two quotes and the comma each name costs inside the
+ * array, and the multiplier being 1 rather than 6 because `SESSION_ID_RE`
+ * admits no character JSON escapes.
+ *
+ * So the worst schema-legal document is under 3.04 MiB against a 4.00 MiB cap,
+ * with 0.96 MiB of headroom. `dispatch-request.test.ts` builds that exact
  * document — every text field filled to the bound with the control character
- * U+0001, which is the worst case above — measures it on disk, and asserts it
- * is ACCEPTED. The invariant is executed rather than asserted, which is the
- * whole of the repair: the previous claim was true-looking prose that no test
- * could have contradicted, and it was false.
+ * U+0001, which is the worst case above, and every `services` list filled to
+ * `MAX_DISPATCH_SERVICES` names at the id bound — measures it on disk, and
+ * asserts it is ACCEPTED. The invariant is executed rather than asserted, which
+ * is the whole of the repair: the previous claim was true-looking prose that no
+ * test could have contradicted, and it was false.
  *
  * **Lowering this rather than raising the cap was the choice, and the cap's own
  * argument is why.** The 4 MiB below is deliberately the same number as
@@ -220,6 +239,29 @@ export const MAX_DISPATCH_TEXT = 32 * 1024;
  * path SEGMENTS on the host.
  */
 export const MAX_DISPATCH_ID_CHARS = 64;
+
+/**
+ * The longest `services` list one request may carry — SRD-TRIAGE-CONSOLE §7.3.
+ *
+ * 64, which is `MAX_SERVICES_PER_ENVIRONMENT` in `triage-targets.ts`: ONE
+ * observer's share may be the whole environment, because §6.5 makes ⌈N/3⌉ the
+ * worker's judgement rather than a refusal — *"the partition is the triage
+ * worker's to make"* — and a bound below the environment's own cap would refuse
+ * a legal partition on arithmetic nobody wrote down.
+ *
+ * **Spelled here rather than imported, and the duplication is deliberate.** The
+ * `DispatchRefusal` block below states the rule this module lives by: the
+ * environment is `triage/targets.yaml`, *"a file this module has never heard of
+ * and must not grow a dependency on"*. An import for one integer is that
+ * dependency arriving through the back door, and `task-ids.ts` duplicates
+ * `MAX_RELAY_TASK_ID_CHARS` rather than take the equivalent edge.
+ *
+ * The pairing is not left to prose. `dispatch-request.test.ts` imports BOTH
+ * constants and asserts they are equal, so a divergence is a red test rather
+ * than a partition refused as `schema` — a code naming neither file — the day
+ * an operator extends an environment past this number.
+ */
+export const MAX_DISPATCH_SERVICES = 64;
 
 /**
  * Hard byte cap, enforced from `fstat` on the open fd BEFORE the read, and
@@ -281,7 +323,39 @@ export interface ConsoleRoster {
   collators: readonly string[];
   /** Workers whose role is `reviewer`: the only permitted targets. */
   reviewers: readonly string[];
+  /**
+   * Whether a request must carry `services` — SRD-TRIAGE-CONSOLE §7.3's table,
+   * as a value.
+   *
+   * **THE RULE RATHER THAN THE CONSOLE'S NAME, and the difference is a
+   * divergence hazard rather than taste.** §7.3 asks for *"`ConsoleRoster` gains
+   * the name and the refinement reads it"*, and a `name` field would work — but
+   * `ConsoleSpec.name` already exists one layer up (`cli/commands/relay.ts`) as
+   * the `--console` value, and two spellings of one console's name,
+   * constructible to disagree, is the failure that interface's own docblock
+   * spends its length on. It would also put a literal `"triage"` inside the
+   * check, which is precisely the shape this interface exists to avoid: see the
+   * argument above about a rule written against the literal `col-1`.
+   *
+   * Carrying the rule keeps §7.3's survival claim exactly true — *"§10 D5's bet
+   * survives: a third console is still a third constant"* — because a third
+   * console answers this question in the constant that declares it, with no
+   * table, no union and no edit to this file.
+   */
+  services: ConsoleServicesRule;
 }
+
+/**
+ * Whether this console's requests carry a service list — §7.3.
+ *
+ * **Two values and no third, because "optional" is the value that would make
+ * the downstream check unreachable.** §7.3: *"A field merely optional
+ * everywhere would make `partition_incomplete` unreachable by the cheapest
+ * failure available to a model — omitting it — and an unreachable refusal is a
+ * check that passes because nothing asked."* So every console either demands
+ * the field or refuses it, and there is no arm that shrugs.
+ */
+export type ConsoleServicesRule = "required" | "refused";
 
 /**
  * The `review` console as it actually ships.
@@ -298,6 +372,14 @@ export interface ConsoleRoster {
 export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
   collators: ["col-1"],
   reviewers: ["rev-arch-1", "rev-ctx-1", "rev-lang-1"],
+  /*
+   * §7.3's review row. **This console has no targets file**, so a service list
+   * here would be a partition of nothing: accepted, never counted, and read by
+   * its author as honoured. Refusing it is §7.3's own promise — *"refused
+   * whole, with the field named"* — spent on the new field rather than weakened
+   * by it, and it is what makes NO review request change behaviour.
+   */
+  services: "refused",
 };
 
 /**
@@ -340,6 +422,17 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
 export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
   collators: ["tri-1"],
   reviewers: ["obs-t1", "obs-t2", "obs-t3"],
+  /*
+   * §7.3's triage row, and the half that makes the completeness check
+   * REACHABLE. §6.5 puts the count on the host — *"a model that partitions can
+   * drop a service and nothing downstream would notice"* — and the cheapest way
+   * for a model to drop one is to write no list at all. Required here, that is
+   * `services_missing` at the request plane; optional, it would be three idle
+   * observers and a sweep refused as `partition_incomplete` naming every
+   * service in the environment, which points the operator at the targets file
+   * rather than at the request.
+   */
+  services: "required",
 };
 
 /**
@@ -540,7 +633,9 @@ function spellableId(value: string): boolean {
 const notReachable = (message: string) => z.never({ error: message }).optional();
 
 /**
- * One request: a worker, a title, a brief. **Nothing else** — §6.4.
+ * One request: a worker, a title, a brief — and, on a console that declares an
+ * environment, the share of it this request covers. **Nothing else** — §6.4,
+ * SRD-TRIAGE-CONSOLE §7.3.
  *
  * The four named refusals below are D11 in the schema rather than in prose.
  * Each is a decision that was made before the fleet existed, by a gate that
@@ -597,6 +692,68 @@ export const DispatchRequestItemSchema = z
         `and this is also the field the /policy/dispatch drop has to stage under ` +
         `MAX_DISPATCH_POLICY_BYTES, so a request that validates here always stages there.`,
     }),
+    /**
+     * One observer's share of the environment — SRD-TRIAGE-CONSOLE §7.3.
+     *
+     * **Optional HERE and settled by the roster**, which is the split arm 1
+     * chose. The SHAPE of a service list is a document question and belongs to
+     * the schema; whether the list must be PRESENT is a question about the
+     * console the request arrived at, and no schema in this module knows which
+     * console that is. {@link checkServices} answers the second half and spends
+     * `services_missing` / `services_not_permitted` rather than `schema`, so an
+     * operator can tell *"this console does not take that field"* from *"that
+     * field is malformed"* — the same split `DispatchRefusal` exists for.
+     *
+     * **It is not `notReachable`, and it is the only field here that is not.**
+     * The four below are decisions a gate already made that a request must not
+     * revisit. This one is a fact only the writer holds: which services its
+     * share covers. §6.5 keeps that judgement with the model and moves the COUNT
+     * to the host, and a field is the only machine-readable way to carry the
+     * first to the second — §7.3 refuses the alternative by name, because
+     * recovering the share from the brief's prose is *"the one thing a check
+     * against a partitioning model must not depend on."*
+     *
+     * The names are held to `SESSION_ID_RE` and `MAX_DISPATCH_ID_CHARS` for
+     * `parent_task_id`'s reason, one level further out: a service name keys an
+     * incident record under `~/.pifleet/triage/` (§6.8) and becomes a path
+     * segment there, and this value was written by a container. This is the same
+     * grammar `triage-targets.ts` holds a DECLARED name to, and the suite pins
+     * the two together against a table of names that pass both and names that
+     * fail both.
+     *
+     * **An EMPTY list is legal and is not `services_missing`.** §6.5's
+     * `1 ≤ N < 3` row — *"an idle observer is not an error"* — and completeness
+     * belongs to `triage-partition.ts`, which refuses an all-empty fan-out as
+     * `partition_incomplete` naming every declared service. A `.min(1)` here
+     * would refuse the ordinary small environment AND would answer a question
+     * about `triage/targets.yaml` in the module that must not read one.
+     */
+    services: z
+      .array(
+        z
+          .string()
+          .max(MAX_DISPATCH_ID_CHARS, {
+            error:
+              `a service name is longer than ${MAX_DISPATCH_ID_CHARS} characters. It keys an ` +
+              `incident record under ~/.pifleet/triage/ (§6.8), so it is bounded like the path ` +
+              `segment it becomes rather than like free text.`,
+          })
+          .regex(SESSION_ID_RE, {
+            error:
+              `a service name is not a name. It must be letters, digits, ".", "_" or "-", ` +
+              `beginning and ending alphanumeric — the grammar triage/targets.yaml holds a ` +
+              `DECLARED service to, and the grammar every name that becomes a host path is held ` +
+              `to. A length bound alone accepts "../../control-auth.json", written by a ` +
+              `container into a run directory that also holds the control-socket secret.`,
+          }),
+      )
+      .max(MAX_DISPATCH_SERVICES, {
+        error:
+          `services[] holds more than ${MAX_DISPATCH_SERVICES} entries, which is more services ` +
+          `than one environment may declare (§7.1). A share larger than the whole environment ` +
+          `cannot be a share OF it.`,
+      })
+      .optional(),
     model: notReachable(
       'a request may not name "model" (SRD-REVIEW-CONSOLE D11, §6.9). The model is pinned to ' +
         "the aspect in fleet.yaml and validated against models_allowlist at `up`, an hour before " +
@@ -738,7 +895,27 @@ export type DispatchRefusal =
   // §6.5 makes them different failures with different operator responses: a
   // service nobody looked at, versus a service two observers both claimed.
   | "partition_incomplete"
-  | "partition_duplicate";
+  | "partition_duplicate"
+  // ── SRD-TRIAGE-CONSOLE §7.3 — the share, and which console may carry one ────
+  //
+  // **Spent by `checkServices` in THIS module**, unlike the pair above, and
+  // they live here by the same rule §6.5 set rather than by proximity: this is
+  // the vocabulary of the request plane, *"whichever module spends them"*. The
+  // four are one alphabet so an actor can log and a test can assert without
+  // knowing which check produced the answer.
+  //
+  // They are decidable here — and the pair above is not — because the question
+  // is about the console the request arrived at, which `ConsoleRoster` already
+  // carries, rather than about `triage/targets.yaml`, which this module has
+  // never heard of.
+  //
+  // `services_missing` is the one that makes `partition_incomplete` reachable.
+  // §6.5 predicted the failure one level up — *"a model that partitions can
+  // drop a service"* — and the cheapest way to drop every service at once is to
+  // write no list. A field merely optional everywhere would make that document
+  // legal and the refusal unreachable.
+  | "services_missing"
+  | "services_not_permitted";
 
 /**
  * The three outcomes, shaped like `OutboxRead` and for its reasons.
@@ -1021,6 +1198,71 @@ function checkRoster(
 }
 
 /**
+ * §7.3's table, as a check — the half the schema cannot answer.
+ *
+ * | Console | `services` present | `services` absent |
+ * |---|---|---|
+ * | **triage** | validated against `triage/targets.yaml` (§6.5) | `services_missing` |
+ * | **review** | `services_not_permitted` | unchanged — exactly today's shape |
+ *
+ * **The two rows are ONE rule.** A field merely optional everywhere would make
+ * `partition_incomplete` unreachable by the cheapest failure available to a
+ * model — omitting it — *"and an unreachable refusal is a check that passes
+ * because nothing asked."* So the absent arm and the present arm are both
+ * refusals, on the console where each is wrong.
+ *
+ * **This runs AFTER `checkRoster`, and the ordering is a decision.** The roster
+ * rules answer *"may this dispatch happen at all, and to whom"*: a request
+ * naming `rev-arch-1` reaches a live worker with a live socket, so the dispatch
+ * SUCCEEDS and leaves its only trace in a run nobody is watching. A capability
+ * fault of that grade must never be masked by a complaint about a field's
+ * absence, and the suite pins the pair — the same missing share with every
+ * target legal reports `services_missing`, so swapping the two checks reddens
+ * exactly one test.
+ *
+ * The entry INDEX is named for `checkRoster`'s reason: eight entries differing
+ * only in one field are otherwise one line in a log, and the whole file is
+ * refused either way (§6.4), so the operator needs to know which one to fix.
+ */
+function checkServices(
+  request: DispatchRequest,
+  roster: ConsoleRoster,
+): DispatchRequestRead | null {
+  for (const [index, entry] of request.requests.entries()) {
+    /** 1-based, as `checkRoster` numbers them, so the two refusals agree. */
+    const at = `request ${index + 1}`;
+
+    if (roster.services === "required" && entry.services === undefined) {
+      return {
+        kind: "refused",
+        code: "services_missing",
+        reason:
+          `${at} carries no "services" list, and this console requires one ` +
+          `(SRD-TRIAGE-CONSOLE §7.3). The host validates the partition against the targets file ` +
+          `before dispatching any of it (§6.5), and this field is the only machine-readable ` +
+          `statement of which services a request covers — recovering it from the brief's prose ` +
+          `is the one thing a check against a partitioning model must not depend on. The whole ` +
+          `file is refused and nothing was dispatched.`,
+      };
+    }
+
+    if (roster.services === "refused" && entry.services !== undefined) {
+      return {
+        kind: "refused",
+        code: "services_not_permitted",
+        reason:
+          `${at} carries a "services" list, and this console declares no environment to check ` +
+          `one against (SRD-TRIAGE-CONSOLE §7.3). A service list here would be a partition of ` +
+          `nothing: accepted, never counted, and read by its author as honoured. Remove the ` +
+          `field, or write this request on a console whose targets file declares those services.`,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Validate bytes already in hand. **Never throws**, for the reason
  * `harvest/outbox.ts` does not either: the caller is a polling loop that
  * performs every dispatch in the console, and a document written by a container
@@ -1049,6 +1291,10 @@ function checkRoster(
  *      the same way and for the same reason: the directory was created by the
  *      host and the body is a claim.
  *   4. **Roster** — the rules that need to know who is asking and who exists.
+ *   5. **The share** — §7.3's table, last, because a request that reaches
+ *      outside its console must report the reach rather than a missing field.
+ *      See `checkServices` for why that ordering is a decision and how it is
+ *      pinned.
  */
 export function parseDispatchRequest(body: string, ctx: DispatchRequestContext): DispatchRequestRead {
   const roster = resolveRoster(ctx);
@@ -1093,6 +1339,9 @@ export function parseDispatchRequest(body: string, ctx: DispatchRequestContext):
 
   const refused = checkRoster(request, ctx.sender, roster);
   if (refused !== null) return refused;
+
+  const wrongShare = checkServices(request, roster);
+  if (wrongShare !== null) return wrongShare;
 
   return { kind: "ok", request };
 }

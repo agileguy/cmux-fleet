@@ -122,13 +122,25 @@ async function plantInbox(run: RunPaths, taskId: string, worker: string): Promis
   await writeFile(inboxTaskPath(run, taskId), JSON.stringify({ task_id: taskId, worker }));
 }
 
-/** A request in a worker's outbox, where a container would write it. */
+/**
+ * A request in a worker's outbox, where a container would write it.
+ *
+ * **The share follows the SENDER's console, because SRD-TRIAGE-CONSOLE §7.3
+ * makes `services` required on triage and refused on review.** A fixture
+ * carrying it unconditionally is refused `services_not_permitted` on the review
+ * arm and one omitting it is refused `services_missing` on the triage arm, so a
+ * single shape cannot serve both — and a fixture the real parser refuses proves
+ * nothing about the roster selection these tests exist to grade.
+ */
 async function plantRequest(
   run: RunPaths,
   sender: string,
   taskId: string,
   targets: readonly string[],
 ): Promise<void> {
+  const needsShare = CONSOLES.some(
+    (spec) => spec.roster.collators.includes(sender) && spec.roster.services === "required",
+  );
   const dir = join(workerOutboxDir(run.root, sender), taskId);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -136,10 +148,11 @@ async function plantRequest(
     JSON.stringify({
       schema: DISPATCH_REQUEST_SCHEMA,
       parent_task_id: taskId,
-      requests: targets.map((worker) => ({
+      requests: targets.map((worker, i) => ({
         worker,
         title: `sweep ${worker}`,
         brief: `observe the services assigned to ${worker}`,
+        ...(needsShare ? { services: [`svc-${i + 1}`] } : {}),
       })),
     }),
   );
@@ -500,6 +513,10 @@ describe("the selected aspect table decides which runs are looked for", () => {
    * from `col-1` is refused under the triage roster, so a shared fixture would
    * fail to build for the review arm — and a cast past the parser would produce
    * a shape nothing in production emits.
+   *
+   * The `services` share follows the same rule, and for the same reason:
+   * SRD-TRIAGE-CONSOLE §7.3 requires it on triage and refuses it on review, so
+   * the fixture reads the roster rather than picking one shape and casting.
    */
   function inputFor(consoleName: string, targets: readonly string[]): RelayFanOutInput {
     const spec = resolveConsole(consoleName);
@@ -509,7 +526,12 @@ describe("the selected aspect table decides which runs are looked for", () => {
       JSON.stringify({
         schema: DISPATCH_REQUEST_SCHEMA,
         parent_task_id: taskId,
-        requests: targets.map((worker) => ({ worker, title: "t", brief: "b" })),
+        requests: targets.map((worker, i) => ({
+          worker,
+          title: "t",
+          brief: "b",
+          ...(spec.roster.services === "required" ? { services: [`svc-${i + 1}`] } : {}),
+        })),
       }),
       { sender, taskId, roster: spec.roster },
     );

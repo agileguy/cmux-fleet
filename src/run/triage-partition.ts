@@ -12,24 +12,28 @@
  * place: **the number the loop branches on is the one the host counted, never the
  * one the worker claimed.**
  *
- * ## Why this takes a partition VALUE and not a `DispatchRequest`
+ * ## Why the check takes a partition VALUE, and where the value now comes from
  *
- * §7.3 fixes the fan-out document at `worker`, `title`, `brief`, **and nothing
- * else** — a request naming any other field is refused whole. So the document
- * carries no machine-readable service list, and this module cannot be handed one
- * and asked to count. It takes {@link PartitionAssignment}s instead: the
- * worker→services mapping, as a value.
+ * The check is written over {@link PartitionAssignment}s — the worker→services
+ * mapping, as a value — rather than over a `DispatchRequest`. That was true
+ * before there was any way to build one from a request, and it stays true now
+ * that there is, because it is what lets Phase 5 grade the whole check *"as pure
+ * functions over fixtures"* with no container and no network in reach.
  *
- * **Recovering that mapping from what the worker actually wrote is not settled by
- * the SRD and is deliberately not settled here.** §6.5 says the actor *"validates
- * the request against the targets file before dispatching any of it"*, and
- * §6.3 step 4 has `tri-1` write the partition into a `dispatch-request.json` whose
- * schema has nowhere to put it. Whatever closes that gap — a structured field, or
- * the actor assigning the services itself and the worker returning only an
- * ordering — is Phase 6/7's, and it changes the CALLER of this function and not
- * this function. Keeping the check over a value is what makes that true, and is
- * why Phase 5 can grade it *"as pure functions over fixtures"* with no container
- * and no network in reach.
+ * **The gap that left open is closed, and the resolution is §7.3's.** As written,
+ * the fan-out document was fixed at `worker`, `title`, `brief` and nothing else,
+ * so it carried no machine-readable service list and nothing could hand this
+ * module a partition at all; §6.5 nevertheless made completeness the host's
+ * question, and the only remaining route was parsing the brief's prose — *"the
+ * one thing a check against a partitioning model must not depend on."* §7.3
+ * weighed three arms and **the operator chose arm 1 on 2026-09-06**:
+ * `pifleet.dispatchrequest/v1` grows `services: string[]`, required on the
+ * triage console and refused on the review console, with `ConsoleRoster` as the
+ * discriminator. {@link partitionFromRequests} is the projection between that
+ * field and this check.
+ *
+ * §6.5's premise survives intact: the partition is still the model's judgement,
+ * and the host still counts.
  *
  * ## Two codes for three conditions, and the third is named rather than hidden
  *
@@ -76,7 +80,7 @@
  * carries all three lists whichever code won.
  */
 
-import type { DispatchRefusal } from "./dispatch-request.ts";
+import type { DispatchRefusal, DispatchRequestItem } from "./dispatch-request.ts";
 
 /**
  * One observer's share of the environment.
@@ -132,6 +136,53 @@ export interface PartitionFault {
 
 /** Complete, or refused with everything known about why. */
 export type PartitionCheck = { kind: "complete" } | ({ kind: "refused" } & PartitionFault);
+
+/**
+ * A sweep's requests, as the partition both waiting modules already take —
+ * SRD-TRIAGE-CONSOLE §7.3, §13 task 5.1a.
+ *
+ * `checkTriagePartition` counts it, and `assessTriageSweep` reads it as
+ * `SweepCoverage.assignments`. One projection feeds both, so the two can never
+ * be counting different partitions of the same sweep — which is the failure a
+ * second, private spelling in the actor would produce, and it would produce it
+ * silently: a coverage census over one mapping and a completeness refusal over
+ * another agree on every sweep where the worker did the obvious thing.
+ *
+ * ## Four things it does NOT do, and each is a property something downstream needs
+ *
+ * It does not SORT: `checkTriagePartition` reports `duplicated` and `undeclared`
+ * in claim order because *"first mention is where the author looks"*, and a sort
+ * here would replace that with alphabetical order two modules away from the
+ * promise. It does not DE-DUPLICATE within a share: a service listed twice in
+ * one brief is `partition_duplicate`, on §6.10 rule 1's read-amplification
+ * argument, and a `Set` here would make that refusal unreachable. It does not
+ * DROP an empty share: §6.5's `1 ≤ N < 3` row makes an idle observer legal and
+ * it is still an observer the actor dispatched. And it does not REORDER the
+ * workers: `dispatchPartition` is serial, so the order is the order the fan-out
+ * happens in.
+ *
+ * All four survive a plausible one-line rewrite of this function, so all four
+ * are asserted by value in `triage-partition.test.ts` against a single fixture
+ * built to separate them.
+ *
+ * ## The absent share, and why the fallback is not a dead branch
+ *
+ * `services` is optional on the ITEM and required by the triage roster, so
+ * `parseDispatchRequest` has already refused a triage request that omits it —
+ * `services_missing`, before the actor projects anything. The `?? []` is what
+ * makes this projection TOTAL rather than partial: an absent share becomes an
+ * idle one, and `checkTriagePartition` then refuses the sweep as
+ * `partition_incomplete` naming every declared service. Loud, not silent, and
+ * the suite pins that outcome rather than leaving the branch uncharacterised.
+ */
+export function partitionFromRequests(
+  requests: readonly DispatchRequestItem[],
+): readonly PartitionAssignment[] {
+  return requests.map((entry) => ({
+    worker: entry.worker,
+    services: entry.services ?? [],
+  }));
+}
 
 /**
  * Does this partition cover the declared environment exactly once?

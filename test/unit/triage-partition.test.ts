@@ -73,12 +73,22 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
+import {
+  DISPATCH_REQUEST_SCHEMA,
+  TRIAGE_CONSOLE_ROSTER,
+  parseDispatchRequest,
+  type DispatchRequestItem,
+} from "../../src/run/dispatch-request.ts";
 import {
   checkTriagePartition,
   dispatchPartition,
+  partitionFromRequests,
   type PartitionAssignment,
 } from "../../src/run/triage-partition.ts";
+import { parseTriageTargets } from "../../src/run/triage-targets.ts";
+import { ROOT } from "../support/role-docs.ts";
 
 /**
  * The environment as `triage/targets.yaml` declares it.
@@ -470,5 +480,227 @@ describe("what this check does NOT answer", () => {
     ];
 
     expect(checkTriagePartition(DECLARED, partition).kind).toBe("complete");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-CONSOLE §7.3 (RESOLVED 2026-09-06, arm 1); §13 task 5.1a — the
+// projection that turns a sweep's requests into the value above.
+//
+// The gap §7.3 closed was never in `checkTriagePartition`; it was that nothing
+// could HAND it a partition. `pifleet.dispatchrequest/v1` carried no
+// machine-readable service list, so the only way to recover which services a
+// request covered was to parse the brief's prose — *"the one thing a check
+// against a partitioning model must not depend on."* Arm 1 put `services` on
+// the request; this block grades the projection between the two.
+//
+// **The projection is the load-bearing half and it is one `.map()`, which is
+// exactly why it needs sharp fixtures.** Every property `checkTriagePartition`
+// promises downstream is a property the projection can silently destroy:
+//
+//  - SORT the names and `duplicated`/`undeclared` stop being in claim order,
+//    which is the order the docblock promises and two tests above assert;
+//  - DEDUPE within a share and "a service listed twice by the SAME observer"
+//    becomes complete — the fixture at line ~362 goes green for the wrong
+//    reason and §6.10 rule 1's read amplification is back;
+//  - DROP the empty shares and §6.5's idle observer stops being dispatched;
+//  - REORDER the workers and a serial fan-out starts somewhere else.
+//
+// So the fixture below is asymmetric in all four directions at once, and every
+// assertion is by VALUE rather than by count.
+// ---------------------------------------------------------------------------
+
+/** A request entry as `parseDispatchRequest` yields it, built without one. */
+function req(worker: string, services?: readonly string[]): DispatchRequestItem {
+  return {
+    worker,
+    title: `sweep ${worker}`,
+    brief: "observe the declared services and report per service.",
+    ...(services === undefined ? {} : { services: [...services] }),
+  } as DispatchRequestItem;
+}
+
+/** `tri-1`'s fan-out on the wire, so a test can drive the REAL parser. */
+function fanOutBody(taskId: string, entries: readonly DispatchRequestItem[]): string {
+  return JSON.stringify({
+    schema: DISPATCH_REQUEST_SCHEMA,
+    parent_task_id: taskId,
+    requests: entries,
+  });
+}
+
+const SWEEP = "T-sweep-288";
+
+describe("the projection — a sweep's requests become the partition value", () => {
+  /**
+   * ONE FIXTURE, FOUR MUTANTS, and every assertion is by value.
+   *
+   * `routing` before `ingest` is not alphabetical, so a sort is red. `mia`
+   * twice in one share is red under a `Set`. `obs-t2`'s empty share is red under
+   * a `filter`. And the workers are asserted in request order, so a reorder is
+   * red. A fixture giving each worker one distinct alphabetical service — the
+   * obvious one to write — is green under all four.
+   */
+  test("preserves worker order, claim order, repeats and empty shares", () => {
+    const projected = partitionFromRequests([
+      req(OBS[0], ["routing", "ingest"]),
+      req(OBS[1], []),
+      req(OBS[2], ["mia", "mia"]),
+    ]);
+
+    expect(projected).toEqual([
+      { worker: OBS[0], services: ["routing", "ingest"] },
+      { worker: OBS[1], services: [] },
+      { worker: OBS[2], services: ["mia", "mia"] },
+    ]);
+  });
+
+  /**
+   * The projection carries the DUPLICATE through to the code that names it.
+   *
+   * Asserted end to end rather than on the projection alone, because a
+   * de-duplicating projection would still return a plausible-looking value and
+   * only the verdict changes: `partition_duplicate` naming `mia` becomes
+   * `complete`, and a service two observers both read 288 times a day is
+   * reported as a clean sweep.
+   */
+  test("a repeat inside one share still reaches partition_duplicate, by name", () => {
+    const outcome = checkTriagePartition(
+      DECLARED,
+      partitionFromRequests([
+        req(OBS[0], ["mia", "mia"]),
+        req(OBS[1], ["authorization"]),
+        req(OBS[2], ["authentication"]),
+      ]),
+    );
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_duplicate");
+    expect(outcome.duplicated).toEqual(["mia"]);
+  });
+
+  /**
+   * An ABSENT list projects to an idle share, and the refusal that follows names
+   * every declared service.
+   *
+   * **Unreachable in production and asserted anyway.** §7.3 makes `services`
+   * required on the triage console, so `parseDispatchRequest` refuses this
+   * document as `services_missing` before the actor ever projects it — which is
+   * the whole point of the required half. The fallback exists so the projection
+   * is TOTAL rather than partial, and this test is what stops it being a dead
+   * branch nobody can characterise: if it ever fires, the outcome is a loud
+   * refusal naming the whole environment, not a silent empty sweep.
+   */
+  test("an absent share projects to an idle observer, and the check then names every service", () => {
+    const projected = partitionFromRequests([req(OBS[0]), req(OBS[1])]);
+    expect(projected).toEqual([
+      { worker: OBS[0], services: [] },
+      { worker: OBS[1], services: [] },
+    ]);
+
+    const outcome = checkTriagePartition(DECLARED, projected);
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_incomplete");
+    expect(outcome.missing).toEqual([...DECLARED]);
+  });
+});
+
+describe("parse → project → check, which is the chain §6.3 step 5 describes", () => {
+  /**
+   * The positive control for the whole chain, and it is FIRST.
+   *
+   * A chain that refused everything would satisfy the asymmetric fixture below
+   * while being a console that dispatches nothing.
+   */
+  test("a complete partition survives the parser and dispatches every share", async () => {
+    const read = parseDispatchRequest(
+      fanOutBody(SWEEP, [
+        req(OBS[0], ["mia"]),
+        req(OBS[1], ["authorization"]),
+        req(OBS[2], ["authentication"]),
+      ]),
+      { sender: "tri-1", taskId: SWEEP, roster: TRIAGE_CONSOLE_ROSTER },
+    );
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+
+    const { dispatch, calls } = spy();
+    const outcome = await dispatchPartition(
+      DECLARED,
+      partitionFromRequests(read.request.requests),
+      dispatch,
+    );
+
+    expect(outcome.kind).toBe("dispatched");
+    expect(calls.map((c) => c.worker)).toEqual([...OBS]);
+    expect(calls.map((c) => c.services)).toEqual([["mia"], ["authorization"], ["authentication"]]);
+  });
+
+  /**
+   * THE ASYMMETRIC FIXTURE, CARRIED THROUGH THE REAL PARSER.
+   *
+   * declared {mia, authorization, authentication} against claimed
+   * {authorization, authentication, ingest} — the fixture this file's header
+   * block is about, now sourced from a document `parseDispatchRequest` accepted
+   * rather than from a hand-built value. That is what makes it a test of the
+   * SEAM: a projection that lost a name, sorted the claims, or dropped the
+   * second share would change which half of this refusal is populated, and both
+   * halves are asserted by name.
+   *
+   * **And nothing is dispatched**, which §12 names as the load-bearing clause:
+   * a refusal that arrives after three observer passes have started against a
+   * live control plane is worse than no check.
+   */
+  test("the asymmetric partition is refused after the parse, and nothing is dispatched", async () => {
+    const read = parseDispatchRequest(
+      fanOutBody(SWEEP, [
+        req(OBS[0], ["authorization"]),
+        req(OBS[1], ["authentication", "ingest"]),
+      ]),
+      { sender: "tri-1", taskId: SWEEP, roster: TRIAGE_CONSOLE_ROSTER },
+    );
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+
+    const { dispatch, calls } = spy();
+    const outcome = await dispatchPartition(
+      DECLARED,
+      partitionFromRequests(read.request.requests),
+      dispatch,
+    );
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_incomplete");
+    expect(outcome.missing).toEqual(["mia"]);
+    expect(outcome.undeclared).toEqual(["ingest"]);
+    expect(calls).toEqual([]);
+  });
+
+  /**
+   * THE ENVIRONMENT THIS SUITE FIXTURES IS THE ONE THE TRACKED FILE DECLARES.
+   *
+   * §13 task 5.1a's acceptance says a triage request's services *"validate
+   * against `triage/targets.yaml`"*, and without this pin that sentence is true
+   * only of a `DECLARED` constant that happens to agree with the file today.
+   * Rename a service there and every fixture above keeps passing while the live
+   * console refuses every sweep as `partition_incomplete` — a refusal naming a
+   * service the operator just deleted.
+   *
+   * The tracked file rather than a fixture, for `reviewer-role.test.ts`'s
+   * reason: `fleet.yaml` is gitignored and `triage/targets.yaml` is not, so this
+   * is the copy a clean checkout has.
+   */
+  test("DECLARED is the cni-dev environment triage/targets.yaml actually declares", () => {
+    const path = `${ROOT}triage/targets.yaml`;
+    const targets = parseTriageTargets(readFileSync(path, "utf8"), path);
+    const cniDev = targets.environments_unchecked_against_kubeconfig["cni-dev"];
+
+    expect(cniDev).toBeDefined();
+    expect(cniDev!.services.map((s) => s.name)).toEqual([...DECLARED]);
   });
 });
