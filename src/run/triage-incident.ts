@@ -341,6 +341,7 @@ export interface IncidentAdvance {
  * | `firing → clear` | **`recovered`** | and only from an `observed_clear` |
  * | `* → flapping` | **`flapping`**, once | replaces the notification that transition would have sent |
  * | `flapping → clear` | **`recovered`** | after `flap_window` of stability |
+ * | `flapping → firing` | **`opened`**, once | after `flap_window` with no observed clear |
  * | `firing` held | **`reminder`** | at most one per `renotify_after` |
  *
  * ## A flap transition is any return to `clear`, not only `firing → clear → firing`
@@ -376,16 +377,33 @@ export interface IncidentAdvance {
  * caller's own object makes that assertable by identity rather than by a
  * field-by-field comparison that could miss a new field.
  *
- * ## A NAMED GAP, rather than an invented transition
+ * ## `flapping → firing`, and it spends `flap_window` in the other direction
  *
- * §6.8 says a `flapping` record *"goes quiet until the service has been stable
- * for a full `flap_window`"*, and the re-notify floor is scoped to *"While
- * `firing`"*. A service that flaps and then goes HARD DOWN is therefore silent
- * until it recovers: it is not stable, so it cannot clear, and it is not `firing`,
- * so it gets no reminder. That is what §6.8 specifies and it is implemented as
- * specified rather than patched here, because the repair — a `flapping → firing`
- * edge after a window of unbroken issues — is a transition the SRD does not have
- * and is not this task's to add. It is carried into the round report.
+ * §6.8's transition table was missing this edge, and the hole it left is the one
+ * §6.8 now calls *"the worst shape a notifier has"*: a service that flaps and then
+ * goes HARD DOWN was silent indefinitely — not stable, so `flapping → clear` never
+ * fires; not `firing`, so the re-notify floor never reaches it. *"The service that
+ * most needs attention is the one that goes quiet."*
+ *
+ * The repair adds **no knob and no field**. `flap_window` already means *"how long
+ * a thing must hold before I believe it"*, and §6.8's table spends it on stability
+ * in one direction and on instability in the other:
+ *
+ * | direction | condition over `flap_window` | result |
+ * |---|---|---|
+ * | `flapping → clear` | no transitions, and the state observed is healthy | `recovered` |
+ * | `flapping → firing` | no transitions, and no observed clear | `opened`, ONCE, and the floor restarts |
+ *
+ * **`flap_transitions[]` is the condition, and that is why a clear observed while
+ * `flapping` is now appended to it.** §7.6 already defines the field as
+ * *"timestamps inside `flap_window`"* and this module already prunes it on every
+ * advance, so an EMPTY list is precisely *"no transition in the last
+ * `flap_window`"* — but only if the clears this record keeps seeing go into it.
+ * Without the append the list merely ages out, a still-alternating service empties
+ * it, and the edge re-opens a service that never stopped flapping. **That is the
+ * anti-twin §13 task 5.4b grades this on**, and it is the reason the append is part
+ * of the edge rather than incidental to it. Entries added while `flapping` cannot
+ * reach a future `flap_threshold`: the list is emptied on the way out to `clear`.
  */
 export function advanceIncident(
   record: IncidentRecord,
@@ -517,13 +535,74 @@ function onIssue(
      * been stable for a full `flap_window`"*, and an issue is not stability. The
      * counters still advance so the eventual recovery can say how much of this
      * there was.
+     *
+     * Quiet, that is, UNTIL the window empties. §6.8's `flapping → firing` row is
+     * the other half of the same window: a service still being seen bad with no
+     * observed clear behind it for a full `flap_window` has stopped flapping and
+     * settled into being down, and this is the sweep that says so.
      */
-    case "flapping":
-      return {
-        record: { ...base, sweep_count: record.sweep_count + 1 },
-        notifications: [],
-      };
+    case "flapping": {
+      const advanced: IncidentRecord = { ...base, sweep_count: record.sweep_count + 1 };
+      if (transitions.length === 0) {
+        return settleFlappingIntoFiring(advanced, observation, signal.evidenceRef);
+      }
+      return { record: advanced, notifications: [] };
+    }
   }
+}
+
+/**
+ * §6.8's `flapping → firing` — *"the open notification, **once**, and the
+ * re-notify floor restarts"*.
+ *
+ * Called only with a record whose pruned `flap_transitions[]` is empty, which is
+ * the table's *"no transitions, and no observed clear"* over one `flap_window`.
+ * Two properties are the whole of the row and both are structural rather than
+ * commented:
+ *
+ *  - **ONCE.** The record leaves `flapping` for `firing`, so the next bad sweep is
+ *    `firing → firing` — *"the rule that turns 288 into 1"*. A machine that stayed
+ *    `flapping` and emitted would re-open every sweep, and §13 task 5.4b names
+ *    that as the failure the anti-twin fixture exists to catch.
+ *  - **THE FLOOR RESTARTS.** `last_notified_at` is stamped `at`, so the first
+ *    reminder is one `renotify_after` past THIS open rather than past the flapping
+ *    notice that preceded it. Both readings emit the same NUMBER of reminders over
+ *    a day, which is why the fixture asserts their instants by value.
+ *
+ * `firingForMs` is `0` on `provisional → firing`'s rule: the state being reported
+ * began on this sweep. `evidenceRef` is the SWEEP's, and `null` when the sweep saw
+ * nothing — citing the artifact that closed the previous good sweep would attach a
+ * clean report to an open.
+ */
+function settleFlappingIntoFiring(
+  base: IncidentRecord,
+  observation: IncidentObservation,
+  evidenceRef: string | null,
+): IncidentAdvance {
+  const at = observation.at;
+  const reason = base.reason ?? "unhealthy";
+  return {
+    record: {
+      ...base,
+      state: "firing",
+      reason,
+      since: at,
+      flap_transitions: [],
+      last_notified_at: at,
+    },
+    notifications: [
+      {
+        kind: "opened",
+        subject: base.subject,
+        reason,
+        at,
+        sweepId: observation.sweepId,
+        firingForMs: 0,
+        sweepCount: base.sweep_count,
+        evidenceRef,
+      },
+    ],
+  };
 }
 
 /**
@@ -655,7 +734,32 @@ function onObservedClear(
     case "flapping": {
       const lastBad = record.last_seen ?? at;
       if (at - lastBad < policy.flap_window_s * 1_000) {
-        return { record: { ...base, flap_transitions: transitions }, notifications: [] };
+        /*
+         * NOT YET STABLE, and THIS CLEAR IS RECORDED — the line the
+         * `flapping → firing` edge rests on.
+         *
+         * §6.8's other direction asks whether there was *"no observed clear"*
+         * across a `flap_window`, and an empty `flap_transitions[]` is that
+         * question already answered, because the list is pruned to the window on
+         * every advance. It is only the right answer if the clears a flapping
+         * service keeps producing go into it. They are transitions in every sense
+         * that matters here: the record sits in `flapping` precisely BECAUSE it
+         * keeps returning to a clear observation, and the state is a stand-in for
+         * that oscillation rather than a denial of it.
+         *
+         * Omitting the append is not a smaller change, it is a different one: the
+         * list would merely age out, a service alternating forever would empty it
+         * one window after the flapping notice, and the edge would re-open a
+         * service that never settled. That is the anti-twin fixture, and it is
+         * the reason this line is part of task 5.4b.
+         *
+         * These entries cannot reach a future `flap_threshold`: the list is
+         * emptied on the way out to `clear`, in the branch just below.
+         */
+        return {
+          record: { ...base, flap_transitions: [...transitions, at] },
+          notifications: [],
+        };
       }
       const reason = record.reason ?? "unhealthy";
       return {
@@ -754,6 +858,24 @@ function onUnobserved(
         },
       ],
     };
+  }
+
+  /*
+   * §6.8's `flapping → firing`, reached through blindness rather than through a
+   * bad sweep — and it fires, because the table's condition is *"no transitions,
+   * and no observed clear"* and a window of blindness is both.
+   *
+   * **This is the conservative direction and the only one available.** The record
+   * already holds an issue; §6.8 keeps a `firing` record firing across blind
+   * sweeps for exactly this reason; and requiring the settling sweep to have SEEN
+   * something would leave a service that flaps and then goes invisible silent
+   * forever — a hole of the identical shape to the one this edge closes. Nothing
+   * was seen, so nothing is cited: `null`, on the coverage escalation's rule
+   * above that an issue naming an artifact it never read is naming one that does
+   * not exist.
+   */
+  if (record.state === "flapping" && transitions.length === 0) {
+    return settleFlappingIntoFiring(base, observation, null);
   }
 
   /*

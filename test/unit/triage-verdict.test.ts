@@ -68,6 +68,8 @@ import {
   evidenceGaps,
   OBSERVER_ASSESSMENTS,
   sweepIdEcho,
+  type CoverageEntry,
+  type CoverageResult,
   type ObserverArtifact,
   type ObserverAssessment,
   type SweepCoverage,
@@ -403,6 +405,243 @@ describe("§6.7 rule 2 — the structural gate, one fixture per condition", () =
     ["a ledger of one blank entry", { evidence_ref: ["  "] }, ["ledger"]],
   ] as const)("%s is not present", (_name, over, expected) => {
     expect(evidenceGaps(row("mia", over))).toEqual([...expected]);
+  });
+});
+
+/**
+ * §6.7 rule 2's FIFTH condition — §13 task 5.3b, and it is condition 1 read
+ * honestly rather than a new judgement.
+ *
+ * §6.7's ruling: a `healthy` whose `coverage[]` is non-empty but whose every entry
+ * is `not_attempted` passed the gate as written, and *"the reason it is safe to
+ * say so is that **zero attempts and zero entries carry exactly the same
+ * information** — the observer attempted nothing either way, and the array's
+ * length is the only thing that differs."* So it spends the EXISTING `coverage`
+ * gap rather than minting a fifth name, and it needs no threshold.
+ *
+ * ## What is NOT built here, said plainly so the silence is not read as an omission
+ *
+ * *"Were these channels ENOUGH"* has a threshold in it, is the judgement §6.7's
+ * opening sentence removes from the host, and stays refused. This gate cannot tell
+ * one answered channel from five; it can only tell the difference between an
+ * observer that tried and one that did not.
+ *
+ * ## THE ASYMMETRIC FIXTURE IS THE TEST
+ *
+ * This is a quantifier over a set, and this branch's MEMORY records the same
+ * defect six times: *"a subset, filter or intersection check survives mutation
+ * whenever every fixture makes the two sets equal"*. Two ways to get it wrong, and
+ * each needs its own fixture pointed at it:
+ *
+ *  - a gate failing EVERY non-empty `coverage[]` passes both the all-`not_attempted`
+ *    fixture and the empty one — **the mixed fixture with one `answered` entry is
+ *    what fails it**;
+ *  - a gate spelled `some(e => e.result === "answered")` passes the mixed fixture
+ *    and quietly downgrades every `healthy` whose channels came back `unreachable`
+ *    or `forbidden` — which are ATTEMPTS, and are the observer telling the truth
+ *    about what it found. **The per-result fixtures below are what fail that one**,
+ *    and without them the condition is satisfiable by the wrong predicate.
+ */
+describe("§6.7 rule 2's fifth condition — zero attempts and zero entries (task 5.3b)", () => {
+  const chan = (result: CoverageResult, channel: string): CoverageEntry => ({ channel, result });
+
+  /** The three real channel names SRD-OBSERVER-001 §9.2a asks a `healthy` to carry. */
+  const CHANNELS = ["rollout", "restarts", "freshness"] as const;
+
+  /**
+   * The split this condition turns on, asserted BY NAME against the closed set.
+   *
+   * Not by count: the point is which members are ATTEMPTS, and a count assertion
+   * survives a fifth member landing on either side of the line.
+   */
+  test("the attempt axis divides COVERAGE_RESULTS by name", () => {
+    expect(COVERAGE_RESULTS.filter((r) => r !== "not_attempted")).toEqual([
+      "answered",
+      "unreachable",
+      "forbidden",
+    ]);
+    expect([...COVERAGE_RESULTS]).toContain("not_attempted");
+  });
+
+  /**
+   * THE RULING, as an equality between two fixtures rather than as two separate
+   * expectations: §13 task 5.3b's acceptance is that the two *"reach the same
+   * assessment and the same gap by name"*.
+   */
+  test("an all-not_attempted coverage[] reports the same gap as an empty one", () => {
+    const emptyArray = evidenceGaps(row("mia", { coverage: [] }));
+    const noAttempts = evidenceGaps(
+      row("mia", { coverage: CHANNELS.map((c) => chan("not_attempted", c)) }),
+    );
+
+    expect(noAttempts).toEqual(["coverage"]);
+    expect(noAttempts).toEqual(emptyArray);
+  });
+
+  /**
+   * **THE ANTI-CRITERION.** One `answered` among two `not_attempted`s is an
+   * observer that looked, and the gate must let it through.
+   *
+   * Without this fixture the change is satisfiable by a gate that fails every
+   * coverage array, which would downgrade every evidenced `healthy` in the fleet
+   * to `indeterminate` and turn the whole console into a coverage alarm.
+   */
+  test("ANTI: one answered entry among not_attempted is NOT a gap", () => {
+    expect(
+      evidenceGaps(
+        row("mia", {
+          coverage: [
+            chan("not_attempted", CHANNELS[0]),
+            chan("answered", CHANNELS[1]),
+            chan("not_attempted", CHANNELS[2]),
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  /**
+   * **THE SECOND ANTI-CRITERION, and it is the one a plausible implementation
+   * fails.** `unreachable` and `forbidden` are ATTEMPTS.
+   *
+   * SRD-OBSERVER-001 §9.1 puts all three beside `not_attempted` on one axis, and
+   * an observer that tried a channel and was refused by RBAC has told the operator
+   * something true about the cluster. Downgrading that `healthy` would be the host
+   * deciding the channel set was insufficient — the *"were these channels enough"*
+   * judgement §6.7 refuses — and it would arrive as a coverage gap naming the
+   * environment, which is the misdiagnosis direction §6.7 rule 3 spends a section
+   * on.
+   */
+  test.each([["unreachable"], ["forbidden"], ["answered"]] as const)(
+    "a lone %s entry is an attempt and closes the gap",
+    (result) => {
+      expect(evidenceGaps(row("mia", { coverage: [chan(result, CHANNELS[0])] }))).toEqual([]);
+      // And mixed with attempts that were never made, which is the shape a real
+      // partial observation has.
+      expect(
+        evidenceGaps(
+          row("mia", {
+            coverage: [chan("not_attempted", CHANNELS[0]), chan(result, CHANNELS[1])],
+          }),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  /**
+   * THROUGH THE MAPPING, because a gap computed correctly and spent on the wrong
+   * branch is a second, separate defect — the reason the four original conditions
+   * are each graded twice.
+   *
+   * The two fixtures are asserted EQUAL on all three fields, which is task 5.3b's
+   * acceptance sentence executed rather than paraphrased.
+   */
+  test("an all-not_attempted healthy is downgraded exactly as an empty one is", () => {
+    const graded = (coverage: readonly CoverageEntry[]) => {
+      const result = assessTriageSweep(
+        SWEEP,
+        fullCoverage(),
+        doc([row(DECLARED[0], { assessment: "healthy", coverage })]),
+      );
+      const service = of(result, DECLARED[0]);
+      return {
+        assessment: service.assessment,
+        reason: service.reason,
+        gaps: [...service.gaps],
+        claimed: service.claimed,
+      };
+    };
+
+    const noAttempts = graded(CHANNELS.map((c) => chan("not_attempted", c)));
+    expect(noAttempts).toEqual({
+      assessment: "indeterminate",
+      reason: "unevidenced_healthy",
+      gaps: ["coverage"],
+      claimed: "healthy",
+    });
+    expect(noAttempts).toEqual(graded([]));
+  });
+
+  /** The mixed row survives the mapping too, and keeps the observer's own word. */
+  test("ANTI: a healthy with one answered channel survives the mapping", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage(),
+      doc([
+        row(DECLARED[0], {
+          assessment: "healthy",
+          coverage: [chan("not_attempted", CHANNELS[0]), chan("answered", CHANNELS[1])],
+        }),
+      ]),
+    );
+
+    const service = of(result, DECLARED[0]);
+    expect(service.assessment).toBe("healthy");
+    expect(service.reason).toBe("observed");
+    expect(service.gaps).toEqual([]);
+  });
+
+  /**
+   * The gate is still spent on `healthy` ALONE — the fifth condition did not
+   * widen it.
+   *
+   * An `unhealthy` whose channels were all `not_attempted` stays `unhealthy`:
+   * downgrading it would convert a service issue into a coverage gap, which is
+   * §6.7 rule 3's misdiagnosis direction arriving through the gate instead of
+   * through saturation. The gap is still REPORTED, because the structure is a
+   * fact about the row whatever the assessment.
+   */
+  test("an unhealthy row with no attempts is not downgraded, and its gap is still named", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage(),
+      doc([
+        row(DECLARED[0], {
+          assessment: "unhealthy",
+          coverage: CHANNELS.map((c) => chan("not_attempted", c)),
+        }),
+      ]),
+    );
+
+    const service = of(result, DECLARED[0]);
+    expect(service.assessment).toBe("unhealthy");
+    expect(service.reason).toBe("observed");
+    expect(service.gaps).toEqual(["coverage"]);
+  });
+
+  /**
+   * A row that attempted nothing was still REPORTED ON — the count and the
+   * quality are different axes, and 5.3a's saturation verdict reads the count.
+   *
+   * The same property the empty-`coverage[]` fixture asserts, restated for the
+   * new shape: folding this gate failure into `census.counted` would make a lazy
+   * observer arithmetically indistinguishable from an absent one.
+   */
+  test("a healthy that attempted nothing still counts as covered", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage(),
+      doc([
+        row(DECLARED[0], {
+          assessment: "healthy",
+          coverage: CHANNELS.map((c) => chan("not_attempted", c)),
+        }),
+        row(DECLARED[1]),
+        row(DECLARED[2]),
+      ]),
+    );
+
+    expect(of(result, DECLARED[0]).reason).toBe("unevidenced_healthy");
+    expect(result.census.counted).toBe(3);
+    expect(result.census.observers_missing).toEqual([]);
+  });
+
+  /**
+   * The fifth condition did not become a fifth GAP NAME. §13 task 5.3b:
+   * *"spending the existing `coverage` gap rather than a new one"*.
+   */
+  test("EVIDENCE_GAPS did not grow a fifth member", () => {
+    expect([...EVIDENCE_GAPS]).toEqual(["coverage", "selector", "window", "ledger"]);
   });
 });
 

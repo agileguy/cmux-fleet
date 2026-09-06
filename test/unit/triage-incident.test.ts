@@ -710,6 +710,338 @@ describe("the flap window is a filter, and the fixture straddles it", () => {
 });
 
 /**
+ * `flapping → firing` — §6.8's row added 2026-09-06, and §13 task 5.4b.
+ *
+ * **The hole this closes is the worst shape a notifier has.** A service that
+ * flaps and then goes hard down was silent INDEFINITELY: it is not stable, so
+ * `flapping → clear` never fires, and it is not `firing`, so the re-notify floor
+ * never reaches it. §6.8: *"The service that most needs attention is the one that
+ * goes quiet"*.
+ *
+ * ## The anti-twin is the whole test, and it is asserted first
+ *
+ * §13 task 5.4b names the trap outright: a machine that RE-OPENS ON EVERY SWEEP
+ * satisfies *"flaps then goes down notifies exactly once more"* just as well as a
+ * correct one, because that fixture only ever looks at one open. So the
+ * still-flapping twin — 288 sweeps of strict alternation, twenty-four full
+ * `flap_window`s — must still produce **exactly one notification in total**, and
+ * it is the fixture that fails a machine which fires the new edge on the strength
+ * of an empty list it never refreshes.
+ *
+ * ## Instants BY VALUE, never counts
+ *
+ * §12's re-notify criterion was rewritten this way — *"assert the message
+ * instants are exactly `[t0, t0+6h, …]` **BY VALUE**"* — because *"a criterion
+ * whose literal count depends on an unstated inclusivity makes a correct
+ * implementation red"* (§6.8a). The same applies twice as hard here: *"restarts
+ * the re-notify floor"* is a claim about WHERE the first reminder lands, and a
+ * count cannot see the difference between a floor restarted at the open and a
+ * floor still running from the flapping notice.
+ */
+describe("flapping → firing — the service that flaps and then goes hard down", () => {
+  /** `flap_window` measured in sweeps at the shipped cadence: 3600s / 300s. */
+  const WINDOW_SWEEPS = DEFAULTS.flap_window_s / (CADENCE_MS / 1_000);
+  /** Four round trips of strict alternation trip the damping on sweep 7. */
+  const FLAPPED_AT = 7;
+  /** One unbroken window later, and the arithmetic is asserted rather than assumed. */
+  const SETTLED_AT = FLAPPED_AT + WINDOW_SWEEPS;
+
+  const alternating = (n: number): IncidentSignal =>
+    n % 2 === 0 ? issue("unhealthy") : clear();
+
+  /** Flap through sweep 7, then never recover and never be seen clear again. */
+  const flapThenHardDown = (n: number): IncidentSignal =>
+    n <= FLAPPED_AT ? alternating(n) : issue("unhealthy");
+
+  test("the fixture's arithmetic is the shipped window, not a hand-picked number", () => {
+    expect(WINDOW_SWEEPS).toBe(12);
+    expect(SETTLED_AT).toBe(19);
+  });
+
+  /**
+   * THE EDGE. One more notification, one `flap_window` after the flapping
+   * notice, and its instant is asserted by value.
+   */
+  test("it opens exactly once more, one full window after the flapping notice", () => {
+    const { record, notifications } = drive(288, flapThenHardDown, NO_RENOTIFY);
+
+    expect(kinds(notifications)).toEqual(["flapping", "opened"]);
+    expect(notifications.map((n) => n.at)).toEqual([
+      T0 + FLAPPED_AT * CADENCE_MS,
+      T0 + SETTLED_AT * CADENCE_MS,
+    ]);
+    expect(notifications[1]!.reason).toBe("unhealthy");
+    // The sweep's own artifact, not the last clear's: an `opened` that cited the
+    // evidence which closed the previous episode would be citing a good report.
+    expect(notifications[1]!.evidenceRef).toBe("a/1");
+    expect(record.state).toBe("firing");
+
+    /*
+     * §6.8's *"how many sweeps"*, and §7.6's definition of the field: sweeps the
+     * issue was OBSERVED in. Every sweep from the one after the flapping notice
+     * through the settling sweep saw it, which is exactly the window's length —
+     * and stating it as the difference rather than as `12` is what keeps the
+     * assertion meaningful if the cadence or the window moves.
+     */
+    expect(notifications[1]!.sweepCount).toBe(SETTLED_AT - FLAPPED_AT);
+    expect(record.sweep_count).toBe(287 - FLAPPED_AT);
+  });
+
+  /**
+   * **THE ANTI-TWIN, and §13 task 5.4b says it is what the edge is graded on.**
+   *
+   * The same 288 sweeps — twenty-four full `flap_window`s — of a service that
+   * never stops flapping. A machine that fires the new edge whenever its pruned
+   * transition list is empty, without recording the clears it keeps seeing,
+   * re-opens here every window and produces twenty-five notifications. A machine
+   * that fires it on every sweep produces two hundred and sixty-nine.
+   */
+  test("ANTI: a service that keeps flapping still notifies exactly once in total", () => {
+    const { record, notifications } = drive(288, alternating, NO_RENOTIFY);
+
+    expect(kinds(notifications)).toEqual(["flapping"]);
+    expect(notifications.map((n) => n.at)).toEqual([T0 + FLAPPED_AT * CADENCE_MS]);
+    expect(record.state).toBe("flapping");
+  });
+
+  /**
+   * *"and the re-notify floor restarts"* — §6.8's own words for this row, and the
+   * half a count cannot check.
+   *
+   * The floor runs from `last_notified_at`. If the edge does not stamp it, the
+   * clock is still the FLAPPING notice's instant and the first reminder lands
+   * twelve sweeps early, at `T0 + 7·cadence + 6h`. Both readings produce three
+   * reminders in 288 sweeps, so **only the instants separate them**.
+   */
+  test("the re-notify floor restarts AT the open, not at the flapping notice", () => {
+    const renotifyMs = DEFAULTS.renotify_after_s * 1_000;
+    const openedAt = T0 + SETTLED_AT * CADENCE_MS;
+    const { notifications } = drive(288, flapThenHardDown, DEFAULTS);
+
+    expect(kinds(notifications)).toEqual([
+      "flapping",
+      "opened",
+      "reminder",
+      "reminder",
+      "reminder",
+    ]);
+    expect(notifications.map((n) => n.at)).toEqual([
+      T0 + FLAPPED_AT * CADENCE_MS,
+      openedAt,
+      openedAt + renotifyMs,
+      openedAt + 2 * renotifyMs,
+      openedAt + 3 * renotifyMs,
+    ]);
+  });
+
+  /**
+   * THE MECHANISM, asserted directly: a clear observed while `flapping` is
+   * recorded as a transition.
+   *
+   * This is what the edge rests on, and it is the line that separates the two
+   * fixtures above. §6.8's condition is *"no transitions, and no observed
+   * clear"*, and `flap_transitions[]` is already *"timestamps inside
+   * `flap_window`"* (§7.6) — so the window being EMPTY is exactly the condition,
+   * **provided a clear seen while flapping goes into it.** Without this append
+   * the list only ever ages out, and a still-alternating service empties it and
+   * gets re-opened as though it had settled.
+   *
+   * Asserted BY VALUE. A length assertion cannot tell an appended `now` from a
+   * survivor that should have been pruned.
+   */
+  test("a clear observed while flapping is recorded as a transition, by value", () => {
+    const now = T0 + 4 * HOUR_MS;
+    const windowMs = DEFAULTS.flap_window_s * 1_000;
+    const record: IncidentRecord = {
+      ...freshIncidentRecord(SERVICE),
+      state: "flapping",
+      reason: "unhealthy",
+      since: now - 3 * windowMs,
+      // Recent enough that the stability window is NOT met, so this clear holds
+      // the record in `flapping` rather than resolving it.
+      last_seen: now - CADENCE_MS,
+      sweep_count: 9,
+      flap_transitions: [now - 2 * windowMs],
+      last_notified_at: now - 3 * windowMs,
+    };
+
+    const step = advanceIncident(
+      record,
+      { subject: SERVICE, sweepId: "s-c", at: now, signal: clear("clean/c") },
+      NO_RENOTIFY,
+    );
+
+    expect(step.record.state).toBe("flapping");
+    expect(step.notifications).toEqual([]);
+    // The stale entry aged out and THIS clear went in. Both halves, by value.
+    expect(step.record.flap_transitions).toEqual([now]);
+  });
+
+  /**
+   * THE ASYMMETRIC FIXTURE for the edge's own set test.
+   *
+   * The condition is the emptiness of a WINDOW-FILTERED list, and this branch's
+   * MEMORY records six times that *"a filter survives mutation whenever every
+   * fixture makes the two sets equal"*. So the two records below differ in
+   * exactly one entry's timestamp, on opposite sides of the boundary, and the
+   * survivors are named by value:
+   *
+   *     fires  : [now − 3·window, now − 2·window]   → nothing inside
+   *     silent : [now − 3·window, now − window/2]   → one inside, named
+   *
+   * `filter(() => true)` fails the first; `filter(() => false)` fails the second.
+   */
+  describe("the window is a filter here too, and the fixture straddles it", () => {
+    const now = T0 + 4 * HOUR_MS;
+    const windowMs = DEFAULTS.flap_window_s * 1_000;
+    const STALE_OLD = now - 3 * windowMs;
+    const STALE_RECENT = now - 2 * windowMs;
+    const ON_THE_BOUNDARY = now - windowMs;
+    const INSIDE = now - windowMs / 2;
+
+    function flappingWith(transitions: readonly number[]): IncidentRecord {
+      return {
+        ...freshIncidentRecord(SERVICE),
+        state: "flapping",
+        reason: "unhealthy",
+        since: STALE_OLD,
+        last_seen: now - CADENCE_MS,
+        sweep_count: 9,
+        flap_transitions: [...transitions],
+        last_notified_at: STALE_OLD,
+      };
+    }
+
+    function step(transitions: readonly number[]): IncidentAdvance {
+      return advanceIncident(
+        flappingWith(transitions),
+        { subject: SERVICE, sweepId: "s-x", at: now, signal: issue("unhealthy", "a/x") },
+        NO_RENOTIFY,
+      );
+    }
+
+    test("nothing inside the window settles the record into firing", () => {
+      const settled = step([STALE_OLD, STALE_RECENT]);
+      expect(kinds(settled.notifications)).toEqual(["opened"]);
+      expect(settled.record.state).toBe("firing");
+      expect(settled.record.flap_transitions).toEqual([]);
+      expect(settled.record.last_notified_at).toBe(now);
+      expect(settled.record.since).toBe(now);
+
+      /*
+       * `firingForMs` is `0`, on `provisional → firing`'s rule: the state being
+       * announced began on THIS sweep. This record's `since` is three windows
+       * old, so a machine reporting `at - since` here — the plausible reading,
+       * and the one the `recovered` notifications use — says twelve hours and is
+       * red. That is why the assertion lives in this fixture and not in one where
+       * the two happen to coincide.
+       */
+      expect(settled.notifications[0]!.firingForMs).toBe(0);
+    });
+
+    test("ONE live transition and the same sweep stays flapping and silent", () => {
+      const held = step([STALE_OLD, INSIDE]);
+      expect(held.notifications).toEqual([]);
+      expect(held.record.state).toBe("flapping");
+      // The survivor by name, so a filter keeping the wrong entry reddens.
+      expect(held.record.flap_transitions).toEqual([INSIDE]);
+    });
+
+    /**
+     * The boundary itself, both sides. `t > at - window` is exclusive, so a
+     * transition exactly one window old has aged out and the record settles;
+     * one millisecond later it has not. `>=` swaps both of these.
+     */
+    test("the boundary is exclusive, on both sides of it", () => {
+      expect(kinds(step([ON_THE_BOUNDARY]).notifications)).toEqual(["opened"]);
+      expect(step([ON_THE_BOUNDARY + 1]).notifications).toEqual([]);
+    });
+  });
+
+  /**
+   * A flapping record that goes BLIND for a full window also settles, and it
+   * settles to `firing`.
+   *
+   * §6.8's condition column is *"no transitions, and no observed clear"*, and a
+   * window of blindness is both. **This is the conservative direction and the
+   * only one available**: the record already holds an issue, §6.8 keeps a
+   * `firing` record firing through blindness for the same reason, and the
+   * alternative — requiring the settling sweep to have SEEN something — leaves a
+   * service that flaps and then goes invisible silent forever, which is a hole of
+   * the identical shape to the one this edge closes.
+   *
+   * Nothing was seen, so nothing is cited: `evidenceRef` is `null`, on the
+   * coverage escalation's rule that *"a coverage issue that named an artifact
+   * would be naming one that does not exist"*.
+   */
+  test("a flapping record blind for a full window settles to firing, citing nothing", () => {
+    const { record, notifications } = drive(
+      24,
+      (n) => (n <= FLAPPED_AT ? alternating(n) : unobserved),
+      NO_RENOTIFY,
+    );
+
+    expect(kinds(notifications)).toEqual(["flapping", "opened"]);
+    expect(notifications[1]!.at).toBe(T0 + SETTLED_AT * CADENCE_MS);
+    expect(notifications[1]!.evidenceRef).toBe(null);
+    expect(record.state).toBe("firing");
+
+    /*
+     * ZERO OBSERVED SWEEPS, and it is the twin of the hard-down fixture's twelve.
+     * §7.6: `sweep_count` counts the sweeps the issue was OBSERVED in, so a
+     * settle reached entirely through blindness reports none — *"observed in 40
+     * sweeps"* being true of an incident nobody looked at is the same
+     * absence-as-evidence mistake §6.8 spends its longest paragraph on.
+     */
+    expect(notifications[1]!.sweepCount).toBe(0);
+  });
+
+  /**
+   * THE REASON IS THE RECORD'S, and this fixture is the only one that can tell.
+   *
+   * Every other timeline in this block flaps on `unhealthy`, so a settle that
+   * hard-coded the string would be indistinguishable from one that copied the
+   * field — a mutation to `const reason: IssueReason = "unhealthy"` survived the
+   * first battery for exactly that reason. §6.7 puts `degraded` and `unhealthy`
+   * on one axis, and an incident that opened at one amplitude must not be
+   * announced at the other.
+   */
+  test("the settled incident carries the reason it was flapping about", () => {
+    const { record, notifications } = drive(
+      24,
+      (n) => (n <= FLAPPED_AT ? (n % 2 === 0 ? issue("degraded") : clear()) : issue("degraded")),
+      NO_RENOTIFY,
+    );
+
+    expect(kinds(notifications)).toEqual(["flapping", "opened"]);
+    expect(notifications.map((n) => n.reason)).toEqual(["degraded", "degraded"]);
+    expect(record.reason).toBe("degraded");
+  });
+
+  /**
+   * ANTI: the edge does not resurrect a record that recovered.
+   *
+   * A flapping service that goes stable clears through `flapping → clear`, and
+   * `flap_transitions[]` is emptied on the way out (*"one later round trip cannot
+   * re-trip a threshold four round trips earned"*). An edge keyed on emptiness
+   * alone, evaluated without the state guard, would re-open the incident on the
+   * next sweep of a service that is FINE — a false open, which is the direction
+   * this console cannot afford twice.
+   */
+  test("ANTI: a service that recovered is not re-opened by the empty window", () => {
+    const { record, notifications } = drive(
+      60,
+      (n) => (n <= FLAPPED_AT ? alternating(n) : clear()),
+      NO_RENOTIFY,
+    );
+
+    expect(kinds(notifications)).toEqual(["flapping", "recovered"]);
+    expect(record.state).toBe("clear");
+    expect(record.flap_transitions).toEqual([]);
+  });
+});
+
+/**
  * THE RE-NOTIFY FLOOR IS SCOPED TO `firing`, and this block exists because a
  * mutation survived the first battery.
  *
@@ -789,8 +1121,42 @@ describe("the re-notify floor speaks only while firing", () => {
     expect(kinds(step.notifications)).toEqual(["reminder"]);
     expect(step.record.last_notified_at).toBe(T0);
 
-    const flapping: IncidentRecord = { ...firing, state: "flapping" };
-    expect(sweep(flapping, 0, unobserved, DEFAULTS).notifications).toEqual([]);
+    /*
+     * The flapping mirror needs a LIVE transition, and the reason is task 5.4b's
+     * edge rather than a convenience.
+     *
+     * §6.8's `flapping → firing` row fires when a full `flap_window` passes with
+     * no observed clear, and a record with an EMPTY `flap_transitions[]` is one
+     * that has already served that window — so it settles, correctly, and the
+     * notification it composes is an `opened`. That is a different rule from the
+     * one this block is about. A still-FLAPPING record is one that has seen a
+     * clear inside the window, and that is the record this assertion needs.
+     *
+     * The claim under test is unchanged and is now asserted precisely: while
+     * flapping, the six-hour floor composes NOTHING, and in particular no
+     * `reminder`. §6.8's *"goes quiet"* would otherwise be undone six hours at a
+     * time.
+     */
+    const flapping: IncidentRecord = {
+      ...firing,
+      state: "flapping",
+      flap_transitions: [T0 - CADENCE_MS],
+    };
+    const held = sweep(flapping, 0, unobserved, DEFAULTS);
+    expect(held.notifications).toEqual([]);
+    expect(kinds(held.notifications)).not.toContain("reminder");
+    expect(held.record.state).toBe("flapping");
+
+    /*
+     * And the twin, so the silence above is the FLOOR being scoped rather than
+     * the new edge swallowing everything: the same record with nothing live in
+     * its window settles, and what it composes is an `opened` — never a
+     * `reminder`, which would be the floor reaching a state §6.8 says it does not
+     * reach.
+     */
+    const settled = sweep({ ...flapping, flap_transitions: [] }, 0, unobserved, DEFAULTS);
+    expect(kinds(settled.notifications)).toEqual(["opened"]);
+    expect(settled.record.state).toBe("firing");
   });
 });
 

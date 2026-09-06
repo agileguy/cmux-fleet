@@ -118,14 +118,15 @@
  * {@link ObserverArtifact} therefore carries no status field: a field this module
  * accepted and did not read would be a field a later reader assumes is honoured.
  *
- * **The fifth gate condition §6.7 does not have.** A `healthy` row whose
- * `coverage[]` is non-empty but every entry is `not_attempted` passes the gate
- * here, and SRD-OBSERVER-001 §9.2 arguably says it should not — *"Absence of a
- * negative signal from a degraded channel set is `indeterminate` — never
- * `healthy`."* §6.7 rule 2 enumerates exactly four conditions and this module
- * spends exactly those four. Adding a fifth would be this module deciding what a
- * sufficient channel set is, which is the judgement §6.7's opening sentence
- * removes from the host. It is filed as a gap in the SRD rather than closed here.
+ * **"Were these channels ENOUGH" is still refused, and the line moved once.**
+ * §6.7 rule 2 now carries a fifth condition — a `healthy` whose `coverage[]` is
+ * non-empty but whose every entry is `not_attempted` fails the gate — and it is
+ * *"condition 1 read honestly rather than a new judgement"*, because **zero
+ * attempts and zero entries carry exactly the same information**. It spends the
+ * existing `coverage` gap, mints no name and needs no threshold; see
+ * {@link attempted}. What stays refused is the check on the other side of that
+ * line: whether the channels an observer DID answer were sufficient has a
+ * threshold in it, and a host that answered it would be judging.
  */
 
 import type { PartitionAssignment } from "./triage-partition.ts";
@@ -233,10 +234,16 @@ export interface SweepCoverage {
 }
 
 /**
- * §6.7 rule 2's four conditions, as four names.
+ * §6.7 rule 2's conditions, as four names.
  *
  * The order is the sentence's own: *"an empty `coverage[]`, no named selector, no
  * window, or an empty evidence ledger"*.
+ *
+ * **FOUR NAMES AND FIVE CONDITIONS, deliberately.** §13 task 5.3b adds the
+ * all-`not_attempted` case *"spending the existing `coverage` gap rather than a
+ * new one"*, on §6.7's ruling that zero attempts and zero entries say the same
+ * thing. A fifth member would tell the operator they were two different faults
+ * when the thing to go and do about them is identical.
  *
  * **They are reported separately rather than as one boolean**, and that is the
  * difference between a gate a test can hold to account and a gate that merely
@@ -248,7 +255,11 @@ export const EVIDENCE_GAPS = ["coverage", "selector", "window", "ledger"] as con
 export type EvidenceGap = (typeof EVIDENCE_GAPS)[number];
 
 /**
- * Which of §6.7 rule 2's four conditions this row fails. Empty means none.
+ * Which of §6.7 rule 2's conditions this row fails, by name. Empty means none.
+ *
+ * Five conditions over four names: the `coverage` gap covers both an empty
+ * `coverage[]` and one whose every entry is `not_attempted`, on §6.7's ruling
+ * that the two carry the same information (see {@link attempted}).
  *
  * **This grades STRUCTURE and nothing else**, and SRD-REVIEW-CONSOLE D8's
  * sentence travels with it unchanged: it *"is not acceptance and must not be
@@ -273,7 +284,7 @@ export type EvidenceGap = (typeof EVIDENCE_GAPS)[number];
  */
 export function evidenceGaps(row: TriageRow): readonly EvidenceGap[] {
   const gaps: EvidenceGap[] = [];
-  if (row.coverage.length === 0) gaps.push("coverage");
+  if (!row.coverage.some(attempted)) gaps.push("coverage");
   if (!named(row.selector)) gaps.push("selector");
   if (!named(row.window)) gaps.push("window");
   if (!row.evidence_ref.some(named)) gaps.push("ledger");
@@ -283,6 +294,30 @@ export function evidenceGaps(row: TriageRow): readonly EvidenceGap[] {
 /** Present, and not merely a string that exists. */
 function named(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Did the observer TRY this channel — §6.7 rule 2's fifth condition, and §13 task
+ * 5.3b.
+ *
+ * §6.7's ruling, and the whole of the argument: *"**zero attempts and zero entries
+ * carry exactly the same information** — the observer attempted nothing either
+ * way, and the array's length is the only thing that differs."* So a `coverage[]`
+ * of three `not_attempted` entries fails the FIRST condition rather than a fifth
+ * one; it spends the existing `coverage` gap, mints no new name, and needs no
+ * threshold.
+ *
+ * **The predicate is `!== "not_attempted"` and not `=== "answered"`, and the
+ * difference is a judgement this host does not make.** `unreachable` and
+ * `forbidden` are attempts — SRD-OBSERVER-001 §9.1 puts all three on one axis, and
+ * an observer refused by RBAC has told the operator something true. Treating them
+ * as non-evidence would be the host deciding the channel set was insufficient,
+ * which is *"were these channels enough"* — a check with a threshold in it, the
+ * judgement §6.7 rule 2's opening sentence removes from the host, and explicitly
+ * still refused.
+ */
+function attempted(entry: CoverageEntry): boolean {
+  return entry.result !== "not_attempted";
 }
 
 /**
