@@ -247,6 +247,60 @@ second — the resume continues the same transcript, so the ceiling that was
 already reached is reached again sooner. After a second stall, split the
 remainder into further rounds or finish it by hand.
 
+**WITHHOLD LIBRARY-SURFACE CHARACTERISATION FROM THE PARTITION. Do it
+yourself, before you dispatch.**
+
+Characterising a library is NOT an engineer's task. Any task of the form
+"determine what library X emits/accepts/already allows" — the elements and
+attributes a renderer produces, the members of a default schema, the handler
+names a plugin exposes, the option keys a builder takes — comes OUT of the
+partition and onto the project manager. You run the probe, you commit the
+answer, and the engineer's task becomes WIRING a fixture that already exists.
+
+**Why: it destroys turns, and no brief prevents it.** Measured on the md-editor
+SRD, `eng-2`, four consecutive turns: every one ended `stopReason: "length"` at
+the hard 65,536-token output ceiling, mid-word, with no result envelope and all
+uncommitted work lost. The mechanism is a degenerate repetition loop while
+emitting a long run of near-identical identifiers — KaTeX macro names, cycling
+twelve of them until the budget ran out. It is NOT the context window: that run
+sat at 9.2% of 1M.
+
+Three briefs failed to stop it, including one built specifically around
+"measure, do not recall" — the fourth failure happened while the worker was
+faithfully reporting the results of six real probe scripts. **The hazard is the
+LENGTH of the emitted list, not its source**, so an instruction to measure
+rather than remember does not help. Removing the subtask worked on the first
+try. This is the same lesson as the launch-directory finding in the skill's
+Gotchas: a worker doing the wrong thing consistently is being handed the wrong
+thing, and the fix belongs in the tree rather than in the wording.
+
+**It is also cheap, because the OUTPUT surface is small even when the INPUT
+surface is not.** KaTeX accepts thousands of macros and emits 23 tags and 25
+attributes. One script answers it in about a second.
+
+**How to do it.** Accumulate into a `Set` and print the set ONCE, sorted. Never
+print per-item results — a loop that reports what each input produced is the
+same long list by another route, and that is precisely what killed the fourth
+turn. Commit the result as a fixture beside the code that consumes it, together
+with the script that regenerates it, so the answer can be refreshed after an
+upgrade instead of re-derived by hand.
+
+Choose probe inputs for STRUCTURAL diversity, and beware the degenerate fixture:
+probing only `\;` dropped `separator` from the KaTeX allowlist, because only a
+literal `;` emits it — an allowlist that would then have silently stripped that
+attribute from every document with a semicolon in its math.
+
+**And tell the engineer, in the brief, that the answer already exists**, naming
+the fixture path and saying explicitly that it must not re-derive it. Add the
+standing cap while you are there: never emit a list of more than about fifteen
+similar identifiers, from memory or from a script's output.
+
+**Extension beats transcription.** Where the engineer must build on a library's
+default (a sanitizer schema, a handler table), the brief says to SPREAD it —
+`{...defaultSchema, tagNames: [...defaultSchema.tagNames, ...EXTRA]}` — which
+needs none of the 53 names transcribed and stays correct across upgrades. Give
+it the DELTA it must add, never the base it must reproduce.
+
 **2. Dispatch both engineers for THIS ROUND, in one message.**
 
 ```bash
