@@ -339,9 +339,11 @@ describe("a restart resolves its title before it stops anything", () => {
  * right".
  *
  * What no module can answer is whether the SCRIPTS still delegate — a script
- * that re-inlines the sequence is back where it started with the module sitting
- * unused beside it — and whether the `--task` path, whose module takes no `plan`
- * dep, still resolves the title itself. So exactly those two facts are checked
+ * that re-inlines a step is back where it started with the module sitting
+ * unused beside it — and that is now asked of three things: the bare path's
+ * whole sequence, the title resolution the `--task` path must do itself because
+ * its module takes no `plan` dep, and the relay stop `review` hands over rather
+ * than performing on the line above the call. Those three facts are checked
  * against the source, and a marker that cannot be found FAILS. It never skips:
  * a marker that has moved means the check this file used to perform is gone,
  * and reporting that as a pass is how a guard disappears without anyone finding
@@ -416,19 +418,44 @@ describe("every console script hands its --restart ordering to the module", () =
     });
   }
 
-  test("scripts/review resolves the title before its --task path stops the relay", async () => {
+  test("scripts/review hands its --task relay stop to the module instead of calling it", async () => {
     /*
-     * `review` is the console that pays most for a late refusal: the relay pins
-     * run ids for the life of the process, so stopping it on a title that is
-     * then refused leaves four healthy workers and nothing able to turn a
-     * collator's dispatch request into reviews. The bare path gets this from
-     * `resolveThenRestart`; the `--task` path spells it here.
+     * THIS TEST USED TO ASSERT THE OPPOSITE, and was right to at the time.
+     *
+     * `review` stopped the relay itself, on the line before `recreateThenDispatch`,
+     * and what this file checked was that the title was resolved before that
+     * happened. Both facts were true and the ordering was still wrong one level
+     * out: the module's wait can run for twenty minutes and then refuse, saying
+     * *"Nothing has been stopped"* — and on this console it had been. The relay
+     * was gone before the wait began, so the refusal left four healthy workers
+     * and nothing able to turn a collator's dispatch request into reviews.
+     *
+     * The stop is now a dep, fired between the settled wait and the teardown,
+     * and its POSITION is asserted in `test/unit/fresh-dispatch.test.ts` against
+     * recorded calls rather than against source text — the same treatment the
+     * bare path already gets from `resolveThenRestart`. What is left for this
+     * file is the one thing no module can answer: that the script delegates at
+     * all, rather than re-inlining the stop beside a module that also does it.
+     *
+     * The two spans are bounded by markers that THROW when missing, and the
+     * `not.toContain` is deliberately the narrower of the two: it reads only as
+     * far as the module call, so the dep's own `quiesce` reference below cannot
+     * satisfy it and a re-inlined stop cannot hide behind it.
      */
     const src = await source("review");
     const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
     const task = at(src, TASK_PATH, branch, "the --task path has moved out of the branch");
-    const resolved = at(src, "plan();", task, "the --task path must resolve the title itself");
-    const relay = at(src, "await quiesce();", task, "the --task path no longer stops the relay");
-    expect(resolved).toBeLessThan(relay);
+    const call = at(src, "recreateThenDispatch(", task, "the --task path calls no module");
+    const opts = at(
+      src,
+      "{ worker: restartFlag },",
+      call,
+      "the --task path's dep object is not closed by the options argument",
+    );
+
+    // Nothing between entering the branch and calling the module may stop it.
+    expect(src.slice(task, call)).not.toContain("quiesce(");
+    // And the module is given it, so the module decides when.
+    expect(src.slice(call, opts)).toContain("quiesce");
   });
 });

@@ -3,12 +3,19 @@
  * effects that make both of them testable.
  *
  * {@link recreateThenDispatch} is `--restart <worker> --task <file>`: wait,
- * stop, respawn, dispatch. {@link resolveThenRestart} is the bare
- * `--restart <worker>`: resolve the pane, stop, respawn. They are siblings on
- * purpose — the same four side effects, the same convention for injecting
- * them, the same suite re-checking the order — because the SECOND of them was
- * once written inline in three scripts and got the order right in none of them
- * for the same reason twice.
+ * quiesce the relay, stop, respawn, dispatch. {@link resolveThenRestart} is the
+ * bare `--restart <worker>`: resolve the pane, quiesce the relay, stop, respawn.
+ * They are siblings on purpose — overlapping side effects, the same convention
+ * for injecting them, the same suite re-checking the order — because the SECOND
+ * of them was once written inline in three scripts and got the order right in
+ * none of them for the same reason twice.
+ *
+ * The relay stop is the newest of those side effects and it arrived by the same
+ * route. It was the SCRIPT's to sequence on the `--task` path, one line above
+ * the call, and being outside the module put it above a wait that refuses —
+ * which is the one place it must never be. It is a dep on both functions now,
+ * declared with the same required-and-nullable type, so the two have one shape
+ * and a console states whether it has a fifth process rather than implying it.
  *
  * A note on a claim this module falsifies, because it was written down and
  * believed: `ISA.md` said the stop-then-respawn ordering *"could not be moved
@@ -161,6 +168,24 @@ export function busyRefusal(worker: string, busy: readonly WorkerActivity[]): st
 export interface FreshDispatchDeps {
   /** stdout of `pifleet status --all --json`. */
   readonly status: () => Promise<string>;
+  /**
+   * Stop the console's relay, or `null` for a console that has none.
+   *
+   * REQUIRED AND NULLABLE rather than optional, for the reason
+   * {@link ConsoleRestartDeps.quiesce} gives and this function has its own
+   * measurement of: an omitted optional field and a console that genuinely has
+   * no relay look identical at the call site, and `null` and a missing property
+   * do not. `operations` and `development` have no fifth process; `review` does.
+   *
+   * It is a DEP rather than something the caller does first because of WHEN it
+   * has to happen. `scripts/review` used to stop its relay on the line above the
+   * call, which put the one unrecoverable step of this path ABOVE a wait that
+   * runs for up to twenty minutes and then refuses with the words *"Nothing has
+   * been stopped"* — words that were false on that console. Handed here, the
+   * stop lands after the settle and before the teardown, and the refusal keeps
+   * its promise for every caller rather than for two of the three.
+   */
+  readonly quiesce: (() => Promise<void>) | null;
   /** `pifleet down --run <id>`. */
   readonly down: (runId: string) => Promise<void>;
   /** Respawn the worker's console pane, which re-runs its `up`. */
@@ -198,7 +223,11 @@ const DEFAULT_POLL_MS = 3_000;
 /**
  * Wait for `worker` to be holding nothing, then recreate it, then dispatch.
  *
- * Throws — having stopped nothing — if the worker does not settle in time.
+ * Throws — having stopped nothing, THE RELAY INCLUDED — if the worker does not
+ * settle in time. That second clause is the whole of ISC-572: the promise the
+ * refusal makes is about the fleet, and a caller that had already taken its
+ * fifth process down before calling made it a lie on the one console where the
+ * fifth process is what turns a dispatch request into reviews.
  */
 export async function recreateThenDispatch(
   deps: FreshDispatchDeps,
@@ -225,11 +254,24 @@ export async function recreateThenDispatch(
   }
   const settleWaitMs = deps.now() - started;
 
-  // PHASE 2 — the runs to replace, named from the SETTLED status read.
+  /*
+   * PHASE 2 — THE RELAY GOES DOWN, AND NOT ONE LINE EARLIER.
+   *
+   * Below the wait because the wait can REFUSE, and above the teardown because
+   * the relay's whole configuration is run ids — `--run <id>` for the collator
+   * and a `PIFLEET_RELAY_RUNS` pin for the other three, both fixed for the life
+   * of the process. Stopping the runs first leaves it polling a dead run in
+   * silence; stopping it before the wait spends it on a recreate that may never
+   * happen. Those are the same two constraints {@link resolveThenRestart} works
+   * under, and this is the same place in the sequence it puts them.
+   */
+  if (deps.quiesce !== null) await deps.quiesce();
+
+  // PHASE 3 — the runs to replace, named from the SETTLED status read.
   const previous = runsHoldingAny(statusJson, new Set([opts.worker]));
   for (const runId of previous) await deps.down(runId);
 
-  // PHASE 3 — respawn, then wait for a run that is not one of the old ones.
+  // PHASE 4 — respawn, then wait for a run that is not one of the old ones.
   await deps.restartPane();
   const readyBy = deps.now() + readyTimeout;
   let fresh: WorkerActivity | undefined;
@@ -261,7 +303,7 @@ export async function recreateThenDispatch(
   }
 
   /*
-   * PHASE 4 — dispatch, AND CHECK THAT IT LANDED.
+   * PHASE 5 — dispatch, AND CHECK THAT IT LANDED.
    *
    * **MEASURED, and the reason this is not just `await deps.dispatch(...)`.**
    * `scripts/review` wires this dep to a helper whose own docblock says it runs

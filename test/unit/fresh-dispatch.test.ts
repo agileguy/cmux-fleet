@@ -64,8 +64,16 @@ interface Harness {
   calls: string[];
 }
 
-/** `reads` is consumed one entry per `status()` call; the last one repeats. */
-function harness(reads: string[]): Harness {
+/**
+ * `reads` is consumed one entry per `status()` call; the last one repeats.
+ *
+ * `relay` says whether this console has a fifth process, which is the same
+ * thing the `quiesce` dep says and the reason that dep is nullable rather than
+ * optional. It defaults to the `null` console because most of the assertions
+ * below are about the recreate itself; the ones that are about the relay say
+ * `{ relay: true }` and read as such.
+ */
+function harness(reads: string[], o: { relay?: boolean } = {}): Harness {
   const calls: string[] = [];
   let i = 0;
   let clock = 0;
@@ -78,6 +86,7 @@ function harness(reads: string[]): Harness {
         calls.push("status");
         return r;
       },
+      quiesce: o.relay === true ? async () => void calls.push("stopRelay") : null,
       down: async (runId) => {
         calls.push(`down:${runId}`);
       },
@@ -339,6 +348,110 @@ describe("the order of a clean recreate", () => {
     expect(r.stopped).toEqual([]);
     expect(h.calls.filter((c) => c.startsWith("down:"))).toEqual([]);
     expect(r.runId).toBe("run-new");
+  });
+});
+
+/**
+ * ── THE RELAY, AND THE REFUSAL THAT HAD ALREADY SPENT IT ───────────────────
+ *
+ * `scripts/review` runs a fifth process whose whole configuration is run ids —
+ * `--run <id>` for the collator, a `PIFLEET_RELAY_RUNS` pin for the other three,
+ * both fixed for the life of the process — so a recreate has to stop it, and a
+ * relay left pointing at a dead run polls forever in silence.
+ *
+ * The script used to stop it ITSELF, on the line before this module was called.
+ * That put the only unrecoverable step of the `--task` path ABOVE a wait that
+ * lasts up to twenty minutes and then REFUSES, and the refusal it printed —
+ * *"Nothing has been stopped"* — was false on that console: the fifth process
+ * was already gone. What an operator was left holding was four healthy workers
+ * and nothing able to turn a collator's dispatch request into reviews, after a
+ * command that told them nothing had happened.
+ *
+ * So the relay stop is a dep here, exactly as it already was for
+ * `resolveThenRestart`, and WHEN it fires is checked below rather than by
+ * reading a script.
+ */
+describe("the relay is stopped after the wait, and never on a refusal", () => {
+  const BUSY = status([
+    { run_id: "run-old", workers: [{ id: "tst-1", phase: "busy", task_id: "T-1" }] },
+  ]);
+
+  /**
+   * THE INVARIANT — and both halves of it are one test on purpose.
+   *
+   * The refusal's call list alone proves nothing. Before the fix this module
+   * had no `quiesce` dep at all, so "the relay was not stopped" was true of the
+   * refusal AND of the success path, and an assertion that only looked at the
+   * refusal was green on the defect it exists to catch. What makes it a claim
+   * about ORDER rather than about absence is the second list: the same harness,
+   * the same relay, a worker that settles — and there the stop is present. One
+   * without the other is a fixture that cannot fail.
+   */
+  test("a settle-timeout refusal leaves the relay RUNNING", async () => {
+    const refused = harness([BUSY], { relay: true });
+    await expect(
+      recreateThenDispatch(refused.deps, {
+        worker: "tst-1",
+        settleTimeoutMs: 2_000,
+        pollMs: 1_000,
+      }),
+    ).rejects.toThrow(/still holds work/);
+    /*
+     * Three reads and NOTHING else — the first, and one after each of the two
+     * polls a 2s budget affords. An exact list rather than three
+     * `not.toContain`s, because the list is also what says no side effect
+     * added to a future phase 1 can slip in above the refusal.
+     */
+    expect(refused.calls).toEqual(["status", "status", "status"]);
+
+    const settled = harness([IDLE, FRESH], { relay: true });
+    await recreateThenDispatch(settled.deps, { worker: "tst-1", pollMs: 100 });
+    expect(settled.calls).toEqual([
+      "status",
+      "stopRelay",
+      "down:run-old",
+      "restartPane",
+      "status",
+      "dispatch:run-new",
+    ]);
+  });
+
+  test("a worker that settles LATE keeps its relay for the whole wait", async () => {
+    /*
+     * The discriminating shape, and the one the invariant is really about. A
+     * worker that is already idle on the first read cannot tell a relay stopped
+     * after the wait from one stopped before it — both produce a stop near the
+     * top of the list. Here the wait takes two polls, so the position of
+     * `stopRelay` in the sequence is the answer: after every busy read, before
+     * the teardown that invalidates the ids it pins, and before the respawn.
+     */
+    const h = harness([BUSY, BUSY, IDLE, FRESH], { relay: true });
+    const r = await recreateThenDispatch(h.deps, { worker: "tst-1", pollMs: 1_000 });
+    expect(r.settleWaitMs).toBe(2_000);
+    expect(h.calls).toEqual([
+      "status",
+      "status",
+      "status",
+      "stopRelay",
+      "down:run-old",
+      "restartPane",
+      "status",
+      "dispatch:run-new",
+    ]);
+  });
+
+  test("a console with no relay says so with null, and nothing else moves", async () => {
+    // `operations` and `development` have no fifth process. The field is
+    // required and nullable so they have to say which they are.
+    const h = harness([IDLE, FRESH], { relay: false });
+    await recreateThenDispatch(h.deps, { worker: "tst-1", pollMs: 100 });
+    expect(h.calls).toEqual([
+      "status",
+      "down:run-old",
+      "restartPane",
+      "status",
+      "dispatch:run-new",
+    ]);
   });
 });
 

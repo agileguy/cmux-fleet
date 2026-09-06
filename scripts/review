@@ -280,9 +280,13 @@ async function main(argv: string[]): Promise<number> {
      * relay whose pin names a run that no longer exists — and a pinned worker
      * that cannot be resolved refuses every fan-out, quietly, forever.
      *
-     * Passed to the module as `quiesce` rather than called here, so that WHEN
-     * it happens — after the title is resolved, before the runs go down — is
-     * checked by the unit suite instead of by reading this file.
+     * Passed to BOTH modules as `quiesce` rather than called here, so that WHEN
+     * it happens is checked by the unit suite instead of by reading this file.
+     * The two paths need it at different moments and only the modules know
+     * which: the bare path stops it once the title resolves, and the `--task`
+     * path stops it once the worker has gone idle — because that path's wait can
+     * end in a refusal, and this script calling it first made that refusal's
+     * "Nothing has been stopped" false on this console alone.
      */
     const quiesce = (): Promise<void> =>
       stopRelay(`before the ${restartFlag} pane is respawned`);
@@ -301,15 +305,16 @@ async function main(argv: string[]): Promise<number> {
      * plausible-looking review of the wrong change.
      *
      * NOTHING is stopped until the worker is holding no task, staged ones
-     * included; the waiting, the refusal and the ordering are in
-     * `src/run/fresh-dispatch.ts` where they are unit-tested.
+     * included — the relay included too, which is why `quiesce` is handed over
+     * below instead of being called here. The waiting, the refusal and the
+     * ordering are in `src/run/fresh-dispatch.ts` where they are unit-tested.
      */
     if (taskFlag !== undefined) {
       plan();
-      await quiesce();
       const r = await recreateThenDispatch(
         {
           status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          quiesce,
           down: async (runId) => {
             process.stderr.write(`review: stopping run ${runId}\n`);
             await runOutput(repoRoot, ["down", "--run", runId]);

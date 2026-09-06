@@ -252,6 +252,8 @@ async function main(argv: string[]): Promise<number> {
       const r = await recreateThenDispatch(
         {
           status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          // No fifth process on this console — see `FreshDispatchDeps.quiesce`.
+          quiesce: null,
           down: async (runId) => {
             process.stderr.write(`development: stopping run ${runId}\n`);
             await runOutput(repoRoot, ["down", "--run", runId]);
