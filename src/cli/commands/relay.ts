@@ -96,10 +96,24 @@ import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import {
   REVIEW_CONSOLE_ROSTER,
+  TRIAGE_CONSOLE_ROSTER,
   type ConsoleRoster,
   type DispatchRequest,
   readDispatchRequest,
 } from "../../run/dispatch-request.ts";
+/*
+ * The aspect tables come from `run/task-ids.ts` DIRECTLY and not through
+ * `run/relay.ts`'s re-export block, which that block's own header now states as
+ * a rule: names added to `task-ids.ts` after the extraction are addressed at
+ * `task-ids.ts`. `REVIEW_CONSOLE_ASPECTS` predates it and would be reachable
+ * either way; spelling both imports from one place is what stops the next
+ * console's table from being the reason the block is widened.
+ */
+import {
+  REVIEW_CONSOLE_ASPECTS,
+  TRIAGE_CONSOLE_ASPECTS,
+  type AspectSeat,
+} from "../../run/task-ids.ts";
 import { ConsoleWatch } from "../../run/console-relay.ts";
 import { classifyRequest, recordDispatch } from "../../run/relay-journal.ts";
 import { consoleFanOut } from "../../run/relay.ts";
@@ -113,6 +127,15 @@ import { consoleFanOut } from "../../run/relay.ts";
  * have broken the pin while changing nothing it is about.
  */
 import { productionRunSources } from "../../run/relay.ts";
+/*
+ * A THIRD statement from that module, on the SECOND one's precedent and for its
+ * reason. `collator-relay-adapter.test.ts` pins the exact text
+ * `import { consoleFanOut } from "../../run/relay.ts"`, so widening the first
+ * statement to carry `consoleFanOutFor` would have broken a pin that is not
+ * about this change at all — it is about the CLI depending on that symbol by
+ * name. Adding a statement leaves the pin saying what it was written to say.
+ */
+import { consoleFanOutFor } from "../../run/relay.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
   inboxTaskPath,
@@ -215,6 +238,119 @@ export type RelayFanOutResult =
  * is left before this command can run.**
  */
 export type RelayFanOut = (input: RelayFanOutInput) => Promise<RelayFanOutResult>;
+
+/**
+ * A CONSOLE, as the actor needs to know it — SRD-TRIAGE-CONSOLE §13 task 2.2.
+ *
+ * **A roster plus an aspect table, which is D5's definition and not a new one.**
+ * `TRIAGE_CONSOLE_ASPECTS`' own docblock states it: *"A console is a roster plus
+ * an aspect table, and a second console is therefore two values rather than a
+ * branch on which console is being served."* This interface is that sentence
+ * given a name, so the two values travel together and cannot be selected apart.
+ *
+ * ## Why the registry is HERE and not in `run/relay.ts`
+ *
+ * The rosters are `dispatch-request.ts`'s and the aspect tables are
+ * `task-ids.ts`'s, and `run/relay.ts` cannot import the first as a VALUE:
+ * `dispatch-request.ts:124` already imports `isCollationTaskId` from
+ * `run/relay.ts`, so a value edge back would be a runtime cycle whose
+ * correctness depends on evaluation order — the hazard `task-ids.ts` duplicates
+ * `MAX_RELAY_TASK_ID_CHARS` rather than risk. This module imports both halves
+ * already and nothing imports it back except as a type, so it is the lowest
+ * place both values are legal at once.
+ *
+ * ## The two fields that look redundant, and why both are spelled
+ *
+ * `fanOut` is built from `aspects` — `consoleFanOutFor(aspects)` is its whole
+ * definition — so a spec whose two fields disagree is constructible. They are
+ * spelled anyway, on `REVIEW_CONSOLE_ROSTER`'s own trade against
+ * `DEFAULT_REVIEW_WORKERS`: *"Spelling both halves and testing the union is the
+ * version whose failure is a red test rather than a working console that does
+ * nothing."* `relay-console.test.ts` pins the pairing for every registered
+ * console, so a mismatch is red rather than a fan-out into the wrong seats.
+ *
+ * The review console's `fanOut` is the module-level `consoleFanOut` binding
+ * rather than a fresh `consoleFanOutFor(REVIEW_CONSOLE_ASPECTS)`, and that is
+ * deliberate: `collator-relay-adapter.test.ts` pins the CLI's dependence on that
+ * exact symbol, and a shipped console whose live fan-out stopped being the
+ * pinned binding would leave the pin passing on text while testing nothing.
+ */
+export interface ConsoleSpec {
+  /** The `--console` value. */
+  readonly name: string;
+  /** Who may ask, and who may be asked — `dispatch-request.ts`'s two questions. */
+  readonly roster: ConsoleRoster;
+  /** Which seats exist, and therefore which runs the fan-out looks for. */
+  readonly aspects: readonly AspectSeat[];
+  /** The production fan-out bound to `aspects`. */
+  readonly fanOut: RelayFanOut;
+}
+
+/**
+ * Every console this actor can serve.
+ *
+ * An array rather than a `Record`, so the refusal below can list the names in a
+ * fixed order and the default can be named as a member rather than as a string
+ * that happens to match a key.
+ */
+export const CONSOLES: readonly ConsoleSpec[] = [
+  {
+    name: "review",
+    roster: REVIEW_CONSOLE_ROSTER,
+    aspects: REVIEW_CONSOLE_ASPECTS,
+    fanOut: consoleFanOut,
+  },
+  {
+    name: "triage",
+    roster: TRIAGE_CONSOLE_ROSTER,
+    aspects: TRIAGE_CONSOLE_ASPECTS,
+    fanOut: consoleFanOutFor(TRIAGE_CONSOLE_ASPECTS),
+  },
+];
+
+/**
+ * The console served when `--console` is not given.
+ *
+ * `review` because it is the console that exists today and the one
+ * `scripts/review` starts without the flag; a default that changed under a
+ * shipped script would be this change breaking the thing it was careful not to
+ * touch.
+ */
+export const DEFAULT_CONSOLE = "review";
+
+/**
+ * `--console <name>` → the two values that name selects, or a refusal.
+ *
+ * **AN UNKNOWN NAME IS REFUSED, NEVER DEFAULTED, and that is the whole reason
+ * this is a function rather than a `find(...) ?? CONSOLES[0]`.**
+ *
+ * The tempting spelling falls back to the review console on anything it does not
+ * recognise, and it is wrong in a way that only shows up in production: the
+ * operator who types `--console triage-console` gets a process that starts
+ * cleanly, prints the same lines a working actor prints, and runs the TRIAGE
+ * CLOCK against the REVIEW console's roster — polling `col-1`, refusing every
+ * observer's request as `worker_not_in_console`, and dispatching a five-minute
+ * cadence of nothing. There is no observable that separates it from a healthy
+ * triage actor, which is §6.4's own failure shape (*"a collator that dispatched
+ * three reviews is indistinguishable from one that dispatched none"*) reached
+ * through a typo.
+ *
+ * `EXIT.USAGE`, because it is: the argument is wrong and no amount of retrying
+ * fixes it. The known names are listed rather than merely counted, so the
+ * operator's next command is the corrected one.
+ */
+export function resolveConsole(name: string | undefined): ConsoleSpec {
+  const wanted = name ?? DEFAULT_CONSOLE;
+  const spec = CONSOLES.find((c) => c.name === wanted);
+  if (spec !== undefined) return spec;
+  throw new CliError(
+    `unknown console ${JSON.stringify(wanted)}. This actor serves ` +
+      `${CONSOLES.map((c) => c.name).join(", ")}, and an unrecognised name is refused rather ` +
+      `than defaulted: falling back would run one console's clock against another console's ` +
+      `roster, which starts cleanly, logs like a healthy actor and dispatches nothing.`,
+    EXIT.USAGE,
+  );
+}
 
 /** What one request did on one pass. The code is the assertion surface, not the prose. */
 export type RelayPassOutcomeKind =
@@ -374,22 +510,44 @@ export async function relayPass(opts: {
    * fleet: a task dispatched to `eng-1` is not this console's business, and its
    * outbox is not read.
    *
-   * ## `sender_not_collator` is UNREACHABLE here today, and the widening stays
+   * ## `sender_not_collator` REACHES PRODUCTION ON THE TRIAGE CONSOLE, and the
+   * widening is what makes that free
    *
-   * Under D4 this pass reads ONE run's inbox, and it is the collator's — so the
-   * only senders it can enumerate are the workers that run holds, which in the
-   * shipped four-run console is the collator alone. A reviewer's outbox lives in
-   * a different run that this pass never opens, so `checkSender`'s refusal
-   * cannot fire from here no matter what a reviewer writes.
+   * **This paragraph used to say the refusal was unreachable and that the fix
+   * waited on `--console`. `--console` has landed, and the reachability changed
+   * with it rather than the loop.**
    *
-   * **The widening is kept anyway, because narrowing it would be a silent
-   * no-op.** Filtering to collators would make the refusal dead in a second,
-   * less visible way and would delete the evidence path for the day this
-   * changes. And the honest fix is not in this loop: making a reviewer's request
-   * observable means enumerating the OTHER runs' outboxes, which is the same
-   * worker→run scoping problem the fan-out solves with `PIFLEET_RELAY_RUNS`, and
-   * it should be solved once — when `--console` lands (§6.5) — rather than twice
-   * in two shapes. Stated here rather than left as an apparent oversight.
+   * On the REVIEW console the old reading still holds exactly: D4 makes it four
+   * runs, this pass reads ONE of them, and it is the collator's — so the only
+   * senders it can enumerate are the workers that run holds, which is `col-1`
+   * alone. A reviewer's outbox lives in a run this pass never opens, so
+   * `checkSender` cannot fire here no matter what a reviewer writes.
+   *
+   * On the TRIAGE console it is live on the first tick. SRD-TRIAGE-CONSOLE D3
+   * puts all four seats in **one run** (`rpc`, no keyboard, §6.1), so the three
+   * observers share the collator's inbox — `onConsole` enumerates them, an
+   * observer that writes `dispatch-request.json` IS read, and `checkSender`
+   * refuses it as `sender_not_collator`. That is §4.2's rule (*"an agent may not
+   * dispatch"*) becoming an enforced refusal instead of an unreachable one, and
+   * it is enforced by the module that states it rather than by an omission here.
+   * **This is the payoff the widening was kept for**, and it arrived without a
+   * line of change in this loop.
+   *
+   * ## What `--console` solved, and the one thing it deliberately did not
+   *
+   * It solved the worker→run scoping problem ONCE, where the SRD said to: in the
+   * fan-out. `consoleFanOutFor` threads the selected console's aspect table to
+   * `consoleRunResolution`, so the scan looks for the seats the selected console
+   * actually has. There is no second scan here and there must not be one — the
+   * ingredients are now in scope (`opts.roster` is the selected console's), and
+   * that is precisely the state in which a second, differently-shaped map gets
+   * written by accident.
+   *
+   * **This pass still reads exactly one run's inbox, on every console.** Making
+   * a REVIEW-console reviewer's request observable would still mean enumerating
+   * other runs' outboxes, and that is still not this loop's job; it is the
+   * fan-out's map, or it is nothing. Stated as a boundary that is kept rather
+   * than as a gap that is pending.
    */
   const onConsole = new Set([...roster.collators, ...roster.reviewers]);
 
@@ -607,6 +765,23 @@ export function renderOutcome(o: RelayPassOutcome): string {
   }
 }
 
+/**
+ * `relay`'s flags, named rather than inlined at `.action`.
+ *
+ * Inline was fine at four fields and stops being fine at five: the inline
+ * annotation pushed the callback onto its own lines, which re-indented the
+ * entire action body and would have buried a twenty-line change in a
+ * hundred-and-thirty-line diff. The type is the same type; only its address
+ * changed.
+ */
+interface RelayCommandOptions {
+  run?: string;
+  console?: string;
+  once?: boolean;
+  poll?: string;
+  json?: boolean;
+}
+
 export function register(program: Command): void {
   program
     .command("relay")
@@ -615,10 +790,25 @@ export function register(program: Command): void {
         "(the review console's actor; --once does a single pass and exits)",
     )
     .option("-r, --run <id>", "run id (defaults to the most recent live run)")
+    .option(
+      "--console <name>",
+      `which console to serve: ${CONSOLES.map((c) => c.name).join(" | ")} (default: ${DEFAULT_CONSOLE})`,
+    )
     .option("--once", "make a single pass and exit, rather than polling")
     .option("--poll <seconds>", `seconds between passes (default: ${DEFAULT_POLL_S})`)
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { run?: string; once?: boolean; poll?: string; json?: boolean }) => {
+    .action(async (opts: RelayCommandOptions) => {
+      /**
+       * THE CONSOLE IS RESOLVED FIRST, before `--poll` and before any run
+       * lookup, because it is the argument every later step is relative to.
+       *
+       * An unknown name refused here costs nothing; the same name refused after
+       * `resolveCollatorRun` would have already scanned the runs root for a
+       * roster the operator did not ask for and reported its absence in that
+       * roster's terms — a second, wrong sentence in front of the right one.
+       */
+      const spec = resolveConsole(opts.console);
+
       const pollS = opts.poll === undefined ? DEFAULT_POLL_S : Number(opts.poll);
       if (!Number.isFinite(pollS) || pollS <= 0) {
         throw new CliError(
@@ -629,9 +819,17 @@ export function register(program: Command): void {
 
       const run =
         opts.run === undefined
-          ? await resolveCollatorRun(REVIEW_CONSOLE_ROSTER)
+          ? await resolveCollatorRun(spec.roster)
           : await resolveRunPaths(opts.run);
-      const fanOut: RelayFanOut = consoleFanOut;
+      /**
+       * The fan-out comes from the SPEC, so the aspect table that decides which
+       * runs are looked for is the same one that decides which seats are
+       * dispatched to. Reading `consoleFanOut` here instead would have made
+       * `--console triage` a flag that changed the roster and nothing else: the
+       * pass would accept `tri-1`'s request and the fan-out would then resolve a
+       * map of three reviewers this console does not have.
+       */
+      const fanOut: RelayFanOut = spec.fanOut;
       const cache: InboxWorkerCache = new Map();
       const ledger = new LedgerWriter(run, `cli-relay-${process.pid}`);
 
@@ -693,7 +891,7 @@ export function register(program: Command): void {
       };
 
       if (opts.once === true) {
-        emit(await relayPass({ run, fanOut, cache, ledger }));
+        emit(await relayPass({ run, fanOut, cache, ledger, roster: spec.roster }));
         return;
       }
 
@@ -737,14 +935,22 @@ export function register(program: Command): void {
        * *"`pifleet down` removes containers and leaves directories"*, so it
        * would answer `true` forever and the watch would never fire.
        */
+      /**
+       * The watched collator is the SELECTED console's, so a triage actor reaps
+       * itself when `tri-1` goes away rather than when `col-1` does — §6.4's
+       * *"The triage actor watches `tri-1` for the same reason the relay watches
+       * its collator."* Left hard-coded, a triage actor would have exited the
+       * moment the unrelated review console came down, and would have run
+       * forever after its own console was gone.
+       */
       const watch = new ConsoleWatch();
       const collator =
-        REVIEW_CONSOLE_ROSTER.collators.find((c) => existsSync(workerPaths(run, c).dir)) ??
-        REVIEW_CONSOLE_ROSTER.collators[0]!;
+        spec.roster.collators.find((c) => existsSync(workerPaths(run, c).dir)) ??
+        spec.roster.collators[0]!;
 
       for (;;) {
         try {
-          emit(await relayPass({ run, fanOut, cache, ledger }));
+          emit(await relayPass({ run, fanOut, cache, ledger, roster: spec.roster }));
           const live = await productionRunSources.isLiveWorker(run, collator);
           const abandon = watch.observe(live, { worker: collator, runId: run.runId });
           if (abandon !== null) {

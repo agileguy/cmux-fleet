@@ -103,6 +103,36 @@ import type { RelayFanOutInput, RelayFanOutResult } from "../cli/commands/relay.
  *
  * Re-exported rather than left for callers to re-address, because every existing
  * import of these names is correct and this move is not their business.
+ *
+ * ## THIS BLOCK IS A COMPATIBILITY SURFACE, NOT A FRONT DOOR — and the header
+ * used to claim otherwise
+ *
+ * `task-ids.ts`'s own header says *"`relay.ts` re-exports every name so no
+ * existing caller or test changes"*, and that sentence was true of the names
+ * that existed at the extraction. It is **not** a standing promise about names
+ * added later, and reading it as one is how the extraction gets undone.
+ *
+ * SRD-TRIAGE-CONSOLE Phase 2.1 added `TRIAGE_CONSOLE_ASPECTS`,
+ * `SWEEP_TASK_PREFIX`, `sweepTaskId`, `sweepNumber` and `SweepCounterError` to
+ * `task-ids.ts` and did **not** add them here. That is the correct outcome and
+ * it is recorded rather than left looking like an omission, because the block
+ * above reads as an invitation to widen:
+ *
+ * - **No caller addresses them through this module.** `dispatch-request.test.ts`
+ *   imports all five from `./task-ids.ts` directly, which is where they live.
+ *   The compatibility this block buys is for imports that predate the move;
+ *   there are none for these names, so widening would spare nobody anything.
+ * - **Widening would manufacture the edge the extraction removed.** An import of
+ *   `sweepTaskId` from *here* drags `cli/commands/relay.ts` and the
+ *   `import()`ed command registry into the importer's closure — the ISC-468
+ *   chain, one module further along. The next consumer of these names is the
+ *   triage actor's pass, a `src/run/` module under SRD-TRIAGE-CONSOLE D7a's
+ *   read-only import guard, so the widening would be aimed squarely at the one
+ *   caller that can least afford it.
+ *
+ * **The rule, stated so the next round does not have to re-derive it: names
+ * added to `task-ids.ts` after the extraction are imported FROM `task-ids.ts`.**
+ * Nothing is added to this block again.
  */
 export {
   COLLATION_ASPECT,
@@ -2899,9 +2929,31 @@ export interface ConsoleRunSources {
 export async function consoleRunResolution(
   input: RelayFanOutInput,
   src: ConsoleRunSources,
+  /**
+   * WHICH CONSOLE'S SEATS TO LOOK FOR — SRD-TRIAGE-CONSOLE §13 task 2.2.
+   *
+   * **This parameter is the worker→run scoping problem, and it is the reason
+   * `--console` is one flag rather than two.** The scan below decides which run
+   * holds each seat; hard-coded to `REVIEW_CONSOLE_ASPECTS` it answered that
+   * question for `rev-arch-1`, `rev-ctx-1` and `rev-lang-1` and for nobody else,
+   * so a triage actor pointed at this function would have resolved a map of
+   * three reviewers it does not have and none of the three observers it does.
+   *
+   * Optional, defaulting to the review console, on `resolveAspects`'s precedent
+   * one screen up and for its stated reason: a required argument with exactly
+   * one right answer at the only call site that existed is an invitation to
+   * COMPUTE it. The default is the SHIPPED console's table, not a guess — the
+   * caller that omits it is the review console's own composition below.
+   *
+   * Note what this does NOT default: `cli/commands/relay.ts` refuses an unknown
+   * `--console` by name rather than falling through to this default. A silent
+   * fallback there would run the triage clock against the review console's
+   * workers, which is a typo becoming a fan-out into another console.
+   */
+  aspects: readonly AspectSeat[] = REVIEW_CONSOLE_ASPECTS,
 ): Promise<ConsoleRunMap> {
   const root = src.runsRoot();
-  const workers = [input.sender, ...REVIEW_CONSOLE_ASPECTS.map((s) => s.worker)];
+  const workers = [input.sender, ...aspects.map((s) => s.worker)];
 
   /**
    * AN EXPLICIT MAP WINS, and it is the shape the SRD actually asked for.
@@ -3392,8 +3444,36 @@ export const productionRunSources: ConsoleRunSources = {
   pinnedRuns: () => process.env["PIFLEET_RELAY_RUNS"],
 };
 
-export const consoleFanOut: (input: RelayFanOutInput) => Promise<RelayFanOutResult> =
-  makeConsoleFanOut({
-    resolveRuns: (input) => consoleRunResolution(input, productionRunSources),
+/**
+ * The production fan-out for ONE console, named by its aspect table.
+ *
+ * **The whole of `--console`'s effect on this module, and it is deliberately
+ * one argument rather than a console name.** A `switch (name)` here would put
+ * the registry of consoles in the module that performs the fan-out, and this
+ * module cannot hold that registry: a console is a roster PLUS an aspect table
+ * (SRD-TRIAGE-CONSOLE D5), the rosters live in `dispatch-request.ts`, and
+ * `dispatch-request.ts` already imports `isCollationTaskId` from here
+ * (`:124`). A value import of the rosters would close that into a runtime
+ * cycle — the exact hazard `task-ids.ts` duplicates a constant to avoid,
+ * *"a cycle whose correctness depends on which one node happens to evaluate
+ * first"*. So the registry lives one layer up, in `cli/commands/relay.ts`,
+ * where both halves are already imported and nothing points back.
+ *
+ * Both places the table is needed get the SAME value, which is the property
+ * worth having: `consoleRunResolution` uses it to decide which runs to look in,
+ * and `relayFanOut` uses it to decide which seats to dispatch to. Threading it
+ * to one and not the other would produce a console that resolved three runs and
+ * dispatched into a different three.
+ */
+export function consoleFanOutFor(
+  aspects: readonly AspectSeat[],
+): (input: RelayFanOutInput) => Promise<RelayFanOutResult> {
+  return makeConsoleFanOut({
+    resolveRuns: (input) => consoleRunResolution(input, productionRunSources, aspects),
     transport: (collator) => consoleTransport(collator, productionRelayEffects),
+    aspects,
   });
+}
+
+export const consoleFanOut: (input: RelayFanOutInput) => Promise<RelayFanOutResult> =
+  consoleFanOutFor(REVIEW_CONSOLE_ASPECTS);
