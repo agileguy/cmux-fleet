@@ -23,6 +23,8 @@
  * operator had already handed it.
  */
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   busyRefusal,
@@ -611,5 +613,177 @@ describe("resolveThenRestart puts the resolution ahead of every irreversible ste
     expect(r.stopped).toEqual([]);
     expect(h.calls).toContain("restartPane");
     expect(h.calls.filter((c) => c.startsWith("down:"))).toEqual([]);
+  });
+});
+
+/**
+ * ── THE FOURTH CONSOLE'S FIFTH PROCESS, READ OUT OF THE FILE ───────────────
+ *
+ * Everything above this line drives the two modules directly, which is the
+ * right way to check an ORDER. None of it can answer whether a console script
+ * supplies the dep at all, and on `scripts/` nothing else can either: ISC-600
+ * measured it — `tsconfig.json`'s `include` is `src/**` and `test/**`, the
+ * scripts run `main()` at import so no test can pull one into the program, and
+ * **every mutation applied to `scripts/review` survived a fully green suite**,
+ * including one that made the review script write the triage console's record.
+ *
+ * So this block reads the working tree. Three things are asked of it, and the
+ * first two are one claim split in half because half of it is satisfiable by
+ * accident.
+ *
+ * ## 1. `null` IS A LIE ON THIS CONSOLE, AND THE MIRROR IS WHAT PROVES IT
+ *
+ * `FreshDispatchDeps.quiesce` is required and nullable so that a console with no
+ * actor must SAY so. That makes `quiesce: null` compile everywhere, and on a
+ * console that has an actor it is the ISC-572 defect wearing the fix's clothes:
+ * the property is present, `console-restart.test.ts`'s handover arm is green,
+ * and the actor is never stopped at all. SRD-TRIAGE-CONSOLE §6.4 fixes which
+ * console is which — *"`scripts/operations` and `scripts/development` pass
+ * `null`; `review` passes a function; `triage` passes a function"* — so the
+ * assertion is a PARTITION over the four scripts rather than a property of one.
+ *
+ * Asserting only "triage does not say null" would be green on a `scripts/triage`
+ * that had no `quiesce` at all, and asserting only "operations says null" would
+ * be green on a repository where nobody had ever written a non-null one. Both
+ * halves, over an asymmetric set, is the shape that cannot pass on a fixture
+ * that agrees with itself.
+ *
+ * ## 2. A DEP THAT STOPS NOTHING IS ALSO A LIE
+ *
+ * `quiesce: async () => {}` satisfies every arm above. So the binding is
+ * followed to the function it names and that function to the signal it sends: a
+ * stop that never reaches `signalRelay` leaves the actor running exactly as
+ * `null` would, and the operator is told it was stopped.
+ *
+ * ## 3. THE ACTOR IT STOPS MUST BE THIS CONSOLE'S
+ *
+ * This is the arm that belongs here rather than anywhere else, and the reason is
+ * the whole point of the block: an ordering that is impeccable about the WRONG
+ * process is not a fixed console. `consoleRelayArgv` spells no `--console`, and
+ * `DEFAULT_CONSOLE = "review"` — so a `scripts/triage` that spawned its argv
+ * unchanged would start a REVIEW actor, hand `recreateThenDispatch` a `quiesce`
+ * that correctly stops it, and leave the triage console with no actor while the
+ * review console silently lost its own. That is §9.13's row reached through the
+ * one caller that did not exist when §9.13 was written, and the call site is in
+ * a file the compiler never opens.
+ */
+describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", () => {
+  const source = (script: string): Promise<string> =>
+    readFile(join(import.meta.dir, "..", "..", "scripts", script), "utf8");
+
+  /** Where `needle` next appears, THROWING when it does not — `at`'s reason. */
+  const at = (src: string, needle: string, from: number, why: string): number => {
+    const i = src.indexOf(needle, from);
+    if (i === -1) throw new Error(`'${needle}' is not in this script after ${from} — ${why}`);
+    return i;
+  };
+
+  /**
+   * The `quiesce` property lines of one module call's dep object.
+   *
+   * LINES whose trimmed text BEGINS with the property name, so a comment saying
+   * `quiesce,` cannot stand in for the property — ISC-572's recorded hole, which
+   * narrowing the span moved rather than closed.
+   */
+  const quiesceProps = (src: string, call: string, script: string): string[] => {
+    const start = at(src, call, 0, `scripts/${script} does not call ${call}`);
+    const end = at(
+      src,
+      "{ worker: restartFlag },",
+      start,
+      `scripts/${script}'s ${call} dep object is not closed by the options argument`,
+    );
+    return src
+      .slice(start, end)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("quiesce"));
+  };
+
+  const MODULE_CALLS = ["recreateThenDispatch(", "resolveThenRestart("];
+
+  test("both of its module calls are handed a stop, and neither of them is null", async () => {
+    const src = await source("triage");
+    for (const call of MODULE_CALLS) {
+      const props = quiesceProps(src, call, "triage");
+      expect(props.length).toBeGreaterThan(0);
+      for (const p of props) expect(p).not.toContain("null");
+    }
+  });
+
+  test("the two consoles with no actor still SAY null, which is what makes that a claim", async () => {
+    // The asymmetric half. Without it "triage's quiesce is not null" is a
+    // sentence about a repository in which nothing is ever null.
+    for (const script of ["operations", "development"]) {
+      const src = await source(script);
+      for (const call of MODULE_CALLS) {
+        const props = quiesceProps(src, call, script);
+        expect(props).toEqual(["quiesce: null,"]);
+      }
+    }
+  });
+
+  test("the stop it hands over reaches a signal, not an empty function", async () => {
+    const src = await source("triage");
+
+    // The binding, followed to the helper it names.
+    const bind = at(src, "const quiesce =", 0, "scripts/triage binds no quiesce at all");
+    const bindEnd = at(src, ";", bind, "the quiesce binding is unterminated");
+    expect(src.slice(bind, bindEnd)).toContain("stopActor(");
+
+    // The helper, followed to the signal. A stop that never signals leaves the
+    // actor running exactly as `null` would, and says it did not.
+    const fn = at(src, "function stopActor(", 0, "scripts/triage defines no stopActor");
+    const body = src.slice(fn, at(src, "\n}", fn, "stopActor is unterminated"));
+    expect(body).toContain("signalRelay(");
+    expect(body).toContain("relayRecordPath(CONSOLE)");
+  });
+
+  test("the actor it starts is served --console triage, and never a bare literal", async () => {
+    const src = await source("triage");
+
+    // Declared once, as a constant. The known-limit arm of ISC-600: a comment
+    // carrying this literal satisfies it, which is why every arm below reads
+    // structure instead.
+    expect(src).toContain('const CONSOLE = "triage";');
+
+    const fn = at(
+      src,
+      "function triageActorArgv(",
+      0,
+      "scripts/triage builds no actor argv of its own — spawning consoleRelayArgv's " +
+        "unchanged would start a REVIEW actor, because DEFAULT_CONSOLE is \"review\"",
+    );
+    const body = src.slice(fn, at(src, "\n}", fn, "triageActorArgv is unterminated"));
+    expect(body).toContain("consoleRelayArgv(");
+    expect(body).toMatch(/"--console",\s*CONSOLE/);
+    // Never `"--console", "triage"`: the constant is what keeps this file's five
+    // console-shaped facts one fact.
+    expect(body).not.toMatch(/"--console",\s*"/);
+
+    /*
+     * And the ACTOR'S OWN spawn is given that argv. Anchored inside
+     * `startActor` rather than on the first `Bun.spawn(` in the file, which is
+     * an ordering accident: `runOutput` and `runChecked` spawn too, and a probe
+     * that happened to read one of those would be green with the actor's argv
+     * replaced.
+     */
+    const start = at(src, "function startActor(", 0, "scripts/triage starts no actor");
+    const spawn = at(src, "Bun.spawn(", start, "startActor spawns nothing");
+    expect(src.slice(spawn, spawn + 40)).toContain("triageActorArgv(");
+  });
+
+  test("every bookkeeping path in it is taken through the same constant", async () => {
+    // `console-relay.ts`'s three path functions are the review console's lock,
+    // record and log when handed the wrong name — §9.13, and the symptom is a
+    // review console that silently stops fanning out.
+    const src = await source("triage");
+    for (const fn of ["relayRecordPath", "relayLogPath", "relayLockPath"]) {
+      const calls = [...src.matchAll(new RegExp(`${fn}\\(([^)]*)\\)`, "g"))];
+      if (calls.length === 0) {
+        throw new Error(`${fn} is called nowhere in scripts/triage — the wiring is gone, not fixed`);
+      }
+      for (const c of calls) expect(`${fn}(${c[1]})`).toBe(`${fn}(CONSOLE)`);
+    }
   });
 });

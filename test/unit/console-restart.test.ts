@@ -371,7 +371,7 @@ describe("every console script hands its --restart ordering to the module", () =
     return i;
   };
 
-  for (const script of ["operations", "development", "review"]) {
+  for (const script of ["operations", "development", "review", "triage"]) {
     test(`scripts/${script} gives the bare --restart to resolveThenRestart`, async () => {
       const src = await source(script);
       const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
@@ -418,44 +418,85 @@ describe("every console script hands its --restart ordering to the module", () =
     });
   }
 
-  test("scripts/review hands its --task relay stop to the module instead of calling it", async () => {
-    /*
-     * THIS TEST USED TO ASSERT THE OPPOSITE, and was right to at the time.
-     *
-     * `review` stopped the relay itself, on the line before `recreateThenDispatch`,
-     * and what this file checked was that the title was resolved before that
-     * happened. Both facts were true and the ordering was still wrong one level
-     * out: the module's wait can run for twenty minutes and then refuse, saying
-     * *"Nothing has been stopped"* — and on this console it had been. The relay
-     * was gone before the wait began, so the refusal left four healthy workers
-     * and nothing able to turn a collator's dispatch request into reviews.
-     *
-     * The stop is now a dep, fired between the settled wait and the teardown,
-     * and its POSITION is asserted in `test/unit/fresh-dispatch.test.ts` against
-     * recorded calls rather than against source text — the same treatment the
-     * bare path already gets from `resolveThenRestart`. What is left for this
-     * file is the one thing no module can answer: that the script delegates at
-     * all, rather than re-inlining the stop beside a module that also does it.
-     *
-     * The two spans are bounded by markers that THROW when missing, and the
-     * `not.toContain` is deliberately the narrower of the two: it reads only as
-     * far as the module call, so the dep's own `quiesce` reference below cannot
-     * satisfy it and a re-inlined stop cannot hide behind it.
-     */
-    const src = await source("review");
-    const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
-    const task = at(src, TASK_PATH, branch, "the --task path has moved out of the branch");
-    const call = at(src, "recreateThenDispatch(", task, "the --task path calls no module");
-    const opts = at(
-      src,
-      "{ worker: restartFlag },",
-      call,
-      "the --task path's dep object is not closed by the options argument",
-    );
+  /**
+   * ── THE ISC-572 ORDERING, ON EVERY CONSOLE THAT HAS AN ACTOR ───────────────
+   *
+   * THIS TEST USED TO ASSERT THE OPPOSITE, and was right to at the time.
+   *
+   * `review` stopped the relay itself, on the line before `recreateThenDispatch`,
+   * and what this file checked was that the title was resolved before that
+   * happened. Both facts were true and the ordering was still wrong one level
+   * out: the module's wait can run for twenty minutes and then refuse, saying
+   * *"Nothing has been stopped"* — and on this console it had been. The relay
+   * was gone before the wait began, so the refusal left four healthy workers
+   * and nothing able to turn a collator's dispatch request into reviews.
+   *
+   * The stop is now a dep, fired between the settled wait and the teardown,
+   * and its POSITION is asserted in `test/unit/fresh-dispatch.test.ts` against
+   * recorded calls rather than against source text — the same treatment the
+   * bare path already gets from `resolveThenRestart`. What is left for this
+   * file is the one thing no module can answer: that the script delegates at
+   * all, rather than re-inlining the stop beside a module that also does it.
+   *
+   * ## IT IS A LOOP BECAUSE THE SAME DEFECT ON A FOURTH CONSOLE IS THE ONE
+   * MOST LIKELY TO SHIP
+   *
+   * ISC-572 was filed on `review` and closed there. `triage` is the second
+   * console with a fifth process, its script is a copy of `review`'s, and
+   * SRD-TRIAGE-CONSOLE §6.4 says so in as many words: *"Getting this wrong on a
+   * fourth console is the same defect a fourth time, and it is the reason §13
+   * Phase 4 names the test before the script."* A per-console copy of this test
+   * would be the same copy-paste one level up, so the two consoles that HAVE an
+   * actor are a list here and the two that do not are absent from it — and
+   * `fresh-dispatch.test.ts` is what checks that the absent two say `null`
+   * rather than merely omitting the field.
+   *
+   * ## THE POSITIVE ARM IS STRUCTURAL, WHICH IT WAS NOT
+   *
+   * The two spans are bounded by markers that THROW when missing, and the
+   * `not.toContain` is deliberately the narrower of the two: it reads only as
+   * far as the module call, so the dep's own `quiesce` reference below cannot
+   * satisfy it and a re-inlined stop cannot hide behind it.
+   *
+   * The arm below it used to be `expect(src.slice(call, opts)).toContain("quiesce")`,
+   * and ISC-572 records what that cost: a wider span was satisfied by the
+   * literal `quiesce,` inside an intervening prose comment. Narrowing the span
+   * did not remove the hole, it only moved it — the deps object is full of
+   * comments too, and one of them saying "quiesce" would still be green with the
+   * property deleted. So the arm now reads LINES and requires one whose trimmed
+   * text BEGINS with the property name: `// quiesce, ...` trims to `// quiesce`
+   * and ` * quiesce,` trims to `* quiesce,`, and neither begins with `quiesce`.
+   */
+  for (const script of ["review", "triage"]) {
+    test(`scripts/${script} hands its --task actor stop to the module instead of calling it`, async () => {
+      const src = await source(script);
+      const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
+      const task = at(src, TASK_PATH, branch, "the --task path has moved out of the branch");
+      const call = at(src, "recreateThenDispatch(", task, "the --task path calls no module");
+      const opts = at(
+        src,
+        "{ worker: restartFlag },",
+        call,
+        "the --task path's dep object is not closed by the options argument",
+      );
 
-    // Nothing between entering the branch and calling the module may stop it.
-    expect(src.slice(task, call)).not.toContain("quiesce(");
-    // And the module is given it, so the module decides when.
-    expect(src.slice(call, opts)).toContain("quiesce");
-  });
+      // Nothing between entering the branch and calling the module may stop it.
+      expect(src.slice(task, call)).not.toContain("quiesce(");
+
+      // And the module is given it, so the module decides when. A LINE that
+      // starts with the property, so no comment in the dep object can stand in
+      // for the property itself.
+      const depLines = src
+        .slice(call, opts)
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.startsWith("quiesce"));
+      if (depLines.length === 0) {
+        throw new Error(
+          `scripts/${script}'s recreateThenDispatch dep object has no quiesce property — ` +
+            `the stop is not handed over, and a comment mentioning it does not count`,
+        );
+      }
+    });
+  }
 });
