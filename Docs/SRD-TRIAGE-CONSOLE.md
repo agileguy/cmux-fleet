@@ -687,6 +687,8 @@ folds the clock into the same process as the fan-out for that reason rather than
 > value. **Nothing in Phases 1–5 depends on the difference** — `consoleRunPins` reads live status, so
 > the pin machinery works either way. **Phase 6's recycling does**: "`down` then `up` between sweeps"
 > is written against the one-run reading and must be re-read as four runs before 6.6 is implemented.
+> **Settled 2026-09-06:** four `down`s and four `up`s, with a per-seat boundary so a partial recycle
+> is finished rather than restarted. See §6.6 layer 4.
 
 ```yaml
 # fleet.yaml — the `triage` console
@@ -1004,8 +1006,11 @@ Three things make this implementable here and nowhere else in this fleet:
 - **An `rpc` recreate needs no terminal.** `up --attach-here` is what demands a TTY on both streams
   (`src/attended/adopt.ts:96-114`), and an `rpc` worker is not attached. So an unattended actor can do
   what an unattended actor could never do for the `development` or `review` consoles. §2.3.
-- **The actor already holds the whole run**, so a recycle is one `down` and one `up`, not a
-  four-way pane dance.
+- ~~**The actor already holds the whole run**, so a recycle is one `down` and one `up`, not a
+  four-way pane dance.~~ **FALSE, and §6.1's correction is why: the console is four runs.** A recycle
+  is four `down`s and four `up`s. The *cost* survives the correction with room to spare — 24
+  container recreations a day against the 288 a per-sweep restart would cost — but the **atomicity
+  the sentence assumed does not**, and that is what the resolution below is about.
 - **The idempotency rules are the same ones §6.4 already needs**: recycle only with no sweep in
   flight, and re-derive from the run tree afterwards.
 
@@ -1014,6 +1019,25 @@ affordable.** A restart per sweep is 288 container recreations a day; a recycle 
 `recycle_after_sweeps: 0` disables it, which is the setting to use while measuring Q5 — but leaving
 it there indefinitely means accepting a transcript that grows until Pi compacts it, which is a
 decision rather than a default.
+
+**RESOLVED 2026-09-06 by the operator: recycle all four seats, and make the recycle RESUMABLE.**
+A four-run recycle can half-succeed where a one-run recycle could not — three seats up, one down, and
+a console that fans out to nobody. There is no transaction available across four `up`s, so the answer
+is re-entrancy instead.
+
+**The boundary condition is per-seat, not per-console.** The actor does not ask *"have
+`recycle_after_sweeps` sweeps elapsed since the last full recycle"*; it asks, of each seat, *"is this
+seat's run older than `recycle_after_sweeps`, or absent"*. A crash between the second seat and the
+third then leaves a state the next boundary **reads correctly and finishes**, rather than one it
+reads as done. Two consequences, both Phase 6's to build:
+
+- **No sweep is admitted while any seat's pin is unresolved.** Constraint B is the reason: a pinned
+  worker the relay cannot resolve *refuses every fan-out*, so a sweep dispatched into a half-recycled
+  console fails four times and reads as a model problem. **The gate is four pins re-derived, not four
+  containers running** — those are different moments and only the later one is safe.
+- **§7.7's `run_id` is wrong and becomes `runs`**, a per-seat map of worker id to run id. D12 keeps
+  the run tree authoritative over the record, so recovery still reads run trees — four of them now;
+  the record is the hint that makes finding them cheap. Task 6.3 writes it.
 
 **Still not built: a restart per sweep.** §5.3. If Q5 shows `rpc` workers replay *within* a recycle
 window, the answer is a shorter window before it is a per-sweep restart, and layer 3 is what would
@@ -1612,16 +1636,16 @@ own task id and must match the directory it was written into.
 Consumed as-is. What changes is the roster it is validated against (§2.1) and two new refusal codes
 (§6.5).
 
-**OPEN 2026-09-06, found while implementing task 5.1, and it blocks the actor rather than the check.**
-This section fixes the document at `worker`/`title`/`brief` **and nothing else**, so a
-`dispatch-request.json` carries **no machine-readable service list**. §6.3 step 5 nevertheless has the
+**OPEN 2026-09-06, found while implementing task 5.1, and it blocked the actor rather than the
+check.** This section fixes the document at `worker`/`title`/`brief` **and nothing else**, so a
+`dispatch-request.json` carried **no machine-readable service list**. §6.3 step 5 nevertheless has the
 actor *"validate the partition against the targets file"*, and §6.5 makes completeness the host's
-question on the ground that *"a model that partitions can drop"*. **There is no specified way for the
-host to recover which services each request covers**, short of parsing the brief's prose — which is
+question on the ground that *"a model that partitions can drop"*. There was no specified way for the
+host to recover which services each request covered, short of parsing the brief's prose — which is
 the one thing a check against a partitioning model must not depend on.
 
 `src/run/triage-partition.ts` is therefore built over a partition VALUE and is correct as written;
-what is unspecified is its caller. Three arms, and the choice belongs to Phase 6:
+what was unspecified was its caller. Three arms were weighed:
 
 1. **A structured field on the request.** Cheapest to check, but it reopens §7.3's closed shape, and
    that shape is closed for a measured reason.
@@ -1630,7 +1654,58 @@ what is unspecified is its caller. Three arms, and the choice belongs to Phase 6
    completeness question rather than answering it — the host cannot drop what it dealt itself — and
    costs §6.5's premise that the partition is the model's judgement.
 
-Until this is settled, `checkTriagePartition` has no production caller and cannot have one.
+**RESOLVED 2026-09-06 by the operator: arm 1.** The arms stand above as the record of what was
+weighed; below is what was chosen, and what makes its cost affordable.
+
+`pifleet.dispatchrequest/v1` grows exactly one field:
+
+```jsonc
+{
+  "worker": "obs-t1",
+  "title":  "...",
+  "brief":  "...",
+  "services": ["svc-a", "svc-b"]   // NEW
+}
+```
+
+**Required on the triage console, refused on the review console, and the roster is the
+discriminator.** Those two halves are one rule rather than a concession. A field merely *optional*
+everywhere would make `partition_incomplete` unreachable by the cheapest failure available to a
+model — omitting it — and an unreachable refusal is a check that passes because nothing asked.
+
+| Console | `services` present | `services` absent |
+|---|---|---|
+| **triage** | validated against `triage/targets.yaml` (§6.5) | refused, `services_missing` |
+| **review** | refused, `services_not_permitted` | unchanged — exactly today's shape |
+
+The review row is §7.3's own promise — *"refused whole, with the field named"* — **spent on the new
+field rather than weakened by it**. No review request changes behaviour, and that is what reduces
+this arm's cost from "a console" to "a schema line".
+
+**No caller grows a parameter.** `resolveRoster` already defaults to `REVIEW_CONSOLE_ROSTER` and
+`TRIAGE_CONSOLE_ROSTER` is spelled beside it (`dispatch-request.ts:298,340`), so the console identity
+is *already* threaded to the check; `ConsoleRoster` gains the name and the refinement reads it.
+§10 D5's bet survives — a third console is still a third constant.
+
+**Two refusal codes join the alphabet**, by the rule §6.5 already set for the first two: they are
+spelled in `dispatch-request.ts` because that is the vocabulary of the request plane, whichever
+module spends them.
+
+- `services_missing` — a triage request with no service list. The model dropped the field itself,
+  which is the failure §6.5 predicted one level up.
+- `services_not_permitted` — a service list on a console with no targets file to check it against.
+
+**The wire tag stays `v1`, and that is a decision rather than an oversight.** The tag exists so a
+reader can refuse a shape it does not know; a v1 reader meeting a triage request refuses it on
+`services_not_permitted` regardless, so a bump buys no refusal that is not already there. It would
+cost an edit to `roles/collator.md:81-91` — a model-facing prompt with no test — and there is one
+binary and one fleet, with every request consumed inside the sweep that wrote it. **No request
+outlives a version**, so there is nothing for a version to protect.
+
+**What this unblocks:** the actor reads the sweep's requests, projects `services` out of them, and
+hands the projection to `checkTriagePartition` — which needs no change and gets its production caller
+in Phase 6. §6.5's premise survives intact: the partition is still the model's judgement, and the
+host still checks it.
 
 ### 7.4 `observer-ops.json` — existing, plus two required fields
 
@@ -1674,8 +1749,9 @@ record refuses rather than being acted on — SRD-FLEET-PM-001 Phase 5 task 5.4'
 
 ### 7.7 The actor record — new, and deliberately the relay's shape
 
-`~/.pifleet/triage.json` (`pid`, `started`, `run_id`, `workers`, `cadence_s`, `sweep_cursor`,
-`consecutive_skips`), `~/.pifleet/triage.log` appended never truncated, `~/.pifleet/triage.lock`.
+`~/.pifleet/triage.json` (`pid`, `started`, `runs`, `workers`, `cadence_s`, `sweep_cursor`,
+`consecutive_skips`) — **`runs` is a per-seat MAP of worker id to run id, not a single `run_id`;
+see §6.1's correction and §6.6 layer 4's resolution** —, `~/.pifleet/triage.log` appended never truncated, `~/.pifleet/triage.lock`.
 `Workflows/Consoles.md:64-66`'s convention, copied rather than invented — including the behaviour it
 names for a record it cannot verify: *"left exactly where it is and nothing is signalled."*
 
@@ -2573,12 +2649,15 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: §12's exit-when-the-console-is-gone criterion and its streak-reset mirror both pass.*
 - **6.4** Resume-from-run-tree, and the anti-criterion that a restart never double-dispatches.
   Touches: `src/run/triage-pass.ts`, `test/unit/triage-pass.test.ts`, `ISA.md`.
-- **6.5** Recycling (§6.6 layer 4): `down` then `up` between sweeps at `recycle_after_sweeps`, with
-  the sweep counter carried across. Touches: `src/run/triage-actor.ts`,
-  `test/unit/triage-actor.test.ts`, `ISA.md`.
-  *Acceptance: the in-flight fixture recycles nothing, the idle fixture recycles, and the sweep
-  counter continues rather than resetting. **This task is what makes an unattended console possible
-  at all** — §2.3a — and it is buildable only because an `rpc` recreate needs no TTY.*
+- **6.5** Recycling (§6.6 layer 4): **four** `down`s and four `up`s between sweeps at
+  `recycle_after_sweeps`, per-seat boundary condition, sweep counter carried across. Touches:
+  `src/run/triage-actor.ts`, `test/unit/triage-actor.test.ts`, `ISA.md`.
+  *Acceptance: the in-flight fixture recycles nothing; the idle fixture recycles all four; the sweep
+  counter continues rather than resetting; **a fixture interrupted after two seats is completed by
+  the next boundary rather than restarted**, asserted by naming the two seats it did NOT touch
+  again; and **a fixture with one pin unresolved admits no sweep**. **This task is what makes an
+  unattended console possible at all** — §2.3a — and it is buildable only because an `rpc` recreate
+  needs no TTY. The four-run shape is §6.1's correction, not the heading's intent.*
 - **6.6** Add the read-only closure guard, mirroring `test/unit/monitor-readonly.test.ts` and scoped
   to the console's own subtree with its one dispatch exception **named**. Touches:
   `test/unit/triage-readonly.test.ts` (new), `ISA.md`.
@@ -2597,6 +2676,16 @@ and SRD-FLEET-PM-001 D7's.
 - **7.4** Update the three-console description. Touches: `README.md`.
 
 ### Phase 8 — The live run
+
+> **SCOPE 2026-09-06, set by the operator: the `triage-console` branch ends after task 7.4.** The
+> code and the operator skill go to PR and merge with the console complete; **Phase 8 then runs on
+> `main` as its own piece of work**, and what it finds becomes a follow-up branch. This is what task
+> 8.3 was always going to produce — §13 calls it *what the document did not predict* — and a
+> day-long run plus its fix rounds is a poor thing to hold a reviewed branch open for. Two
+> consequences worth stating: **Q11 (the ntfy token) and the `cni-dev` kubeconfig context stop
+> gating this branch entirely**, and every criterion in Phases 0-7 must therefore be provable
+> offline, which they are.
+
 
 **Intent.** One console, one environment, one day. Everything before this is fixtures.
 
