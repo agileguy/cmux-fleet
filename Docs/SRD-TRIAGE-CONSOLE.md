@@ -719,6 +719,24 @@ Each field, with the reason:
   worker-level `model:` override only if §0.2 arm 1 or 2 is taken. **No new role, and no widened
   grant.** That is the single strongest thing this design has going for it: the observers are the
   role that already exists, doing the job it was written for, at a cadence.
+
+  **CORRECTION 2026-09-06, found while implementing 1.1b: that override rule is right for the live
+  file and wrong for the tracked one, because the two disagree about what the `observer` role's model
+  is.** The sentence above cites `fleet.yaml:467-490`, and in the live file the role is
+  `model: gpt-oss-20b-MXFP4-Q8` (`:486`) — so inheriting it delivers arm 3 exactly. In
+  `fleet.example.yaml` the same role is `model: Qwen3.5-35B-A3B-8bit`, so inheriting it delivers a
+  *different* local model. **Both are local and both satisfy arm 3's privacy property**, which is why
+  this is a correction about legibility rather than about exposure: the tracked example is where a
+  reader looks to see what was decided, and it should show the decision rather than a model that
+  merely shares its posture. So `obs-t1`, `obs-t2` and `obs-t3` carry an explicit
+  `model: gpt-oss-20b-MXFP4-Q8` **in the example only**, commented with why an override exists where
+  this section says none should. `tri-1` is unaffected — the `triage` role declares the model itself.
+
+  **The general lesson, recorded because it will recur:** every rule in this document that cites
+  `fleet.yaml` is a rule about the untracked file, and the example is not guaranteed to agree with
+  it. §13 Phase 1 already splits task 1.1 on that line for the *diff* reason. This is the same seam
+  biting for a second, unrelated reason, and a task that touches both files should check both rather
+  than assume the citation covers them.
 - **`thinking: high` on `triage`**, the `observer`/`collator`/`reviewer` level, and for the same
   reason `fleet.yaml:476` gives: reconciling channels that disagree is where the budget pays.
 
