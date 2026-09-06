@@ -277,7 +277,7 @@
   "hold": {
     "set": "2026-09-06, by the operator: 'hold at the end of this round'",
     "means": "Verify round 8 from the diff, grade it into ISA.md, commit, report. Then STOP: no round 9 dispatch, no push, no PR.",
-    "resume_with": "Round 9 candidates: 5.5a (zod schema for triage.json), 4.5a (two source probes), 5.3a (saturation), 5.4a (console-health identities), 5.5, 5.6/a/b, 5.7.",
-    "open_decision": "5.3c \u2014 SRD \u00a76.6 layer 3's window_opened_at echo is specified and enforced nowhere. Orchestrator's recommendation is to grow \u00a77.4's field rather than strike the clause, needing no new knob. NOT written in; left for the operator."
+    "resume_with": "Round 9 candidates: 5.3c (window echo, now specified), 5.5a (zod schema for triage.json), 4.5a (two source probes), 5.3a (saturation), 5.4a (console-health identities), 5.5, 5.6/a/b, 5.7.",
+    "open_decision": "RESOLVED 2026-09-06 by the operator: grow the field. \u00a77.4 now requires window_opened_at; task 5.3c is a spec, not a decision. It touches triage-verdict.ts which round 8 holds, so it lands round 9."
   }
 }
