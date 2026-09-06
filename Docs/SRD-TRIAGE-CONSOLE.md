@@ -987,8 +987,9 @@ SRD-OBSERVER-001 §9.1's four fields do all the work:
 | `assessment: indeterminate` (3+ consecutive, same service) | **Yes**, as a *coverage* issue | fifteen minutes of not being able to see a service is a finding about the console, and it must not be silent |
 | observer `status: blocked` | **Yes**, as a *console-health* issue, not a service issue | SRD-OBSERVER-001 §9.3: a tunnel-down control plane is `blocked`, *"Nothing the worker did caused it"* |
 | child stalled / no collation dispatched | **Yes**, as a console-health issue | §6.5's zero-row |
+| **two or more observers in one sweep produced no artifact at all** | **Yes**, as a *saturation* issue naming **inference**, never the environment | rule 3 below. It **suppresses** the coverage escalation two rows up rather than sitting beside it |
 
-**Two rules make this trustworthy rather than merely tidy.**
+**Three rules make this trustworthy rather than merely tidy.**
 
 **1. Confirmation, on the operator's own recorded discipline.** SRD-OBSERVER-001 §11.0 requires two
 separated observations before a stall is called, and marks the language: *"Provisional, on the first
@@ -1007,6 +1008,42 @@ That is grading on structure — SRD-REVIEW-CONSOLE D8 — and it *"is not accep
 described as acceptance."* It cannot tell a lazy `healthy` from a real one. It can tell a `healthy`
 with no evidence attached from one with evidence attached, and SRD-OBSERVER-001 §11.2 names that as
 this operator's dominant production failure: *"you told me it was fine but didn't actually check."*
+
+**3. Saturation is its own verdict, and it must never arrive as a coverage gap.** All four seats
+resolve to one model on one provider — `gpt-oss-20b-MXFP4-Q8` on `omlx`, which is `hosted: false` and
+is the operator's own server (`fleet.yaml:113-140`) — and `fleet.yaml:77` already names that server as
+this fleet's scarce resource in its own words: `max_concurrent: 1  # bounded by oMLX throughput, not
+pane count (§5.9)`. So the failure this console will actually meet is not the inference server being
+*down*. It is the server being *slow*. Four seats contend for it, observers exceed
+`sweep_deadline_s`, their services come back with no artifact, those services are `indeterminate`,
+and three consecutive sweeps of that escalates through the row above into a **coverage** issue. The
+console then tells the operator *"I could not see `mia`, `authorization` and `authentication`"* and
+points them at the cluster, while the fault is one process on their own machine. **That is the
+console misdiagnosing itself, in the direction that costs the most** — it spends the operator's
+attention on the environment it was built to watch in order to hide a defect in the watcher.
+
+The discriminator is available host-side and needs no new machinery:
+
+- **Correlation, and it is the primary signal.** A cluster fault does not arrive at three independent
+  observers in the same sweep; a shared dependency does, and the only dependency all three share is
+  the inference server. **Two or more observers producing no artifact in one sweep is a statement
+  about what they have in common**, and what they have in common is not the environment.
+- **Confirmation, from a probe this repository already exports.** `probeNativeToolCalls`
+  (`src/security/model-probe.ts:230`), run host-side against `hostReachableBaseUrl` (`:603`), once per
+  saturation candidate and never per sweep. Its failure classes are already the two this verdict has
+  to keep apart, and its own docblock says why they are worth keeping apart: *"A timeout is NOT
+  "unreachable", and conflating them is a misdiagnosis this project has the incident report for
+  (S1)."* A `timeout` verdict is saturation. An `unreachable` verdict is the server being down, which
+  is a different sentence on the operator's screen and a different thing for them to go and do.
+
+**Ordering, because both rules can be true of one sweep.** Saturation is evaluated **before** the
+coverage escalation and **suppresses** it: a service's `consecutive_indeterminate` counter does not
+advance across a sweep marked saturated. Without that ordering the console emits both findings and
+the operator reads the one that names their cluster, which is the failure this rule exists to
+prevent rather than to describe. The announcement composed for a saturation issue carries the
+**provider and model** as its subject and the environment only as the scope of what went unobserved
+— and that is a typed field (§6.9), so a later edit that reuses the service template cannot get it
+the wrong way round without failing a test.
 
 **Coverage is counted host-side.** The number of services observed comes from the run tree — the
 journal's `children[]` against the reply files present — never from `triage.json`'s own claim. This
@@ -1068,51 +1105,298 @@ could send**, because it is an all-clear derived from an absence, and the operat
 sweeps, and the evidence that closed it — with the word *observed*, because the artifact it is
 derived from carries a positive check rather than a silence.
 
-### 6.9 The notification — host-side, typed, and one channel
+### 6.8a Console-health issues reuse that machine, and this is the hole that closes
 
-**Decision: `POST http://localhost:8888/notify`, the operator's PAI voice server, with
-`{title, message}` composed host-side from typed fields.** §11 Q2 flags the ambiguity explicitly and
-this is a pick, not a reading.
+**The machine above is keyed per `(environment, service)`. Six of the things this console can notify
+about are not a service, and until this section they had no dedup identity at all** — which is not a
+small omission. §6.7 makes an observer's `blocked` notifiable, and a tunnel that is down for a day is
+`blocked` on **every** sweep: 288 identical notifications, from the console whose §6.8 exists
+precisely to turn 288 into 1. §6.4 has the same shape from the other side — it fires at
+`max_consecutive_skips` and says nothing about skips 4, 5 and 6.
 
-**Why this arm.** The commission says *"via claude"*. Four readings were available: the orchestrating
-Claude Code session (SRD-FLEET-PM-001 §0.2's actor); the PAI notify endpoint; `backend.notify()`; or
-a chat/ticket channel. The first is unavailable by construction — this console's whole premise is that
-it runs when no session is open. **The third is refused by its own header** (Finding G): *"Presentation
-plane only. Nothing correctness-bearing may live behind this"*, and a triage notification is this
-console's entire output. The fourth is out of scope (§5.2) and would need a credential and an egress
-rule this design otherwise does not want. The second is the operator's own assistant surface, it is
-the one channel in this environment whose entire job is *"tell me something happened"*, it is
-host-side (which is where a notification must be performed regardless), and its payload is already the
-shape this design needs: `{title, message, voice_enabled, voice_id}` (`server.ts:252-255`).
+**They reuse §6.8's machine unchanged. Only the identity is new**, and the identity is the whole
+fix: a state machine with no key deduplicates nothing.
+
+**The identity is `(scope, kind)`**, recorded at `~/.pifleet/triage/<scope>/_console/<kind>.json`,
+where `scope` is an environment token for the kinds that are about an environment and the literal
+`_console` for the kinds that are about the console itself. `kind` is a closed enum, on §6.2's rule
+for `checks[]` — a closed set cannot acquire a seventh member by accident, and a `kind` a reader
+cannot enumerate is a `kind` nobody writes a criterion for.
+
+| `kind` | `scope` | Raised when | Cleared by |
+|---|---|---|---|
+| `observer_blocked` | environment | an observer returned `status: blocked` (SRD-OBSERVER-001 §9.3) | a sweep in which that environment's observers returned a non-`blocked` status |
+| `sweep_produced_nothing` | environment | §6.5's zero-row: no child succeeded, so no collation was dispatched | a sweep that collated |
+| `sweeps_skipped` | `_console` | consecutive skips reach `max_consecutive_skips` (§6.4) | a sweep that ran |
+| `inference_saturated` | `_console` | §6.7 rule 3 | a sweep in which every observer produced an artifact |
+| `budget_exhausted` | `_console` | admission refused on the run's ceiling, exit 5 (§6.10) | a new run — which in practice means a recycle or a restart |
+| `reporter_undelivered` | `_console` | §9.15 — the delivery path itself is failing | a delivery that succeeds |
+
+**What reuse buys, stated as the three properties it inherits rather than left implied:**
+
+1. **Confirmation.** One sweep of `blocked` is `provisional` and silent; two consecutive is `firing`
+   and notifies **once**. A tunnel down for a day is one notification and then the `renotify_after`
+   floor, which is 4 messages in 24h at the 6h default rather than 288. **The 288-a-day hole is
+   closed by the machine that already existed**, and the only thing that was missing was a key to
+   hang it on.
+2. **`firing → firing` is silent.** That is the rule §6.8 calls *"the rule that turns 288 into 1"*,
+   and it is the direct answer to §6.4's unstated question about skips 4, 5 and 6: they advance
+   `sweep_count` and send nothing.
+3. **Recovery must be observed, on §6.8's rule and for §6.8's reason.** A `kind` clears on a sweep
+   that positively saw the good state, never on the absence of the bad one. `sweeps_skipped` does
+   **not** clear because the actor stopped counting — an actor that died stops emitting skips, and
+   reading that as recovery would announce that a dead console is healthy.
+
+**One thing carries over that a reader might not expect, and one thing cannot carry over at all.**
+
+- **`flapping` applies, and it is the more useful verdict here than it is for a service.** An
+  environment whose control plane is reachable every other sweep is a finding about the network, and
+  it is exactly the shape §6.8's flap damping was written for. Nothing special is needed; the same
+  `flap_threshold` and `flap_window` apply.
+- **`reporter_undelivered` cannot notify through the channel it is about**, which is why it has §9.15
+  and its own paragraph in §6.9 rather than a row here that pretends otherwise.
+
+### 6.9 The notification — a configurable webhook, host-side, typed, with ntfy as the default adapter
+
+**Decision: a configurable webhook. The actor `POST`s to `notify.endpoint`, which defaults to
+`https://ntfy.agileguy.ca/Alerts`, and the request is built by a named adapter from a typed
+announcement composed host-side. `notify` lives in the console config contract §7.8 defines, not in
+`fleet.yaml` and not in argv. This supersedes the `localhost:8888` PAI voice-server pick this
+document carried in draft — including §2.5's closing candidate — and it closes §11 Q2.**
+
+**The default was checked before it was written down**, because a default URL nobody verified is
+exactly the class of claim this document's closing rule forbids. Measured on this host, 2026-09-06:
+
+| Check | Result |
+|---|---|
+| `dig agleguy.ca A` — the spelling the commission used | **NXDOMAIN.** No A record, no zone. It is a typo, not an alternative, and a console defaulting to it would have failed DNS on every notification forever |
+| `dig ntfy.agileguy.ca A` | `104.21.70.27`, `172.67.218.174` |
+| `GET https://ntfy.agileguy.ca/v1/health` | `200`, body `{"healthy":true}`. `docs.ntfy.sh/config/` defines this endpoint and its rule: *"If a non-200 HTTP status code is returned or if the returned `healthy` field is false the ntfy service should be considered as unhealthy"* |
+| anonymous `GET https://ntfy.agileguy.ca/Alerts/json?poll=1` | **`403`.** The server is not open by default, so **the default endpoint needs a credential** — which is why the auth field below is a requirement and not scaffolding. Read was refused; **publish was deliberately not attempted**, because the only way to test a publish is to send the operator a notification |
+| `GET /v1/account` (anonymous tier) | `messages: 17280` per `messages_expiry_duration: 259200` — 5,760 a day, against a console whose §6.8 design target is single digits. **The rate limit is not the binding constraint here** |
+
+**And one coincidence that is a finding rather than a convenience.** `104.21.70.27` is the address
+`fleet.yaml:131` already pins as `relay_upstream` for `inference.agileguy.ca`, and `fleet.yaml:355`
+already carries `{host: 104.21.70.27, port: 443}` as an `egress.allow` entry. Both names sit behind
+the same Cloudflare account, so **an IP-keyed allow rule written for the inference relay also admits
+the notification endpoint**, and nobody would have to add a line to make that true.
+`fleet.yaml:126-128` records half of this already — *"this pins a CDN anycast address Cloudflare does
+not contract to keep"* — and the other half belongs beside it: **it does not contract to keep that
+address unique to that name either**, so an IP-keyed entry for an anycast CDN grants reachability its
+own comment does not describe. It costs this console nothing, because the transport does not run in a
+container (**Egress**, below). It would cost something the day anything else did.
+
+#### Why a webhook, and what the three rejected readings were
+
+The commission says *"via claude"*, and §0.5 correction 4 recorded that as the least specified part of
+it. Four readings were available and three are refused on grounds that do not depend on taste:
+
+- **The orchestrating Claude Code session** (SRD-FLEET-PM-001 §0.2's actor) is **unavailable by
+  construction**. This console's whole premise is that it runs when no session is open.
+- **`backend.notify()` is refused by its own header** (Finding G): *"Presentation plane only. Nothing
+  correctness-bearing may live behind this"* (`src/backends/types.ts:104`), and a triage notification
+  is this console's entire output. Its tmux implementation is a deliberate no-op.
+- **The PAI voice server** was this document's draft pick and is now withdrawn. Two reasons, and the
+  second is the one that matters. It is not running — measured 2026-09-06, neither `8888` nor `31337`
+  answered and `com.paivoice.server` was not loaded (Finding E). More consequentially, **it is a
+  single hard-coded endpoint on the loopback interface of the machine the console runs on**, which
+  means a console whose job is to reach the operator can only reach them while they are sitting at
+  it. A health check that only works when you are already watching is the product this console exists
+  not to be.
+- **A webhook is the general case of all three**, and `ntfy` is one configuration of it. The endpoint
+  is a URL in a tracked config file; the operator points it at their phone today and at a chat channel
+  tomorrow without a code change; and the default is an endpoint that is up, that the operator already
+  runs, and that was checked above rather than assumed.
 
 **Do not call it `notify` in `src/`.** The name is taken twice already — the presentation-plane
 backend method, and a Pi UI-request method in `FIRE_AND_FORGET_METHODS`
 (`supervisor/ui-requests.ts:127-138`) that the supervisor is contractually required not to answer. A
 third meaning in the same tree is how a reader ends up at the wrong one. `src/run/triage-notify.ts`
-exports `composeAnnouncement` and `deliverAnnouncement`.
+exports `composeAnnouncement`, `renderRequest` and `deliverAnnouncement`.
 
-**Three requirements, and the first is a security control rather than a style rule.**
+#### The payload — a typed envelope with named adapters, and ntfy is one of them
 
-**1. Typed fields only in the spoken message.** §4.3. `title` and `message` are rendered host-side
-from `{environment, service, assessment, transition, first_seen, sweep_count}` through a pure
-function. **No worker-authored string is ever interpolated into them.** Worker prose — the log lines
-an observer quotes, which are the reason the report is worth reading — appears only in a fenced,
-banner-marked evidence block that is not the spoken message and not the notification body. §12.6's
-erratum is why this is built rather than inherited: fencing and banner-marking are recorded there as
-**not met** on the existing surfaces.
+*"Configurable webhook"* and *"defaults to ntfy"* pull against each other, and the pull has to be
+resolved in the design rather than left for whoever implements it. **Three arms, and the choice turns
+on where the message's words are allowed to be decided.**
 
-**2. An undelivered notification is retained, never dropped.** §2.5: measured 2026-09-06, the endpoint
-is not listening. A `429` from its rate limiter (`server.ts:240-246`), a connection refused, or a
-non-2xx all mark the notification `undelivered` in the incident record with its reason and timestamp.
-The next successful delivery names the backlog — *"3 notifications were not delivered between 04:10
-and 09:35"* — and the count is visible in `pifleet triage --status`. **A notifier that silently
-swallows is precisely the failure this console exists to catch, and it would be catching it about
-itself.**
+| Arm | Why not |
+|---|---|
+| **ntfy's shape, always** | Then "configurable webhook" means "configurable ntfy server", and pointing `notify.endpoint` at anything else produces a request that endpoint cannot read. It also bakes one vendor's wire format into the composer, so a second destination is a rewrite of the thing §12's injection criterion guards |
+| **A body template in config** | **Refused, and this is the decisive one.** §6.9's entire security property is that the message is produced by a *pure typed function* that no worker string reaches. A template makes the composition configurable — and a configurable composition is a **configurable injection guard**. A template is also a second rendering language, living in a YAML file, outside `tsconfig.json`'s reach and outside the suite's. §6.2's rule 4 refused free strings in `checks[]` *"so a targets file cannot smuggle a command"*; a body template is the same smuggling with a different payload |
+| **A typed envelope, rendered by a named adapter** | **Chosen.** `composeAnnouncement` produces an `Announcement` **value** — fields, not a string. `renderRequest(announcement, notify)` turns it into `{method, url, headers, body}`. `adapter` is a **closed enum**, `["ntfy", "json"]`, on §6.2's rule for `checks[]`: a closed set cannot acquire a third member by accident, and the set is small enough that every member has a criterion |
 
-**3. The channel is configuration, and its absence is not a startup failure.** `notify.endpoint`
-in the console's own config with a null default. A console with no notifier configured still sweeps,
-still drives the incident machine, and still records every transition — it just cannot announce them,
-and `--status` says so. Refusing to start would make a diagnostic console depend on a voice server.
+**What the two adapters do, and the ntfy one is specified from what ntfy actually accepts rather than
+from what a JSON API usually looks like.**
+
+- **`ntfy`** — `POST` to `notify.endpoint` **verbatim**, with the **topic in the URL path** (which is
+  what `/Alerts` is), a **plain-text body carrying the message**, and the title, priority and tags as
+  **headers**: `Title`, `Priority`, `Tags` (`docs.ntfy.sh/publish/` lists these as aliases of
+  `X-Title`, `X-Priority`, `X-Tags`). Priority is an int 1–5, *"with 1=min, 3=default and 5=max"*.
+  **This is the arm a reasonable person gets wrong**: ntfy also accepts a JSON body, and the obvious
+  move is to `POST` JSON to the topic URL. The docs refuse it in a call-out box — *"To publish as
+  JSON, you must PUT/POST to the ntfy root URL, not to the topic URL. Be sure to check that you're
+  POST-ing to `https://ntfy.sh/` (correct), and not to `https://ntfy.sh/mytopic` (incorrect)"* — and
+  the failure is silent rather than loud: the server accepts it and **the JSON becomes the message
+  text**, so the operator's phone shows a wall of braces and the console reports a successful
+  delivery. The adapter therefore never rewrites the configured URL and never sends JSON to it.
+- **`json`** — `POST` the `Announcement` envelope itself as `application/json` to `notify.endpoint`,
+  unchanged. This is the escape hatch for every destination that is not ntfy, and it is deliberately
+  the *typed envelope* rather than a shaped-for-someone-else body: a receiver that needs a different
+  shape puts a five-line function in front of it, which is a place a template cannot smuggle
+  anything into the composer.
+
+**One ntfy constraint that becomes a rule on our side.** The title travels as an HTTP header, and
+*"The message title is limited to 1 KB, and all tags combined to 512 bytes. Requests exceeding either
+are rejected with HTTP 400"* (`docs.ntfy.sh/publish/`). So `composeAnnouncement` emits a title that is
+**a single line of printable ASCII, at most 200 bytes**, and `renderRequest` asserts it. A violation
+is a **composer defect that fails the suite**, never a delivery outcome — because a title that could
+carry a newline is a title that could carry a header, and §12.6's fencing rule applies to a header
+boundary exactly as it applies to a prompt.
+
+#### Seven requirements, and the first is a security control rather than a style rule
+
+**1. Typed fields only in the composed message.** §4.3. `title` and `message` are rendered host-side
+from `{kind, scope, subject, environment, service, assessment, transition, first_seen, sweep_count}`
+through a pure function. **No worker-authored string is ever interpolated into them.** Worker prose —
+the log lines an observer quotes, which are the reason the report is worth reading — appears only in a
+fenced, banner-marked evidence block that is neither the title nor the body. §12.6's erratum is why
+this is built rather than inherited: fencing and banner-marking are recorded there as **not met** on
+the existing surfaces. Note that `subject` is what makes §6.7 rule 3 expressible: a saturation
+announcement's subject is the provider and model, and a service announcement's is the service, and the
+composer reads the field rather than guessing from the shape.
+
+**2. The delivery call is bounded, and this is not defensive — it is what stops one wedged endpoint
+from stopping the console.** `relayPass` is serial; §6.5 already quotes the cost in the review
+console's own terms — *"`relayPass` is serial — three of them stop the actor for an hour and a half."*
+An unbounded `fetch` inside that pass is strictly worse than a slow one, because a half-open socket to
+an endpoint that accepted the connection and will never answer has **no** natural end at all: the pass
+blocks, the loop blocks, the console stops sweeping, and the operator's only evidence is silence from
+a console whose entire output is messages. So:
+
+> **Every delivery carries `AbortSignal.timeout(notify.timeout_ms)`, default `5000`.**
+
+That is the house pattern and not a new one — `src/security/model-probe.ts:252` and
+`src/cli/commands/doctor.ts:1122` both spell it exactly that way. Five seconds against a 240-second
+sweep deadline is invisible on the happy path and is the difference between a degraded console and a
+stopped one on the unhappy one.
+
+**3. The transport is an injected, named, exported type.** The idiom is
+`export type DockerPsRun = () => Promise<DockerPsResult>` (`src/monitor/read/docker.ts:122`), taken
+through an optional ports object with real defaults and an injected clock (`:209-214`). So:
+
+```ts
+export type NotifyTransport = (req: NotifyRequest) => Promise<NotifyOutcome>;
+```
+
+`deliverAnnouncement` takes it through `{transport?, now?}` with the real `fetch`-backed default. That
+is what makes §12's "returns 429, then 200" fixture a unit test rather than a live-endpoint hand-run,
+and §3.3 is why it is not optional: a module CI cannot drive in-process fails the coverage gate.
+**`deliverAnnouncement` returns a `NotifyOutcome` and never returns `void`** — a void-returning
+transport is one whose failure is indistinguishable from its success at the call site, which is the
+silent swallow this console exists to catch.
+
+**4. Auth reaches the actor as an environment variable NAME, never as a value in a tracked file.**
+`notify.token_env` names a variable; the actor reads it from its own process environment at delivery
+time and sends `Authorization: Bearer <value>` (`docs.ntfy.sh/publish/`: *"Use access tokens via
+Bearer/Basic auth, e.g. `Authorization: Bearer tk_AgQdq7mVBoFD37zQVN29RhuMzNIz2`"*). **This is the
+fleet's existing mechanism, reused rather than invented**: it is `api_key_env`'s shape, and the guard
+is already an exported function — `envVarNameIssue` (`src/config/schema.ts:672`), which
+`ProviderSchema` and `llm.api_key_env` both call, and whose own refusal states the rule this field
+needs verbatim: *"The value is read from the host environment under this name; it is never written in
+config."* It rejects the reserved prefixes and the names the container's own environment depends on,
+which is a guard §7.8 gets for free by calling it.
+
+**Two rejected alternatives, each with the reason:**
+
+- **A token in the URL** — `https://user:tk_…@host/Alerts`, or ntfy's documented `?auth=` query form.
+  **Refused.** `triage/console.yaml` is *tracked*, so that is a credential in git history. It is also
+  a credential in `~/.pifleet/triage.log`, which appends and is never truncated (§7.7), and in
+  `pifleet triage --status`, which prints the endpoint. §7.8 makes this a **refusal rather than
+  advice**: the schema rejects an `endpoint` carrying userinfo or a query string, so the failure is a
+  `config validate` error at the moment it is written rather than a secret discovered in a log later.
+- **`secrets.env_allowlist`** — the fleet's other secret channel, and the wrong one. It is the
+  **per-worker container** delivery path — `fleet.yaml:392-408`'s own comment calls it *"the only
+  per-worker delivery channel"* — and it carries values into containers as files. The actor is a host
+  process; it needs a *name*, not a delivery. Its scope discipline points the same way:
+  `schema.ts:1332` says *"NEVER provider keys"*, and a notification credential is the same class of
+  thing.
+
+**A credential refusal is not a wedged endpoint, and must not be treated as one.** A `4xx` that is not
+`429` — a rejected token, or the `400` ntfy returns for an oversized title — cannot be fixed by
+sending the identical bytes again. It is `rejected`, it does **not** enter the backoff, and it raises
+`reporter_undelivered` on the **first** occurrence rather than waiting for §6.8a's confirmation,
+because a misconfiguration that looks like a transient outage is a misconfiguration nobody fixes.
+(`docs.ntfy.sh` does not state which code an auth failure returns, so the rule is written on the
+class — not-`429` `4xx` — rather than on a number this document cannot cite.)
+
+**5. Egress: the actor runs on the host, so no `egress.allow` entry is required and none should be
+added.** `src/security/egress.ts:4-6` is explicit about what that list governs: *"Workers sit on an
+internal Docker network (`src/security/network.ts`), so the DEFAULT is that no destination is
+reachable at all."* `pifleet triage` is not on that bridge; it is the same kind of host process
+`pifleet relay` is. **This is a positive design property and not an accident**, and it is worth
+stating as a rule rather than a fact: *the notification transport stays host-side.* Moving it into a
+container would need an `egress.allow` entry, and — per the coincidence recorded above — it would
+appear to work **without** one, through the IP rule written for oMLX, which is the worst possible
+version of that change: a containment boundary crossed by a line nobody added.
+
+**6. Retry, backoff, and why the ordering question dissolves.** Three outcome classes, and they are
+not interchangeable:
+
+| Outcome | When | What happens |
+|---|---|---|
+| `delivered` | 2xx | recorded with the timestamp. **`delivered` is not `acknowledged`** — a 200 is evidence the server accepted bytes, not that a human read them, and `--status` uses the first word. §6.7's gate on `healthy` is the same discipline applied to this console's own output |
+| `retryable` | `429`, any `5xx`, a timeout, a refused connection | marked `undelivered` in the record with reason and timestamp. **No retry loop inside the pass** |
+| `rejected` | any other non-2xx | as above, plus: no backoff, and `reporter_undelivered` fires immediately (requirement 4) |
+
+**There is no retry loop, and the cadence is the backoff.** One attempt per notification per pass —
+because a backoff loop inside a serial actor is the stall §6.5 spent a paragraph avoiding, and a
+five-minute cadence is a longer and better backoff than any client library would choose, at a cost of
+zero lines. Consecutive `retryable` outcomes double the wait in units of sweeps, from 1 to
+`notify.max_retry_sweeps` (default 12, one hour at the 5-minute cadence).
+
+**And the ordering question dissolves rather than being answered, because an undelivered notification
+is never re-sent as itself.** A notification is a statement about a transition at a time; re-sending
+it four hours later asserts a present tense that is no longer true, and *"`authorization` is
+unhealthy"* arriving after it recovered is a worse message than none. So:
+
+> **The backlog is carried as a count and a window, appended to the next message that does go out** —
+> *"3 notifications were not delivered between 04:10 and 09:35"* — and the individual messages are
+> retained in the record, visible in `pifleet triage --status`, and never replayed.
+
+Nothing is reordered because nothing is requeued. **The one case this leaves open is closed by
+§6.8a**: if the endpoint is down and nothing new fires, no message goes out to carry the backlog — so
+`reporter_undelivered` is itself an incident, and the first thing delivered when the channel returns
+is the statement that the reporter was down for N sweeps and M notifications were lost. §9.15.
+
+**One note on `429` specifically.** ntfy's documented limiter is a 60-request burst refilling at one
+per five seconds (`docs.ntfy.sh/publish/`), and this console's design target is single-digit messages
+a day. **So a `429` from this endpoint is not a capacity problem — it is evidence that §6.8's
+deduplication has broken**, and it is recorded as such rather than merely retried: a second,
+independent check on the failure §6.8 exists to prevent, arriving from outside the process that would
+be wrong about it.
+
+**7. A failure of the webhook must never look like health. This is the rule, stated as a rule.**
+
+> **The delivery result is an input to nothing.** The incident machine advances on *observations*
+> only. A `NotifyOutcome` is written to the incident record's `undelivered[]` and to
+> `reporter_undelivered`, and it is read by `--status` and by the next composition's backlog line. It
+> **never** clears an incident, **never** completes a transition, **never** marks a sweep clean, and
+> **never** decides whether the next sweep runs.
+
+Three corollaries, because the rule is easy to agree with and easy to violate in code:
+
+- **A transition is recorded before it is delivered, not after.** `firing → clear` is written on the
+  observed evidence; whether anyone was told is a separate fact with a separate field. Coupling them
+  would mean an unreachable endpoint silently re-opening a closed incident on the next sweep, and the
+  console re-notifying the same recovery forever once it came back.
+- **The absence of notifications is never evidence of health**, and `--status` must not be readable
+  that way. It reports sweeps completed, incidents by state, and the undelivered count as three
+  separate numbers, so *"quiet"* and *"could not speak"* are never the same row.
+- **The channel is configuration, and its absence is not a startup failure.** `notify: null` disables
+  it. A console with no notifier still sweeps, still drives both state machines, and still records
+  every transition — it just cannot announce them, and `--status` says so. Refusing to start would
+  make a diagnostic console depend on a webhook, which inverts which of the two is load-bearing.
 
 ### 6.10 Safety — read-only by mechanism, and what stops a sweep becoming an outage
 
@@ -1152,16 +1436,23 @@ question the design most has to answer honestly:
    mutating verb, no `/workspace`, no shell — which is why §6.9 spends its rigour on where the
    notification's words come from rather than on what the worker can do.
 
-**The exposure this design does NOT bound, stated rather than discovered.** A hosted provider is
-metered and `usd_ceiling` does not exist — §5.9's amendment says so: *"a hosted provider is metered
-and this fleet has no spend gate for it."* This console is the first workload in this fleet that runs
-**unattended and continuously**. The only gate that binds is `run.budget.tokens_ceiling: 6000000`
-(`fleet.yaml:79`), which is **per run** (Finding C), and a triage console is one run — so the console
-has a hard lifetime measured in tokens, after which `up`'s budget refuses admission and the run ends
-on exit 5. **Nothing announces that today**, so this design makes it a notification: budget
-exhaustion is a console-health issue on §6.7's table, and the actor emits it on the way down. §11 Q4
-asks whether 6,000,000 is the right number for a console whose job is to keep running, and notes that
-raising it is the one change here with an unbounded bill attached.
+**The exposure this design does NOT bound, stated rather than discovered.** This console is the first
+workload in this fleet that runs **unattended and continuously**, and the resource it consumes
+continuously is not a vendor's — every seat resolves to `gpt-oss-20b-MXFP4-Q8` on `omlx`, which is
+`hosted: false` (`fleet.yaml:118`) and is one process on the operator's own machine. **So there is no
+bill to bound and there is a throughput to bound**, and the fleet has already written down which one
+of those is scarce: `max_concurrent: 1  # bounded by oMLX throughput, not pane count`
+(`fleet.yaml:77`). Four seats, one server, 288 sweeps a day. That is §6.7 rule 3's whole argument, and
+it is why the saturation verdict exists: the honest statement of this console's cost is not money, it
+is that **it is the first thing in this fleet that can starve the fleet's own inference server around
+the clock**, and the console has to be able to say so about itself.
+
+The one hard ceiling that does bind is `run.budget.tokens_ceiling: 6000000` (`fleet.yaml:79`), which
+is **per run** (Finding C), and a triage console is one run — so the console has a hard lifetime
+measured in tokens, after which `up`'s budget refuses admission and the run ends on exit 5. **Nothing
+announces that today**, so this design makes it a notification: `budget_exhausted` is a console-health
+issue on §6.8a's table, with §6.8a's identity and §6.8a's dedup, and the actor emits it on the way
+down. §11 Q4 asks whether 6,000,000 is the right number for a console whose job is to keep running.
 
 ### 6.11 The models and the config edits
 
@@ -1322,6 +1613,153 @@ record refuses rather than being acted on — SRD-FLEET-PM-001 Phase 5 task 5.4'
 `Workflows/Consoles.md:64-66`'s convention, copied rather than invented — including the behaviour it
 names for a record it cannot verify: *"left exactly where it is and nothing is signalled."*
 
+### 7.8 `triage/console.yaml` — new, tracked, and the home nine knobs did not have
+
+**This contract exists because a review of the draft found that it did not.** §6.9 said the endpoint
+lived *"in the console's own config"* and no such config was specified anywhere; §7.1-§7.7 hold seven
+contracts and none of them is it. Meanwhile §6 names **nine** tuning values with defaults —
+`cadence_s`, `reserve_s`, `max_consecutive_skips`, `recycle_after_sweeps`, `flap_threshold`,
+`flap_window`, `renotify_after`, `sweep_deadline_s` and now `notify` — and every one of them was
+homeless. A default with no contract is a default that becomes a literal in whichever module reads it
+first, which is the shape §12's *"no decision lives in `scripts/triage`"* criterion is written against.
+
+`pifleet.triageconsole/v1`. Zod-validated in `src/run/triage-config.ts`, refused on any violation,
+and validated by `pifleet config validate` in the same pass as `fleet.yaml` and `triage/targets.yaml`.
+
+**Why a third tracked file rather than any of the four cheaper answers:**
+
+| Home | Why not |
+|---|---|
+| **`fleet.yaml`** | §6.2's three reasons, unchanged and all still binding: `FleetConfigSchema` is `.strict()` with thirteen keys (`schema.ts:1486-1502`), so a `triage:` key is a schema change to the fleet's own contract for data that is not fleet configuration; it changes on a different clock than roles and models; and **it is gitignored** (`.gitignore:9`), so a notification endpoint written there is untracked, undiffable and undispatchable |
+| **A CLI flag** | **This is the arm to reject loudest, because it is the one that looks reasonable.** §6.2 already refused argv as the inventory mechanism — *"288 invocations a day against a list nobody can review. An inventory in argv is an inventory with no history."* Every word of that applies here and one more besides: the endpoint is the console's **output destination**, so an endpoint in argv is a console whose entire product is decided by a shell line nobody reviewed, changed by editing a script that `bun run typecheck` does not read (§3.3). `--cadence` survives as an **override** for a hand-run, and an override with a home is a different thing from a value with no home |
+| **Merged into `triage/targets.yaml`** | Tempting — one file is cheaper than two, and §10 D4 already books the cost of a second one. Refused on **blast radius**: the targets file is the one an operator edits *often* (§6.2 property 1, *"Adding an environment or a service is a YAML edit and nothing else"*), and this file holds the two values whose accidental edit costs the most — the cadence and the endpoint. Different edit frequency, different file. It is §6.2's own argument applied one level down, and it costs nothing extra, because both files are validated in the same `config validate` pass |
+| **`~/.pifleet/triage.json`** | That is the actor's **record** (§7.7), written by the actor, and D12 makes the run tree authoritative over it. Configuration an operator writes and state a process writes must not share a file, or a crashed actor rewrites the cadence |
+
+**The schema**, and it is written out because three of its properties are load-bearing rather than
+decorative:
+
+```ts
+// src/run/triage-config.ts
+export const TRIAGE_CONSOLE_SCHEMA = "pifleet.triageconsole/v1";
+
+/** ntfy priority: "1=min, 3=default and 5=max" — docs.ntfy.sh/publish/. */
+const NtfyPriority = z.number().int().min(1).max(5);
+
+export const NotifyConfigSchema = z
+  .object({
+    /** The URL POSTed to, VERBATIM. For ntfy the topic is this path. */
+    endpoint: z.string().url().superRefine(notifyEndpointIssue),
+    adapter: z.enum(["ntfy", "json"]).default("ntfy"),
+    /** AbortSignal.timeout(). §6.9 requirement 2. */
+    timeout_ms: z.number().int().min(1_000).max(30_000).default(5_000),
+    /** A NAME. The value is read from the host environment; never written here. */
+    token_env: envVarName("notify.token_env").nullable().default(null),
+    /** The backoff cap, in sweeps. §6.9 requirement 6. */
+    max_retry_sweeps: z.number().int().min(1).max(288).default(12),
+    priority: z
+      .object({
+        open: NtfyPriority.default(4),
+        recover: NtfyPriority.default(3),
+        flapping: NtfyPriority.default(3),
+        console_health: NtfyPriority.default(4),
+      })
+      .strict()
+      .default({}),
+  })
+  .strict();
+
+export const TriageConsoleConfigSchema = z
+  .object({
+    version: z.literal(1),
+    cadence_s: z.number().int().min(60).max(3_600).default(300),
+    reserve_s: z.number().int().min(15).max(600).default(60),
+    max_consecutive_skips: z.number().int().min(1).max(24).default(3),
+    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(48),
+    flap_threshold: z.number().int().min(2).max(20).default(3),
+    flap_window_s: z.number().int().min(300).max(86_400).default(3_600),
+    renotify_after_s: z.number().int().min(0).max(604_800).default(21_600),
+    /** `null` DISABLES. Absent takes the default below. §6.9 requirement 7. */
+    notify: NotifyConfigSchema.nullable().default(DEFAULT_NOTIFY),
+  })
+  .strict()
+  .superRefine(reserveFitsCadence);
+
+export const DEFAULT_NOTIFY = {
+  endpoint: "https://ntfy.agileguy.ca/Alerts",
+  // …the field defaults above.
+};
+
+/** COMPUTED, never configured. §6.5 derives it; this is where that becomes true. */
+export function sweepDeadlineS(cfg: TriageConsoleConfig): number {
+  return cfg.cadence_s - cfg.reserve_s;
+}
+```
+
+**The three properties that are doing work:**
+
+**1. `sweep_deadline_s` is absent from the schema on purpose, and `.strict()` is what enforces it.**
+§6.5 derives it as `cadence_s − reserve_s` and refuses a configuration where
+`sweep_deadline_s ≥ cadence_s`. Making it a field would mean carrying a value that must always equal
+a function of two others — and a redundant field is a field that will one day disagree. So it is
+computed, writing it is a **field-level error** on `fleet.yaml`'s own rule (`schema.ts:4-7`: an
+unknown key is a field-level error, never an ignored typo), and the operator who wants a shorter deadline raises
+`reserve_s`. **§6.5's refusal then becomes unreachable rather than merely checked**, because
+`reserve_s.min(15)` and `cadence_s.min(60)` make `sweep_deadline_s ≥ cadence_s` impossible to
+construct. A refusal you cannot reach is better than a refusal you have to remember to test, and it
+is the reason the bound on `reserve_s` is a bound and not a comment.
+
+**2. `token_env` calls the fleet's existing guard rather than restating it.** `envVarName` wraps
+`envVarNameIssue` (`src/config/schema.ts:672`) — the same exported function `ProviderSchema` and
+`llm.api_key_env` both call, written as a function for exactly this reason: its docblock records that
+*"an inline copy of these checks on the flat field only would have left the per-provider one bare"*,
+and a third door into the same namespace would be the same mistake a third time. It brings the
+reserved-prefix and reserved-name refusals with it for free.
+
+**3. `notifyEndpointIssue` refuses a credential rather than discouraging one.** Three rules, and each
+one is a thing that would otherwise become a secret in a tracked file, an appended-forever log
+(`~/.pifleet/triage.log`, §7.7) and `--status` output:
+
+- the scheme must be `http:` or `https:`;
+- **`url.username` and `url.password` must be empty** — no `https://user:tk_…@host/Alerts`;
+- **`url.search` must be empty** — which specifically refuses ntfy's own documented `?auth=` form
+  (`docs.ntfy.sh/publish/`), and refuses it *because* it is documented: an operator who finds that
+  page will reach for it, and the schema is the only place that can catch them before git does.
+
+**The fields, with what each is for:**
+
+| Field | Default | Note |
+|---|---|---|
+| `version` | — | literal `1` |
+| `cadence_s` | `300` | §6.4's tick. `--cadence` overrides it for a hand-run and does not persist |
+| `reserve_s` | `60` | the margin `sweep_deadline_s` is derived against. §6.5 |
+| `max_consecutive_skips` | `3` | fifteen minutes of not sweeping. Raises `sweeps_skipped` (§6.8a) |
+| `recycle_after_sweeps` | `48` | four hours. `0` disables — the setting for measuring Q5, and §6.6 records that leaving it there is a decision rather than a default |
+| `flap_threshold` | `3` | §6.8 |
+| `flap_window_s` | `3600` | §6.8 |
+| `renotify_after_s` | `21600` | six hours. `0` disables. **The knob that undoes the design if it is set small** — §6.8 and §8 both say so, and the schema's `min(0)`/`max(604800)` bound it but cannot protect it |
+| `notify` | the ntfy block | `null` disables the channel without disabling the console. §6.9 requirement 7 |
+| `notify.endpoint` | `https://ntfy.agileguy.ca/Alerts` | checked 2026-09-06 — §6.9's table. POSTed verbatim; the topic is the path |
+| `notify.adapter` | `ntfy` | closed enum, `["ntfy", "json"]`. §6.9 |
+| `notify.timeout_ms` | `5000` | `AbortSignal.timeout()`. §6.9 requirement 2 |
+| `notify.token_env` | `null` | **the default endpoint refused an anonymous read with `403`, so this will need setting** — §6.9's table and §11 Q11 |
+| `notify.max_retry_sweeps` | `12` | one hour at the default cadence. §6.9 requirement 6 |
+| `notify.priority.*` | `4/3/3/4` | ntfy's 1–5 scale. `open` and `console_health` are `high`; a recovery is not worth a long vibration burst at 3 a.m. |
+
+**Loading, and it obeys §3.3 rather than being an exception to it.** The parse is pure —
+`parseTriageConsoleConfig(text: string)` — and the I/O is one injected dep, the house pattern named as
+a type: `export type TriageConfigRead = (path: string) => Promise<string | null>`, taken through an
+optional ports object with a real default, exactly as `DockerPsRun` is
+(`src/monitor/read/docker.ts:122`, `:209-214`). **A missing file is not an error**: it resolves to the
+schema's defaults, which is what makes the default endpoint the default rather than a thing an
+operator must type. An unparseable or invalid file **is** an error and the actor refuses to start,
+because a console running on half a config is a console whose cadence nobody knows.
+
+**One check spans two files and therefore lives in neither schema.** §7.1's `default_window` must not
+exceed `cadence_s`, which is in this file. So the cross-file refusal belongs to the loader that holds
+both — the same place §6.10's kubeconfig-subset fence lives — and it is refused at load with both
+file names in the message. A refusal that names one file when two disagree sends the operator to
+the wrong editor.
+
 ---
 
 ## 8. The `/fleet` skill changes
@@ -1363,13 +1801,56 @@ deterministic function of `targets.yaml` and the sweep id, and §12 makes that a
 | 9.5 | A sweep overruns its cadence | the next tick is **skipped**, never queued; the skip is recorded with the sweep it waits on | 3 consecutive skips → notify. §6.4 |
 | 9.6 | The actor dies mid-sweep | the run tree is authoritative; on restart the actor resumes an in-flight sweep rather than starting one | `./scripts/triage` again — idempotent, as `scripts/review` is |
 | 9.7 | The actor's record names a pid it cannot verify | left exactly where it is, nothing signalled, nothing started; the script says so | `Workflows/Consoles.md:83-85`, inherited |
-| 9.8 | The notify endpoint is down (**true today** — §2.5) | notifications marked `undelivered` with reason and timestamp; retained | the next successful delivery names the backlog; `--status` shows the count |
+| 9.8 | The notify endpoint refuses, times out or rate-limits | the outcome is `retryable`; the notification is marked `undelivered` with reason and timestamp and is **never re-sent as itself**; the backoff doubles in sweeps to `max_retry_sweeps` | the next successful delivery names the backlog as a count and a window; `--status` shows it. §6.9 requirement 6. A `429` is additionally recorded as evidence §6.8's dedup has broken, because this console's volume is nowhere near ntfy's documented limiter |
 | 9.9 | The run's token ceiling is reached | admission is refused, exit 5, the console stops sweeping | notified on the way down (§6.10). **Silent today, and that is the defect this row exists to close** |
 | 9.10 | A pane is restarted by hand | the actor's pin is invalidated | the actor is stopped before and started after, as `scripts/review` does — and it is a `quiesce` dep so the settle-wait refusal stays honest (ISC-572). Note the pin **decays** rather than sticking (`relay.ts:2915-2954`), so a seat that returns in a new run is found rather than waited for forever |
 | 9.11 | A recycle is due while a sweep is in flight | the recycle waits; nothing is torn down | the next boundary. §6.6 layer 4 |
 | 9.12 | The sweep counter resets across a recycle | every task id collides with one the epoch fence saw in a previous run | prevented, not recovered: §12's anti-criterion. The symptom would be intermittent and would read as a dispatch bug |
 | 9.13 | A copy-paste actor claims `review-relay.lock` | the review console silently stops fanning out | prevented by Phase 2.3's per-console paths, and asserted in §12 |
 | 9.14 | A pass throws | logged to stderr; the loop continues | `relay.ts:700-723`. **`--once` propagates instead**, because a single pass is somebody's command |
+| 9.15 | **The thing that cannot be reported IS the reporter** | see below — this row has a section rather than a cell | |
+| 9.16 | The inference server is slow, not down | ≥2 observers produce no artifact in one sweep; the sweep is marked **saturated**, `consecutive_indeterminate` does not advance, and the announcement names the provider and model | §6.7 rule 3. **Without this row the console reports a coverage gap and points the operator at their cluster**, which is the wrong finger at the worst moment |
+| 9.17 | The endpoint answers `4xx` other than `429` — a rejected token, or a title over ntfy's 1 KB header limit | the outcome is `rejected`, **not** `retryable`: no backoff, and `reporter_undelivered` fires on the **first** occurrence | §6.9 requirement 4. Resending identical bytes cannot fix either cause, and a misconfiguration wearing the costume of a transient outage is a misconfiguration nobody fixes |
+| 9.18 | The delivery fails and the console reads it as health | **prevented, not recovered.** §6.9 requirement 7: the delivery result is an input to nothing. A transition is recorded on the observation, before and independently of whether anyone was told | §12's anti-criterion. The failure it prevents is an unreachable endpoint silently re-opening a closed incident every sweep |
+
+#### 9.15 — when the reporter is the thing that failed
+
+**§6.9's `undelivered[]` covers the record of a lost message. It does not cover the case where the
+component that cannot report is the reporting component**, and that case has a property none of the
+other fourteen rows have: **it cannot use the channel to say so.** Every other failure in this table
+is announced through the notifier; this one is the notifier.
+
+So it gets four mechanisms, in the order they become available, and the ordering is the design:
+
+1. **The record, immediately.** `reporter_undelivered` is a `_console`-scoped console-health incident
+   (§6.8a) with §6.8's state machine and §6.8's dedup — so a channel down for a day is one incident
+   with a sweep count, not 288 records. It enters `firing` on the first `rejected` outcome
+   (§6.9 requirement 4) and on the second consecutive `retryable` one.
+2. **The log, immediately.** `~/.pifleet/triage.log`, which appends and is never truncated (§7.7).
+   This is the only surface that is guaranteed to work, because it is a file on the machine the actor
+   is already running on.
+3. **`pifleet triage --status`, on demand.** It reports the channel state, the undelivered count, and
+   the window — as fields distinct from the sweep count, so that *"quiet"* and *"could not speak"*
+   are never the same number (§6.9 requirement 7).
+4. **The channel itself, when it returns.** The `firing → clear` transition for
+   `reporter_undelivered` composes a notification and **that notification is delivered first**, ahead
+   of the sweep's own. It is the only message in this design whose subject is the console's own
+   silence: *the reporter was unable to deliver for N sweeps between T1 and T2, and M notifications
+   were lost.*
+
+**The property that makes this honest rather than decorative**, and it is the one worth writing a
+criterion against: **the console must never be quieter about its own failure than about a service's.**
+A design that logged this and stopped would have the console's most serious failure be its least
+visible one, which is precisely the shape §6.7's structural gate on `healthy` exists to refuse —
+applied, as it should be, to the console rather than to the cluster.
+
+**And the boundary, stated so nobody mistakes this for a solved problem.** If the actor is dead, none
+of the four mechanisms fire, because all four are the actor's. **This console cannot report its own
+death**, and no arrangement of its own components can change that — the observer would have to be
+outside it. That is what §11 Q7 is really asking, and it is recorded here rather than in a row
+because it is a limit rather than a failure mode: the honest statement is that the operator's
+detector for a dead triage console is the absence of the sweeps they expected, and this document does
+not have a better one to offer.
 
 **What this cannot see, and must not imply it can.** Anything outside the four channels an observer
 polls; anything between two sweeps; anything a five-minute window does not reach; and — the important
@@ -1392,9 +1873,12 @@ not close it.
 | **D7a** | The console's own modules are held read-only by a transitive-import-closure guard, with its one dispatch exception **named** rather than counted | §6.10, §12 |
 | **D8** | An issue is derived from the observer's `assessment`/`coverage`/`status`, **confirmed on a second consecutive sweep** before it notifies | §6.7 |
 | **D9** | Notification is edge-triggered on an incident state machine, **with flapping as its own state**, a long re-notify floor, and recovery that must be **observed** | §6.8 |
-| **D10** | **OPEN** — the notification channel is `localhost:8888/notify`, composed host-side from typed fields only | §6.9, §11 Q2 |
+| **D10** | **SETTLED** — the notification channel is a **configurable webhook**, defaulting to `https://ntfy.agileguy.ca/Alerts`, composed host-side from typed fields only, rendered by a closed-enum adapter, bounded by `AbortSignal.timeout`, through an injected transport. Rejected: the PAI voice server; `backend.notify()`; a session; a body template in config | §6.9, §11 Q2 |
 | **D11** | `cloud.kubeconfig` becomes a **requirement** for this console, and the targets file must be a subset of it | §6.10 |
 | **D12** | The run tree is authoritative; `~/.pifleet/triage.json` is a cursor | §6.4 |
+| **D13** | Console-health issues get a **`(scope, kind)` identity** over a closed `kind` enum and **reuse §6.8's state machine unchanged**. Rejected: a second machine; per-sweep emission | §6.8a |
+| **D14** | The console's nine knobs and the webhook live in a **third tracked file**, `triage/console.yaml`, with `sweep_deadline_s` **computed rather than configured**. Rejected: `fleet.yaml`; a CLI flag; merging into `targets.yaml`; the actor's record | §7.8 |
+| **D15** | **Endpoint saturation is its own verdict**, evaluated before the coverage escalation and **suppressing** it, with the provider as the announcement's subject | §6.7 rule 3, §9.16 |
 
 ### The seven that need no argument
 
@@ -1438,9 +1922,26 @@ lines and the triage worker reads them.
 
 ### D10 — the notification channel
 
-**OPEN.** §6.9 has the pick and the reasoning. What is **not** open, under any arm: the message is
-composed host-side from typed fields, worker prose never reaches the spoken text, and an undelivered
-notification is retained. Those are §4.3 and §2.5, and they hold whichever channel is chosen.
+**SETTLED, and the settlement is a shape rather than a URL.** The channel is a webhook whose endpoint
+is configuration (§7.8), and `https://ntfy.agileguy.ca/Alerts` is its default — checked on
+2026-09-06 rather than assumed, because §14's closing rule makes an unverified default the same class
+of defect as an unverified citation. The commission's spelling, `agleguy.ca`, is **NXDOMAIN**; the
+corrected name resolves, its `/v1/health` answers `200`, and its `Alerts` topic refuses an anonymous
+read with `403` — which is how the credential field stopped being scaffolding.
+
+**What the change costs, stated as this section's convention requires.** **The cost is that the
+console's output now depends on a network, a DNS name and a third-party CDN**, where the withdrawn
+design depended on a loopback socket. That is a real regression in one dimension and the trade is
+made deliberately: a loopback notifier can only reach an operator who is sitting at the machine, and
+this is a console built for the hours when nobody is. §6.9's undelivered path, §6.8a's
+`reporter_undelivered` identity and §9.15's four mechanisms are what buy the trade back, and none of
+them would have been written for a channel that could not fail.
+
+**What is not open under any arm, and did not change when the channel did:** the message is composed
+host-side from typed fields through a pure function; worker prose never reaches the title or the body
+(§4.3, §12.6); an undelivered notification is retained and never replayed as itself; and **a delivery
+failure is an input to nothing** (§6.9 requirement 7). Those hold for the ntfy adapter, for the
+generic `json` one, and for whatever the operator points `notify.endpoint` at next.
 
 ---
 
@@ -1449,7 +1950,7 @@ notification is retained. Those are §4.3 and §2.5, and they hold whichever cha
 | # | Question | Probe that settles it | Blocks |
 |---|---|---|---|
 | **Q1** | **BLOCKING.** Which seats run `ollama-cloud/gpt-oss:120b`? §0.2's three arms. `fleet.yaml:471-475` and `Docs/SRD.md` §5.9 both record the opposite of what the commission asks, for the exact role it asks about | **Not a probe — an owner decision**, and it needs one because the recorded decision is explicit and dated. What a probe *would* add: measure `gpt-oss:120b` against `probe_timeout_ms: 90000` before allowlisting it, because a model near the ceiling makes `up` refuse the whole fleet | **Everything.** Phase 1 writes a `model:` line and cannot write it |
-| **Q2** | **BLOCKING for §6.9 only.** Is *"a notification via claude"* the PAI notify endpoint, a Claude Code session, a chat channel, or a ticket? §6.9 picks the first and this row is the ambiguity flagged rather than buried | **Not a probe — an owner decision.** One supporting fact: measured 2026-09-06, `localhost:8888` is not listening and `com.paivoice.server` is not loaded, so whichever arm is taken, §6.9's undelivered path is required rather than defensive | §13 Phase 5. **Nothing else** — the incident machine is channel-agnostic by construction |
+| **Q2** | **ANSWERED 2026-09-06 by the owner: a configurable webhook, defaulting to ntfy.** The original question — is *"a notification via claude"* the PAI notify endpoint, a Claude Code session, a chat channel, or a ticket? — is superseded rather than picked between: the endpoint is a config field (§7.8), and the readings that are not endpoints (a session, `backend.notify()`) are refused in §6.9 on grounds that do not depend on the answer. The draft's `localhost:8888` pick is **withdrawn**, and §6.9 records why the loopback arm was the wrong shape as well as the wrong host | Settled. The one thing the answer changed and a probe could not: the spelling. `agleguy.ca` is **NXDOMAIN**; `ntfy.agileguy.ca` resolves, is healthy, and refuses anonymous reads — all three measured 2026-09-06 and recorded in §6.9 | **Nothing.** §13 Phase 5 is unblocked; the incident machine was channel-agnostic by construction and stayed that way |
 | **Q3** | What should `run.max_concurrent` be? It is `1` (`fleet.yaml:77`) and this is the first console that puts several workers in one run, so it is the first place the value binds. Three observers serialised will not fit a five-minute cadence | Time one observer pass against a real environment, ×3, and compare with the cadence. **And check the cheap half first:** raising it binds only runs holding more than one worker, so confirm by inspection that no other console has such a run before treating the change as fleet-wide | **Nothing structurally.** It decides whether the default cadence is 5 minutes or something longer |
 | **Q4** | Is `tokens_ceiling: 6000000` right for a run that is meant to live for days? Finding C: it is per run, it is the only spend gate that exists, and it ends the console on exit 5 when reached | Run the console for a day and measure the spend per sweep, then divide. **Cheap and it must be done before the console is left running unattended**, because the current answer is "unknown, and the failure is silent" | **Nothing structurally.** It decides the console's lifetime and whether §6.10's exhaustion notification is a rare event or a daily one |
 | **Q5** | Does an `rpc` worker *replay* a previous task's answer the way the measured `tui` worker did, and after how many sweeps? §3.4 — both measurements are on `tui` seats, and both attribute the behaviour partly to the vague staged trigger, which an `rpc` dispatch does not have. **The `accumulation` half needs no probe** (§2.3a) and is why layer 4 is built regardless | Dispatch two clearly different tasks to one `rpc` worker without a restart and read the second answer; then repeat at 10, 50 and 100 dispatches to find where a session stops being usable. **Cheap, and what it decides is the DEFAULT of `recycle_after_sweeps`, not whether recycling exists** | **Nothing.** It sets one number |
@@ -1458,6 +1959,7 @@ notification is retained. Those are §4.3 and §2.5, and they hold whichever cha
 | **Q8** | Should `cloud.impersonate_service_account` be provisioned before this console runs? SRD-OBSERVER-001 §6.3 already argues it; a continuous unattended reader argues it harder | **Not this document's to probe** — it is a cloud-provisioning decision. Recorded because this console is the first workload that makes the operator's full identity available to an agent continuously rather than occasionally | **Nothing.** D11's kubeconfig fence is the control that ships either way |
 | **Q9** | Does `event_stall_kill: 25m` (`fleet.yaml:91`) count an idle-between-sweeps worker as stalled? `stall.ts:31` excuses a worker waiting behind `max_concurrent` as *"the queue"*; whether an idle `rpc` worker between tasks is excused the same way is not established here | Read `stall.ts` and `state.ts` against an `rpc` worker's idle state, or leave a console up for 30 minutes with the cadence disabled and see what happens | **Nothing at a 5-minute cadence** — the gap never reaches 25 minutes. It binds if the cadence is ever set above ~20 minutes, or after 5 consecutive skips |
 | **Q10** | If `run_timeout` ever gains a reader, this console dies at two hours. Finding C. Should the ceiling be raised now, or should the console be exempted, or should the field be retired? | **Not a probe.** Recorded so that whoever implements `run_timeout` finds this row rather than finding a triage console that stops every two hours for no visible reason | **Nothing today.** It is a tripwire pointed at a future change |
+| **Q11** | **Which credential does `https://ntfy.agileguy.ca/Alerts` need, and under what variable name?** Measured 2026-09-06: an anonymous read of that topic returns `403`, so the server is not open by default and a publish should be assumed to need a token until an authorised one is measured. §7.8's `token_env` defaults to `null`, which means the shipped default is an endpoint that will refuse | **A probe the OPERATOR must take, not this document** — the only way to test a publish is to send a real notification, so it was deliberately not attempted here. Mint an ntfy access token, export it, set `notify.token_env`, and `pifleet triage --once` against a fixture incident. **Two things to check while doing it:** that a wrong token produces §9.17's `rejected` outcome and not a silent retry loop, and that the topic name in the path is the one the operator's phone is subscribed to | **§13 Phase 8 only** — Phase 5's fixtures never touch the network. It decides whether the first live sweep announces anything, not whether the console works |
 
 ---
 
@@ -1543,24 +2045,117 @@ ordering) gains a fourth console that must pass it, and its own closing note —
 - The re-notify floor fires at most once per `renotify_after`. *Probe: fixture sweeps spanning 24h at
   the 6h default; assert 4 reminders, not 288.*
 
+**Console-health deduplication (D13) — the same shape as the block above, applied to the console**
+- **Anti: an observer reporting `blocked` on 288 consecutive sweeps produces one notification.**
+  *Probe: drive 288 fixture sweeps in which one environment's observer returns `status: blocked`;
+  assert `notifications.length === 1` plus the `renotify_after` reminders — **4 at the 6h default,
+  and the literal numbers, because "few" would pass a design that sends twelve.** This is the
+  288-a-day hole §6.8a was written to close, and asserting it on the service path only would leave it
+  open.*
+- **Anti: skips 4, 5 and 6 send nothing.** *Probe: six consecutive fixture passes each finding a
+  sweep in flight; assert exactly one notification, at the third. §6.4 names the threshold and says
+  nothing about what follows it; this is what says it.*
+- A console-health `kind` clears only on a positively observed good state. *Probe: a `firing`
+  `observer_blocked` record followed by a sweep that did not run at all; assert it stays `firing` and
+  composes no recovery. **The mirror of §6.8's `unhealthy → indeterminate` rule, and wrong for the
+  same reason: an actor that stopped counting is not an actor that recovered.***
+- **Anti: `kind` is a closed set.** *Probe: assert the enum's members by name against §6.8a's table,
+  not by count — `test/unit/monitor-readonly.test.ts:363-369`'s lesson, that naming the permitted set
+  is what makes a seventh member fail.*
+
+**Saturation (D15)**
+- **Anti: two observers producing no artifact in one sweep is `saturated`, not a coverage gap.**
+  *Probe: a fixture sweep with one artifact of three; assert the outcome is `saturated`, that each
+  service's `consecutive_indeterminate` did **not** advance, and that no coverage issue was composed.
+  **A gate that escalates to coverage here passes every other criterion in this document and is
+  exactly the misdiagnosis §6.7 rule 3 exists to prevent.***
+- The saturation announcement names the provider and model, never the environment. *Probe: assert the
+  composed `subject` equals the provider/model pair and that the environment appears only as scope.*
+- One observer missing is **not** saturation. *Probe: a fixture sweep with two artifacts of three;
+  assert the normal `indeterminate` path and that `consecutive_indeterminate` **did** advance. This
+  is the fixture that stops the verdict swallowing ordinary coverage gaps.*
+
 **The notification (D10)**
 - **Anti: no worker-authored string reaches the notification's `title` or `message`.** *Probe: a
   fixture `triage.json` whose prose fields contain a marker string and an injection-shaped sentence;
   assert the composed `message` contains neither, and that the marker appears only inside the fenced
   evidence block. **§4.3 — this is the criterion that is worth the most and would be the easiest to
   omit.***
+- **Anti: the composed title is header-safe.** *Probe: assert every fixture's title is a single line
+  of printable ASCII under 200 bytes, and that `renderRequest` throws on one that is not. **The title
+  travels as an HTTP header** (§6.9), so a newline is a header-injection boundary and ntfy rejects
+  over 1 KB with a `400` — which would arrive as a delivery failure for what is actually a composer
+  defect.*
+- **Anti: the delivery call is bounded.** *Probe: a fixture transport that never resolves; assert the
+  pass returns within `timeout_ms` and records `retryable`. **A pass that hangs here stops the console
+  — §6.9 requirement 2 — and this is the only criterion that would catch it, because the happy path is
+  identical either way.***
+- The `ntfy` adapter POSTs the configured URL verbatim with a plain-text body and header metadata.
+  *Probe: assert `url` is `notify.endpoint` unchanged, `body` is the message text, and the title,
+  priority and tags are headers. **Anti, in the same test: the request body is never JSON for the
+  `ntfy` adapter** — ntfy accepts JSON only at the root URL and turns JSON POSTed to a topic URL into
+  the message text, so the wrong version delivers successfully and shows the operator a wall of
+  braces.*
+- The `json` adapter POSTs the typed envelope unchanged. *Probe: assert the parsed body round-trips
+  to the `Announcement`, so the escape hatch cannot quietly acquire a shape.*
 - An undelivered notification is retained and the backlog is named. *Probe: a fixture transport that
-  returns 429, then 200; assert the second delivery names the first.*
-- **Anti: a console with no notifier configured still sweeps and still records transitions.** *Probe:
-  `notify.endpoint: null`; assert the incident record advances and `--status` reports the channel as
-  unconfigured.*
+  returns 429, then 200; assert the second delivery names the first as a count and a window.*
+- **Anti: an undelivered notification is never re-sent as itself.** *Probe: the same fixture; assert
+  the second request's body does **not** contain the first message's text. §6.9 requirement 6 — a
+  transport that replays the backlog passes the criterion above and fails this one, and replaying a
+  four-hour-old "`authorization` is unhealthy" after it recovered is the message that makes an
+  operator stop reading.*
+- **Anti: a non-`429` `4xx` is `rejected`, not `retryable`.** *Probe: a fixture transport returning
+  `401`; assert no backoff was scheduled and that `reporter_undelivered` fired on the **first**
+  occurrence. §9.17.*
+- **Anti: a delivery failure never advances or clears an incident.** *Probe: a `firing` record, a
+  sweep observing `healthy` with evidence, and a transport that fails; assert the record is `clear`,
+  the recovery is recorded, and the failure appears **only** in `undelivered[]`. **§6.9 requirement 7
+  — the rule this document states most plainly and the one a plausible implementation violates by
+  writing the transition after the `await`.***
+- The reporter's own failure reaches all four of §9.15's surfaces. *Probe: a fixture channel down for
+  five sweeps then up; assert the incident record, a log line, a `--status` count, and that the
+  **first** message delivered on recovery is the one naming the outage and the lost count — before
+  the sweep's own.*
+- **Anti: a console with `notify: null` still sweeps and still records transitions.** *Probe: assert
+  the incident record advances and `--status` reports the channel as disabled rather than failing.*
+- **Anti: `--status` cannot be read as an all-clear.** *Probe: assert sweeps completed, incidents by
+  state, and the undelivered count are three distinct fields. **A single "OK" line is how "quiet" and
+  "could not speak" become the same row** (§6.9 requirement 7).*
 
-**Configuration (D4, D11, §6.11)**
+**Configuration (D4, D11, D14, §6.11)**
 - A targets file naming a `kube_context` absent from `cloud.kubeconfig` is refused. *Probe: a fixture
   pair; assert the load throws and the actor refuses to start.*
-- A `default_window` greater than the cadence is refused. *Probe: `default_window: 6h` with
-  `cadence: 5m`; assert refusal. §6.10 rule 1 as a gate rather than a note.*
-- `sweep_deadline_s >= cadence_s` is refused. *Probe: as above. §6.5.*
+- A `default_window` greater than the cadence is refused, **and the message names both files**.
+  *Probe: `default_window: 6h` in `targets.yaml` against `cadence_s: 300` in `console.yaml`; assert
+  refusal and assert both filenames appear in it. §6.10 rule 1 and §7.8's cross-file note — a refusal
+  naming one file when two disagree sends the operator to the wrong editor.*
+- **Anti: `sweep_deadline_s` cannot be written.** *Probe: a fixture `console.yaml` carrying the key;
+  assert a **field-level** `.strict()` error naming it, and separately assert
+  `sweepDeadlineS({cadence_s: 300, reserve_s: 60}) === 240`. §7.8 property 1 — §6.5's
+  `sweep_deadline_s ≥ cadence_s` refusal is unreachable by construction, and this pair is what says so
+  rather than a comment claiming it.*
+- **Anti: `notify.endpoint` cannot carry a credential.** *Probe: three fixtures —
+  `https://u:tk_x@host/Alerts`, `https://host/Alerts?auth=x`, and `ftp://host/Alerts`; assert each is
+  refused at load. **The query-string case is the one that matters most**, because ntfy documents
+  `?auth=` and an operator who finds that page will reach for it — and `console.yaml` is tracked,
+  `~/.pifleet/triage.log` appends forever, and `--status` prints the endpoint.*
+- `notify.token_env` is a NAME and is guarded by the fleet's own function. *Probe: assert
+  `token_env: PIFLEET_X` and `token_env: PATH` are both refused with `envVarNameIssue`'s messages —
+  **driving the shared function, not a copy of its rules**, which is the defect
+  `src/config/schema.ts:649-666` records having already been made once.*
+- The shipped defaults are the documented ones. *Probe: parse an empty `console.yaml` and assert every
+  field of §7.8's table, `notify.endpoint === "https://ntfy.agileguy.ca/Alerts"` included. **A missing
+  file resolves to the same values** — assert that too, because "the default endpoint" is only true if
+  an operator who writes no file gets it.*
+- `notify: null` parses and disables; `notify:` absent parses and enables the default. *Probe: both
+  fixtures. The two must not be confused — `FreshDispatchDeps.quiesce`'s docblock records the same
+  distinction being got wrong, that "an omitted optional field and a console that genuinely has no
+  relay look identical at the call site".*
+- **Anti: no `src/` module reads a triage tuning value that `TriageConsoleConfigSchema` does not
+  define.** *Probe: grep the triage modules for the nine knob names and assert each occurrence is a
+  read from the config object. **This is the criterion that keeps §7.8 from becoming decorative** —
+  a contract nothing is required to route through is a second copy of the defaults.*
 - A worker resolves to `ollama-cloud/gpt-oss:120b` with the tag intact. *Probe: `resolveWorker` on a
   fixture config; assert provider and model, and assert the `:120b` is **not** stripped as thinking.*
 - **Anti: removing `gpt-oss:120b` from `models_allowlist` throws.** *Probe: the mutation. **This is
@@ -1652,8 +2247,14 @@ and 4.
   `fleet.yaml:471-475`'s comment, because a comment that records a superseded decision is how the next
   reader learns there was one. Touches: `Docs/SRD.md`, `fleet.yaml`.
   *Acceptance: §5.9 names this console, or D1 arm 3 is recorded in §10.*
-- **0.2** *(owner, not dispatchable)* Answer Q2. Touches: `Docs/SRD-TRIAGE-CONSOLE.md` §11, as an
-  answered question **in place** — never deleted, always prepended with the date and the answer.
+- **0.2** ~~Answer Q2.~~ **DONE 2026-09-06** — answered in place in §11 with the date, per this task's
+  own rule. The channel is a configurable webhook defaulting to `https://ntfy.agileguy.ca/Alerts`
+  (D10, §6.9, §7.8), and §13 Phase 5 is unblocked.
+- **0.2a** *(operator, not dispatchable)* Q11: mint an ntfy access token for the `Alerts` topic and
+  export it under the name `notify.token_env` will carry. **Not a code task and not a fixture task** —
+  Phase 5 is entirely offline and does not need it; Phase 8 does not work without it. Touches:
+  nothing tracked. *Acceptance: `pifleet triage --once` against a fixture incident delivers, and a
+  deliberately wrong token produces §9.17's `rejected` outcome rather than a retry loop.*
 - **0.3** Measure `ollama-cloud/gpt-oss:120b` against `probe_timeout_ms: 90000` **before** it is
   allowlisted. Touches: nothing.
   *Acceptance: the latency is recorded in `ISA.md`. `fleet.yaml:280` calls it "in the fast group" and
@@ -1737,9 +2338,28 @@ it should be solved.
   `test/unit/triage-targets.test.ts`.
   *Acceptance: §12's three configuration probes pass. **This is D11's fence and it is the phase's
   highest-priority task** — without it the console can reach an environment nobody wrote down.*
-- **3.3** Wire it into `pifleet config validate` so one command checks both files. Touches:
-  `src/cli/commands/config.ts`, `test/integration/cli-exit-codes.test.ts`.
-- **3.4** Write the worked file for the commission's example. Touches: `triage/targets.yaml` (new).
+- **3.3** **The console config contract (D14, §7.8).** `TriageConsoleConfigSchema`,
+  `NotifyConfigSchema`, `DEFAULT_NOTIFY`, the computed `sweepDeadlineS`, and the pure
+  `parseTriageConsoleConfig` behind an injected `TriageConfigRead`. Touches:
+  `src/run/triage-config.ts` (new), `test/unit/triage-config.test.ts` (new).
+  *Acceptance: §12's configuration block passes, including the empty-file and missing-file default
+  fixtures and the `sweep_deadline_s`-is-not-a-field pair. **Call `envVarNameIssue`
+  (`src/config/schema.ts:672`) for `token_env` rather than restating its rules** — `:649-666` records
+  that an inline copy on one door left the other bare, and this is a third door.*
+- **3.4** `notifyEndpointIssue`: refuse a `notify.endpoint` carrying userinfo, a query string, or a
+  scheme other than `http:`/`https:`. Touches: `src/run/triage-config.ts`,
+  `test/unit/triage-config.test.ts`.
+  *Acceptance: §12's three-fixture credential probe passes. **The `?auth=` case is the priority** —
+  ntfy documents that form, so it is the one an operator will reach for, and `triage/console.yaml` is
+  tracked.*
+- **3.5** Wire **both** files into `pifleet config validate` so one command checks all three, and put
+  the cross-file `default_window ≤ cadence_s` refusal in the loader that holds both — naming both
+  files in the message. Touches: `src/cli/commands/config.ts`, `src/run/triage-config.ts`,
+  `test/integration/cli-exit-codes.test.ts`.
+- **3.6** Write the worked files: the targets file for the commission's example, and a
+  `console.yaml` carrying `version: 1` and nothing else, **so that the tracked example is also the
+  proof that the defaults are reachable**. Touches: `triage/targets.yaml` (new),
+  `triage/console.yaml` (new).
 
 ### Phase 4 — The console
 
@@ -1779,20 +2399,61 @@ and SRD-FLEET-PM-001 D7's.
   `src/run/triage-verdict.ts` (new), `test/unit/triage-verdict.test.ts` (new).
 - **5.3** The `sweep_id` echo check. Touches: `src/run/triage-verdict.ts`,
   `test/unit/triage-verdict.test.ts`.
+- **5.3a** **The saturation verdict (D15, §6.7 rule 3).** The correlation rule, the suppression of the
+  coverage escalation, and the confirming probe — which is `probeNativeToolCalls`
+  (`src/security/model-probe.ts:230`) over `hostReachableBaseUrl` (`:603`), **injected as a dep, never
+  called in a fixture**. Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`.
+  *Acceptance: §12's Saturation block passes, including the two-of-three fixture that must **not**
+  saturate. **Write the suppression before the verdict** — a saturation verdict that does not stop
+  `consecutive_indeterminate` advancing is a console that reports both findings and lets the operator
+  pick the wrong one.*
 - **5.4** The incident state machine, as a pure `(record, observation) => {record, notifications[]}`.
   Touches: `src/run/triage-incident.ts` (new), `test/unit/triage-incident.test.ts` (new).
   *Acceptance: the 288-consecutive-sweeps fixture asserts exactly one notification; the alternating
   fixture reaches `flapping` and emits once; the `unhealthy → indeterminate` fixture does **not**
   recover.*
-- **5.5** The incident record's schema and validated read. Touches: `src/run/triage-incident.ts`,
+- **5.4a** **Console-health identities (D13, §6.8a).** The closed `kind` enum, the `(scope, kind)`
+  record path, and the mapping from a sweep outcome to a console-health observation — **driven
+  through 5.4's machine unchanged**. Touches: `src/run/triage-incident.ts`,
   `test/unit/triage-incident.test.ts`.
-- **5.6** The notification composer — typed fields in, `{title, message}` out, pure — and the
-  transport with its undelivered path. Touches: `src/run/triage-notify.ts` (new),
+  *Acceptance: §12's Console-health block passes, including the 288-sweep `blocked` fixture and the
+  skips-4-5-6 fixture. **If this task finds itself writing a second state machine, it has gone wrong**
+  — the whole content of §6.8a is that the identity was missing and the machine was not.*
+- **5.5** The incident record's schema and validated read, for both record kinds. Touches:
+  `src/run/triage-incident.ts`, `test/unit/triage-incident.test.ts`.
+- **5.6** **The composer and the adapters (D10, §6.9).** `composeAnnouncement` — typed fields in, an
+  `Announcement` **value** out, pure, with `subject` distinct from `environment` so §6.7 rule 3's
+  notification can name the provider — and `renderRequest(announcement, notify)` with the closed
+  `["ntfy", "json"]` adapter enum. Touches: `src/run/triage-notify.ts` (new),
   `test/unit/triage-notify.test.ts` (new).
-  *Acceptance: §12's injection fixture passes. **This is the phase's highest-priority task after 5.4**
-  — §4.3 is why.*
-- **5.7** Add every §12 fixture in the issue-predicate, dedup and notification blocks. Touches:
-  `ISA.md`.
+  *Acceptance: §12's injection fixture and the header-safety fixture pass. **This is the phase's
+  highest-priority task after 5.4** — §4.3 is why. **Two things to get right and one not to invent:**
+  the `ntfy` adapter POSTs the configured URL **verbatim** with a plain-text body and header metadata
+  and **never JSON**, because ntfy accepts JSON only at its root URL and silently turns JSON POSTed to
+  a topic URL into the message text; and the title is asserted header-safe by `renderRequest` rather
+  than trusted, because ntfy rejects a title over 1 KB with a `400` that would otherwise arrive
+  looking like an endpoint failure.*
+- **5.6a** **The transport and its outcomes.** `export type NotifyTransport`, taken through
+  `{transport?, now?}` with a `fetch`-backed default carrying
+  `AbortSignal.timeout(notify.timeout_ms)` — `src/security/model-probe.ts:252` and
+  `src/cli/commands/doctor.ts:1122` are the two existing spellings. The three outcome classes
+  (`delivered` / `retryable` / `rejected`), the sweep-unit backoff to `max_retry_sweeps`, and the
+  backlog carried as a count and a window. Touches: `src/run/triage-notify.ts`,
+  `test/unit/triage-notify.test.ts`.
+  *Acceptance: §12's 429-then-200 fixture, the never-resolving-transport fixture, the `401`-is-not-
+  retryable fixture, and the anti-criterion that no undelivered message is re-sent as itself.
+  **`deliverAnnouncement` must return a `NotifyOutcome` and never `void`** — a void return makes
+  failure indistinguishable from success at the call site, which is the silent swallow this console
+  exists to catch.*
+- **5.6b** **The reporter's own failure (§9.15).** Wire `reporter_undelivered` through 5.4a's
+  identity, and make the recovery notification the **first** thing delivered when the channel returns.
+  Touches: `src/run/triage-incident.ts`, `src/run/triage-notify.ts`,
+  `test/unit/triage-notify.test.ts`.
+  *Acceptance: §12's four-surfaces probe passes. **And the anti-criterion that outranks it: assert a
+  delivery failure never advances or clears an incident** (§6.9 requirement 7) — the plausible
+  implementation writes the transition after the `await`, and it fails only this test.*
+- **5.7** Add every §12 fixture in the issue-predicate, saturation, dedup, console-health and
+  notification blocks. Touches: `ISA.md`.
 
 ### Phase 6 — The clock
 
@@ -1896,7 +2557,22 @@ Q4 is measured.
 - `ISA.md` — the grading convention at `:97-119`, ISC-517, ISC-572, ISC-573.
 - `.claude/skills/fleet/SKILL.md` and `Workflows/Consoles.md` — the cardinal rule, the measured
   replay, the relay's pins, and the console verbs.
-- `~/repos/paisley/.claude/voice-server/server.ts` — `POST /notify`, its payload and its rate limiter.
+- `src/security/model-probe.ts` — `FetchLike` and `ProbeRequestInit` (the injected-`fetch` idiom this
+  console's transport copies), `AbortSignal.timeout` at `:252`, `probeNativeToolCalls` at `:230` and
+  `hostReachableBaseUrl` at `:603` (§6.7 rule 3's confirming probe), and the timeout-is-not-
+  unreachable argument at `:257-270`.
+- `src/monitor/read/docker.ts:122`, `:209-214` — `export type DockerPsRun`, and the optional-ports
+  object with real defaults: the named-injected-seam pattern §6.9 and §7.8 both take.
+- `src/config/schema.ts:672`, `:649-666` — `envVarNameIssue` and the docblock recording why the
+  `api_key_env` rules are a shared function rather than a paragraph two schemas each remember.
+  `notify.token_env` is the third door.
+- `src/security/egress.ts:4-6`: *"Workers sit on an internal Docker network
+  (`src/security/network.ts`), so the DEFAULT is that no destination is reachable at all."* That is
+  what `egress.allow` governs, and it is why a host-side notifier needs no entry on it.
+- `docs.ntfy.sh/publish/` and `docs.ntfy.sh/config/` — the topic-in-the-path form, the JSON-only-at-
+  the-root call-out, the `Title`/`Priority`/`Tags` header aliases, the 1–5 priority scale, the
+  `Authorization: Bearer tk_…` form and the `?auth=` form §7.8 refuses, the 1 KB title limit and its
+  `400`, the request limiter behind `429`, and `/v1/health`. Read 2026-09-06.
 
 **A rule for maintaining this document.** Cite the file the behaviour is *in*, never the file a
 comment *says* it is in; and re-open the cited lines when editing the section around them.
