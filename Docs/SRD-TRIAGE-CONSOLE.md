@@ -1193,6 +1193,23 @@ spent on stability in one direction and on instability in the other.
 | `flapping → clear` | no transitions, and the state observed is healthy | the recovery notification |
 | `flapping → firing` | no transitions, and no observed clear | the open notification, **once**, and the re-notify floor restarts |
 
+**What a window of BLINDNESS does, ruled 2026-09-06 after task 5.4b implemented the literal
+reading.** The condition column says *"no transitions, and no observed clear"*, and a window in which
+nothing was seen at all satisfies both — so 5.4b fires, with `evidenceRef: null`, and argues the case
+in the code. That was the right call **given the escalation guard as it stands**, because refusing
+would leave a service that flaps and then goes invisible silent forever, which is the identical hole
+this edge closes. But it announces the record's last known reason — `unhealthy`, or the literal
+fallback — when the true fact is *"we could not see it"*, and that is §6.7 rule 3's misdiagnosis
+family in miniature.
+
+**The better answer was already in the module and guarded away from this state:** `onUnobserved`'s
+coverage escalation is restricted to `clear` and `provisional`, so a flapping service that goes blind
+never reaches it. Widening it to `flapping` is the same `COVERAGE_THRESHOLD` applied to one more
+state — **not a new judgement, and the same oversight family as the missing edge itself**, since both
+come from a table that treated `flapping` as terminal. With that widened, the edge can require an
+OBSERVED issue and the two paths stop overlapping: blind escalates as `coverage`, hard-down opens
+with what was seen. Task 5.4c.
+
 The symmetry is the argument: a window of unbroken *anything* means the service has stopped flapping,
 and which state it settled into decides which notification is owed. Task 5.4b.
 
@@ -1740,8 +1757,26 @@ this arm's cost from "a console" to "a schema line".
 
 **No caller grows a parameter.** `resolveRoster` already defaults to `REVIEW_CONSOLE_ROSTER` and
 `TRIAGE_CONSOLE_ROSTER` is spelled beside it (`dispatch-request.ts:298,340`), so the console identity
-is *already* threaded to the check; `ConsoleRoster` gains the name and the refinement reads it.
-§10 D5's bet survives — a third console is still a third constant.
+is *already* threaded to the check; `ConsoleRoster` carries the discriminator and the refinement
+reads it. §10 D5's bet survives — a third console is still a third constant.
+
+> **CORRECTED 2026-09-06 while implementing 5.1a.** This sentence said *"`ConsoleRoster` gains the
+> NAME"*. It gains the **rule** instead — `services: "required" | "refused"` — and the deviation is
+> accepted, because the engineer's two reasons beat mine. `ConsoleSpec.name` already exists at
+> `relay.ts:280` as the `--console` value, and a second spelling of one console's name, constructible
+> to disagree with the first, is the precise hazard that interface's docblock spends its length on.
+> A name field would also put the literal `"triage"` inside the check, which is the shape
+> `ConsoleRoster`'s own docblock exists to refuse. **Carrying the rule keeps this section's survival
+> claim literally true** — a third console is a third constant, with no table, no union and no edit
+> to `dispatch-request.ts`.
+
+**AND ONE COST THIS SECTION MISSED, found the same day and owned here.** The paragraph above reasons
+that keeping the tag at `v1` avoids *"an edit to `roles/collator.md:81-91` — a model-facing prompt
+with no test"*. That is right about the TAG and wrong about the consequence: **the field obliges a
+prompt edit regardless of the tag.** `roles/triage.md:115-130` still shows a request with no
+`services` key and still says *"`worker`, `title` and `brief`, and **nothing else**"*, so the live
+worker writes a document this schema refuses `services_missing` on the first sweep. Phase 5 is
+host-side and CI cannot see it. Task 5.1b.
 
 **Two refusal codes join the alphabet**, by the rule §6.5 already set for the first two: they are
 spelled in `dispatch-request.ts` because that is the vocabulary of the request plane, whichever
@@ -2726,7 +2761,9 @@ and SRD-FLEET-PM-001 D7's.
   required on triage and refused on review with `ConsoleRoster` as the discriminator, spending the
   two new codes `services_missing` and `services_not_permitted`. **Then wire both waiting modules** —
   `checkTriagePartition` and `assessTriageSweep` project their partition out of the sweep's requests.
-  Touches: `src/run/dispatch-request.ts`, `test/unit/dispatch-request.test.ts`.
+  Touches: `src/run/dispatch-request.ts`, `test/unit/dispatch-request.test.ts`,
+  `src/run/triage-partition.ts`, `test/unit/triage-partition.test.ts`. **(The last two were missing
+  from this line until 2026-09-06; the acceptance bullet below has always required them.)**
   *Acceptance: a review request carrying `services` refuses by code; a triage request without it
   refuses by code; a triage request with it validates against `triage/targets.yaml`; and a
   `partitionFromRequests` projection beside `checkTriagePartition` turns a sweep's requests into the
@@ -2736,6 +2773,22 @@ and SRD-FLEET-PM-001 D7's.
   files and that is the correct outcome rather than an unfinished one. Saying so here because a brief
   that demands a caller which cannot exist is the shape that has cost this phase twice (ISC-600,
   ISC-609).
+- **5.1b** Edit `roles/triage.md:115-130` so the `dispatch-request.json` example carries `services`
+  and the sentence under it stops saying *"and nothing else"*. **Without this the live console
+  refuses its own first sweep**, and no host-side test can see it. Touches: `roles/triage.md`,
+  `test/unit/roles.test.ts` (or wherever a role-prompt probe can live), `ISA.md`.
+  *Acceptance: a probe reads `roles/triage.md` and asserts the example parses through
+  `parseDispatchRequest` under `TRIAGE_CONSOLE_ROSTER` — the same working-tree source-probe posture
+  ISC-600 forced on `scripts/`, for the same reason: nothing else checks this file.*
+- **5.4c** Blind flapping records escalate as COVERAGE, not as an issue (§6.8). Widen
+  `onUnobserved`'s coverage escalation to include `flapping` — the same `COVERAGE_THRESHOLD` applied
+  to one more state, not a new judgement — and narrow the `flapping → firing` edge to require an
+  OBSERVED issue, so the two paths cannot both fire. Touches: `src/run/triage-incident.ts`,
+  `test/unit/triage-incident.test.ts`, `ISA.md`.
+  *Acceptance: a flapping service blind for `COVERAGE_THRESHOLD` sweeps opens with
+  `reason: "coverage"` and `evidenceRef: null`; a flapping service observed unhealthy across a
+  `flap_window` opens with the observed reason and its artifact; and neither fixture produces two
+  notifications.*
 - **4.5a** Two source probes task 4.5 left open, both in round 6's files. (a) `scripts/triage` spells
   its four seats as literals rather than importing `DEFAULT_TRIAGE_WORKERS` — behaviourally
   equivalent today and a silent divergence the day a seat is added; probe it beside the `CONSOLE`

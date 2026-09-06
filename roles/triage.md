@@ -117,17 +117,36 @@ you are executing — the `task_id:` line of the fenced `## This task` block in 
   "schema": "pifleet.dispatchrequest/v1",
   "parent_task_id": "T-sweep-41",
   "requests": [
-    {"worker": "obs-t1", "title": "<one line>", "brief": "<the brief for this slice>"},
-    {"worker": "obs-t2", "title": "<one line>", "brief": "<the brief for this slice>"},
-    {"worker": "obs-t3", "title": "<one line>", "brief": "<the brief for this slice>"}
+    {"worker": "obs-t1", "title": "<one line>", "brief": "<the brief for this slice>",
+     "services": ["routing", "ingest"]},
+    {"worker": "obs-t2", "title": "<one line>", "brief": "<the brief for this slice>",
+     "services": ["authorization"]},
+    {"worker": "obs-t3", "title": "<one line>", "brief": "<the brief for this slice>",
+     "services": ["telemetry", "alert-db"]}
   ]
 }
 ```
 
-`worker`, `title` and `brief`, and **nothing else**. A request that also names a model, a tool
-list, a deadline or an acceptance command is refused whole, with the field named. Those were
-settled in config before this console started; naming one here would be assigning something
-that was already fixed.
+`worker`, `title`, `brief` and `services` — **and nothing else**. A request that also names a
+model, a tool list, a deadline or an acceptance command is refused whole, with the field named.
+Those were settled in config before this console started; naming one here would be assigning
+something that was already fixed.
+
+**`services` is the partition, written down.** It is the machine-readable half of the split you
+just made, and it is what the host counts against the targets file — the `partition_incomplete`
+and `partition_duplicate` refusals above are spent on THIS list, not on your prose. Every
+service you were given appears in exactly one request's `services`. The brief still has to
+explain the slice in words, because the observer reads the brief and never sees this field; the
+field exists so the host can check you without reading English.
+
+Two consequences worth holding on to:
+
+- **A request with no `services` is refused `services_missing`, and the whole file with it.**
+  Not that request — the file. Dropping the field is indistinguishable from partitioning
+  nothing.
+- **An empty list is legal.** If a sweep genuinely has nothing for one observer, `"services":
+  []` says so and the file is accepted; the count then fails as `partition_incomplete` if a
+  declared service went nowhere, which is a different refusal telling you a different thing.
 
 ### What every brief must carry, and this is not boilerplate
 

@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 8,
+  "current_round": 9,
   "completed_phases": [
     0,
     1,
@@ -229,6 +229,42 @@
       },
       "verified_commit": "8e5b9f6",
       "verified_note": "eng-1 d502448; eng-2 fdb21a7/36b54d9/8e5b9f6. unit 4580 pass, full 5271 pass / 149 skip / 0 fail, typecheck clean. Both modules land UNWIRED by design - 5.1a is their caller."
+    },
+    {
+      "round": 8,
+      "tasks": {
+        "eng-1": [
+          "5.1a"
+        ],
+        "eng-2": [
+          "5.4b",
+          "5.3b"
+        ],
+        "orchestrator": [
+          "5.1b"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/run/dispatch-request.ts",
+          "test/unit/dispatch-request.test.ts",
+          "src/run/triage-partition.ts",
+          "test/unit/triage-partition.test.ts",
+          "test/unit/relay-console.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-incident.ts",
+          "test/unit/triage-incident.test.ts",
+          "src/run/triage-verdict.ts",
+          "test/unit/triage-verdict.test.ts"
+        ],
+        "orchestrator": [
+          "roles/triage.md",
+          "test/unit/triage-role.test.ts"
+        ]
+      },
+      "verified_commit": "034054b",
+      "verified_note": "eng-1 7da3e21 (18 mutations, 0 survivors); eng-2 034054b (17 mutations, 17 killed). eng-1 also touched relay-console.test.ts outside its list - an ADAPTATION (fixture derives shape from the roster), not a loosening; accepted. 5.1b done by orchestrator after the round."
     }
   ],
   "status": "in_progress_hold_after_round_8",
@@ -277,7 +313,8 @@
   "hold": {
     "set": "2026-09-06, by the operator: 'hold at the end of this round'",
     "means": "Verify round 8 from the diff, grade it into ISA.md, commit, report. Then STOP: no round 9 dispatch, no push, no PR.",
-    "resume_with": "Round 9 candidates: 5.3c (window echo, now specified), 5.5a (zod schema for triage.json), 4.5a (two source probes), 5.3a (saturation), 5.4a (console-health identities), 5.5, 5.6/a/b, 5.7.",
-    "open_decision": "RESOLVED 2026-09-06 by the operator: grow the field. \u00a77.4 now requires window_opened_at; task 5.3c is a spec, not a decision. It touches triage-verdict.ts which round 8 holds, so it lands round 9."
+    "resume_with": "Round 9 candidates: 5.5 + 5.5a (incident record + triage.json schemas), 5.6/5.6a/5.6b (the notifier chain), 5.3c (window echo), 5.4c (blind flapping escalates as coverage), 5.3a (saturation), 5.4a (console-health identities), 4.5a (two source probes), 5.7 (fixtures). Then Phase 6 - 6.1 and 6.2 are what make one hand-run sweep possible.",
+    "open_decision": "RESOLVED 2026-09-06 by the operator: grow the field. \u00a77.4 now requires window_opened_at; task 5.3c is a spec, not a decision. It touches triage-verdict.ts which round 8 holds, so it lands round 9.",
+    "state_at_hold": "Round 8 verified and graded. 5.1b landed with a document probe that reddens on the subtlest form. ISA 619/644."
   }
 }
