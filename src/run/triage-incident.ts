@@ -1503,3 +1503,206 @@ export async function loadIncidentRecord(
   if (text === null) return { kind: "ok", record: freshIncidentRecord(opts.subject) };
   return parseIncidentRecord(text, opts.subject, path);
 }
+
+// ── §6.8a task 5.4a — a sweep's console-level facts, as observations ─────────
+
+/**
+ * What one sweep learned about ONE environment, at the console level.
+ *
+ * Two of §6.8a's six kinds are environment-scoped and both are answered per
+ * environment, so they travel together rather than as two parallel arrays that
+ * can disagree about which environments the sweep saw.
+ */
+export interface ConsoleEnvironmentFacts {
+  readonly environment: string;
+  /** SRD-OBSERVER-001 §9.3's `status: blocked`, from that environment's observer. */
+  readonly observerBlocked: boolean;
+  /** False is §6.5's zero-row: no child succeeded, so nothing was collated. */
+  readonly collated: boolean;
+}
+
+/**
+ * A sweep's console-level facts. **A DATA shape, and that is the whole task.**
+ *
+ * §13 task 5.4a states its own failure condition: *"if this task finds itself
+ * writing a second state machine, it has gone wrong — the whole content of §6.8a
+ * is that the identity was missing and the machine was not."* So nothing below
+ * decides a transition, a threshold or a notification. {@link
+ * consoleHealthObservations} turns facts into {@link IncidentObservation}s and
+ * `advanceIncident` does the rest, unchanged, exactly as it does for a service.
+ *
+ * **The `ran: false` arm is not a convenience.** §12 requires that a
+ * console-health `kind` clear *"only on a positively observed good state"*, with
+ * the probe being a `firing` record followed by *"a sweep that did not run at
+ * all"* — and the note beside it is the reason: *"an actor that stopped counting
+ * is not an actor that recovered."* Modelling a non-sweep as a variant rather
+ * than as absent fields makes the recovery UNREACHABLE from it: the arm can only
+ * produce `unobserved`, which carries no `evidenceRef` and therefore cannot
+ * reach `onObservedClear`. It is §6.8's own asymmetry, spelled in the type that
+ * feeds the machine rather than re-argued inside it.
+ */
+export type ConsoleHealthFacts =
+  | {
+      readonly ran: true;
+      readonly sweepId: string;
+      readonly at: number;
+      /**
+       * What a CLEAR cites. Required, and non-nullable for the reason
+       * `IncidentSignal["observed_clear"]` makes it non-nullable: a recovery that
+       * names nothing is a recovery derived from an absence.
+       */
+      readonly evidenceRef: string;
+      readonly environments: readonly ConsoleEnvironmentFacts[];
+      /** §6.4's counter as this sweep found it. */
+      readonly consecutiveSkips: number;
+      /** §7.8's `max_consecutive_skips`, passed rather than read, so this stays pure. */
+      readonly maxConsecutiveSkips: number;
+      /**
+       * §6.7 rule 3. `null` when the sweep could not tell — which is NOT `false`,
+       * and the distinction is the one §6.7 rule 3 exists to protect.
+       */
+      readonly saturated: boolean | null;
+      /** §6.10's exit 5. */
+      readonly budgetExhausted: boolean;
+      /** §9.15. Task 5.6b is what sets it; this shape is the seam it lands on. */
+      readonly reporterUndelivered: boolean;
+    }
+  | {
+      readonly ran: false;
+      readonly sweepId: string;
+      readonly at: number;
+      /** The environments whose records the actor holds, so each gets its silence. */
+      readonly environments: readonly string[];
+    };
+
+/** `issue` or `observed_clear`, on one boolean, with the reason fixed. */
+function raised(
+  bad: boolean,
+  reason: ConsoleHealthKind,
+  evidenceRef: string,
+): IncidentSignal {
+  return bad
+    ? { kind: "issue", reason, evidenceRef }
+    : { kind: "observed_clear", evidenceRef };
+}
+
+/**
+ * §6.8a's table, as a function from one sweep's facts to observations.
+ *
+ * One observation per `(scope, kind)` the sweep has something to say about. A
+ * subject the sweep is silent on gets NO observation here — the actor (task 6.1)
+ * holds the record set and is the only thing that can know a record exists for a
+ * subject this sweep never mentioned. Emitting a fabricated `unobserved` for
+ * every enum member on every sweep would be this module inventing the record set,
+ * which it does not have.
+ *
+ * The order is §6.8a's table, top to bottom, then environments in the order the
+ * caller supplied them — deterministic, so a test can assert by value.
+ */
+export function consoleHealthObservations(
+  facts: ConsoleHealthFacts,
+): readonly IncidentObservation[] {
+  const { sweepId, at } = facts;
+  const out: IncidentObservation[] = [];
+  const say = (subject: IncidentSubject, signal: IncidentSignal): void => {
+    out.push({ subject, sweepId, at, signal });
+  };
+  const console_ = (health: ConsoleHealthKind): IncidentSubject => ({
+    kind: "console_health",
+    scope: CONSOLE_SCOPE,
+    health,
+  });
+  const env = (environment: string, health: ConsoleHealthKind): IncidentSubject => ({
+    kind: "console_health",
+    scope: environment,
+    health,
+  });
+
+  /*
+   * THE SWEEP THAT DID NOT RUN. Every subject the actor holds hears silence, and
+   * silence is all this arm can produce — see the type's docblock. §6.4's own
+   * skip counter is deliberately NOT advanced here either: this function reports
+   * what a sweep saw, and a sweep that did not run saw nothing, including nothing
+   * about itself.
+   */
+  if (!facts.ran) {
+    for (const environment of facts.environments) {
+      say(env(environment, "observer_blocked"), { kind: "unobserved" });
+      say(env(environment, "sweep_produced_nothing"), { kind: "unobserved" });
+    }
+    for (const health of CONSOLE_HEALTH_KINDS) {
+      if (health === "observer_blocked" || health === "sweep_produced_nothing") continue;
+      say(console_(health), { kind: "unobserved" });
+    }
+    return out;
+  }
+
+  const ref = facts.evidenceRef;
+  for (const e of facts.environments) {
+    say(env(e.environment, "observer_blocked"), raised(e.observerBlocked, "observer_blocked", ref));
+    say(
+      env(e.environment, "sweep_produced_nothing"),
+      raised(!e.collated, "sweep_produced_nothing", ref),
+    );
+  }
+
+  /*
+   * §6.4's threshold, and the off-by-one is DELIBERATE and lives here rather
+   * than in the machine.
+   *
+   * §12 asks for two things at once: *"skips 4, 5 and 6 send nothing"* and
+   * *"exactly one notification, at the third"*, with `max_consecutive_skips`
+   * defaulting to 3. Those are only consistent if the OPEN lands on skip 3 — and
+   * §6.8a inherits §6.7 rule 1, so an open needs a confirmation sweep behind it.
+   * Raising at the threshold itself would put the open on skip 4 and falsify
+   * both sentences.
+   *
+   * So the issue is raised one skip EARLY and the machine's own confirmation
+   * carries it to the threshold. That is not a second rule: §6.4's number is a
+   * statement about when the OPERATOR is told, and confirmation is how the
+   * machine gets there. Absorbing it in the identity layer is what lets §6.8a's
+   * *"the machine unchanged"* stay literally true.
+   *
+   * `Math.max(1, …)` guards the schema's `min(1)`: at `max_consecutive_skips: 1`
+   * there is no earlier skip to raise on, so the open lands on skip 2 and the
+   * knob's floor costs one sweep of latency rather than an unreachable rule.
+   *
+   * `>=` rather than `===` for the reason the coverage escalation carries: the
+   * counter arrives from a record this module did not write, and a counter
+   * already past the line must still raise.
+   *
+   * **Below the raise line and above zero there is NO observation, not an
+   * `unobserved` one.** A skipped pass is not a sweep that ran, so it cannot
+   * clear (§6.8a's table: *"cleared by a sweep that ran"*); and `unobserved`
+   * would advance `consecutive_indeterminate` toward the coverage escalation,
+   * announcing that the console cannot see a service when the fact is that it
+   * chose not to look yet.
+   */
+  const raiseSkipsAt = Math.max(1, facts.maxConsecutiveSkips - 1);
+  if (facts.consecutiveSkips >= raiseSkipsAt) {
+    say(console_("sweeps_skipped"), {
+      kind: "issue",
+      reason: "sweeps_skipped",
+      evidenceRef: ref,
+    });
+  } else if (facts.consecutiveSkips === 0) {
+    say(console_("sweeps_skipped"), { kind: "observed_clear", evidenceRef: ref });
+  }
+
+  /*
+   * `null` is NOT `false`. §6.7 rule 3's whole content is that a sweep which
+   * could not tell whether the provider was saturated must not report that it
+   * was not — that is the absence-as-evidence mistake, and here it would compose
+   * a recovery.
+   */
+  if (facts.saturated !== null) {
+    say(console_("inference_saturated"), raised(facts.saturated, "inference_saturated", ref));
+  }
+
+  say(console_("budget_exhausted"), raised(facts.budgetExhausted, "budget_exhausted", ref));
+  say(
+    console_("reporter_undelivered"),
+    raised(facts.reporterUndelivered, "reporter_undelivered", ref),
+  );
+  return out;
+}

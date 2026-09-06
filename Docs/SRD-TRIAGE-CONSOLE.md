@@ -1279,10 +1279,34 @@ cannot enumerate is a `kind` nobody writes a criterion for.
 |---|---|---|---|
 | `observer_blocked` | environment | an observer returned `status: blocked` (SRD-OBSERVER-001 §9.3) | a sweep in which that environment's observers returned a non-`blocked` status |
 | `sweep_produced_nothing` | environment | §6.5's zero-row: no child succeeded, so no collation was dispatched | a sweep that collated |
-| `sweeps_skipped` | `_console` | consecutive skips reach `max_consecutive_skips` (§6.4) | a sweep that ran |
+| `sweeps_skipped` | `_console` | consecutive skips reach `max_consecutive_skips` (§6.4) — **raised one skip earlier, see below** | a sweep that ran |
 | `inference_saturated` | `_console` | §6.7 rule 3 | a sweep in which every observer produced an artifact |
 | `budget_exhausted` | `_console` | admission refused on the run's ceiling, exit 5 (§6.10) | a new run — which in practice means a recycle or a restart |
 | `reporter_undelivered` | `_console` | §9.15 — the delivery path itself is failing | a delivery that succeeds |
+
+**THE SKIP THRESHOLD CARRIES A DELIBERATE OFF-BY-ONE, resolved 2026-09-06 while implementing task
+5.4a.** §12 asks for two things at once — *"skips 4, 5 and 6 send nothing"* and *"exactly one
+notification, at the third"* — with `max_consecutive_skips` defaulting to 3. Those are only
+consistent if the OPEN lands on skip 3, and this section inherits §6.7 rule 1, so an open needs a
+confirmation sweep behind it. **Raising the issue AT the threshold would put the open on skip 4 and
+falsify both of §12's sentences.**
+
+So the issue is raised one skip early and the machine's own confirmation carries it to the threshold.
+That is not a second rule: **§6.4's number is a statement about when the OPERATOR is told**, and
+confirmation is how the machine gets there. Absorbing it in the identity layer is precisely what lets
+this section's *"the machine unchanged"* stay literally true — the alternative was a special case
+inside `advanceIncident`, which is the failure condition §13 task 5.4a names for itself.
+
+Two smaller rules fall out of the same place and are worth stating because the obvious choice is
+wrong for both:
+
+- **A skipped pass below the raise line produces NO observation** — not an `unobserved` one. A
+  skipped pass is not *"a sweep that ran"*, so it cannot clear; and `unobserved` would advance
+  `consecutive_indeterminate` toward the coverage escalation, announcing that the console cannot SEE
+  a service when the fact is that it chose not to look yet.
+- **`saturated: null` is not `saturated: false`.** A sweep that could not tell says nothing about
+  `inference_saturated`; only a sweep that positively observed every observer producing an artifact
+  clears it. §6.7 rule 3's own distinction, at the one place a `boolean` would have erased it.
 
 **What reuse buys, stated as the three properties it inherits rather than left implied:**
 
@@ -2760,9 +2784,11 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: the 288-consecutive-sweeps fixture asserts exactly one notification; the alternating
   fixture reaches `flapping` and emits once; the `unhealthy → indeterminate` fixture does **not**
   recover.*
-- **5.4a** **Console-health identities (D13, §6.8a).** The closed `kind` enum, the `(scope, kind)`
-  record path, and the mapping from a sweep outcome to a console-health observation — **driven
-  through 5.4's machine unchanged**. Touches: `src/run/triage-incident.ts`,
+- **5.4a** **Console-health identities (D13, §6.8a). DONE 2026-09-06** — the types with task 5.5
+  (a record kind whose subject cannot be spelled cannot be validated), the mapping and §12's
+  fixtures after it. The closed `kind` enum, the `(scope, kind)` record path, and
+  `consoleHealthObservations` — a pure map from one sweep's facts to `IncidentObservation`s, **driven
+  through 5.4's machine unchanged**; no `switch` in `advanceIncident` reads a subject or a reason. Touches: `src/run/triage-incident.ts`,
   `test/unit/triage-incident.test.ts`.
   *Acceptance: §12's Console-health block passes, including the 288-sweep `blocked` fixture and the
   skips-4-5-6 fixture. **If this task finds itself writing a second state machine, it has gone wrong**

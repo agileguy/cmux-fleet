@@ -42,6 +42,9 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import {
+  consoleHealthObservations,
+  type ConsoleHealthFacts,
+  type IncidentObservation,
   ADVANCE_READS_NO_ISSUE_REASON,
   ADVANCE_READS_NO_SUBJECT_FIELD,
   CONSOLE_HEALTH_KINDS,
@@ -2090,5 +2093,241 @@ describe("the two record kinds are one machine — §6.8a, and 5.5's half of it"
     expect(new Set(keys).size).toBe(3);
     expect(subjectKey(SKIPS)).toContain("console_health");
     expect(subjectKey(SERVICE)).toContain("service");
+  });
+});
+
+
+// ── §12's Console-health block (D13), task 5.4a ─────────────────────────────
+
+describe("console-health deduplication — §6.8a's identity on §6.8's machine", () => {
+  const ENV = "cni-dev";
+  /*
+   * The FULL config, because `IncidentPolicy` is a `Pick` and
+   * `max_consecutive_skips` is §6.4's knob rather than §6.8's. Read from the
+   * shipped defaults rather than spelled, so the fixture moves when the knob does.
+   */
+  const CONFIG = defaultTriageConsoleConfig();
+  const BLOCKED: IncidentSubject = {
+    kind: "console_health",
+    scope: ENV,
+    health: "observer_blocked",
+  };
+  const SKIPS: IncidentSubject = {
+    kind: "console_health",
+    scope: CONSOLE_SCOPE,
+    health: "sweeps_skipped",
+  };
+
+  /** `drive`, for a subject that is not the service fixture. */
+  function driveSubject(
+    subject: IncidentSubject,
+    sweeps: number,
+    signalFor: (n: number) => IncidentSignal | null,
+    policy: IncidentPolicy = DEFAULTS,
+  ): { record: IncidentRecord; notifications: IncidentNotification[] } {
+    let record = freshIncidentRecord(subject);
+    const notifications: IncidentNotification[] = [];
+    for (let n = 0; n < sweeps; n += 1) {
+      const signal = signalFor(n);
+      // `null` is "this sweep said nothing about this subject" — not `unobserved`.
+      if (signal === null) continue;
+      const step = advanceIncident(
+        record,
+        { subject, sweepId: `s-${n}`, at: T0 + n * CADENCE_MS, signal },
+        policy,
+      );
+      record = step.record;
+      notifications.push(...step.notifications);
+    }
+    return { record, notifications };
+  }
+
+  /** The facts a sweep hands `consoleHealthObservations`, with one knob moved. */
+  const ranWith = (over: Partial<Extract<ConsoleHealthFacts, { ran: true }>>) =>
+    consoleHealthObservations({
+      ran: true,
+      sweepId: "s-1",
+      at: T0,
+      evidenceRef: "sweep/1",
+      environments: [{ environment: ENV, observerBlocked: false, collated: true }],
+      consecutiveSkips: 0,
+      maxConsecutiveSkips: CONFIG.max_consecutive_skips,
+      saturated: false,
+      budgetExhausted: false,
+      reporterUndelivered: false,
+      ...over,
+    });
+
+  const forSubject = (
+    obs: readonly IncidentObservation[],
+    health: string,
+    scope: string,
+  ): IncidentObservation | undefined =>
+    obs.find(
+      (o) => o.subject.kind === "console_health" && o.subject.health === health && o.subject.scope === scope,
+    );
+
+  /**
+   * §12: *"an observer reporting `blocked` on 288 consecutive sweeps produces one
+   * notification"*. This is the 288-a-day hole §6.8a was written to close, and
+   * §12 says asserting it on the service path alone would leave it open.
+   *
+   * Instants BY VALUE, on §6.8a's own correction: a bare count inherits the
+   * inclusivity ambiguity that made the re-notify number wrong once already.
+   */
+  test("288 sweeps of `blocked` produce one open and its reminders, at their instants", () => {
+    const { record, notifications } = driveSubject(BLOCKED, 288, () =>
+      issue("observer_blocked", "obs-t1/1"),
+    );
+
+    expect(kinds(notifications)).toEqual(["opened", "reminder", "reminder", "reminder"]);
+    expect(notifications[0]!.reason).toBe("observer_blocked");
+    expect(record.state).toBe("firing");
+
+    /*
+     * The open lands on the CONFIRMATION sweep — §6.7 rule 1, inherited
+     * unchanged — and each reminder is exactly one `renotify_after` past the
+     * message before it. Both are asserted from the instants rather than
+     * restated as literals.
+     */
+    const opened = T0 + 1 * CADENCE_MS;
+    const step = DEFAULTS.renotify_after_s * 1_000;
+    expect(notifications.map((n) => n.at)).toEqual([
+      opened,
+      opened + step,
+      opened + 2 * step,
+      opened + 3 * step,
+    ]);
+  });
+
+  /**
+   * ANTI, and without it the test above is satisfied by a machine that opens once
+   * and never reminds — or by one that never notifies at all.
+   */
+  test("ANTI: 288 sweeps of a NON-blocked observer notify nothing", () => {
+    const { record, notifications } = driveSubject(BLOCKED, 288, () => clear("obs-t1/ok"));
+    expect(notifications).toEqual([]);
+    expect(record.state).toBe("clear");
+  });
+
+  /**
+   * §12: *"skips 4, 5 and 6 send nothing. Probe: six consecutive fixture passes
+   * each finding a sweep in flight; assert exactly one notification, at the
+   * third."*
+   *
+   * Driven through `consoleHealthObservations` rather than through hand-built
+   * signals, because the off-by-one that makes both of §12's sentences true lives
+   * in that mapping and a hand-built fixture would test around it.
+   */
+  test("six skipped passes notify exactly once, on the third", () => {
+    let record = freshIncidentRecord(SKIPS);
+    const at: number[] = [];
+    const seen: string[] = [];
+    for (let pass = 1; pass <= 6; pass += 1) {
+      const obs = forSubject(
+        ranWith({ consecutiveSkips: pass, sweepId: `s-${pass}`, at: T0 + pass * CADENCE_MS }),
+        "sweeps_skipped",
+        CONSOLE_SCOPE,
+      );
+      if (obs === undefined) continue;
+      const step = advanceIncident(record, obs, DEFAULTS);
+      record = step.record;
+      for (const n of step.notifications) {
+        seen.push(n.kind);
+        at.push(n.at);
+      }
+    }
+    expect(seen).toEqual(["opened"]);
+    expect(at).toEqual([T0 + 3 * CADENCE_MS]);
+    expect(CONFIG.max_consecutive_skips).toBe(3);
+  });
+
+  /**
+   * §12: a console-health `kind` clears *"only on a positively observed good
+   * state"* — *"an actor that stopped counting is not an actor that recovered"*.
+   *
+   * The `ran: false` arm can only produce `unobserved`, which carries no
+   * `evidenceRef` and therefore cannot reach the recovery path. Asserted on the
+   * SIGNAL as well as on the outcome, so the property is visible where it is
+   * enforced.
+   */
+  test("a sweep that did not run at all composes no recovery", () => {
+    const firing = driveSubject(BLOCKED, 2, () => issue("observer_blocked", "obs-t1/1"));
+    expect(firing.record.state).toBe("firing");
+
+    const silent = consoleHealthObservations({
+      ran: false,
+      sweepId: "s-99",
+      at: T0 + 99 * CADENCE_MS,
+      environments: [ENV],
+    });
+    for (const o of silent) expect(o.signal.kind).toBe("unobserved");
+
+    const obs = forSubject(silent, "observer_blocked", ENV)!;
+    const after = advanceIncident(firing.record, obs, NO_RENOTIFY);
+    expect(after.notifications).toEqual([]);
+    expect(after.record.state).toBe("firing");
+  });
+
+  /**
+   * The mirror, so the silence above is the RULE and not a machine that never
+   * recovers anything: an observed non-blocked sweep does clear it, once.
+   */
+  test("an observed non-blocked sweep DOES recover it, exactly once", () => {
+    const firing = driveSubject(BLOCKED, 2, () => issue("observer_blocked", "obs-t1/1"));
+    const obs = forSubject(ranWith({ at: T0 + 5 * CADENCE_MS, sweepId: "s-5" }), "observer_blocked", ENV)!;
+    expect(obs.signal.kind).toBe("observed_clear");
+    const after = advanceIncident(firing.record, obs, NO_RENOTIFY);
+    expect(kinds(after.notifications)).toEqual(["recovered"]);
+    expect(after.record.state).toBe("clear");
+  });
+
+  /**
+   * §6.7 rule 3's distinction, on the one field where `null` and `false` are
+   * different facts: a sweep that could not tell whether the provider was
+   * saturated must not compose a recovery for it.
+   */
+  test("`saturated: null` says NOTHING; `false` says it is fine", () => {
+    expect(forSubject(ranWith({ saturated: null }), "inference_saturated", CONSOLE_SCOPE)).toBeUndefined();
+    const said = forSubject(ranWith({ saturated: false }), "inference_saturated", CONSOLE_SCOPE);
+    expect(said?.signal.kind).toBe("observed_clear");
+    const bad = forSubject(ranWith({ saturated: true }), "inference_saturated", CONSOLE_SCOPE);
+    expect(bad?.signal.kind).toBe("issue");
+  });
+
+  /**
+   * A skipped pass BELOW the raise line says nothing at all — not `unobserved`,
+   * which would advance `consecutive_indeterminate` toward the coverage
+   * escalation and announce that the console cannot SEE a service when the fact
+   * is that it chose not to look yet; and not `observed_clear`, because a skipped
+   * pass is not §6.8a's *"a sweep that ran"*.
+   */
+  test("a skip below the raise line is neither a clear nor an unobserved", () => {
+    expect(forSubject(ranWith({ consecutiveSkips: 1 }), "sweeps_skipped", CONSOLE_SCOPE)).toBeUndefined();
+    expect(forSubject(ranWith({ consecutiveSkips: 0 }), "sweeps_skipped", CONSOLE_SCOPE)?.signal.kind).toBe(
+      "observed_clear",
+    );
+    expect(forSubject(ranWith({ consecutiveSkips: 2 }), "sweeps_skipped", CONSOLE_SCOPE)?.signal.kind).toBe(
+      "issue",
+    );
+  });
+
+  /**
+   * The environment-scoped kinds are keyed BY ENVIRONMENT, so two environments
+   * dedup independently. Asserted on an asymmetric fixture — one blocked, one
+   * not — because a mapping that keyed both to `CONSOLE_SCOPE` passes every
+   * single-environment fixture above.
+   */
+  test("two environments carry two records, asserted by scope", () => {
+    const obs = ranWith({
+      environments: [
+        { environment: "cni-dev", observerBlocked: true, collated: true },
+        { environment: "saas-dev", observerBlocked: false, collated: false },
+      ],
+    });
+    expect(forSubject(obs, "observer_blocked", "cni-dev")?.signal.kind).toBe("issue");
+    expect(forSubject(obs, "observer_blocked", "saas-dev")?.signal.kind).toBe("observed_clear");
+    expect(forSubject(obs, "sweep_produced_nothing", "cni-dev")?.signal.kind).toBe("observed_clear");
+    expect(forSubject(obs, "sweep_produced_nothing", "saas-dev")?.signal.kind).toBe("issue");
   });
 });
