@@ -38,6 +38,14 @@ ids is a failure mode nobody needs.**
 
 ### 0.2 The decision that matters — the model the commission names is the one this fleet's config refuses, in writing
 
+**ANSWERED 2026-09-06 by the owner: arm 3 — all four seats run the local
+`gpt-oss-20b-MXFP4-Q8`.** The commission's model request is refused, the recorded 2026-09-03 decision
+stands unreversed, and **no amendment to `Docs/SRD.md` §5.9 and no edit to `fleet.yaml:471-475`'s
+comment are required** — which is the one arm that needed neither. The argument below is kept in
+full, undeleted, because it is what the answer was taken against and because the next reader of
+`fleet.yaml:471-475` deserves to find the reasoning rather than the outcome alone. D1 records the
+cost.
+
 The commission says: *"They will all use ollama cloud gpt-oss-120b."* That is not a configuration
 detail. It is a request to reverse a recorded owner decision, for the exact role that decision was
 written about.
@@ -93,7 +101,11 @@ exists to prevent.
    reconciliation task — which is the task SRD-OBSERVER-001 §6.2 says most needs the budget.
 
 **Nothing else in this document depends on which arm is taken.** Every other section is written to
-be correct under all three.
+be correct under all three, and **arm 3 is the one taken**: §6.11's worker-level `model:` override is
+therefore not written, `llm.providers.ollama-cloud.models_allowlist` is not extended, and §13 task
+0.3's latency measurement is moot because the model it would have measured is not being allowlisted.
+The observers take the `observer` role's model unchanged, and `triage` is declared with the same
+one.
 
 ### 0.3 The disclosure boundary, and the gate that does not cover this console
 
@@ -177,7 +189,7 @@ matter whether or not this console is ever built.
 | **D** | **`pane_mode: tui` allocates no epoch, and `fleet.yaml:487-489` already argues that the `observer` role is the one least able to afford it.** *"the ROLE stays rpc — tui allocates no epoch, so a re-dispatched watch pass would run twice."* `fleet.example.yaml:551-556` puts it at length and names the reason: an observer watch is *"built on repeated dispatch of near-identical tasks"*. A five-minute cadence is that argument multiplied by 288. The schema already warns on it — `observerTuiEpochWarning`, `schema.ts:1841-1851`, keyed on the role NAME because the hazard is what `observer-ops` does. `tui` also costs `--auto` outright: `dispatch.ts:1219-1231` rejects a `pane` route with `pane_mode_tui_is_not_auto_schedulable`. | Yes | §2.3, §6.1 |
 | **D′** | **`rpc` buys the epoch fence and NOT a fresh session, and this is the finding this design most nearly got wrong.** A worker's Pi session id **is its worker id** (`src/config/render.ts:203`, `--session-id w.id`) and its session directory is the **run's** (`render.ts:513`, `-v <run>/sessions:/sessions`). So a session is per `(run, worker)` and survives every dispatch into that run, on **both** pane modes. `grep` finds no `/clear`, no context-reset verb, no session rotation anywhere in `src/`. **A standing triage run therefore accumulates 288 sweeps of transcript per day into one session, and Pi auto-compacts it.** The only lever in the tree is a **new run** — and `fresh-dispatch.ts:29-42` is the measured proof of what the absence costs: *"it answered about `T-unit-tests-2` — the PREVIOUS task — reciting that envelope's contents without opening the new one… The run settled `success` seven seconds after staging."* | Yes | §2.3a, §6.6 |
 | **G** | **A notification API exists in this repository, has ZERO call sites, and is explicitly forbidden from carrying anything that matters.** `src/backends/types.ts:49-52` declares `interface Notification { title: string; body: string }`; `:116` makes `notify?()` optional on the backend; `cmux/client.ts:256-261` builds the argv and `cmux/index.ts:342-344` is the only implementation, while `tmux/index.ts:233-237` is a deliberate no-op — *"Not implemented rather than pretending delivery happened."* The header at `types.ts:104` settles it: **"Presentation plane only. Nothing correctness-bearing may live behind this."** So it is not this console's notifier. **And the name is already taken twice**: `notify` is a Pi UI-request method the supervisor is contractually required *not* to answer (`src/supervisor/ui-requests.ts:127-138`, `FIRE_AND_FORGET_METHODS`). | Yes | §2.5, §6.9 |
-| **E** | **There is no clock and no notifier anywhere in this fleet, and the endpoint the commission most plausibly names is not listening.** `run:` carries `per_task_timeout`, `run_timeout` and four `timers` (`fleet.yaml:86-92`) and **nothing that schedules**. The one recurring host process is `pifleet relay`, whose loop is a `setTimeout` around an exported single pass (`relay.ts:82-88`, `:767`) — which is the pattern this design copies rather than the scheduler it needs. For the notifier: **measured on this host 2026-09-06** — `curl` to `localhost:8888` and `localhost:31337` both returned no response, and `lsof -nP -iTCP -sTCP:LISTEN` showed neither port bound. The PAI voice server is real (`~/repos/paisley/.claude/voice-server/server.ts:249`, `POST /notify`, payload `{title, message, voice_enabled, voice_id}`, launchd `com.paivoice.server`, `PORT` default `8888` at `:24`) and its service was **not loaded**. | Yes | §2.4, §2.5, §6.9 |
+| **E** | **There is no clock and no notifier anywhere in this fleet, and the endpoint the commission's wording most plausibly named is not listening** — a finding that survived the channel decision it prompted; D10 picked a webhook instead (§6.9), and the reason this row still matters is that it is *why* the undelivered path is a requirement. `run:` carries `per_task_timeout`, `run_timeout` and four `timers` (`fleet.yaml:86-92`) and **nothing that schedules**. The one recurring host process is `pifleet relay`, whose loop is a `setTimeout` around an exported single pass (`relay.ts:82-88`, `:767`) — which is the pattern this design copies rather than the scheduler it needs. For the notifier: **measured on this host 2026-09-06** — `curl` to `localhost:8888` and `localhost:31337` both returned no response, and `lsof -nP -iTCP -sTCP:LISTEN` showed neither port bound. The PAI voice server is real (`~/repos/paisley/.claude/voice-server/server.ts:249`, `POST /notify`, payload `{title, message, voice_enabled, voice_id}`, launchd `com.paivoice.server`, `PORT` default `8888` at `:24`) and its service was **not loaded**. | Yes | §2.4, §2.5, §6.9 |
 | **F** | **The verdict vocabulary a notifier needs already exists, is exactly right, and is NOT YET WRITTEN into the skill the observers follow.** SRD-OBSERVER-001 §9.1 separates `status` (did I observe) from `assessment` (`healthy \| degraded \| unhealthy \| indeterminate`) from `coverage` (per channel). `skills/observer-ops/SKILL.md:104-112` says the verdict rule is **not in the bundle yet**: *"Still unwritten: … the verdict rule (`indeterminate` vs `healthy` vs `failed`)"*, with the interim instruction *"apply the one your briefing states and do not invent a finer one"*. **So this console's briefs must carry the verdict rule until §8 of SRD-OBSERVER-001 lands**, and a design that assumed a shipped rule would be reading a document rather than the skill. | Yes | §2.6, §6.7, §7.4 |
 
 ---
@@ -437,9 +449,15 @@ The candidate the commission most plausibly names is host-side and outside this 
 (`macos-service/com.paivoice.server.plist:18`, `server.ts:24`).
 
 **Measured 2026-09-06 on this host: it is not running.** Neither `8888` nor `31337` answered, and
-neither was in `lsof -nP -iTCP -sTCP:LISTEN`. So the channel this design picks is real, is the
-operator's own, and **is not available today** — which makes §6.9's undelivered-notification path a
-requirement rather than a nicety.
+neither was in `lsof -nP -iTCP -sTCP:LISTEN`.
+
+**This is a reading of what exists, not the channel this design picks — and that sentence is a
+correction.** The draft did pick it; §6.9 and D10 withdrew the pick the same day, and this subsection
+is retained because the measurement is what made the withdrawal necessary rather than stylistic. The
+channel is a configurable webhook (§6.9, §7.8). What survives the withdrawal intact is the lesson:
+the operator's own notifier was **not available** on the day the console was specified, so §6.9's
+undelivered-notification path is a requirement rather than a nicety, and it would have been one for a
+loopback socket too.
 
 ### 2.6 The verdict rule this console depends on is specified and not yet shipped
 
@@ -1913,12 +1931,28 @@ ticks. That cost is the point: the record is written by the least durable compon
 
 ### D1 — the hosted model assignment
 
-**OPEN and BLOCKING.** §0.2 has the three arms and the argument. Nothing can be dispatched to this
-console until it is answered, because the answer is a line in every role and worker entry §13 Phase 1
-writes. **This document's own reading, offered as a reading rather than a recommendation:** arm 2 is
-the one that treats §5.9's axis as being about *what reaches the vendor* rather than about a role
-name, and it is honest about not eliminating the exposure — an observer's `.md` carries real log
-lines and the triage worker reads them.
+**SETTLED 2026-09-06 by the owner: arm 3.** All four seats — `tri-1` and the three observers — run
+the local `gpt-oss-20b-MXFP4-Q8`. §0.2 has the argument; this records the outcome and its price.
+
+**What the change costs, stated as this section's convention requires. The cost is quality on the
+one task this console has that most wants a bigger model**, and it is worth naming precisely rather
+than waving at: SRD-OBSERVER-001 §6.2 argues the reconciliation turn is where the budget pays, and
+the reconciliation turn is exactly what `tri-1` does. A 20B model reconciling three observers'
+`triage.json` fragments will be worse at it than a 120B one, and the failure will not look like a
+model failure — it will look like a noisy console. §6.7's structural gates are the mitigation and
+they are not a substitute: they downgrade an unevidenced `healthy` and they refuse a partial
+partition, but nothing in them makes a weak reconciliation strong. **§11 Q4's day-long run is where
+this cost becomes measurable**, and if the console is noisy, this decision is the first thing to
+re-examine rather than the last.
+
+**What it buys, and why the document does not treat the cost as regrettable.** The exposure this arm
+refuses is not hypothetical: an observer's context is namespaces, workload names, pod names, restart
+counts, log lines and cluster endpoints from a live environment, 288 times a day, and §5.9 records
+that *"there is no ceiling, timeout or scope that reduces a transcript after it has been sent."*
+This document's own draft reading preferred arm 2. **The owner took the stricter arm, and it is the
+only one of the three that reverses no recorded decision and widens no boundary** — so `Docs/SRD.md`
+§5.9 is untouched, `fleet.yaml:471-475`'s comment stands as written, and §0.3's disclosure gate has
+nothing new to cover.
 
 ### D10 — the notification channel
 
@@ -1949,7 +1983,7 @@ generic `json` one, and for whatever the operator points `notify.endpoint` at ne
 
 | # | Question | Probe that settles it | Blocks |
 |---|---|---|---|
-| **Q1** | **BLOCKING.** Which seats run `ollama-cloud/gpt-oss:120b`? §0.2's three arms. `fleet.yaml:471-475` and `Docs/SRD.md` §5.9 both record the opposite of what the commission asks, for the exact role it asks about | **Not a probe — an owner decision**, and it needs one because the recorded decision is explicit and dated. What a probe *would* add: measure `gpt-oss:120b` against `probe_timeout_ms: 90000` before allowlisting it, because a model near the ceiling makes `up` refuse the whole fleet | **Everything.** Phase 1 writes a `model:` line and cannot write it |
+| **Q1** | **ANSWERED 2026-09-06 by the owner: arm 3 — all four seats on the local `gpt-oss-20b-MXFP4-Q8`.** The original question — which seats run `ollama-cloud/gpt-oss:120b`? — is answered *none*, so the recorded 2026-09-03 decision at `fleet.yaml:471-475` and `Docs/SRD.md` §5.9 stands rather than being amended. §0.2 keeps the three arms and the argument undeleted | Settled by decision, and the probe it named is **moot rather than skipped**: the latency measurement existed only to protect an allowlisting that is no longer happening, so §13 task 0.3 is closed for want of a subject, not for want of a measurement | **Nothing.** Phase 1 can write its `model:` line, and it writes the role's existing one |
 | **Q2** | **ANSWERED 2026-09-06 by the owner: a configurable webhook, defaulting to ntfy.** The original question — is *"a notification via claude"* the PAI notify endpoint, a Claude Code session, a chat channel, or a ticket? — is superseded rather than picked between: the endpoint is a config field (§7.8), and the readings that are not endpoints (a session, `backend.notify()`) are refused in §6.9 on grounds that do not depend on the answer. The draft's `localhost:8888` pick is **withdrawn**, and §6.9 records why the loopback arm was the wrong shape as well as the wrong host | Settled. The one thing the answer changed and a probe could not: the spelling. `agleguy.ca` is **NXDOMAIN**; `ntfy.agileguy.ca` resolves, is healthy, and refuses anonymous reads — all three measured 2026-09-06 and recorded in §6.9 | **Nothing.** §13 Phase 5 is unblocked; the incident machine was channel-agnostic by construction and stayed that way |
 | **Q3** | What should `run.max_concurrent` be? It is `1` (`fleet.yaml:77`) and this is the first console that puts several workers in one run, so it is the first place the value binds. Three observers serialised will not fit a five-minute cadence | Time one observer pass against a real environment, ×3, and compare with the cadence. **And check the cheap half first:** raising it binds only runs holding more than one worker, so confirm by inspection that no other console has such a run before treating the change as fleet-wide | **Nothing structurally.** It decides whether the default cadence is 5 minutes or something longer |
 | **Q4** | Is `tokens_ceiling: 6000000` right for a run that is meant to live for days? Finding C: it is per run, it is the only spend gate that exists, and it ends the console on exit 5 when reached | Run the console for a day and measure the spend per sweep, then divide. **Cheap and it must be done before the console is left running unattended**, because the current answer is "unknown, and the failure is silent" | **Nothing structurally.** It decides the console's lifetime and whether §6.10's exhaustion notification is a rare event or a daily one |
@@ -2222,7 +2256,7 @@ network.**
 
 | Phase | Deliverable | Depends on | Exit criteria |
 |---|---|---|---|
-| **0 — Decisions** | Q1 and Q2 answered; Q3 measured or defaulted | — | `Docs/SRD.md` §5.9 carries the amendment (or D1 arm 3 is recorded); the notify channel is named; `run.max_concurrent` is set |
+| **0 — Decisions** | ~~Q1 and Q2 answered; Q3 measured or defaulted~~ **COMPLETE 2026-09-06** | — | **Met.** D1 arm 3 is recorded in §10 (so §5.9 needs no amendment — the arm that reverses nothing); the notify channel is named a configurable webhook (D10, §6.9, §7.8); `run.max_concurrent` is `4`. **Q11 is the one thing outstanding and it gates Phase 8 alone** — it is an operator credential, and every phase up to 8 is offline |
 | **1 — Config and roles** | Four seats declared and resolvable | 0 | `pifleet config validate` exits 0; `resolveWorker` returns `rpc` and the intended model for all four |
 | **2 — The roster and `--console`** | The request plane serves a second console, with its own record paths | — | A triage-roster fixture drives `relayPass`; `--console` selects a roster; the actor's lock is not the review console's |
 | **3 — The targets file** | `triage/targets.yaml`, schema, validation | — | A fixture round-trips; every §12 configuration criterion passes |
@@ -2242,11 +2276,11 @@ and 4.
 
 **Does not.** Write any code.
 
-- **0.1** *(owner, not dispatchable)* Answer Q1. If arm 1 or 2, add the second amendment to
-  `Docs/SRD.md` §5.9 naming `triage` and the observer seats, and **rewrite rather than delete**
-  `fleet.yaml:471-475`'s comment, because a comment that records a superseded decision is how the next
-  reader learns there was one. Touches: `Docs/SRD.md`, `fleet.yaml`.
-  *Acceptance: §5.9 names this console, or D1 arm 3 is recorded in §10.*
+- **0.1** ~~Answer Q1.~~ **DONE 2026-09-06** — **arm 3**, recorded in §10 D1 with its cost, answered
+  in place in §11 and at the head of §0.2. Arm 3 is the one arm that required no edit anywhere:
+  `Docs/SRD.md` §5.9 is untouched and `fleet.yaml:471-475`'s comment stands as written, because
+  nothing was superseded. **The conditional half of this task therefore did not fire**, and that is
+  the outcome rather than a skipped step.
 - **0.2** ~~Answer Q2.~~ **DONE 2026-09-06** — answered in place in §11 with the date, per this task's
   own rule. The channel is a configurable webhook defaulting to `https://ntfy.agileguy.ca/Alerts`
   (D10, §6.9, §7.8), and §13 Phase 5 is unblocked.
@@ -2255,13 +2289,22 @@ and 4.
   Phase 5 is entirely offline and does not need it; Phase 8 does not work without it. Touches:
   nothing tracked. *Acceptance: `pifleet triage --once` against a fixture incident delivers, and a
   deliberately wrong token produces §9.17's `rejected` outcome rather than a retry loop.*
-- **0.3** Measure `ollama-cloud/gpt-oss:120b` against `probe_timeout_ms: 90000` **before** it is
-  allowlisted. Touches: nothing.
-  *Acceptance: the latency is recorded in `ISA.md`. `fleet.yaml:280` calls it "in the fast group" and
-  that is a 2026-09-03/04 measurement of a model not currently on the list; a model near the ceiling
-  makes `up` refuse the whole fleet.*
-- **0.4** Set `run.max_concurrent` (Q3), after confirming by inspection that no other console has a
-  run holding more than one worker. Touches: `fleet.yaml`, `fleet.example.yaml`.
+- **0.3** ~~Measure `ollama-cloud/gpt-oss:120b` against `probe_timeout_ms: 90000`.~~ **MOOT
+  2026-09-06** — closed for want of a subject, not for want of a measurement. The probe existed only
+  to protect an allowlisting, and under D1 arm 3 nothing is allowlisted: `models_allowlist` is not
+  extended and `context_windows` gains no row. **Recorded rather than deleted** because the reasoning
+  is a live tripwire — if that model is ever added, it must be measured against the ceiling first, or
+  a model near it makes `up` refuse the whole fleet.
+- **0.4** ~~Set `run.max_concurrent` (Q3).~~ **DONE 2026-09-06 — set to `4`, in both files, with the
+  inspection this task required actually performed.** The finding: `agentPaneCommand` builds
+  `up --workers <one worker>` and `operations-plan.ts:310` states it outright — *"Each pane creates
+  its own run"* — so **no run in this fleet has ever held more than one worker, and the key has had
+  nothing to bind on at any value.** Raising it is therefore inert for every existing console rather
+  than merely safe for them, which is a stronger result than the task asked for. `4` is the console's
+  own size: three observers fan out at once and `tri-1` reconciles. Touches: `fleet.yaml` (live,
+  untracked — operator-applied), `fleet.example.yaml` (tracked).
+  *Acceptance: `pifleet config validate` exits 0 against the live file. **Verified 2026-09-06:** it
+  does, with only the pre-existing `obs-1 pane_mode: tui` warning, which this console does not touch.*
 
 ### Phase 1 — Config and roles
 

@@ -64,7 +64,22 @@ run:
   # It lives in the gitignored `fleet.yaml`, never here — a consent committed to
   # a shared example is a consent nobody chose.
   # hosted_repo_consent: <the exact remote you mean to send>
-  max_concurrent: 2          # bounded by oMLX throughput, not pane count (§5.9)
+  # RAISED to 4 for the triage console (SRD-TRIAGE-CONSOLE Q3/task 0.4). It
+  # bounds each RUN, not the host, and until the triage console existed every
+  # console in this fleet gave each worker its OWN run --- `agentPaneCommand`
+  # builds `up --workers <one worker>` and `operations-plan.ts:310` says it in
+  # as many words: "Each pane creates its own run". So this key had nothing to
+  # bind on, at any value. The triage console is the first run holding four
+  # seats, and three of them fan out at once; at 1 the sweep serialises and
+  # cannot fit a five-minute cadence.
+  #
+  # THE COST, which is the reason this is 4 and not higher: the bound that
+  # actually matters is oMLX throughput, and all four triage seats are LOCAL
+  # (D1 arm 3). Four concurrent local requests from this run is the ceiling
+  # this number sets, and it is set at the console's size deliberately --- a
+  # larger value would not make the sweep faster and would let some future
+  # multi-worker run outrun the server it shares.
+  max_concurrent: 4          # bounded by oMLX throughput, not pane count (§5.9)
   # The F39 RUNTIME detector (§5.9 detector 2). A worker completing this many
   # consecutive turns with ZERO tool calls is failed `no_tool_calls` rather than
   # settling "successfully" — the startup probe catches a model that cannot emit
