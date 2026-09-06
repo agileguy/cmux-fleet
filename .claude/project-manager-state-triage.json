@@ -5,8 +5,8 @@
   "branch_kind": "long-lived",
   "base": "main",
   "total_phases": 9,
-  "current_phase": "3 (+2)",
-  "current_round": 3,
+  "current_phase": "2+3",
+  "current_round": 4,
   "completed_phases": [
     0,
     1
@@ -85,6 +85,36 @@
           "test/unit/dispatch-request.test.ts"
         ]
       },
+      "verified_commit": "1fbae8f",
+      "verified_how": "Diff plus suite 4415/0. ISC-582..590 written into ISA.md. ISC-579's probe was CORRECTED this round: it read `grep -rn \"triage-targets\" src/`, which went non-empty on comments alone -- triage-config.ts mentions the sibling module in three docblock sentences. Now anchored on `from \"...\"` so it reads imports. Still empty, so the [~] stands and covers BOTH loaders."
+    },
+    {
+      "round": 4,
+      "phase": "3+2",
+      "tasks": {
+        "eng-1": [
+          "3.5",
+          "3.6"
+        ],
+        "eng-2": [
+          "2.2"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/cli/commands/config.ts",
+          "src/run/triage-config.ts",
+          "test/integration/cli-exit-codes.test.ts",
+          "triage/targets.yaml",
+          "triage/console.yaml"
+        ],
+        "eng-2": [
+          "src/cli/commands/relay.ts",
+          "src/run/relay.ts",
+          "test/unit/relay-console.test.ts"
+        ]
+      },
+      "note": "Round 4 is the one that turns ISC-579 red -- 3.5 gives both loaders their first src/ importer, which is exactly what its tripwire is pinned to.",
       "verified_commit": null
     }
   ],
@@ -106,6 +136,7 @@
     "cosmetic": "doctor-allowlist.test.ts:43 comment says 'The three fleet.example.yaml names' against four (constant is hardcoded, nothing fails). fleet.example.yaml workers: header says '8 panes' against 14 -- wrong before this branch."
   },
   "task_1_1a": "DONE 2026-09-06 by the orchestrator. Live fleet.yaml carries the triage role (lifted verbatim from the tracked example) and the four seats, with NO model override on the observers because this file's observer role already is the 20b. config validate exits 0; the four seats resolve rpc + gpt-oss-20b-MXFP4-Q8. Untracked by design, so this record is the only evidence it happened.",
-  "baseline_suite": "4347 pass / 0 fail / 200 files / 115s, typecheck clean, measured 2026-09-06 after round 2",
-  "git_lesson": "An earlier orchestrator commit claimed test/unit/role-briefings.test.ts and did not contain it. `git add` aborts the ENTIRE invocation when any one pathspec does not match, the invocation named a file a later rename had already moved, and its stderr went to /dev/null -- so it staged nothing and said nothing, while the commit still succeeded on what `git mv` had already staged. Every check afterwards read the WORKING TREE, where the fix was present, so a green suite kept confirming a state the branch did not have. Stage one path per add when the list is heterogeneous; never redirect its stderr."
+  "baseline_suite": "4415 pass / 0 fail / 201 files / 115s, typecheck clean, measured 2026-09-06 after round 3",
+  "git_lesson": "An earlier orchestrator commit claimed test/unit/role-briefings.test.ts and did not contain it. `git add` aborts the ENTIRE invocation when any one pathspec does not match, the invocation named a file a later rename had already moved, and its stderr went to /dev/null -- so it staged nothing and said nothing, while the commit still succeeded on what `git mv` had already staged. Every check afterwards read the WORKING TREE, where the fix was present, so a green suite kept confirming a state the branch did not have. Stage one path per add when the list is heterogeneous; never redirect its stderr.",
+  "orchestrator_commit_rule": "ALWAYS `git commit -- <paths>`. Two agents share one checkout, so the index is shared and the window between an engineer's `git add` and its `git commit` is a race. A bare orchestrator commit took 1,094 of an engineer's staged lines under a documentation-count message. Split apart, index restored, content verified byte-identical by sha256 -- but the fix is the rule, not the recovery."
 }
