@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": 1,
-  "current_round": 1,
+  "current_round": 2,
   "completed_phases": [
     0
   ],
@@ -33,7 +33,8 @@
           "roles/triage.md"
         ]
       },
-      "verified_commit": null
+      "verified_commit": "23a5d0f",
+      "verified_how": "Diff, not report. Both agents committed with explicit paths and neither touched the other's files. resolveWorker run directly against BOTH configs: all four seats return pane=rpc and model=gpt-oss-20b-MXFP4-Q8, which is Phase 1's exit criterion. No ollama-cloud entry added anywhere. No AI attribution in either commit."
     },
     {
       "round": 2,
@@ -65,5 +66,18 @@
   "open_operator_items": [
     "Q11: mint ntfy token for the Alerts topic, set notify.token_env (gates Phase 8 only)"
   ],
-  "prior_run_state": ".claude/project-manager-state-fleet-pm.json \u2014 the SRD-FLEET-PROJECT-MANAGER run (7 phases, claimed_complete, PR #148). MOVED rather than overwritten, which is the precedent that run set for its own predecessor; it carries measurements nothing else records."
+  "path_note": "NOT at .claude/project-manager-state.json, and deliberately. That path is the fleet project manager's own contract -- pm-state.ts:801-803 hardcodes it as SRD-FLEET-PROJECT-MANAGER 7.6's exact path, PmStateDocumentSchema governs its shape, and pm-state.test.ts treats the real file there as evidence that the schema keeps up with practice. This run is driven by the generic /ProjectManager skill, whose state is a different shape, so it takes a named file like the -observer and -review-console runs before it.",
+  "orchestrator_fixes_round_1": {
+    "role-briefings.test.ts": "Pinned briefing-role list went seven -> eight. Both agents correctly refused it as unowned; the orchestrator owns cross-cutting pins.",
+    "state-file-path": "REVERTED an orchestrator error. pm-state.ts:801-803 hardcodes .claude/project-manager-state.json as SRD-FLEET-PROJECT-MANAGER 7.6's contract path and pm-state.test.ts treats the real file there as evidence. Putting this run's differently-shaped state there broke it. The fleet-pm document is back at the canonical path untouched; this run took a named file.",
+    "mutation-anchors": "THIRD red test, and not caused by either of the first two fixes. The triage role copies the reviewer's tool grant byte for byte, so `    tools: [read, write, grep, find, ls]` stopped being unique in fleet.example.yaml and collation-contract.battery.ts's RV15/RV16 matched it 2x. A two-match anchor mutates whichever line the replacer reaches first, so those entries would have kept passing while testing something other than their `what:`. Re-anchored through append_system_prompt_file: ./roles/reviewer.md, which is the spelling RV17 already used for the live config. TWO GOTCHAS worth keeping: mutation-anchors.test.ts reads BOTH the battery and its target at git HEAD, so a working-tree fix looks like it changed nothing until committed; and it truncates the anchor to 70 chars in the message, so a re-anchored entry still prints as the bare line it used to be."
+  },
+  "carry_forward": {
+    "phase_2_1": "When the triage aspect table lands, roles/triage.md must gain the child task ids and aspect names. roles/collator.md names T-arch/T-context/T-lang because REVIEW_CONSOLE_ASPECTS exists; the triage equivalent does not yet, so the prompt currently says the turn-two brief names the reply paths.",
+    "phase_5_2": "roles/triage.md chose five triage.json spellings the SRD does not fix: schema tag pifleet.triage/v1, services[], unaccounted[], evidence_ref shaped obs-t1:observer-ops.json#services[0], and sweep_id exemplified equal to the parent task id. src/run/triage-verdict.ts MUST match these or the role prompt is wrong.",
+    "phase_5_new_task": "There is no triage-role.test.ts. collator-role.test.ts exists because a role document naming a path nothing reads is an instruction an agent cannot push back on. Everything it checks is checkable here (container paths, wire tags, derived ids, both JSON examples against real schemas); all were run by hand once and nothing re-runs them.",
+    "cosmetic": "doctor-allowlist.test.ts:43 comment says 'The three fleet.example.yaml names' against four (constant is hardcoded, nothing fails). fleet.example.yaml workers: header says '8 panes' against 14 -- wrong before this branch."
+  },
+  "task_1_1a": "DONE 2026-09-06 by the orchestrator. Live fleet.yaml carries the triage role (lifted verbatim from the tracked example) and the four seats, with NO model override on the observers because this file's observer role already is the 20b. config validate exits 0; the four seats resolve rpc + gpt-oss-20b-MXFP4-Q8. Untracked by design, so this record is the only evidence it happened.",
+  "baseline_suite": "4296 pass / 0 fail / 199 files / 117s, measured 2026-09-06 on the branch after round 1 plus three orchestrator fixes"
 }
