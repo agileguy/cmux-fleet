@@ -35,13 +35,15 @@
  *   2. Inspect the incoming tree BEFORE materialising it — `git diff
  *      --name-only <base>..<fetched-head>` lists what the merge would write
  *      without writing it. A path matching a hazard CLASS (`AGENTS.md`,
- *      `CLAUDE.md`, `.pi/**`, `.agents/skills/**`, `.gitattributes`, anything
- *      under `.github/workflows/`, `.mcp.json`) refuses the merge outright — a
- *      legitimate edit to one of these is an edit the operator approves by
- *      hand, and must not be approved by this loop's silence. That the class
- *      list covers every tree-visible path part 4 scans is a CHECKED relation
- *      (`TREE_VISIBLE_HAZARD_PATHS`), not a remembered one: the two lists had
- *      drifted by exactly one entry when phase 6's review looked (finding 4).
+ *      `CLAUDE.md`, `.pi/**`, `.agents`, `.agents/skills/**`, `.gitattributes`,
+ *      anything under `.github/workflows/`, `.mcp.json`) refuses the merge
+ *      outright — a legitimate edit to one of these is an edit the operator
+ *      approves by hand, and must not be approved by this loop's silence. That
+ *      the class list covers every tree-visible path part 4 scans is a CHECKED
+ *      relation (`TREE_VISIBLE_HAZARD_PATHS`), not a remembered one: the two
+ *      lists had drifted by exactly one entry when phase 6's review looked
+ *      (finding 4), and by one more when phase 7's did — `.agents`, which was
+ *      missing from BOTH lists, so the check itself could not see it.
  *   3. Merge with hooks and the global/user attributes file disabled —
  *      `-c core.hooksPath=/dev/null -c core.attributesFile=/dev/null`.
  *   4. `neutralizeRepoHazards` (imported, never re-implemented — see below)
@@ -137,10 +139,11 @@ const taskIdField = z
 // ---------------------------------------------------------------------------
 
 /**
- * The six classes §6.2.1 names, verbatim. This list is intentionally an
- * ARRAY of independent rules rather than one combined regex: the mutation
- * proof for ISC-534 removes one entry at a time and expects exactly that
- * class's fixture to start failing while the other five stay green — a
+ * The six classes §6.2.1 names, verbatim, plus the two the reviews added
+ * (`.mcp.json`, `.agents` — each with its own note below). This list is
+ * intentionally an ARRAY of independent rules rather than one combined regex:
+ * the mutation proof for ISC-534 removes one entry at a time and expects
+ * exactly that class's fixture to start failing while the others stay green — a
  * property a combined pattern could not demonstrate as cleanly.
  */
 export const HAZARD_PATH_CLASSES = [
@@ -157,6 +160,13 @@ export const HAZARD_PATH_CLASSES = [
   // is what made the gap invisible: the class LOOKED covered. The drift is now
   // a checked relation, not a remembered one — see `TREE_VISIBLE_HAZARD_PATHS`.
   ".mcp.json",
+  // Added 2026-09-05 for phase 7's finding: the BARE parent, not the skills
+  // directory under it. `.pi/**` covers `p === ".pi"` by construction and
+  // `.agents/skills/**` never covered `.agents`, so a committed `.agents`
+  // symlink was refused by nothing — while `repo-hazards.ts` scans exactly that
+  // path, as a parent dot-dir, precisely because it can be a symlink. See
+  // `HAZARD_PATH_RULES` for why a bare path in the diff means a symlink.
+  ".agents",
 ] as const;
 export type HazardPathClass = (typeof HAZARD_PATH_CLASSES)[number];
 
@@ -175,6 +185,26 @@ interface HazardPathRule {
  * git honours a `.gitattributes` in every directory, and a nested
  * `.pi`/`.agents/skills` is exactly where a worker would place one to avoid a
  * root-only check.
+ *
+ * ## Why the BARE parent paths have rules of their own
+ *
+ * `.pi/**` matched `p === ".pi"` from the start and `.agents/skills/**` never
+ * matched `.agents`, and for a long time that asymmetry looked like a
+ * formatting detail. It is not, because of what a bare path in a diff listing
+ * MEANS. Measured with git 2.50.1: a committed `.agents -> /etc` is a
+ * mode-120000 blob at that exact path, and `git diff --name-only` reports the
+ * single entry `.agents`. A real directory is never listed by name — only its
+ * children are. **So a bare parent in the incoming listing is a symlink or a
+ * file, and nothing else**, which is the one shape `repo-hazards.ts` scans
+ * `.pi` and `.agents` for (`DISCOVERY_PARENT_DIRS`): the link resolves outside
+ * the worktree and everything Pi discovers "under" it comes from wherever the
+ * worker pointed. The scanner saw it, the gate did not, and it landed in the
+ * operator's tree to be neutralized afterwards instead of refused before.
+ *
+ * `.agents` is matched EXACTLY, not as a prefix. Widening it to `.agents/**`
+ * would refuse `.agents/anything`, which `repo-hazards.ts` does not scan and Pi
+ * does not read — and this module's own header states the cost of that mistake:
+ * a gate that refuses good branches gets turned off.
  */
 const HAZARD_PATH_RULES: readonly HazardPathRule[] = [
   { hazardClass: "AGENTS.md", matches: (p) => p === "AGENTS.md" },
@@ -184,6 +214,7 @@ const HAZARD_PATH_RULES: readonly HazardPathRule[] = [
     hazardClass: ".agents/skills/**",
     matches: (p) => p === ".agents/skills" || p.startsWith(".agents/skills/"),
   },
+  { hazardClass: ".agents", matches: (p) => p === ".agents" },
   { hazardClass: ".gitattributes", matches: (p) => p === ".gitattributes" || p.endsWith("/.gitattributes") },
   {
     hazardClass: ".github/workflows/**",
@@ -353,6 +384,16 @@ export interface MergeWorkerBranchInput {
    * merging more than one worker in sequence should not cache it.
    */
   baseRef?: string;
+  /**
+   * Workers earlier in THIS batch whose row came back `tree_restored: false`.
+   *
+   * Passed rather than derived, because it cannot be derived here: the rows live
+   * with the orchestrator, and a checkout that a failed merge left modified
+   * looks — to `git status` alone — exactly like an operator's own half-finished
+   * edit. Optional, and the refusal degrades to what the checkout itself shows
+   * (see `assertMergePreconditions`) when a caller passes nothing.
+   */
+  unrestoredPriorWorkers?: readonly string[];
 }
 
 export type MergeWorkerBranchOutcome =
@@ -443,8 +484,38 @@ export class IntegrationPreconditionError extends Error {
  * told it — `mergeWorkerBranch` takes a repo root, and the branch identity
  * lives in the integration record. "On a branch, and clean" is the part of
  * the precondition that is both knowable here and load-bearing.
+ *
+ * ## The second refusal in a batch is a different sentence (phase 7)
+ *
+ * The dirty-tree message told the operator to "commit or stash first", which is
+ * correct advice for THEIR uncommitted work and wrong, misleading advice for
+ * the case the batch produces: worker A's merge fails, its row records
+ * `tree_restored: false`, and worker B's precondition then finds the tree A left
+ * behind. Stashing that is stashing half of A's merge. The operator has already
+ * been told, in A's row, that A needs cleaning up by hand — and then gets a
+ * refusal on B that does not mention A at all, in a loop where B is the message
+ * they are actually looking at.
+ *
+ * Two independent sources say so, and the message uses whichever is available:
+ *
+ *  - **What the caller knows.** `unrestoredPriorWorkers` names the workers whose
+ *    rows in THIS batch carried `tree_restored: false`. The orchestrator holds
+ *    those rows; nothing in the checkout does.
+ *  - **What the checkout itself shows.** A live `MERGE_HEAD`, or unmerged index
+ *    entries (`git status --porcelain` marks those with `U` on either side, plus
+ *    `AA`/`DD`), is evidence of an interrupted merge that needs no caller
+ *    cooperation to find. This is what covers the caller that passes nothing.
+ *
+ * Neither is invented when absent: with no prior workers named and no leftover
+ * state in the checkout, the message is the original one, unchanged. A refusal
+ * that blamed a previous merge on every dirty tree would be the same defect in
+ * the other direction — an operator told their own half-finished edit was
+ * somebody else's merge.
  */
-async function assertMergePreconditions(repoRoot: string): Promise<void> {
+async function assertMergePreconditions(
+  repoRoot: string,
+  unrestoredPriorWorkers: readonly string[] = [],
+): Promise<void> {
   const symref = await spawnGit(repoRoot, ["symbolic-ref", "--quiet", "HEAD"]);
   if (symref.code !== 0) {
     throw new IntegrationPreconditionError(
@@ -455,14 +526,44 @@ async function assertMergePreconditions(repoRoot: string): Promise<void> {
   const dirty = await spawnGit(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
   if (dirty.code !== 0) throw new IntegrationGitError("git status --porcelain", dirty);
   const changed = dirty.stdout.split("\n").filter((l) => l.trim().length > 0);
-  if (changed.length > 0) {
+  if (changed.length === 0) return;
+
+  const changedList =
+    `Changed: ${changed.slice(0, 5).join(", ")}` + (changed.length > 5 ? ` (+${changed.length - 5} more)` : "");
+
+  const evidence: string[] = [];
+  if (unrestoredPriorWorkers.length > 0) {
+    evidence.push(
+      `${unrestoredPriorWorkers.map((w) => `"${w}"`).join(", ")} failed to merge earlier in this batch and its ` +
+        "row records tree_restored: false",
+    );
+  }
+  const midMerge = await spawnGit(repoRoot, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
+  if (midMerge.code === 0) evidence.push("MERGE_HEAD is present, so this checkout is still mid-merge");
+  // Porcelain v1 status codes: `U` on either side is an unmerged path, and
+  // `AA`/`DD` are the two unmerged shapes that carry no `U` at all.
+  const unmerged = changed.filter((l) => {
+    const xy = l.slice(0, 2);
+    return xy.includes("U") || xy === "AA" || xy === "DD";
+  });
+  if (unmerged.length > 0) {
+    evidence.push(`${unmerged.length} path(s) are left unresolved in the index (${unmerged.slice(0, 3).join(", ")})`);
+  }
+
+  if (evidence.length === 0) {
     throw new IntegrationPreconditionError(
       `refused: ${repoRoot} has ${changed.length} uncommitted change(s) to tracked files, and a ` +
         "merge would interleave them with the worker's content in a commit you did not author " +
-        `them into — commit or stash first. Changed: ${changed.slice(0, 5).join(", ")}` +
-        (changed.length > 5 ? ` (+${changed.length - 5} more)` : ""),
+        `them into — commit or stash first. ${changedList}`,
     );
   }
+  throw new IntegrationPreconditionError(
+    `refused: ${repoRoot} has ${changed.length} uncommitted change(s) to tracked files, and they are ` +
+      `LEFTOVER STATE FROM AN EARLIER MERGE rather than your own work: ${evidence.join("; ")}. Do not commit ` +
+      "or stash this — that would fold half of a failed merge into the integration branch. Finish or undo " +
+      "that merge first (`git merge --abort` while MERGE_HEAD is live, otherwise resolve or `git checkout --` " +
+      `the listed paths), then merge the rest of the batch. ${changedList}`,
+  );
 }
 
 /**
@@ -487,6 +588,33 @@ async function assertMergePreconditions(repoRoot: string): Promise<void> {
  * elsewhere, because this is the one place a worker id becomes part of a git
  * REF NAME. `mergeWorkerBranch`'s input types it as a bare `string`, so the
  * boundary is here or nowhere.
+ *
+ * ## It does not survive a merge that did not happen (phase 7)
+ *
+ * The ref was written on every fetch and deleted never, which made the
+ * operator's repository the durable home of content it had just REFUSED. A
+ * hazard-refused branch — an `AGENTS.md` rewriting the grader's instructions, a
+ * `.agents` symlink — stayed fully reachable from a ref in the operator's own
+ * repo after the gate said no, and every run added another. Reachable is the
+ * operative word: deleting the ref removes no object, it removes the last
+ * thing keeping those objects alive, which is what lets `git gc` reclaim them.
+ * With the ref in place, nothing ever would.
+ *
+ * The delete is only half of it, and the other half was invisible until the
+ * test asserted unreachability instead of ref-absence: a fetch from a named
+ * remote ALSO writes `refs/remotes/<remote>/<branch>` opportunistically, so
+ * dropping this ref left the refused head reachable from that one instead.
+ * `--refmap=` on the fetch is what makes the delete mean anything — see the
+ * fetch itself.
+ *
+ * On a merge that LANDS the ref is kept, and the reason is that the growth
+ * argument does not apply there: the merge commit already makes that head an
+ * ancestor of the integration branch, so the ref pins nothing the branch is not
+ * pinning anyway and deleting it would reclaim exactly zero objects. What it
+ * does buy is the one thing this module's record cannot: `git rev-parse
+ * refs/pifleet/incoming/<worker>` answers "what was last fetched for this
+ * worker" from the repository itself, with no record file to read, which is
+ * where an operator looks when reconstructing a run by hand.
  */
 function incomingRefFor(worker: string): string {
   if (!SESSION_ID_RE.test(worker) || worker.length > 64) {
@@ -495,6 +623,24 @@ function incomingRefFor(worker: string): string {
     );
   }
   return `refs/pifleet/incoming/${worker}`;
+}
+
+/**
+ * Drop the incoming ref for a merge that did not land.
+ *
+ * Best-effort by design, and the failure mode is bounded rather than ignored: a
+ * delete that does not take leaves a ref the NEXT fetch of this worker
+ * force-updates anyway (`+<branch>:<ref>`), so the worst case is one stale
+ * pointer, not an accumulating set. Turning that into a thrown error would
+ * replace the refusal the operator needs to read with a cleanup error about the
+ * refusal, which is a strictly worse thing to hand back.
+ *
+ * `update-ref -d <ref> <oldvalue>` rather than a bare `-d`: the old value is the
+ * head this call fetched, so if anything else has moved the ref since, the
+ * delete declines instead of discarding whatever is there now.
+ */
+async function deleteIncomingRef(repoRoot: string, ref: string, fetchedHead: string): Promise<void> {
+  await spawnGit(repoRoot, ["update-ref", "-d", ref, fetchedHead]);
 }
 
 export async function workerCloneLocalPath(repoRoot: string, remote: string): Promise<string | null> {
@@ -538,6 +684,27 @@ export async function workerCloneLocalPath(repoRoot: string, remote: string): Pr
  * was tried the same way (with a real separate alternate object store) and
  * also did not fire on fetch; it serves `receive-pack`, not this path.
  *
+ * ## The one thing in the clone that DOES change what the fetch pulls
+ *
+ * Phase 7's review pointed out that the "record, don't refuse" posture below
+ * was stated over a scan that had never looked at
+ * `.git/objects/info/alternates` — the string appeared nowhere in this module
+ * or in `repo-hazards.ts` — while a local-path fetch honours that file. That is
+ * now measured and closed, and the measurement is worth stating because it is
+ * the only item here that is not merely visible-but-inert. Three repositories,
+ * git 2.50.1: a `worker/` clone whose alternates file named an unrelated
+ * `secret/.git/objects` on the same machine, with its branch pointed straight
+ * at a commit that exists only there. The operator's
+ * `git fetch ../worker feat:refs/pifleet/incoming/w` **succeeded**, and
+ * `git ls-tree -r` on the fetched ref in the OPERATOR's repository listed that
+ * repository's file. The worker's object store is not confined to the run tree.
+ *
+ * `repo-hazards.ts` now detects that file (detect-only — see its docblock for
+ * why moving it would break a repository whose objects legitimately live in an
+ * alternate), so this scan records it along with everything else. Gate part 2
+ * still governs what may LAND: whatever store the objects came out of, the
+ * merge is refused unless the paths pass `HAZARD_PATH_RULES`.
+ *
  * ## So why scan at all
  *
  * Because the two keys we could name being covered by git's current hardening
@@ -550,6 +717,19 @@ export async function workerCloneLocalPath(repoRoot: string, remote: string): Pr
  * names a program is a fact the operator should see next to that worker's
  * merge; it is not, on the evidence above, grounds for this loop to reject the
  * branch on its own.
+ *
+ * ## Stated precisely, because the previous version of this docblock did not
+ *
+ * What is recorded is exactly `detectRepoHazards`'s own coverage of the clone
+ * directory: root instruction files, MCP and Pi settings files, the discovery
+ * dot-dirs, `.gitattributes` (root and nested, to its own depth bound), both
+ * `.git` config files, `.git/objects/info/alternates`, and executable
+ * `.git/hooks` entries. What is NOT recorded is anything outside that walk —
+ * the clone's ref namespace, its packed objects, and any state the worker
+ * created outside the directory the `worker-<id>` remote names. A remote that
+ * is not a bare local path is not scanned at all: there is no clone on this
+ * machine to look at, and the function returns an empty list rather than a
+ * misleading clean one.
  */
 async function scanWorkerCloneBeforeFetch(repoRoot: string, remote: string): Promise<RepoHazard[]> {
   const clonePath = await workerCloneLocalPath(repoRoot, remote);
@@ -583,20 +763,64 @@ async function scanWorkerCloneBeforeFetch(repoRoot: string, remote: string): Pro
  * A guard that alarmed on a non-zero abort would cry wolf on every one of
  * those, and a guard that cries wolf gets turned off.
  *
- * The state that actually matters is the one the finding named: *"the checkout
- * can be left mid-conflict with a live MERGE_HEAD"*. So MERGE_HEAD is what is
- * asked, AFTER the abort attempt. It answers both shapes correctly, and it is
- * the state itself rather than a proxy for it.
+ * ## Why MERGE_HEAD alone is also the wrong thing to inspect (phase 7)
+ *
+ * The first fix asked for MERGE_HEAD after the abort, on the grounds that it is
+ * "the state itself rather than a proxy for it". It is a state, but it is
+ * MERGE-state, and the field it feeds is called `tree_restored`. The two come
+ * apart, and not only in theory. Reproduced with git 2.50.1: drive a real
+ * conflicting merge (MERGE_HEAD present, `README.md` left with conflict
+ * markers, index entry `UU`), then remove `.git/MERGE_HEAD` — which is what a
+ * merge killed mid-checkout, or an abort that failed after clearing the merge
+ * state, leaves behind. `git merge --abort` now exits 128 with *"There is no
+ * merge to abort (MERGE_HEAD missing)"*, MERGE_HEAD is absent, and
+ * `git status --porcelain --untracked-files=no` still prints `UU README.md`.
+ * The old probe reported `treeRestored: true` over a tree holding the worker's
+ * conflict markers, and the record said so under this worker's task_id.
+ *
+ * So both are asked, and restored means BOTH are clean: no MERGE_HEAD, and no
+ * uncommitted change to a tracked file.
+ *
+ * ## The false-positive guarantee survives, and this is why
+ *
+ * `--untracked-files=no` is the same flag, chosen for the same reason, as in
+ * `assertMergePreconditions`. In the refused-before-starting shape the only
+ * thing in the tree is the operator's own UNTRACKED file — git wrote nothing —
+ * so the status probe is empty and the verdict stays `true`, exactly as before.
+ * (The status probe is also readable under the contention that makes the abort
+ * fail: measured with `.git/index.lock` held, `git status --porcelain -uno`
+ * still exits 0 and still prints `UU README.md`. The one probe that cannot run
+ * in that state is the abort, whose exit code this function already ignores.)
+ *
+ * A status probe that itself fails is reported as NOT restored: this function's
+ * answer is written into the record as a fact about the operator's checkout,
+ * and "we could not tell" must never be recorded as "it is fine".
  */
 export async function restoreAfterFailedMerge(repoRoot: string): Promise<{ treeRestored: boolean; detail: string }> {
   const abort = await spawnGit(repoRoot, ["merge", "--abort"]);
   const midMerge = await spawnGit(repoRoot, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
-  if (midMerge.code !== 0) return { treeRestored: true, detail: "" };
+  const status = await spawnGit(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
+  const dirty = status.stdout.split("\n").filter((l) => l.trim().length > 0);
+
+  const problems: string[] = [];
+  if (midMerge.code === 0) problems.push("MERGE_HEAD is still present, so the checkout is mid-merge");
+  if (status.code !== 0) {
+    problems.push(
+      `git status could not read the working tree (exit ${status.code}: ${status.stderr.trim() || "no output"}), ` +
+        "so whether it was restored is unknown",
+    );
+  } else if (dirty.length > 0) {
+    problems.push(
+      `${dirty.length} tracked path(s) are left modified: ${dirty.slice(0, 5).join(", ")}` +
+        (dirty.length > 5 ? ` (+${dirty.length - 5} more)` : ""),
+    );
+  }
+  if (problems.length === 0) return { treeRestored: true, detail: "" };
   return {
     treeRestored: false,
     detail:
-      `git merge --abort exited ${abort.code} and MERGE_HEAD is still present, so ${repoRoot} is ` +
-      `left mid-merge and must be cleaned up by hand before anything else is merged into it` +
+      `git merge --abort exited ${abort.code} and ${problems.join("; ")} — ${repoRoot} must be cleaned up ` +
+      `by hand before anything else is merged into it` +
       (abort.stderr.trim() ? `: ${abort.stderr.trim()}` : ""),
   };
 }
@@ -623,13 +847,22 @@ export async function restoreAfterFailedMerge(repoRoot: string): Promise<{ treeR
  * other git command writes by convention, and the `rev-parse` then asks for
  * that ref by name. A concurrent fetch cannot move it, because nothing else
  * names it.
+ *
+ * ## And it is dropped again unless the merge lands
+ *
+ * Every exit from here that is not `merged` deletes the ref it fetched into:
+ * the hazard refusal, the failed merge, and — through the `catch` — the paths
+ * where git itself fails between the fetch and the merge. `incomingRefFor`
+ * carries the argument for the asymmetry with the merged case, which keeps it.
+ * The `catch` re-throws untouched; it exists to stop a thrown `rev-parse` or
+ * `diff` from being the one way refused content stays reachable forever.
  */
 export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<MergeWorkerBranchResult> {
   const { repoRoot, worker, remote, branch, taskId } = input;
   const baseRef = input.baseRef ?? "HEAD";
 
   // ---- Part -1: the operator's checkout must be fit to merge into. ----
-  await assertMergePreconditions(repoRoot);
+  await assertMergePreconditions(repoRoot, input.unrestoredPriorWorkers ?? []);
 
   // ---- Part 0: look at the clone git is about to run its SERVER side inside. ----
   const preFetchHazards = await scanWorkerCloneBeforeFetch(repoRoot, remote);
@@ -639,9 +872,20 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
   // `+` forces the update: this ref is a scratch pointer for one merge, and a
   // previous merge of the same worker leaving a non-fast-forward tip behind is
   // the ordinary case, not an error.
-  const fetchRes = await spawnGit(repoRoot, ["fetch", remote, `+${branch}:${incomingRef}`]);
+  //
+  // `--refmap=` is not decoration, and it was found by asserting the property
+  // rather than the mechanism. Deleting the incoming ref after a refusal
+  // reclaims NOTHING on its own: fetching from a named remote also performs
+  // git's opportunistic remote-tracking update, so the same head stayed
+  // reachable from `refs/remotes/worker-<id>/<branch>` — measured, git 2.50.1,
+  // an explicit refspec on the command line does not suppress it. An empty
+  // `--refmap` tells git to ignore the remote's configured refspecs entirely
+  // and use only what this command names, and with it the fetch writes exactly
+  // one ref: the one this call owns and can therefore drop again. It also makes
+  // finding 6's property literal — one fetch, one ref, named here.
+  const fetchRes = await spawnGit(repoRoot, ["fetch", "--refmap=", remote, `+${branch}:${incomingRef}`]);
   if (fetchRes.code !== 0) {
-    throw new IntegrationGitError(`git fetch ${remote} +${branch}:${incomingRef}`, fetchRes);
+    throw new IntegrationGitError(`git fetch --refmap= ${remote} +${branch}:${incomingRef}`, fetchRes);
   }
   const headRes = await spawnGit(repoRoot, ["rev-parse", incomingRef]);
   if (headRes.code !== 0) {
@@ -658,62 +902,85 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
   const parsedAhead = Number.parseInt(countRes.stdout.trim(), 10);
   const commitsAhead = countRes.code === 0 && Number.isFinite(parsedAhead) ? parsedAhead : null;
 
-  // ---- Part 2: inspect BEFORE materialising. ----
-  const changed = await incomingTreeChanges(repoRoot, baseRef, head);
-  const hazards = findHazardTouches(changed, head);
-  if (hazards.length > 0) {
-    return {
-      worker,
-      remote,
-      branch,
-      taskId,
-      head,
-      commitsAhead,
-      preFetchHazards,
-      outcome: { kind: "refused_hazard", hazards },
-    };
-  }
+  let mergeCommit: string;
+  let postMergeHazards: RepoHazard[];
+  try {
+    // ---- Part 2: inspect BEFORE materialising. ----
+    const changed = await incomingTreeChanges(repoRoot, baseRef, head);
+    const hazards = findHazardTouches(changed, head);
+    if (hazards.length > 0) {
+      // Refused content does not stay reachable from the operator's repository.
+      await deleteIncomingRef(repoRoot, incomingRef, head);
+      return {
+        worker,
+        remote,
+        branch,
+        taskId,
+        head,
+        commitsAhead,
+        preFetchHazards,
+        outcome: { kind: "refused_hazard", hazards },
+      };
+    }
 
-  // ---- Part 3: merge with hooks and the attributes file disabled. ----
-  const mergeMessage = `Merge worker ${worker} (${remote}/${branch} @ ${head.slice(0, 12)}) into the integration branch`;
-  const mergeRes = await spawnGit(repoRoot, [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.attributesFile=/dev/null",
-    "merge",
-    "--no-ff",
-    "--no-edit",
-    "-m",
-    mergeMessage,
-    head,
-  ]);
-  if (mergeRes.code !== 0) {
-    const cleanup = await restoreAfterFailedMerge(repoRoot);
-    return {
-      worker,
-      remote,
-      branch,
-      taskId,
+    // ---- Part 3: merge with hooks and the attributes file disabled. ----
+    const mergeMessage = `Merge worker ${worker} (${remote}/${branch} @ ${head.slice(0, 12)}) into the integration branch`;
+    const mergeRes = await spawnGit(repoRoot, [
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.attributesFile=/dev/null",
+      "merge",
+      "--no-ff",
+      "--no-edit",
+      "-m",
+      mergeMessage,
       head,
-      commitsAhead,
-      preFetchHazards,
-      outcome: {
-        kind: "merge_failed",
-        detail: mergeRes.stderr.trim() || mergeRes.stdout.trim(),
-        treeRestored: cleanup.treeRestored,
-        cleanupDetail: cleanup.detail,
-      },
-    };
-  }
-  const mergeCommitRes = await spawnGit(repoRoot, ["rev-parse", "HEAD"]);
-  if (mergeCommitRes.code !== 0) {
-    throw new IntegrationGitError("git rev-parse HEAD", mergeCommitRes);
-  }
-  const mergeCommit = mergeCommitRes.stdout.trim();
+    ]);
+    if (mergeRes.code !== 0) {
+      const cleanup = await restoreAfterFailedMerge(repoRoot);
+      // Same argument as the refusal above, and it holds even when the cleanup
+      // could not restore the tree: the ref is what would keep this head
+      // reachable FOREVER, and dropping it is independent of whatever hand
+      // cleanup the checkout still needs.
+      await deleteIncomingRef(repoRoot, incomingRef, head);
+      return {
+        worker,
+        remote,
+        branch,
+        taskId,
+        head,
+        commitsAhead,
+        preFetchHazards,
+        outcome: {
+          kind: "merge_failed",
+          detail: mergeRes.stderr.trim() || mergeRes.stdout.trim(),
+          treeRestored: cleanup.treeRestored,
+          cleanupDetail: cleanup.detail,
+        },
+      };
+    }
+    const mergeCommitRes = await spawnGit(repoRoot, ["rev-parse", "HEAD"]);
+    if (mergeCommitRes.code !== 0) {
+      throw new IntegrationGitError("git rev-parse HEAD", mergeCommitRes);
+    }
+    mergeCommit = mergeCommitRes.stdout.trim();
 
-  // ---- Part 4: neutralize the operator's checkout, after every merge, before anything reads it. ----
-  const postMergeHazards = await neutralizeRepoHazards(repoRoot);
+    // ---- Part 4: neutralize the operator's checkout, after every merge, before anything reads it. ----
+    postMergeHazards = await neutralizeRepoHazards(repoRoot);
+  } catch (err) {
+    // A throw between the fetch and a landed merge is a merge that did not
+    // happen, and it must not be the one path where the fetched head stays
+    // parked in the operator's repository. A throw from the two steps AFTER the
+    // merge lands (`rev-parse HEAD`, the part 4 re-scan) deletes the ref too,
+    // and that costs nothing: the merge commit already pins that head, so the
+    // delete reclaims no objects there — it only forfeits the "what was last
+    // fetched" convenience `incomingRefFor` describes, on a call that is
+    // throwing anyway. Re-thrown untouched: this handler adds cleanup, never a
+    // second, worse-worded error.
+    await deleteIncomingRef(repoRoot, incomingRef, head);
+    throw err;
+  }
 
   return {
     worker,

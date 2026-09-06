@@ -231,6 +231,14 @@ export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessP
   return { patterns: recorded, note: null };
 }
 
+/** What `up` recorded about each worker's model, and whether it could be read. */
+export interface RunWorkerModels {
+  /** `id -> "provider/model"`. `{}` when nothing recorded any, AND when the read failed. */
+  readonly models: Record<string, string>;
+  /** A degradation the caller must surface, or `null` when there is nothing to say. */
+  readonly note: string | null;
+}
+
 /**
  * What each worker in this run is ACTUALLY running, as `up` recorded it —
  * `id -> "provider/model"`, or `{}` when nothing recorded any.
@@ -246,15 +254,43 @@ export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessP
  * itself discards the `StateReadError` path, and `monitor/read/runs.ts` is the
  * caller this exists for.
  *
- * TOTALLY forgiving, and more so than its neighbours on purpose. A missing
- * key, a non-object, a non-string value: all `{}` or a dropped entry, never a
- * throw and never a note. The neighbours grade or budget a run and must
- * complain when the record disagrees with itself; this one decides whether a
- * name appears on a line. A monitor that failed its whole run listing because
- * a DISPLAY value was malformed would be a worse monitor than one that shows
- * a blank there, and `runs.ts` has no region to degrade into for this.
+ * ## `{ models, note }` and not a bare map — the shape is the whole fix
+ *
+ * The first version returned `Record<string, string>` and wrapped the read in a
+ * blanket `catch { return {}; }`. That renders a CORRUPT `run.json` and a run
+ * that simply PREDATES the field as the same answer, which is the one outcome
+ * this file's other readers all refuse: it takes the `StateReadError` path that
+ * `readValidated` exists to carry — path, zod issue paths, and the bytes on
+ * disk — and drops it on the floor. The monitor is the surface most likely to
+ * be the first thing an operator looks at when a run tree is damaged, so
+ * swallowing it there makes the viewer the one place a broken control-plane
+ * document looks completely normal.
+ *
+ * So: **forgiving about ABSENCE, loud about DAMAGE**, which is the split
+ * `readRunHarnessPatterns` two functions up already makes and whose two-field
+ * return shape this deliberately copies rather than inventing a second idiom.
+ * A missing key or an explicit `null` is `{ models: {}, note: null }` — a run
+ * directory written before 2026-09-05 has no `worker_models` and must stay
+ * silent. A document that will not parse, or whose `worker_models` is not a
+ * map, is `{ models: {}, note: <sentence> }`.
+ *
+ * It still never THROWS, and that half of the original argument survives
+ * untouched: this value decides whether a name appears on a line, and a monitor
+ * that failed its whole run listing over a display value would be worse than
+ * one that says why the name is missing. The note is how the caller says that;
+ * `monitor/read/runs.ts` carries it to `RunRow.modelsNote` and the fleet view
+ * prints it in place of the models.
+ *
+ * ## The residual, named rather than left for a reader to discover
+ *
+ * A value inside an otherwise-valid map that is not a non-empty string is still
+ * dropped silently. That is a different failure with a different cost: the
+ * document parsed, the run's own record is intact, and what is lost is one
+ * worker's name off a line an operator can already see the worker on. The
+ * damage this function now reports is the document being unreadable AT ALL,
+ * which is the fact nothing else on the frame would tell them.
  */
-export async function readRunWorkerModels(run: RunPaths): Promise<Record<string, string>> {
+export async function readRunWorkerModels(run: RunPaths): Promise<RunWorkerModels> {
   let doc: { worker_models?: Record<string, unknown> | null } | null;
   try {
     doc = await readValidated(run.runJson, (v) =>
@@ -263,16 +299,24 @@ export async function readRunWorkerModels(run: RunPaths): Promise<Record<string,
         .loose()
         .parse(v),
     );
-  } catch {
-    return {};
+  } catch (err) {
+    return {
+      models: {},
+      // `StateReadError`'s own sentence, verbatim inside the parentheses: it
+      // already names the path, the failing field and the bytes, and a second
+      // paraphrase here would be a second spelling of one diagnosis.
+      note:
+        "run.json does not record readable worker models " +
+        `(${err instanceof Error ? err.message : String(err)})`,
+    };
   }
   const recorded = doc?.worker_models;
-  if (recorded === undefined || recorded === null) return {};
+  if (recorded === undefined || recorded === null) return { models: {}, note: null };
   const out: Record<string, string> = {};
   for (const [id, model] of Object.entries(recorded)) {
     if (typeof model === "string" && model !== "") out[id] = model;
   }
-  return out;
+  return { models: out, note: null };
 }
 
 /**

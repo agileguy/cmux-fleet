@@ -142,9 +142,11 @@ export async function readRuns(
     const run = runPaths(runId, root);
     const workerIds = await workerIdsOf(run);
     if (workerIds === null) continue;
+    const { models, modelsNote } = await recordedModels(run, workerIds);
     rows.push({
       runId,
-      models: await recordedModels(run, workerIds),
+      models,
+      modelsNote,
       workers: await readWorkerRows(run, workerIds, {
         containers: opts?.containers ?? null,
         now,
@@ -166,22 +168,39 @@ export async function readRuns(
  * discards `readValidated` and the `StateReadError` path. The first version of
  * this function did exactly that and the source-text guard caught it.
  *
- * Every failure is `[]` and none of them throws — see the reader's own
- * docblock for why this one value is more forgiving than its neighbours.
+ * **And the second version discarded that path anyway, one layer down.**
+ * `readRunWorkerModels` used to swallow its own `StateReadError` and return
+ * `{}`, so importing the compliant reader bought nothing: an unparseable
+ * `run.json` reached this function as an empty map, indistinguishable from a
+ * run predating the field. That reader's own docblock justified it with
+ * "`runs.ts` has no region to degrade into for this", which was true when it
+ * was written. There is a place now — {@link PartialRunRow.modelsNote} — so
+ * the reader carries the diagnosis and this function carries it through.
+ * **Neither failure was
+ * visible to ISC-472's source-text guard**: it can see a `JSON.parse` that
+ * should not be here, not a `catch` that throws information away in the module
+ * it points at.
+ *
+ * Still never throws, and the note is still the ONLY thing a damaged
+ * `run.json` costs: the run is listed, its workers are read, and the models
+ * cell says why it is blank.
  *
  * De-duplicated in worker order: a four-seat run on one model should say that
  * model once, and the review console — four seats, three vendors — should say
  * all of them.
  */
-async function recordedModels(run: RunPaths, workerIds: readonly string[]): Promise<readonly string[]> {
-  const byId = await readRunWorkerModels(run);
+async function recordedModels(
+  run: RunPaths,
+  workerIds: readonly string[],
+): Promise<{ readonly models: readonly string[]; readonly modelsNote: string | null }> {
+  const { models: byId, note } = await readRunWorkerModels(run);
   const out: string[] = [];
   for (const id of workerIds) {
     const m = byId[id];
     if (m === undefined || out.includes(m)) continue;
     out.push(m);
   }
-  return out;
+  return { models: out, modelsNote: note };
 }
 
 /**

@@ -42,12 +42,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { failed, never, ok } from "../../src/monitor/model.ts";
 import type { FleetModel, RunRow, WorkerRow } from "../../src/monitor/model.ts";
 import { renderFleet } from "../../src/monitor/render.ts";
 import { COLOUR, PLAIN } from "../../src/monitor/views/chrome.tsx";
-import { FLOOR_COLUMNS, planColumns } from "../../src/monitor/views/fleet.tsx";
+import { FLOOR_COLUMNS, planColumns, runModelStyle } from "../../src/monitor/views/fleet.tsx";
 import { workerContainerName } from "../../src/run/paths.ts";
 
 const NOW = Date.parse("2026-09-02T14:00:00.000Z");
@@ -155,8 +157,8 @@ const revGone = worker({
 });
 
 const RUNS: readonly RunRow[] = [
-  { runId: RUN_A, models: [], workers: [engRpc, engSilent, engQuiet, engActive] },
-  { runId: RUN_B, models: [], workers: [engNeverGrew, revGone] },
+  { runId: RUN_A, models: [], modelsNote: null, workers: [engRpc, engSilent, engQuiet, engActive] },
+  { runId: RUN_B, models: [], modelsNote: null, workers: [engNeverGrew, revGone] },
 ];
 
 /** A whole fleet, every region healthy. Departures spread over this the same way. */
@@ -304,7 +306,7 @@ describe("ISC-483: the first frame answers both questions for every live worker"
  */
 describe("ISC-480: the five activity states survive to the frame", () => {
   const one = (row: WorkerRow): string =>
-    rowFor(renderFleet({ ...healthy, runs: ok([{ runId: row.runId, models: [], workers: [row] }], NOW - 1_000) }), row.workerId);
+    rowFor(renderFleet({ ...healthy, runs: ok([{ runId: row.runId, models: [], modelsNote: null, workers: [row] }], NOW - 1_000) }), row.workerId);
 
   const fixtures: ReadonlyArray<readonly [string, WorkerRow]> = [
     ["rpc", engRpc],
@@ -563,7 +565,7 @@ describe("the task column", () => {
     return {
       ...healthy,
       runs: ok(
-        [{ runId: runA!.runId, models: [], workers: [{ ...first!, taskId }, ...others] }, ...rest],
+        [{ runId: runA!.runId, models: [], modelsNote: null, workers: [{ ...first!, taskId }, ...others] }, ...rest],
         NOW - 2_000,
       ),
     };
@@ -911,10 +913,10 @@ describe("ISC-485: below the floor it refuses, and the refusal is actionable", (
  * ------------------------------------------------------------------------- */
 
 describe("the run line names what its workers are running", () => {
-  const withModels = (models: readonly string[]): FleetModel => ({
+  const withModels = (models: readonly string[], modelsNote: string | null = null): FleetModel => ({
     ...healthy,
     columns: 120,
-    runs: ok([{ runId: RUN_A, models, workers: [engRpc] }], NOW - 1_000),
+    runs: ok([{ runId: RUN_A, models, modelsNote, workers: [engRpc] }], NOW - 1_000),
   });
   const runLine = (models: readonly string[], colour = false): string => {
     const line = renderFleet(withModels(models), { colour }).find((l) => l.includes(`run ${RUN_A}`));
@@ -966,6 +968,13 @@ describe("the run line names what its workers are running", () => {
    * So the checkable claim is which colour the palette names. `blue` is SGR 34
    * and `blueBright` is 94; the owner asked for dark, and this is the line
    * that would have to change for it to become bright.
+   *
+   * **THIS TEST PINS THE PALETTE AND NOTHING ELSE, which is exactly half of
+   * the claim.** It says the entry named `model` holds dark blue; it does not
+   * say the run line reads that entry, and a view painting the model from any
+   * other `"blue"` in the palette passes every line below. The other half is
+   * the block that follows, and the two are kept apart rather than merged so
+   * neither can be mistaken for the other.
    */
   test("the palette names dark blue for the model, and it is its own entry", () => {
     expect(COLOUR.model).toBe("blue");
@@ -978,5 +987,158 @@ describe("the run line names what its workers are running", () => {
     // And the plain frame carries no escape at all, which is the property
     // every byte-pinned assertion in this file rests on.
     expect(PLAIN.model).toBeUndefined();
+  });
+
+  /**
+   * THE PAINT, WHICH THE PALETTE ASSERTION ABOVE CANNOT REACH.
+   *
+   * The same hole `monitor-workspace.test.ts` records and repairs for the
+   * workspace heading, on the very next palette entry to be added. There, a
+   * reviewer's mutation — `fleet.tsx` `p.workspace` -> `p.warn` — survived the
+   * full unit AND integration suites, because `COLOUR.workspace` and
+   * `COLOUR.warn` are both `"yellow"` and every assertion was on the palette.
+   *
+   * `COLOUR.model` and `COLOUR.busy` are BOTH `"blue"`. The identical mutation
+   * is available here and, until this block, was equally invisible.
+   *
+   * **The repair is not "assert they differ", because they do not** and should
+   * not: the phase cell's `Busy` and the run line's model are both deliberately
+   * dark blue. What the separate entry buys is INDEPENDENCE, not distinctness.
+   * So the discrimination moves to an ASYMMETRIC palette in which the two are
+   * made to differ, driven through the exported decision — the degenerate
+   * -fixture lesson applied to a palette: the fixture has to make the
+   * candidates distinguishable before an assertion about them means anything.
+   */
+  test("the model text is painted from `p.model` — proved on a palette where model and busy differ", () => {
+    // The real palette CANNOT discriminate, and saying so is the point.
+    expect(COLOUR.model).toBe(COLOUR.busy);
+
+    // So: a palette where they differ. Only a `p.model` read gives blue.
+    expect(runModelStyle({ ...COLOUR, model: "blue", busy: "magenta" }).color).toBe("blue");
+    // And the mirror, so a mutation to a CONSTANT rather than to `p.busy`
+    // cannot pass by coincidence.
+    expect(runModelStyle({ ...COLOUR, model: "magenta", busy: "blue" }).color).toBe("magenta");
+
+    // THE NO-TTY PATH: a palette entry carrying a colour in `PLAIN` would put
+    // an escape on every run line of every redirected frame.
+    expect(runModelStyle(PLAIN).color).toBeUndefined();
+  });
+
+  /**
+   * The degraded slot takes `alarm`, and it is asserted the same way for the
+   * same reason — `alarm` is the only red in the palette today, so a mutation
+   * to a red CONSTANT would pass a symmetric fixture.
+   */
+  test("the degradation line is painted from `p.alarm`, never from the model colour", () => {
+    expect(runModelStyle({ ...COLOUR, alarm: "red", model: "magenta" }, true).color).toBe("red");
+    expect(runModelStyle({ ...COLOUR, alarm: "magenta", model: "red" }, true).color).toBe("magenta");
+    expect(runModelStyle(PLAIN, true).color).toBeUndefined();
+    // The two slots are different decisions, which is the whole reason the
+    // flag exists rather than a second call site reading the palette directly.
+    expect(runModelStyle(COLOUR).color).not.toBe(runModelStyle(COLOUR, true).color);
+  });
+
+  /**
+   * THE OTHER HALF OF THE LINK, AND THE ONE THE PRECEDENT LEAVES OPEN.
+   *
+   * `workspaceHeadingStyle` closed its regression by exporting the decision and
+   * driving it with an asymmetric palette, which is what the two tests above
+   * do. That technique has a residual and it is worth naming: it proves the
+   * FUNCTION reads the right entry, and says nothing about whether the view
+   * calls the function. `color={p.busy}` written straight into the run line
+   * passes both of them, and passes the whole suite, for exactly the reason the
+   * original mutation did.
+   *
+   * A frame cannot settle it — `render.ts:176-183`, chalk's level, no escapes
+   * in a test process — so the only remaining observable is the source text,
+   * which is how ISC-471 and ISC-472 are asserted three files away. Two claims,
+   * both whitespace-tolerant so a reformat cannot redden them:
+   *
+   *   1. `p.model` is read in ONE place in the view, which makes
+   *      {@link runModelStyle} the only paint decision there is to test; and
+   *   2. both slots name it, so a call site cannot go round the back.
+   */
+  test("the view paints through the decision rather than round it", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../../src/monitor/views/fleet.tsx", import.meta.url)),
+      "utf8",
+    );
+    expect(source.match(/\bp\.model\b/g) ?? []).toHaveLength(1);
+    expect(source).toMatch(/color=\{\s*runModelStyle\(\s*p\s*\)\.color\s*\}/);
+    expect(source).toMatch(/color=\{\s*runModelStyle\(\s*p\s*,\s*true\s*\)\.color\s*\}/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * WHY THE MODELS ARE MISSING (the F8 repair, seen from the frame)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * `RunRow.modelsNote` keeps two empties apart and the FRAME has to keep them
+ * apart too — a note that reaches the row and dies in the view is the same
+ * silence one layer up.
+ */
+describe("a run whose run.json could not be read says so on screen", () => {
+  const NOTE =
+    "run.json does not record readable worker models (unreadable state file " +
+    "/runs/2026-09-02T00-00-00Z-mon0/run.json: Unexpected end of JSON input — 60 bytes on disk)";
+
+  const withNote = (modelsNote: string | null, models: readonly string[] = []): FleetModel => ({
+    ...healthy,
+    columns: 120,
+    runs: ok([{ runId: RUN_A, models, modelsNote, workers: [engRpc] }], NOW - 1_000),
+  });
+
+  test("the note reaches the frame", () => {
+    const frame = renderFleet(withNote(NOTE)).join("\n");
+    expect(frame).toContain("does not record readable worker models");
+    expect(frame).toContain("run.json");
+  });
+
+  /*
+   * ANTI-DEGENERATE, and the assertion that would fail on the version of this
+   * fix that noted every run: the ordinary frame must be untouched. Every run
+   * created before 2026-09-05 has no `worker_models`, so a note on that path
+   * would put this line on the operator's whole history.
+   *
+   * The line COUNT is what discriminates. "Does not contain the sentence"
+   * alone passes for a view that renders an empty extra line on every run,
+   * which is the shape a `{note ?? ""}` would produce and is invisible to a
+   * `toContain`.
+   */
+  test("a run with nothing to say adds no line at all", () => {
+    const quiet = renderFleet(withNote(null));
+    expect(quiet.join("\n")).not.toContain("does not record readable worker models");
+    // A SHORT note for the count, so the number is a property of the branch
+    // rather than of how many times the real sentence wraps at 120 columns.
+    expect(renderFleet(withNote("run.json unreadable"))).toHaveLength(quiet.length + 1);
+    // …and the real one is longer than the pane, so it legitimately takes more.
+    expect(renderFleet(withNote(NOTE)).length).toBeGreaterThan(quiet.length);
+  });
+
+  /*
+   * THE NOTE WRAPS RATHER THAN TRUNCATING. It carries a path, a failing field
+   * and a byte count, and `chrome.tsx` is explicit that content the view did
+   * not compose must not be clipped — a truncated diagnosis deletes the half
+   * that names the file, which is the only part an operator can act on. At 60
+   * columns the sentence is longer than the pane, so a truncating render loses
+   * its tail and a wrapping one keeps every word.
+   */
+  test("the note keeps every word at a narrow width", () => {
+    const joined = renderFleet({ ...withNote(NOTE), columns: 60 }).join(" ").replace(/\s+/g, " ");
+    expect(joined).toContain("60 bytes on disk");
+    expect(joined).toContain("/runs/2026-09-02T00-00-00Z-mon0/run.json");
+  });
+
+  /*
+   * ISC-478 ON ONE ROW: the reason stands IN PLACE of the content, never
+   * beside it. The two fields can express the pairing even though the reader
+   * never produces it, so the view is asserted against the impossible input
+   * rather than trusted to never meet it.
+   */
+  test("a note wins over models that should not be there", () => {
+    const frame = renderFleet(withNote(NOTE, ["ollama-cloud/glm-5.3"])).join("\n");
+    expect(frame).toContain("does not record readable worker models");
+    expect(frame).not.toContain("glm-5.3");
   });
 });

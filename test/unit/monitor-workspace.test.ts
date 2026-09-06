@@ -137,7 +137,7 @@ describe("a worker with no discoverable workspace is still rendered", () => {
    */
   test("a lone unattached worker survives grouping", () => {
     const frame = renderFleet(
-      model([{ runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: null })] }]),
+      model([{ runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: null })] }]),
     );
     expect(renderedWorkerIds(frame)).toEqual(["eng-1"]);
     expect(frame.join("\n")).toContain(NO_WORKSPACE);
@@ -156,7 +156,7 @@ describe("a worker with no discoverable workspace is still rendered", () => {
   test("an unattached worker survives ALONGSIDE an attached one", () => {
     const frame = renderFleet(
       model([
-        { runId: RUN_A, models: [], workers: [
+        { runId: RUN_A, models: [], modelsNote: null, workers: [
             row({ workerId: "eng-1", workspace: WS_OPS }),
             row({ workerId: "eng-2", workspace: null }),
           ],
@@ -179,13 +179,13 @@ describe("a worker with no discoverable workspace is still rendered", () => {
    */
   test("grouping is a partition — no worker is added, lost or duplicated", () => {
     const runs: RunRow[] = [
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: WS_OPS }),
           row({ workerId: "eng-2", workspace: null }),
           row({ workerId: "eng-3", workspace: WS_DEV }),
         ],
       },
-      { runId: RUN_B, models: [], workers: [
+      { runId: RUN_B, models: [], modelsNote: null, workers: [
           row({ workerId: "rev-1", runId: RUN_B, workspace: WS_DEV }),
           row({ workerId: "tst-1", runId: RUN_B, workspace: null }),
         ],
@@ -219,7 +219,7 @@ describe("a worker with no discoverable workspace is still rendered", () => {
    */
   test("a run spanning two workspaces appears under both, with its workers split", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: WS_OPS }),
           row({ workerId: "eng-2", workspace: WS_DEV }),
           row({ workerId: "eng-3", workspace: WS_OPS }),
@@ -233,7 +233,7 @@ describe("a worker with no discoverable workspace is still rendered", () => {
     // The block header counts what the block LISTS. A split run whose two
     // headers both said "3 workers" would be a frame that contradicts itself.
     const frame = renderFleet(model([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: WS_OPS }),
           row({ workerId: "eng-2", workspace: WS_DEV }),
           row({ workerId: "eng-3", workspace: WS_OPS }),
@@ -253,7 +253,7 @@ describe("a worker with no discoverable workspace is still rendered", () => {
    * class of loss as a dropped worker and is easier to introduce.
    */
   test("a workerless run keeps its heading", () => {
-    const frame = renderFleet(model([{ runId: RUN_A, models: [], workers: [] }])).join("\n");
+    const frame = renderFleet(model([{ runId: RUN_A, models: [], modelsNote: null, workers: [] }])).join("\n");
     expect(frame).toContain(`run ${RUN_A} — 0 workers`);
   });
 
@@ -267,7 +267,7 @@ describe("a worker with no discoverable workspace is still rendered", () => {
    */
   test("with no workspace anywhere, every worker still renders and no row moves", () => {
     const runs: RunRow[] = [
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: null }),
           row({ workerId: "eng-2", workspace: null, phase: "busy" }),
         ],
@@ -339,8 +339,8 @@ describe("cmux is not consulted, so it cannot be a dependency", () => {
   test("a full grouped frame renders from a literal, touching nothing", () => {
     const frame = renderFleet(
       model([
-        { runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: WS_OPS })] },
-        { runId: RUN_B, models: [], workers: [row({ workerId: "rev-1", runId: RUN_B, workspace: null })] },
+        { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: WS_OPS })] },
+        { runId: RUN_B, models: [], modelsNote: null, workers: [row({ workerId: "rev-1", runId: RUN_B, workspace: null })] },
       ]),
     );
     expect(renderedWorkerIds(frame)).toEqual(["eng-1", "rev-1"]);
@@ -366,7 +366,7 @@ describe("grouping preserves the model's order and imposes none of its own", () 
    */
   test("groups appear in the order their first worker does", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: WS_DEV }),  // 3200… — second alphabetically
           row({ workerId: "eng-2", workspace: null }),    // would sort last under a null-last rule
           row({ workerId: "eng-3", workspace: WS_OPS }),  // 72D0… — first alphabetically
@@ -386,7 +386,7 @@ describe("grouping preserves the model's order and imposes none of its own", () 
    */
   test("the detached group is not sunk to the end", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: null }),
           row({ workerId: "eng-2", workspace: WS_OPS }),
         ],
@@ -414,7 +414,7 @@ describe("grouping preserves the model's order and imposes none of its own", () 
    */
   test("an undefined workspace groups with the nulls rather than becoming its own", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: undefined as unknown as null }),
           row({ workerId: "eng-2", workspace: null }),
         ],
@@ -427,7 +427,7 @@ describe("grouping preserves the model's order and imposes none of its own", () 
     // And it never reaches the frame as the word `undefined`.
     const frame = renderFleet(
       model([
-        { runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: undefined as unknown as null })] },
+        { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: undefined as unknown as null })] },
       ]),
     ).join("\n");
     expect(frame).toContain(NO_WORKSPACE);
@@ -436,8 +436,8 @@ describe("grouping preserves the model's order and imposes none of its own", () 
 
   test("run order and worker order inside a group are the model's", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_B, models: [], workers: [row({ workerId: "z-1", runId: RUN_B })] },
-      { runId: RUN_A, models: [], workers: [row({ workerId: "a-2" }), row({ workerId: "a-1" })] },
+      { runId: RUN_B, models: [], modelsNote: null, workers: [row({ workerId: "z-1", runId: RUN_B })] },
+      { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "a-2" }), row({ workerId: "a-1" })] },
     ]);
     expect(groups).toHaveLength(1);
     expect(groups[0]!.runs.map((r) => r.runId)).toEqual([RUN_B, RUN_A]);
@@ -532,7 +532,7 @@ describe("the workspace heading is bold yellow, and only when colour is on", () 
    */
   test("the plain frame contains no escape byte", () => {
     const frame = renderFleet(
-      model([{ runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: WS_OPS })] }]),
+      model([{ runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: WS_OPS })] }]),
     ).join("\n");
     expect(frame).not.toContain("");
   });
@@ -562,8 +562,8 @@ describe("the workspace heading is bold yellow, and only when colour is on", () 
    */
   test("the coloured frame carries the same text as the plain one", () => {
     const m = model([
-      { runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: WS_OPS })] },
-      { runId: RUN_B, models: [], workers: [row({ workerId: "rev-1", runId: RUN_B, workspace: null })] },
+      { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: WS_OPS })] },
+      { runId: RUN_B, models: [], modelsNote: null, workers: [row({ workerId: "rev-1", runId: RUN_B, workspace: null })] },
     ]);
     const strip = (s: string) =>
       s.replace(/\[[0-9;]*m/g, "").replace(/[─-]/g, "-").replace(/●/g, "*");
@@ -593,7 +593,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
   test("a named workspace renders its name, not its ref", () => {
     const frame = renderFleet(
       model([
-        { runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: WS_DEV, workspaceName: "development" })],
+        { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: WS_DEV, workspaceName: "development" })],
         },
       ]),
     ).join("\n");
@@ -615,7 +615,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
     expect(workspaceHeading(WS_OPS, null)).toBe(WS_OPS);
     const frame = renderFleet(
       model([
-        { runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: null })] },
+        { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: null })] },
       ]),
     ).join("\n");
     expect(frame).toContain(WS_OPS);
@@ -645,7 +645,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
 
     const frame = renderFleet(
       model([
-        { runId: RUN_A, models: [], workers: [
+        { runId: RUN_A, models: [], modelsNote: null, workers: [
             row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: undefined as unknown as null }),
             row({ workerId: "eng-2", workspace: WS_DEV, workspaceName: "" }),
           ],
@@ -669,7 +669,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
    */
   test("two workspaces sharing a name stay two groups", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: "review" }),
           row({ workerId: "eng-2", workspace: WS_DEV, workspaceName: "review" }),
         ],
@@ -691,8 +691,8 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
    */
   test("a name on any worker labels the whole group", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [row({ workerId: "old-1", workspace: WS_OPS, workspaceName: null })] },
-      { runId: RUN_B, models: [], workers: [row({ workerId: "new-1", runId: RUN_B, workspace: WS_OPS, workspaceName: "operations" })],
+      { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "old-1", workspace: WS_OPS, workspaceName: null })] },
+      { runId: RUN_B, models: [], modelsNote: null, workers: [row({ workerId: "new-1", runId: RUN_B, workspace: WS_OPS, workspaceName: "operations" })],
       },
     ]);
     expect(groups).toHaveLength(1);
@@ -718,7 +718,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
    */
   test("the FIRST name in model order wins, not the last", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "a-1", workspace: WS_OPS, workspaceName: "dev" }),
           row({ workerId: "a-2", workspace: WS_OPS, workspaceName: "development" }),
         ],
@@ -736,7 +736,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
    */
   test("a null on the first worker does not suppress a later name", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [
+      { runId: RUN_A, models: [], modelsNote: null, workers: [
           row({ workerId: "a-1", workspace: WS_OPS, workspaceName: null }),
           row({ workerId: "a-2", workspace: WS_OPS, workspaceName: "operations" }),
           row({ workerId: "a-3", workspace: WS_OPS, workspaceName: "later" }),
@@ -753,7 +753,7 @@ describe("the heading prefers the workspace's name and falls back to its ref", (
    */
   test("the detached group is never given a name", () => {
     const groups = groupByWorkspace([
-      { runId: RUN_A, models: [], workers: [row({ workerId: "eng-1", workspace: null, workspaceName: "development" })],
+      { runId: RUN_A, models: [], modelsNote: null, workers: [row({ workerId: "eng-1", workspace: null, workspaceName: "development" })],
       },
     ]);
     expect(workspaceHeading(groups[0]!.workspace, groups[0]!.name)).toBe(NO_WORKSPACE);

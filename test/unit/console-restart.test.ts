@@ -317,35 +317,118 @@ describe("a restart resolves its title before it stops anything", () => {
 });
 
 /*
+ * WHAT IS LEFT FOR THE SOURCE TO ANSWER, AND WHY IT IS SO LITTLE.
+ *
  * The scripts run `main()` at import, so no test can call their restart path —
  * the reason `review-console-relay.test.ts` states for keeping decisions in
- * modules. `plannedPane` is that module. What no module can hold is WHERE the
- * scripts call it, and that placement is the entire fix, so it is re-checked
- * here against the source: inside the `--restart` branch, ahead of every
- * irreversible thing that branch does.
+ * modules. The ORDERING used to be one of the things no module held, so it was
+ * checked here by reading the scripts and comparing `indexOf` positions. That
+ * check had two silent false-pass modes and a reviewer found both:
+ *
+ *   1. it asserted only that the substring `plannedPane(` appeared before the
+ *      destructive ones, so ANY call satisfied it — the wrong spec, the wrong
+ *      title, or a call inside a `try` that swallowed the throw;
+ *   2. it read `if (at === -1) continue;`, so extracting `runsHoldingAny(` into
+ *      a helper made `indexOf` return -1 and the assertion was SKIPPED. The
+ *      guard would have been gone and the suite green.
+ *
+ * `resolveThenRestart` now owns the ordering and `test/unit/fresh-dispatch.test.ts`
+ * asserts it against real calls: that the resolution precedes every irreversible
+ * step, that a refused title stops neither the run nor the relay, and that the
+ * respawn follows the teardown. Those are the tests that answer "is the order
+ * right".
+ *
+ * What no module can answer is whether the SCRIPTS still delegate — a script
+ * that re-inlines the sequence is back where it started with the module sitting
+ * unused beside it — and whether the `--task` path, whose module takes no `plan`
+ * dep, still resolves the title itself. So exactly those two facts are checked
+ * against the source, and a marker that cannot be found FAILS. It never skips:
+ * a marker that has moved means the check this file used to perform is gone,
+ * and reporting that as a pass is how a guard disappears without anyone finding
+ * out.
  */
-describe("every console script guards its --restart branch first", () => {
+describe("every console script hands its --restart ordering to the module", () => {
   const BRANCH = 'const restartFlag = flag(argv, "--restart");';
-  const DESTRUCTIVE = ["runsHoldingAny(", "recreateThenDispatch(", "stopRelay("];
+  const TASK_PATH = "if (taskFlag !== undefined) {";
+
+  const source = (script: string): Promise<string> =>
+    readFile(join(import.meta.dir, "..", "..", "scripts", script), "utf8");
+
+  /**
+   * Where `needle` next appears, THROWING when it does not.
+   *
+   * The whole point of the helper. `indexOf` answers -1 for something absent,
+   * -1 is less than every real index, and an ordering assertion built on it
+   * passes most confidently exactly when the thing it orders has been deleted.
+   */
+  const at = (src: string, needle: string, from: number, why: string): number => {
+    const i = src.indexOf(needle, from);
+    if (i === -1) {
+      throw new Error(`the marker '${needle}' is not in this script after ${from} — ${why}`);
+    }
+    return i;
+  };
 
   for (const script of ["operations", "development", "review"]) {
-    test(`scripts/${script} calls plannedPane before it stops anything`, async () => {
-      const src = await readFile(join(import.meta.dir, "..", "..", "scripts", script), "utf8");
+    test(`scripts/${script} gives the bare --restart to resolveThenRestart`, async () => {
+      const src = await source(script);
+      const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
+      at(
+        src,
+        "resolveThenRestart(",
+        branch,
+        "the bare --restart path must be the module's ordering, not four statements here",
+      );
+    });
 
-      const branch = src.indexOf(BRANCH);
-      expect(branch).toBeGreaterThan(-1);
+    test(`scripts/${script} no longer resolves its own teardown after --restart`, async () => {
+      /*
+       * `runsHoldingAny` still scopes the `--recreate` sweep, which sits ABOVE
+       * this branch — so its absence is asserted from the branch onward rather
+       * than over the whole file. A second appearance below the branch is the
+       * sequence being re-inlined, which is the regression this fix exists to
+       * make impossible to reach by accident.
+       */
+      const src = await source(script);
+      const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
+      expect(src.indexOf("runsHoldingAny(", branch)).toBe(-1);
+      expect(src.indexOf("runsHoldingAny(")).toBeGreaterThan(-1); // still scoping --recreate
+    });
 
-      const guard = src.indexOf("plannedPane(", branch);
-      expect(guard).toBeGreaterThan(-1);
-
-      for (const marker of DESTRUCTIVE) {
-        const at = src.indexOf(marker, branch);
-        if (at === -1) continue;
-        expect(guard).toBeLessThan(at);
-      }
-
-      // And the respawn, which needs the run already stopped, still comes last.
-      expect(guard).toBeLessThan(src.indexOf("restartConsolePane(", branch));
+    test(`scripts/${script} resolves the title before recreateThenDispatch`, async () => {
+      /*
+       * The one ordering the source still has to answer for: the `--task`
+       * module takes no `plan` dep — it waits, and a wait of up to twenty
+       * minutes before an unplannable title is refused would be worse than
+       * useless — so the script calls the resolution itself, first.
+       */
+      const src = await source(script);
+      const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
+      const task = at(src, TASK_PATH, branch, "the --task path has moved out of the branch");
+      const resolved = at(
+        src,
+        "plan();",
+        task,
+        "the --task path must resolve the title itself; the module it calls does not",
+      );
+      const dispatch = at(src, "recreateThenDispatch(", task, "the --task path calls no module");
+      expect(resolved).toBeLessThan(dispatch);
     });
   }
+
+  test("scripts/review resolves the title before its --task path stops the relay", async () => {
+    /*
+     * `review` is the console that pays most for a late refusal: the relay pins
+     * run ids for the life of the process, so stopping it on a title that is
+     * then refused leaves four healthy workers and nothing able to turn a
+     * collator's dispatch request into reviews. The bare path gets this from
+     * `resolveThenRestart`; the `--task` path spells it here.
+     */
+    const src = await source("review");
+    const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
+    const task = at(src, TASK_PATH, branch, "the --task path has moved out of the branch");
+    const resolved = at(src, "plan();", task, "the --task path must resolve the title itself");
+    const relay = at(src, "await quiesce();", task, "the --task path no longer stops the relay");
+    expect(resolved).toBeLessThan(relay);
+  });
 });

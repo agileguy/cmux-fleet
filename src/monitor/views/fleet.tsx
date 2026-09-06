@@ -54,6 +54,7 @@ import { Box, Text } from "ink";
 import type { FleetModel, Region, RunRow, WorkerRow } from "../model.ts";
 import { workerContainerName } from "../../run/paths.ts";
 import {
+  BodyLine,
   Bullet,
   Cell,
   FloorRefusal,
@@ -548,15 +549,76 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
          * count so the run id keeps its position for anyone reading down the
          * column, and truncates last because it is the least urgent value on
          * the line.
+         *
+         * The colour comes from {@link runModelStyle} rather than from a
+         * palette entry named here — see that function for the regression that
+         * makes the indirection worth a call, and for why the view being the
+         * only reader of that entry is itself asserted.
          */}
-        {run.models.length > 0 ? (
-          <Text wrap="truncate-end" color={p.model}>
+        {run.modelsNote === null && run.models.length > 0 ? (
+          <Text wrap="truncate-end" color={runModelStyle(p).color}>
             {`  ${run.models.join(" ")}`}
           </Text>
         ) : null}
       </Box>
+      {/*
+       * WHY THE MODELS ARE MISSING, WHEN THEIR ABSENCE IS A FAILURE.
+       *
+       * `model.ts`'s `modelsNote` keeps two empties apart: a run that predates
+       * `worker_models` (nothing to say, nothing printed) and a `run.json` that
+       * would not parse (the monitor could not look). Only the second reaches
+       * here, so an ordinary frame is unchanged by a byte.
+       *
+       * ITS OWN LINE, and `BodyLine` rather than the run line's `Text`. The
+       * note carries `StateReadError`'s sentence — a path, a failing field and
+       * the bytes on disk — and `chrome.tsx` is explicit that content the view
+       * did not compose must WRAP: truncating it to the tail of a run line
+       * would delete the half that names the file, which is the only part an
+       * operator can act on. It is also not a cell and needs no rung on §6.5's
+       * ladder for the same reason every other full-width line has none.
+       *
+       * It stands IN PLACE of the models rather than beside them (ISC-478),
+       * which the guard above enforces on the one impossible pairing the two
+       * fields can express.
+       */}
+      {run.modelsNote !== null ? (
+        <BodyLine color={runModelStyle(p, true).color}>{`  ${run.modelsNote}`}</BodyLine>
+      ) : null}
     </Box>
   );
+}
+
+/**
+ * How the run line's model slot is painted — extracted as a function of the
+ * palette for the reason {@link workspaceHeadingStyle} states, and because THIS
+ * palette entry has the same trap the workspace heading had.
+ *
+ * `COLOUR.model` and `COLOUR.busy` are BOTH `"blue"` (`chrome.tsx:106,137`),
+ * exactly as `COLOUR.workspace` and `COLOUR.warn` are both `"yellow"`. The
+ * workspace heading was found painting itself from `p.warn`, and a full unit
+ * AND integration suite passed on the mutation, because every assertion about
+ * it was on the PALETTE — `COLOUR.model === "blue"` pins which colour the
+ * palette names and says nothing about which entry the view reads. The frame
+ * cannot settle it either: `render.ts:176-183` records that colour has two
+ * gates and the second is chalk's own level, computed from the real
+ * `process.stdout`, so `{colour: true}` inside a test process produces a frame
+ * byte-identical to the plain one and an assertion on SGR escapes would pass
+ * vacuously exactly where it runs.
+ *
+ * So the DECISION is what gets exported, and `monitor-render.test.ts` drives it
+ * with an asymmetric palette in which `model` and `busy` deliberately differ —
+ * a fixture that makes the two candidates distinguishable before asserting
+ * about them, which under the real palette no test can do.
+ *
+ * `degraded` selects `alarm` for {@link RunRow.modelsNote}'s line, and it is
+ * the same function rather than a second one because both paint one slot: what
+ * this run is running, or why the monitor cannot say.
+ */
+export function runModelStyle(
+  p: Palette,
+  degraded = false,
+): { readonly color: string | undefined } {
+  return { color: degraded ? p.alarm : p.model };
 }
 
 

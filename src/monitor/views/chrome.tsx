@@ -133,6 +133,15 @@ export interface Palette {
    * Its own entry rather than a reuse of {@link dim} for the same reason
    * {@link workspace} is not a reuse of {@link warn}: a later decision about
    * what dim means must not silently repaint this.
+   *
+   * **And it collides with {@link busy} exactly as {@link workspace} collides
+   * with {@link warn} — both are `"blue"`.** That is the design (the phase
+   * cell and the model are both meant to sit behind the severity colours), and
+   * it is also the shape that let the workspace heading paint itself from the
+   * wrong entry through a full green suite. No test can tell the two apart on
+   * THIS palette, so `fleet.tsx`'s `runModelStyle` exists to be driven with one
+   * where they differ; that function is the only reader of this entry, which
+   * `monitor-render.test.ts` asserts rather than assumes.
    */
   readonly model: string | undefined;
 }

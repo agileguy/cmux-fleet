@@ -94,6 +94,27 @@ const MCP_FILES = [".mcp.json", join(".pi", "mcp.json")] as const;
 const PI_SETTINGS_FILES = [join(".pi", "settings.json")] as const;
 
 /**
+ * The dot-directories every `PI_DIRS` entry resolves THROUGH, checked as a unit
+ * before anything below them is looked at.
+ *
+ * Exported because the scan's own loop below is the only authority on what this
+ * set contains, and a second hand-written copy of it is exactly the drift
+ * `TREE_VISIBLE_HAZARD_PATHS` exists to prevent. The list was inlined at its one
+ * use site until phase 7's review found the consequence: `.agents` was scanned
+ * here as a parent and appeared in NO exported list, so the pre-merge gate in
+ * `pm-integration.ts` had no rule for it and nothing anywhere compared the two.
+ *
+ * A bare parent path is tree-visible — it can arrive by merge — for one shape
+ * only, and it is the shape this scan is here for. Measured with git 2.50.1: a
+ * committed `.agents -> /etc` is a mode-120000 blob AT that path, and
+ * `git diff --name-only` reports the entry `.agents` exactly. A real directory
+ * never appears by name in that listing; only its children do. So "`.agents` is
+ * a path in the incoming diff" and "`.agents` is a symlink or a file" are the
+ * same statement.
+ */
+export const DISCOVERY_PARENT_DIRS = [".pi", ".agents"] as const;
+
+/**
  * Discovery directories Pi probes from the workspace root (§4.2). Extensions
  * are the in-process-execution case and get their own kind; the rest are
  * instruction-bearing and reported as `other`.
@@ -192,6 +213,16 @@ const ATTRIBUTE_FILES = [join(".git", "info", "attributes"), ".gitattributes"] a
  * the operator's tree, while every other tree-visible entry was refused up
  * front. One missing row, and nothing anywhere could have noticed.
  *
+ * Phase 7's review found the SECOND way the comparison could be silent, and it
+ * is worse than a missing gate rule: a hazard missing from BOTH lists passes
+ * the coverage assertion, because the assertion iterates this array. `.agents`
+ * was that hazard — scanned below as a parent dot-dir specifically because it
+ * can be a symlink, absent from `PI_DIRS` (which carries only `.agents/skills`)
+ * and therefore absent from here, so a bare `.agents` symlink was detected by
+ * this module and refused by no gate. The remedy is that this list is now
+ * assembled from the scan's OWN constants — `DISCOVERY_PARENT_DIRS` included —
+ * rather than from a parallel enumeration a reader has to keep in step.
+ *
  * This module has been patched twice for a docstring claiming a coverage
  * relationship that did not hold, and the remedy both times was to make the
  * claim checked rather than written — `git-config-forms.test.ts` asserts the
@@ -207,6 +238,7 @@ export const TREE_VISIBLE_HAZARD_PATHS: readonly string[] = [
   ...INSTRUCTION_FILES,
   ...MCP_FILES,
   ...PI_SETTINGS_FILES,
+  ...DISCOVERY_PARENT_DIRS,
   ...PI_DIRS.map((d) => d.rel),
   ".gitattributes",
 ].map((p) => p.split(sep).join("/"));
@@ -381,7 +413,7 @@ export async function scanRepoHazards(
   // if the repo chooses. The link is quarantined as a unit and NOTHING below
   // it is touched, because "below it" is not inside this tree.
   const symlinkedParents = new Set<string>();
-  for (const parent of [".pi", ".agents"]) {
+  for (const parent of DISCOVERY_PARENT_DIRS) {
     const abs = join(worktreeRoot, parent);
     if (await isSymlink(abs)) {
       symlinkedParents.add(parent);
@@ -448,6 +480,7 @@ export async function scanRepoHazards(
     } else if (gitSt.isDirectory()) {
       await scanGitConfig(worktreeRoot, opts, record);
       await scanGitAttributes(worktreeRoot, opts, record);
+      await scanGitAlternates(worktreeRoot, record);
       await scanGitHooks(worktreeRoot, opts, record, defuse);
     }
   }
@@ -595,6 +628,89 @@ async function scanGitAttributes(
         `${o.shown} — assigns a driver that makes a repo-defined program apply to matching paths; ${note}`,
       );
     }
+  }
+}
+
+/**
+ * The object store this repository BORROWS from (`.git/objects/info/alternates`).
+ *
+ * ## Why it is here at all, measured rather than reasoned
+ *
+ * Phase 7's review found that the string `alternates` appeared nowhere in this
+ * module or in `pm-integration.ts`, while `scanWorkerCloneBeforeFetch`'s
+ * docblock claimed a record-everything posture over the clone git runs its
+ * server side inside. Reproduced against git 2.50.1, three repositories on one
+ * machine:
+ *
+ *  - `secret/` — an ordinary repository, unrelated to the run, holding one
+ *    commit with `secret.txt`.
+ *  - `worker/` — a clone of the operator's repo, with
+ *    `.git/objects/info/alternates` naming `…/secret/.git/objects` and
+ *    `refs/heads/feat` pointed straight at the secret repo's commit SHA.
+ *  - `op/` — the operator's checkout, running the fetch this module gates.
+ *
+ * `git fetch ../worker feat:refs/pifleet/incoming/w` **succeeded**, and
+ * `git ls-tree -r refs/pifleet/incoming/w` in the OPERATOR's repository listed
+ * `secret.txt`. The worker's object store is not confined to the run tree: one
+ * line in this file makes any object directory readable by the worker part of
+ * what the operator's fetch can pull, under a ref the worker chooses.
+ *
+ * ## Detected, deliberately never neutralized
+ *
+ * Every other hazard here is renamed aside or commented out. This one is not,
+ * and the asymmetry is the point: a repository whose objects genuinely LIVE in
+ * an alternate (`git clone --shared`, `--reference`) is broken the instant the
+ * file is moved — `git log` stops working, and the "neutralization" would have
+ * destroyed a repository rather than defused one. pifleet's own clones are made
+ * with `--no-hardlinks` and no `--shared`/`--reference` (`worktree.ts:689`), so
+ * this file is absent from every clone the fleet creates, which is what keeps
+ * the finding a signal rather than a line on every row.
+ *
+ * Every non-empty line is reported. Git's parser takes the file as
+ * newline-separated paths with no comment syntax, so a detector inventing one
+ * would be reporting less than git honours.
+ */
+const ALTERNATES_FILE = join(".git", "objects", "info", "alternates");
+
+async function scanGitAlternates(worktreeRoot: string, record: Record_): Promise<void> {
+  const rel = ALTERNATES_FILE;
+  const abs = join(worktreeRoot, rel);
+  let st: Awaited<ReturnType<typeof lstat>>;
+  try {
+    st = await lstat(abs);
+  } catch {
+    return; // absent — the shape every fleet-made clone has
+  }
+  if (st.isSymbolicLink()) {
+    record("other", rel, false, `${rel} is a symlink (not followed); detected only, never neutralized`);
+    return;
+  }
+  if (!st.isFile()) {
+    record("other", rel, false, `${rel} is not a regular file; left untouched`);
+    return;
+  }
+  if (st.size > MAX_GIT_CONFIG_BYTES) {
+    record("other", rel, false, `${rel} is ${st.size} bytes (cap ${MAX_GIT_CONFIG_BYTES}); not parsed, not neutralized`);
+    return;
+  }
+  let text: string;
+  try {
+    text = await readFile(abs, "utf8");
+  } catch (err) {
+    record("other", rel, false, `${rel} could not be read: ${String(err)}`);
+    return;
+  }
+  for (const line of text.split("\n")) {
+    const entry = line.replace(/\r$/, "").trim();
+    if (entry.length === 0) continue;
+    record(
+      "other",
+      rel,
+      false,
+      `borrows objects from ${entry.slice(0, 256)} — a fetch from this repository serves objects out of ` +
+        `that directory too, so its object store is not confined to this tree; detected only, never ` +
+        `neutralized, because a repository whose objects really live there stops working if the file moves`,
+    );
   }
 }
 
