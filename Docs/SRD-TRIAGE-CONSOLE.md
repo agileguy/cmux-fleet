@@ -2700,8 +2700,14 @@ and SRD-FLEET-PM-001 D7's.
   `checkTriagePartition` and `assessTriageSweep` project their partition out of the sweep's requests.
   Touches: `src/run/dispatch-request.ts`, `test/unit/dispatch-request.test.ts`.
   *Acceptance: a review request carrying `services` refuses by code; a triage request without it
-  refuses by code; a triage request with it validates against `triage/targets.yaml`; and the
-  `grep -rn` for each module's name finds a caller outside its own file.*
+  refuses by code; a triage request with it validates against `triage/targets.yaml`; and a
+  `partitionFromRequests` projection beside `checkTriagePartition` turns a sweep's requests into the
+  partition value both waiting modules already take.*
+  **This task removes the SPECIFICATION blocker, not the caller gap.** The production caller is the
+  actor, which is task 6.1 and does not exist yet, so `grep` will still find no caller outside these
+  files and that is the correct outcome rather than an unfinished one. Saying so here because a brief
+  that demands a caller which cannot exist is the shape that has cost this phase twice (ISC-600,
+  ISC-609).
 - **4.5a** Two source probes task 4.5 left open, both in round 6's files. (a) `scripts/triage` spells
   its four seats as literals rather than importing `DEFAULT_TRIAGE_WORKERS` — behaviourally
   equivalent today and a silent divergence the day a seat is added; probe it beside the `CONSOLE`
