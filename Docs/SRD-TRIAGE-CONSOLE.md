@@ -2355,8 +2355,8 @@ worker.** Task 1.1 is split on that line.
 
 ### Phase 2 — The roster and `--console`
 
-**Intent.** Make the request plane serve a second console, once, in the shape `relay.ts:377-392` says
-it should be solved.
+**Intent.** Make the request plane serve a second console, once, in the shape
+`src/cli/commands/relay.ts:377-392` says it should be solved.
 
 **Does not.** Rename `ConsoleRoster`'s fields (§10 D5), or add a second request mechanism.
 
@@ -2369,8 +2369,13 @@ it should be solved.
 - **2.2** Add `--console <name>` to the actor path, selecting a roster and an aspect table, so the
   worker→run scoping problem is solved once rather than twice. Touches: `src/cli/commands/relay.ts`,
   `src/run/relay.ts`, `test/unit/relay-console.test.ts` (new).
-  *Note: `relay.ts:377-392` is the comment this task closes; it should be updated rather than left
-  describing a gap that no longer exists.*
+  *Note: **`src/cli/commands/relay.ts:377-392`** is the comment this task closes; it should be updated
+  rather than left describing a gap that no longer exists. **Qualify the path when citing it** — §0.6
+  writes it in full and this section originally wrote it bare, which reads as `src/run/relay.ts`, where
+  those lines are inside `relayEnvelopeState` and concern envelope states rather than console
+  selection. That bare form sent an implementer to the wrong file in round 4; corrected 2026-09-06
+  after the implementer caught it. Two modules in this tree are called `relay.ts` and every citation of
+  either needs its directory.*
 - **2.3** Parameterise the actor's three bookkeeping paths and add the console name to
   `RelayRecordSchema`, so a second actor cannot claim the review console's lock. Touches:
   `src/run/console-relay.ts`, `test/unit/console-relay.test.ts`.
