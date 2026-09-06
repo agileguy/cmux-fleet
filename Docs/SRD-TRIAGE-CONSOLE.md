@@ -1120,6 +1120,35 @@ journal's `children[]` against the reply files present — never from `triage.js
 is ISC-517's hazard and SRD-FLEET-PM-001 §7.5's correction, and this console meets it 288 times a day
 rather than occasionally.
 
+**THREE FINDINGS FROM TASK 5.3's MUTATION BATTERY, 2026-09-06, graded and ruled.** Each came from a
+survivor rather than from reading, which is why they are recorded here rather than left to the module.
+
+**1. `duplicate_rows` is ADOPTED as a seventh assessment reason.** `triage.json` can carry two rows
+for one service, and the battery found first-row-wins and last-row-wins mutually indistinguishable —
+**under either, a worker overturns its own `unhealthy` by appending a `healthy`.** That is a silent
+upgrade past the whole gate, by a document the worker controls end to end. The refusal is the only
+answer that is not the host picking a verdict, which rule 1's opening sentence removes from the host:
+`indeterminate`, not counted, agreement deliberately not consulted, and **asserted in both orders** so
+the fixture cannot pass by accident. It is a vocabulary addition the draft did not name; it is
+adopted because refusing to choose is the *conservative* direction and choosing would be judgement.
+
+**2. A FIFTH condition joins rule 2, and it is condition 1 read honestly rather than a new
+judgement.** A `healthy` whose `coverage[]` is non-empty but whose every entry is `not_attempted`
+passes the gate as written. It should not, and the reason it is safe to say so is that **zero attempts
+and zero entries carry exactly the same information** — the observer attempted nothing either way, and
+the array's length is the only thing that differs. This needs no threshold and decides no channel set,
+so it does not reopen the judgement rule 2's opening sentence closes. Contrast the check that *would*:
+*"were these channels enough"* has a threshold in it and is refused. Task 5.3b.
+
+**3. §6.6 layer 3's second echo is specified and enforced nowhere.** Layer 3 requires the artifact to
+echo *"the sweep id **and the observation window's opening timestamp** … must echo **both**"*, while
+§7.4's two required additions are `sweep_id` and the per-service rows — the timestamp is not among
+them and no refusal is written for it. **The row-level `window` field is not the same check and does
+not cover it**: `evidenceGaps` tests that a window was *named*, not that it was *opened when it should
+have been*, so an observer can echo the right sweep id, name a window, and have queried six hours
+against a five-minute configuration. Both halves are needed and only one exists. Task 5.3c settles it
+— either §7.4 grows the field and a refusal, or layer 3's clause is struck as overstated.
+
 ### 6.8 The incident state machine — one notification per transition, and flapping is its own state
 
 **Per `(environment, service)`, in `~/.pifleet/triage/<env>/<service>.json`.** Not in the run tree,
@@ -1719,6 +1748,14 @@ The artifact pair is `skills/observer-ops/SKILL.md:26-33`'s and the rule that a 
   structural gate is what reads these.
 
 ### 7.5 `triage.json` — new
+
+> **GAP found while implementing task 5.3, 2026-09-06: nothing validates this document.** §7.6's
+> per-service records are *"Zod-validated on read, so a malformed record refuses rather than being
+> acted on"*; this contract has no schema, and no task in §13 assigns it one — task 5.5 covers the
+> **incident** record, which is §7.6. So between the file a container wrote and `assessTriageSweep`,
+> which takes an already-typed value, **there is currently no validator at all**. The asymmetry is
+> the wrong way round: §7.6 is written by the host and §7.5 is written by a worker, and it is the
+> untrusted one that is unchecked. Task 5.5a.
 
 Written by `tri-1` on turn two, at `/outbox/<collate-task-id>/files/triage.json`, beside a
 `triage.md` for the person who was not watching — the same split, for the same measured reason
@@ -2624,6 +2661,20 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: §12's four-surfaces probe passes. **And the anti-criterion that outranks it: assert a
   delivery failure never advances or clears an incident** (§6.9 requirement 7) — the plausible
   implementation writes the transition after the `await`, and it fails only this test.*
+- **5.3b** §6.7 rule 2's fifth condition: a `healthy` whose `coverage[]` is non-empty and whose every
+  entry is `not_attempted` fails the gate, spending the existing `coverage` gap rather than a new one.
+  Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`, `ISA.md`.
+  *Acceptance: an all-`not_attempted` fixture and an empty-`coverage[]` fixture reach the same
+  assessment and the same gap by name; a mixed fixture with one `answered` entry does not.*
+- **5.3c** Settle §6.6 layer 3's `window_opened_at` echo — either §7.4 grows the field with a refusal
+  spelled beside `stale_replay`, or layer 3's clause is struck. **Decide first, then implement**; the
+  §7.3 gap is what a specified-and-unenforced sentence costs when it is left standing.
+  Touches: `Docs/SRD-TRIAGE-CONSOLE.md`, then whichever module the decision names.
+- **5.5a** A Zod schema for `triage.json` (§7.5), refused on any violation, matching §7.6's
+  validated-on-read posture. Touches: `src/run/triage-document.ts` (new),
+  `test/unit/triage-document.test.ts` (new), `ISA.md`.
+  *Acceptance: a document with a row missing `assessment`, one with an unknown assessment value, and
+  one that is not an object each refuse by name rather than reaching `assessTriageSweep`.*
 - **5.7** Add every §12 fixture in the issue-predicate, saturation, dedup, console-health and
   notification blocks. Touches: `ISA.md`.
 
