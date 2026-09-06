@@ -59,6 +59,7 @@ import { monotonicMs } from "../../util/clock.ts";
 import { ok, failed, type Region, type RunRow } from "../model.ts";
 import { runPaths, runsRoot, type RunPaths } from "../../run/paths.ts";
 import { liveRunIds } from "../../run/registry.ts";
+import { readRunWorkerModels } from "../../run/state.ts";
 import { readWorkerRows, type WorkerRead } from "./worker.ts";
 
 /**
@@ -143,6 +144,7 @@ export async function readRuns(
     if (workerIds === null) continue;
     rows.push({
       runId,
+      models: await recordedModels(run, workerIds),
       workers: await readWorkerRows(run, workerIds, {
         containers: opts?.containers ?? null,
         now,
@@ -153,6 +155,33 @@ export async function readRuns(
   }
 
   return ok(rows, now());
+}
+
+/**
+ * What this run's workers were launched running, from the run's OWN record.
+ *
+ * `run.json`'s `worker_models` is `id -> "provider/model"`, written by `up`.
+ * Read through `run/state.ts` and NOT with a local `JSON.parse`: ISC-472
+ * forbids a module parsing a control-plane document itself, because doing so
+ * discards `readValidated` and the `StateReadError` path. The first version of
+ * this function did exactly that and the source-text guard caught it.
+ *
+ * Every failure is `[]` and none of them throws — see the reader's own
+ * docblock for why this one value is more forgiving than its neighbours.
+ *
+ * De-duplicated in worker order: a four-seat run on one model should say that
+ * model once, and the review console — four seats, three vendors — should say
+ * all of them.
+ */
+async function recordedModels(run: RunPaths, workerIds: readonly string[]): Promise<readonly string[]> {
+  const byId = await readRunWorkerModels(run);
+  const out: string[] = [];
+  for (const id of workerIds) {
+    const m = byId[id];
+    if (m === undefined || out.includes(m)) continue;
+    out.push(m);
+  }
+  return out;
 }
 
 /**

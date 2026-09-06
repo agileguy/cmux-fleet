@@ -121,6 +121,20 @@ export interface Palette {
    * meanings a yellow line carried.
    */
   readonly workspace: string | undefined;
+  /**
+   * The `provider/model` a run's workers are running, on the run line.
+   *
+   * DARK blue (`blue`), not `blueBright`, and that is the owner's word taken
+   * literally. It also earns it: this is reference text an operator reads when
+   * they go looking for it, never a finding, so it must sit BEHIND the
+   * severity colours in the eye's order. A bright blue would compete with the
+   * bullet, which is the one thing on the frame that must win.
+   *
+   * Its own entry rather than a reuse of {@link dim} for the same reason
+   * {@link workspace} is not a reuse of {@link warn}: a later decision about
+   * what dim means must not silently repaint this.
+   */
+  readonly model: string | undefined;
 }
 
 export const PLAIN: Palette = {
@@ -133,6 +147,7 @@ export const PLAIN: Palette = {
   quiet: undefined,
   busy: undefined,
   workspace: undefined,
+  model: undefined,
 };
 
 /**
@@ -160,6 +175,7 @@ export const COLOUR: Palette = {
   quiet: "white",
   busy: "blue",
   workspace: "yellow",
+  model: "blue",
 };
 
 const PaletteContext = createContext<Palette>(PLAIN);

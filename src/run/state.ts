@@ -232,6 +232,50 @@ export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessP
 }
 
 /**
+ * What each worker in this run is ACTUALLY running, as `up` recorded it —
+ * `id -> "provider/model"`, or `{}` when nothing recorded any.
+ *
+ * The same argument as every other reader in this file, applied to a value
+ * whose only consumer is a display: re-resolving `fleet.yaml` answers "what
+ * would this worker run if launched today", which is a different question from
+ * "what is it running". An operator who edits a role's `model:` mid-run must
+ * not see the new value printed beside a container still running the old one.
+ *
+ * Reads through `readValidated` rather than a local `JSON.parse` because
+ * ISC-472 forbids the second — a module that parses a control-plane document
+ * itself discards the `StateReadError` path, and `monitor/read/runs.ts` is the
+ * caller this exists for.
+ *
+ * TOTALLY forgiving, and more so than its neighbours on purpose. A missing
+ * key, a non-object, a non-string value: all `{}` or a dropped entry, never a
+ * throw and never a note. The neighbours grade or budget a run and must
+ * complain when the record disagrees with itself; this one decides whether a
+ * name appears on a line. A monitor that failed its whole run listing because
+ * a DISPLAY value was malformed would be a worse monitor than one that shows
+ * a blank there, and `runs.ts` has no region to degrade into for this.
+ */
+export async function readRunWorkerModels(run: RunPaths): Promise<Record<string, string>> {
+  let doc: { worker_models?: Record<string, unknown> | null } | null;
+  try {
+    doc = await readValidated(run.runJson, (v) =>
+      z
+        .object({ worker_models: z.record(z.string(), z.unknown()).nullish() })
+        .loose()
+        .parse(v),
+    );
+  } catch {
+    return {};
+  }
+  const recorded = doc?.worker_models;
+  if (recorded === undefined || recorded === null) return {};
+  const out: Record<string, string> = {};
+  for (const [id, model] of Object.entries(recorded)) {
+    if (typeof model === "string" && model !== "") out[id] = model;
+  }
+  return out;
+}
+
+/**
  * What the run was launched to SPEND, as `up` recorded it (ISC-109/114/115).
  *
  * Fourth reader of `run.json` in this file and the same shape as the three

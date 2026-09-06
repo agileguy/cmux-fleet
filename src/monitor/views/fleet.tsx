@@ -531,9 +531,30 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
       {run.workers.map((w) => (
         <WorkerLine key={w.workerId} row={w} plan={plan} />
       ))}
-      <Text wrap="truncate-end" color={p.heading}>
-        {`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}
-      </Text>
+      <Box>
+        <Text wrap="truncate-end" color={p.heading}>
+          {`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}
+        </Text>
+        {/*
+         * THE MODEL, on the run line, in dark blue (owner's request).
+         *
+         * Rendered only when the run recorded one. A run created before `up`
+         * wrote `worker_models` prints nothing here — the alternative would be
+         * a placeholder that an operator has to learn does not mean a model
+         * named "unknown", and a monitor should not teach vocabulary.
+         *
+         * Its own `Text` rather than interpolation, because the colour is the
+         * request: one string cannot be two colours. It follows the worker
+         * count so the run id keeps its position for anyone reading down the
+         * column, and truncates last because it is the least urgent value on
+         * the line.
+         */}
+        {run.models.length > 0 ? (
+          <Text wrap="truncate-end" color={p.model}>
+            {`  ${run.models.join(" ")}`}
+          </Text>
+        ) : null}
+      </Box>
     </Box>
   );
 }

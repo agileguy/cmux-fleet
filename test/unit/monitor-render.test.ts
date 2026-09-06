@@ -46,6 +46,7 @@ import { describe, expect, test } from "bun:test";
 import { failed, never, ok } from "../../src/monitor/model.ts";
 import type { FleetModel, RunRow, WorkerRow } from "../../src/monitor/model.ts";
 import { renderFleet } from "../../src/monitor/render.ts";
+import { COLOUR, PLAIN } from "../../src/monitor/views/chrome.tsx";
 import { FLOOR_COLUMNS, planColumns } from "../../src/monitor/views/fleet.tsx";
 import { workerContainerName } from "../../src/run/paths.ts";
 
@@ -154,8 +155,8 @@ const revGone = worker({
 });
 
 const RUNS: readonly RunRow[] = [
-  { runId: RUN_A, workers: [engRpc, engSilent, engQuiet, engActive] },
-  { runId: RUN_B, workers: [engNeverGrew, revGone] },
+  { runId: RUN_A, models: [], workers: [engRpc, engSilent, engQuiet, engActive] },
+  { runId: RUN_B, models: [], workers: [engNeverGrew, revGone] },
 ];
 
 /** A whole fleet, every region healthy. Departures spread over this the same way. */
@@ -303,7 +304,7 @@ describe("ISC-483: the first frame answers both questions for every live worker"
  */
 describe("ISC-480: the five activity states survive to the frame", () => {
   const one = (row: WorkerRow): string =>
-    rowFor(renderFleet({ ...healthy, runs: ok([{ runId: row.runId, workers: [row] }], NOW - 1_000) }), row.workerId);
+    rowFor(renderFleet({ ...healthy, runs: ok([{ runId: row.runId, models: [], workers: [row] }], NOW - 1_000) }), row.workerId);
 
   const fixtures: ReadonlyArray<readonly [string, WorkerRow]> = [
     ["rpc", engRpc],
@@ -562,7 +563,7 @@ describe("the task column", () => {
     return {
       ...healthy,
       runs: ok(
-        [{ runId: runA!.runId, workers: [{ ...first!, taskId }, ...others] }, ...rest],
+        [{ runId: runA!.runId, models: [], workers: [{ ...first!, taskId }, ...others] }, ...rest],
         NOW - 2_000,
       ),
     };
@@ -901,5 +902,81 @@ describe("ISC-485: below the floor it refuses, and the refusal is actionable", (
     const joined = renderFleet({ ...healthy, columns: 12 }).join(" ").replace(/\s+/g, " ");
     expect(joined).toContain("needs at least 32 columns");
     expect(joined).toContain("has 12");
+  });
+});
+
+
+/* ---------------------------------------------------------------------------
+ * THE MODEL ON THE RUN LINE (owner's request, 2026-09-05)
+ * ------------------------------------------------------------------------- */
+
+describe("the run line names what its workers are running", () => {
+  const withModels = (models: readonly string[]): FleetModel => ({
+    ...healthy,
+    columns: 120,
+    runs: ok([{ runId: RUN_A, models, workers: [engRpc] }], NOW - 1_000),
+  });
+  const runLine = (models: readonly string[], colour = false): string => {
+    const line = renderFleet(withModels(models), { colour }).find((l) => l.includes(`run ${RUN_A}`));
+    expect(line).toBeDefined();
+    return line as string;
+  };
+
+  test("a recorded model is printed on the run line, after the worker count", () => {
+    const line = runLine(["ollama-cloud/qwen3.5:397b"]);
+    expect(line).toContain("1 worker");
+    expect(line).toContain("ollama-cloud/qwen3.5:397b");
+    // AFTER the count. The run id keeps its position for anyone reading down
+    // the column, which is the whole reason the id sits on this line at all.
+    expect(line.indexOf("ollama-cloud")).toBeGreaterThan(line.indexOf("1 worker"));
+  });
+
+  /*
+   * ANTI-DEGENERATE, and the state every run on this operator's disk was in
+   * when the field landed: `up` did not record `worker_models` before
+   * 2026-09-05, so a run created earlier has none. Nothing is printed — NOT a
+   * placeholder, which an operator would have to learn does not name a model
+   * called "unknown".
+   */
+  test("a run that recorded no model prints nothing rather than a placeholder", () => {
+    const line = runLine([]);
+    expect(line.trimEnd().endsWith("1 worker")).toBe(true);
+    expect(line).not.toContain("unknown");
+    expect(line).not.toContain("undefined");
+    expect(line).not.toContain("null");
+  });
+
+  test("a run whose workers differ names each model", () => {
+    const line = runLine(["ollama-cloud/deepseek-v4-pro:0813", "ollama-cloud/glm-5.3"]);
+    expect(line).toContain("deepseek-v4-pro:0813");
+    expect(line).toContain("glm-5.3");
+  });
+
+  /*
+   * The colour IS the request — dark blue.
+   *
+   * Asserted on the PALETTE and not on an SGR escape, because the escape is
+   * not observable from here and that is by design: `render.ts:176-183` says
+   * colour has TWO independent gates, and the second is chalk's own level,
+   * computed from the real `process.stdout` when chalk is imported. A test
+   * process is not a terminal, so that gate is shut and `colour: true`
+   * produces a frame byte-identical to the plain one. A capture stream
+   * claiming to be a TTY was already tried in this design and does nothing.
+   *
+   * So the checkable claim is which colour the palette names. `blue` is SGR 34
+   * and `blueBright` is 94; the owner asked for dark, and this is the line
+   * that would have to change for it to become bright.
+   */
+  test("the palette names dark blue for the model, and it is its own entry", () => {
+    expect(COLOUR.model).toBe("blue");
+    expect(COLOUR.model).not.toBe("blueBright");
+    // Its own entry, not a reuse: a later decision about what `dim` or the
+    // workspace heading means must not silently repaint this.
+    expect(COLOUR.model).not.toBe(COLOUR.dim);
+    expect(COLOUR.model).not.toBe(COLOUR.workspace);
+    expect(COLOUR.model).not.toBe(COLOUR.heading);
+    // And the plain frame carries no escape at all, which is the property
+    // every byte-pinned assertion in this file rests on.
+    expect(PLAIN.model).toBeUndefined();
   });
 });

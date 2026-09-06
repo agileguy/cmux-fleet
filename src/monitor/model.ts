@@ -248,6 +248,21 @@ export interface WorkerRow {
 export interface RunRow {
   readonly runId: string;
   readonly workers: readonly WorkerRow[];
+  /**
+   * What this run's workers are ACTUALLY running, as `provider/model`, in
+   * worker order and de-duplicated — `[]` when nothing recorded one.
+   *
+   * Read from the run's own `run.json`, never re-resolved from `fleet.yaml`.
+   * The distinction is the whole point: `fleet.yaml` answers "what would this
+   * worker run if launched today", and an operator who edits a role's `model:`
+   * mid-run must not see the new value printed beside a container still
+   * running the old one. `up.ts` records it for the same reason it records
+   * `repo` and `branch_prefix`.
+   *
+   * `[]` for a run created before the key existed, which the view renders as
+   * nothing at all rather than as a guess.
+   */
+  readonly models: readonly string[];
 }
 
 /**

@@ -156,7 +156,7 @@ const DETAIL: WorkerDetail = {
 };
 
 const model = (over: Partial<FleetModel> = {}): FleetModel => ({
-  runs: ok([{ runId: RUN, workers: [row()] }], NOW - 1_000),
+  runs: ok([{ runId: RUN, models: [], workers: [row()] }], NOW - 1_000),
   containers: ok(["c1"], NOW - 1_000),
   now: NOW,
   columns: 140,
@@ -275,7 +275,7 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
     const rendered = states.map((activity) => {
       const frame = renderFleet(
         model({
-          runs: ok([{ runId: RUN, workers: [row({ activity })] }], NOW - 1_000),
+          runs: ok([{ runId: RUN, models: [], workers: [row({ activity })] }], NOW - 1_000),
         }),
       ).join("\n");
       // The phase is `idle` in every one of them — which is the whole point:
@@ -292,7 +292,7 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
     // The age is the fifth discriminator, and it is continuous rather than
     // enumerated — which is why it cannot be counted as a sixth state.
     const young = renderFleet(
-      model({ runs: ok([{ runId: RUN, workers: [row({ activity: "active", transcriptAgeMs: 4_000 })] }], NOW - 1_000) }),
+      model({ runs: ok([{ runId: RUN, models: [], workers: [row({ activity: "active", transcriptAgeMs: 4_000 })] }], NOW - 1_000) }),
     ).join("\n");
     expect(young).not.toBe(rendered[3]);
     expect(young).toContain("wrote 4s ago");
