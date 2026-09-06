@@ -102,9 +102,17 @@ export interface ConsoleRunPins {
  * `alive` is `status`'s own (pid, start-time) identity check, and requiring it
  * here is not belt-and-braces: `pifleet down` removes containers and LEAVES
  * DIRECTORIES, so every run the operator has ever started still lists every
- * worker it ever materialised. A pin computed from mere presence would point a
- * relay at a corpse and there would be nothing to notice it, because a pin
- * REPLACES the scan that would otherwise have found the live one.
+ * worker it ever materialised. A pin computed from mere presence would name a
+ * dead run.
+ *
+ * **The consequence of that changed when pins began to decay, and the rule did
+ * not.** It is no longer that nothing would notice — `relay.ts:2999-3005`
+ * probes each named run and abandons the pinned branch when one fails, so a
+ * corpse resolves to the scan's answer rather than to the corpse. It is that the
+ * pin then buys NOTHING: a named-but-dead run decays on every pass, so the
+ * console pays the full host-wide scan every tick while carrying a variable that
+ * says it does not have to. Requiring `alive` is what makes the pin do the job
+ * it was set for, rather than what stops it doing harm.
  *
  * ## Ambiguity is reported, never resolved
  *
@@ -163,12 +171,30 @@ export function consoleRunPins(
  *
  * ## ALL OR NOTHING, and the partial map is the trap
  *
- * `consoleRunResolution` takes the pinned branch WHOLE: if the variable is set
- * at all, the host-wide scan never runs, and a worker the pin does not name is
- * simply absent from the map for the life of the process. So a pin emitted while
- * the console is still coming up — three `pifleet up`s still starting, one run
- * visible — would freeze that incomplete answer permanently, and the relay would
- * refuse every fan-out with `run_unresolved` forever while looking configured.
+ * **The pin now DECAYS, and this function is the reason that is not enough.**
+ * `relay.ts:2968-3005` no longer short-circuits the scan on the mere presence of
+ * the variable: every worker the pin NAMES is liveness-probed on every pass, and
+ * one dead pinned run abandons the whole pinned branch so the host-wide scan
+ * answers instead. An earlier version of this docblock said a set variable means
+ * "the host-wide scan never runs", and that sentence is now wrong.
+ *
+ * **What decay does not reach is the shape this function exists to prevent.**
+ * The decay test keys on the workers the pin names — `relay.ts:2997` skips a
+ * worker the pin omits with a bare `continue`, BEFORE the liveness probe — so an
+ * omitted worker contributes nothing to the decay set. A pin naming three of
+ * four workers, all three live, therefore still takes the early return with the
+ * fourth absent, and the scan still never runs. Measured, not reasoned:
+ * `collator-relay-adapter.test.ts`'s "an explicit pin bypasses the scan entirely"
+ * pins two of three seats and asserts the run listing was never called.
+ *
+ * So a pin emitted while the console is still coming up — three `pifleet up`s
+ * still starting, one run visible — freezes that gap, and the relay refuses every
+ * fan-out for the missing worker with `run_unresolved` while looking configured.
+ * The gap closes only when some OTHER, named worker's run stops being live, at
+ * which point the scan runs and answers for everybody including the worker the
+ * pin never mentioned. **Repair by unrelated bereavement is not a convergence
+ * story**, and it is the whole reason the completeness test below survived the
+ * change that made pins decay.
  *
  * The scan is the weaker answer and it has one property the pin does not: it is
  * re-taken on every tick, so it converges as the console comes up. Emitting
