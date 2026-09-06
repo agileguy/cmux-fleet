@@ -657,8 +657,17 @@ const MUTATIONS: M[] = [
     id: "RV15",
     what: "GRANT: bash is granted to the reviewer in the TRACKED config",
     file: EXAMPLE,
-    find: "    tools: [read, write, grep, find, ls]",
-    replace: "    tools: [read, write, grep, find, ls, bash]",
+    /*
+     * ANCHORED THROUGH `./roles/reviewer.md` RATHER THAN ON THE `tools:` LINE
+     * ALONE, which is RV17's spelling arriving in the tracked file for the same
+     * reason it was needed in the live one. The triage console's `triage` role
+     * carries a byte-identical grant by deliberate copy, so the bare line now
+     * matches twice and a two-match anchor mutates whichever the replacer
+     * reaches first. `mutation-anchors.test.ts` caught it the day the role
+     * landed; this is the re-anchor it asked for.
+     */
+    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    replace: "    tools: [read, write, grep, find, ls, bash]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
   // ── The file/summary split, added 2026-09-05 with the contract it measures. ─
@@ -1051,8 +1060,10 @@ const MUTATIONS: M[] = [
     id: "RV16",
     what: "GRANT: `write` is removed from the TRACKED config — the role cannot report",
     file: EXAMPLE,
-    find: "    tools: [read, write, grep, find, ls]",
-    replace: "    tools: [read, grep, find, ls]",
+    // Re-anchored with RV15, and for that entry's reason: `triage` copies this
+    // grant byte for byte, so the bare `tools:` line is no longer unique here.
+    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    replace: "    tools: [read, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
   {
