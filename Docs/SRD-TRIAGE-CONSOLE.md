@@ -1763,16 +1763,44 @@ hands the projection to `checkTriagePartition` — which needs no change and get
 in Phase 6. §6.5's premise survives intact: the partition is still the model's judgement, and the
 host still checks it.
 
-### 7.4 `observer-ops.json` — existing, plus two required fields
+### 7.4 `observer-ops.json` — existing, plus three required fields
 
 The artifact pair is `skills/observer-ops/SKILL.md:26-33`'s and the rule that a run writing only the
-`.md` clamps to `failed` is inherited. This console requires two additions:
+`.md` clamps to `failed` is inherited. This console requires three additions:
 
 - **`sweep_id`** — echoed from the envelope. §6.6 layer 3. An artifact whose value is not the
   dispatched one is `stale_replay` and the row is not counted.
+- **`window_opened_at`** — an ISO-8601 UTC instant, the moment the observer's queries start looking
+  back from. §6.6 layer 3's *other* half. **RESOLVED 2026-09-06 by the operator: grow the field
+  rather than strike the clause.** See below.
 - **a row per service**, each carrying `assessment`, `coverage[]`, the selector, the window, and the
   evidence ledger. SRD-OBSERVER-001 §12 D12 already forbids one verdict over a batch; §6.7's
   structural gate is what reads these.
+
+**Why `window_opened_at` is a THIRD field rather than a duplicate of the second.** The two echoes
+catch different lies and neither implies the other. `sweep_id` proves the observer ran *this* sweep;
+`window_opened_at` proves it looked at *the right stretch of time*. An observer can echo the correct
+sweep id, name a window in every row, and have queried six hours against a five-minute configuration
+— **reporting stale data as fresh, which is the exact failure layer 3 exists to prevent.** The
+row-level `window` field does not cover it either: §6.7's gate tests that a window was NAMED, not that
+it was opened when it should have been.
+
+**The bound needs no new knob**, which is what makes this affordable. The host dispatched the sweep at
+a known instant and §7.8 already holds the two values that fix the legal range:
+
+| condition | verdict |
+|---|---|
+| absent | refused |
+| earlier than `dispatched_at − default_window − reserve_s` | refused — the observer looked further back than configured |
+| later than `dispatched_at` | refused — a window that opens in the future is not a window |
+| otherwise | accepted |
+
+**It is an ARTIFACT-level check, so it discards the artifact rather than gapping a row**, exactly as
+`stale_replay` does and for the same reason: a wrong window applies to every row the document
+carries. It spends its own reason, `stale_window`, because the operator response differs — a stale
+sweep id is a worker replaying an old answer, and a wrong window is a worker answering the wrong
+question. Shaped as a `windowEcho` beside `sweepIdEcho`, three states for the refusal's two, so a log
+can say which of `absent` and `out_of_range` occurred.
 
 ### 7.5 `triage.json` — new
 
@@ -2727,10 +2755,17 @@ and SRD-FLEET-PM-001 D7's.
   Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`, `ISA.md`.
   *Acceptance: an all-`not_attempted` fixture and an empty-`coverage[]` fixture reach the same
   assessment and the same gap by name; a mixed fixture with one `answered` entry does not.*
-- **5.3c** Settle §6.6 layer 3's `window_opened_at` echo — either §7.4 grows the field with a refusal
-  spelled beside `stale_replay`, or layer 3's clause is struck. **Decide first, then implement**; the
-  §7.3 gap is what a specified-and-unenforced sentence costs when it is left standing.
-  Touches: `Docs/SRD-TRIAGE-CONSOLE.md`, then whichever module the decision names.
+- **5.3c** Implement §7.4's `window_opened_at` echo, **decided 2026-09-06: the field grows.** A
+  `windowEcho(dispatchedAt, openedAt, policy)` beside `sweepIdEcho`, three states (`fresh`,
+  `absent`, `out_of_range`) spent as one reason `stale_window`; `SweepCoverage` carries the dispatch
+  instant and the environment's `default_window`. Artifact-level, so a bad window discards every row
+  the document carries. Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`,
+  `ISA.md`.
+  *Acceptance: fixtures at each boundary asserted BY VALUE — exactly on `dispatched_at −
+  default_window − reserve_s` (accepted), one second earlier (refused), exactly on `dispatched_at`
+  (accepted), one second later (refused), and absent (refused). A correct `sweep_id` with a bad
+  window still discards, and a bad `sweep_id` with a good window still discards, so neither check can
+  be satisfied by the other.*
 - **5.5a** A Zod schema for `triage.json` (§7.5), refused on any violation, matching §7.6's
   validated-on-read posture. Touches: `src/run/triage-document.ts` (new),
   `test/unit/triage-document.test.ts` (new), `ISA.md`.
