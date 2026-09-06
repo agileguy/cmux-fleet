@@ -65,7 +65,7 @@
  *  - **`pifleet triage` and `--status`.** §13 Phase 6 and Phase 7. Not built.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -105,7 +105,16 @@ const EXEC_TMP = hostHas("exec-tmpdir");
 
 /** Every `sleep` this file spawned as a stand-in actor, killed at the end. */
 const sleepers: Bun.Subprocess[] = [];
-afterAll(() => {
+/**
+ * Every rig's state directory, removed at the end.
+ *
+ * Each test gets its own, and without this the file leaves nine directories in
+ * `$TMPDIR` per run — which is not a leak anybody notices until a mutation
+ * battery has run the file forty times and left a hundred and thirty-seven of
+ * them. Measured, then fixed.
+ */
+const rigDirs: string[] = [];
+afterAll(async () => {
   for (const s of sleepers) {
     try {
       s.kill("SIGKILL");
@@ -113,6 +122,7 @@ afterAll(() => {
       // Already gone — which is what a test that asserted a stop wanted.
     }
   }
+  for (const dir of rigDirs) await rm(dir, { recursive: true, force: true });
 });
 
 interface Rig {
@@ -132,6 +142,7 @@ interface Rig {
  */
 async function makeRig(label: string): Promise<Rig> {
   const stateDir = await mkdtemp(join(tmpdir(), `pf-triage-${label}-`));
+  rigDirs.push(stateDir);
   const runsRoot = join(stateDir, "runs");
   await mkdir(runsRoot, { recursive: true });
 
