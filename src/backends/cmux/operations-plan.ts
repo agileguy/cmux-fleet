@@ -608,14 +608,16 @@ export const DEVELOPMENT_WORKSPACE = "development";
  * +---------------+---------------+
  * |     eng-1     |     eng-2     |
  * +---------------+---------------+
- * |     tst-1     |     rev-1     |
+ * |     tst-1     |     tst-2     |
  * +---------------+---------------+
  * ```
  *
  * Two engineers on top because that is the pair a person actually alternates
  * between — two changes in flight, each with its own container and its own
- * branch. The tester and the reviewer sit under them because their work is
- * downstream of it and is read in bursts rather than watched.
+ * branch. The two testers sit under them because their work is downstream of
+ * it and is read in bursts rather than watched. The second of them was a
+ * `reviewer` seat until 2026-09-05; review is the `review` console's job now,
+ * and `fleet.example.yaml`'s comment on that seat records what the swap costs.
  *
  * ALL FOUR ARE ATTENDED, which is the whole difference from `operations`: this
  * console is four keyboards, so it is four runs. `status --all` is what reports
@@ -633,7 +635,7 @@ export const DEFAULT_DEVELOPMENT_WORKERS: readonly string[] = [
   "eng-1",
   "eng-2",
   "tst-1",
-  "rev-1",
+  "tst-2",
 ];
 
 /**

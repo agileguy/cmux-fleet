@@ -34,9 +34,10 @@ import {
   OPERATIONS_SPEC,
   cmuxReachable,
   ensureOperations,
+  plannedPane,
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
-import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
+import { recreateThenDispatch, resolveThenRestart } from "../src/run/fresh-dispatch.ts";
 import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/operations [options]
@@ -237,6 +238,18 @@ async function main(argv: string[]): Promise<number> {
   const restartFlag = flag(argv, "--restart");
   if (restartFlag !== undefined) {
     /*
+     * REFUSE BEFORE DESTROYING — the pure resolution, handed to whichever
+     * module owns the ordering of the path taken below.
+     *
+     * Everything either path does is irreversible, and the title used not to be
+     * resolved until the respawn at the very end, so an unplannable one stopped
+     * a live worker and THEN refused. `plannedPane` is pure, so calling it
+     * first costs nothing when it succeeds and costs nothing when it does not.
+     * The gap is not hypothetical: see `resolveThenRestart` for the measurement.
+     */
+    const plan = (): unknown => plannedPane(OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+
+    /*
      * `--task` makes this recreate-then-dispatch. See the same branch in
      * `scripts/development` and `src/run/fresh-dispatch.ts`: a tui worker
      * keeps its session across epochs, so a dispatch can be answered from the
@@ -245,9 +258,12 @@ async function main(argv: string[]): Promise<number> {
      */
     const taskFlag = flag(argv, "--task");
     if (taskFlag !== undefined) {
+      plan();
       const fresh = await recreateThenDispatch(
         {
           status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          // No fifth process on this console — see `FreshDispatchDeps.quiesce`.
+          quiesce: null,
           down: async (runId) => {
             process.stderr.write(`operations: stopping run ${runId}\n`);
             await runOutput(repoRoot, ["down", "--run", runId]);
@@ -275,15 +291,37 @@ async function main(argv: string[]): Promise<number> {
       return EXIT.SUCCESS;
     }
 
-    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
-    for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
-      process.stderr.write(`operations: stopping run ${runId} before restarting ${restartFlag}\n`);
-      await runOutput(repoRoot, ["down", "--run", runId]);
-    }
-    const r = await restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+    /*
+     * The bare restart — resolve, stop, respawn — and the ORDER of those three
+     * is `resolveThenRestart`'s, not this script's.
+     *
+     * It used to be four statements right here, and the same four in
+     * `scripts/development` and `scripts/review`. Three copies of one ordering
+     * are three places to get it wrong, and this copy did: it resolved the
+     * title last, so `--restart obs-1` stopped a live run and then refused.
+     * What is left here is what only a script can supply — a subprocess runner,
+     * a stderr line and a cmux client.
+     */
+    const r = await resolveThenRestart(
+      {
+        plan,
+        status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+        // No fifth process on this console — see `ConsoleRestartDeps.quiesce`.
+        quiesce: null,
+        down: async (runId) => {
+          process.stderr.write(
+            `operations: stopping run ${runId} before restarting ${restartFlag}\n`,
+          );
+          await runOutput(repoRoot, ["down", "--run", runId]);
+        },
+        restartPane: () =>
+          restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag),
+      },
+      { worker: restartFlag },
+    );
     process.stdout.write(
-      `operations: respawned the ${restartFlag} pane (surface ${r.surfaceId}) ` +
-        `in workspace ${r.workspaceId}; the other panes were not touched\n`,
+      `operations: respawned the ${restartFlag} pane (surface ${r.pane.surfaceId}) ` +
+        `in workspace ${r.pane.workspaceId}; the other panes were not touched\n`,
     );
     return EXIT.SUCCESS;
   }

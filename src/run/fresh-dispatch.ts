@@ -1,7 +1,32 @@
 /**
- * Recreate a worker, THEN give it the task.
+ * The two orderings a console's `--restart` is made of, and the injected side
+ * effects that make both of them testable.
  *
- * ## Why a dispatch would want a new worker at all
+ * {@link recreateThenDispatch} is `--restart <worker> --task <file>`: wait,
+ * quiesce the relay, stop, respawn, dispatch. {@link resolveThenRestart} is the
+ * bare `--restart <worker>`: resolve the pane, quiesce the relay, stop, respawn.
+ * They are siblings on purpose — overlapping side effects, the same convention
+ * for injecting them, the same suite re-checking the order — because the SECOND
+ * of them was once written inline in three scripts and got the order right in
+ * none of them for the same reason twice.
+ *
+ * The relay stop is the newest of those side effects and it arrived by the same
+ * route. It was the SCRIPT's to sequence on the `--task` path, one line above
+ * the call, and being outside the module put it above a wait that refuses —
+ * which is the one place it must never be. It is a dep on both functions now,
+ * declared with the same required-and-nullable type, so the two have one shape
+ * and a console states whether it has a fifth process rather than implying it.
+ *
+ * A note on a claim this module falsifies, because it was written down and
+ * believed: `ISA.md` said the stop-then-respawn ordering *"could not be moved
+ * into a module because the stop is the script's to do"*. It is the script's to
+ * DO and it was never the script's to ORDER, and `recreateThenDispatch` had
+ * already been demonstrating the difference for the `--task` half of the very
+ * same branch. Two independent reviewers said so; the bare half now gets the
+ * same treatment, and what stays in the scripts is `Bun.spawn`, `process.stderr`
+ * and a cmux client.
+ *
+ * ## Why a dispatch would want a new worker at all — RECREATE FIRST, DISPATCH SECOND
  *
  * A `pane_mode: tui` worker keeps its session across epochs. Measured
  * 2026-09-04: `T-unit-tests-3` was staged to `tst-1`, the worker was
@@ -35,11 +60,12 @@
  *
  * ## Why the dependencies are injected
  *
- * Everything below is orchestration over four side effects — read status, stop
- * a run, respawn a pane, dispatch. Injecting them keeps the ORDER and the
- * REFUSALS testable with no cmux, no containers and no clock, which is the only
- * way the "never while busy" rule gets re-checked on every run rather than
- * being a sentence in a docblock.
+ * Everything below is orchestration over a handful of side effects — resolve a
+ * pane, read status, stop a run, respawn a pane, quiesce a relay, dispatch.
+ * Injecting them keeps the ORDER and the REFUSALS testable with no cmux, no
+ * containers, no relay and no clock, which is the only way the "never while
+ * busy" and "refuse before destroying" rules get re-checked on every run rather
+ * than being sentences in a docblock.
  */
 
 import { runsHoldingAny } from "./status-runs.ts";
@@ -142,6 +168,24 @@ export function busyRefusal(worker: string, busy: readonly WorkerActivity[]): st
 export interface FreshDispatchDeps {
   /** stdout of `pifleet status --all --json`. */
   readonly status: () => Promise<string>;
+  /**
+   * Stop the console's relay, or `null` for a console that has none.
+   *
+   * REQUIRED AND NULLABLE rather than optional, for the reason
+   * {@link ConsoleRestartDeps.quiesce} gives and this function has its own
+   * measurement of: an omitted optional field and a console that genuinely has
+   * no relay look identical at the call site, and `null` and a missing property
+   * do not. `operations` and `development` have no fifth process; `review` does.
+   *
+   * It is a DEP rather than something the caller does first because of WHEN it
+   * has to happen. `scripts/review` used to stop its relay on the line above the
+   * call, which put the one unrecoverable step of this path ABOVE a wait that
+   * runs for up to twenty minutes and then refuses with the words *"Nothing has
+   * been stopped"* — words that were false on that console. Handed here, the
+   * stop lands after the settle and before the teardown, and the refusal keeps
+   * its promise for every caller rather than for two of the three.
+   */
+  readonly quiesce: (() => Promise<void>) | null;
   /** `pifleet down --run <id>`. */
   readonly down: (runId: string) => Promise<void>;
   /** Respawn the worker's console pane, which re-runs its `up`. */
@@ -179,7 +223,11 @@ const DEFAULT_POLL_MS = 3_000;
 /**
  * Wait for `worker` to be holding nothing, then recreate it, then dispatch.
  *
- * Throws — having stopped nothing — if the worker does not settle in time.
+ * Throws — having stopped nothing, THE RELAY INCLUDED — if the worker does not
+ * settle in time. That second clause is the whole of ISC-572: the promise the
+ * refusal makes is about the fleet, and a caller that had already taken its
+ * fifth process down before calling made it a lie on the one console where the
+ * fifth process is what turns a dispatch request into reviews.
  */
 export async function recreateThenDispatch(
   deps: FreshDispatchDeps,
@@ -206,11 +254,24 @@ export async function recreateThenDispatch(
   }
   const settleWaitMs = deps.now() - started;
 
-  // PHASE 2 — the runs to replace, named from the SETTLED status read.
+  /*
+   * PHASE 2 — THE RELAY GOES DOWN, AND NOT ONE LINE EARLIER.
+   *
+   * Below the wait because the wait can REFUSE, and above the teardown because
+   * the relay's whole configuration is run ids — `--run <id>` for the collator
+   * and a `PIFLEET_RELAY_RUNS` pin for the other three, both fixed for the life
+   * of the process. Stopping the runs first leaves it polling a dead run in
+   * silence; stopping it before the wait spends it on a recreate that may never
+   * happen. Those are the same two constraints {@link resolveThenRestart} works
+   * under, and this is the same place in the sequence it puts them.
+   */
+  if (deps.quiesce !== null) await deps.quiesce();
+
+  // PHASE 3 — the runs to replace, named from the SETTLED status read.
   const previous = runsHoldingAny(statusJson, new Set([opts.worker]));
   for (const runId of previous) await deps.down(runId);
 
-  // PHASE 3 — respawn, then wait for a run that is not one of the old ones.
+  // PHASE 4 — respawn, then wait for a run that is not one of the old ones.
   await deps.restartPane();
   const readyBy = deps.now() + readyTimeout;
   let fresh: WorkerActivity | undefined;
@@ -242,7 +303,7 @@ export async function recreateThenDispatch(
   }
 
   /*
-   * PHASE 4 — dispatch, AND CHECK THAT IT LANDED.
+   * PHASE 5 — dispatch, AND CHECK THAT IT LANDED.
    *
    * **MEASURED, and the reason this is not just `await deps.dispatch(...)`.**
    * `scripts/review` wires this dep to a helper whose own docblock says it runs
@@ -315,4 +376,134 @@ function dispatchProblem(stdout: string): string | null {
     return `it was refused — accepted is ${JSON.stringify(accepted)}: ${text.slice(0, 200)}`;
   }
   return null;
+}
+
+/**
+ * The side effects {@link resolveThenRestart} needs, so its ORDER is testable.
+ *
+ * `T` is whatever the respawn hands back — a surface id, a whole
+ * `RestartResult`, anything a script wants to print. This module has no opinion
+ * about it and deliberately no way to form one: typing it concretely would mean
+ * importing `src/backends/cmux/`, and ISC-137 keeps every cmux import inside
+ * that directory. What the module has an opinion about is WHEN the respawn
+ * happens, which is the only thing it can get wrong.
+ */
+export interface ConsoleRestartDeps<T> {
+  /**
+   * Resolve the pane the console plans under this title — `plannedPane`, which
+   * is PURE and THROWS when the console plans no such pane.
+   *
+   * Synchronous on purpose. Everything else in this interface is I/O and this
+   * one is not, and the whole value of the phase below is that it can refuse
+   * having touched nothing. A dep typed `Promise` would invite a caller to put
+   * a cmux call here, and a cmux call is a thing that can fail for reasons that
+   * have nothing to do with whether the title is plannable.
+   */
+  readonly plan: () => unknown;
+  /** stdout of `pifleet status --all --json`. */
+  readonly status: () => Promise<string>;
+  /**
+   * Stop the console's relay, or `null` for a console that has none.
+   *
+   * REQUIRED AND NULLABLE rather than optional, so each console states which it
+   * is. `operations` and `development` have no fifth process; `review` does, and
+   * a `review` that forgot to pass this would respawn a pane under a relay whose
+   * run pins are fixed for the life of the process — see {@link resolveThenRestart}.
+   * An omitted optional field and a console that genuinely has no relay look
+   * identical at the call site; `null` and a missing property do not.
+   */
+  readonly quiesce: (() => Promise<void>) | null;
+  /** `pifleet down --run <id>`. */
+  readonly down: (runId: string) => Promise<void>;
+  /** Respawn the worker's console pane, which re-runs its `up`. */
+  readonly restartPane: () => Promise<T>;
+}
+
+export interface ConsoleRestartOptions {
+  /** The worker whose runs are stopped. Also the pane title, on the consoles where those agree. */
+  readonly worker: string;
+}
+
+export interface ConsoleRestartResult<T> {
+  /** The runs that were stopped, in the order status listed them. */
+  readonly stopped: readonly string[];
+  /** Whatever `restartPane` returned. */
+  readonly pane: T;
+}
+
+/**
+ * Resolve the pane, THEN stop the runs holding the worker, THEN respawn it.
+ *
+ * The bare `--restart <worker>` of all three console scripts, in one place,
+ * because all three had it inline and the ordering below is three separate
+ * measurements deep.
+ *
+ * ## PHASE 1 — RESOLVE BEFORE DESTROYING
+ *
+ * MEASURED 2026-09-06. `./scripts/operations --restart obs-1` printed, in this
+ * order:
+ *
+ *     operations: stopping run 2026-09-04T18-03-52Z-e2fc before restarting obs-1
+ *     operations: 'obs-1' is not a pane this console plans — it holds observer, monitor, ticketing
+ *
+ * Both operations workers were left DOWN with nothing respawned. The refusal was
+ * already correct and already tested; it arrived after the only irreversible
+ * step, because the teardown keys on WORKER ID (`runsHoldingAny`) and the
+ * respawn keys on PANE TITLE (the plan), and on that console those namespaces
+ * are disjoint — the panes are `observer` and `ticketing`, the workers `obs-1`
+ * and `tick-1`. The instance is narrow and the shape is not: any live worker id
+ * a console does not plan reaches it, `development` and `review` included.
+ *
+ * So `plan` runs FIRST and nothing in this function precedes it. A throw here
+ * leaves the fleet exactly as it was found.
+ *
+ * ## PHASE 2 — THE RELAY GOES DOWN BEFORE THE RUNS DO, AND NEVER ON A REFUSAL
+ *
+ * `scripts/review` runs a fifth process whose whole configuration is run ids:
+ * `--run <id>` for the collator and a `PIFLEET_RELAY_RUNS` pin for the other
+ * three, both fixed for the life of the process. Respawning ANY pane invalidates
+ * them, and a relay left pointing at a dead run polls forever in silence. It is
+ * therefore stopped before the teardown rather than merely before the respawn.
+ *
+ * And it is stopped AFTER `plan`, which is the half a refusal gets wrong. On the
+ * measured operations failure the console had no relay to lose; on `review` the
+ * same mistyped title would have taken the actor down as well, leaving three
+ * healthy reviewers, a collator, and nothing able to turn a dispatch request
+ * into reviews.
+ *
+ * ## PHASE 3 THEN 4 — STOP THE RUN, THEN RESPAWN THE PANE
+ *
+ * Never the other way round, and this is the older of the two lessons.
+ * Respawning first kills the pane's shell, and the supervisor that shell
+ * launched — which owns a detached container — is signalled by the dying shell
+ * rather than told to quiesce. The container outlives every record of it. See
+ * `restartConsolePane`, whose contract makes the same statement from the other
+ * side: *"the caller is responsible for stopping any run the worker still holds
+ * BEFORE calling this."* This function IS that caller now, so the contract has
+ * one reader rather than three.
+ *
+ * The teardown is scoped to runs actually holding `worker`, so restarting a
+ * watch pane — `fleet-status`, `git-watch`, the monitor — stops nothing and
+ * simply respawns it. An unreadable status stops nothing either, which is
+ * `runsHoldingAny`'s own documented direction and the right blast radius for a
+ * launcher: containers left running are untidy, and a console that refuses to
+ * come back is not.
+ */
+export async function resolveThenRestart<T>(
+  deps: ConsoleRestartDeps<T>,
+  opts: ConsoleRestartOptions,
+): Promise<ConsoleRestartResult<T>> {
+  // PHASE 1. Nothing above this line and nothing irreversible in it.
+  deps.plan();
+
+  // PHASE 2.
+  if (deps.quiesce !== null) await deps.quiesce();
+
+  // PHASE 3.
+  const stopped = runsHoldingAny(await deps.status(), new Set([opts.worker]));
+  for (const runId of stopped) await deps.down(runId);
+
+  // PHASE 4.
+  const pane = await deps.restartPane();
+  return { stopped, pane };
 }

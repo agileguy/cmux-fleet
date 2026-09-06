@@ -49,7 +49,7 @@ died · `4` timeout · `7` partial · `0` success.
 ## A run, end to end
 
 ```bash
-pifleet up --workers eng-1,rev-1 --backend headless   # build the run dir, start supervisors
+pifleet up --workers eng-1,tst-2 --backend headless   # build the run dir, start supervisors
 pifleet dispatch --worker eng-1 --task task.json      # send a typed envelope
 pifleet wait --all --timeout 20m --json               # block until every task settles
 pifleet artifacts --all --json                        # adjudicated results
@@ -80,7 +80,19 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-**There are zero `[ ]` criteria.** The block ISC-468..ISC-493 was filed 2026-09-02 as
+**There are zero `[ ]` criteria.** The last one, ISC-572, was filed 2026-09-06 while
+verifying a different fix and closed the same day: `scripts/review --restart <id> --task
+<file>` stopped the review relay BEFORE the settle wait whose whole value is refusing
+having torn nothing down, so on that one console the refusal's promise was false. The
+stop is a `quiesce` dep on `recreateThenDispatch` now, firing after the wait and before
+the teardown, and the source-order test that used to assert the WRONG order was replaced
+rather than routed around. The SRD-FLEET-PM-001 block's own last two, ISC-547 and ISC-555, closed on
+2026-09-06: both are Anti guards against a false green, and both are now decisions in
+`src/run/pm-guards.ts` that `pifleet pm-guard` makes reachable from the workflow's own
+shell lines. Its remaining eight moved to `[~]` on 2026-09-05 when the phase 6 dogfood
+run exercised them live, and **not one of them reached `[x]`**: every observation needed
+a terminal, a model and four containers, which is precisely what CI cannot re-check. The block
+ISC-468..ISC-493 was filed 2026-09-02 as
 the done-condition for a read-only fleet-monitor TUI (`Docs/SRD-FLEET-MONITOR.md` v0.2),
 **before any of it was built** — deliberately, so the criteria are the specification rather
 than a description of what was written. It is now closed: `pifleet monitor` reads the run
@@ -190,10 +202,12 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-There are zero `[ ]` criteria; every one has been attempted. Thirteen are graded `[~]`
+There are zero `[ ]` criteria; the last, ISC-572, closed on 2026-09-06.
+Twenty-four are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
-falls short of the standard — with one exception, added 2026-09-05 and worth stating plainly:
-**ISC-517 is `[~]` because it is FALSIFIED, not because its evidence is thin.** The review
+falls short of the standard — with one departure worth stating plainly, because it is the only
+criterion so far to have made the round trip:
+**ISC-562 moved backwards and then forwards again.** It was closed `[x]` on 2026-09-05, regraded `[~]` on 2026-09-06 when phase 7's review took its own "what is NOT graded" paragraph at its word — the ungraded half was justified with "the window cannot be deterministically entered from a test", which is a statement about a module-level import rather than about the window — and closed again the same day once the spawner was injected and a test drove a real second fetch into that window. The regrade was the useful half: it is what turned a paragraph explaining why the race could not be tested into a tripwire that said what would close it. **ISC-517 is `[~]` because it is FALSIFIED, not because its evidence is thin.** The review
 console lost a complete, valid lens report on two consecutive runs, and the criterion is filed
 open so the document carries the failure its own subject exists to prevent. It was root-caused
 the same day — a reviewer spelled its artifact path relatively, one bad pointer refuses the whole

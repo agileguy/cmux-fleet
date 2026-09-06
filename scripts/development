@@ -2,18 +2,18 @@
 /**
  * `scripts/development` — open the standing four-pane development console.
  *
- *   ./scripts/development                          # eng-1, eng-2, tst-1, rev-1
+ *   ./scripts/development                          # eng-1, eng-2, tst-1, tst-2
  *   ./scripts/development --workers eng-1,eng-2
  *   ./scripts/development --dry-run                # print the plan, touch nothing
  *
- * Four EQUAL panes, two engineers across the top and a tester and a reviewer
- * beneath them, each one running Pi's own interface for its worker:
+ * Four EQUAL panes, two engineers across the top and two testers beneath
+ * them, each one running Pi's own interface for its worker:
  *
  * ```
  * +---------------+---------------+
  * |     eng-1     |     eng-2     |
  * +---------------+---------------+
- * |     tst-1     |     rev-1     |
+ * |     tst-1     |     tst-2     |
  * +---------------+---------------+
  * ```
  *
@@ -54,9 +54,10 @@ import {
   DEVELOPMENT_SPEC,
   cmuxReachable,
   ensureDevelopment,
+  plannedPane,
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
-import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
+import { recreateThenDispatch, resolveThenRestart } from "../src/run/fresh-dispatch.ts";
 import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/development [options]
@@ -191,8 +192,9 @@ async function main(argv: string[]): Promise<number> {
    * The narrow sibling of `--recreate`. `--recreate` is the only tool the
    * console had for a worker that did not come back, and it costs the other
    * three: it stops every run this console holds and rebuilds four panes to
-   * fix one. Measured 2026-09-04 — a `--recreate` returned eng-1, eng-2 and
-   * tst-1 and left rev-1 with no run and no container, and the only sanctioned
+   * fix one. Measured 2026-09-04, when the fourth seat was still `rev-1` — a
+   * `--recreate` returned eng-1, eng-2 and tst-1 and left the fourth pane with
+   * no run and no container, and the only sanctioned
    * repair was a second `--recreate` that would have torn down the three that
    * had just come back.
    *
@@ -205,6 +207,19 @@ async function main(argv: string[]): Promise<number> {
    */
   const restartFlag = flag(argv, "--restart");
   if (restartFlag !== undefined) {
+    /*
+     * REFUSE BEFORE DESTROYING — the pure resolution, handed to whichever
+     * module owns the ordering of the path taken below.
+     *
+     * Everything either path does is irreversible, and the title used not to be
+     * resolved until the respawn at the very end, so an unplannable one stopped
+     * a live worker and THEN refused. `plannedPane` is pure, so calling it
+     * first costs nothing when it succeeds and costs nothing when it does not.
+     * This console reaches the same trap by being asked for another console's
+     * live worker: see `resolveThenRestart` for the measurement.
+     */
+    const plan = (): unknown => plannedPane(DEVELOPMENT_SPEC, { ...opts, tuiWorkers }, restartFlag);
+
     const taskFlag = flag(argv, "--task");
     const restartPane = async (): Promise<string> => {
       const r = await restartConsolePane(
@@ -233,9 +248,12 @@ async function main(argv: string[]): Promise<number> {
      * stopped until the worker is holding no task, staged ones included.
      */
     if (taskFlag !== undefined) {
+      plan();
       const r = await recreateThenDispatch(
         {
           status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          // No fifth process on this console — see `FreshDispatchDeps.quiesce`.
+          quiesce: null,
           down: async (runId) => {
             process.stderr.write(`development: stopping run ${runId}\n`);
             await runOutput(repoRoot, ["down", "--run", runId]);
@@ -269,14 +287,34 @@ async function main(argv: string[]): Promise<number> {
       return EXIT.SUCCESS;
     }
 
-    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
-    for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
-      process.stderr.write(`development: stopping run ${runId} before restarting ${restartFlag}\n`);
-      await runOutput(repoRoot, ["down", "--run", runId]);
-    }
-    const surfaceId = await restartPane();
+    /*
+     * The bare restart — resolve, stop, respawn — and the ORDER of those three
+     * is `resolveThenRestart`'s, not this script's. It was four statements
+     * here, and the same four in `scripts/operations` and `scripts/review`;
+     * three copies of one ordering are three places to get it wrong, and the
+     * `operations` copy did — it resolved the title last, so a `--restart` of a
+     * worker it does not plan stopped a live run and then refused. What is left
+     * here is what only a script can supply: a subprocess runner, a stderr line
+     * and a cmux client.
+     */
+    const r = await resolveThenRestart(
+      {
+        plan,
+        status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+        // No fifth process on this console — see `ConsoleRestartDeps.quiesce`.
+        quiesce: null,
+        down: async (runId) => {
+          process.stderr.write(
+            `development: stopping run ${runId} before restarting ${restartFlag}\n`,
+          );
+          await runOutput(repoRoot, ["down", "--run", runId]);
+        },
+        restartPane,
+      },
+      { worker: restartFlag },
+    );
     process.stdout.write(
-      `development: respawned the ${restartFlag} pane (surface ${surfaceId}); ` +
+      `development: respawned the ${restartFlag} pane (surface ${r.pane}); ` +
         `the other panes were not touched\n`,
     );
     return EXIT.SUCCESS;

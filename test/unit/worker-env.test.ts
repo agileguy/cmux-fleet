@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { parseConfig, resolveWorker, ConfigError } from "../../src/config/load.ts";
+import { DEFAULT_GIT_IDENTITY } from "../../src/config/schema.ts";
 import {
   LLM_API_KEY_FILE_VAR,
   SECRETS_MOUNT,
@@ -54,6 +55,66 @@ async function load(doc: Record<string, unknown>) {
   return parseConfig(stringify(doc), "/tmp/fleet.yaml");
 }
 
+/**
+ * A hermetic git environment for the identity probes below (ISC-528,
+ * ISC-529): the developer's OWN `~/.gitconfig` and hooks are held out
+ * exactly as `test/integration/git-config-forms.test.ts` holds them out, and
+ * for the identical reason its own comment gives — without this, a real
+ * `user.email` already set on the machine running the suite would make the
+ * commit succeed for a reason that has nothing to do with `buildWorkerEnv`,
+ * and the assertion below would pass on this laptop and mean nothing on CI.
+ */
+function hermeticGitEnv(vars: Record<string, string>): Record<string, string> {
+  return {
+    PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+    HOME: "/dev/null",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    ...vars,
+  };
+}
+
+/**
+ * The ISC-528 probe, verbatim from §12: commit into a REAL throwaway
+ * repository using the EXACT `GIT_CONFIG_*` vars `buildWorkerEnv` produced —
+ * not a re-statement of what those vars say — then read back
+ * `git log -1 --format='%an <%ae>'`. A plan whose strings merely look right
+ * and a plan git actually obeys are two different claims; only the second is
+ * what a worker's container experiences, since `docker/entrypoint.sh` hands
+ * this exact `--env-file` to git unmodified.
+ *
+ * Returns `{ ok: false, ... }` instead of throwing on a failed commit, so a
+ * caller proving the OLD, identity-less behavior (the mutation in this
+ * phase's report) can assert the refusal directly instead of catching.
+ */
+async function commitAndReadAuthor(
+  planVars: Record<string, string>,
+): Promise<{ ok: true; author: string } | { ok: false; stderr: string }> {
+  const dir = await mkdtemp(join(tmpdir(), "worker-env-identity-"));
+  const env = hermeticGitEnv(planVars);
+  await Bun.spawn(["git", "-C", dir, "init", "-q", "."], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env,
+  }).exited;
+  const commit = Bun.spawn(
+    ["git", "-C", dir, "commit", "--allow-empty", "-q", "-m", "fixture: identity probe"],
+    { stdout: "pipe", stderr: "pipe", env },
+  );
+  const stderr = await new Response(commit.stderr).text();
+  if ((await commit.exited) !== 0) {
+    return { ok: false, stderr };
+  }
+  const log = Bun.spawn(["git", "-C", dir, "log", "-1", "--format=%an <%ae>"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  const author = (await new Response(log.stdout).text()).trim();
+  await log.exited;
+  return { ok: true, author };
+}
+
 describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
   /**
    * The SECOND of ISC-298's two blockers, and the one the permission fix does
@@ -76,7 +137,12 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
     const loaded = await load(baseDoc());
     for (const id of ["w1", "wc"]) {
       const plan = buildWorkerEnv(loaded, resolveWorker(loaded, id), {});
-      expect(plan.vars["GIT_CONFIG_COUNT"]).toBe("1");
+      // 3, not 1: keys 1 and 2 are the identity pair (ISC-528, below). A
+      // count left at "1" while KEY_1/VALUE_1/KEY_2/VALUE_2 are also present
+      // would mean git reads only `safe.directory` and silently ignores the
+      // identity — the exact failure mode §6.8's implementation note warns
+      // against, so the count is asserted here, not just the keys.
+      expect(plan.vars["GIT_CONFIG_COUNT"]).toBe("3");
       expect(plan.vars["GIT_CONFIG_KEY_0"]).toBe("safe.directory");
       // The CONTAINER path, and specifically not `*`. The wildcard is the form
       // most answers to this error reach for, and it disables the check for
@@ -108,6 +174,35 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
   });
 
   /**
+   * `shared-ro` gets `safe.directory` (above) and NOT an identity — a
+   * deliberate narrower scope than the guard `safe.directory` uses (SRD
+   * §6.8, D13 arm 2). That mount carries the docker `:ro` flag, so no commit
+   * a `shared-ro` worker could attempt ever reaches git's identity check;
+   * handing it a commit identity would misstate what `shared-ro` means in
+   * this fleet ("reads, never commits"). Locked in here so a future change
+   * that widens the identity guard to match `safe.directory`'s has to edit a
+   * test to do it, not just a diff nobody reads.
+   */
+  test("a read-only code mount gets no identity — it can never commit", async () => {
+    const loaded = await load(
+      baseDoc({
+        roles: { eng: {}, cloudy: { cloud_access: true }, rev: { isolation: "shared-ro" } },
+        workers: [
+          { id: "w1", role: "eng" },
+          { id: "wc", role: "cloudy" },
+          { id: "wr", role: "rev" },
+        ],
+      }),
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wr"), {});
+    expect(plan.vars["GIT_CONFIG_COUNT"]).toBe("1");
+    expect(plan.vars["GIT_CONFIG_KEY_1"]).toBeUndefined();
+    expect(plan.vars["GIT_CONFIG_VALUE_1"]).toBeUndefined();
+    expect(plan.vars["GIT_CONFIG_KEY_2"]).toBeUndefined();
+    expect(plan.vars["GIT_CONFIG_VALUE_2"]).toBeUndefined();
+  });
+
+  /**
    * And `none` gets nothing. A setting emitted unconditionally is one nobody
    * notices has stopped tracking the mount it exists for — this is what keeps
    * the assertion above non-vacuous.
@@ -125,6 +220,137 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
     );
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wf"), {});
     expect(Object.keys(plan.vars).filter((k) => k.startsWith("GIT_CONFIG"))).toEqual([]);
+  });
+});
+
+describe("ISC-528: a worker's commit carries the exact configured identity", () => {
+  /**
+   * The measured failure (SRD §6.8) is not a refusal, it is an INVENTION: a
+   * worker with a writable clone and no configured identity self-configured
+   * one to get past git's check, and the probe caught it committing as
+   * `eng-1 <eng-1@pifleet.invalid>` — a value nothing in the fleet
+   * constrained or recorded. So this asserts the EXACT `%an <%ae>` a commit
+   * carries, not merely that a commit succeeds — a criterion of the second
+   * shape would have passed the invented identity too.
+   */
+  /**
+   * The refusal an operator can act on, raised by the review round's F2.
+   *
+   * `serializeEnvFile` has always refused a newline in an env value — docker's
+   * `--env-file` has no escaping, so a newline terminates the declaration —
+   * and that refusal is what keeps anything unsanitised out of a container.
+   * But it fires at `up` and names `GIT_CONFIG_VALUE_1`, the env key, not
+   * `run.git_identity.name`, the line the operator wrote. The schema now
+   * refuses first, so `config validate` is where a bad identity is caught and
+   * the message can name the field. Both refusals are asserted: the schema
+   * one here, and the env-file one in the block below, because the second is
+   * the one that must never be removed.
+   */
+  test("a newline in run.git_identity is refused by the schema, naming the field", async () => {
+    await expect(
+      load(
+        baseDoc({
+          run: {
+            repo: "./repo",
+            budget: { tokens_ceiling: 1_000_000 },
+            git_identity: { name: "fixture-fleet\nAlso-Trailer: x", email: "a@b.invalid" },
+          },
+        }),
+      ),
+    ).rejects.toThrow(/git identity may not contain a newline/);
+
+    // and a carriage return, which docker treats the same way
+    await expect(
+      load(
+        baseDoc({
+          run: {
+            repo: "./repo",
+            budget: { tokens_ceiling: 1_000_000 },
+            git_identity: { name: "ok", email: "a@b.invalid\rx" },
+          },
+        }),
+      ),
+    ).rejects.toThrow(/git identity may not contain a newline/);
+  });
+
+  test("git log -1 --format='%an <%ae>' equals the configured run.git_identity", async () => {
+    const loaded = await load(
+      baseDoc({
+        run: {
+          repo: "./repo",
+          budget: { tokens_ceiling: 1_000_000 },
+          git_identity: { name: "fixture-fleet", email: "fixture-fleet@pifleet.invalid" },
+        },
+      }),
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+
+    const result = await commitAndReadAuthor(plan.vars);
+    expect(result.ok, !result.ok ? result.stderr : "").toBe(true);
+    if (result.ok) {
+      // Both forms asserted: against the RESOLVED config (proves the wiring)
+      // and against the literal the fixture wrote above (proves the fixture
+      // itself did not drift into a tautology).
+      expect(result.author).toBe(
+        `${loaded.config.run.git_identity.name} <${loaded.config.run.git_identity.email}>`,
+      );
+      expect(result.author).toBe("fixture-fleet <fixture-fleet@pifleet.invalid>");
+    }
+  });
+
+  /** The schema default, exercised the same way — this is what a fleet run
+   * with no `run.git_identity:` override actually commits as. */
+  test("the schema DEFAULT identity is what an unconfigured run commits as", async () => {
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const result = await commitAndReadAuthor(plan.vars);
+    expect(result.ok, !result.ok ? result.stderr : "").toBe(true);
+    if (result.ok) {
+      expect(result.author).toBe(`${DEFAULT_GIT_IDENTITY.name} <${DEFAULT_GIT_IDENTITY.email}>`);
+    }
+  });
+});
+
+describe("ISC-529: no worker commits under the operator's own address", () => {
+  /**
+   * A stand-in for a real operator's own address — chosen independently of
+   * every fixture identity in this file, deliberately NOT sharing a
+   * placeholder with `run.git_identity` below (SRD §12's design note: two
+   * identities sharing a placeholder cannot fail this assertion no matter
+   * what the code does, which is precisely the degenerate fixture this
+   * constant exists to avoid).
+   */
+  const OPERATORS_OWN_ADDRESS = "j.operator@example.com";
+
+  test("the commit's %ae is the configured fleet identity, never the operator's own", async () => {
+    const loaded = await load(
+      baseDoc({
+        run: {
+          repo: "./repo",
+          budget: { tokens_ceiling: 1_000_000 },
+          git_identity: { name: "fixture-fleet", email: "fixture-fleet@pifleet.invalid" },
+        },
+      }),
+    );
+    // The fixture's own premise: if this ever equalled the operator address
+    // below, the assertions that follow could pass by coincidence.
+    expect(loaded.config.run.git_identity.email).not.toBe(OPERATORS_OWN_ADDRESS);
+
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const result = await commitAndReadAuthor(plan.vars);
+    expect(result.ok, !result.ok ? result.stderr : "").toBe(true);
+    if (result.ok) {
+      expect(result.author).not.toContain(OPERATORS_OWN_ADDRESS);
+      expect(result.author).toBe("fixture-fleet <fixture-fleet@pifleet.invalid>");
+    }
+  });
+
+  test("the schema DEFAULT is not a plausible operator address either", () => {
+    expect(DEFAULT_GIT_IDENTITY.email).not.toBe(OPERATORS_OWN_ADDRESS);
+    // `.invalid` is the RFC 2606 domain reserved so it can never resolve or
+    // belong to anyone — asserted by name so a future default that drifts
+    // onto a real, resolvable domain fails here rather than in production.
+    expect(DEFAULT_GIT_IDENTITY.email.endsWith("@pifleet.invalid")).toBe(true);
   });
 });
 

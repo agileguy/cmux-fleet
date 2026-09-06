@@ -66,7 +66,7 @@ const worker: WorkerRow = {
   workspaceName: null,
 };
 
-const RUNS: readonly RunRow[] = [{ runId: RUN_A, workers: [worker] }];
+const RUNS: readonly RunRow[] = [{ runId: RUN_A, models: [], modelsNote: null, workers: [worker] }];
 
 const HISTORY: readonly RunHistoryRow[] = [
   { runId: RUN_A, ageMs: 120_000, workerCount: 4, live: true, taskCount: 5, settledCount: 3 },

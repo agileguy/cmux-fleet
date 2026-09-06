@@ -1795,6 +1795,28 @@ export function register(program: Command): void {
         created_at: new Date().toISOString(),
         backend: requestedBackend,
         workers,
+        /**
+         * What each worker is ACTUALLY running, `id -> provider/model`.
+         *
+         * Recorded here for exactly the reason `repo` and `branch_prefix` are
+         * recorded a few lines below: re-resolving `fleet.yaml` later answers
+         * "what would this worker run if launched today", which is a different
+         * question from "what is this worker running", and only the second one
+         * a monitor may print. An operator who edits a role's `model:` mid-run
+         * must not see the new value beside a container still running the old.
+         *
+         * A MAP rather than a field on each entry of `workers`, because
+         * `workers` is a list of ids that several readers already parse as
+         * such; widening it would be a schema break for a display value. A
+         * worker missing from this map is a run created before this key
+         * existed, which reads as "not recorded" and never as a model name.
+         */
+        worker_models: Object.fromEntries(
+          workers.map((workerId) => {
+            const w = loadedConfig === null ? null : resolveWorker(loadedConfig, workerId);
+            return [workerId, w === null ? "" : `${w.provider}/${w.model}`];
+          }),
+        ),
         heartbeat_interval_ms: heartbeatIntervalMs,
         /**
          * The bound the supervisor answers a blocking `extension_ui_request`

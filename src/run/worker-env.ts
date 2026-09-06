@@ -774,16 +774,45 @@ export function buildWorkerEnv(
    * every repository the container can see rather than the one tree a worker
    * has business in.
    *
-   * Emitted for `shared-ro` as well as `worktree`: that mount is the
-   * operator's OWN checkout, owned by the operator, so a read-only role
-   * running `git log` meets the identical refusal. `none` has no `/workspace`
-   * to name and gets nothing — a setting emitted unconditionally is one
-   * nobody notices has stopped tracking the mount it exists for.
+   * `safe.directory` is emitted for `shared-ro` as well as `worktree`: that
+   * mount is the operator's OWN checkout, owned by the operator, so a
+   * read-only role running `git log` meets the identical refusal. `none` has
+   * no `/workspace` to name and gets nothing — a setting emitted
+   * unconditionally is one nobody notices has stopped tracking the mount it
+   * exists for.
+   *
+   * ## Identity is narrower than `safe.directory`, deliberately (SRD §6.8, D13
+   * ## arm 2 — ISC-528)
+   *
+   * `user.name`/`user.email` are set ONLY for `worktree`, not for every
+   * isolation `safe.directory` covers. `shared-ro` mounts the operator's own
+   * checkout with the docker `:ro` flag (`config/render.ts`,
+   * `harvest/collation-census.ts:73`) — the filesystem itself refuses a
+   * write, so no commit a `shared-ro` worker could make ever reaches git's
+   * identity check in the first place. Handing that worker a commit identity
+   * would assert nothing false, but it would misstate what the worker IS:
+   * `shared-ro` is how this fleet expresses "reads, never commits", and an
+   * identity it can never use is a setting nobody would notice has stopped
+   * meaning anything, which is exactly the failure mode the paragraph above
+   * describes for `safe.directory` and `none`. Only a `worktree` seat has a
+   * writable clone a commit can land in, so only `worktree` gets one.
+   *
+   * The value comes from `run.git_identity` (`config/schema.ts:~342`),
+   * never from `~/.gitconfig` — not mounted, and must not be (§6.8).
    */
   if (w.isolation !== "none") {
-    vars["GIT_CONFIG_COUNT"] = "1";
     vars["GIT_CONFIG_KEY_0"] = "safe.directory";
     vars["GIT_CONFIG_VALUE_0"] = "/workspace";
+
+    if (w.isolation === "worktree") {
+      vars["GIT_CONFIG_COUNT"] = "3";
+      vars["GIT_CONFIG_KEY_1"] = "user.name";
+      vars["GIT_CONFIG_VALUE_1"] = loaded.config.run.git_identity.name;
+      vars["GIT_CONFIG_KEY_2"] = "user.email";
+      vars["GIT_CONFIG_VALUE_2"] = loaded.config.run.git_identity.email;
+    } else {
+      vars["GIT_CONFIG_COUNT"] = "1";
+    }
   }
 
   /*

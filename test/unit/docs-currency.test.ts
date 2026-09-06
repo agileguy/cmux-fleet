@@ -179,8 +179,25 @@ describe("the SRD's CLI table names every command the CLI registers", () => {
     for (const f of readdirSync(dir)) {
       if (!f.endsWith(".ts")) continue;
       const src = readFileSync(join(dir, f), "utf8");
+      /*
+       * The RECEIVER decides whether a name is a command or a subcommand.
+       * `program.command("x")` is `pifleet x`; anything registered on another
+       * identifier is nested under the command this file registered on
+       * `program`, and §10 must name the whole path. Before this, a nested
+       * `pm-guard dispatch-started` was extracted as though the CLI exposed
+       * `pifleet dispatch-started` — so the table could satisfy the check with
+       * a row naming a command that does not exist, while the real one went
+       * unlisted.
+       */
+      let top: string | null = null;
+      const nested: string[] = [];
       // `.command("name")`, `.command("name <action>")`, `.command("name [x...]")`
-      for (const m of src.matchAll(/\.command\("([a-z][a-z0-9-]*)/g)) names.add(m[1]!);
+      for (const m of src.matchAll(/([A-Za-z_$][\w$]*)\s*\.command\("([a-z][a-z0-9-]*)/g)) {
+        if (m[1] === "program") top ??= m[2]!;
+        else nested.push(m[2]!);
+      }
+      if (top !== null) names.add(top);
+      for (const sub of nested) names.add(top === null ? sub : `${top} ${sub}`);
     }
     return [...names].sort();
   }
@@ -425,9 +442,21 @@ describe("the README's criteria count matches the ISA", () => {
       ).toBe(false);
       const openWord = words[open];
       expect(openWord, `ISA has ${open} [ ] criteria — extend the word map`).toBeDefined();
+      /*
+       * Singular gets its own sentence, because the count reached one and the
+       * fixed plural phrasing demanded "One criteria are unattempted" — which
+       * is not a sentence, and a checker that can only be satisfied by bad
+       * English gets satisfied by bad English. The count word is still exact
+       * and still the only accepted spelling; what varies is the agreement
+       * around it.
+       */
+      const expected =
+        open === 1
+          ? `${openWord} criterion is unattempted \`[ ]\``
+          : `${openWord} criteria are unattempted \`[ ]\``;
       expect(
-        README.includes(`${openWord} criteria are unattempted \`[ ]\``),
-        `README should say "${openWord} criteria are unattempted \`[ ]\`" — ISA.md carries ${open}.`,
+        README.includes(expected),
+        `README should say "${expected}" — ISA.md carries ${open}.`,
       ).toBe(true);
     }
   });

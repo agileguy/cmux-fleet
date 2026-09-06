@@ -87,6 +87,7 @@ import {
   REVIEW_SPEC,
   cmuxReachable,
   ensureReview,
+  plannedPane,
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
 import {
@@ -101,7 +102,7 @@ import {
   writeRelayRecord,
 } from "../src/run/console-relay.ts";
 import { REVIEW_CONSOLE_ROSTER } from "../src/run/dispatch-request.ts";
-import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
+import { recreateThenDispatch, resolveThenRestart } from "../src/run/fresh-dispatch.ts";
 import { processStartTime } from "../src/safety/procstart.ts";
 import { consoleRunPins, relayRunPinValue, runsHoldingAny } from "../src/run/status-runs.ts";
 
@@ -258,13 +259,37 @@ async function main(argv: string[]): Promise<number> {
   const restartFlag = flag(argv, "--restart");
   if (restartFlag !== undefined) {
     /*
+     * REFUSE BEFORE DESTROYING — the pure resolution, handed to whichever
+     * module owns the ordering of the path taken below.
+     *
+     * Everything either path does is irreversible — the relay stop and the run
+     * teardown both — and the title used not to be resolved until the respawn
+     * at the very end, so an unplannable one stopped a live worker and THEN
+     * refused. `plannedPane` is pure, so calling it first costs nothing when it
+     * succeeds and costs nothing when it does not. This console reaches the
+     * trap by being asked for another console's live worker, and pays more for
+     * it than the others do: see `resolveThenRestart` for the measurement and
+     * for why the relay must not go down on a refused title.
+     */
+    const plan = (): unknown => plannedPane(REVIEW_SPEC, { ...opts, tuiWorkers }, restartFlag);
+
+    /*
      * ANY pane, not only the collator's. The relay holds `--run` for the
      * collator and a `PIFLEET_RELAY_RUNS` pin for the other three, both fixed
      * for the life of the process, so respawning a reviewer's pane leaves a
      * relay whose pin names a run that no longer exists — and a pinned worker
      * that cannot be resolved refuses every fan-out, quietly, forever.
+     *
+     * Passed to BOTH modules as `quiesce` rather than called here, so that WHEN
+     * it happens is checked by the unit suite instead of by reading this file.
+     * The two paths need it at different moments and only the modules know
+     * which: the bare path stops it once the title resolves, and the `--task`
+     * path stops it once the worker has gone idle — because that path's wait can
+     * end in a refusal, and this script calling it first made that refusal's
+     * "Nothing has been stopped" false on this console alone.
      */
-    await stopRelay(`before the ${restartFlag} pane is respawned`);
+    const quiesce = (): Promise<void> =>
+      stopRelay(`before the ${restartFlag} pane is respawned`);
     const taskFlag = flag(argv, "--task");
     const restartPane = async (): Promise<string> => {
       const r = await restartConsolePane(client, REVIEW_SPEC, { ...opts, tuiWorkers }, restartFlag);
@@ -280,13 +305,16 @@ async function main(argv: string[]): Promise<number> {
      * plausible-looking review of the wrong change.
      *
      * NOTHING is stopped until the worker is holding no task, staged ones
-     * included; the waiting, the refusal and the ordering are in
-     * `src/run/fresh-dispatch.ts` where they are unit-tested.
+     * included — the relay included too, which is why `quiesce` is handed over
+     * below instead of being called here. The waiting, the refusal and the
+     * ordering are in `src/run/fresh-dispatch.ts` where they are unit-tested.
      */
     if (taskFlag !== undefined) {
+      plan();
       const r = await recreateThenDispatch(
         {
           status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          quiesce,
           down: async (runId) => {
             process.stderr.write(`review: stopping run ${runId}\n`);
             await runOutput(repoRoot, ["down", "--run", runId]);
@@ -323,14 +351,32 @@ async function main(argv: string[]): Promise<number> {
       return EXIT.SUCCESS;
     }
 
-    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
-    for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
-      process.stderr.write(`review: stopping run ${runId} before restarting ${restartFlag}\n`);
-      await runOutput(repoRoot, ["down", "--run", runId]);
-    }
-    const surfaceId = await restartPane();
+    /*
+     * The bare restart — resolve, quiesce, stop, respawn — and the ORDER of
+     * those four is `resolveThenRestart`'s, not this script's. It was five
+     * statements here, and four of them in each of `scripts/operations` and
+     * `scripts/development`; three copies of one ordering are three places to
+     * get it wrong, and the `operations` copy did — it resolved the title last,
+     * so a `--restart` of a worker it does not plan stopped a live run and then
+     * refused. Reached here, that same mistyped title would have taken the
+     * relay with it. What is left is what only a script can supply: a
+     * subprocess runner, a stderr line, a relay pidfile and a cmux client.
+     */
+    const r = await resolveThenRestart(
+      {
+        plan,
+        status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+        quiesce,
+        down: async (runId) => {
+          process.stderr.write(`review: stopping run ${runId} before restarting ${restartFlag}\n`);
+          await runOutput(repoRoot, ["down", "--run", runId]);
+        },
+        restartPane,
+      },
+      { worker: restartFlag },
+    );
     process.stdout.write(
-      `review: respawned the ${restartFlag} pane (surface ${surfaceId}); ` +
+      `review: respawned the ${restartFlag} pane (surface ${r.pane}); ` +
         `the other panes were not touched\n`,
     );
     if (!argv.includes("--no-relay")) await startRelay(repoRoot, reviewWorkers);

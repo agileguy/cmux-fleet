@@ -248,6 +248,52 @@ export interface WorkerRow {
 export interface RunRow {
   readonly runId: string;
   readonly workers: readonly WorkerRow[];
+  /**
+   * What this run's workers are ACTUALLY running, as `provider/model`, in
+   * worker order and de-duplicated — `[]` when nothing recorded one.
+   *
+   * Read from the run's own `run.json`, never re-resolved from `fleet.yaml`.
+   * The distinction is the whole point: `fleet.yaml` answers "what would this
+   * worker run if launched today", and an operator who edits a role's `model:`
+   * mid-run must not see the new value printed beside a container still
+   * running the old one. `up.ts` records it for the same reason it records
+   * `repo` and `branch_prefix`.
+   *
+   * `[]` for a run created before the key existed, which the view renders as
+   * nothing at all rather than as a guess.
+   */
+  readonly models: readonly string[];
+  /**
+   * Why {@link models} is empty when the emptiness is a FAILURE — or `null`,
+   * which is every ordinary run.
+   *
+   * ## Two empties that must not look alike
+   *
+   * `models: []` has two causes and only one of them is normal. A run created
+   * before `up` recorded `worker_models` has no such key and never will: it is
+   * empty because there is nothing to say, and the view prints nothing, which
+   * is right. A `run.json` that will not parse is empty because the monitor
+   * COULD NOT LOOK, and printing nothing there makes the viewer the one
+   * surface in the fleet where a damaged control-plane document renders as an
+   * ordinary line.
+   *
+   * That is `Region`'s own distinction at the top of this file — *read and
+   * empty* versus *read and threw* — arriving one level down, on a field
+   * rather than on a reader's whole output. A `Region<readonly string[]>` here
+   * would say it with the existing type, and was rejected for a concrete
+   * reason: a region carries a `readAt`, and this value has no read time of its
+   * own — it is produced inside the run walk whose stamp the enclosing region
+   * already carries, so the field would have to invent a timestamp to fill.
+   *
+   * ## The invariant, stated because two fields can contradict each other
+   *
+   * A non-`null` note implies `models` is `[]`. `read/runs.ts` is the only
+   * producer and cannot break it — the reader returns no models on the path
+   * that produces a note — and the view resolves the impossible pairing by
+   * preferring the note, because a reason beside a value is the shape ISC-478
+   * refuses.
+   */
+  readonly modelsNote: string | null;
 }
 
 /**

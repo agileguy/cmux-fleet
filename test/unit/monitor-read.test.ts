@@ -873,3 +873,131 @@ describe("readRuns", () => {
     expect(expectOk(await readRuns({ root }))).toEqual([]);
   });
 });
+
+/**
+ * THE TWO EMPTIES ON THE MODEL CELL, WHICH USED TO BE ONE.
+ *
+ * `readRunWorkerModels` wrapped its read in `catch { return {}; }`, so a
+ * `run.json` that would not parse and a run created before `up` ever wrote
+ * `worker_models` produced the identical answer: no models, no complaint, a
+ * run line that looks exactly like every other run line on the fleet. That
+ * throws away the `StateReadError` path `readValidated` exists to carry — and
+ * ISC-472's source-text guard cannot see it, because the violation is not a
+ * local `JSON.parse`, it is a `catch` in the module the guard points AT.
+ *
+ * The monitor is the surface where this matters most: it is the first thing an
+ * operator looks at when a run tree is suspect, and it was the one place a
+ * damaged control-plane document rendered as normal.
+ *
+ * **The discriminating fixture is the point of this block.** Either half alone
+ * passes on a broken reader — "always note" satisfies the corrupt case,
+ * "never note" satisfies the pre-field case — so the two are asserted against
+ * each other, on the same reader, in the same run root.
+ */
+describe("a corrupt run.json is not the same as a run that predates worker_models", () => {
+  /** A run whose `run.json` carries whatever `doc` says, plus one live worker. */
+  async function runWithDoc(tag: string, doc: unknown): Promise<string> {
+    const root = await makeRoot(tag);
+    const run = await makeRun(root);
+    await writeFile(run.runJson, JSON.stringify(doc));
+    await writeWorker(run, "eng-1");
+    return root;
+  }
+
+  const only = async (root: string) => {
+    const rows = expectOk(await readRuns({ root }));
+    expect(rows).toHaveLength(1);
+    return rows[0]!;
+  };
+
+  test("a recorded model reaches the row, and says nothing else", async () => {
+    const root = await runWithDoc("models-recorded", {
+      schema: "pifleet.run/v1",
+      run_id: RUN_ID,
+      worker_models: { "eng-1": "ollama-cloud/glm-5.3" },
+    });
+    const row = await only(root);
+    expect(row.models).toEqual(["ollama-cloud/glm-5.3"]);
+    expect(row.modelsNote).toBeNull();
+  });
+
+  /*
+   * THE QUIET EMPTY. Every run on the operator's disk before 2026-09-05 is
+   * this one, so a note here would put a red line on the whole fleet's
+   * history — which is the failure mode a fix in the other direction produces.
+   */
+  test("a run that predates the field is empty and SILENT", async () => {
+    const root = await runWithDoc("models-absent", {
+      schema: "pifleet.run/v1",
+      run_id: RUN_ID,
+    });
+    const row = await only(root);
+    expect(row.models).toEqual([]);
+    expect(row.modelsNote).toBeNull();
+  });
+
+  /*
+   * THE LOUD EMPTY, cut MID-TOKEN rather than replaced with garbage: a torn
+   * `writeJsonAtomic` leaves a valid PREFIX of a valid document, which is the
+   * input `readValidated`'s retry is written against and the shape
+   * `truncateState` uses for `state.json` two hundred lines up.
+   */
+  test("a truncated run.json is empty and SAYS SO, naming the file", async () => {
+    const root = await makeRoot("models-truncated");
+    const run = await makeRun(root);
+    await writeFile(
+      run.runJson,
+      JSON.stringify({
+        schema: "pifleet.run/v1",
+        run_id: RUN_ID,
+        worker_models: { "eng-1": "ollama-cloud/glm-5.3" },
+      }).slice(0, 60),
+    );
+    await writeWorker(run, "eng-1");
+
+    const row = await only(root);
+    expect(row.models).toEqual([]);
+    expect(row.modelsNote).not.toBeNull();
+    // The path, so the sentence is actionable rather than a mood.
+    expect(row.modelsNote).toContain(run.runJson);
+    // `StateReadError`'s own diagnosis, carried rather than paraphrased.
+    expect(row.modelsNote).toContain("unreadable state file");
+  });
+
+  /*
+   * SCHEMA-INVALID rather than unparseable: the JSON is whole and
+   * `worker_models` is a string. This is the arm that would survive a fix that
+   * only caught `SyntaxError`, and it is the likelier shape of a hand-edited
+   * `run.json`.
+   */
+  test("a worker_models that is not a map is also reported", async () => {
+    const root = await runWithDoc("models-wrong-type", {
+      schema: "pifleet.run/v1",
+      run_id: RUN_ID,
+      worker_models: "ollama-cloud/glm-5.3",
+    });
+    const row = await only(root);
+    expect(row.models).toEqual([]);
+    expect(row.modelsNote).toContain("worker_models");
+  });
+
+  /*
+   * THE COST CEILING. A damaged `run.json` must cost the models cell and
+   * nothing else — the run is still listed and its workers are still read,
+   * because none of that comes from this document. Without this the fix could
+   * be "fail the run row", which is a much wider blast radius than the finding
+   * asks for and would hide a live fleet behind one bad file.
+   */
+  test("the damage costs the model cell and no more", async () => {
+    const root = await makeRoot("models-blast-radius");
+    const run = await makeRun(root);
+    await writeFile(run.runJson, "{\"schema\": \"pifleet.run/v1\", \"worker_mod");
+    await writeWorker(run, "eng-1");
+    await writeWorker(run, "eng-2");
+
+    const row = await only(root);
+    expect(row.modelsNote).not.toBeNull();
+    expect(row.workers).toHaveLength(2);
+    expect(row.workers.map((w) => expectOk(w).row.workerId)).toEqual(["eng-1", "eng-2"]);
+  });
+});

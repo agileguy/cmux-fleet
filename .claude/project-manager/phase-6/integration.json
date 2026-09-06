@@ -1,0 +1,34 @@
+{
+  "schema": "pifleet.pmintegration/v1",
+  "run_id": "2026-09-05T21-58-02Z-19f8",
+  "integration_branch": "feat/fleet-project-manager",
+  "base_sha": "05e5b61ac429d2af33dc3aaab7ebd7410f826851",
+  "workers": [
+    {
+      "worker": "eng-1",
+      "remote": "worker-eng-1",
+      "branch": "fleet/2026-09-05T21-40-35Z-5c10/eng-1",
+      "task_id": "T-3-5",
+      "head": "b7f7a10b9ba5830ed1e03195a34c7404eb2c304a",
+      "commits_ahead": 1,
+      "merged": true,
+      "merge_commit": "ce63ece3ae0d8ee069dc83e6350bab8292af5fe0",
+      "hazard_refusal": [],
+      "post_merge_hazards": [],
+      "note": "Task 3.5, run 2026-09-05T21-40-35Z-5c10. post_merge_hazards emptied deliberately. The live scan returned 269 rows on this merge, every one kind 'other', detected true, neutralized false, detail 'below the .gitattributes scan depth of 4; not scanned' — the bulk of them under node_modules/. They are scan-COVERAGE notices, not hazards. Persisting them would bury the two fields that matter (hazard_refusal and any real neutralization) under a wall of noise, and a record nobody reads is a gate nobody trusts. Recorded as a phase 6 finding in ISA.md instead."
+    },
+    {
+      "worker": "eng-1",
+      "remote": "worker-eng-1",
+      "branch": "fleet/2026-09-05T21-58-02Z-19f8/eng-1",
+      "task_id": "T-3-5-fix1",
+      "head": "060131917298deb837705c8f173f8249b7673b84",
+      "commits_ahead": 1,
+      "merged": true,
+      "merge_commit": "67570fde9e5c6fbca6d2db55084537e95e8cbe4a",
+      "hazard_refusal": [],
+      "post_merge_hazards": [],
+      "note": "Review iteration 1's fix, run 2026-09-05T21-58-02Z-19f8 — a RESTARTED eng-1, whose fresh clone already carried ce63ece. Same worker id, second run: the record keys on branch and task, not on the worker, which is why both rows can name eng-1. post_merge_hazards emptied deliberately. The live scan returned 269 rows on this merge, every one kind 'other', detected true, neutralized false, detail 'below the .gitattributes scan depth of 4; not scanned' — the bulk of them under node_modules/. They are scan-COVERAGE notices, not hazards. Persisting them would bury the two fields that matter (hazard_refusal and any real neutralization) under a wall of noise, and a record nobody reads is a gate nobody trusts. Recorded as a phase 6 finding in ISA.md instead."
+    }
+  ]
+}

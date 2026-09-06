@@ -54,6 +54,7 @@ import { Box, Text } from "ink";
 import type { FleetModel, Region, RunRow, WorkerRow } from "../model.ts";
 import { workerContainerName } from "../../run/paths.ts";
 import {
+  BodyLine,
   Bullet,
   Cell,
   FloorRefusal,
@@ -74,7 +75,7 @@ import type { Palette } from "./chrome.tsx";
  * width depends on the longest value in it MOVES when an unrelated worker
  * appears, and a monitor whose columns shift under the operator's eye every 30
  * seconds is harder to read than one that occasionally truncates. `ID_COL` is
- * sized for the ids this fleet actually issues (`eng-1`, `rev-1`, `w-0`); the
+ * sized for the ids this fleet actually issues (`eng-1`, `tst-2`, `w-0`); the
  * cost of the choice is stated at `Cell` below, where it is paid.
  */
 const ID_COL = 8;
@@ -513,16 +514,111 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
    * heading.
    */
   const label = plan.runIdFull ? run.runId : (run.runId.split("-").pop() ?? run.runId);
+  /*
+   * WORKERS FIRST, RUN ID SECOND (owner's request, 2026-09-05).
+   *
+   * The run id used to head the block. It now follows the rows it describes,
+   * because on this fleet a "run" is usually ONE worker — every console seat is
+   * `pane_mode: tui` and therefore its own run — so a heading above a single row
+   * pushed the thing an operator actually reads (the worker, what it is doing,
+   * what phase it is in) down a line for a value they need only when they are
+   * about to type it into `dispatch --run`.
+   *
+   * The id keeps its two-space indent so the block still reads as owned by the
+   * group heading above it, and the em-dash worker count stays with it.
+   */
   return (
     <Box flexDirection="column">
-      <Text wrap="truncate-end" color={p.heading}>
-        {`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}
-      </Text>
       {run.workers.map((w) => (
         <WorkerLine key={w.workerId} row={w} plan={plan} />
       ))}
+      <Box>
+        <Text wrap="truncate-end" color={p.heading}>
+          {`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}
+        </Text>
+        {/*
+         * THE MODEL, on the run line, in dark blue (owner's request).
+         *
+         * Rendered only when the run recorded one. A run created before `up`
+         * wrote `worker_models` prints nothing here — the alternative would be
+         * a placeholder that an operator has to learn does not mean a model
+         * named "unknown", and a monitor should not teach vocabulary.
+         *
+         * Its own `Text` rather than interpolation, because the colour is the
+         * request: one string cannot be two colours. It follows the worker
+         * count so the run id keeps its position for anyone reading down the
+         * column, and truncates last because it is the least urgent value on
+         * the line.
+         *
+         * The colour comes from {@link runModelStyle} rather than from a
+         * palette entry named here — see that function for the regression that
+         * makes the indirection worth a call, and for why the view being the
+         * only reader of that entry is itself asserted.
+         */}
+        {run.modelsNote === null && run.models.length > 0 ? (
+          <Text wrap="truncate-end" color={runModelStyle(p).color}>
+            {`  ${run.models.join(" ")}`}
+          </Text>
+        ) : null}
+      </Box>
+      {/*
+       * WHY THE MODELS ARE MISSING, WHEN THEIR ABSENCE IS A FAILURE.
+       *
+       * `model.ts`'s `modelsNote` keeps two empties apart: a run that predates
+       * `worker_models` (nothing to say, nothing printed) and a `run.json` that
+       * would not parse (the monitor could not look). Only the second reaches
+       * here, so an ordinary frame is unchanged by a byte.
+       *
+       * ITS OWN LINE, and `BodyLine` rather than the run line's `Text`. The
+       * note carries `StateReadError`'s sentence — a path, a failing field and
+       * the bytes on disk — and `chrome.tsx` is explicit that content the view
+       * did not compose must WRAP: truncating it to the tail of a run line
+       * would delete the half that names the file, which is the only part an
+       * operator can act on. It is also not a cell and needs no rung on §6.5's
+       * ladder for the same reason every other full-width line has none.
+       *
+       * It stands IN PLACE of the models rather than beside them (ISC-478),
+       * which the guard above enforces on the one impossible pairing the two
+       * fields can express.
+       */}
+      {run.modelsNote !== null ? (
+        <BodyLine color={runModelStyle(p, true).color}>{`  ${run.modelsNote}`}</BodyLine>
+      ) : null}
     </Box>
   );
+}
+
+/**
+ * How the run line's model slot is painted — extracted as a function of the
+ * palette for the reason {@link workspaceHeadingStyle} states, and because THIS
+ * palette entry has the same trap the workspace heading had.
+ *
+ * `COLOUR.model` and `COLOUR.busy` are BOTH `"blue"` (`chrome.tsx:106,137`),
+ * exactly as `COLOUR.workspace` and `COLOUR.warn` are both `"yellow"`. The
+ * workspace heading was found painting itself from `p.warn`, and a full unit
+ * AND integration suite passed on the mutation, because every assertion about
+ * it was on the PALETTE — `COLOUR.model === "blue"` pins which colour the
+ * palette names and says nothing about which entry the view reads. The frame
+ * cannot settle it either: `render.ts:176-183` records that colour has two
+ * gates and the second is chalk's own level, computed from the real
+ * `process.stdout`, so `{colour: true}` inside a test process produces a frame
+ * byte-identical to the plain one and an assertion on SGR escapes would pass
+ * vacuously exactly where it runs.
+ *
+ * So the DECISION is what gets exported, and `monitor-render.test.ts` drives it
+ * with an asymmetric palette in which `model` and `busy` deliberately differ —
+ * a fixture that makes the two candidates distinguishable before asserting
+ * about them, which under the real palette no test can do.
+ *
+ * `degraded` selects `alarm` for {@link RunRow.modelsNote}'s line, and it is
+ * the same function rather than a second one because both paint one slot: what
+ * this run is running, or why the monitor cannot say.
+ */
+export function runModelStyle(
+  p: Palette,
+  degraded = false,
+): { readonly color: string | undefined } {
+  return { color: degraded ? p.alarm : p.model };
 }
 
 
@@ -560,10 +656,13 @@ export const NO_WORKSPACE = "no workspace recorded";
 /**
  * One group's heading line.
  *
- * The word `workspace` is carried in the TEXT rather than left to the colour,
- * and that is the same rule the severity bullet follows: the plain frame is the
- * one a pipe, a grep or a diff reads, and it has no yellow to carry meaning. A
- * bare ref on its own line would be indistinguishable from a run id there.
+ * The word `workspace` USED to be carried in the text, on the argument that a
+ * plain frame has no yellow to carry meaning and a bare ref on its own line
+ * would be indistinguishable from a run id. The owner asked for it removed
+ * (2026-09-05) and the argument does not survive the current layout: run lines
+ * begin with two spaces and the literal `run `, group headings begin at column
+ * zero, so the two are still distinguishable in a pipe by indent and prefix
+ * without spending eleven characters of every heading saying so.
  *
  * The ref is printed WHOLE and left to truncate. It needs no rung on §6.5's
  * ladder because it is not a cell: `chrome.tsx` states the rule — full-width
@@ -593,7 +692,7 @@ export function workspaceHeading(workspace: string | null, name: string | null =
    * renders a dash: a heading reading `workspace ` with nothing after it is
    * indistinguishable from one that failed to render.
    */
-  return name === null || name === "" ? `workspace ${workspace}` : `workspace ${name}`;
+  return name === null || name === "" ? workspace : name;
 }
 
 /**

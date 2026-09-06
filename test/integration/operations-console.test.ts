@@ -109,7 +109,7 @@ describe("the development console's four panes", () => {
     async () => {
       const out = await dryRun(["--config", "fleet.example.yaml"], "scripts/development");
       expect(out).toContain("workspace: development");
-      for (const w of ["eng-1", "eng-2", "tst-1", "rev-1"]) {
+      for (const w of ["eng-1", "eng-2", "tst-1", "tst-2"]) {
         expect(out, `${w} has no pane`).toContain(`(${w}):`);
         expect(out).toContain(`'up' '--workers' '${w}'`);
       }
@@ -131,7 +131,7 @@ describe("the development console's four panes", () => {
           "run",
           "scripts/development",
           "--workers",
-          "eng-1,eng-2,tst-1,rev-1,sre-1",
+          "eng-1,eng-2,tst-1,tst-2,sre-1",
           "--dry-run",
         ],
         { cwd: REPO, stdout: "pipe", stderr: "pipe" },
@@ -171,7 +171,7 @@ describe("the development console's four panes", () => {
  * `fleet.example.yaml` — the TRACKED config, used here because the operator's
  * `fleet.yaml` is gitignored (`test/unit/review-plan.test.ts` records what a
  * test that reads an untracked config costs in CI) — declares `sre-1, sre-2,
- * obs-1, obs-2, ver-1, eng-1, eng-2, tst-1, rev-1, tick-1`. It declares NONE
+ * obs-1, obs-2, ver-1, eng-1, eng-2, tst-1, tst-2, tick-1`. It declares NONE
  * of the review console's own workers: no `col-1`, no `rev-arch-1`,
  * `rev-ctx-1` or `rev-lang-1`.
  *
@@ -203,7 +203,7 @@ describe("--dry-run prints the workspace name the console will actually pass", (
   const consoles = [
     ["scripts/operations", "operations", [] as readonly string[]],
     ["scripts/development", "development", [] as readonly string[]],
-    ["scripts/review", "review", ["--workers", "eng-1,eng-2,tst-1,rev-1"] as readonly string[]],
+    ["scripts/review", "review", ["--workers", "eng-1,eng-2,tst-1,tst-2"] as readonly string[]],
   ] as const;
 
   for (const [script, name, extra] of consoles) {

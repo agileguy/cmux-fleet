@@ -59,6 +59,7 @@ import { monotonicMs } from "../../util/clock.ts";
 import { ok, failed, type Region, type RunRow } from "../model.ts";
 import { runPaths, runsRoot, type RunPaths } from "../../run/paths.ts";
 import { liveRunIds } from "../../run/registry.ts";
+import { readRunWorkerModels } from "../../run/state.ts";
 import { readWorkerRows, type WorkerRead } from "./worker.ts";
 
 /**
@@ -141,8 +142,11 @@ export async function readRuns(
     const run = runPaths(runId, root);
     const workerIds = await workerIdsOf(run);
     if (workerIds === null) continue;
+    const { models, modelsNote } = await recordedModels(run, workerIds);
     rows.push({
       runId,
+      models,
+      modelsNote,
       workers: await readWorkerRows(run, workerIds, {
         containers: opts?.containers ?? null,
         now,
@@ -153,6 +157,50 @@ export async function readRuns(
   }
 
   return ok(rows, now());
+}
+
+/**
+ * What this run's workers were launched running, from the run's OWN record.
+ *
+ * `run.json`'s `worker_models` is `id -> "provider/model"`, written by `up`.
+ * Read through `run/state.ts` and NOT with a local `JSON.parse`: ISC-472
+ * forbids a module parsing a control-plane document itself, because doing so
+ * discards `readValidated` and the `StateReadError` path. The first version of
+ * this function did exactly that and the source-text guard caught it.
+ *
+ * **And the second version discarded that path anyway, one layer down.**
+ * `readRunWorkerModels` used to swallow its own `StateReadError` and return
+ * `{}`, so importing the compliant reader bought nothing: an unparseable
+ * `run.json` reached this function as an empty map, indistinguishable from a
+ * run predating the field. That reader's own docblock justified it with
+ * "`runs.ts` has no region to degrade into for this", which was true when it
+ * was written. There is a place now — {@link PartialRunRow.modelsNote} — so
+ * the reader carries the diagnosis and this function carries it through.
+ * **Neither failure was
+ * visible to ISC-472's source-text guard**: it can see a `JSON.parse` that
+ * should not be here, not a `catch` that throws information away in the module
+ * it points at.
+ *
+ * Still never throws, and the note is still the ONLY thing a damaged
+ * `run.json` costs: the run is listed, its workers are read, and the models
+ * cell says why it is blank.
+ *
+ * De-duplicated in worker order: a four-seat run on one model should say that
+ * model once, and the review console — four seats, three vendors — should say
+ * all of them.
+ */
+async function recordedModels(
+  run: RunPaths,
+  workerIds: readonly string[],
+): Promise<{ readonly models: readonly string[]; readonly modelsNote: string | null }> {
+  const { models: byId, note } = await readRunWorkerModels(run);
+  const out: string[] = [];
+  for (const id of workerIds) {
+    const m = byId[id];
+    if (m === undefined || out.includes(m)) continue;
+    out.push(m);
+  }
+  return { models: out, modelsNote: note };
 }
 
 /**

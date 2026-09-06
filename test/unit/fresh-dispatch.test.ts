@@ -1,5 +1,12 @@
 /**
- * Recreate-then-dispatch, and the rule that it must never recreate over work.
+ * The two orderings a console's `--restart` is made of.
+ *
+ * `recreateThenDispatch` is the `--task` half — recreate-then-dispatch, and the
+ * rule that it must never recreate over work. `resolveThenRestart` is the bare
+ * half — resolve the pane, stop the runs holding the worker, respawn it — and
+ * its tests live at the bottom of this file for the reason its docblock gives:
+ * the two are siblings, they are ordered by the same convention, and the
+ * ordering is the only thing either of them can get wrong.
  *
  * The ordering assertions carry the weight here. A recreate destroys the
  * worker's container, supervisor and worktree, so "did it wait?" and "did it
@@ -20,8 +27,10 @@ import { describe, expect, test } from "bun:test";
 import {
   busyRefusal,
   recreateThenDispatch,
+  resolveThenRestart,
   settledEnough,
   workerActivity,
+  type ConsoleRestartDeps,
   type FreshDispatchDeps,
 } from "../../src/run/fresh-dispatch.ts";
 
@@ -55,8 +64,16 @@ interface Harness {
   calls: string[];
 }
 
-/** `reads` is consumed one entry per `status()` call; the last one repeats. */
-function harness(reads: string[]): Harness {
+/**
+ * `reads` is consumed one entry per `status()` call; the last one repeats.
+ *
+ * `relay` says whether this console has a fifth process, which is the same
+ * thing the `quiesce` dep says and the reason that dep is nullable rather than
+ * optional. It defaults to the `null` console because most of the assertions
+ * below are about the recreate itself; the ones that are about the relay say
+ * `{ relay: true }` and read as such.
+ */
+function harness(reads: string[], o: { relay?: boolean } = {}): Harness {
   const calls: string[] = [];
   let i = 0;
   let clock = 0;
@@ -69,6 +86,7 @@ function harness(reads: string[]): Harness {
         calls.push("status");
         return r;
       },
+      quiesce: o.relay === true ? async () => void calls.push("stopRelay") : null,
       down: async (runId) => {
         calls.push(`down:${runId}`);
       },
@@ -330,5 +348,268 @@ describe("the order of a clean recreate", () => {
     expect(r.stopped).toEqual([]);
     expect(h.calls.filter((c) => c.startsWith("down:"))).toEqual([]);
     expect(r.runId).toBe("run-new");
+  });
+});
+
+/**
+ * ── THE RELAY, AND THE REFUSAL THAT HAD ALREADY SPENT IT ───────────────────
+ *
+ * `scripts/review` runs a fifth process whose whole configuration is run ids —
+ * `--run <id>` for the collator, a `PIFLEET_RELAY_RUNS` pin for the other three,
+ * both fixed for the life of the process — so a recreate has to stop it, and a
+ * relay left pointing at a dead run polls forever in silence.
+ *
+ * The script used to stop it ITSELF, on the line before this module was called.
+ * That put the only unrecoverable step of the `--task` path ABOVE a wait that
+ * lasts up to twenty minutes and then REFUSES, and the refusal it printed —
+ * *"Nothing has been stopped"* — was false on that console: the fifth process
+ * was already gone. What an operator was left holding was four healthy workers
+ * and nothing able to turn a collator's dispatch request into reviews, after a
+ * command that told them nothing had happened.
+ *
+ * So the relay stop is a dep here, exactly as it already was for
+ * `resolveThenRestart`, and WHEN it fires is checked below rather than by
+ * reading a script.
+ */
+describe("the relay is stopped after the wait, and never on a refusal", () => {
+  const BUSY = status([
+    { run_id: "run-old", workers: [{ id: "tst-1", phase: "busy", task_id: "T-1" }] },
+  ]);
+
+  /**
+   * THE INVARIANT — and both halves of it are one test on purpose.
+   *
+   * The refusal's call list alone proves nothing. Before the fix this module
+   * had no `quiesce` dep at all, so "the relay was not stopped" was true of the
+   * refusal AND of the success path, and an assertion that only looked at the
+   * refusal was green on the defect it exists to catch. What makes it a claim
+   * about ORDER rather than about absence is the second list: the same harness,
+   * the same relay, a worker that settles — and there the stop is present. One
+   * without the other is a fixture that cannot fail.
+   */
+  test("a settle-timeout refusal leaves the relay RUNNING", async () => {
+    const refused = harness([BUSY], { relay: true });
+    await expect(
+      recreateThenDispatch(refused.deps, {
+        worker: "tst-1",
+        settleTimeoutMs: 2_000,
+        pollMs: 1_000,
+      }),
+    ).rejects.toThrow(/still holds work/);
+    /*
+     * Three reads and NOTHING else — the first, and one after each of the two
+     * polls a 2s budget affords. An exact list rather than three
+     * `not.toContain`s, because the list is also what says no side effect
+     * added to a future phase 1 can slip in above the refusal.
+     */
+    expect(refused.calls).toEqual(["status", "status", "status"]);
+
+    const settled = harness([IDLE, FRESH], { relay: true });
+    await recreateThenDispatch(settled.deps, { worker: "tst-1", pollMs: 100 });
+    expect(settled.calls).toEqual([
+      "status",
+      "stopRelay",
+      "down:run-old",
+      "restartPane",
+      "status",
+      "dispatch:run-new",
+    ]);
+  });
+
+  test("a worker that settles LATE keeps its relay for the whole wait", async () => {
+    /*
+     * The discriminating shape, and the one the invariant is really about. A
+     * worker that is already idle on the first read cannot tell a relay stopped
+     * after the wait from one stopped before it — both produce a stop near the
+     * top of the list. Here the wait takes two polls, so the position of
+     * `stopRelay` in the sequence is the answer: after every busy read, before
+     * the teardown that invalidates the ids it pins, and before the respawn.
+     */
+    const h = harness([BUSY, BUSY, IDLE, FRESH], { relay: true });
+    const r = await recreateThenDispatch(h.deps, { worker: "tst-1", pollMs: 1_000 });
+    expect(r.settleWaitMs).toBe(2_000);
+    expect(h.calls).toEqual([
+      "status",
+      "status",
+      "status",
+      "stopRelay",
+      "down:run-old",
+      "restartPane",
+      "status",
+      "dispatch:run-new",
+    ]);
+  });
+
+  test("a console with no relay says so with null, and nothing else moves", async () => {
+    // `operations` and `development` have no fifth process. The field is
+    // required and nullable so they have to say which they are.
+    const h = harness([IDLE, FRESH], { relay: false });
+    await recreateThenDispatch(h.deps, { worker: "tst-1", pollMs: 100 });
+    expect(h.calls).toEqual([
+      "status",
+      "down:run-old",
+      "restartPane",
+      "status",
+      "dispatch:run-new",
+    ]);
+  });
+});
+
+/**
+ * ── THE BARE `--restart`, AND THE REFUSAL THAT ARRIVED TOO LATE ────────────
+ *
+ * MEASURED 2026-09-06. `./scripts/operations --restart obs-1` printed, in this
+ * order:
+ *
+ *   operations: stopping run 2026-09-04T18-03-52Z-e2fc before restarting obs-1
+ *   operations: 'obs-1' is not a pane this console plans — it holds observer, monitor, ticketing
+ *
+ * Both operations workers were left DOWN with nothing respawned. The refusal was
+ * correct and already tested; it simply arrived after the only irreversible
+ * step, because the teardown keys on WORKER ID and the respawn keys on PANE
+ * TITLE, and on that console those namespaces are disjoint.
+ *
+ * These tests assert the ORDER of the four side effects rather than the source
+ * text of the scripts that supply them, which is the difference between
+ * checking the fix and checking that somebody typed a function name. Every one
+ * of them would have reddened on the console that produced the two lines above.
+ */
+describe("resolveThenRestart puts the resolution ahead of every irreversible step", () => {
+  const HELD = JSON.stringify({
+    runs: [
+      // ASYMMETRIC on purpose. A fixture where every run holds the named worker
+      // cannot tell a scoped teardown from a sweep, so the second run here is
+      // another console's and must survive.
+      { run_id: "run-old", workers: [{ id: "tst-1", alive: true }] },
+      { run_id: "run-theirs", workers: [{ id: "obs-1", alive: true }] },
+    ],
+  });
+  const NONE = JSON.stringify({ runs: [] });
+
+  const REFUSAL =
+    "operations: 'obs-1' is not a pane this console plans — it holds observer, monitor, ticketing";
+
+  function restartHarness(
+    o: { statusJson?: string; relay?: boolean; plannable?: boolean } = {},
+  ): { calls: string[]; deps: ConsoleRestartDeps<string> } {
+    const calls: string[] = [];
+    return {
+      calls,
+      deps: {
+        plan: () => {
+          calls.push("plan");
+          if (o.plannable === false) throw new Error(REFUSAL);
+          return { title: "the pane" };
+        },
+        status: async () => {
+          calls.push("status");
+          return o.statusJson ?? HELD;
+        },
+        quiesce: o.relay === true ? async () => void calls.push("stopRelay") : null,
+        down: async (runId) => void calls.push(`down:${runId}`),
+        restartPane: async () => {
+          calls.push("restartPane");
+          return "surf-1";
+        },
+      },
+    };
+  }
+
+  test("the whole sequence — resolve, quiesce, read status, stop, respawn", async () => {
+    const h = restartHarness({ relay: true });
+    const r = await resolveThenRestart(h.deps, { worker: "tst-1" });
+    expect(h.calls).toEqual(["plan", "stopRelay", "status", "down:run-old", "restartPane"]);
+    expect(r.stopped).toEqual(["run-old"]);
+    expect(r.pane).toBe("surf-1");
+  });
+
+  test("an unplannable title stops NOTHING — not the run, not the relay", async () => {
+    /*
+     * The measured failure, asserted as an exact call list rather than as three
+     * `not.toContain`s: a list is also what says no status was even read, and a
+     * side effect added to a future phase 1 cannot slip past it.
+     */
+    const h = restartHarness({ relay: true, plannable: false });
+    await expect(resolveThenRestart(h.deps, { worker: "obs-1" })).rejects.toThrow(
+      /not a pane this console plans/,
+    );
+    expect(h.calls).toEqual(["plan"]);
+  });
+
+  test("the run is stopped BEFORE the pane is respawned", async () => {
+    /*
+     * The orphan-container rule. Respawning first kills the pane's shell, and
+     * the supervisor it launched — which owns a detached container — is
+     * signalled by the dying shell rather than told to quiesce.
+     *
+     * Both calls are asserted PRESENT before their indices are compared:
+     * `indexOf` returns -1 for a call that never happened, and -1 is less than
+     * everything, so an ordering assertion on its own passes loudest when the
+     * teardown has been deleted outright.
+     */
+    const h = restartHarness();
+    await resolveThenRestart(h.deps, { worker: "tst-1" });
+    expect(h.calls).toContain("down:run-old");
+    expect(h.calls).toContain("restartPane");
+    expect(h.calls.indexOf("down:run-old")).toBeLessThan(h.calls.indexOf("restartPane"));
+  });
+
+  test("the relay is stopped before the runs go down, because it pins their ids", async () => {
+    // `--run <id>` for the collator and `PIFLEET_RELAY_RUNS` for the other
+    // three, both fixed for the life of the process.
+    const h = restartHarness({ relay: true });
+    await resolveThenRestart(h.deps, { worker: "tst-1" });
+    expect(h.calls).toContain("stopRelay");
+    expect(h.calls).toContain("down:run-old");
+    expect(h.calls.indexOf("stopRelay")).toBeLessThan(h.calls.indexOf("down:run-old"));
+    expect(h.calls.indexOf("stopRelay")).toBeLessThan(h.calls.indexOf("restartPane"));
+  });
+
+  test("the relay is NOT stopped when the title is refused", async () => {
+    // The half a refusal gets wrong. On `review` a mistyped title would
+    // otherwise take the actor down and leave four healthy workers with nothing
+    // able to turn a dispatch request into reviews.
+    const h = restartHarness({ relay: true, plannable: false });
+    await expect(resolveThenRestart(h.deps, { worker: "obs-1" })).rejects.toThrow(REFUSAL);
+    expect(h.calls).not.toContain("stopRelay");
+  });
+
+  test("a console with no relay says so with null, and nothing else moves", async () => {
+    const h = restartHarness({ relay: false });
+    await resolveThenRestart(h.deps, { worker: "tst-1" });
+    expect(h.calls).toEqual(["plan", "status", "down:run-old", "restartPane"]);
+  });
+
+  test("only runs holding THIS worker are stopped", async () => {
+    // The other console's run is somebody else's; a rebuild that swept it would
+    // leave their panes attached to runs that no longer exist.
+    const h = restartHarness();
+    const r = await resolveThenRestart(h.deps, { worker: "tst-1" });
+    expect(r.stopped).toEqual(["run-old"]);
+    expect(h.calls).not.toContain("down:run-theirs");
+  });
+
+  test("a title no run holds — a watch pane — is respawned with nothing stopped", async () => {
+    // `fleet-status`, `git-watch` and the monitor are panes and not workers, so
+    // a restart of one must respawn and stop nothing.
+    const h = restartHarness({ statusJson: NONE });
+    const r = await resolveThenRestart(h.deps, { worker: "git-watch" });
+    expect(r.stopped).toEqual([]);
+    expect(h.calls).toEqual(["plan", "status", "restartPane"]);
+  });
+
+  test("unreadable status stops nothing and still brings the pane back", async () => {
+    /*
+     * The OPPOSITE direction from `workerActivity`, deliberately, and both are
+     * right. There, no evidence must not green-light destroying a task, so it
+     * throws. Here the caller is a launcher: containers left running are
+     * untidy, and a console that refuses to come back is not. `runsHoldingAny`
+     * documents the same choice.
+     */
+    const h = restartHarness({ statusJson: "not json" });
+    const r = await resolveThenRestart(h.deps, { worker: "tst-1" });
+    expect(r.stopped).toEqual([]);
+    expect(h.calls).toContain("restartPane");
+    expect(h.calls.filter((c) => c.startsWith("down:"))).toEqual([]);
   });
 });

@@ -105,10 +105,12 @@ export function listPanesArgv(workspaceId: string): string[] {
  * THIS IS THE ONLY WAY TO ASK CMUX WHICH WORKER A PANE IS, and the reason it
  * exists is that {@link listPanesArgv} does not report titles while pane INDEX
  * is not the console's worker order. Measured on the live development console
- * 2026-09-04, whose workers are `eng-1,eng-2,tst-1,rev-1`:
+ * 2026-09-04, whose fourth seat was then `rev-1` and is now `tst-2` — the
+ * rename moved no pane, so the mapping below is reproduced with the current
+ * id and the ORDER is the measured one:
  *
  *   index 0 -> eng-1    index 1 -> tst-1
- *   index 2 -> eng-2    index 3 -> rev-1
+ *   index 2 -> eng-2    index 3 -> tst-2
  *
  * Index 1 is the THIRD worker. `developmentPanes` builds a 2x2 with
  * `splitFrom`, so creation order and cmux's index disagree, and anything that

@@ -101,6 +101,11 @@ async function main(argv: string[]): Promise<number> {
     import("./commands/status.ts"),
     import("./commands/monitor.ts"),
     import("./commands/worktrees.ts"),
+    // Beside `worktrees` because it is the consumer that matters: `pm-guard
+    // tester-fresh` answers "is THIS clone current" from the same per-worker
+    // checkout `worktrees` lists, and an operator who has just read a stale
+    // base sha out of that table wants the refusal next to it.
+    import("./commands/pm-guard.ts"),
     import("./commands/dispatch.ts"),
     // Beside `dispatch` because it is the same verb with a different asker: the
     // operator dispatches, and `relay` is what turns a COLLATOR's request into

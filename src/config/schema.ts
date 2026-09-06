@@ -78,6 +78,29 @@ export type Isolation = z.infer<typeof IsolationSchema>;
 
 const shortStr = z.string().min(1).max(4096);
 
+/**
+ * A `shortStr` that also refuses a newline, for the two `run.git_identity`
+ * fields (SRD §6.8 — ISC-528).
+ *
+ * These values are delivered through `GIT_CONFIG_VALUE_1`/`_2` in the
+ * container's env FILE, and docker's `--env-file` has no escaping: a newline
+ * does not escape, it terminates the declaration. `worker-env.ts:1199`
+ * already refuses one, so nothing unsanitised has ever reached a container —
+ * but it refuses at `up`, naming `GIT_CONFIG_VALUE_1`, the env key the value
+ * landed in rather than `run.git_identity.name`, the line the operator wrote.
+ * Tracing one to the other means knowing the `GIT_CONFIG_*` mapping by heart.
+ *
+ * Refusing here moves the same failure to `config validate`, where the field
+ * name is what the message can say. The check is a duplicate of a check that
+ * already works, deliberately: this one is about DIAGNOSIS, and the one in
+ * `worker-env.ts` is the one that must never be removed.
+ */
+const gitIdentityStr = shortStr.refine((v) => !/[\r\n]/.test(v), {
+  message:
+    "a git identity may not contain a newline: it is delivered through the container's env file, " +
+    "and docker's --env-file has no escaping, so a newline would terminate the declaration",
+});
+
 // ---------------------------------------------------------------------------
 // Role-level fields — shared by `defaults`, `roles.*`, and worker overrides
 // ---------------------------------------------------------------------------
@@ -341,6 +364,51 @@ export const RunSchema = z
     isolation: IsolationSchema.default("worktree"),
     branch_prefix: shortStr.default("fleet"),
     /**
+     * The identity a worker's commits carry (SRD §6.8, D13 arm 2 — ISC-528).
+     *
+     * Sourced from the run's OWN configuration and delivered through the
+     * `GIT_CONFIG_*` channel in `worker-env.ts:783-787` — never from
+     * `~/.gitconfig`, which is not mounted into the container and must not be
+     * (§6.8: "Does not. Mount the operator's `~/.gitconfig`, or use the
+     * operator's address"). Nested, not two flat keys, so the pair defaults
+     * and travels together — the same shape `timers` and `budget` above use.
+     *
+     * The measured alternative to this field existing is BOTH a refusal and
+     * an invention, in that order, and the order is the point. Task 2.0's
+     * probe was re-taken on this operator's own image on 2026-09-05:
+     * `docker exec -u 10001 <eng-1> git commit --allow-empty` exits 128 with
+     * `fatal: unable to auto-detect email address (got 'pi@<cid>.(none)')`,
+     * because the container's hostname has no domain and `HOME=/home/pi` is
+     * read-only so `--global` is not even available. That refusal is where it
+     * stops for a script. It is NOT where it stops for an agent: a worker
+     * with a writable clone reads the refusal, runs `git config` against
+     * `/workspace` (mode 0777, so a repository-local identity is
+     * self-configurable) and commits anyway — D13's probe caught one doing
+     * exactly that, as `eng-1 <eng-1@pifleet.invalid>`, a value nothing in
+     * the fleet constrained or recorded. So the failure this field closes is
+     * not "commits fail"; it is "commits succeed under a name the fleet
+     * never chose". This field is what the fleet constrains and records them
+     * WITH instead.
+     *
+     * The default is deliberately not a person's name or a plausible one —
+     * `pifleet`, not `pi-worker` or a role name — so a reviewer reading
+     * `git log` sees unambiguously that the fleet made the commit, and
+     * `@pifleet.invalid` uses the domain suffix reserved by RFC 2606 for
+     * exactly this: an address guaranteed never to resolve or belong to
+     * anyone, so it can never collide with an operator's or a real
+     * person's own address. It must never be the operator's own address
+     * (§6.8) — `test/unit/worker-env.test.ts`'s ISC-529 asserts the two
+     * differ, and a fixture where they coincide would not be able to fail
+     * that assertion even if the check were removed.
+     */
+    git_identity: z
+      .object({
+        name: gitIdentityStr.default("pifleet"),
+        email: gitIdentityStr.default("pifleet@pifleet.invalid"),
+      })
+      .strict()
+      .prefault({}),
+    /**
      * The remote this operator consents to send to a HOSTED provider, echoed
      * exactly. `null` means no consent, which is the default and the safe one.
      *
@@ -401,6 +469,22 @@ export const RunSchema = z
  * neighbours.
  */
 export const DEFAULT_BRANCH_PREFIX: string = RunSchema.shape.branch_prefix.parse(undefined);
+
+/**
+ * The git identity a worker's commits carry when no config is reachable (SRD
+ * §6.8, D13 arm 2 — ISC-528).
+ *
+ * Same construction and the same reason as `DEFAULT_BRANCH_PREFIX` above: a
+ * literal `{ name: "pifleet", email: "pifleet@pifleet.invalid" }` restated in
+ * `worker-env.ts` would be correct today and silently wrong the first time
+ * the schema default moves — precisely the drift `branch_prefix` sat unread
+ * through before it gained a reader. `worker-env.ts` reads the *configured*
+ * value off `loaded.config.run.git_identity` for a real run; this constant is
+ * for callers with no `LoadedConfig` to read it from — a test fixture, or a
+ * run directory assembled by hand.
+ */
+export const DEFAULT_GIT_IDENTITY: { name: string; email: string } =
+  RunSchema.shape.git_identity.parse(undefined);
 
 /**
  * The in-flight cap a run gets when no config is reachable.
@@ -1800,6 +1884,39 @@ export function unknownThemeWorkers(cfg: FleetConfig): { id: string; theme: stri
  * the overwhelmingly likely cause is a spelling — `catppuccin` alone, say,
  * where the bundle distinguishes `catppuccin-mocha` from `catppuccin-latte`.
  */
+/**
+ * ISC-529's anti-criterion, made observable (SRD §6.8).
+ *
+ * "No worker commits under the operator's own address" is a rule about what
+ * the fleet CANNOT do, and until this existed nothing checked it: the two
+ * `run.git_identity` fields are free strings, so a config that names the
+ * operator's own address is accepted and every worker then commits as them.
+ * The review round raised it as a consensus finding across two lenses.
+ *
+ * A WARNING, not a refusal, and the distinction is deliberate. The fleet
+ * cannot know that a given address is "the operator's" — it can only compare
+ * against the host's `git config user.email`, which is a good proxy and not a
+ * fact. An operator who genuinely wants worker commits under their own name
+ * is making a provenance decision, not a mistake, and a hard refusal would
+ * make that unreachable rather than deliberate. What matters is that it can
+ * never happen SILENTLY, which is what this closes.
+ *
+ * `operator` is `null` when the host has no `user.email` configured — a
+ * legitimate state (CI, a fresh machine), and one where there is nothing to
+ * collide with, so there is nothing to say.
+ */
+export function operatorIdentityWarning(configured: string, operator: string | null): string | null {
+  if (operator === null || operator.trim().length === 0) return null;
+  if (configured.trim().toLowerCase() !== operator.trim().toLowerCase()) return null;
+  return (
+    `warning: run.git_identity.email is the operator's own address (${configured})\n` +
+    `  Every worker's commits will be authored by you (SRD §6.8): a hosted model's work becomes ` +
+    `indistinguishable from yours in git log, and the integration merge — the one place your ` +
+    `authorship legitimately enters — stops being distinguishable from the commits it merges. ` +
+    `Set run.git_identity to a fleet address, or keep this deliberately.\n`
+  );
+}
+
 export function unknownThemeWarning(
   workers: readonly { id: string; theme: string }[],
 ): string | null {

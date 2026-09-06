@@ -121,6 +121,29 @@ export interface Palette {
    * meanings a yellow line carried.
    */
   readonly workspace: string | undefined;
+  /**
+   * The `provider/model` a run's workers are running, on the run line.
+   *
+   * DARK blue (`blue`), not `blueBright`, and that is the owner's word taken
+   * literally. It also earns it: this is reference text an operator reads when
+   * they go looking for it, never a finding, so it must sit BEHIND the
+   * severity colours in the eye's order. A bright blue would compete with the
+   * bullet, which is the one thing on the frame that must win.
+   *
+   * Its own entry rather than a reuse of {@link dim} for the same reason
+   * {@link workspace} is not a reuse of {@link warn}: a later decision about
+   * what dim means must not silently repaint this.
+   *
+   * **And it collides with {@link busy} exactly as {@link workspace} collides
+   * with {@link warn} — both are `"blue"`.** That is the design (the phase
+   * cell and the model are both meant to sit behind the severity colours), and
+   * it is also the shape that let the workspace heading paint itself from the
+   * wrong entry through a full green suite. No test can tell the two apart on
+   * THIS palette, so `fleet.tsx`'s `runModelStyle` exists to be driven with one
+   * where they differ; that function is the only reader of this entry, which
+   * `monitor-render.test.ts` asserts rather than assumes.
+   */
+  readonly model: string | undefined;
 }
 
 export const PLAIN: Palette = {
@@ -133,6 +156,7 @@ export const PLAIN: Palette = {
   quiet: undefined,
   busy: undefined,
   workspace: undefined,
+  model: undefined,
 };
 
 /**
@@ -160,6 +184,7 @@ export const COLOUR: Palette = {
   quiet: "white",
   busy: "blue",
   workspace: "yellow",
+  model: "blue",
 };
 
 const PaletteContext = createContext<Palette>(PLAIN);
