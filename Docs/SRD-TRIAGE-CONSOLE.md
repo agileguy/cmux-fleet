@@ -1174,6 +1174,27 @@ because it must outlive a run; not a history, because §5.2 refuses one.
 | `firing → clear` | **yes — the recovery notification** | and see the recovery rule below |
 | `firing → flapping` | **yes, once** | see below |
 | `flapping → clear` | **yes**, after `flap_window` of stability | |
+| `flapping → firing` | **yes, once** | after `flap_window` with no observed clear. **Added 2026-09-06 — see below** |
+
+**`flapping → firing` was MISSING, and the hole it left is the worst shape a notifier has — found
+2026-09-06 while implementing task 5.4, from the state machine rather than from a fixture.** A service
+that flaps and then goes hard down was **silent indefinitely**: it is not stable, so `flapping → clear`
+never fires; it is not `firing`, so the re-notify floor never reaches it. The operator's last word on
+it was *"this is flapping"*, which by then is false and reassuring in the wrong direction. **The
+service that most needs attention is the one that goes quiet**, and no probe in §12 would have caught
+it because every flap fixture keeps flapping.
+
+The repair needs **no new knob and no new judgement**, which is what makes it safe to add here rather
+than defer: `flap_window` already means *"how long a thing must hold before I believe it"*, and it is
+spent on stability in one direction and on instability in the other.
+
+| direction | condition over `flap_window` | result |
+|---|---|---|
+| `flapping → clear` | no transitions, and the state observed is healthy | the recovery notification |
+| `flapping → firing` | no transitions, and no observed clear | the open notification, **once**, and the re-notify floor restarts |
+
+The symmetry is the argument: a window of unbroken *anything* means the service has stopped flapping,
+and which state it settled into decides which notification is owed. Task 5.4b.
 
 **Three refinements, each closing a hole a pure transition rule leaves open:**
 
@@ -1235,9 +1256,15 @@ cannot enumerate is a `kind` nobody writes a criterion for.
 
 1. **Confirmation.** One sweep of `blocked` is `provisional` and silent; two consecutive is `firing`
    and notifies **once**. A tunnel down for a day is one notification and then the `renotify_after`
-   floor, which is 4 messages in 24h at the 6h default rather than 288. **The 288-a-day hole is
-   closed by the machine that already existed**, and the only thing that was missing was a key to
-   hang it on.
+   floor — **single digits rather than 288**, and the exact figure is deliberately not stated here
+   any more. **CORRECTED 2026-09-06, found while implementing task 5.4:** this sentence said *"4
+   messages in 24h"* while §12 asked for *"4 reminders"* on top of the open, and both were
+   defensible — the difference is whether the 24h window is closed (`0,6,12,18,24` → one open and
+   four reminders) or half-open (`0,6,12,18` → one open and three). **A criterion whose literal
+   count depends on an unstated inclusivity makes a correct implementation red**, which is worse
+   than the vagueness it was written to avoid. §12 now pins the INSTANTS instead, and the count
+   follows from them; the rule is that each reminder falls exactly one `renotify_after` after the
+   message before it.
 2. **`firing → firing` is silent.** That is the rule §6.8 calls *"the rule that turns 288 into 1"*,
    and it is the direct answer to §6.4's unstated question about skips 4, 5 and 6: they advance
    `sweep_count` and send nothing.
@@ -2237,14 +2264,20 @@ ordering) gains a fourth console that must pass it, and its own closing note —
 - A recovery requires an observed `healthy` with evidence. *Probe: the same fixture with a healthy row
   carrying `coverage[]` and a ledger; assert exactly one recovery notification naming the duration and
   the sweep count.*
-- The re-notify floor fires at most once per `renotify_after`. *Probe: fixture sweeps spanning 24h at
-  the 6h default; assert 4 reminders, not 288.*
+- The re-notify floor fires at most once per `renotify_after`. *Probe: fixture sweeps every 5m from
+  the firing instant `t0` through `t0+24h` inclusive at the 6h default; assert the message instants
+  are **exactly `[t0, t0+6h, t0+12h, t0+18h, t0+24h]` BY VALUE** — one `opened` and four
+  `reminder`s. Asserting instants rather than a count is what makes the criterion survive the
+  inclusivity question that made this number wrong once already (§6.8a), and it still fails a design
+  that sends 288.*
 
 **Console-health deduplication (D13) — the same shape as the block above, applied to the console**
 - **Anti: an observer reporting `blocked` on 288 consecutive sweeps produces one notification.**
   *Probe: drive 288 fixture sweeps in which one environment's observer returns `status: blocked`;
-  assert `notifications.length === 1` plus the `renotify_after` reminders — **4 at the 6h default,
-  and the literal numbers, because "few" would pass a design that sends twelve.** This is the
+  assert one `opened` and the `renotify_after` reminders **at their instants by value**, as the
+  service-path criterion above spells them — **literal and not "few", because "few" would pass a
+  design that sends twelve**, and by instant rather than by count because a bare count inherits the
+  inclusivity ambiguity §6.8a was corrected for. This is the
   288-a-day hole §6.8a was written to close, and asserting it on the service path only would leave it
   open.*
 - **Anti: skips 4, 5 and 6 send nothing.** *Probe: six consecutive fixture passes each finding a
@@ -2661,6 +2694,28 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: §12's four-surfaces probe passes. **And the anti-criterion that outranks it: assert a
   delivery failure never advances or clears an incident** (§6.9 requirement 7) — the plausible
   implementation writes the transition after the `await`, and it fails only this test.*
+- **5.1a** Implement §7.3's resolution: `services: string[]` on `pifleet.dispatchrequest/v1`,
+  required on triage and refused on review with `ConsoleRoster` as the discriminator, spending the
+  two new codes `services_missing` and `services_not_permitted`. **Then wire both waiting modules** —
+  `checkTriagePartition` and `assessTriageSweep` project their partition out of the sweep's requests.
+  Touches: `src/run/dispatch-request.ts`, `test/unit/dispatch-request.test.ts`.
+  *Acceptance: a review request carrying `services` refuses by code; a triage request without it
+  refuses by code; a triage request with it validates against `triage/targets.yaml`; and the
+  `grep -rn` for each module's name finds a caller outside its own file.*
+- **4.5a** Two source probes task 4.5 left open, both in round 6's files. (a) `scripts/triage` spells
+  its four seats as literals rather than importing `DEFAULT_TRIAGE_WORKERS` — behaviourally
+  equivalent today and a silent divergence the day a seat is added; probe it beside the `CONSOLE`
+  probes already in `test/unit/fresh-dispatch.test.ts`. (b) `test/unit/console-restart.test.ts:471`
+  asserts ISC-572 for triage by reading source text, while `test/integration/triage-console.test.ts`
+  now EXECUTES it — keep both and say which is load-bearing. Touches:
+  `test/unit/fresh-dispatch.test.ts`, `test/unit/console-restart.test.ts`, `ISA.md`.
+- **5.4b** The `flapping → firing` edge (§6.8, added 2026-09-06): after `flap_window` with no
+  observed clear, a flapping record opens once and restarts the re-notify floor. Touches:
+  `src/run/triage-incident.ts`, `test/unit/triage-incident.test.ts`, `ISA.md`.
+  *Acceptance: a fixture that flaps and then goes hard down notifies exactly once more and its
+  message instants are asserted by value; the anti-twin — a fixture that keeps flapping — still
+  notifies exactly once in total, so the new edge cannot be satisfied by a machine that re-opens on
+  every sweep.*
 - **5.3b** §6.7 rule 2's fifth condition: a `healthy` whose `coverage[]` is non-empty and whose every
   entry is `not_attempted` fails the gate, spending the existing `coverage` gap rather than a new one.
   Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`, `ISA.md`.
