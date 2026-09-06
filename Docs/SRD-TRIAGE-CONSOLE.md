@@ -237,9 +237,13 @@ possible at all is available only because an `rpc` recreate needs no terminal. �
 The operator can already ask `obs-1` about a service, one service at a time, by hand, and get a good
 answer. What this buys is **the sweep nobody remembers to run**: the check at 03:00, the check on the
 service nobody was thinking about, and — the one that pays for the console — the **before** half of a
-before-and-after. SRD-OBSERVER-001 §9.2a: *"A baseline has to exist before the change to be a
-baseline"*, and today every baseline in this fleet is reconstructed after the fact. A console that
-has been sweeping every five minutes has an observed baseline for free.
+before-and-after. SRD-OBSERVER-001 §2.1 records that a captured baseline is **"absent by
+construction"** for two of its three invocation shapes, because by the time the operator asks, the
+pipeline has already run; the fallback there is to date the anomaly instead, and that document is
+explicit about what the fallback costs — *"It is the fallback, not the general method, because it can
+only speak to anomalies that leave a datable trace, where a baseline captures the whole state."* A
+console that has been sweeping every five minutes holds the whole state, observed, for the shapes
+that today have to fall back to dating.
 
 **What it does not buy, and this must not be implied:** it is not monitoring, it does not replace an
 alerting system, and it has no more coverage than three read-only agents polling four channels can
