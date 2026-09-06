@@ -213,6 +213,34 @@ staged envelope whose trigger line was never typed prints `accepted: true`,
 `via: "staged"` and exits 0. **The JSON cannot tell you the turn never started.
 Only `status` can.**
 
+**Do not eyeball it — `pm-guard` holds the judgement.** Capture both streams and
+ask; it exits 0 when the worker really has the task and 7 when it does not, so
+`&&` is enough to stop the phase over a refusal:
+
+```bash
+cd <repo> && ~/repos/cmux-fleet/scripts/development --restart eng-1 --task <env-1.json> \
+  > /tmp/eng-1-dispatch.json
+cd ~/repos/cmux-fleet && bun run src/cli/index.ts status --run <id> --json > /tmp/status.json
+bun run src/cli/index.ts pm-guard dispatch-started --worker eng-1 --task <task-id> \
+  --dispatch-output /tmp/eng-1-dispatch.json --status /tmp/status.json
+```
+
+It answers with three states and a distinct exit for each.
+
+| exit | state | what it means | what to do |
+|------|-------|---------------|------------|
+| 0 | `started` | the worker is holding this task | continue |
+| 4 | `staged` | the envelope landed, the turn has not begun | **look again — do NOT re-dispatch** |
+| 7 | `refused` | the dispatch never landed | fix the envelope, re-run the same dispatch |
+| 7 | `unconfirmed` | the payload claims success and the fleet does not show it | investigate before anything else |
+
+**`staged` is not a failure and it is not a start**, and keeping those apart is
+the whole point of the step. `via: "staged"` IS success for the question *did the
+envelope land*, which is why re-dispatching on it is the documented mistake. It
+is not an answer to *did the turn start*, and the accepted payload carries no
+field that separates the two. **`unconfirmed` is the dangerous one**, because
+everything an operator would look at reads like success.
+
 **4. Wait, then harvest.**
 
 ```bash
@@ -335,6 +363,21 @@ at.
 Write the integration record. Then repeat steps 2-5 for `tst-1` and `tst-2` —
 AFTER the merge, so each tester's clone holds both engineers' work. Each tester
 takes the files its paired engineer touched.
+
+**Prove the clone is current before dispatching, rather than trusting the
+order.** A restart that silently did not happen leaves a tester that runs a real
+suite against the previous phase's tree and reports a real pass about it —
+nothing in the envelope, the status table or the result marks it, and a worker's
+clone has no remotes so it cannot fetch the merge afterwards:
+
+```bash
+cd ~/repos/cmux-fleet && bun run src/cli/index.ts pm-guard tester-fresh \
+  --worker tst-1 --phase <n> --repo <repo>
+```
+
+Exit 0 means the clone contains every commit this phase merged. Exit 7 names the
+ones it is missing, and the only remedy is `--restart … --task` so the tester
+re-clones from the checkout as it now stands.
 
 **6. Review, in the review console.**
 

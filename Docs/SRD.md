@@ -1696,6 +1696,8 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet status [--run r] [--watch]` | fleet snapshot |
 | `pifleet monitor [--once] [--poll s]` | live fleet viewer; read-only (SRD-FLEET-MONITOR) |
 | `pifleet worktrees [--run r]` | list every worker's per-worker checkout — branch, path, clean/dirty; the operator-visibility surface `git worktree list` no longer answers now that each worker is an independent clone rather than a linked worktree (§9.2 erratum) |
+| `pifleet pm-guard dispatch-started` | confirm from `status` — never from the dispatch payload — that a dispatched task actually started; exit 7 distinguishes a dispatch that was REFUSED from one that reported success the fleet cannot corroborate (SRD-FLEET-PROJECT-MANAGER §8.2 step 3) |
+| `pifleet pm-guard tester-fresh` | refuse a tester whose clone predates this phase's integration merge, before it runs a real suite against the previous phase's tree and reports a real pass about it; a worker's clone has no remotes, so a restart is the only remedy |
 | `pifleet dispatch --worker <id> --task <file\|->` / `--auto --tasks <f>` | send task envelopes |
 | `pifleet steer --worker <id> "msg"` | mid-turn correction |
 | `pifleet relay [--run r] [--once] [--poll s]` | the review console's ACTOR (SRD-REVIEW-CONSOLE §6.5): poll collators' `dispatch-request.json`, validate, and perform the fan-out host-side. Restartable by design — its state is the run tree, so `--once` and the polling loop are the same pass. Beside `dispatch` because it is the same verb with a different asker: the operator dispatches, and `relay` is what turns a *collator's* request into dispatches |
