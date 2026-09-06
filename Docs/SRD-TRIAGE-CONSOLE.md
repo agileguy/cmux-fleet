@@ -1854,6 +1854,22 @@ can say which of `absent` and `out_of_range` occurred.
 
 ### 7.5 `triage.json` — new
 
+> **A SECOND GAP in `roles/triage.md`, found while implementing task 5.5a and fixed the same day as
+> task 5.1c — and this one FAILED OPEN.** The worked example at `roles/triage.md:288-317` disagreed
+> with this contract in three places: `coverage[]` held channel NAMES rather than `{channel, result}`
+> entries, `evidence_ref` was a single string rather than a ledger array, and `unaccounted[]` held
+> objects rather than service names. Two of the three would have refused the sweep. **The third was
+> silent and inverted the evidence gate**: `attempted(entry)` is `entry.result !== "not_attempted"`,
+> a string entry has no `result`, and `undefined !== "not_attempted"` is `true` — so every channel
+> NAME counted as an attempted channel, §6.7 rule 2's first condition could never fail, and a row
+> carrying no evidence at all passed the gate built to catch exactly that.
+>
+> **Task 5.1b fixed the request example in the same file and did not look at the rest of it.** That
+> is the orchestrator's miss and the lesson generalises past this document: a schema change obliges
+> an audit of every worked example a container reads, not of the one that prompted the change.
+> `test/unit/triage-document.test.ts` now parses this example through the real schema and asserts
+> the three shapes on the PARSED value, so a later relaxation cannot re-open the silent one.
+
 > **GAP found while implementing task 5.3, 2026-09-06: nothing validates this document.** §7.6's
 > per-service records are *"Zod-validated on read, so a malformed record refuses rather than being
 > acted on"*; this contract has no schema, and no task in §13 assigns it one — task 5.5 covers the
@@ -1884,10 +1900,22 @@ worker-claim-versus-host-count distinction §6.7 turns on.
 
 ### 7.6 The incident record — new
 
-`~/.pifleet/triage/<env>/<service>.json`. `state`, `since`, `last_seen`, `sweep_count`,
-`consecutive_indeterminate`, `flap_transitions[]` (timestamps inside `flap_window`),
-`last_notified_at`, `undelivered[]`, and `last_artifact_ref`. Zod-validated on read, so a malformed
-record refuses rather than being acted on — SRD-FLEET-PM-001 Phase 5 task 5.4's rule.
+`~/.pifleet/triage/<env>/<service>.json`. **`subject`**, `state`, **`reason`**, `since`,
+`last_seen`, `sweep_count`, `consecutive_indeterminate`, `flap_transitions[]` (timestamps inside
+`flap_window`), `last_notified_at`, `undelivered[]`, and `last_artifact_ref`. Zod-validated on read,
+so a malformed record refuses rather than being acted on — SRD-FLEET-PM-001 Phase 5 task 5.4's rule.
+
+> **CORRECTED 2026-09-06 while implementing task 5.5: this list omitted `subject` and `reason`**,
+> both of which `IncidentRecord` has carried since round 7 and both of which are load-bearing.
+> `subject` is what `advanceIncident` compares to refuse a foreign observation; `reason` is what the
+> recovery notification names. The list grew rather than the record shrinking — the code was right
+> and the contract was short, which is the direction that costs nothing to fix and would have cost a
+> schema had it been resolved the other way.
+
+**§6.8a's console-health records are the SECOND kind and share this file layout**, keyed under a
+`_console` subject rather than a service. They cannot collide: `SESSION_ID_RE` requires an
+alphanumeric first character, so no environment or service can be named `_console` and the two
+layouts are unrepresentable as the same path — prevented rather than merely unlikely.
 
 ### 7.7 The actor record — new, and deliberately the relay's shape
 
@@ -2795,6 +2823,13 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: a probe reads `roles/triage.md` and asserts the example parses through
   `parseDispatchRequest` under `TRIAGE_CONSOLE_ROSTER` — the same working-tree source-probe posture
   ISC-600 forced on `scripts/`, for the same reason: nothing else checks this file.*
+- **5.1c** Correct `roles/triage.md:288-317`'s `triage.json` worked example to §7.5's contract —
+  `coverage[]` as `{channel, result}`, `evidence_ref` as a ledger array, `unaccounted[]` as service
+  names — and hold it there with a probe. **DONE 2026-09-06.** Touches: `roles/triage.md`,
+  `src/run/triage-document.ts`, `test/unit/triage-document.test.ts`.
+  *Acceptance: the example parses through `parseTriageDocument`, AND the three shapes are asserted
+  on the parsed value so a later relaxation cannot re-open the silent failure; the example carries
+  both an attempted and a `not_attempted` channel so it teaches the whole enum.*
 - **5.4c** Blind flapping records escalate as COVERAGE, not as an issue (§6.8). Widen
   `onUnobserved`'s coverage escalation to include `flapping` — the same `COVERAGE_THRESHOLD` applied
   to one more state, not a new judgement — and narrow the `flapping → firing` edge to require an

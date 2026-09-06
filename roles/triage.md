@@ -296,26 +296,48 @@ to be long.
       "service": "mia",
       "observer": "obs-t1",
       "assessment": "healthy",
-      "coverage": ["rollout", "logs", "sink"],
+      "coverage": [
+        {"channel": "rollout", "result": "answered"},
+        {"channel": "logs", "result": "answered"},
+        {"channel": "sink", "result": "not_attempted"}
+      ],
       "selector": "app=mia",
       "window": "5m",
-      "evidence_ref": "obs-t1:observer-ops.json#services[0]"
+      "evidence_ref": ["obs-t1:observer-ops.json#services[0]"]
     },
     {
       "service": "authorization",
       "observer": "obs-t2",
       "assessment": "unhealthy",
-      "coverage": ["rollout", "logs"],
+      "coverage": [
+        {"channel": "rollout", "result": "answered"},
+        {"channel": "logs", "result": "answered"}
+      ],
       "selector": "app=authorization",
       "window": "5m",
-      "evidence_ref": "obs-t2:observer-ops.json#services[0]"
+      "evidence_ref": ["obs-t2:observer-ops.json#services[0]"]
     }
   ],
-  "unaccounted": [
-    {"service": "authentication", "reason": "obs-t3 produced no report"}
-  ]
+  "unaccounted": ["authentication"]
 }
 ```
+
+**Three shapes worth reading twice, because the obvious guess is wrong for each.**
+
+- **`coverage` is a list of `{channel, result}` objects, not a list of channel names.** `result`
+  is one of `answered`, `unreachable`, `forbidden`, `not_attempted`. A bare list of names is
+  the shape that reads naturally and it is refused — and before the host validated this
+  document it did something worse than refuse it: a string where an object belongs has no
+  `result` at all, and the host's *"was anything attempted"* test passed every entry. **A row
+  with no real coverage sailed through the gate that exists to catch exactly that.**
+  `unreachable` and `forbidden` are ATTEMPTS and count as evidence; only `not_attempted` does
+  not. A channel you were refused by RBAC is a channel you tried.
+- **`evidence_ref` is an array**, even when there is one reference. One ledger entry is a
+  one-element list.
+- **`unaccounted` is a list of service NAMES**, not of objects. There is no `reason` field to
+  fill in: the host counts coverage from its own run tree and needs the names to compare
+  against it, and your account of *why* belongs in the report you write beside this file. A
+  document that carries a reason here is refused whole and the sweep produces nothing.
 
 Field rules. **They are not all enforced the same way, and each says which** — a rule list that
 claims uniform enforcement it does not have is the same defect as a document naming a path that
@@ -334,9 +356,9 @@ does not exist.
   is **downgraded to `indeterminate`** and recorded as unevidenced. It cannot tell a lazy
   `healthy` from a real one; it can tell one with evidence attached from one without. So a row
   you trimmed to keep the document tidy arrives as a service nobody could see. Carry the
-  observer's ledger reference through. **`evidence_ref` names the observer and the row inside
-  its artifact** — the host already holds that reply and resolves the reference against it, so
-  it needs no path, and it must never carry a host path.
+  observer's ledger references through. **Each `evidence_ref` entry names the observer and the
+  row inside its artifact** — the host already holds that reply and resolves the reference
+  against it, so it needs no path, and it must never carry a host path.
 - **A service you could not account for goes in `unaccounted`, never in `services` with a
   guess.** No row at all is better than a row you invented, and **a `healthy` you wrote for a
   service nobody looked at is the single most damaging thing this console can emit** — because

@@ -29,11 +29,13 @@
  *    holds a ledger array. `row.evidence_ref.some` is not a function on a string,
  *    so the sweep throws out of the verdict rather than returning one.
  *
- * So the two shapes on either side of this boundary disagree today, one of the
- * disagreements is silent, and the silent one fails OPEN. `TRIAGE_DOCUMENT_GAP`
- * carries the finding to a reader of this module, and
- * `test/unit/triage-document.test.ts` drives `roles/triage.md` itself so the
- * divergence cannot be outlived by either side changing alone.
+ * The two shapes on either side of this boundary DID disagree, one of the
+ * disagreements was silent, and the silent one failed OPEN — see
+ * {@link TRIAGE_DOCUMENT_HISTORY}, kept after the correction because the failure
+ * mode is the interesting part and a fixed bug with no record is one that comes
+ * back. `test/unit/triage-document.test.ts` drives `roles/triage.md`'s own
+ * example through this schema, so the divergence cannot be outlived by either
+ * side changing alone.
  *
  * ## Refused BY NAME, and each name reachable by exactly ONE fault
  *
@@ -128,13 +130,17 @@ export const TRIAGE_DOCUMENT_SCHEMA = "pifleet.triage/v1";
  * a promise that lives only in a test file is one a reader of the module never
  * sees. `roles/triage.md` is not this task's file to edit.
  */
-export const TRIAGE_DOCUMENT_GAP =
-  "roles/triage.md:288-317's worked example disagrees with §7.5's host contract in three " +
-  "places: coverage[] is an array of channel names rather than {channel, result} entries, " +
-  "evidence_ref is a single string rather than a ledger array, and unaccounted[] is an array " +
-  "of objects rather than of service names. Until that example is corrected the live console " +
-  "refuses its own first sweep — and before this schema existed it did something worse, " +
-  "because a string coverage[] satisfies §6.7 rule 2's evidence gate.";
+export const TRIAGE_DOCUMENT_HISTORY =
+  "roles/triage.md's worked example disagreed with §7.5's host contract in three places until " +
+  "2026-09-06: coverage[] was an array of channel names rather than {channel, result} " +
+  "entries, evidence_ref was a single string rather than a ledger array, and unaccounted[] " +
+  "was an array of objects rather than of service names. Two of the three would have refused " +
+  "the sweep. The coverage one FAILED OPEN and is why this constant is kept after the fix: a " +
+  "string entry has no `result`, `undefined !== \"not_attempted\"` is true, and every channel " +
+  "NAME therefore counted as an attempted channel — so §6.7 rule 2's first condition could " +
+  "never fail and a row carrying no evidence at all passed the gate built to catch it. " +
+  "test/unit/triage-document.test.ts now parses the document's own example through this " +
+  "schema, so neither side can drift again alone.";
 
 /** Prose the worker chose: bounded, never a path, never a segment. */
 const shortStr = z.string().max(4096);

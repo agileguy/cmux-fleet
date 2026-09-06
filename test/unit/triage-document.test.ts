@@ -37,7 +37,7 @@ import { join } from "node:path";
 
 import {
   TRIAGE_DOCUMENT_FAULTS,
-  TRIAGE_DOCUMENT_GAP,
+  TRIAGE_DOCUMENT_HISTORY,
   TRIAGE_DOCUMENT_SCHEMA,
   parseTriageDocument,
   type TriageDocumentContext,
@@ -558,22 +558,55 @@ describe("roles/triage.md's example against the schema it is supposed to satisfy
     expect(jsonBlocks().filter((b) => b.includes(TRIAGE_DOCUMENT_SCHEMA))).toHaveLength(1);
   });
 
-  test("it does NOT yet satisfy §7.5, and the three fields are named", () => {
+  test("it satisfies §7.5, parsed through the real schema", () => {
     const body = jsonBlocks().find((b) => b.includes(TRIAGE_DOCUMENT_SCHEMA))!;
     const got = parseTriageDocument(body, CTX);
-    if (got.kind !== "refused") {
+    if (got.kind !== "ok") {
+      // The union here is `ok | refused`, so this branch is the refusal.
       throw new Error(
-        "roles/triage.md's example now parses. That is the FIX, not a regression: delete this " +
-          "test, keep the one above, and assert `read.kind === \"ok\"` instead.",
+        `roles/triage.md's example is refused ${got.code}: ` +
+          got.issues.map((i) => `${i.path} ${i.fault}`).join("; "),
       );
     }
+    expect(got.document.services.length).toBeGreaterThan(1);
+  });
 
-    expect(got.code).toBe("schema");
-    const paths = got.issues.map((i) => i.path);
-    // Each of the three, by name. A count would not say which drifted.
-    expect(paths).toContain("services.0.coverage.0");
-    expect(paths).toContain("services.0.evidence_ref");
-    expect(paths.some((p) => p.startsWith("unaccounted.0"))).toBe(true);
+  /**
+   * ANTI, and it is what stops "it parses" from becoming the whole claim.
+   *
+   * A later schema that relaxed `coverage[]` back to strings would keep the test
+   * above green while re-opening the exact defect the correction closed — a
+   * string entry has no `result`, so `undefined !== "not_attempted"` is true and
+   * every channel NAME counts as an attempted channel. So the three shapes that
+   * were wrong are asserted BY SHAPE on the parsed value, not merely parsed.
+   */
+  test("the three shapes that were wrong are asserted on the parsed value", () => {
+    const body = jsonBlocks().find((b) => b.includes(TRIAGE_DOCUMENT_SCHEMA))!;
+    const got = parseTriageDocument(body, CTX);
+    if (got.kind !== "ok") throw new Error("premise failed: the example no longer parses");
+    const row = got.document.services[0]!;
+
+    // coverage[] carries OBJECTS with a result in the closed set, never names.
+    expect(row.coverage.length).toBeGreaterThan(0);
+    for (const entry of row.coverage) {
+      expect(typeof entry).toBe("object");
+      expect(COVERAGE_RESULTS).toContain(entry.result);
+    }
+    /*
+     * The premise for the gate below: the example must carry at least one
+     * `not_attempted` AND at least one attempt, or it teaches only half the enum
+     * and the fifth gate condition is unexercised by the document a model copies.
+     */
+    expect(row.coverage.some((e) => e.result === "not_attempted")).toBe(true);
+    expect(row.coverage.some((e) => e.result !== "not_attempted")).toBe(true);
+
+    // evidence_ref is a LEDGER, even at length one.
+    expect(Array.isArray(row.evidence_ref)).toBe(true);
+    expect(row.evidence_ref.length).toBeGreaterThan(0);
+
+    // unaccounted[] is service NAMES.
+    expect(got.document.unaccounted.length).toBeGreaterThan(0);
+    for (const name of got.document.unaccounted) expect(typeof name).toBe("string");
   });
 
   /**
@@ -581,9 +614,9 @@ describe("roles/triage.md's example against the schema it is supposed to satisfy
    * code meets it, and is driven here so it is a test rather than a comment —
    * `ADVANCE_READS_NO_SUBJECT_FIELD`'s pattern.
    */
-  test("the gap is stated where a reader of the module will find it", () => {
-    expect(TRIAGE_DOCUMENT_GAP).toContain("roles/triage.md");
-    expect(TRIAGE_DOCUMENT_GAP).toContain("evidence_ref");
+  test("the failure mode is recorded where a reader of the module will find it", () => {
+    expect(TRIAGE_DOCUMENT_HISTORY).toContain("roles/triage.md");
+    expect(TRIAGE_DOCUMENT_HISTORY).toContain("FAILED OPEN");
   });
 
   /**
