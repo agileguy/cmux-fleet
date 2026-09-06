@@ -678,6 +678,16 @@ folds the clock into the same process as the fan-out for that reason rather than
 
 ### 6.1 The console — four `rpc` seats, one run, and no keyboard
 
+> **CORRECTION 2026-09-06, measured while implementing task 4.4: this console is four runs, not one,
+> and so is every other console in the fleet.** `agentSquarePanes` gives each seat its own pane whose
+> command is `pifleet up --workers <one worker>`, and `operations-plan.ts:310` states it outright —
+> *"Each pane creates its own run."* `./scripts/triage --dry-run` prints exactly that. The heading's
+> "one run" is what the design intended and not what the fleet does; the same measurement is what
+> closed §13 task 0.4, where `run.max_concurrent` turned out to have had nothing to bind on at any
+> value. **Nothing in Phases 1–5 depends on the difference** — `consoleRunPins` reads live status, so
+> the pin machinery works either way. **Phase 6's recycling does**: "`down` then `up` between sweeps"
+> is written against the one-run reading and must be re-read as four runs before 6.6 is implemented.
+
 ```yaml
 # fleet.yaml — the `triage` console
 roles:
@@ -1601,6 +1611,26 @@ own task id and must match the directory it was written into.
 
 Consumed as-is. What changes is the roster it is validated against (§2.1) and two new refusal codes
 (§6.5).
+
+**OPEN 2026-09-06, found while implementing task 5.1, and it blocks the actor rather than the check.**
+This section fixes the document at `worker`/`title`/`brief` **and nothing else**, so a
+`dispatch-request.json` carries **no machine-readable service list**. §6.3 step 5 nevertheless has the
+actor *"validate the partition against the targets file"*, and §6.5 makes completeness the host's
+question on the ground that *"a model that partitions can drop"*. **There is no specified way for the
+host to recover which services each request covers**, short of parsing the brief's prose — which is
+the one thing a check against a partitioning model must not depend on.
+
+`src/run/triage-partition.ts` is therefore built over a partition VALUE and is correct as written;
+what is unspecified is its caller. Three arms, and the choice belongs to Phase 6:
+
+1. **A structured field on the request.** Cheapest to check, but it reopens §7.3's closed shape, and
+   that shape is closed for a measured reason.
+2. **A sidecar the worker writes beside the request**, leaving `pifleet.dispatchrequest/v1` untouched.
+3. **The ACTOR assigns the services and the worker returns only an ordering.** This deletes the
+   completeness question rather than answering it — the host cannot drop what it dealt itself — and
+   costs §6.5's premise that the partition is the model's judgement.
+
+Until this is settled, `checkTriagePartition` has no production caller and cannot have one.
 
 ### 7.4 `observer-ops.json` — existing, plus two required fields
 
