@@ -5,10 +5,11 @@
   "branch_kind": "long-lived",
   "base": "main",
   "total_phases": 9,
-  "current_phase": 1,
-  "current_round": 2,
+  "current_phase": "3 (+2)",
+  "current_round": 3,
   "completed_phases": [
-    0
+    0,
+    1
   ],
   "phase_0_note": "Owner tasks. D1 arm 3 (all four seats local gpt-oss-20b-MXFP4-Q8), max_concurrent 4, channel drift closed. 0.3 moot. Q11 (ntfy token) outstanding, gates Phase 8 only.",
   "rounds": [
@@ -58,6 +59,32 @@
           "test/unit/triage-targets.test.ts"
         ]
       },
+      "verified_commit": "ae5e72f",
+      "verified_how": "Diff plus suite. 4347/0 and tsc clean. ISC-574..581 written into ISA.md by the orchestrator from both engineers' reported criteria. ISC-579 graded [~]: the fence function is mutation-proved fifteen ways but NO src/ module imports triage-targets.ts, so it defends a function rather than a system. Its probe is pinned to `grep -rn triage-targets src/` being EMPTY, verified empty today, so task 3.5 turns it red."
+    },
+    {
+      "round": 3,
+      "phase": "3+2",
+      "tasks": {
+        "eng-1": [
+          "3.3",
+          "3.4"
+        ],
+        "eng-2": [
+          "2.1"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/run/triage-config.ts",
+          "test/unit/triage-config.test.ts"
+        ],
+        "eng-2": [
+          "src/run/dispatch-request.ts",
+          "src/run/task-ids.ts",
+          "test/unit/dispatch-request.test.ts"
+        ]
+      },
       "verified_commit": null
     }
   ],
@@ -79,5 +106,6 @@
     "cosmetic": "doctor-allowlist.test.ts:43 comment says 'The three fleet.example.yaml names' against four (constant is hardcoded, nothing fails). fleet.example.yaml workers: header says '8 panes' against 14 -- wrong before this branch."
   },
   "task_1_1a": "DONE 2026-09-06 by the orchestrator. Live fleet.yaml carries the triage role (lifted verbatim from the tracked example) and the four seats, with NO model override on the observers because this file's observer role already is the 20b. config validate exits 0; the four seats resolve rpc + gpt-oss-20b-MXFP4-Q8. Untracked by design, so this record is the only evidence it happened.",
-  "baseline_suite": "4296 pass / 0 fail / 199 files / 117s, measured 2026-09-06 on the branch after round 1 plus three orchestrator fixes"
+  "baseline_suite": "4347 pass / 0 fail / 200 files / 115s, typecheck clean, measured 2026-09-06 after round 2",
+  "git_lesson": "An earlier orchestrator commit claimed test/unit/role-briefings.test.ts and did not contain it. `git add` aborts the ENTIRE invocation when any one pathspec does not match, the invocation named a file a later rename had already moved, and its stderr went to /dev/null -- so it staged nothing and said nothing, while the commit still succeeded on what `git mv` had already staged. Every check afterwards read the WORKING TREE, where the fix was present, so a green suite kept confirming a state the branch did not have. Stage one path per add when the list is heterogeneous; never redirect its stderr."
 }
