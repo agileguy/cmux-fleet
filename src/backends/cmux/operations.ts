@@ -293,7 +293,7 @@ export function adoptionRefusal(
   planned: readonly string[],
 ): string | null {
   const key = (xs: readonly (string | null)[]): string =>
-    [...xs].map((t) => t ?? " untitled").sort().join("");
+    [...xs].map((t) => t ?? "\u0000untitled").sort().join("\u0001");
   if (key(present) === key(planned)) return null;
   return (
     `${workspaceName}: a workspace already titled '${workspaceName}' is open and its panes are ` +
