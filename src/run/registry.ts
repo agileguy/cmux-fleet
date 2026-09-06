@@ -590,6 +590,36 @@ export async function socketRequest(
   if (opts.secret !== undefined) msg = { ...msg, [AUTH_FIELD]: opts.secret };
   const splitter = new LineSplitter();
 
+  /*
+   * The request is written WITH BACKPRESSURE, and that is not a refinement.
+   *
+   * `socket.write` returns the number of bytes it actually took. A unix stream
+   * socket on macOS has an 8 KiB send buffer (`net.local.stream.sendspace`), so
+   * any request larger than that is accepted only in part — and a single
+   * unchecked `write` therefore drops the tail on the floor. The far end is
+   * reading LINES, so a truncated request never completes one: the server waits
+   * for a newline that was never sent, the client waits for a response that
+   * will never come, and the whole thing surfaces as `no response in 5000ms`
+   * against a supervisor that is perfectly healthy and still heartbeating.
+   *
+   * Measured on this repository: a task envelope with a 6.5 KB brief staged
+   * fine and one with a 7.6 KB brief timed out every time, on freshly created
+   * runs, with no special characters involved. Size alone.
+   *
+   * `drain` resumes the flush when the kernel has room again, so the loop below
+   * is the whole fix: write, keep what was not taken, return, and be called
+   * back.
+   */
+  let pending = new TextEncoder().encode(`${JSON.stringify(msg)}\n`);
+  const flush = (socket: { write(data: Uint8Array): number }): void => {
+    while (pending.byteLength > 0) {
+      const wrote = socket.write(pending);
+      // 0 (or a refusal) means the buffer is full; `drain` will call us back.
+      if (wrote <= 0) return;
+      pending = pending.subarray(wrote);
+    }
+  };
+
   return await new Promise<Record<string, unknown>>((resolve, reject) => {
     let done = false;
     const finish = (fn: () => void) => {
@@ -606,7 +636,10 @@ export async function socketRequest(
       unix: path,
       socket: {
         open(socket) {
-          socket.write(`${JSON.stringify(msg)}\n`);
+          flush(socket);
+        },
+        drain(socket) {
+          flush(socket);
         },
         data(socket, chunk) {
           for (const line of splitter.push(chunk)) {
