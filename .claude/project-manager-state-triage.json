@@ -231,7 +231,7 @@
       "verified_note": "eng-1 d502448; eng-2 fdb21a7/36b54d9/8e5b9f6. unit 4580 pass, full 5271 pass / 149 skip / 0 fail, typecheck clean. Both modules land UNWIRED by design - 5.1a is their caller."
     }
   ],
-  "status": "in_progress",
+  "status": "in_progress_hold_after_round_8",
   "version_file": "package.json",
   "open_operator_items": [
     "Q11: mint ntfy token for the Alerts topic, set notify.token_env (gates Phase 8 only)"
@@ -273,5 +273,11 @@
     "5.3b",
     "5.3c",
     "5.5a"
-  ]
+  ],
+  "hold": {
+    "set": "2026-09-06, by the operator: 'hold at the end of this round'",
+    "means": "Verify round 8 from the diff, grade it into ISA.md, commit, report. Then STOP: no round 9 dispatch, no push, no PR.",
+    "resume_with": "Round 9 candidates: 5.5a (zod schema for triage.json), 4.5a (two source probes), 5.3a (saturation), 5.4a (console-health identities), 5.5, 5.6/a/b, 5.7.",
+    "open_decision": "5.3c \u2014 SRD \u00a76.6 layer 3's window_opened_at echo is specified and enforced nowhere. Orchestrator's recommendation is to grow \u00a77.4's field rather than strike the clause, needing no new knob. NOT written in; left for the operator."
+  }
 }
