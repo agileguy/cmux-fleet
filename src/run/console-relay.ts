@@ -69,20 +69,105 @@ import { writeJsonAtomic } from "../util/jsonl.ts";
 import { runsRoot } from "./paths.ts";
 
 /**
- * Where the record lives: BESIDE the runs root, not inside it.
+ * Every console that has an actor, and therefore a set of bookkeeping files.
+ *
+ * This is a FILENAME NAMESPACE, not a second console registry: the rosters and
+ * aspect tables live in `cli/commands/relay.ts`'s `CONSOLES`, which this module
+ * cannot import — `cli/commands/relay.ts` imports `ConsoleWatch` from here, so a
+ * value import the other way is a runtime cycle, which is the same reason that
+ * file gives for owning the registry in the first place.
+ *
+ * Two lists that must agree is a shape this repository already distrusts, so it
+ * is closed the way `ConsoleSpec`'s two fields are: `console-relay.test.ts`
+ * asserts SET EQUALITY against `CONSOLES`, so a console registered without
+ * bookkeeping paths — or a name here with no console — is a red test rather than
+ * an actor writing a file no manager reads.
+ */
+export const CONSOLE_NAMES = ["review", "triage"] as const;
+export type ConsoleName = (typeof CONSOLE_NAMES)[number];
+
+/**
+ * The basename stem for one console's bookkeeping, and the ONLY place the
+ * console name becomes part of a path.
+ *
+ * ## The membership check is not defensive programming against the type system
+ *
+ * `tsconfig.json` includes `src/**` and `test/**` and nothing else, and
+ * `scripts/review` cannot be pulled in transitively either — it runs `main()` at
+ * import, which is why `review-console-relay.test.ts`'s own header says *"nothing
+ * in it can be imported by a test"*. So **the only production caller of these
+ * three functions is a file the compiler never opens.** `ConsoleName` disciplines
+ * `src/` and `test/`; this check is what disciplines the console scripts, and
+ * without it a `scripts/triage` that passed a name nobody registered would
+ * quietly bookkeep into a fourth set of files while the real triage actor used
+ * the first — two actors, one console, no lock between them.
+ *
+ * It also refuses the traversal shape for free. The argument is interpolated into
+ * a basename beside `~/.pifleet`, so `"../.."` would name a path outside it; a
+ * `join` that silently escapes its directory is worth a throw rather than a
+ * comment.
+ */
+function consoleStem(console_: ConsoleName): string {
+  if (!(CONSOLE_NAMES as readonly string[]).includes(console_)) {
+    throw new Error(
+      `${JSON.stringify(console_)} is not a console this actor keeps books for ` +
+        `(${CONSOLE_NAMES.join(", ")}). The name becomes a filename beside the runs root, so an ` +
+        `unrecognised one is refused rather than joined: it would give a second actor its own ` +
+        `record and lock, which is exactly the mutual exclusion those files exist to provide.`,
+    );
+  }
+  return `${console_}-relay`;
+}
+
+/**
+ * Where the record lives: BESIDE the runs root, not inside it, and PER CONSOLE.
  *
  * Inside would put a non-run file in the directory `runIdsAscending` enumerates,
  * which is how a stray filename becomes a run id and then a path segment. The
  * parent is `~/.pifleet` by default and follows `PIFLEET_RUNS_DIR` when it is
  * set, so a test never touches the operator's own.
+ *
+ * ## Why the console is a REQUIRED first parameter and not an optional last one
+ *
+ * These three basenames were `review-relay.{json,log,lock}`, host-wide, and
+ * `pifleet relay --console triage` shipped before this did — so a triage actor
+ * started today would write the review console's record and take the review
+ * console's lock. §9.13 names the symptom and it is the silent one: *"the review
+ * console silently stops fanning out"*.
+ *
+ * The tempting fix is `relayRecordPath(env, console = "review")`, and it is the
+ * bug rather than the fix. A defaulted console is precisely the copy-paste
+ * hazard: the caller that forgets the argument is the one that claims somebody
+ * else's lock, and it compiles. Required makes the omission a type error at every
+ * call site the compiler can see.
+ *
+ * **Console FIRST is then forced, not chosen.** TypeScript will not let a
+ * required parameter follow an optional one, and `env` must stay optional —
+ * it is the seam every hermetic test in this repository uses to point the whole
+ * module at a temp directory. Console-first also makes the old spelling loud
+ * rather than merely wrong: `relayRecordPath(env)` fails to compile because a
+ * `Record` is not a `ConsoleName`, where `relayRecordPath(env)` under the
+ * defaulted shape would have kept compiling and kept meaning "review".
+ *
+ * The review console's three basenames are UNCHANGED by the parameterisation.
+ * That is deliberate: an operator upgrading has a relay running right now, and a
+ * rename would orphan its record — leaving a live actor nothing on disk names,
+ * which is the *"background process nobody can name"* this file's header calls
+ * the real content of §6.5's objection.
  */
-export function relayRecordPath(env: Record<string, string | undefined> = process.env): string {
-  return join(dirname(runsRoot(env)), "review-relay.json");
+export function relayRecordPath(
+  console_: ConsoleName,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return join(dirname(runsRoot(env)), `${consoleStem(console_)}.json`);
 }
 
-/** Where a detached relay's stdout and stderr go. Beside the record. */
-export function relayLogPath(env: Record<string, string | undefined> = process.env): string {
-  return join(dirname(runsRoot(env)), "review-relay.log");
+/** Where a detached relay's stdout and stderr go. Beside the record, per console. */
+export function relayLogPath(
+  console_: ConsoleName,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return join(dirname(runsRoot(env)), `${consoleStem(console_)}.log`);
 }
 
 export const RelayRecordSchema = z.object({
@@ -90,6 +175,38 @@ export const RelayRecordSchema = z.object({
   pid: z.number().int().positive(),
   /** A `processStartTime` token. The half that survives a recycled pid. */
   started: z.string(),
+  /**
+   * WHICH CONSOLE THIS ACTOR SERVES — the coarsest half of the identity, and the
+   * one whose absence `servesConsole` could not see.
+   *
+   * `run_id` and `workers` below discriminate two REVIEW consoles from each
+   * other. Neither discriminates a review console from a triage one, and after
+   * `--console <name>` shipped that is a live pair rather than a hypothetical.
+   *
+   * ## Tolerant on read, strict on write, and the asymmetry is the whole design
+   *
+   * `.default("")` rather than a required field, on this schema's own precedent:
+   * `workers` was added to a shipped record exactly this way, with a default
+   * whose value matches NOTHING, so an older record parses and is adopted by
+   * nobody. `contracts.ts` states the idiom for the registry's identical field —
+   * *"Empty string means 'not recorded' … Fail-closed is preserved."*
+   *
+   * Making it required instead would turn every record written before this change
+   * into `unreadable`, and `unreadable` is — correctly — the one verdict that
+   * refuses to signal or delete anything. A running review relay would become a
+   * process the script declines to touch and a file only a human can clear. The
+   * default costs one relay restart on upgrade instead, automatically: `""` names
+   * no console, `servesConsole` refuses it, and `scripts/review` replaces it.
+   *
+   * The write side gets no such tolerance — see `writeRelayRecord`. A record
+   * SAVED without a console is a copy-paste bug, not history.
+   *
+   * `z.string()` and not `z.enum(CONSOLE_NAMES)`: a record naming a console this
+   * build has never heard of must be READABLE and unadoptable, not `unreadable`.
+   * Refusing to parse it is the direction that leaves an actor running with no
+   * record any manager will look at.
+   */
+  console: z.string().default(""),
   /**
    * The run this relay was pointed at — the collator's, under D4.
    *
@@ -230,9 +347,28 @@ export async function readRelayStatus(path: string): Promise<RelayStatus> {
  * and `unreadable` is — correctly — the one verdict that refuses to signal or
  * delete anything. The console would be permanently actorless until a human
  * deleted a file, and the refusal that made it so would be right at every step.
+ *
+ * ## AND THE CONSOLE IS CHECKED HERE, WHERE THE SCHEMA'S TOLERANCE STOPS
+ *
+ * `console` defaults to `""` so a record written before it existed still parses.
+ * That tolerance is about HISTORY and must not extend to new writes: `.parse`
+ * would fill `""` in silently for a caller that simply forgot the field, and the
+ * result is a live actor whose record no console will ever adopt — a relay that
+ * gets stopped and respawned on every run of the script, forever, for a reason
+ * nothing prints.
+ *
+ * The caller that would forget is not hypothetical. `RelayRecord` is the schema's
+ * OUTPUT type, so `console` is required on it and `src/` and `test/` callers get
+ * a type error — but the only production writer is `scripts/review`, which
+ * `tsconfig.json` does not include and no test can import. This throw is the
+ * check that reaches it, and the next console's script is the one it is for.
  */
 export async function writeRelayRecord(path: string, record: RelayRecord): Promise<void> {
-  await writeJsonAtomic(path, RelayRecordSchema.parse(record));
+  const parsed = RelayRecordSchema.parse(record);
+  // Reuses the path validator so "a name that may be written" and "a name that
+  // may be a filename" cannot drift into two different answers.
+  consoleStem(parsed.console as ConsoleName);
+  await writeJsonAtomic(path, parsed);
 }
 
 /**
@@ -346,11 +482,31 @@ export function consoleRelayArgv(cliEntry: string, runId: string): string[] {
  * OURS. Conflating them is exactly the defect this pair replaces — a manager
  * that returned early on "running" never reached the run it should have compared
  * against, so the check compared nothing.
+ *
+ * ## THE NAME IS COMPARED FIRST, AND UNTIL NOW IT WAS NOT COMPARED AT ALL
+ *
+ * This function is called `servesConsole` and asked about a run id and a worker
+ * set. Both discriminate one review console from another review console; neither
+ * can tell a review console from a triage one, so the question in the name was
+ * the one question it did not answer. That was harmless while `review` was the
+ * only console with an actor and stopped being harmless when `--console <name>`
+ * shipped.
+ *
+ * First, because it is the coarsest and because a mismatch here means the
+ * comparison below is meaningless rather than merely negative: two consoles'
+ * worker sets are disjoint by construction, so `false` from the worker arm would
+ * be RIGHT for the wrong reason, and a fixture in which the rosters happened to
+ * overlap would make it wrong outright.
+ *
+ * A record whose `console` is `""` — written before the field existed — matches
+ * no console and is adopted by none. Fail-closed, and the same posture the `""`
+ * start-time sentinel gets from `readRelayStatus`.
  */
 export function servesConsole(
   record: RelayRecord,
-  console_: { runId: string; workers: readonly string[] },
+  console_: { name: ConsoleName; runId: string; workers: readonly string[] },
 ): boolean {
+  if (record.console !== console_.name) return false;
   if (record.run_id !== console_.runId) return false;
   /**
    * Order-insensitive: `--workers` is a list the operator types and the pane
@@ -521,9 +677,23 @@ export async function acquireRelayLock(path: string): Promise<{ release: () => P
   return await claim();
 }
 
-/** Where the start lock lives. Beside the record, and removed with it. */
-export function relayLockPath(env: Record<string, string | undefined> = process.env): string {
-  return join(dirname(runsRoot(env)), "review-relay.lock");
+/**
+ * Where the start lock lives. Beside the record, per console, and removed with it.
+ *
+ * **This is the file §9.13 is about.** The lock is what makes "one starter at a
+ * time" true, and a host-wide lock makes it true across CONSOLES as well — so a
+ * triage actor starting while the review console holds it is told *"another
+ * ./scripts/review is starting the relay right now"* and starts nothing, or wins
+ * the race and leaves the review console's starter refusing instead. Per-console
+ * is not a tidiness change: it is the difference between mutual exclusion between
+ * two starters of the SAME actor, which is what the lock is for, and mutual
+ * exclusion between two different consoles, which is a deadlock dressed as one.
+ */
+export function relayLockPath(
+  console_: ConsoleName,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return join(dirname(runsRoot(env)), `${consoleStem(console_)}.lock`);
 }
 
 export function signalRelay(pid: number): "signalled" | "gone" | "refused" {

@@ -106,6 +106,24 @@ import { recreateThenDispatch, resolveThenRestart } from "../src/run/fresh-dispa
 import { processStartTime } from "../src/safety/procstart.ts";
 import { consoleRunPins, relayRunPinValue, runsHoldingAny } from "../src/run/status-runs.ts";
 
+/**
+ * WHICH CONSOLE THIS SCRIPT IS, SPELLED ONCE.
+ *
+ * The actor's record, log and lock are per-console (`console-relay.ts`), and this
+ * name selects all three plus the identity `servesConsole` compares. It is a
+ * constant rather than five literals because the next console's script is a copy
+ * of this one, and a copy in which exactly one line has to change is a copy that
+ * can be made correctly. Five scattered `"review"`s is how §9.13 happens: *"a
+ * copy-paste actor claims `review-relay.lock`"*, and the symptom is a review
+ * console that silently stops fanning out.
+ *
+ * `scripts/` is not in `tsconfig.json`'s `include` and this file cannot be
+ * imported by a test — it runs `main()` at import — so nothing here is
+ * typechecked. `relayRecordPath` and friends validate the name at runtime for
+ * exactly that reason.
+ */
+const CONSOLE = "review";
+
 const USAGE = `Usage: scripts/review [options]
 
   --workers <ids>   comma-separated pifleet workers, in pane order
@@ -426,7 +444,7 @@ async function main(argv: string[]): Promise<number> {
  * refuses every pid it cannot confirm for the same reason.
  */
 async function stopRelay(why: string): Promise<void> {
-  const path = relayRecordPath();
+  const path = relayRecordPath(CONSOLE);
   const status = await readRelayStatus(path);
   switch (status.kind) {
     case "absent":
@@ -504,7 +522,7 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
   const map = consoleRunPins(await runOutput(repoRoot, ["status", "--all", "--json"]), workers);
   const runId = map.pins.get(collator);
 
-  const path = relayRecordPath();
+  const path = relayRecordPath(CONSOLE);
   const existing = await readRelayStatus(path);
 
   /**
@@ -527,7 +545,7 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
   }
 
   if (existing.kind === "live") {
-    if (runId !== undefined && servesConsole(existing.record, { runId, workers })) {
+    if (runId !== undefined && servesConsole(existing.record, { name: CONSOLE, runId, workers })) {
       process.stdout.write(
         `review: the relay is already running (pid ${existing.record.pid}, run ` +
           `${existing.record.run_id}); its output is in ${existing.record.log_path}\n`,
@@ -548,9 +566,21 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
       );
       return;
     }
+    /*
+     * The mismatch is NAMED rather than assumed to be the run, because it is now
+     * three fields and the record may predate one of them. A relay written before
+     * `console` existed carries `""`, which matches nobody — and on the upgrade
+     * run its run id is very often THIS console's, so the old wording printed
+     * "serves run r-1, not this console's r-1" and read as a bug in the script
+     * rather than as the one-time replacement it is.
+     */
+    const mismatch =
+      existing.record.console !== CONSOLE
+        ? `serves console ${JSON.stringify(existing.record.console)}, not ${JSON.stringify(CONSOLE)}` +
+          `${existing.record.console === "" ? " (a record written before the actor named its console)" : ""}`
+        : `serves run ${existing.record.run_id}, not this console's ${runId}`;
     process.stderr.write(
-      `review: the running relay (pid ${existing.record.pid}) serves run ` +
-        `${existing.record.run_id}, not this console's ${runId} — stopping it\n`,
+      `review: the running relay (pid ${existing.record.pid}) ${mismatch} — stopping it\n`,
     );
     await stopRelay("because it serves a different console");
   }
@@ -573,18 +603,18 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
    * spawn — the loser is told rather than silently adding a second actor to a
    * console that can only account for one.
    */
-  const lock = await acquireRelayLock(relayLockPath());
+  const lock = await acquireRelayLock(relayLockPath(CONSOLE));
   if (lock === null) {
     process.stderr.write(
       `review: another ./scripts/review is starting the relay right now ` +
-        `(${relayLockPath()} is held), so this one did not\n`,
+        `(${relayLockPath(CONSOLE)} is held), so this one did not\n`,
     );
     return;
   }
 
   try {
     const pinned = relayRunPinValue(map, workers);
-    const logPath = relayLogPath();
+    const logPath = relayLogPath(CONSOLE);
     // Appended to, never truncated: the log is the only place a refusal a
     // detached process printed can be read afterwards, and a restart must not
     // erase the reason the previous relay stopped.
@@ -628,6 +658,7 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
       schema: "pifleet.consolerelay/v1",
       pid: proc.pid,
       started,
+      console: CONSOLE,
       run_id: runId,
       pinned,
       workers: [...workers],
