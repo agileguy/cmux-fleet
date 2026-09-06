@@ -898,3 +898,152 @@ export const REVIEW_TOP_FRACTION: number | null = null;
 export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
   return agentSquarePanes(opts, DEFAULT_REVIEW_WORKERS, "review");
 }
+
+// ---------------------------------------------------------------------------
+// The `triage` console — a reconciler and three observers (SRD-TRIAGE-CONSOLE)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `triage` workspace's `--name`, and its idempotency key.
+ *
+ * Exact-matched on `custom_title` for the reason {@link OPERATIONS_WORKSPACE}
+ * records. FOUR consoles now share one adoption rule and must never adopt each
+ * other, which exact matching on four distinct names gives for free — and this
+ * is the console where a mis-adoption would be quietest, because it is the one
+ * nobody is sitting in front of.
+ */
+export const TRIAGE_WORKSPACE = "triage";
+
+/**
+ * The four workers the triage console stands up, in PANE ORDER.
+ *
+ * ```
+ * +---------------+---------------+
+ * |     tri-1     |     obs-t1    |
+ * +---------------+---------------+
+ * |    obs-t2     |     obs-t3    |
+ * +---------------+---------------+
+ * ```
+ *
+ * THE RECONCILER IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for
+ * a weaker version of its reason. Pane 1 consumes the workspace's initial
+ * surface and is where the operator lands. Nobody drives this console by typing
+ * — see the fraction below — but somebody DEBUGS it, and `tri-1` is the seat
+ * that holds the reconciliation the other three feed, so it is the pane worth
+ * landing on when a sweep has said something surprising.
+ *
+ * `tri-1` RECONCILES AND THE THREE OBSERVERS FAN OUT, which is the review
+ * console's collator/reviewer shape reappearing over a different role pair
+ * (`fleet.example.yaml`'s `triage` role and three `observer` seats). That is not
+ * a coincidence and it is already load-bearing elsewhere: `ConsoleRoster`
+ * (`src/run/dispatch-request.ts:279`) was written over the two ROLES rather than
+ * over `col-1`, so `TRIAGE_CONSOLE_ROSTER` needed no schema change, no new
+ * refusal and no branch — SRD-TRIAGE-CONSOLE D5's bet, collected once already.
+ * This constant is the same bet on the layout plane, and `triagePanes` below is
+ * what it buys: three lines.
+ *
+ * NONE OF THE FOUR IS ATTENDED, and that is the whole difference from
+ * `development` and `review`. Both of those are four keyboards and therefore
+ * four runs; this console is ONE run of four `rpc` seats
+ * (`pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3`), because a console that
+ * dispatches 288 times a day cannot afford a `tui` seat: `tui` allocates no
+ * epoch, so without the `already_completed` fence a re-dispatched sweep runs
+ * twice, `dispatch --auto` refuses a `tui` worker outright
+ * (`pane_mode_tui_is_not_auto_schedulable`), and closing the pane stops the
+ * worker. SRD-TRIAGE-CONSOLE §2.2, §2.3.
+ *
+ * **The plan cannot ENFORCE that, and the enforcement is not missing — it is
+ * elsewhere, twice.** `tuiWorkers` is a caller's argument, so a driver that
+ * passed these four would get four attended panes out of this function. What
+ * stops it is the config (all four resolve to `pane_mode: rpc` from their roles,
+ * with no worker-level override) and `up`'s own one-tui-worker guard. What this
+ * plan owns is the DEFAULT: name no `tuiWorkers` and no pane carries
+ * `--attach-here`, which is the opposite disposition from `scripts/review`.
+ *
+ * THE COST, stated as its two siblings state theirs: one run at
+ * `run.max_concurrent: 4` is four seats sharing one admission budget, so the
+ * three-way fan-out has exactly enough room and none spare. A fourth environment
+ * is a `max_concurrent` decision before it is a worker line
+ * (`fleet.example.yaml:67-82`).
+ */
+export const DEFAULT_TRIAGE_WORKERS: readonly string[] = [
+  "tri-1",
+  "obs-t1",
+  "obs-t2",
+  "obs-t3",
+];
+
+/**
+ * The triage console's panes are EQUAL, and `null` says so — but the argument
+ * that gets there is not {@link REVIEW_TOP_FRACTION}'s, and copying it would
+ * have hidden the reason this console is the clearest `null` of the four.
+ *
+ * ## A fraction moves a ROW, and this console's rows do not match its roles
+ *
+ * `applyTopFraction` addresses the BORDER BETWEEN THE ROWS
+ * (`operations.ts:494-542` — a pane in the top row has no border above it and
+ * cmux refuses `-U` there), so the only thing a fraction can express is "the top
+ * two panes over the bottom two". Read that against the square above: the top
+ * row is `tri-1` AND `obs-t1`, the bottom row is `obs-t2` and `obs-t3`.
+ *
+ * So the preference somebody would reach for this constant to state — *give the
+ * reconciler more room than the observers* — **is not expressible at all**. Any
+ * value that grew `tri-1` would grow `obs-t1` by exactly as much and shrink
+ * `obs-t2` and `obs-t3`, privileging one arbitrary observer over its two
+ * identical siblings for a reason nobody could write down. `0.65` here would not
+ * be a layout with a rationale; it would be a layout with a typo's shape.
+ *
+ * This is a stronger statement than {@link REVIEW_TOP_FRACTION}'s *"there is
+ * nothing to favour"*, and deliberately so: that argument concedes the day
+ * somebody decides there IS something to favour, and this one does not.
+ *
+ * ## What `OPERATIONS_TOP_FRACTION` exists for, which this console does not have
+ *
+ * 0.65 corrects a console whose rows are UNLIKE — two agent panes over one
+ * full-width monitor that says its piece in a handful of lines and repeats.
+ * Every pane here is an agent's view, so the rows are alike and `new-split`'s
+ * halves are already the answer. `null` skips the resize outright rather than
+ * asking for a fraction of `1/2` and leaning on the sub-pixel guard to make it a
+ * no-op: {@link DEVELOPMENT_TOP_FRACTION} records why a value that happens to
+ * round to nothing must not stand in for a stated one.
+ *
+ * ## And the reason that is this console's alone: nobody is watching
+ *
+ * Height is a claim about where an eye should go first, and on the ordinary path
+ * there is no eye — this console runs on a clock, 288 sweeps a day, with no
+ * keyboard in any seat. The moment it IS read is after something has already
+ * gone wrong, and then the interesting pane is whichever one broke. A layout
+ * that had pre-committed to an answer would be wrong three times in four.
+ *
+ * ## WHEN THIS SHOULD BECOME A NUMBER, named so the next reader knows the trigger
+ *
+ * If the pane plan ever stops being four agent views — SRD-TRIAGE-CONSOLE §11
+ * Q6 leaves open a `pifleet monitor` pane or a tail of the actor's log, and
+ * either would make the bottom row a status readout rather than an agent. That
+ * is precisely `OPERATIONS_TOP_FRACTION`'s situation, and at that point a
+ * fraction stops being unexpressible and starts being required.
+ */
+export const TRIAGE_TOP_FRACTION: number | null = null;
+
+/**
+ * The triage console's panes, in creation order.
+ *
+ * The same 2x2 as {@link reviewPanes} and {@link developmentPanes}, built by the
+ * same {@link agentSquarePanes} — only the default worker set and the name in a
+ * refusal differ. **That this is three lines is the claim SRD-TRIAGE-CONSOLE D5
+ * makes about the whole design**: a fourth console is a DATA addition. The
+ * request plane collected that bet already (`TRIAGE_CONSOLE_ROSTER` added two
+ * values and changed no logic); this is the layout plane collecting it, and the
+ * split table — the part that actually breaks, because pane 4 must anchor on
+ * pane 2 rather than on pane 3 — is read from one place for the third time
+ * rather than copied for the second.
+ *
+ * `triage-plan.test.ts` pins that structurally rather than taking it on trust:
+ * this plan's split table is compared against `reviewPanes`' at RUNTIME on one
+ * shared worker set, so a copy made here would pass on the day it was written
+ * and redden the moment `agentSquarePanes` moved — which is the only day the
+ * difference between sharing and copying has ever cost anything.
+ */
+export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
+  return agentSquarePanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
+}

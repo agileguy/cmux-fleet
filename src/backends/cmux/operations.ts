@@ -64,9 +64,12 @@ import {
   OPERATIONS_WORKSPACE,
   REVIEW_TOP_FRACTION,
   REVIEW_WORKSPACE,
+  TRIAGE_TOP_FRACTION,
+  TRIAGE_WORKSPACE,
   developmentPanes,
   operationsPanes,
   reviewPanes,
+  triagePanes,
   type OperationsPane,
   type OperationsPlanOptions,
 } from "./operations-plan.ts";
@@ -142,6 +145,29 @@ export const REVIEW_SPEC: WorkspaceSpec = {
   name: REVIEW_WORKSPACE,
   panes: reviewPanes,
   topFraction: REVIEW_TOP_FRACTION,
+};
+
+/**
+ * The scheduled triage console: a reconciler top-left, three observers around
+ * it, and NOT ONE KEYBOARD between them.
+ *
+ * The FOURTH value in this file and still not a fourth builder, which is the
+ * whole of what {@link WorkspaceSpec} was written to buy and the whole of what
+ * SRD-TRIAGE-CONSOLE D5 bet on. Three fields, no branch, no new argument: the
+ * BUILD-FIRST-CLOSE-SECOND order in {@link ensureWorkspace} — a measured lesson
+ * that cost a destroyed console once — is stated in exactly one place and cannot
+ * be got backwards a fourth time.
+ *
+ * `topFraction` is `null` here for an argument that is NOT `REVIEW_SPEC`'s. See
+ * {@link TRIAGE_TOP_FRACTION}: a fraction moves the border between the two ROWS,
+ * and this console's reconciler shares its row with one of its three observers,
+ * so the preference somebody would reach for it to state cannot be stated at
+ * all.
+ */
+export const TRIAGE_SPEC: WorkspaceSpec = {
+  name: TRIAGE_WORKSPACE,
+  panes: triagePanes,
+  topFraction: TRIAGE_TOP_FRACTION,
 };
 
 /**
@@ -764,4 +790,53 @@ export async function ensureReview(
       planned,
     ),
   );
+}
+
+/**
+ * {@link ensureWorkspace} for the scheduled triage console.
+ *
+ * Identical in shape to {@link ensureDevelopment} and deliberately NOT to
+ * {@link ensureReview}, which is the one decision in this function and is worth
+ * the paragraph it costs.
+ *
+ * ## NO ADOPTION GUARD, and that is a choice rather than an omission
+ *
+ * `ensureReview` carries §6.10's guard for a MEASURED reason, not a
+ * precautionary one: a `review` workspace was already open on this machine
+ * before the console existed, so the exact-title match had something real to
+ * collide with. {@link adoptionRefusal} exists for that collision. There is no
+ * such measurement for `triage`, and {@link ensureWorkspace}'s own docblock says
+ * why that matters — the guard is opt-in *"because the hazard is not
+ * universal"*, and *"a guard that fires on the healthy case is one that gets
+ * deleted."*
+ *
+ * The honest reading of the risk is also smaller than it first looks. ADOPTION
+ * ALONE DESTROYS NOTHING: the adoption arm selects the workspace and returns,
+ * and the two operations that would damage somebody's window — `--recreate`,
+ * which closes it, and `--restart <id>`, which respawns a pane — are both flags
+ * an operator types. The guard's value is in catching the collision BEFORE they
+ * reach for one, which is a `scripts/triage` concern and is where §6.10 scoped
+ * the refusal for `review` too.
+ *
+ * ## What WOULD change this, stated so the silence is not read as coverage
+ *
+ * A `triage` workspace observed on a machine that this console did not build.
+ * At that point the guard is one closure argument — `ensureWorkspace` already
+ * takes it, and takes it as a parameter precisely so the console-shaped policy
+ * can live with the console — and the change is `ensureReview`'s three lines.
+ * What it must NOT become is a branch inside `ensureWorkspace` on which console
+ * is asking.
+ *
+ * One asymmetry pulls the other way and is recorded rather than acted on: this
+ * is the console nobody watches. A `review` mis-adoption is four wrong panes in
+ * front of a person; a `triage` mis-adoption is four wrong panes in a window
+ * nobody opens. That raises the cost of being wrong here without raising the
+ * evidence that it will happen, which is the trade this decision takes.
+ */
+export async function ensureTriage(
+  client: CmuxClient,
+  opts: OperationsPlanOptions,
+  recreate = false,
+): Promise<EnsureResult> {
+  return ensureWorkspace(client, TRIAGE_SPEC, opts, recreate);
 }

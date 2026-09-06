@@ -17,8 +17,18 @@ import { describe, expect, test } from "bun:test";
 
 import { CmuxClient } from "../../src/backends/cmux/client.ts";
 import type { ExecResult } from "../../src/container/run.ts";
-import { DEFAULT_OPERATIONS_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
-import { cmuxReachable, ensureOperations, selectWorkspaceArgv } from "../../src/backends/cmux/operations.ts";
+import {
+  DEFAULT_OPERATIONS_WORKERS,
+  DEFAULT_TRIAGE_WORKERS,
+} from "../../src/backends/cmux/operations-plan.ts";
+import {
+  TRIAGE_SPEC,
+  cmuxReachable,
+  createWorkspace,
+  ensureOperations,
+  ensureTriage,
+  selectWorkspaceArgv,
+} from "../../src/backends/cmux/operations.ts";
 
 const REPO = "/Users/x/repos/cmux-fleet";
 const CWD = "/Users/x/repos/somewhere-else";
@@ -287,6 +297,238 @@ describe("creating the workspace", () => {
      * for this pane to report on correctly or otherwise.
      */
     expect(commands[1]).toContain("'monitor'");
+  });
+});
+
+/**
+ * The `triage` console, driven through the same scripted `Exec`.
+ *
+ * ## Why this block is here rather than only in `triage-plan.test.ts`
+ *
+ * That file pins the PLAN — a pure function returning titles, splits and command
+ * strings. It cannot see whether anything ever asks for that plan. `TRIAGE_SPEC`
+ * and `ensureTriage` are the wiring between the plan and a live cmux, and a test
+ * that imported the constant and asserted its three fields would prove only that
+ * an object literal has the shape it was written with. So every assertion below
+ * is made on the CALLS the fake actually received.
+ *
+ * ## The asymmetry that makes these probes mean something
+ *
+ * `TRIAGE_SPEC.topFraction` is `null` and `OPERATIONS_SPEC`'s is `0.65`, and
+ * that difference is OBSERVABLE rather than merely declared: `applyTopFraction`
+ * returns immediately on `null`, before it reads geometry, so this console
+ * issues exactly ONE `list-panes` where the operations console issues two. The
+ * fraction is therefore pinned by behaviour and not by reading the constant back
+ * — a spec that had copied `OPERATIONS_TOP_FRACTION` reddens here.
+ */
+describe("the triage console is built from its own spec", () => {
+  test("an existing triage workspace is adopted, and nothing is created or respawned", async () => {
+    const { client, calls } = fakeCmux({
+      workspaces: [
+        { id: "ws-ops", custom_title: "operations" },
+        { id: "ws-tri", custom_title: "triage" },
+      ],
+    });
+
+    const result = await ensureTriage(client, OPTS);
+
+    expect(result).toEqual({ created: false, workspaceId: "ws-tri" });
+    // The whole verb list, not a count. This console holds four containers on
+    // one run; "refresh it" and "destroy it" are the same call from outside, and
+    // it is the console nobody is watching while it happens.
+    expect(verbsOf(calls)).toEqual(["workspace list", "select-workspace"]);
+    expect(calls[1]).toEqual(selectWorkspaceArgv("ws-tri"));
+  });
+
+  test("…unless --recreate, which BUILDS first and closes the old one second", async () => {
+    /*
+     * The `recreate` parameter is EXERCISED rather than merely accepted. Without
+     * this the argument could be dropped on the floor — `ensureWorkspace(client,
+     * TRIAGE_SPEC, opts)` with no fourth argument typechecks, keeps every other
+     * probe in this block green, and silently turns the one flag that repairs a
+     * stale console into a no-op.
+     *
+     * The order is the operations console's measured lesson, and it is stated
+     * once in `ensureWorkspace` precisely so a fourth console cannot get it
+     * backwards: closing first on a machine where this is the only workspace
+     * leaves cmux with no window, and every later call fails with `TabManager
+     * not available` — including the create that was meant to rebuild it.
+     */
+    const { client, calls } = fakeCmux({
+      workspaces: [{ id: "ws-tri", custom_title: "triage" }],
+    });
+
+    const result = await ensureTriage(client, OPTS, true);
+
+    expect(result.created).toBe(true);
+    const verbs = verbsOf(calls);
+    expect(verbs).toContain("workspace close");
+    expect(verbs.indexOf("workspace create")).toBeLessThan(verbs.indexOf("workspace close"));
+    // By the OLD id, never by a re-query: the only moment two workspaces share
+    // this title is between those two calls.
+    expect(calls[verbs.indexOf("workspace close")]).toEqual(["workspace", "close", "ws-tri"]);
+  });
+
+  test("a review workspace is NOT adopted as this console's", async () => {
+    // Four consoles now share one adoption rule, and it is an exact match on
+    // `custom_title`. A prefix or substring rule would let any two of the four
+    // adopt each other and split this console's panes into the review console's
+    // window — with four `pifleet up` commands respawned over whatever was in
+    // them.
+    const { client, calls } = fakeCmux({
+      workspaces: [
+        { id: "ws-rev", custom_title: "review" },
+        { id: "ws-dev", custom_title: "development" },
+        { id: "ws-t", custom_title: "triage-old" },
+      ],
+    });
+
+    const result = await ensureTriage(client, OPTS);
+
+    expect(result).toEqual({ created: true, workspaceId: "ws-new" });
+    expect(verbsOf(calls)).toContain("workspace create");
+  });
+
+  test("issues one create, three splits and four respawns — and only ONE list-panes", async () => {
+    const { client, calls } = fakeCmux();
+
+    const result = await ensureTriage(client, OPTS);
+
+    expect(result).toEqual({ created: true, workspaceId: "ws-new" });
+    expect(verbsOf(calls)).toEqual([
+      "workspace list",
+      "workspace create",
+      // Pane 1 consumes the surface `workspace create` opened with — no split.
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
+      "select-workspace",
+      // ONE `list-panes`, for the focus lookup, and no second one for geometry.
+      // The operations console's equivalent test pins TWO, because its
+      // `topFraction` is 0.65 and `applyTopFraction` reads geometry to correct
+      // it. `null` returns before that read, so the absence of a second call is
+      // this spec's fraction asserted through behaviour.
+      "list-panes",
+      "focus-pane",
+    ]);
+  });
+
+  test("the four named seats get the four panes, in pane order", async () => {
+    const { client, calls } = fakeCmux();
+    await ensureTriage(client, OPTS);
+
+    const titles = calls
+      .filter((c) => verb(["cmux", ...c]) === "rename-tab")
+      .map((c) => c[c.indexOf("--title") + 1]);
+    // THE NAMED SEATS, never a count: three consoles are one function call apart
+    // and a spec pointed at the wrong constant would still produce four panes in
+    // a 2x2 and stand up the wrong fleet.
+    expect(titles).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
+    // …and against the exported default rather than only against literals, so a
+    // seat renamed in the plan and not here is a red test rather than a console
+    // whose panes are titled for workers it never starts.
+    expect(titles).toEqual([...DEFAULT_TRIAGE_WORKERS]);
+  });
+
+  test("each seat's own `up` reaches the pane that was created for it", async () => {
+    const { client, calls } = fakeCmux();
+    await ensureTriage(client, OPTS);
+
+    const commands = calls
+      .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
+      .map((c) => c[c.indexOf("--command") + 1]!);
+
+    expect(commands).toHaveLength(DEFAULT_TRIAGE_WORKERS.length);
+    DEFAULT_TRIAGE_WORKERS.forEach((worker, i) => {
+      expect(commands[i]).toContain(`'--workers' '${worker}'`);
+    });
+    /*
+     * NOT ONE KEYBOARD, which is this console's defining property and the reason
+     * it is one run rather than four. `--attach-here` is what would make a seat
+     * `tui` in practice, and `tui` allocates no epoch: without the
+     * `already_completed` fence a re-dispatched sweep runs twice, which a console
+     * dispatching 288 times a day is the least able thing in this fleet to
+     * afford (SRD-TRIAGE-CONSOLE §2.3).
+     *
+     * Asserted HERE as well as in `triage-plan.test.ts` because the two claims
+     * differ: that file pins the plan's default, and this pins that the caller
+     * on the ensure path adds no `tuiWorkers` of its own.
+     */
+    for (const c of commands) expect(c).not.toContain("'--attach-here'");
+  });
+
+  test("the square is a square — the bottom-right pane anchors on the top-right", async () => {
+    const { client, calls } = fakeCmux();
+    await ensureTriage(client, OPTS);
+
+    const surfaceOf = (c: string[]) => c[c.indexOf("--surface") + 1];
+    const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
+
+    expect(splits.map((c) => c[1])).toEqual(["right", "down", "down"]);
+    /*
+     * THE ANCHORS ARE THE WHOLE TEST, as they are for the operations console.
+     *
+     *   right off surf-0 — obs-t1 beside the reconciler
+     *   down  off surf-0 — obs-t2 under the reconciler   (splitFrom 0)
+     *   down  off surf-1 — obs-t3 under obs-t1           (splitFrom 1)
+     *
+     * The last one is why `splitFrom` exists. Split off its PREDECESSOR — surf-2
+     * — the fourth pane stacks a third row in the left column and the console
+     * comes out 3+1 while every count, title and direction assertion still
+     * passes.
+     */
+    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-0", "surf-1"]);
+    // Every pane respawns into the surface it was given, and never twice into
+    // one: a stale anchor repeats an id here.
+    const respawned = calls
+      .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
+      .map(surfaceOf);
+    expect(respawned).toEqual(["surf-0", "surf-1", "surf-2", "surf-3"]);
+  });
+
+  test("the workspace is named `triage` and opened on the INVOCATION directory", async () => {
+    const { client, calls } = fakeCmux();
+    await ensureTriage(client, OPTS);
+    const create = calls.find((c) => verb(["cmux", ...c]) === "workspace create")!;
+    // `--name` is what `findWorkspaceByTitle` matches on next time, exactly.
+    expect(create[create.indexOf("--name") + 1]).toBe("triage");
+    expect(create[create.indexOf("--cwd") + 1]).toBe(CWD);
+    // Never steal focus while building; the workspace is selected at the end.
+    expect(create[create.indexOf("--focus") + 1]).toBe("false");
+  });
+
+  /**
+   * `ensureTriage` DRIVES `TRIAGE_SPEC`, and not some other spec that happens to
+   * agree with it today.
+   *
+   * Every probe above would also pass if `ensureTriage` inlined its own literal,
+   * or named a spec that is currently identical. Building the same console
+   * straight from the exported value and comparing the two call streams is what
+   * pins the wiring itself — `TRIAGE_SPEC` is the one edit point, so a future
+   * change to it must reach the entry point the driver calls.
+   *
+   * `slice(1)` drops `ensureTriage`'s own `workspace list`: that is the adoption
+   * probe, which `createWorkspace` does not perform and must not.
+   */
+  test("is the exported spec, not a second copy of it", async () => {
+    const viaEnsure = fakeCmux();
+    await ensureTriage(viaEnsure.client, OPTS);
+
+    const viaSpec = fakeCmux();
+    await createWorkspace(viaSpec.client, TRIAGE_SPEC, OPTS);
+
+    expect(viaEnsure.calls.slice(1)).toEqual(viaSpec.calls);
+    // And the spec's name is the title the create actually used, rather than a
+    // field nothing reads.
+    expect(TRIAGE_SPEC.name).toBe("triage");
   });
 });
 
