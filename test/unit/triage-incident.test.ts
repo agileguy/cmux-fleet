@@ -39,23 +39,39 @@
  * as arithmetic.
  */
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 
 import {
   ADVANCE_READS_NO_ISSUE_REASON,
   ADVANCE_READS_NO_SUBJECT_FIELD,
+  CONSOLE_HEALTH_KINDS,
+  CONSOLE_SCOPE,
   COVERAGE_THRESHOLD,
+  INCIDENT_RECORD_FAULTS,
+  INCIDENT_STATES,
+  MAX_FLAP_TRANSITIONS,
+  MAX_UNDELIVERED,
+  IncidentPathError,
+  ISSUE_REASONS,
+  OBSERVED_ISSUE_REASONS,
   advanceIncident,
   freshIncidentRecord,
+  incidentRecordPath,
+  incidentRecordRoot,
+  loadIncidentRecord,
+  parseIncidentRecord,
   subjectKey,
   type IncidentAdvance,
   type IncidentNotification,
   type IncidentPolicy,
   type IncidentRecord,
+  type IncidentRecordRead,
   type IncidentSignal,
   type IncidentSubject,
   type ObservedIssueReason,
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
+import { TRIAGE_DOCUMENT_FAULTS } from "../../src/run/triage-document.ts";
 
 /** A round wall-clock start, so every timestamp below reads as an offset. */
 const T0 = Date.UTC(2026, 8, 6, 0, 0, 0);
@@ -1339,7 +1355,8 @@ describe("one machine — §13 task 5.4a's premise, asserted rather than promise
       expect(kinds(stepB.notifications)).toEqual(kinds(stepA.notifications));
       // Every notification names ITS OWN subject, copied through untouched.
       for (const note of stepB.notifications) expect(note.subject).toEqual(other);
-      expect({ ...stepB.record, subject: SERVICE }).toEqual(stepA.record);
+      const rebased: IncidentRecord = { ...stepB.record, subject: SERVICE };
+      expect(rebased).toEqual(stepA.record);
       a = stepA.record;
       b = stepB.record;
     }
@@ -1445,5 +1462,633 @@ describe("the record's own shape", () => {
     // and this is not among them, so it lives here as a named constant.
     expect(COVERAGE_THRESHOLD).toBe(3);
     expect(shipped).not.toHaveProperty("coverage_threshold");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §7.6 — the record on disk, and the validated read (§13 task 5.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The runs-root seam every hermetic test in this repository uses, so no
+ * assertion below can name a path under the operator's own `~/.pifleet`.
+ *
+ * ISC-614's rule stated as a fixture: `~/.pifleet` is keyed off `$HOME` rather
+ * than off the checkout, so isolating the TREE isolates nothing here.
+ */
+const ENV = { PIFLEET_RUNS_DIR: "/tmp/pifleet-fixture/runs" };
+
+/** A `_console`-scoped console-health subject, and an environment-scoped one. */
+const SKIPS: IncidentSubject = {
+  kind: "console_health",
+  scope: CONSOLE_SCOPE,
+  health: "sweeps_skipped",
+};
+const BLOCKED: IncidentSubject = {
+  kind: "console_health",
+  scope: "cni-prod",
+  health: "observer_blocked",
+};
+
+const PATH = "/tmp/pifleet-fixture/triage/cni-prod/authorization.json";
+
+/** A record as JSON, the way a previous run left it. */
+const onDisk = (record: unknown): string => JSON.stringify(record);
+
+/** Parse, and fail loudly rather than silently skipping when it refuses. */
+function parsedOk(text: string, expected: IncidentSubject = SERVICE): IncidentRecord {
+  const read = parseIncidentRecord(text, expected, PATH);
+  if (read.kind !== "ok") throw new Error(`expected ok, got ${read.code}: ${read.reason}`);
+  return read.record;
+}
+
+function refused(
+  text: string,
+  expected: IncidentSubject = SERVICE,
+): Extract<IncidentRecordRead, { kind: "refused" }> {
+  const read = parseIncidentRecord(text, expected, PATH);
+  if (read.kind !== "refused") throw new Error(`expected a refusal, got ${read.kind}`);
+  return read;
+}
+
+describe("the record class this task exists to make reachable — §13 task 5.5", () => {
+  /**
+   * **THE test for this task**, and the reason §7.6's schema is not hygiene.
+   *
+   * A mutation battery found `blind >= COVERAGE_THRESHOLD` and
+   * `blind === COVERAGE_THRESHOLD` indistinguishable on every record the machine
+   * itself wrote, because the counter advances by one per sweep and is reset by
+   * any observation — so it passes THROUGH the threshold and never over it. The
+   * two spellings part company on exactly one input: a record read from disk
+   * whose counter is already past it, where `===` steps over forever and leaves
+   * a service permanently invisible and permanently silent.
+   *
+   * Nothing could construct that record before this task, because nothing read
+   * one. The premise is asserted rather than assumed: the fixture is only
+   * meaningful if the NEXT counter value overshoots the threshold, and that is
+   * the assertion `===` fails on.
+   */
+  test("a clear record whose counter is already past the threshold escalates on the next sweep", () => {
+    const stale = {
+      ...freshIncidentRecord(SERVICE),
+      // An older build, a half-written file, or an operator's editor. All three
+      // produce a record the machine's own arithmetic cannot.
+      consecutive_indeterminate: COVERAGE_THRESHOLD + 2,
+    };
+    const record = parsedOk(onDisk(stale));
+
+    // PREMISE, one step earlier and in an assertion rather than a comment: this
+    // record OVERSHOOTS the threshold on its next blind sweep. A fixture landing
+    // exactly on it would make `===` and `>=` agree and prove nothing.
+    expect(record.state).toBe("clear");
+    expect(record.consecutive_indeterminate + 1).toBeGreaterThan(COVERAGE_THRESHOLD);
+    expect(record.consecutive_indeterminate + 1).not.toBe(COVERAGE_THRESHOLD);
+
+    const step = sweep(record, 0, unobserved);
+    expect(step.notifications).toHaveLength(1);
+    expect(step.notifications[0]!.kind).toBe("opened");
+    expect(step.notifications[0]!.reason).toBe("coverage");
+    expect(step.notifications[0]!.evidenceRef).toBeNull();
+    expect(step.record.state).toBe("firing");
+  });
+
+  /**
+   * The anti-twin, and it is what says the fixture above HAD to come off disk.
+   *
+   * Driven from a fresh record the machine wrote itself, the counter lands on the
+   * threshold exactly — so `===` and `>=` agree here, and every fixture that
+   * starts from `freshIncidentRecord` is blind to the difference between them.
+   */
+  test("a record the machine wrote reaches the threshold exactly, where === and >= agree", () => {
+    const { record, notifications } = drive(COVERAGE_THRESHOLD, () => unobserved);
+
+    expect(record.consecutive_indeterminate).toBe(COVERAGE_THRESHOLD);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]!.reason).toBe("coverage");
+  });
+
+  /**
+   * And the same record, blind again the sweep after: `firing` on `coverage` is
+   * not re-announced. The state guard is what turns a day of invisibility into
+   * one notification, and it must survive a record arriving from disk too.
+   */
+  test("a firing coverage record read back from disk does not re-open", () => {
+    const first = parsedOk(
+      onDisk({
+        ...freshIncidentRecord(SERVICE),
+        consecutive_indeterminate: COVERAGE_THRESHOLD + 2,
+      }),
+    );
+    const opened = sweep(first, 0, unobserved);
+    // Round-tripped through JSON, as the actor would: write, then read next sweep.
+    const reread = parsedOk(onDisk(opened.record));
+    expect(reread).toEqual(opened.record);
+
+    const next = sweep(reread, 1, unobserved, NO_RENOTIFY);
+    expect(next.notifications).toEqual([]);
+    expect(next.record.state).toBe("firing");
+  });
+});
+
+describe("every record the machine can write is a record the schema accepts", () => {
+  /**
+   * The property that stops this console refusing its OWN files.
+   *
+   * A schema derived from the record type can still disagree with the values the
+   * machine produces — a `.min(1)`, a missing nullable, an enum that lost a
+   * member. So a long mixed timeline is round-tripped through `JSON.stringify`
+   * and the parser after EVERY sweep, which is the only way to cover the states
+   * and field combinations the machine actually reaches rather than the ones a
+   * fixture author thought of.
+   */
+  test("a 60-sweep mixed timeline round-trips at every step", () => {
+    let record = freshIncidentRecord(SERVICE);
+    const seen = new Set<string>();
+    for (let n = 0; n < 60; n += 1) {
+      const signal =
+        n % 11 === 0
+          ? unobserved
+          : n % 3 === 2
+            ? clear()
+            : n % 7 === 5
+              ? issue("degraded")
+              : issue("unhealthy");
+      record = sweep(record, n, signal).record;
+      seen.add(record.state);
+      expect(parsedOk(onDisk(record))).toEqual(record);
+    }
+    /*
+     * PREMISE: the timeline actually visited more than one state. A round-trip
+     * assertion over a record that never left `clear` would be satisfied by a
+     * schema that only knew about `clear`, which is the degenerate shape of this
+     * whole family of test.
+     */
+    expect(seen.size).toBeGreaterThan(2);
+    expect(seen.has("firing")).toBe(true);
+    expect(seen.has("flapping")).toBe(true);
+  });
+
+  test("a fresh record of each subject kind round-trips", () => {
+    for (const subject of [SERVICE, SKIPS, BLOCKED]) {
+      const fresh = freshIncidentRecord(subject);
+      expect(parsedOk(onDisk(fresh), subject)).toEqual(fresh);
+    }
+  });
+});
+
+describe("what a malformed record does — §7.6's 'refuses rather than being acted on'", () => {
+  /**
+   * Every fixture below is {@link freshIncidentRecord} with EXACTLY ONE thing
+   * changed, and the premise is asserted rather than commented: the unmutated
+   * record must parse, or a refusal proves nothing about the mutation.
+   */
+  const base = (): Record<string, unknown> => ({ ...freshIncidentRecord(SERVICE) });
+
+  function refusalFor(mutate: (r: Record<string, unknown>) => void) {
+    expect(parseIncidentRecord(onDisk(base()), SERVICE, PATH).kind).toBe("ok");
+    const record = base();
+    mutate(record);
+    return refused(onDisk(record));
+  }
+
+  test("bytes that are not JSON refuse as not_json", () => {
+    expect(parseIncidentRecord(onDisk(base()), SERVICE, PATH).kind).toBe("ok");
+    const read = refused('{"state": ');
+    expect(read.code).toBe("not_json");
+    expect(read.reason).toContain(PATH);
+  });
+
+  test.each([
+    ["an array", "[]"],
+    ["null", "null"],
+    ["a number", "7"],
+  ])("a record that is %s refuses as not_an_object", (_label, text) => {
+    expect(parseIncidentRecord(onDisk(base()), SERVICE, PATH).kind).toBe("ok");
+    const read = refused(text);
+    expect(read.code).toBe("not_an_object");
+    expect(read.code).not.toBe("schema");
+  });
+
+  test("a missing field refuses at its path as missing", () => {
+    const read = refusalFor((r) => {
+      delete r.sweep_count;
+    });
+    expect(read.code).toBe("schema");
+    expect(read.issues).toHaveLength(1);
+    expect(read.issues[0]!.path).toBe("sweep_count");
+    expect(read.issues[0]!.fault).toBe("missing");
+  });
+
+  test("a state outside INCIDENT_STATES refuses as invalid, at the same kind of path", () => {
+    const read = refusalFor((r) => {
+      r.state = "degraded";
+    });
+    expect(read.code).toBe("schema");
+    expect(read.issues[0]!.path).toBe("state");
+    expect(read.issues[0]!.fault).toBe("invalid");
+  });
+
+  /**
+   * The SECOND closed domain, and it needs its own fixture.
+   *
+   * A battery found `reason: z.enum(ISSUE_REASONS)` → `z.string()` SURVIVING while
+   * the identical mutation on `state` died: the suite pinned one enum and left the
+   * other to be assumed from it. Two closed sets on one object are two claims, and
+   * a reader who saw the `state` test would have believed both.
+   *
+   * `degraded` is a deliberate choice for the state fixture above and `firing` for
+   * this one: each is a legal member of the OTHER field's domain, so a schema that
+   * had crossed the two enums fails both tests rather than passing both.
+   */
+  test("a reason outside ISSUE_REASONS refuses as invalid", () => {
+    const read = refusalFor((r) => {
+      r.reason = "firing";
+    });
+    expect(read.code).toBe("schema");
+    expect(read.issues[0]!.path).toBe("reason");
+    expect(read.issues[0]!.fault).toBe("invalid");
+
+    // And the domain is populated as well as closed: every member parses.
+    for (const reason of ISSUE_REASONS) {
+      expect(parsedOk(onDisk({ ...freshIncidentRecord(SERVICE), reason }))).toHaveProperty(
+        "reason",
+        reason,
+      );
+    }
+  });
+
+  /**
+   * The arrays are BOUNDED, and the bound is not zero.
+   *
+   * A refusal-only assertion would pass a schema with `.max(0)`, which refuses
+   * every record a flapping service produces — so the premise is asserted one step
+   * earlier: a list AT the cap parses. That pair is what makes the bound
+   * load-bearing rather than merely present.
+   */
+  test("flap_transitions and undelivered are bounded, and the bounds admit a full list", () => {
+    const atCap: IncidentRecord = {
+      ...freshIncidentRecord(SERVICE),
+      flap_transitions: Array.from({ length: MAX_FLAP_TRANSITIONS }, (_, i) => T0 + i),
+      undelivered: Array.from({ length: MAX_UNDELIVERED }, (_, i) => `n-${i}`),
+    };
+    expect(parsedOk(onDisk(atCap)).flap_transitions).toHaveLength(MAX_FLAP_TRANSITIONS);
+    expect(parsedOk(onDisk(atCap)).undelivered).toHaveLength(MAX_UNDELIVERED);
+
+    expect(
+      refused(onDisk({ ...atCap, flap_transitions: [...atCap.flap_transitions, T0] })).issues[0]!
+        .path,
+    ).toBe("flap_transitions");
+    expect(
+      refused(onDisk({ ...atCap, undelivered: [...atCap.undelivered, "n"] })).issues[0]!.path,
+    ).toBe("undelivered");
+  });
+
+  /**
+   * The two above are DISTINGUISHABLE, asserted directly. Zod answers a missing
+   * `z.enum` key and an unknown `z.enum` value with one identical issue — same
+   * code, same path, same message — so without this module's own classification
+   * these two faults would be one fault, and an operator whose record lost a
+   * field would be told to check the spelling of a field that is not there.
+   */
+  test("a missing state and a bad state are two faults, not one", () => {
+    const absent = refusalFor((r) => {
+      delete r.state;
+    });
+    const wrong = refusalFor((r) => {
+      r.state = "degraded";
+    });
+    expect(absent.issues[0]!.path).toBe(wrong.issues[0]!.path);
+    expect(absent.issues[0]!.fault).not.toBe(wrong.issues[0]!.fault);
+    expect(absent.issues[0]!.message).not.toContain("Invalid option");
+  });
+
+  test("an unrecognized key refuses and is named", () => {
+    const read = refusalFor((r) => {
+      r.acknowledged = true;
+    });
+    expect(read.issues[0]!.path).toBe("acknowledged");
+    expect(read.issues[0]!.fault).toBe("unrecognized");
+  });
+
+  test("a non-integer or negative timestamp refuses", () => {
+    expect(
+      refusalFor((r) => {
+        r.since = 1.5;
+      }).issues[0]!.path,
+    ).toBe("since");
+    expect(
+      refusalFor((r) => {
+        r.last_seen = -1;
+      }).issues[0]!.path,
+    ).toBe("last_seen");
+    expect(
+      refusalFor((r) => {
+        r.sweep_count = -2;
+      }).issues[0]!.path,
+    ).toBe("sweep_count");
+  });
+
+  /**
+   * **`subject_mismatch` is its own code and is reachable on its own.** The
+   * record is otherwise perfect — this is a file that was copied, moved, or read
+   * from a path built for another subject, and it is the failure
+   * `advanceIncident` throws on when the actor gets it wrong.
+   */
+  test("a well-formed record about another subject refuses as subject_mismatch", () => {
+    const other: IncidentSubject = { kind: "service", environment: "cni-prod", service: "mia" };
+    // PREMISE: the record itself is clean — it parses when read as its own subject.
+    expect(parseIncidentRecord(onDisk(freshIncidentRecord(other)), other, PATH).kind).toBe("ok");
+
+    const read = refused(onDisk(freshIncidentRecord(other)), SERVICE);
+    expect(read.code).toBe("subject_mismatch");
+    expect(read.issues).toEqual([]);
+    expect(read.reason).toContain("mia");
+    expect(read.reason).toContain("authorization");
+  });
+
+  /** And across the two record KINDS, which is the mismatch a path bug produces. */
+  test("a console-health record read as a service record refuses as subject_mismatch", () => {
+    const read = refused(onDisk(freshIncidentRecord(SKIPS)), SERVICE);
+    expect(read.code).toBe("subject_mismatch");
+  });
+
+  /**
+   * The four codes are distinct and each is reachable by exactly one fault, so a
+   * suite cannot satisfy one of them with a fixture that is wrong in three ways.
+   */
+  test("the four refusal codes are four", () => {
+    const codes = new Set([
+      refused('{"state": ').code,
+      refused("[]").code,
+      refusalFor((r) => {
+        delete r.state;
+      }).code,
+      refused(onDisk(freshIncidentRecord(SKIPS)), SERVICE).code,
+    ]);
+    expect([...codes].sort()).toEqual(["not_an_object", "not_json", "schema", "subject_mismatch"]);
+  });
+
+  /**
+   * **A record that is internally inconsistent but well TYPED still parses**, and
+   * this is a decision rather than an omission.
+   *
+   * `state: "clear"` with a non-null reason, or with a live counter, is exactly
+   * the class of record this task exists to admit — see the block at the top of
+   * this section. A `.superRefine` that refused it would put the validator in the
+   * business of deciding what the machine should have written, and would delete
+   * the only input that distinguishes `>=` from `===`.
+   */
+  test("an internally inconsistent but well-typed record parses", () => {
+    const odd: IncidentRecord = {
+      ...freshIncidentRecord(SERVICE),
+      state: "clear",
+      reason: "unhealthy",
+      consecutive_indeterminate: 40,
+      sweep_count: 12,
+      last_notified_at: T0,
+    };
+    expect(parsedOk(onDisk(odd))).toEqual(odd);
+  });
+});
+
+describe("the record's path — §7.6, §6.8a, and the traversal argument", () => {
+  test("a service record is <root>/<env>/<service>.json", () => {
+    const path = incidentRecordPath(SERVICE, ENV);
+    expect(path).toBe(join(incidentRecordRoot(ENV), "cni-prod", "authorization.json"));
+    // And the literal spelling §7.6 fixes, so a derived-equality assertion alone
+    // cannot pass a builder that changed the layout on both sides.
+    expect(path.endsWith("/cni-prod/authorization.json")).toBe(true);
+  });
+
+  test("a console-health record is <root>/<scope>/_console/<kind>.json", () => {
+    expect(incidentRecordPath(SKIPS, ENV).endsWith("/_console/_console/sweeps_skipped.json")).toBe(
+      true,
+    );
+    expect(
+      incidentRecordPath(BLOCKED, ENV).endsWith("/cni-prod/_console/observer_blocked.json"),
+    ).toBe(true);
+  });
+
+  test("the root is beside the runs root and follows PIFLEET_RUNS_DIR", () => {
+    expect(incidentRecordRoot(ENV)).toBe("/tmp/pifleet-fixture/triage");
+    expect(incidentRecordRoot({ PIFLEET_RUNS_DIR: "/other/runs" })).toBe("/other/triage");
+  });
+
+  /**
+   * `join` resolves `..` rather than refusing it, so the check belongs in the
+   * BUILDER — `dispatchRequestPath`'s measured argument, where an unchecked id
+   * returned `/etc/dispatch-request.json` without a word.
+   */
+  test.each([["../../etc/passwd"], ["a/b"], [".."], [""], ["with space"]])(
+    "a service named %p throws rather than joining",
+    (service) => {
+      expect(() =>
+        incidentRecordPath({ kind: "service", environment: "cni-prod", service }, ENV),
+      ).toThrow(IncidentPathError);
+    },
+  );
+
+  test("an environment or scope that cannot be spelled throws too", () => {
+    expect(() =>
+      incidentRecordPath({ kind: "service", environment: "../..", service: "mia" }, ENV),
+    ).toThrow(IncidentPathError);
+    expect(() =>
+      incidentRecordPath({ kind: "console_health", scope: "../..", health: "sweeps_skipped" }, ENV),
+    ).toThrow(IncidentPathError);
+  });
+
+  /**
+   * **The two record kinds cannot name the same file**, and it is structural
+   * rather than lucky: `CONSOLE_SCOPE` begins with `_`, and `SESSION_ID_RE`
+   * requires an alphanumeric first character — so no environment and no service
+   * can ever be called `_console`. Asserted from both ends: the grammar refuses
+   * the name, and the schema refuses a record carrying it.
+   */
+  /**
+   * **This test was DEGENERATE when first written, and a mutation battery said
+   * so.** The schema half read the smuggled record as `SERVICE`'s, so
+   * `subject_mismatch` refused it before the token grammar was ever consulted —
+   * and `expect(read.kind).toBe("refused")` was green whether `recordToken`
+   * carried its regex or was a bare `z.string()`. Two refusals, one assertion,
+   * and the wrong one doing the work: the seventh-appearance defect, in the
+   * repair for it.
+   *
+   * The fix is to read the record as ITS OWN subject, so the subject comparison
+   * cannot fire and only the grammar can refuse — and then to assert the CODE
+   * rather than the kind, so which refusal answered is part of the claim.
+   */
+  test("no environment or service can be named _console, so the two layouts cannot collide", () => {
+    const asConsole: IncidentSubject = {
+      kind: "service",
+      environment: CONSOLE_SCOPE,
+      service: "mia",
+    };
+    expect(() => incidentRecordPath(asConsole, ENV)).toThrow(IncidentPathError);
+
+    // PREMISE: read as its own subject, `subject_mismatch` is unreachable — the
+    // identical record with a LEGAL environment parses through this same call.
+    const legal: IncidentSubject = { kind: "service", environment: "cni-prod", service: "mia" };
+    expect(parseIncidentRecord(onDisk(freshIncidentRecord(legal)), legal, PATH).kind).toBe("ok");
+
+    const smuggled = { ...freshIncidentRecord(legal), subject: asConsole };
+    const read = parseIncidentRecord(onDisk(smuggled), asConsole, PATH);
+    if (read.kind !== "refused") throw new Error("expected a refusal");
+    expect(read.code).toBe("schema");
+    expect(read.code).not.toBe("subject_mismatch");
+    expect(read.issues[0]!.path).toBe("subject.environment");
+
+    // And the paths differ for every pair of subjects this console can hold.
+    const paths = [SERVICE, SKIPS, BLOCKED].map((s) => incidentRecordPath(s, ENV));
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  /**
+   * The same grammar on the other three subject fields, each read as its own
+   * subject for the reason above. `service` and `scope` are separate members of
+   * separate union arms, so one fixture cannot stand for the others.
+   */
+  test("a traversal in any subject field is refused by the SCHEMA, not only by the builder", () => {
+    const bad: IncidentSubject[] = [
+      { kind: "service", environment: "../..", service: "mia" },
+      { kind: "service", environment: "cni-prod", service: "../../etc/passwd" },
+      { kind: "console_health", scope: "a/b", health: "sweeps_skipped" },
+    ];
+    for (const subject of bad) {
+      const record = { ...freshIncidentRecord(SERVICE), subject };
+      const read = parseIncidentRecord(onDisk(record), subject, PATH);
+      if (read.kind !== "refused") throw new Error(`expected a refusal for ${JSON.stringify(subject)}`);
+      expect(read.code).toBe("schema");
+      expect(read.issues[0]!.path.startsWith("subject.")).toBe(true);
+    }
+  });
+});
+
+describe("loadIncidentRecord — a missing file is not a malformed one", () => {
+  const readingNothing = { readText: async () => null };
+
+  test("a missing file resolves to a fresh record for the subject", async () => {
+    const read = await loadIncidentRecord({ subject: SERVICE, deps: readingNothing, env: ENV });
+    if (read.kind !== "ok") throw new Error(read.reason);
+    expect(read.record).toEqual(freshIncidentRecord(SERVICE));
+  });
+
+  /**
+   * **The two must not be collapsed, and this pair is what says so.** A console
+   * watching nine services has nine missing files on its first sweep; a file that
+   * exists and cannot be read is a service whose incident state is now unknown,
+   * and reading it as "never seen" would silently clear a firing incident and
+   * swallow its recovery notification.
+   */
+  test("a malformed file refuses and does NOT fall back to a fresh record", async () => {
+    const read = await loadIncidentRecord({
+      subject: SERVICE,
+      deps: { readText: async () => "{ not json" },
+      env: ENV,
+    });
+    expect(read.kind).toBe("refused");
+    // There is no `record` on the refused arm — the fallback is unavailable
+    // rather than merely unused.
+    expect(read).not.toHaveProperty("record");
+  });
+
+  test("it reads the path the subject derives, and takes an override", async () => {
+    const seen: string[] = [];
+    const deps = {
+      readText: async (path: string) => {
+        seen.push(path);
+        return null;
+      },
+    };
+    await loadIncidentRecord({ subject: BLOCKED, deps, env: ENV });
+    await loadIncidentRecord({ subject: BLOCKED, deps, env: ENV, path: "/elsewhere/x.json" });
+    expect(seen[0]).toBe(incidentRecordPath(BLOCKED, ENV));
+    expect(seen[1]).toBe("/elsewhere/x.json");
+  });
+});
+
+describe("the two record kinds are one machine — §6.8a, and 5.5's half of it", () => {
+  /**
+   * §6.8a's table, by name. §12: *"assert the enum's members by name against
+   * §6.8a's table, not by count — naming the permitted set is what makes a
+   * seventh member fail"*.
+   */
+  test("CONSOLE_HEALTH_KINDS is exactly §6.8a's six", () => {
+    expect([...CONSOLE_HEALTH_KINDS]).toEqual([
+      "observer_blocked",
+      "sweep_produced_nothing",
+      "sweeps_skipped",
+      "inference_saturated",
+      "budget_exhausted",
+      "reporter_undelivered",
+    ]);
+  });
+
+  test("the state and reason vocabularies are closed and derived from each other", () => {
+    expect([...INCIDENT_STATES]).toEqual(["clear", "provisional", "firing", "flapping"]);
+    // The six kinds are reasons as well as identities, and `coverage` is minted
+    // by the machine and by nothing else.
+    expect([...ISSUE_REASONS]).toEqual([...OBSERVED_ISSUE_REASONS, "coverage"]);
+    for (const kind of CONSOLE_HEALTH_KINDS) {
+      expect(OBSERVED_ISSUE_REASONS).toContain(kind);
+    }
+    expect(OBSERVED_ISSUE_REASONS).not.toContain("coverage");
+  });
+
+  /**
+   * §7.5's reader and §7.6's reader spend ONE fault alphabet, so an actor can log
+   * and count a refusal without knowing which file produced it —
+   * `dispatch-request.ts`'s rule for refusal vocabularies. The two
+   * implementations are deliberately not shared (importing §7.5's reader here
+   * would pull the targets and verdict modules into this module's transitive
+   * closure, which §12's read-only criterion walks), so this assertion is what
+   * keeps them in step instead of a comment.
+   */
+  test("the fault vocabulary is the one triage-document.ts spends", () => {
+    expect([...INCIDENT_RECORD_FAULTS]).toEqual([...TRIAGE_DOCUMENT_FAULTS]);
+  });
+
+  /**
+   * 5.4a's premise, extended to the identity 5.5 had to add: the machine's output
+   * does not vary with the subject KIND either, so §6.8a really is a data
+   * addition and not a second machine.
+   */
+  test("a console-health subject drives the same machine to the same states", () => {
+    const timeline = (n: number): IncidentSignal =>
+      n % 3 === 2 ? clear() : n % 5 === 0 ? unobserved : issue("unhealthy");
+
+    let service = freshIncidentRecord(SERVICE);
+    let health = freshIncidentRecord(SKIPS);
+    for (let n = 0; n < 40; n += 1) {
+      const a = sweep(service, n, timeline(n), DEFAULTS, SERVICE);
+      const b = sweep(health, n, timeline(n), DEFAULTS, SKIPS);
+      expect(kinds(b.notifications)).toEqual(kinds(a.notifications));
+      for (const note of b.notifications) expect(note.subject).toEqual(SKIPS);
+      const rebased: IncidentRecord = { ...b.record, subject: SERVICE };
+      expect(rebased).toEqual(a.record);
+      service = a.record;
+      health = b.record;
+    }
+    expect(service.state).toBe(health.state);
+    // PREMISE: the timeline moved. Two records that both sat in `clear` would
+    // agree for reasons that have nothing to do with the machine.
+    expect(service.state).not.toBe("clear");
+  });
+
+  /** And a console-health reason is carried through untouched, like any other. */
+  test.each([...CONSOLE_HEALTH_KINDS])("the reason %s survives a confirmation", (reason) => {
+    let record = freshIncidentRecord(BLOCKED);
+    record = sweep(record, 0, issue(reason), DEFAULTS, BLOCKED).record;
+    const confirmed = sweep(record, 1, issue(reason), DEFAULTS, BLOCKED);
+    expect(confirmed.notifications).toHaveLength(1);
+    expect(confirmed.notifications[0]!.reason).toBe(reason);
+    expect(confirmed.record.reason).toBe(reason);
+  });
+
+  /** `subjectKey` separates the two kinds, which is what keys the two layouts. */
+  test("subjectKey never collides across the two kinds", () => {
+    const keys = [SERVICE, SKIPS, BLOCKED].map(subjectKey);
+    expect(new Set(keys).size).toBe(3);
+    expect(subjectKey(SKIPS)).toContain("console_health");
+    expect(subjectKey(SERVICE)).toContain("service");
   });
 });

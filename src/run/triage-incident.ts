@@ -68,39 +68,100 @@
  * test can reference rather than a literal `3` in a comparison.
  */
 
+import { dirname, join } from "node:path";
+
+import { z } from "zod";
+
+import { SESSION_ID_RE } from "../contracts.ts";
+import { runsRoot } from "./paths.ts";
 import type { TriageConsoleConfig } from "./triage-config.ts";
+
+/**
+ * §6.8a's closed `kind` set, entire — the six things this console can notify
+ * about that are not a service.
+ *
+ * Closed *"on §6.2's rule for `checks[]` — a closed set cannot acquire a seventh
+ * member by accident, and a `kind` a reader cannot enumerate is a `kind` nobody
+ * writes a criterion for"*. Exported as a frozen tuple and not only as a type,
+ * because §12's console-health criterion is *"assert the enum's members by name …
+ * not by count"* and a type is erased at runtime and asserts nothing.
+ *
+ * The order is §6.8a's own table, top to bottom.
+ */
+export const CONSOLE_HEALTH_KINDS = [
+  /** An observer returned `status: blocked` (SRD-OBSERVER-001 §9.3). */
+  "observer_blocked",
+  /** §6.5's zero-row: no child succeeded, so no collation was dispatched. */
+  "sweep_produced_nothing",
+  /** Consecutive skips reached `max_consecutive_skips` (§6.4). */
+  "sweeps_skipped",
+  /** §6.7 rule 3. */
+  "inference_saturated",
+  /** Admission refused on the run's ceiling, exit 5 (§6.10). */
+  "budget_exhausted",
+  /** §9.15 — the delivery path itself is failing. */
+  "reporter_undelivered",
+] as const;
+export type ConsoleHealthKind = (typeof CONSOLE_HEALTH_KINDS)[number];
+
+/**
+ * §6.8a's literal scope for the kinds that are about the console rather than
+ * about an environment.
+ *
+ * **It also makes a collision between the two record kinds unrepresentable, and
+ * that is worth more than the readability.** Environment keys and service names
+ * are held to `SESSION_ID_RE` by `triage-targets.ts:107-117`, which requires an
+ * alphanumeric first character — so no environment and no service can ever be
+ * named `_console`. §7.6's `<env>/<service>.json` and §6.8a's
+ * `<scope>/_console/<kind>.json` therefore cannot name the same file however the
+ * targets file is written, rather than merely being unlikely to.
+ */
+export const CONSOLE_SCOPE = "_console";
 
 /**
  * Who an incident is about. **The machine copies this and never reads it.**
  *
  * §6.8 keys per `(environment, service)`. §6.8a adds `(scope, kind)` for the six
  * things that are not a service, and its whole content is that the identity was
- * the missing piece — *"a state machine with no key deduplicates nothing"*. So
- * this is a union with one member today, and task 5.4a adds
- * `{kind: "console_health"; scope: string; health: ConsoleHealthKind}` beside it
- * without touching a function body in this file.
+ * the missing piece — *"a state machine with no key deduplicates nothing"*.
+ *
+ * The second member is a DATA ADDITION and no function body below changed to
+ * admit it — {@link ADVANCE_READS_NO_SUBJECT_FIELD} is the executable half of
+ * that claim, and §13 task 5.4a states the failure condition outright: *"if this
+ * task finds itself writing a second state machine, it has gone wrong"*.
  *
  * `subjectKey` is the ONE place the shape is read, and it is read to compare two
  * subjects rather than to decide anything.
  */
-export type IncidentSubject = {
-  readonly kind: "service";
-  readonly environment: string;
-  readonly service: string;
-};
+export type IncidentSubject =
+  | {
+      readonly kind: "service";
+      readonly environment: string;
+      readonly service: string;
+    }
+  | {
+      readonly kind: "console_health";
+      /** An environment token, or {@link CONSOLE_SCOPE} for the console itself. */
+      readonly scope: string;
+      readonly health: ConsoleHealthKind;
+    };
 
 /**
  * A stable string for one subject — the equality this module needs, and nothing
  * more.
  *
- * Deliberately NOT a path. §6.8's record lives at
- * `~/.pifleet/triage/<env>/<service>.json` and §6.8a's at
- * `.../<scope>/_console/<kind>.json`, and turning a subject into a filesystem
- * path is task 5.5's job with 5.5's traversal argument to make. This is an
- * identity token for a `throw` message and an equality test.
+ * Deliberately NOT a path, even though {@link incidentRecordPath} now exists
+ * beside it. This is an identity token for a `throw` message and an equality
+ * test; a path is a location, and conflating the two would make an equality
+ * check depend on a runs root.
+ *
+ * The two arms cannot collide: the discriminator leads, and `CONSOLE_SCOPE`
+ * cannot be an environment name.
  */
 export function subjectKey(subject: IncidentSubject): string {
-  return `${subject.kind}:${subject.environment}/${subject.service}`;
+  return subject.kind === "service"
+    ? `service:${subject.environment}/${subject.service}`
+    : `console_health:${subject.scope}/${subject.health}`;
 }
 
 /**
@@ -111,15 +172,28 @@ export function subjectKey(subject: IncidentSubject): string {
  * `consecutive_indeterminate`, which only the record knows. A verdict module that
  * could pass `coverage` in would be a second place the threshold is decided.
  *
- * Task 5.4a widens this union with §6.8a's six `kind` tokens. That is a data
- * addition: no `switch` below reads the value, and {@link
- * ADVANCE_READS_NO_ISSUE_REASON} asserts it by driving every member through the
- * same fixture.
+ * §6.8a's six `kind` tokens are HERE as well as on the subject, and that is not
+ * duplication: the subject says which record a sweep is about, and the reason
+ * says what the record is open for. A console-health incident whose reason was
+ * `unhealthy` would compose a notification saying an environment is unhealthy
+ * when the fact is that an observer was blocked, which is §6.7 rule 3's
+ * misdiagnosis family again. It remains a data addition — no `switch` below reads
+ * the value, and {@link ADVANCE_READS_NO_ISSUE_REASON} asserts it by driving
+ * every member through the same fixture.
+ *
+ * Spread rather than re-spelled, so a seventh `kind` cannot become a reason the
+ * schema accepts and the subject does not.
  */
-export type ObservedIssueReason = "unhealthy" | "degraded";
+export const OBSERVED_ISSUE_REASONS = [
+  "unhealthy",
+  "degraded",
+  ...CONSOLE_HEALTH_KINDS,
+] as const;
+export type ObservedIssueReason = (typeof OBSERVED_ISSUE_REASONS)[number];
 
 /** What a RECORD may hold — the above, plus the escalation this module mints. */
-export type IssueReason = ObservedIssueReason | "coverage";
+export const ISSUE_REASONS = [...OBSERVED_ISSUE_REASONS, "coverage"] as const;
+export type IssueReason = (typeof ISSUE_REASONS)[number];
 
 /**
  * What one sweep learned about one subject.
@@ -175,8 +249,14 @@ export interface IncidentObservation {
   readonly signal: IncidentSignal;
 }
 
-/** §6.8's four states. `flapping` is a state and not a comment — see §6.8. */
-export type IncidentState = "clear" | "provisional" | "firing" | "flapping";
+/**
+ * §6.8's four states. `flapping` is a state and not a comment — see §6.8.
+ *
+ * A frozen tuple as well as a type, so {@link IncidentRecordSchema} derives its
+ * enum from the same four members rather than re-spelling them.
+ */
+export const INCIDENT_STATES = ["clear", "provisional", "firing", "flapping"] as const;
+export type IncidentState = (typeof INCIDENT_STATES)[number];
 
 /**
  * §7.6's record, as a value.
@@ -981,3 +1061,445 @@ export const ADVANCE_READS_NO_SUBJECT_FIELD =
 export const ADVANCE_READS_NO_ISSUE_REASON =
   "advanceIncident copies ObservedIssueReason into the record and into every notification " +
   "and never branches on it, so §6.8a's six kinds are a data addition (§13 task 5.4a).";
+
+// ---------------------------------------------------------------------------
+// §7.6 — the record on disk, and the validated read (§13 task 5.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * §7.6: *"Zod-validated on read, so a malformed record refuses rather than being
+ * acted on — SRD-FLEET-PM-001 Phase 5 task 5.4's rule."*
+ *
+ * ## This is not hygiene, and `onUnobserved`'s comparison is the proof
+ *
+ * `onUnobserved`'s coverage escalation is spelled `blind >= COVERAGE_THRESHOLD`,
+ * and a mutation battery found `>=` and `===` **indistinguishable on every record
+ * the machine itself wrote** — because the counter is incremented by one per
+ * sweep and reset on every observation, so it passes through the threshold
+ * exactly. The two spellings part company on precisely one class of input: a
+ * record read from DISK whose counter is already past the threshold, where `===`
+ * steps over it forever and leaves a service permanently invisible and
+ * permanently silent.
+ *
+ * **Everything below is what makes that class of record reachable**, so the
+ * schema is not a formality standing between the machine and its own outputs. It
+ * is what stands between a hand-edited, half-written or older-build record and a
+ * state machine whose every branch assumes its inputs are its own outputs.
+ *
+ * ## Which is why there is NO cross-field refinement here, deliberately
+ *
+ * A `state: "clear"` record carrying `consecutive_indeterminate: 40`, or a `clear`
+ * record with a non-null `reason`, is internally inconsistent — and refusing it
+ * would delete the input class this task exists to admit. A `.superRefine` that
+ * "tidied" such a record would put the validator in the business of deciding what
+ * the machine should have written, and the machine already answers every one of
+ * those shapes: the escalation is `>=`, and `record.reason ?? "unhealthy"` covers
+ * a missing reason. The schema checks TYPES and DOMAINS. It does not reconcile.
+ *
+ * ## What refuses, and each name reachable by exactly one fault
+ *
+ * Four codes, ordered so that no fixture has to be wrong twice to reach the
+ * third: bytes that are not JSON never reach the object check, a non-object never
+ * reaches the schema, and a record that fails the schema never reaches the
+ * subject comparison.
+ */
+export const INCIDENT_RECORD_SCHEMA = "pifleet.triageincident/v1";
+
+/**
+ * One record's worth of `flap_transitions[]`, bounded.
+ *
+ * `advanceIncident` prunes the list to `flap_window` on every advance, so a live
+ * record holds at most `flap_window_s / cadence_s` entries — twelve at the shipped
+ * defaults. The cap is three orders of magnitude above that because it is not a
+ * policy: it is the bound that stops a corrupt or hand-written file turning a read
+ * into an unbounded allocation, and a cap near the working figure would refuse a
+ * legitimate record the day an operator shortened the cadence.
+ */
+export const MAX_FLAP_TRANSITIONS = 4096;
+
+/** The same bound for 5.6b's backlog, and for the same reason. */
+export const MAX_UNDELIVERED = 4096;
+
+/**
+ * Absent, or present and wrong.
+ *
+ * **Deliberately the same three tokens `triage-document.ts` spends**, so an actor
+ * can log and count a refusal without knowing which of the two files produced it.
+ * That is `dispatch-request.ts:879-917`'s rule for refusal vocabularies — one
+ * alphabet, *"whichever module spends them"* — and the two are held identical by
+ * an assertion in `test/unit/triage-incident.test.ts` rather than by a comment,
+ * because the implementations are deliberately NOT shared: importing §7.5's
+ * document reader here would pull the targets and verdict modules into this
+ * module's transitive closure for the sake of seven lines, and §12's read-only
+ * criterion walks that closure.
+ */
+export const INCIDENT_RECORD_FAULTS = ["missing", "invalid", "unrecognized"] as const;
+export type IncidentRecordFault = (typeof INCIDENT_RECORD_FAULTS)[number];
+
+export interface IncidentRecordIssue {
+  /** Dotted, `subject.environment`. `""` is the record itself. */
+  readonly path: string;
+  readonly fault: IncidentRecordFault;
+  readonly message: string;
+}
+
+/** Why a record on disk was refused, as a value rather than as prose. */
+export type IncidentRecordRefusal =
+  | "not_json"
+  | "not_an_object"
+  | "schema"
+  /**
+   * The record parsed, and it is about somebody else.
+   *
+   * Its own arm rather than a schema issue, because it is the only refusal here
+   * that depends on WHERE the file was found. `advanceIncident` throws on this
+   * pairing — a host bug, the caller loaded the wrong file — and catching it at
+   * read time turns the throw into something a polling actor can log, which is
+   * the same value-versus-throw split `triage-partition.ts` draws.
+   */
+  | "subject_mismatch";
+
+/**
+ * The three outcomes, and `missing` is not a failure.
+ *
+ * A subject nothing has ever been observed about has no file, and that is the
+ * ordinary state on a console's first sweep for every service it watches. It
+ * resolves to {@link freshIncidentRecord} at the loader rather than here, so the
+ * parse stays a pure function of bytes.
+ *
+ * **There is no fallback from `refused` to a fresh record, and that is the
+ * decision this type exists to make unavailable.** Falling back would turn a
+ * hand-edited or half-written file into a silent reset: a `firing` incident would
+ * become `clear`, the recovery notification would never be sent, and the next bad
+ * sweep would re-open it as new. §7.6's *"refuses rather than being acted on"* is
+ * exactly that, and a `record` field on the refused arm would make ignoring it a
+ * one-character mistake.
+ */
+export type IncidentRecordRead =
+  | { kind: "ok"; record: IncidentRecord }
+  | {
+      kind: "refused";
+      code: IncidentRecordRefusal;
+      reason: string;
+      issues: readonly IncidentRecordIssue[];
+    };
+
+/**
+ * An environment key, a service name or a scope — the grammar
+ * `triage/targets.yaml` holds all three to.
+ *
+ * `SESSION_ID_RE` is a traversal refusal rather than a naming convention here,
+ * for the reason `triage-targets.ts:102-117` states: the value *"becomes a path
+ * segment under ~/.pifleet/triage/, so a name carrying a slash, a space or a
+ * leading dot is a directory traversal rather than a label"*. A record read off
+ * disk is exactly where an unchecked one would arrive, since the targets file
+ * that vetted the live names never saw this file.
+ */
+const recordToken = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(SESSION_ID_RE, "must be a bare token — it becomes a path segment under ~/.pifleet/triage/");
+
+/** `recordToken`, or §6.8a's literal console scope, which begins with `_`. */
+const scopeToken = z.union([z.literal(CONSOLE_SCOPE), recordToken]);
+
+/** Epoch milliseconds. Integral and non-negative; a clock is not a float. */
+const epochMs = z.number().int().nonnegative();
+
+/** A non-negative count. */
+const counter = z.number().int().nonnegative();
+
+const SubjectSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("service"),
+      environment: recordToken,
+      service: recordToken,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("console_health"),
+      scope: scopeToken,
+      health: z.enum(CONSOLE_HEALTH_KINDS),
+    })
+    .strict(),
+]);
+
+/**
+ * §7.6's record, as a schema over the same shape {@link IncidentRecord} declares.
+ *
+ * Every closed set is DERIVED — `z.enum(INCIDENT_STATES)`, `z.enum(ISSUE_REASONS)`,
+ * `z.enum(CONSOLE_HEALTH_KINDS)` — rather than re-spelled, so a fifth state or a
+ * seventh `kind` widens the schema in the same commit that widens the constant or
+ * not at all. A re-spelled list is a second copy of a decision, and this
+ * repository has the receipts for what those cost.
+ *
+ * **`subject` and `reason` are fields §7.6's own list does not name.** They are
+ * on `IncidentRecord` because round 7 put them there and the recovery
+ * notification spends both; §7.6 enumerates nine fields and neither is among
+ * them. Recorded here rather than silently reconciled — see the round report.
+ *
+ * `.strict()`: an unrecognised key means the file was written by a build whose
+ * record shape this one does not implement, and a reader cannot know whether the
+ * part it could not read was the load-bearing part.
+ */
+export const IncidentRecordSchema = z
+  .object({
+    subject: SubjectSchema,
+    state: z.enum(INCIDENT_STATES),
+    reason: z.enum(ISSUE_REASONS).nullable(),
+    since: epochMs.nullable(),
+    last_seen: epochMs.nullable(),
+    sweep_count: counter,
+    consecutive_indeterminate: counter,
+    flap_transitions: z.array(epochMs).max(MAX_FLAP_TRANSITIONS),
+    last_notified_at: epochMs.nullable(),
+    undelivered: z.array(z.string().max(4096)).max(MAX_UNDELIVERED),
+    last_artifact_ref: z.string().max(4096).nullable(),
+  })
+  .strict();
+
+/**
+ * Where §7.6's and §6.8a's records live.
+ *
+ * `~/.pifleet/triage/` by default, and beside the runs root rather than inside it
+ * — `relayRecordPath`'s placement and its reason: inside would put non-run
+ * directories in the tree `runIdsAscending` enumerates, *"which is how a stray
+ * filename becomes a run id and then a path segment"*. It follows
+ * `PIFLEET_RUNS_DIR`, so a test never touches the operator's own.
+ */
+export function incidentRecordRoot(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return join(dirname(runsRoot(env)), "triage");
+}
+
+/** A subject that cannot become a path. Thrown, never returned. */
+export class IncidentPathError extends Error {
+  constructor(field: string, value: string) {
+    super(
+      `${field} ${JSON.stringify(value)} cannot be spelled as a path segment, so no incident ` +
+        `record path was built from it. Both halves of a record's location are segments under ` +
+        `~/.pifleet/triage, and \`join\` resolves ".." rather than refusing it — so an unchecked ` +
+        `name here reads or writes a file of the caller's choosing. The grammar is 1-64 ` +
+        `characters of letters, digits, ".", "_" or "-", beginning and ending alphanumeric.`,
+    );
+    this.name = "IncidentPathError";
+  }
+}
+
+/**
+ * §7.6's `<env>/<service>.json` and §6.8a's `<scope>/_console/<kind>.json`.
+ *
+ * ## It THROWS on a segment it cannot spell, and a bare `join` is why
+ *
+ * `dispatchRequestPath`'s argument, measured there rather than hypothesised:
+ * *"`join` is not a containment predicate — it is string arithmetic that resolves
+ * `..` cheerfully"*, and it returned `/etc/dispatch-request.json` for a traversal
+ * id without a word. The refusal belongs in the builder rather than in each
+ * caller's memory of it, **including callers that do not exist yet** — the actor
+ * is task 6.1.
+ *
+ * That the live names came through `triage/targets.yaml`, which holds them to the
+ * same grammar, is not a reason to omit the check: a subject can also be
+ * reconstructed from a record read off disk, and that record never met the
+ * targets file. {@link parseIncidentRecord} refuses such a name as a VALUE first,
+ * so this throw is the second of two independent gates rather than the only one.
+ *
+ * A `console_health` subject needs no guard on its `health`: it is a closed enum
+ * of six literals, none of which contains a separator.
+ */
+export function incidentRecordPath(
+  subject: IncidentSubject,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const root = incidentRecordRoot(env);
+  if (subject.kind === "service") {
+    if (!spellable(subject.environment)) throw new IncidentPathError("environment", subject.environment);
+    if (!spellable(subject.service)) throw new IncidentPathError("service", subject.service);
+    return join(root, subject.environment, `${subject.service}.json`);
+  }
+  if (subject.scope !== CONSOLE_SCOPE && !spellable(subject.scope)) {
+    throw new IncidentPathError("scope", subject.scope);
+  }
+  return join(root, subject.scope, CONSOLE_SCOPE, `${subject.health}.json`);
+}
+
+function spellable(value: string): boolean {
+  return value.length > 0 && value.length <= 64 && SESSION_ID_RE.test(value);
+}
+
+/**
+ * Parse the bytes of one incident record, for the subject the caller expected.
+ *
+ * Returns a REFUSAL rather than throwing. The bytes are a file, and a file can be
+ * hand-edited, truncated by a crash mid-write, or left behind by a build whose
+ * record shape differed — none of which is a reason to end the actor's loop, and
+ * all of which are reasons not to act on it.
+ *
+ * `expected` is what makes `subject_mismatch` decidable, and it is a REQUIRED
+ * parameter rather than an optional one on `relayRecordPath`'s reasoning: the
+ * caller that forgets the argument is the caller that acts on another service's
+ * state, and it would compile.
+ */
+export function parseIncidentRecord(
+  text: string,
+  expected: IncidentSubject,
+  path: string,
+): IncidentRecordRead {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text) as unknown;
+  } catch (err) {
+    return {
+      kind: "refused",
+      code: "not_json",
+      reason: `${path} is not JSON: ${(err as Error).message}`,
+      issues: [],
+    };
+  }
+
+  // `typeof null` is `"object"` and an array is an object, so both are spelled
+  // out; a truncated write produces one or the other often enough to name them.
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      kind: "refused",
+      code: "not_an_object",
+      reason: `${path} holds ${shapeOf(raw)} rather than a §7.6 incident record object.`,
+      issues: [],
+    };
+  }
+
+  const result = IncidentRecordSchema.safeParse(raw);
+  if (!result.success) {
+    const issues = result.error.issues.flatMap((issue): IncidentRecordIssue[] => {
+      const segments = issue.path.map(String);
+      if (issue.code === "unrecognized_keys") {
+        return (issue as unknown as { keys: string[] }).keys.map((key) => ({
+          path: [...segments, key].join("."),
+          fault: "unrecognized" as const,
+          message: `unrecognized key — §7.6 fixes this record's fields and ${key} is not one`,
+        }));
+      }
+      const fault = faultAt(raw, issue.path);
+      return [
+        {
+          path: segments.join("."),
+          fault,
+          /*
+           * Rewritten when the key is absent, for the reason
+           * `triage-document.ts` records: zod 4 answers a MISSING enum key and an
+           * unknown enum value with one identical issue, and its sentence
+           * ("Invalid option: expected one of …") describes a spelling mistake in
+           * a field that is not there.
+           */
+          message:
+            fault === "missing"
+              ? `required by §7.6 and absent from the record — written by an older build, ` +
+                `or by a write that did not finish`
+              : issue.message,
+        },
+      ];
+    });
+    return {
+      kind: "refused",
+      code: "schema",
+      reason:
+        `${path} does not satisfy §7.6: ` +
+        issues.map((i) => `${i.path === "" ? "(record)" : i.path}: ${i.message}`).join("; "),
+      issues,
+    };
+  }
+
+  /*
+   * The record parsed and is about somebody else. `advanceIncident` would throw
+   * on this pairing and be right to — *"continuing would write one service's
+   * state into another's file"* — but the caller here is a polling actor holding
+   * a path, so the same fact arrives as a value it can log and skip.
+   */
+  if (subjectKey(result.data.subject) !== subjectKey(expected)) {
+    return {
+      kind: "refused",
+      code: "subject_mismatch",
+      reason:
+        `${path} holds the record for ${subjectKey(result.data.subject)} but was read as ` +
+        `${subjectKey(expected)}. §6.8 keys a record per subject, so acting on this one would ` +
+        `advance one subject's state from another subject's sweeps.`,
+      issues: [],
+    };
+  }
+
+  return { kind: "ok", record: result.data };
+}
+
+/**
+ * Absent, or present and wrong — see {@link INCIDENT_RECORD_FAULTS}.
+ *
+ * Sound because the value came through `JSON.parse`, where `undefined` is not
+ * representable: `undefined` at a path is a key that was never written and can be
+ * nothing else, while `null` is a key that is present and carries a value this
+ * contract does not accept.
+ */
+function faultAt(raw: unknown, path: readonly PropertyKey[]): IncidentRecordFault {
+  let cursor: unknown = raw;
+  for (const segment of path) {
+    if (cursor === null || typeof cursor !== "object") return "invalid";
+    cursor = (cursor as Record<PropertyKey, unknown>)[segment];
+  }
+  return cursor === undefined ? "missing" : "invalid";
+}
+
+function shapeOf(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "a JSON array";
+  return `a JSON ${typeof value}`;
+}
+
+/** The read, and nothing but the read. `null` means the file does not exist. */
+export type IncidentRecordText = (path: string) => Promise<string | null>;
+
+export interface IncidentRecordDeps {
+  readonly readText: IncidentRecordText;
+}
+
+/** The real read, taken through a ports object exactly as `TriageConfigDeps` is. */
+export const DEFAULT_INCIDENT_RECORD_DEPS: IncidentRecordDeps = {
+  readText: async (path) => {
+    const file = Bun.file(path);
+    return (await file.exists()) ? await file.text() : null;
+  },
+};
+
+export interface LoadIncidentRecordOptions {
+  readonly subject: IncidentSubject;
+  /** Defaults to {@link incidentRecordPath} for the subject. */
+  readonly path?: string;
+  readonly deps?: Partial<IncidentRecordDeps>;
+  readonly env?: Record<string, string | undefined>;
+}
+
+/**
+ * Read one subject's record, with a MISSING file resolving to a fresh record and a
+ * MALFORMED one refusing.
+ *
+ * The two are the whole of §7.6's posture and they must not be collapsed. A
+ * console watching nine services has nine missing files on its first sweep, which
+ * is the ordinary state and costs nothing; a file that exists and cannot be read
+ * is a fact about a service whose incident state is now unknown, and treating it
+ * as "never seen" would silently clear it.
+ *
+ * The disk is reached only through {@link IncidentRecordDeps}, so every test in
+ * this phase runs without one — Phase 5 *"touches no container and no network"*,
+ * and `~/.pifleet` is keyed off `$HOME` rather than off the checkout.
+ */
+export async function loadIncidentRecord(
+  opts: LoadIncidentRecordOptions,
+): Promise<IncidentRecordRead> {
+  const deps: IncidentRecordDeps = { ...DEFAULT_INCIDENT_RECORD_DEPS, ...opts.deps };
+  const path = opts.path ?? incidentRecordPath(opts.subject, opts.env);
+  const text = await deps.readText(path);
+  if (text === null) return { kind: "ok", record: freshIncidentRecord(opts.subject) };
+  return parseIncidentRecord(text, opts.subject, path);
+}
