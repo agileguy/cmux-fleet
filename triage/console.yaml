@@ -1,0 +1,55 @@
+# The triage console's own configuration — `pifleet.triageconsole/v1`.
+#
+# SRD-TRIAGE-CONSOLE §7.8. Tracked, and validated by `pifleet config validate`
+# in the same pass as `fleet.yaml` and `triage/targets.yaml`.
+#
+# ------------------------------------------------------------------------------
+# THE EMPTINESS IS THE DELIVERABLE. DO NOT HELPFULLY FILL THIS IN.
+#
+# §13 task 3.6 asks for this file to carry `version: 1` and nothing else, "so
+# that the tracked example is also the proof that the defaults are reachable".
+# Every one of the nine knobs and the whole `notify` block have documented
+# defaults in §7.8's table, and a default an operator has to type is not a
+# default — it is a value with a suggested spelling, and the second copy of it
+# in this file is the one that drifts. Writing `cadence_s: 300` here would look
+# like documentation and would in fact be a second definition of 300, silently
+# outranking the schema the day the schema changes.
+#
+# So the shipped values live in `TriageConsoleConfigSchema`
+# (`src/run/triage-config.ts`) and this file proves you can reach them:
+#
+#   cadence_s              300     §6.4's tick. `--cadence` overrides a hand-run
+#   reserve_s               60     the margin sweep_deadline_s is derived against
+#   max_consecutive_skips    3     fifteen minutes of not sweeping (§6.8a)
+#   recycle_after_sweeps    48     four hours; 0 disables (§6.6, Q5)
+#   flap_threshold           3     §6.8
+#   flap_window_s         3600     §6.8
+#   renotify_after_s     21600     six hours; 0 disables. §6.8 and §8 both warn
+#                                  that setting this small undoes the design
+#   notify                 the ntfy block; `notify: null` disables the channel
+#                          without disabling the console (§6.9 requirement 7)
+#
+# `sweep_deadline_s` IS NOT A FIELD. It is computed as `cadence_s - reserve_s`
+# (§7.8 property 1), so with the defaults it is 240s. Writing the key here is a
+# field-level error naming the key, because a value that must always equal a
+# function of two others is one that will one day disagree with them. Raise
+# `reserve_s` to shorten the deadline.
+#
+# `notify.token_env` defaults to `null` and the shipped endpoint
+# (https://ntfy.agileguy.ca/Alerts) refused an anonymous read with 403 when it
+# was measured on 2026-09-06 — so out of the box this console will not publish.
+# That is deliberate and is §11 Q11: the alternative is a credential baked into
+# a tracked file, which is the thing `notifyEndpointIssue` exists to refuse from
+# the other direction. Mint a token, export it on the HOST, and name the
+# variable — never the value — here:
+#
+#   notify:
+#     token_env: NTFY_TOKEN
+#
+# An endpoint carrying the token instead — userinfo, or ntfy's own documented
+# `?auth=<token>` query form — is REFUSED at load, because this file is tracked,
+# `~/.pifleet/triage.log` appends forever, and `pifleet triage --status` prints
+# the endpoint.
+# ------------------------------------------------------------------------------
+
+version: 1

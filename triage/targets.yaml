@@ -1,0 +1,61 @@
+# The triage console's service registry — `pifleet.triagetargets/v1`.
+#
+# SRD-TRIAGE-CONSOLE §6.2 and §7.1. Tracked, diffable, and schema-validated by
+# `pifleet config validate` in the same pass as `fleet.yaml` and
+# `triage/console.yaml`. It is deliberately NOT in `fleet.yaml`: that schema is
+# `.strict()` over the FLEET's contract, it changes on a different clock than
+# roles and models, and it is gitignored — so a service list there is untracked,
+# undiffable, and undispatchable.
+#
+# ADDING AN ENVIRONMENT OR A SERVICE IS AN EDIT TO THIS FILE AND NOTHING ELSE.
+# That is §6.2 property 1 and it is the whole reason this file exists.
+#
+# ------------------------------------------------------------------------------
+# TWO VALUES HERE ARE PLACEHOLDERS AND MUST BE SET BEFORE THE FIRST LIVE SWEEP.
+#
+# `kube_context` and `namespace` are the operator's, and they are not written out
+# here on purpose: §0.3 fixes this design's disclosure boundary as "no cloud
+# project, no cluster endpoint, no namespace, no credential value", and this file
+# is tracked in a repository that boundary applies to just as much as the SRD.
+#
+#   - `kube_context` is a LOGICAL token — `cni-dev`, not GKE's generated
+#     `gke_<project>_<region>_<cluster>`. §6.2 property 3 and SRD-OBSERVER-001
+#     §7.1 both say so: the filtered kubeconfig carries the environment token the
+#     envelope carries. If your filtered copy still has the vendor's generated
+#     name, rename it there — `kubectl --kubeconfig <filtered copy> config
+#     rename-context <generated> cni-dev` — rather than pasting the generated
+#     name here, which would put a cloud project id in a tracked file.
+#   - `namespace` is DECLARED, never derived (§6.2 rule 2). Nothing infers it
+#     from the service name or from a branch.
+#
+# `pifleet config validate` refuses this file the moment either is wrong in a way
+# it can see: a `kube_context` the fleet's `cloud.kubeconfig` does not carry is
+# refused at load and the console refuses to start (D11, §6.10). A `namespace`
+# it cannot check is checked by the first sweep instead.
+# ------------------------------------------------------------------------------
+
+version: 1
+
+environments:
+  # The commission's own example: `mia`, `authorization` and `authentication` in
+  # `cni-dev`. The key is the logical environment token, and it must match
+  # `SESSION_ID_RE` because it becomes a path segment under `~/.pifleet/triage/`.
+  cni-dev:
+    kube_context: cni-dev
+
+    # 5m, matching the default cadence — NOT something generous. §6.10 rule 1:
+    # a six-hour window re-read every five minutes is 72x the necessary read
+    # volume against a live logging API, and it is the obvious default a person
+    # would write. A window wider than `cadence_s` in triage/console.yaml is
+    # refused, naming both files.
+    default_window: 5m
+
+    # `checks` is a CLOSED enum — [rollout, logs, sink, endpoint]. No free
+    # strings, so this file selects among the observers' procedures and cannot
+    # extend them (§6.2 property 4). Every entry is a read against a live
+    # control plane on every sweep, 288 times a day, so the list is the ones
+    # that earn their place rather than all four by default.
+    services:
+      - {name: mia,            namespace: cni-dev, workload: mia,            checks: [rollout, logs]}
+      - {name: authorization,  namespace: cni-dev, workload: authorization,  checks: [rollout, logs, sink]}
+      - {name: authentication, namespace: cni-dev, workload: authentication, checks: [rollout, logs, sink]}

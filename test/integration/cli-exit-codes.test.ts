@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
@@ -167,6 +167,397 @@ describe("exit-code ladder", () => {
     const r = await runCli(["no-such-command"]);
     expect(r.code).not.toBe(EXIT.SUCCESS);
     expect(r.stderr).not.toContain("at async");
+  }, cliBudget(1));
+});
+
+/**
+ * The triage pair, through the real command (SRD-TRIAGE-CONSOLE §7.1, §7.8,
+ * task 3.5).
+ *
+ * ## Why these are CLI tests and not more unit tests
+ *
+ * `test/unit/triage-targets.test.ts` already drives D11's fence hard — fifteen
+ * mutations, an asymmetric fixture, the degenerate empty-allowlist shape. None
+ * of that made the fence defend anything, because until this wiring existed no
+ * module under `src/` imported the loader at all: the only importer was the
+ * test. ISC-579 is written against exactly that gap and its probe is a grep for
+ * an IMPORT, so the thing that has to be re-checked here is not whether the
+ * function narrows — it does — but whether a real `pifleet` invocation, reading
+ * real files off a real disk, reaches it. That is only observable from the
+ * outside, which is what this file is for.
+ *
+ * Every rig writes its own `fleet.yaml`, its own kubeconfig and its own
+ * `triage/` directory into a temp dir and passes `-c` at it, so none of them
+ * reads the repository's own tracked pair — except the last one, which reads it
+ * deliberately and says so.
+ */
+describe("config validate — the triage pair", () => {
+  const KUBECONFIG = (contexts: string[]): string =>
+    [
+      "apiVersion: v1",
+      "kind: Config",
+      "contexts:",
+      ...contexts.map((c) => `  - {name: ${c}, context: {cluster: c1, user: u1}}`),
+      "",
+    ].join("\n");
+
+  const TARGETS = (env: string, context: string, extra = ""): string =>
+    [
+      "version: 1",
+      "environments:",
+      `  ${env}:`,
+      `    kube_context: ${context}`,
+      ...(extra === "" ? [] : [`    ${extra}`]),
+      "    services:",
+      "      - {name: mia, namespace: ns, workload: mia, checks: [rollout, logs]}",
+      "",
+    ].join("\n");
+
+  interface Rig {
+    /** `contexts` the fleet's kubeconfig carries; `null` leaves `cloud.kubeconfig` unset. */
+    contexts?: string[] | null;
+    /** `triage/targets.yaml`'s text; `null` writes no file at all. */
+    targets?: string | null;
+    /** `triage/console.yaml`'s text; `null` writes no file at all. */
+    consoleYaml?: string | null;
+  }
+
+  /** A temp fleet whose `triage/` directory is entirely this test's. */
+  async function rig(spec: Rig): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-triage-"));
+    const kubeconfig = join(dir, "kubeconfig.yaml");
+    if (spec.contexts != null) await writeFile(kubeconfig, KUBECONFIG(spec.contexts));
+    await mkdir(join(dir, "triage"), { recursive: true });
+    if (spec.targets != null) await writeFile(join(dir, "triage", "targets.yaml"), spec.targets);
+    if (spec.consoleYaml != null)
+      await writeFile(join(dir, "triage", "console.yaml"), spec.consoleYaml);
+    await writeFile(
+      join(dir, "fleet.yaml"),
+      [
+        "version: 2",
+        "name: triage-fence",
+        'docker: { pi_version: "0.79.6" }',
+        'run: { repo: "./repo", budget: { tokens_ceiling: 1000000 } }',
+        "llm: { model: m }",
+        "roles:",
+        "  engineer: {}",
+        "workers:",
+        "  - { id: eng-1, role: engineer }",
+        "cloud:",
+        spec.contexts == null ? "  kubeconfig: null" : `  kubeconfig: ${kubeconfig}`,
+        "",
+      ].join("\n"),
+    );
+    return dir;
+  }
+
+  const validate = (dir: string, extra: string[] = []) =>
+    runCli(["config", "validate", "-c", join(dir, "fleet.yaml"), ...extra]);
+
+  /**
+   * ISC-579's own claim, re-taken against the CLI rather than the function.
+   *
+   * The kubeconfig and the targets file hold ASYMMETRIC context sets — the
+   * kubeconfig carries `cni-dev` and `cni-verify`, the file names `cni-dev` and
+   * `cni-prod`, and neither set contains the other. So a check that compared
+   * SIZES, or that ran the subset the wrong way round, would see two-and-two and
+   * pass; and the environment that must survive is asserted BY NAME, so
+   * "exactly one refusal" cannot be reached by refusing the wrong half.
+   */
+  test("an environment naming a context the kubeconfig lacks exits 2, naming the file", async () => {
+    const dir = await rig({
+      contexts: ["cni-dev", "cni-verify"],
+      targets: [
+        "version: 1",
+        "environments:",
+        "  cni-dev:",
+        "    kube_context: cni-dev",
+        "    services: [{name: mia, namespace: ns, workload: mia, checks: [rollout]}]",
+        "  cni-prod:",
+        "    kube_context: cni-prod",
+        "    services: [{name: mia, namespace: ns, workload: mia, checks: [rollout]}]",
+        "",
+      ].join("\n"),
+      consoleYaml: "version: 1\n",
+    });
+    try {
+      const r = await validate(dir);
+      expect(r.code).toBe(EXIT.USAGE);
+      // The FILE, because three files are read in this pass and the operator
+      // has to know which editor to open.
+      expect(r.stderr).toContain(join(dir, "triage", "targets.yaml"));
+      // The FIELD, at the offending environment's own path.
+      expect(r.stderr).toContain("environments.cni-prod.kube_context");
+      // What the kubeconfig DOES carry, so the fix needs no second command.
+      expect(r.stderr).toContain("cni-verify");
+      // NARROWING: the reachable environment is not refused. A fence that
+      // refused everything would satisfy every assertion above.
+      expect(r.stderr).not.toContain("environments.cni-dev.kube_context");
+      expect(r.stderr).toContain("1 validation error");
+      expect(r.stderr).not.toContain("at async");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, cliBudget(1));
+
+  /**
+   * ANTI-VACUITY for the test above, and the half that makes it evidence rather
+   * than an assertion about a broken command: the same file, the same command,
+   * one context added to the kubeconfig, and it passes — reporting the pair it
+   * fenced.
+   */
+  test("the same file validates once the kubeconfig carries every context", async () => {
+    const dir = await rig({
+      contexts: ["cni-dev", "cni-prod", "cni-verify"],
+      targets: [
+        "version: 1",
+        "environments:",
+        "  cni-dev:",
+        "    kube_context: cni-dev",
+        "    services: [{name: mia, namespace: ns, workload: mia, checks: [rollout]}]",
+        "  cni-prod:",
+        "    kube_context: cni-prod",
+        "    services: [{name: mia, namespace: ns, workload: mia, checks: [rollout]}]",
+        "",
+      ].join("\n"),
+      consoleYaml: "version: 1\n",
+    });
+    try {
+      const r = await validate(dir, ["--json"]);
+      expect(r.code).toBe(EXIT.SUCCESS);
+      const d = JSON.parse(r.stdout);
+      expect(d.triage.fenced).toBe(true);
+      expect(d.triage.environments).toEqual(["cni-dev", "cni-prod"]);
+      expect(d.triage.services).toBe(2);
+      // The COMPUTED deadline, from the defaults an empty console.yaml resolves
+      // to: 300 - 60. `sweep_deadline_s` is not a field anywhere.
+      expect(d.triage.cadence_s).toBe(300);
+      expect(d.triage.sweep_deadline_s).toBe(240);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, cliBudget(1));
+
+  /**
+   * §7.8's cross-file note and §12's own probe: `default_window: 6h` in one file
+   * against `cadence_s: 300` in the other. **Both filenames must appear**, since
+   * either could be the one the operator meant to change and "a refusal naming
+   * one file when two disagree sends the operator to the wrong editor."
+   */
+  test("a default_window wider than the cadence exits 2 naming BOTH files", async () => {
+    const dir = await rig({
+      contexts: ["cni-dev"],
+      targets: TARGETS("cni-dev", "cni-dev", "default_window: 6h"),
+      consoleYaml: "version: 1\ncadence_s: 300\n",
+    });
+    try {
+      const r = await validate(dir);
+      expect(r.code).toBe(EXIT.USAGE);
+      expect(r.stderr).toContain(join(dir, "triage", "targets.yaml"));
+      expect(r.stderr).toContain(join(dir, "triage", "console.yaml"));
+      expect(r.stderr).toContain("environments.cni-dev.default_window");
+      expect(r.stderr).toContain("cadence_s");
+      expect(r.stderr).not.toContain("at async");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, cliBudget(1));
+
+  /**
+   * The same cross-file bound on the arm where the kube-context fence CANNOT
+   * run — and this test exists because its absence let a mutation live.
+   *
+   * Deleting `windowIssues` from the un-fenced arm changed nothing in the suite:
+   * every window fixture had a kubeconfig, so every one of them went down the
+   * fenced path where `fenceTriageTargets` applies that check itself. The
+   * un-fenced arm's whole claim is that it is a MISSING FENCE and not a skipped
+   * file — that a fleet with no `cloud.kubeconfig` still has its targets file
+   * checked against the cadence — and until this fixture existed that claim was
+   * prose. §12's degenerate-fixture lesson, one layer up: two paths that agree
+   * on every fixture are one path being tested twice.
+   */
+  test("a window wider than the cadence is refused even when nothing can be fenced", async () => {
+    const dir = await rig({
+      contexts: null,
+      targets: TARGETS("cni-dev", "cni-dev", "default_window: 6h"),
+      consoleYaml: "version: 1\ncadence_s: 300\n",
+    });
+    try {
+      const r = await validate(dir);
+      expect(r.code).toBe(EXIT.USAGE);
+      expect(r.stderr).toContain(join(dir, "triage", "targets.yaml"));
+      expect(r.stderr).toContain(join(dir, "triage", "console.yaml"));
+      expect(r.stderr).toContain("environments.cni-dev.default_window");
+      // Not the fence — that check is the one this arm cannot make, and saying
+      // it ran would be worse than not running it.
+      expect(r.stderr).not.toContain("kube_context");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, cliBudget(1));
+
+  /**
+   * §7.8 property 1, through the CLI: `sweep_deadline_s` is COMPUTED and writing
+   * it is a field-level error NAMING THE KEY — not `(root): Unrecognized key`,
+   * which would send an operator hunting for a typo they did not make.
+   */
+  test("sweep_deadline_s in console.yaml exits 2 as a field-level error naming the key", async () => {
+    const dir = await rig({
+      contexts: ["cni-dev"],
+      targets: TARGETS("cni-dev", "cni-dev"),
+      consoleYaml: "version: 1\nsweep_deadline_s: 240\n",
+    });
+    try {
+      const r = await validate(dir);
+      expect(r.code).toBe(EXIT.USAGE);
+      expect(r.stderr).toContain(join(dir, "triage", "console.yaml"));
+      expect(r.stderr).toContain("sweep_deadline_s");
+      expect(r.stderr).toContain("cadence_s - reserve_s");
+      expect(r.stderr).not.toContain("(root)");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, cliBudget(1));
+
+  /**
+   * §6.9 requirement 4 and §12's highest-priority credential fixture, reachable
+   * from the command an operator actually runs before committing: ntfy's own
+   * documented `?auth=<token>` form.
+   *
+   * The second half is the one that would be easy to lose — **the refusal must
+   * not itself print the token**, because this text goes to a terminal and, once
+   * the console is running, to a log that appends forever.
+   */
+  test("notify.endpoint carrying ?auth= exits 2 without echoing the token", async () => {
+    const dir = await rig({
+      contexts: ["cni-dev"],
+      targets: TARGETS("cni-dev", "cni-dev"),
+      consoleYaml: [
+        "version: 1",
+        "notify:",
+        "  endpoint: https://ntfy.example.test/Alerts?auth=tk_secret_value",
+        "",
+      ].join("\n"),
+    });
+    try {
+      const r = await validate(dir);
+      expect(r.code).toBe(EXIT.USAGE);
+      expect(r.stderr).toContain(join(dir, "triage", "console.yaml"));
+      expect(r.stderr).toContain("notify.endpoint");
+      expect(r.stderr).toContain("token_env");
+      // The VALUE, and the URL it sat in: the query case quotes no part of the
+      // endpoint back, because a bare `?tk_abc…` carries the secret as the
+      // parameter NAME, so listing names would not be safe either. The
+      // message's reference to ntfy's documented `?auth=<token>` FORM is the
+      // diagnosis and is not the operator's string.
+      expect(r.stderr).not.toContain("tk_secret_value");
+      expect(r.stderr).not.toContain("ntfy.example.test");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, cliBudget(1));
+
+  /**
+   * The `no-inventory` arm, asserted in BOTH directions so silence is not an
+   * option: a fleet with no `triage/targets.yaml` validates and reports no
+   * triage pair — **and its `triage/console.yaml` is still parsed**, which is
+   * the half that would otherwise rot into a tracked file nothing reads.
+   */
+  test("a fleet with no targets file validates, and its console.yaml is still checked", async () => {
+    const clean = await rig({ contexts: null, targets: null, consoleYaml: "version: 1\n" });
+    const broken = await rig({
+      contexts: null,
+      targets: null,
+      consoleYaml: "version: 1\ncadence_s: 3\n",
+    });
+    try {
+      const ok = await validate(clean, ["--json"]);
+      expect(ok.code).toBe(EXIT.SUCCESS);
+      expect(JSON.parse(ok.stdout).triage).toBeNull();
+
+      const bad = await validate(broken);
+      expect(bad.code).toBe(EXIT.USAGE);
+      expect(bad.stderr).toContain(join(broken, "triage", "console.yaml"));
+      expect(bad.stderr).toContain("cadence_s");
+    } finally {
+      await rm(clean, { recursive: true, force: true });
+      await rm(broken, { recursive: true, force: true });
+    }
+  }, cliBudget(2));
+
+  /**
+   * The REPOSITORY'S OWN tracked pair, read by the real command — the one test
+   * here that deliberately does not build a rig.
+   *
+   * `fleet.example.yaml` sits beside `triage/`, so this is the assertion that
+   * the files task 3.6 tracks are the files `config validate` actually reads,
+   * that they parse, and that `triage/console.yaml` carrying nothing but
+   * `version: 1` resolves to §7.8's documented defaults rather than to an error
+   * — which is the entire reason that file is empty.
+   *
+   * The example declares `cloud.kubeconfig: null`, so the kube-context fence has
+   * no reach to check against and the pass says so in a warning instead of
+   * refusing. That split is ISC-392's, not a new one: the same field, the same
+   * document, and its recorded reason — "a refusal would reject a document the
+   * fleet already runs." The **warning is asserted**, so the un-fenced state can
+   * never be silent.
+   */
+  test("the tracked triage/ pair is what validate reads beside the shipped example", async () => {
+    const r = await runCli(["config", "validate", "-c", "fleet.example.yaml", "--json"]);
+    expect(r.code).toBe(EXIT.SUCCESS);
+    const d = JSON.parse(r.stdout);
+    expect(d.triage.targets_path).toBe(join(REPO_ROOT, "triage", "targets.yaml"));
+    expect(d.triage.console_path).toBe(join(REPO_ROOT, "triage", "console.yaml"));
+    expect(d.triage.environments).toEqual(["cni-dev"]);
+    expect(d.triage.services).toBe(3);
+    // §7.8's defaults, reached by a file that states only its version.
+    expect(d.triage.cadence_s).toBe(300);
+    expect(d.triage.sweep_deadline_s).toBe(240);
+    // Not fenced, and never silently so.
+    expect(d.triage.fenced).toBe(false);
+    expect(r.stderr).toContain("was NOT fenced");
+    expect(r.stderr).toContain("REFUSES TO START");
+  }, cliBudget(1));
+
+  /**
+   * The tracked pair again — this time PASSED THROUGH THE FENCE, by copying both
+   * files verbatim beside a fleet whose kubeconfig carries the context they
+   * name.
+   *
+   * The test above proves the tracked files parse. This one proves the tracked
+   * `kube_context` is a value the fence can actually admit, which is a different
+   * claim and the one that decides whether task 3.6's worked example is a
+   * working example or a shape. It is also what makes an edit to that line
+   * FAIL: change `cni-dev` in `triage/targets.yaml` to anything else and this
+   * test goes red, while every schema-level assertion elsewhere stays green.
+   *
+   * The kubeconfig is written by the test rather than read from the host, so
+   * this asserts nothing about the operator's own filtered copy — which is the
+   * one thing on this path that is environment-specific, and the reason the
+   * tracked file names the LOGICAL token `cni-dev` rather than a cloud
+   * provider's generated context id (§0.3's disclosure boundary; §6.2 property
+   * 3).
+   */
+  test("the tracked triage/targets.yaml passes the fence against a kubeconfig carrying its context", async () => {
+    const dir = await rig({ contexts: ["cni-dev", "cni-verify"], targets: null, consoleYaml: null });
+    try {
+      for (const name of ["targets.yaml", "console.yaml"]) {
+        await writeFile(
+          join(dir, "triage", name),
+          await Bun.file(join(REPO_ROOT, "triage", name)).text(),
+        );
+      }
+      const r = await validate(dir, ["--json"]);
+      expect(r.code).toBe(EXIT.SUCCESS);
+      const d = JSON.parse(r.stdout);
+      expect(d.triage.fenced).toBe(true);
+      expect(d.triage.environments).toEqual(["cni-dev"]);
+      expect(d.triage.services).toBe(3);
+      expect(d.triage.sweep_deadline_s).toBe(240);
+      expect(r.stderr).not.toContain("was NOT fenced");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }, cliBudget(1));
 });
 

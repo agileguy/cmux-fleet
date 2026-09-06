@@ -102,13 +102,69 @@
  *   even after a failed string check (measured), so keeping it produces TWO
  *   issues on one path for one defect — and the second of them would be the bare
  *   `"Invalid URL"` that property 4 above is written against.
+ *
+ * ## THE PAIR — why the cross-file refusal lives in THIS file (task 3.5)
+ *
+ * §7.8: *"One check spans two files and therefore lives in neither schema…
+ * the cross-file refusal belongs to the loader that holds both."* Two modules
+ * could have been that loader, and the CODE picks one of them rather than taste:
+ *
+ * `triage-targets.ts` cannot be it, and says so in its own words — the cadence
+ * and the deadline *"arrive as parameters together with BOTH file names, rather
+ * than this module importing a config it does not own."* Its
+ * {@link windowIssues} and `sweepDeadlineIssue` take `cadenceS`,
+ * `sweepDeadlineS` and a `TriageFileNames` as REQUIRED parameters precisely so
+ * that it never has to know where those came from. Making it import this file
+ * would delete that property and create the import cycle the parameters exist
+ * to avoid.
+ *
+ * So it is this file, and the direction is the only one available: this module
+ * imports `triage-targets.ts`, {@link loadTriagePair} reads `console.yaml`
+ * FIRST, computes {@link sweepDeadlineS} from it, and hands both numbers and
+ * both file names to `loadTriageTargets`. Nothing new decides the rule — the
+ * refusals are `triage-targets.ts`'s, unchanged — this is the one place where
+ * both operands exist at once, which is what "the loader that holds both"
+ * means.
+ *
+ * **`triage/console.yaml` is loaded before `triage/targets.yaml` and that order
+ * is load-bearing, not stylistic.** The cadence bounds every window in the
+ * targets file, so a targets file cannot be judged until the cadence is known;
+ * and a `console.yaml` that will not parse must be reported as a `console.yaml`
+ * error rather than surfacing as a window refusal against a default cadence the
+ * operator never wrote.
+ *
+ * ## The console this exports for `pifleet config validate` (task 3.5)
+ *
+ * {@link validateTriageFiles} is the whole triage stage of `config validate`,
+ * as a value rather than as a branch inside a command file, and its three arms
+ * are the three states a fleet can actually be in. Two of them are policy and
+ * both are argued at {@link TriageStage}: an ABSENT inventory is not this
+ * command's refusal to make, and an UNDECLARED kubeconfig cannot be fenced
+ * against. Neither arm relaxes a refusal in either loader — the `no-inventory`
+ * arm still parses `console.yaml`, and the `unfenced` arm still applies every
+ * check that does not need a reach and still refuses to produce a
+ * `TriageTargets`.
  */
+
+import { join } from "node:path";
 
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
 import { ConfigValidationError, type FieldIssue } from "../config/load.ts";
 import { envVarNameIssue } from "../config/schema.ts";
+import {
+  DEFAULT_TRIAGE_TARGETS_DEPS,
+  loadTriageTargets,
+  parseTriageTargets,
+  sweepDeadlineIssue,
+  windowIssues,
+  type KubeContextRead,
+  type TriageFileNames,
+  type TriageTargets,
+  type TriageTargetsDeps,
+  type UnfencedTriageTargets,
+} from "./triage-targets.ts";
 
 // ---------------------------------------------------------------------------
 // The notification endpoint (§6.9, §7.8; task 3.4)
@@ -491,4 +547,297 @@ export async function loadTriageConsoleConfig(
   const deps: TriageConfigDeps = { ...DEFAULT_TRIAGE_CONFIG_DEPS, ...opts.deps };
   const text = await deps.readText(opts.configPath);
   return parseTriageConsoleConfig(text ?? "", opts.configPath);
+}
+
+// ---------------------------------------------------------------------------
+// The pair — the loader that holds both files (§7.8; task 3.5)
+// ---------------------------------------------------------------------------
+
+/** `triage/`, beside the fleet config. §6.2: *"at the repository root, tracked"*. */
+export const TRIAGE_DIR = "triage";
+
+/**
+ * Where the two tracked files live, given the fleet config's own directory.
+ *
+ * `loaded.dir` and NOT the cwd and NOT `run.repo`, on `config/load.ts:18-20`'s
+ * standing rule — *"a config that renders differently depending on where the
+ * command was typed is not a config"*. `run.repo` is the tempting second
+ * reading, because §6.2's decisive argument for tracking the inventory is that
+ * a worker must be able to EDIT it and produce a diff, and a worker's worktree
+ * is a worktree of `run.repo`. It is refused anyway: `run.repo` is a checkout of
+ * repository content this fleet treats as UNTRUSTED (SRD §12.2), and a fleet's
+ * own fence must not be read out of the tree its workers write to. For the
+ * fleet that runs this console the two directories are the same one.
+ *
+ * Returns `TriageFileNames` — `triage-targets.ts`'s own type — rather than a
+ * second shape carrying the same two strings, because these are exactly the two
+ * names the cross-file refusals quote.
+ */
+export function triagePaths(configDir: string): TriageFileNames {
+  return {
+    targets: join(configDir, TRIAGE_DIR, "targets.yaml"),
+    console: join(configDir, TRIAGE_DIR, "console.yaml"),
+  };
+}
+
+/** Both files, loaded and cross-checked. Only {@link loadTriagePair} makes one. */
+export interface TriagePair {
+  readonly console: TriageConsoleConfig;
+  /** FENCED — `fenceTriageTargets` is the only thing that produces this type. */
+  readonly targets: TriageTargets;
+  readonly files: TriageFileNames;
+}
+
+export interface LoadTriagePairOptions {
+  readonly paths: TriageFileNames;
+  /** The fleet's `cloud.kubeconfig`, resolved, or `null` when it is unset. */
+  readonly kubeconfigPath: string | null;
+  readonly deps?: Partial<TriageConfigDeps & TriageTargetsDeps>;
+}
+
+/**
+ * A kubeconfig read whose failure is a CONFIG error rather than a crash.
+ *
+ * `cloud.kubeconfig` naming a path that does not exist — a laptop reimaged, a
+ * filtered copy not yet minted — reaches `Bun.file(p).text()` as a bare ENOENT,
+ * which no `instanceof ConfigError` handler in the CLI recognises, so it escapes
+ * as exit 8 "internal error" with a stack trace. `config/load.ts:166-176`
+ * records the same defect for `fleet.yaml` itself and fixes it the same way: a
+ * file the operator NAMED and the tool cannot read is a bad config, not a bug.
+ *
+ * A `ConfigValidationError` from `parseKubeContexts` — the kubeconfig is present
+ * and is not YAML — passes through untouched, because it is already the better
+ * message.
+ */
+function guardKubeContextRead(read: KubeContextRead): KubeContextRead {
+  return async (kubeconfigPath) => {
+    try {
+      return await read(kubeconfigPath);
+    } catch (err) {
+      if (err instanceof ConfigValidationError) throw err;
+      throw new ConfigValidationError(kubeconfigPath, [
+        {
+          path: "",
+          message:
+            `cloud.kubeconfig names this file and it could not be read: ` +
+            `${err instanceof Error ? err.message : String(err)}. It is the triage console's ` +
+            `fence (D11, §6.10) — the set of contexts the console may reach — so a fence that ` +
+            `cannot be read is not an empty fence, it is an unknown one, and the load refuses ` +
+            `rather than guessing which of the two it is.`,
+        },
+      ]);
+    }
+  };
+}
+
+/**
+ * Read `triage/console.yaml`, then `triage/targets.yaml` fenced against it and
+ * against the fleet's kubeconfig — the one call `pifleet config validate` and
+ * the triage actor both make.
+ *
+ * Nothing new is decided here. `loadTriageTargets` performs the fence exactly as
+ * it does when called alone; this function's whole content is that the cadence,
+ * the deadline and BOTH file names come from the file that owns them instead of
+ * from a caller who might supply a second copy of the defaults. That is §7.8's
+ * *"a refusal naming one file when two disagree sends the operator to the wrong
+ * editor"*, made structural: there is no way to reach the targets loader from
+ * here without having read the console file first.
+ *
+ * A MISSING `triage/targets.yaml` is an error, unchanged — see
+ * `loadTriageTargets`. `config validate` does not want that arm and does not
+ * take it; see {@link validateTriageFiles}, which decides whether to call this
+ * at all rather than asking it to be lenient.
+ */
+export async function loadTriagePair(opts: LoadTriagePairOptions): Promise<TriagePair> {
+  const consoleConfig = await loadTriageConsoleConfig({
+    configPath: opts.paths.console,
+    deps: opts.deps,
+  });
+  const readKubeContexts = guardKubeContextRead(
+    opts.deps?.readKubeContexts ?? DEFAULT_TRIAGE_TARGETS_DEPS.readKubeContexts,
+  );
+  const targets = await loadTriageTargets({
+    targetsPath: opts.paths.targets,
+    consolePath: opts.paths.console,
+    kubeconfigPath: opts.kubeconfigPath,
+    cadenceS: consoleConfig.cadence_s,
+    sweepDeadlineS: sweepDeadlineS(consoleConfig),
+    deps: { ...opts.deps, readKubeContexts },
+  });
+  return { console: consoleConfig, targets, files: opts.paths };
+}
+
+// ---------------------------------------------------------------------------
+// `pifleet config validate`'s triage stage (task 3.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * What `config validate` found when it looked for a triage console, and the two
+ * policy decisions this command makes that the loaders deliberately do not.
+ *
+ * **`no-inventory` — an absent `triage/targets.yaml` is not this command's
+ * refusal.** `loadTriageTargets` refuses one, and the reason it gives is about
+ * a CONSOLE: *"an absent targets file would start a console that sweeps nothing
+ * and reports healthy."* `config validate` is not starting a console; it runs on
+ * every fleet in this tree, and all but one of them has no triage console at
+ * all. Refusing them would make the command useless, which is the ISC-392 trade
+ * in the other direction. Presence of the inventory is what says a fleet HAS a
+ * console — and `triage/console.yaml` is still parsed on this arm, so a broken
+ * one is still a refusal rather than a file nothing reads.
+ *
+ * **`unfenced` — `cloud.kubeconfig: null` warns here and refuses in the actor,
+ * and that split is ISC-392's, not a new opinion.** D11 requires the kubeconfig
+ * and `loadTriageTargets` REFUSES without it; that refusal is untouched and is
+ * what the actor gets. What `config validate` may not do is turn that same state
+ * into a refusal of the whole document, because ISC-392 already settled this
+ * exact question for this exact field — `cloud_access: true` with
+ * `cloud.kubeconfig` unset WARNS *"because a refusal would reject a document the
+ * fleet already runs"*, and `fleet.example.yaml` is that document: it ships the
+ * console's four seats and `kubeconfig: null`. So the arm warns, and the warning
+ * names the inventory it could not fence and says the console will not start.
+ *
+ * The arm is not a skip. Everything that does not need a reach is still checked
+ * and still fatal — the targets file's whole schema, `default_window` against
+ * the cadence, and the sweep deadline — and the value it carries is an
+ * {@link UnfencedTriageTargets}, so nothing downstream can read `environments`
+ * off it. Exactly one check is absent, and it is absent because its operand is:
+ * there is no reach to be a subset of.
+ */
+export type TriageStage =
+  | { readonly kind: "no-inventory"; readonly files: TriageFileNames }
+  | {
+      readonly kind: "unfenced";
+      readonly console: TriageConsoleConfig;
+      readonly unfenced: UnfencedTriageTargets;
+      readonly files: TriageFileNames;
+    }
+  | { readonly kind: "fenced"; readonly pair: TriagePair };
+
+/**
+ * `fenceTriageTargets`' issue list with `kubeContextIssues` REMOVED and nothing
+ * else — the checks that do not need a reach.
+ *
+ * Written as a subtraction rather than as its own list so that a fourth refusal
+ * added next door is either inherited here or is a visible omission. It returns
+ * issues rather than a document on purpose: the caller keeps holding an
+ * {@link UnfencedTriageTargets}, and `TriageTargets` stays a type only
+ * `fenceTriageTargets` can produce.
+ */
+function unreachedIssues(
+  unfenced: UnfencedTriageTargets,
+  cfg: TriageConsoleConfig,
+  files: TriageFileNames,
+): FieldIssue[] {
+  const cadenceS = cfg.cadence_s;
+  const deadline = sweepDeadlineIssue(sweepDeadlineS(cfg), cadenceS, files);
+  return [
+    ...windowIssues(unfenced.environments_unchecked_against_kubeconfig, cadenceS, files),
+    ...(deadline === null ? [] : [deadline]),
+  ];
+}
+
+export interface ValidateTriageFilesOptions {
+  readonly paths: TriageFileNames;
+  readonly kubeconfigPath: string | null;
+  readonly deps?: Partial<TriageConfigDeps & TriageTargetsDeps>;
+}
+
+/**
+ * The triage stage of `pifleet config validate` (§7.1, §7.8, task 3.5).
+ *
+ * Throws `ConfigValidationError` — naming whichever of the three files is wrong
+ * — for every refusal either loader makes. Returns a {@link TriageStage}
+ * otherwise; the two non-`fenced` arms are argued on that type.
+ */
+export async function validateTriageFiles(
+  opts: ValidateTriageFilesOptions,
+): Promise<TriageStage> {
+  const readText = opts.deps?.readText ?? DEFAULT_TRIAGE_CONFIG_DEPS.readText;
+  /*
+   * `console.yaml` FIRST, and on every arm — including the one that returns
+   * `no-inventory`. A tracked file that is only validated when a SECOND file
+   * happens to exist is a file whose refusals an operator meets at the worst
+   * possible moment, and §7.8's credential refusal is the one that must fire
+   * earliest of all.
+   */
+  const consoleConfig = await loadTriageConsoleConfig({
+    configPath: opts.paths.console,
+    deps: opts.deps,
+  });
+  const text = await readText(opts.paths.targets);
+  if (text === null) return { kind: "no-inventory", files: opts.paths };
+
+  if (opts.kubeconfigPath === null) {
+    const unfenced = parseTriageTargets(text, opts.paths.targets);
+    const issues = unreachedIssues(unfenced, consoleConfig, opts.paths);
+    if (issues.length > 0) throw new ConfigValidationError(opts.paths.targets, issues);
+    return { kind: "unfenced", console: consoleConfig, unfenced, files: opts.paths };
+  }
+  /*
+   * The bytes are read a second time inside `loadTriagePair`, deliberately.
+   * `config validate` drives the loader the ACTOR drives, rather than a
+   * re-composition of its parts that could one day disagree with it — ISC-256's
+   * standing lesson, that a preflight and the thing it previews must not read
+   * the same state through two paths. One extra read of a small tracked YAML is
+   * the whole cost.
+   */
+  const pair = await loadTriagePair({
+    paths: opts.paths,
+    kubeconfigPath: opts.kubeconfigPath,
+    deps: opts.deps,
+  });
+  return { kind: "fenced", pair };
+}
+
+/** What `config validate` prints about the triage pair. `null` on `no-inventory`. */
+export interface TriageStageSummary {
+  readonly targets_path: string;
+  readonly console_path: string;
+  /** False when `cloud.kubeconfig` is unset — the kube-context fence was not evaluated. */
+  readonly fenced: boolean;
+  readonly environments: string[];
+  readonly services: number;
+  readonly cadence_s: number;
+  readonly sweep_deadline_s: number;
+}
+
+export function triageStageSummary(stage: TriageStage): TriageStageSummary | null {
+  if (stage.kind === "no-inventory") return null;
+  const [cfg, environments, files] =
+    stage.kind === "fenced"
+      ? ([stage.pair.console, stage.pair.targets.environments, stage.pair.files] as const)
+      : ([stage.console, stage.unfenced.environments_unchecked_against_kubeconfig, stage.files] as const);
+  return {
+    targets_path: files.targets,
+    console_path: files.console,
+    fenced: stage.kind === "fenced",
+    environments: Object.keys(environments),
+    services: Object.values(environments).reduce((n, env) => n + env.services.length, 0),
+    cadence_s: cfg.cadence_s,
+    sweep_deadline_s: sweepDeadlineS(cfg),
+  };
+}
+
+/**
+ * The warning the `unfenced` arm renders. `null` on every other arm.
+ *
+ * Names what is GIVEN UP rather than restating the config, on
+ * `kubeconfigScopeWarning`'s precedent (`schema.ts:1783-1791`) — and the thing
+ * given up here is specific enough to say outright: this fleet validates and its
+ * triage console does not start.
+ */
+export function triageUnfencedWarning(stage: TriageStage): string | null {
+  if (stage.kind !== "unfenced") return null;
+  const names = Object.keys(stage.unfenced.environments_unchecked_against_kubeconfig);
+  return (
+    `warning: ${stage.files.targets} was NOT fenced — cloud.kubeconfig is unset ` +
+    `(${names.length} environment(s): ${names.join(", ")})\n` +
+    `  The filtered kubeconfig is the triage console's fence (D11, SRD-TRIAGE-CONSOLE §6.10): it ` +
+    `bounds which environments the console can reach at all, so with none declared there is no ` +
+    `set for these environments to be a subset of and the check could not run. The rest of the ` +
+    `file was validated. THE CONSOLE ITSELF REFUSES TO START in this state — the actor's load is ` +
+    `the same one that refuses a context the kubeconfig does not carry — so this document is ` +
+    `valid and its triage console is not runnable. Set cloud.kubeconfig to a filtered copy ` +
+    `carrying exactly the contexts ${stage.files.targets} names.\n`
+  );
 }

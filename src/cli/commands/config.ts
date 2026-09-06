@@ -4,6 +4,7 @@ import { EXIT } from "../../contracts.ts";
 import {
   ConfigError,
   ConfigValidationError,
+  expandPath,
   loadConfig,
   resolveAllWorkers,
 } from "../../config/load.ts";
@@ -16,6 +17,12 @@ import {
   unknownThemeWorkers,
   workersMissingKubeconfig,
 } from "../../config/schema.ts";
+import {
+  triagePaths,
+  triageStageSummary,
+  triageUnfencedWarning,
+  validateTriageFiles,
+} from "../../run/triage-config.ts";
 
 /**
  * Register `pifleet config` (SRD §10).
@@ -23,6 +30,24 @@ import {
  * `config validate` exits 2 on ANY failure (ISC-58) and prints field-level
  * errors — the dotted document path plus the message — because "invalid
  * config" without a path is a debugging session, not a diagnostic.
+ *
+ * ## Three files, one command (SRD-TRIAGE-CONSOLE §7.1, §7.8, task 3.5)
+ *
+ * `fleet.yaml`, `triage/targets.yaml` and `triage/console.yaml` are validated in
+ * ONE pass, because §7.8 charges the second and third files' existence against
+ * exactly that: *"it costs nothing extra, because both files are validated in
+ * the same `config validate` pass."* Split across two commands the cross-file
+ * bound has no home — `default_window` lives in one file and `cadence_s` in the
+ * other, and a command holding one of them can only guess at the other's
+ * default.
+ *
+ * **This is also the only path along which D11's fence defends anything.** The
+ * fence is `triage-targets.ts`'s and was complete before this wiring existed,
+ * but until a command called it the console could still have reached an
+ * environment nobody wrote down, because nothing in `src/` called the loader at
+ * all (ISC-579). `validateTriageFiles` is that call; the policy for a fleet with
+ * no inventory and for one with no kubeconfig is argued on `TriageStage`, not
+ * here.
  */
 
 /**
@@ -77,6 +102,20 @@ export function register(program: Command): void {
          * passes here is exactly what `up` will accept.
          */
         resolveAllWorkers(loaded);
+        /*
+         * The other two contracts, in the same pass and against the SAME
+         * document that was just merged: the kubeconfig this fence reads is
+         * this fleet's `cloud.kubeconfig`, resolved against the config file's
+         * own directory on §6.1 rule 3 — the same base every other path in the
+         * document uses.
+         */
+        const triage = await validateTriageFiles({
+          paths: triagePaths(loaded.dir),
+          kubeconfigPath:
+            loaded.config.cloud.kubeconfig === null
+              ? null
+              : expandPath(loaded.config.cloud.kubeconfig, loaded.dir),
+        });
         // Non-fatal (SRD-OBSERVER-001 §6.2, §6.6) — a document that trips
         // these still validates; see `schema.ts` for why each is a warning
         // and not a refusal.
@@ -85,12 +124,17 @@ export function register(program: Command): void {
           observerTuiEpochWarning(observerTuiWorkers(loaded.config)),
           unknownThemeWarning(unknownThemeWorkers(loaded.config)),
           operatorIdentityWarning(loaded.config.run.git_identity.email, await hostGitEmail()),
+          triageUnfencedWarning(triage),
         ].filter((w): w is string => w !== null);
         const summary = {
           valid: true,
           path: loaded.path,
           roles: Object.keys(loaded.config.roles),
           workers: loaded.config.workers.map((w) => w.id),
+          // `null` when this fleet has no `triage/targets.yaml` — the absence
+          // is reported as a field rather than by omitting the key, so a JSON
+          // consumer can tell "no console" from "an older pifleet".
+          triage: triageStageSummary(triage),
           warnings,
         };
         if (opts.json) {
@@ -99,6 +143,18 @@ export function register(program: Command): void {
           console.log(`ok: ${loaded.path}`);
           console.log(`  roles:   ${summary.roles.join(", ")}`);
           console.log(`  workers: ${summary.workers.join(", ")}`);
+          if (summary.triage !== null) {
+            const t = summary.triage;
+            console.log(
+              `  triage:  ${t.targets_path} — ${t.environments.length} environment(s) ` +
+                `(${t.environments.join(", ")}), ${t.services} service(s)` +
+                `${t.fenced ? "" : ", NOT fenced"}`,
+            );
+            console.log(
+              `           ${t.console_path} — cadence ${t.cadence_s}s, ` +
+                `sweep deadline ${t.sweep_deadline_s}s`,
+            );
+          }
         }
         // Stderr regardless of --json, on `unattendedTuiWarning`'s precedent:
         // the JSON stream on stdout stays one object either way.
