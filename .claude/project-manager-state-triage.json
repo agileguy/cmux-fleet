@@ -1,142 +1,172 @@
 {
-  "srd_path": "Docs/SRD-TRIAGE-CONSOLE.md",
-  "repo_path": "/Users/de895996/repos/cmux-fleet",
-  "branch": "triage-console",
-  "branch_kind": "long-lived",
-  "base": "main",
-  "total_phases": 9,
-  "current_phase": "2+3",
-  "current_round": 4,
-  "completed_phases": [
-    0,
-    1
-  ],
-  "phase_0_note": "Owner tasks. D1 arm 3 (all four seats local gpt-oss-20b-MXFP4-Q8), max_concurrent 4, channel drift closed. 0.3 moot. Q11 (ntfy token) outstanding, gates Phase 8 only.",
-  "rounds": [
-    {
-      "round": 1,
-      "phase": 1,
-      "tasks": {
-        "eng-1": [
-          "1.1b",
-          "1.3-partial-seven-roles-test"
-        ],
-        "eng-2": [
-          "1.2"
-        ]
-      },
-      "files": {
-        "eng-1": [
-          "fleet.example.yaml",
-          "test/unit/config.test.ts"
-        ],
-        "eng-2": [
-          "roles/triage.md"
-        ]
-      },
-      "verified_commit": "23a5d0f",
-      "verified_how": "Diff, not report. Both agents committed with explicit paths and neither touched the other's files. resolveWorker run directly against BOTH configs: all four seats return pane=rpc and model=gpt-oss-20b-MXFP4-Q8, which is Phase 1's exit criterion. No ollama-cloud entry added anywhere. No AI attribution in either commit."
-    },
-    {
-      "round": 2,
-      "phase": "1+3",
-      "tasks": {
-        "eng-1": [
-          "1.3",
-          "1.4"
-        ],
-        "eng-2": [
-          "3.1"
-        ]
-      },
-      "files": {
-        "eng-1": [
-          "test/unit/config.test.ts",
-          "ISA.md"
-        ],
-        "eng-2": [
-          "src/run/triage-targets.ts",
-          "test/unit/triage-targets.test.ts"
-        ]
-      },
-      "verified_commit": "ae5e72f",
-      "verified_how": "Diff plus suite. 4347/0 and tsc clean. ISC-574..581 written into ISA.md by the orchestrator from both engineers' reported criteria. ISC-579 graded [~]: the fence function is mutation-proved fifteen ways but NO src/ module imports triage-targets.ts, so it defends a function rather than a system. Its probe is pinned to `grep -rn triage-targets src/` being EMPTY, verified empty today, so task 3.5 turns it red."
-    },
-    {
-      "round": 3,
-      "phase": "3+2",
-      "tasks": {
-        "eng-1": [
-          "3.3",
-          "3.4"
-        ],
-        "eng-2": [
-          "2.1"
-        ]
-      },
-      "files": {
-        "eng-1": [
-          "src/run/triage-config.ts",
-          "test/unit/triage-config.test.ts"
-        ],
-        "eng-2": [
-          "src/run/dispatch-request.ts",
-          "src/run/task-ids.ts",
-          "test/unit/dispatch-request.test.ts"
-        ]
-      },
-      "verified_commit": "1fbae8f",
-      "verified_how": "Diff plus suite 4415/0. ISC-582..590 written into ISA.md. ISC-579's probe was CORRECTED this round: it read `grep -rn \"triage-targets\" src/`, which went non-empty on comments alone -- triage-config.ts mentions the sibling module in three docblock sentences. Now anchored on `from \"...\"` so it reads imports. Still empty, so the [~] stands and covers BOTH loaders."
-    },
-    {
-      "round": 4,
-      "phase": "3+2",
-      "tasks": {
-        "eng-1": [
-          "3.5",
-          "3.6"
-        ],
-        "eng-2": [
-          "2.2"
-        ]
-      },
-      "files": {
-        "eng-1": [
-          "src/cli/commands/config.ts",
-          "src/run/triage-config.ts",
-          "test/integration/cli-exit-codes.test.ts",
-          "triage/targets.yaml",
-          "triage/console.yaml"
-        ],
-        "eng-2": [
-          "src/cli/commands/relay.ts",
-          "src/run/relay.ts",
-          "test/unit/relay-console.test.ts"
-        ]
-      },
-      "note": "Round 4 is the one that turns ISC-579 red -- 3.5 gives both loaders their first src/ importer, which is exactly what its tripwire is pinned to.",
-      "verified_commit": null
-    }
-  ],
-  "status": "in_progress",
-  "version_file": "package.json",
-  "open_operator_items": [
-    "Q11: mint ntfy token for the Alerts topic, set notify.token_env (gates Phase 8 only)"
-  ],
-  "path_note": "NOT at .claude/project-manager-state.json, and deliberately. That path is the fleet project manager's own contract -- pm-state.ts:801-803 hardcodes it as SRD-FLEET-PROJECT-MANAGER 7.6's exact path, PmStateDocumentSchema governs its shape, and pm-state.test.ts treats the real file there as evidence that the schema keeps up with practice. This run is driven by the generic /ProjectManager skill, whose state is a different shape, so it takes a named file like the -observer and -review-console runs before it.",
-  "orchestrator_fixes_round_1": {
-    "role-briefings.test.ts": "Pinned briefing-role list went seven -> eight. Both agents correctly refused it as unowned; the orchestrator owns cross-cutting pins.",
-    "state-file-path": "REVERTED an orchestrator error. pm-state.ts:801-803 hardcodes .claude/project-manager-state.json as SRD-FLEET-PROJECT-MANAGER 7.6's contract path and pm-state.test.ts treats the real file there as evidence. Putting this run's differently-shaped state there broke it. The fleet-pm document is back at the canonical path untouched; this run took a named file.",
-    "mutation-anchors": "THIRD red test, and not caused by either of the first two fixes. The triage role copies the reviewer's tool grant byte for byte, so `    tools: [read, write, grep, find, ls]` stopped being unique in fleet.example.yaml and collation-contract.battery.ts's RV15/RV16 matched it 2x. A two-match anchor mutates whichever line the replacer reaches first, so those entries would have kept passing while testing something other than their `what:`. Re-anchored through append_system_prompt_file: ./roles/reviewer.md, which is the spelling RV17 already used for the live config. TWO GOTCHAS worth keeping: mutation-anchors.test.ts reads BOTH the battery and its target at git HEAD, so a working-tree fix looks like it changed nothing until committed; and it truncates the anchor to 70 chars in the message, so a re-anchored entry still prints as the bare line it used to be."
+ "srd_path": "Docs/SRD-TRIAGE-CONSOLE.md",
+ "repo_path": "/Users/de895996/repos/cmux-fleet",
+ "branch": "triage-console",
+ "branch_kind": "long-lived",
+ "base": "main",
+ "total_phases": 9,
+ "current_phase": "2+3",
+ "current_round": 5,
+ "completed_phases": [
+  0,
+  1
+ ],
+ "phase_0_note": "Owner tasks. D1 arm 3 (all four seats local gpt-oss-20b-MXFP4-Q8), max_concurrent 4, channel drift closed. 0.3 moot. Q11 (ntfy token) outstanding, gates Phase 8 only.",
+ "rounds": [
+  {
+   "round": 1,
+   "phase": 1,
+   "tasks": {
+    "eng-1": [
+     "1.1b",
+     "1.3-partial-seven-roles-test"
+    ],
+    "eng-2": [
+     "1.2"
+    ]
+   },
+   "files": {
+    "eng-1": [
+     "fleet.example.yaml",
+     "test/unit/config.test.ts"
+    ],
+    "eng-2": [
+     "roles/triage.md"
+    ]
+   },
+   "verified_commit": "23a5d0f",
+   "verified_how": "Diff, not report. Both agents committed with explicit paths and neither touched the other's files. resolveWorker run directly against BOTH configs: all four seats return pane=rpc and model=gpt-oss-20b-MXFP4-Q8, which is Phase 1's exit criterion. No ollama-cloud entry added anywhere. No AI attribution in either commit."
   },
-  "carry_forward": {
-    "phase_2_1": "When the triage aspect table lands, roles/triage.md must gain the child task ids and aspect names. roles/collator.md names T-arch/T-context/T-lang because REVIEW_CONSOLE_ASPECTS exists; the triage equivalent does not yet, so the prompt currently says the turn-two brief names the reply paths.",
-    "phase_5_2": "roles/triage.md chose five triage.json spellings the SRD does not fix: schema tag pifleet.triage/v1, services[], unaccounted[], evidence_ref shaped obs-t1:observer-ops.json#services[0], and sweep_id exemplified equal to the parent task id. src/run/triage-verdict.ts MUST match these or the role prompt is wrong.",
-    "phase_5_new_task": "There is no triage-role.test.ts. collator-role.test.ts exists because a role document naming a path nothing reads is an instruction an agent cannot push back on. Everything it checks is checkable here (container paths, wire tags, derived ids, both JSON examples against real schemas); all were run by hand once and nothing re-runs them.",
-    "cosmetic": "doctor-allowlist.test.ts:43 comment says 'The three fleet.example.yaml names' against four (constant is hardcoded, nothing fails). fleet.example.yaml workers: header says '8 panes' against 14 -- wrong before this branch."
+  {
+   "round": 2,
+   "phase": "1+3",
+   "tasks": {
+    "eng-1": [
+     "1.3",
+     "1.4"
+    ],
+    "eng-2": [
+     "3.1"
+    ]
+   },
+   "files": {
+    "eng-1": [
+     "test/unit/config.test.ts",
+     "ISA.md"
+    ],
+    "eng-2": [
+     "src/run/triage-targets.ts",
+     "test/unit/triage-targets.test.ts"
+    ]
+   },
+   "verified_commit": "ae5e72f",
+   "verified_how": "Diff plus suite. 4347/0 and tsc clean. ISC-574..581 written into ISA.md by the orchestrator from both engineers' reported criteria. ISC-579 graded [~]: the fence function is mutation-proved fifteen ways but NO src/ module imports triage-targets.ts, so it defends a function rather than a system. Its probe is pinned to `grep -rn triage-targets src/` being EMPTY, verified empty today, so task 3.5 turns it red."
   },
-  "task_1_1a": "DONE 2026-09-06 by the orchestrator. Live fleet.yaml carries the triage role (lifted verbatim from the tracked example) and the four seats, with NO model override on the observers because this file's observer role already is the 20b. config validate exits 0; the four seats resolve rpc + gpt-oss-20b-MXFP4-Q8. Untracked by design, so this record is the only evidence it happened.",
-  "baseline_suite": "4415 pass / 0 fail / 201 files / 115s, typecheck clean, measured 2026-09-06 after round 3",
-  "git_lesson": "An earlier orchestrator commit claimed test/unit/role-briefings.test.ts and did not contain it. `git add` aborts the ENTIRE invocation when any one pathspec does not match, the invocation named a file a later rename had already moved, and its stderr went to /dev/null -- so it staged nothing and said nothing, while the commit still succeeded on what `git mv` had already staged. Every check afterwards read the WORKING TREE, where the fix was present, so a green suite kept confirming a state the branch did not have. Stage one path per add when the list is heterogeneous; never redirect its stderr.",
-  "orchestrator_commit_rule": "ALWAYS `git commit -- <paths>`. Two agents share one checkout, so the index is shared and the window between an engineer's `git add` and its `git commit` is a race. A bare orchestrator commit took 1,094 of an engineer's staged lines under a documentation-count message. Split apart, index restored, content verified byte-identical by sha256 -- but the fix is the rule, not the recovery."
+  {
+   "round": 3,
+   "phase": "3+2",
+   "tasks": {
+    "eng-1": [
+     "3.3",
+     "3.4"
+    ],
+    "eng-2": [
+     "2.1"
+    ]
+   },
+   "files": {
+    "eng-1": [
+     "src/run/triage-config.ts",
+     "test/unit/triage-config.test.ts"
+    ],
+    "eng-2": [
+     "src/run/dispatch-request.ts",
+     "src/run/task-ids.ts",
+     "test/unit/dispatch-request.test.ts"
+    ]
+   },
+   "verified_commit": "1fbae8f",
+   "verified_how": "Diff plus suite 4415/0. ISC-582..590 written into ISA.md. ISC-579's probe was CORRECTED this round: it read `grep -rn \"triage-targets\" src/`, which went non-empty on comments alone -- triage-config.ts mentions the sibling module in three docblock sentences. Now anchored on `from \"...\"` so it reads imports. Still empty, so the [~] stands and covers BOTH loaders."
+  },
+  {
+   "round": 4,
+   "phase": "3+2",
+   "tasks": {
+    "eng-1": [
+     "3.5",
+     "3.6"
+    ],
+    "eng-2": [
+     "2.2"
+    ]
+   },
+   "files": {
+    "eng-1": [
+     "src/cli/commands/config.ts",
+     "src/run/triage-config.ts",
+     "test/integration/cli-exit-codes.test.ts",
+     "triage/targets.yaml",
+     "triage/console.yaml"
+    ],
+    "eng-2": [
+     "src/cli/commands/relay.ts",
+     "src/run/relay.ts",
+     "test/unit/relay-console.test.ts"
+    ]
+   },
+   "note": "Tasks 3.5/3.6. ISC-579's tripwire fired and the criterion re-graded [~] -> [x]; fence reproduced independently by the orchestrator against COPIES of the tracked files, not by mutating them. Four criteria filed (ISC-591..594). Phase 3 is now complete.",
+   "verified_commit": "f8427f7",
+   "graded_commit": "2ff997d"
+  },
+  {
+   "round": 5,
+   "tasks": {
+    "eng-1": [
+     "2.3"
+    ],
+    "eng-2": [
+     "4.1",
+     "4.2"
+    ]
+   },
+   "files": {
+    "eng-1": [
+     "src/run/console-relay.ts",
+     "test/unit/console-relay.test.ts",
+     "scripts/review",
+     "test/unit/review-console-relay.test.ts"
+    ],
+    "eng-2": [
+     "src/backends/cmux/operations-plan.ts",
+     "test/unit/triage-plan.test.ts",
+     "src/backends/cmux/operations.ts",
+     "test/unit/operations-workspace.test.ts"
+    ]
+   },
+   "verified_commit": null,
+   "note": "2.4 DEFERRED to round 6 on the ownership rule, not on size: it edits scripts/review, which 2.3 must also edit because the three path functions gain a REQUIRED console argument. Two agents in one file in one round is the one thing the cap forbids."
+  }
+ ],
+ "status": "in_progress",
+ "version_file": "package.json",
+ "open_operator_items": [
+  "Q11: mint ntfy token for the Alerts topic, set notify.token_env (gates Phase 8 only)"
+ ],
+ "path_note": "NOT at .claude/project-manager-state.json, and deliberately. That path is the fleet project manager's own contract -- pm-state.ts:801-803 hardcodes it as SRD-FLEET-PROJECT-MANAGER 7.6's exact path, PmStateDocumentSchema governs its shape, and pm-state.test.ts treats the real file there as evidence that the schema keeps up with practice. This run is driven by the generic /ProjectManager skill, whose state is a different shape, so it takes a named file like the -observer and -review-console runs before it.",
+ "orchestrator_fixes_round_1": {
+  "role-briefings.test.ts": "Pinned briefing-role list went seven -> eight. Both agents correctly refused it as unowned; the orchestrator owns cross-cutting pins.",
+  "state-file-path": "REVERTED an orchestrator error. pm-state.ts:801-803 hardcodes .claude/project-manager-state.json as SRD-FLEET-PROJECT-MANAGER 7.6's contract path and pm-state.test.ts treats the real file there as evidence. Putting this run's differently-shaped state there broke it. The fleet-pm document is back at the canonical path untouched; this run took a named file.",
+  "mutation-anchors": "THIRD red test, and not caused by either of the first two fixes. The triage role copies the reviewer's tool grant byte for byte, so `    tools: [read, write, grep, find, ls]` stopped being unique in fleet.example.yaml and collation-contract.battery.ts's RV15/RV16 matched it 2x. A two-match anchor mutates whichever line the replacer reaches first, so those entries would have kept passing while testing something other than their `what:`. Re-anchored through append_system_prompt_file: ./roles/reviewer.md, which is the spelling RV17 already used for the live config. TWO GOTCHAS worth keeping: mutation-anchors.test.ts reads BOTH the battery and its target at git HEAD, so a working-tree fix looks like it changed nothing until committed; and it truncates the anchor to 70 chars in the message, so a re-anchored entry still prints as the bare line it used to be."
+ },
+ "carry_forward": {
+  "phase_2_1": "When the triage aspect table lands, roles/triage.md must gain the child task ids and aspect names. roles/collator.md names T-arch/T-context/T-lang because REVIEW_CONSOLE_ASPECTS exists; the triage equivalent does not yet, so the prompt currently says the turn-two brief names the reply paths.",
+  "phase_5_2": "roles/triage.md chose five triage.json spellings the SRD does not fix: schema tag pifleet.triage/v1, services[], unaccounted[], evidence_ref shaped obs-t1:observer-ops.json#services[0], and sweep_id exemplified equal to the parent task id. src/run/triage-verdict.ts MUST match these or the role prompt is wrong.",
+  "phase_5_new_task": "There is no triage-role.test.ts. collator-role.test.ts exists because a role document naming a path nothing reads is an instruction an agent cannot push back on. Everything it checks is checkable here (container paths, wire tags, derived ids, both JSON examples against real schemas); all were run by hand once and nothing re-runs them.",
+  "cosmetic": "doctor-allowlist.test.ts:43 comment says 'The three fleet.example.yaml names' against four (constant is hardcoded, nothing fails). fleet.example.yaml workers: header says '8 panes' against 14 -- wrong before this branch."
+ },
+ "task_1_1a": "DONE 2026-09-06 by the orchestrator. Live fleet.yaml carries the triage role (lifted verbatim from the tracked example) and the four seats, with NO model override on the observers because this file's observer role already is the 20b. config validate exits 0; the four seats resolve rpc + gpt-oss-20b-MXFP4-Q8. Untracked by design, so this record is the only evidence it happened.",
+ "baseline_suite": "4415 pass / 0 fail / 201 files / 115s, typecheck clean, measured 2026-09-06 after round 3",
+ "git_lesson": "An earlier orchestrator commit claimed test/unit/role-briefings.test.ts and did not contain it. `git add` aborts the ENTIRE invocation when any one pathspec does not match, the invocation named a file a later rename had already moved, and its stderr went to /dev/null -- so it staged nothing and said nothing, while the commit still succeeded on what `git mv` had already staged. Every check afterwards read the WORKING TREE, where the fix was present, so a green suite kept confirming a state the branch did not have. Stage one path per add when the list is heterogeneous; never redirect its stderr.",
+ "orchestrator_commit_rule": "ALWAYS `git commit -- <paths>`. Two agents share one checkout, so the index is shared and the window between an engineer's `git add` and its `git commit` is a race. A bare orchestrator commit took 1,094 of an engineer's staged lines under a documentation-count message. Split apart, index restored, content verified byte-identical by sha256 -- but the fix is the rule, not the recovery.",
+ "phase_3_note": "COMPLETE (3.1-3.6) as of f8427f7."
 }
