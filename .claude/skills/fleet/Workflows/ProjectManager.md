@@ -155,7 +155,7 @@ branch                       the integration branch
 total_phases, current_phase, completed_phases[], status
 consoles: {development: {launched_from, workspace_id}, review: {…}}
 phases[]: {n, slug, name,
-           partition: [{worker, task_ids[], files[]}],
+           partition: [{worker, round, task_ids[], files[]}],
            dispatched: [{worker, task_id, run_id}],
            integration: {…}
            review: {parent_task_id, collate_task_id, coverage, verdict, iteration}}
@@ -163,7 +163,11 @@ answered_questions{}, out_of_band_commits{}, pr_policy
 ```
 
 **`partition` is the field that makes a resumed run possible**, because it is the
-one thing the run tree cannot supply: which SRD tasks were meant to go where.
+one thing the run tree cannot supply: which SRD tasks were meant to go where —
+and, since a phase is dispatched in rounds, in what order. `round` is 1-based and
+defaults to 1. File ownership is unique **within** a round and free across rounds;
+a task id belongs to exactly one round and one worker. A resumed run reads the
+highest round with a merge behind it and briefs the next one.
 
 **Everything else in this file is a cursor and must be treated as one.** A phase
 listed in `completed_phases` whose artifacts do not exist is a stale file, not a
@@ -173,13 +177,77 @@ finished.**
 
 ## Per phase
 
-**1. Partition.** Read the phase's tasks. Split them so NO FILE APPEARS IN TWO
-PARTITIONS. A task naming a file another partition owns joins that partition even
-if the split becomes uneven. If it cannot be made disjoint, DO NOT SPLIT — give it
-to one engineer and leave the other idle. Record the partition in the state file
-before you dispatch.
+**1. Partition, then SIZE — a phase is 4 or 5 ROUNDS, not one big dispatch.**
 
-**2. Dispatch both engineers, in one message.**
+Read the phase's tasks and split them **twice**: across the two engineers, and
+then along the phase into a sequence of rounds. Steps 2-5 run once per round.
+
+**The size cap.** One engineer's brief in one round carries **at most two SRD
+tasks and about four files**. A phase with eight criteria is four rounds, not one
+dispatch of eight. When a slice is close to the line, take the smaller one — the
+cost of an extra round is one merge, and the cost of an oversized one is a
+worker's entire output discarded.
+
+**Why the cap exists, and why it is not about time.** A brief that names four
+criteria does not run slowly, it runs OUT. Measured on this project across two
+phases and eight agent runs — those were orchestrator-side agents rather than
+fleet seats, so read the NUMBERS as indicative and the MECHANISM as the finding:
+given the whole slice at once, an agent produces a complete, well-argued module,
+never wires it to a caller, stops mid-sentence, and reports success. Every seat
+in this loop generates against a bounded context, so nothing about the mechanism
+is specific to where the agent runs. The ceiling lands on whatever is LAST
+in the queue — implement, then test, then integrate — so what it eats is always
+the integration, and integration is the part that has no local unit test to go
+red. Cheaper test commands delay that wall; they do not move it. **Only a smaller
+brief moves it.**
+
+**Split by CRITERION, never by src/test.** Each engineer gets a complete vertical
+slice: the source, its tests, and its call site. A src/test split across two
+workers manufactures the exact failure the cap is there to prevent — the test
+author writes probes against a contract the source author has not wired, and
+neither one owns the wiring.
+
+**Disjointness binds WITHIN a round, not across the phase.** Two engineers
+editing one file at the same time is a merge conflict, so no file appears in two
+partitions OF THE SAME ROUND; a task naming a file another partition owns joins
+that partition even if the split becomes uneven, and if a round cannot be made
+disjoint, DO NOT SPLIT IT — give that round to one engineer and leave the other
+idle for it. The same file returning in round 3 is not a conflict at all: round
+3's clone is taken after round 2 merged, so it already contains round 2's work.
+This is the same mechanism as the tester-freshness rule below, and it is the
+reason rounds are cheap.
+
+**Record every round's partition in the state file before you dispatch it**, each
+entry carrying its `round` (1-based; the key defaults to 1, so a single-round
+phase and every file written before rounds existed are unchanged). The validator
+in `~/repos/cmux-fleet/src/run/pm-state.ts` enforces the scoping: a file with two
+owners in one round is refused, the same file in two rounds parses, and a task id
+in two rounds is refused because a dispatch must trace to exactly one round.
+
+**Recognise an oversized round afterwards and TIGHTEN THE CAP — do not just
+re-run it.** The signature is consistent: a report whose text ends mid-sentence,
+`commitsAhead: 0` after twenty minutes, or commits that stop before the last
+criterion in the brief. **Read the diff, not the report** — the suite goes green
+with the defect in, because the tests that would catch it were written in the
+same exhausted turn and never run. When the deliverable is "a thing that runs",
+the check is `grep` for its caller, not the suite that exercises the module
+directly:
+
+```bash
+cd <repo> && git diff --stat <base>...HEAD                      # THREE dots, as below
+cd <repo> && grep -rn "<new-module>" src/ | grep -v "^src/<new-module>"   # must be non-empty
+```
+
+A call sitting inside the defining file is a real caller — check for an internal
+one before declaring a module unwired.
+
+**Resume ONCE, then split.** A worker that stalled recovers reliably on a single
+resume when the brief names ONLY the remaining items. It does not recover on a
+second — the resume continues the same transcript, so the ceiling that was
+already reached is reached again sooner. After a second stall, split the
+remainder into further rounds or finish it by hand.
+
+**2. Dispatch both engineers for THIS ROUND, in one message.**
 
 ```bash
 cd <repo> && ~/repos/cmux-fleet/scripts/development --restart eng-1 --task <env-1.json>
@@ -360,9 +428,25 @@ is the cost, and it is why the partition rule exists. **Do not resolve the
 conflict yourself** — every line you write is a line no reviewer was told to look
 at.
 
-Write the integration record. Then repeat steps 2-5 for `tst-1` and `tst-2` —
-AFTER the merge, so each tester's clone holds both engineers' work. Each tester
-takes the files its paired engineer touched.
+Write the integration record.
+
+**Then go back to step 2 for the next round, if the phase has one.** The merge
+you just performed is what makes the next round possible: `--restart` re-clones
+from the checkout as it now stands, so round N+1's engineers open a `/workspace`
+that already contains round N. That is why a file may be revisited in a later
+round and why the rounds must not be dispatched concurrently — **a round is
+briefed only after the previous round is merged.** Two rounds in flight at once
+is just the oversized dispatch again, with a conflict added.
+
+One integration record covers the phase, so a later round's merge updates it
+rather than writing a second; the per-round evidence that a round happened is its
+merge commit on the integration branch, not a field in this file.
+
+**When the last round is merged**, repeat steps 2-5 for `tst-1` and `tst-2` —
+AFTER that merge, so each tester's clone holds every round's work. Each tester
+takes the files its paired engineer touched. Testers are sized by the same rule:
+a tester handed the whole phase's surface runs out exactly where an engineer
+does.
 
 **Prove the clone is current before dispatching, rather than trusting the
 order.** A restart that silently did not happen leaves a tester that runs a real
@@ -543,6 +627,18 @@ failures and dispatch fixes exactly as in step 7.
 - **`commitsAhead: 0` on a worker that reported `success` is a contradiction worth
   stopping on.** Either it did the work in the wrong place or its envelope is not
   about this task. Read the transcript.
+- **An oversized brief does not fail, it reports success.** A worker given a
+  phase's whole slice at once writes the module, skips the call site, stops
+  mid-sentence and returns `success` — measured across eight agent runs in two
+  phases, four of four in one of them producing a module `grep` could not find a
+  caller for. Nothing in the envelope, the status table or the suite goes red,
+  because the tests that would have caught it were written in the same exhausted
+  turn. **Two SRD tasks per engineer per round, four or five rounds per phase**,
+  and read the diff rather than the report.
+- **Rounds are sequential, and that is the whole point.** Round N+1's clone is
+  taken from the checkout after round N merged, which is what lets a file be
+  revisited and what keeps the briefs small. Dispatching two rounds at once
+  restores the big dispatch and adds a merge conflict to it.
 - **An engineer cannot `bun install`.** The role has no `egress_access`, so a fresh
   clone's dependency install hangs against the deny-all policy until the tool
   timeout — it does not fail, it sits at ~1.6% CPU with nothing written. Testers

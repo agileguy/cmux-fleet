@@ -307,7 +307,7 @@ describe("`partition` is structurally load-bearing (§7.6)", () => {
    * is the same two workers, the same task ids, the same phase number — and
    * `src/a.ts` moved into eng-2's list as well. Only the overlap differs.
    */
-  test("§6.3's rule as a refusal: a file may not have two owners in one phase", async () => {
+  test("§6.3's rule as a refusal: a file may not have two owners in one round", async () => {
     const doc = baseDocument();
     const phases = doc.phases.map((p) =>
       p.n === 0
@@ -324,7 +324,111 @@ describe("`partition` is structurally load-bearing (§7.6)", () => {
 
     const msg = await readMessage();
     expect(msg).toContain("src/a.ts");
-    expect(msg).toContain("a file has one owner per phase");
+    expect(msg).toContain("a file has one owner per round");
+  });
+
+  /*
+   * THE PAIR THAT MAKES ROUNDS REAL, and the reason the refusal above had to be
+   * re-scoped. Both fixtures below are the SAME two entries naming the SAME
+   * file `src/a.ts` under the SAME worker. One field differs: `round`.
+   *
+   * A degenerate version of this pair would prove nothing. If the second
+   * fixture also changed the file names, it would parse whether the key were
+   * round-scoped or not — the two sets would be disjoint either way and the
+   * test would survive reverting the change. `src/a.ts` is deliberately held
+   * constant so the ONLY thing separating a refusal from a parse is the round.
+   */
+  test("the same file in the same round is refused — one worker, twice", async () => {
+    const doc = baseDocument();
+    const phases = doc.phases.map((p) =>
+      p.n === 0
+        ? {
+            ...p,
+            partition: [
+              { worker: "eng-1", round: 1, task_ids: ["T-3-1"], files: ["src/a.ts"] },
+              { worker: "eng-1", round: 1, task_ids: ["T-3-2"], files: ["src/a.ts"] },
+              { worker: "eng-2", round: 1, task_ids: ["T-3-3"], files: ["src/b.ts"] },
+            ],
+          }
+        : p,
+    );
+    await writeRaw(JSON.stringify({ ...doc, phases }, null, 2));
+
+    const msg = await readMessage();
+    expect(msg).toContain("src/a.ts");
+    expect(msg).toContain("in round 1 of phase 0");
+  });
+
+  test("the same file in a LATER round parses — round 2's clone already holds round 1", async () => {
+    const doc = baseDocument();
+    const phases = doc.phases.map((p) =>
+      p.n === 0
+        ? {
+            ...p,
+            partition: [
+              { worker: "eng-1", round: 1, task_ids: ["T-3-1"], files: ["src/a.ts"] },
+              { worker: "eng-1", round: 2, task_ids: ["T-3-2"], files: ["src/a.ts"] },
+              { worker: "eng-2", round: 1, task_ids: ["T-3-3"], files: ["src/b.ts"] },
+            ],
+          }
+        : p,
+    );
+    await writeRaw(JSON.stringify({ ...doc, phases }, null, 2));
+
+    const cursor = await readPmState(repo);
+    const rounds = cursor.phases.find((ph) => ph.n === 0)!.partition.map((e) => e.round);
+    expect(rounds).toEqual([1, 2, 1]);
+  });
+
+  /*
+   * Files are round-scoped; TASKS are not. A task in two rounds is the same
+   * "two answers is no answer" problem the two-worker case has — it makes the
+   * `dispatched` cross-check unable to say which round a dispatch belongs to.
+   */
+  test("a task may not be split across two rounds either", async () => {
+    const doc = baseDocument();
+    const phases = doc.phases.map((p) =>
+      p.n === 0
+        ? {
+            ...p,
+            partition: [
+              { worker: "eng-1", round: 1, task_ids: ["T-3-1"], files: ["src/a.ts"] },
+              { worker: "eng-2", round: 2, task_ids: ["T-3-1"], files: ["src/b.ts"] },
+              { worker: "eng-2", round: 1, task_ids: ["T-3-3"], files: ["src/c.ts"] },
+            ],
+          }
+        : p,
+    );
+    await writeRaw(JSON.stringify({ ...doc, phases }, null, 2));
+
+    const msg = await readMessage();
+    expect(msg).toContain("T-3-1");
+    expect(msg).toContain("two answers is no answer");
+  });
+
+  /*
+   * Every state file written before rounds existed omits the key entirely.
+   * `baseDocument()` is exactly such a document — none of its literals carry
+   * `round` — so this asserts the default on the fixture the whole suite uses.
+   */
+  test("an entry written without a round is round 1", async () => {
+    const doc = baseDocument();
+    expect(doc.phases.flatMap((p) => p.partition).map((e) => e.round)).toEqual([1, 1, 1]);
+
+    await writePmState(repo, doc);
+    const cursor = await readPmState(repo);
+    expect(cursor.phases.find((p) => p.n === 1)!.partition[0]!.round).toBe(1);
+  });
+
+  test("round 0, and a fractional round, are not rounds", async () => {
+    const doc = baseDocument();
+    for (const bad of [0, -1, 1.5]) {
+      const phases = doc.phases.map((p) =>
+        p.n === 1 ? { ...p, partition: [{ worker: "eng-1", round: bad, task_ids: ["T-5-4"], files: ["src/x.ts"] }] } : p,
+      );
+      await writeRaw(JSON.stringify({ ...doc, phases }, null, 2));
+      expect(await readMessage()).toContain("round");
+    }
   });
 
   test("a task may not be assigned to two workers either", async () => {

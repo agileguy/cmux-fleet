@@ -211,14 +211,40 @@ export type PmRunStatusClaim = (typeof PM_RUN_STATUS_CLAIMS)[number];
 // ---------------------------------------------------------------------------
 
 /**
- * One worker's share of a phase. `task_ids` and `files` are both `.min(1)`:
- * §6.3's unit of ownership is a FILE, and §13's own preamble says *"a task
- * naming no file cannot be partitioned and will serialise"* — so an entry
- * naming no file is not a partition entry, it is a note.
+ * One worker's share of ONE ROUND of a phase. `task_ids` and `files` are both
+ * `.min(1)`: §6.3's unit of ownership is a FILE, and §13's own preamble says
+ * *"a task naming no file cannot be partitioned and will serialise"* — so an
+ * entry naming no file is not a partition entry, it is a note.
+ *
+ * WHY `round` EXISTS. §6.3 wrote one partition per phase and dispatched it
+ * once, so a phase's whole share of work reached an engineer in a single brief.
+ * That brief is what runs out. Measured repeatedly on this project: an agent
+ * given four criteria at once generates a complete, well-argued module, never
+ * wires it to a caller, stops mid-sentence, and reports success — because the
+ * context ceiling lands on whatever is LAST in the queue, and what is last is
+ * the integration. Cheaper test commands delay that wall; they do not move it.
+ * Only a smaller brief does.
+ *
+ * So a phase is now a SEQUENCE of rounds, each a separately dispatched slice
+ * that is merged before the next is briefed. The disjointness rule follows the
+ * reason it was written: two engineers editing one file **at the same time** is
+ * a merge conflict, so files are unique WITHIN a round. The same file across
+ * two rounds is not a conflict at all — round 2's clone is taken after round
+ * 1 merged, so it already contains round 1's work. Task ids stay unique across
+ * the whole phase: a task belongs to exactly one round and one worker, and two
+ * answers is still no answer.
+ *
+ * `.default(1)` keeps every single-round phase, and every state file written
+ * before rounds existed, valid and unchanged.
  */
 export const PmPartitionEntrySchema = z
   .object({
     worker: workerId,
+    round: z
+      .number()
+      .int()
+      .positive({ error: "a round is 1-based — there is no round 0" })
+      .default(1),
     task_ids: z
       .array(taskIdField)
       .min(1, { error: "a partition entry must name at least one SRD task — that is what a partition IS (§7.6)" })
@@ -337,22 +363,27 @@ export const PmPhaseSchema = z
   })
   .strict()
   .superRefine((phase, ctx) => {
-    // §6.3 rule 2, as a refusal: "no file appears in two partitions".
+    // §6.3 rule 2, as a refusal: "no file appears in two partitions" — scoped
+    // to the ROUND, which is the set of dispatches that are in flight at once.
+    // Keyed by round, so `src/x.ts` in rounds 1 and 3 is two separate keys and
+    // `src/x.ts` twice in round 1 is one key seen twice.
     const fileOwner = new Map<string, string>();
     const taskOwner = new Map<string, string>();
     phase.partition.forEach((entry, i) => {
       for (const f of entry.files) {
-        const prior = fileOwner.get(f);
+        const key = `${entry.round}\u0000${f}`;
+        const prior = fileOwner.get(key);
         if (prior !== undefined) {
           ctx.addIssue({
             code: "custom",
             path: ["partition", i, "files"],
             message:
-              `file "${f}" is owned by both "${prior}" and "${entry.worker}" in phase ${phase.n} — ` +
-              "§6.3: a file has one owner per phase, because an overlap that is free in one checkout is a merge conflict in two.",
+              `file "${f}" is owned by both "${prior}" and "${entry.worker}" in round ${entry.round} of ` +
+              `phase ${phase.n} — §6.3: a file has one owner per round, because an overlap that is free ` +
+              "in one checkout is a merge conflict in two.",
           });
         } else {
-          fileOwner.set(f, entry.worker);
+          fileOwner.set(key, entry.worker);
         }
       }
       for (const t of entry.task_ids) {
