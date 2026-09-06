@@ -5,11 +5,12 @@
  "branch_kind": "long-lived",
  "base": "main",
  "total_phases": 9,
- "current_phase": "2+4+5",
- "current_round": 6,
+ "current_phase": "4+5",
+ "current_round": 7,
  "completed_phases": [
   0,
   1,
+  2,
   3
  ],
  "phase_0_note": "Owner tasks. D1 arm 3 (all four seats local gpt-oss-20b-MXFP4-Q8), max_concurrent 4, channel drift closed. 0.3 moot. Q11 (ntfy token) outstanding, gates Phase 8 only.",
@@ -173,8 +174,35 @@
      "test/unit/triage-partition.test.ts"
     ]
    },
+   "verified_commit": "f145b09+0e5b2c0",
+   "note": "4.3/4.4 and 2.4/5.1 landed. ISC-604..614 (10 [x], 1 [~]). Two SRD corrections recorded in place: 7.3 carries no machine-readable service list so 6.3 step 5 is unimplementable as written (three arms enumerated, Phase 6 picks); 6.1's 'one run' is four runs, which Phase 6 recycling depends on. ISC-609 corrects my own brief's premise about the pin. ISC-614: tree isolation is not state isolation.",
+   "graded_commit": "d79555f"
+  },
+  {
+   "round": 7,
+   "tasks": {
+    "eng-1": [
+     "5.2",
+     "5.3"
+    ],
+    "eng-2": [
+     "4.5",
+     "5.4"
+    ]
+   },
+   "files": {
+    "eng-1": [
+     "src/run/triage-verdict.ts",
+     "test/unit/triage-verdict.test.ts"
+    ],
+    "eng-2": [
+     "test/integration/triage-console.test.ts",
+     "src/run/triage-incident.ts",
+     "test/unit/triage-incident.test.ts"
+    ]
+   },
    "verified_commit": null,
-   "note": "4.3 must precede 4.4 inside eng-1's own brief -- the SRD says write the quiesce-ordering test BEFORE the script. 2.4 finally gets scripts/review now that 2.3 has settled it. Open follow-ups raised by round 5, not yet scheduled: consoleRelayArgv omits --console so scripts/triage MUST pass it or the triage actor serves review; dispatch-request.ts:330-338 names a set-equality follow-up that DEFAULT_TRIAGE_WORKERS has now unblocked; --workspace-name never reaches an rpc-only console."
+   "note": "5.3a deferred to round 8 -- it is a third task on triage-verdict.ts and over the cap. ISA.md excluded from 4.5: grading is the orchestrator's."
   }
  ],
  "status": "in_progress",
@@ -198,5 +226,15 @@
  "baseline_suite": "4415 pass / 0 fail / 201 files / 115s, typecheck clean, measured 2026-09-06 after round 3",
  "git_lesson": "An earlier orchestrator commit claimed test/unit/role-briefings.test.ts and did not contain it. `git add` aborts the ENTIRE invocation when any one pathspec does not match, the invocation named a file a later rename had already moved, and its stderr went to /dev/null -- so it staged nothing and said nothing, while the commit still succeeded on what `git mv` had already staged. Every check afterwards read the WORKING TREE, where the fix was present, so a green suite kept confirming a state the branch did not have. Stage one path per add when the list is heterogeneous; never redirect its stderr.",
  "orchestrator_commit_rule": "ALWAYS `git commit -- <paths>`. Two agents share one checkout, so the index is shared and the window between an engineer's `git add` and its `git commit` is a race. A bare orchestrator commit took 1,094 of an engineer's staged lines under a documentation-count message. Split apart, index restored, content verified byte-identical by sha256 -- but the fix is the rule, not the recovery.",
- "phase_3_note": "COMPLETE (3.1-3.6) as of f8427f7."
+ "phase_3_note": "COMPLETE (3.1-3.6) as of f8427f7.",
+ "open_srd_questions": [
+  "7.3 vs 6.3 step 5: no machine-readable service list on the fan-out request. Three arms enumerated in 7.3. Phase 6 must pick before checkTriagePartition can have a caller.",
+  "6.1: four runs not one. Phase 6.6 recycling is written against the one-run reading."
+ ],
+ "open_followups": [
+  "consoleRelayArgv should take a required console argument (3 callers, src/) -- scripts/triage works around it today",
+  "dispatch-request.ts:336 + dispatch-request.test.ts:1578: set-equality follow-up unblocked by DEFAULT_TRIAGE_WORKERS",
+  "--workspace-name never reaches an rpc-only console; pifleet monitor heads the group with a UUID",
+  "~/.pifleet/{review,triage}-relay.json are leaked test fixtures from round 5's battery (ISC-614); left in place"
+ ]
 }
