@@ -673,6 +673,33 @@ failures and dispatch fixes exactly as in step 7.
 - **A lens lost to a failed harvest does not come back.** The fan-out is journalled
   after dispatch, so a re-issued pass finds it done. The review is on disk and
   missing from the document — say so, and do not re-run the whole round hoping.
+- **A lens lost to a failed harvest is still READABLE, so go and read it.** "Does
+  not come back" is about the fan-out, not about the findings. The review file is
+  written before the envelope, so an envelope that fails to parse costs the
+  transport and nothing else. Measured twice on `rev-lang-1`, once in phase 1 and
+  again in phase 2: both times it wrote a complete review — 18,314 bytes the
+  second time, twelve located findings, three of them high — and both times the
+  collation recorded it as a lens that never reported. The second one falsified a
+  security justification the operator had written into the tree an hour earlier.
+  Losing that to a missing JSON key is not an acceptable cost of the round.
+
+  So after every review, before folding the collation into a fix round:
+
+  ```bash
+  pifleet artifacts --task <child> --run <that reviewer's run> --json
+  ```
+
+  for each child the journal names. `verdict: "unknown"` with a reason that reads
+  *"the worker DID write an account of its work"* means the review exists. The
+  harvest prints the artifact path and its size; read the file. If the envelope is
+  the only thing wrong, repair it in place — the two fields actually dropped were
+  `schema` and `status` — and re-run `artifacts` to confirm it grades. The lens is
+  then yours to use even though the collation could not see it.
+
+  **Say what you did.** Report the coverage the run tree gives — 2 of 3 — and
+  separately that the third was recovered by hand and is included. Those are two
+  different facts and the second does not repair the first: the transport failed,
+  and it will fail again next phase unless something changes.
 - **The token ceiling in `fleet.yaml` does not bound this loop.** Budget admission
   is reached only from `dispatch --auto`, which cannot target these seats. Two
   engineers generating at once are bounded by the inference server and nothing
