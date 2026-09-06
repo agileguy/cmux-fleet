@@ -301,6 +301,48 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
 };
 
 /**
+ * The `triage` console — SRD-TRIAGE-CONSOLE §2.1, D5.
+ *
+ * **A VALUE, and that is the entire content of that document's Phase 2.** The
+ * second console needs no schema change, no new refusal and no branch anywhere in
+ * this module, because {@link ConsoleRoster} was already written over roles
+ * rather than over `col-1` — see that interface for the argument, which was made
+ * against a hypothetical second collator and turns out to have bought a second
+ * console. §2.1: *"a value that needs no schema change and no new refusal"*.
+ *
+ * **Two of the twelve refusals do real work here on their first day.**
+ * `duplicate_target` makes a partition that names one observer twice a refused
+ * file rather than a lost service, and `worker_not_in_console` makes a triage
+ * worker that invents a worker id a refused file rather than a dispatch into the
+ * engineering fleet. Both are the host counting rather than the worker claiming,
+ * which is the discipline the whole console turns on (§6.5).
+ *
+ * ## The field names read wrong, and renaming them is refused rather than pending
+ *
+ * An observer is not a reviewer. D5 records the trade explicitly — *"The cost is
+ * two field names that read wrong for the rest of this console's life. Accepted
+ * over a rename that would touch a shipped console for no behaviour."* The two
+ * halves answer the two questions the interface names, and `obs-t1` is a
+ * legitimate answer to *"is this target inside the console?"* whatever the field
+ * is called.
+ *
+ * ## What is NOT pinned here yet, stated so the silence is not read as coverage
+ *
+ * {@link REVIEW_CONSOLE_ROSTER} is pinned against `DEFAULT_REVIEW_WORKERS` as a
+ * SET, so a seat renamed in one and not the other is a red test rather than a
+ * console that starts four healthy panes and refuses every dispatch. This console
+ * has no such export yet — its pane plan is SRD-TRIAGE-CONSOLE Phase 4 — so the
+ * suite pins these four ids against the tracked `fleet.example.yaml` instead, by
+ * id AND by role. **When `DEFAULT_TRIAGE_WORKERS` lands, that probe should become
+ * the same set equality the review console has**, because the config check
+ * catches a rename and does not catch a fifth seat added to only one of them.
+ */
+export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
+  collators: ["tri-1"],
+  reviewers: ["obs-t1", "obs-t2", "obs-t3"],
+};
+
+/**
  * A roster under which the checks below would not mean what they say.
  *
  * **THROWN, not refused, and the asymmetry with everything else in this file is
@@ -678,7 +720,25 @@ export type DispatchRefusal =
   | "collation_parent"
   | "collator_target"
   | "worker_not_in_console"
-  | "duplicate_target";
+  | "duplicate_target"
+  // ── SRD-TRIAGE-CONSOLE §6.5, D6 — the partition's completeness ─────────────
+  //
+  // **Emitted by `src/run/triage-partition.ts`, not by this module**, and the
+  // codes live here anyway because this is the vocabulary of the request plane
+  // and one refusal alphabet is what lets an actor log and a test assert without
+  // knowing which check produced the answer. §6.5 puts them here by name:
+  // *"Two new refusal codes, joining the twelve at `dispatch-request.ts:669-682`."*
+  //
+  // Nothing in this file can decide either one, and that is a property of the
+  // rules rather than an omission. Both are answers to "does this request cover
+  // the environment exactly once?", and the environment is `triage/targets.yaml`
+  // — a file this module has never heard of and must not grow a dependency on.
+  // The checks that spend these codes are Phase 5's; the ordering is Phase 5's
+  // too. What is settled here is that the two exist and are DISTINCT, because
+  // §6.5 makes them different failures with different operator responses: a
+  // service nobody looked at, versus a service two observers both claimed.
+  | "partition_incomplete"
+  | "partition_duplicate";
 
 /**
  * The three outcomes, shaped like `OutboxRead` and for its reasons.
