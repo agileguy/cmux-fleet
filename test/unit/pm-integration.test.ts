@@ -31,9 +31,11 @@ import {
   mergeWorkerBranch,
   readIntegrationRecord,
   restoreAfterFailedMerge,
+  spawnGit,
   toIntegrationWorkerRow,
   workerCloneLocalPath,
   writeIntegrationRecord,
+  type GitSpawner,
   type IntegrationRecord,
 } from "../../src/run/pm-integration.ts";
 import {
@@ -1453,6 +1455,155 @@ describe("the fetch lands in a ref this call owns, not in shared FETCH_HEAD (rev
     expect(fetchHead).toBe(other.workerHead);
     // And the owned ref is untouched by it.
     expect(ownedRef).toBe(w.workerHead);
+  });
+
+  /**
+   * ISC-562's tripwire: the same interleaving, driven through
+   * `mergeWorkerBranch` ITSELF rather than reproduced beside it.
+   *
+   * The test above hand-builds the window with four `git` commands and then
+   * asserts what two refs point at. That proves the MECHANISM — an owned ref is
+   * not FETCH_HEAD — and it does not prove the RACE, because the function that
+   * has the race never runs. The entry said so in its own "what is NOT graded"
+   * paragraph, and justified it with *"the window cannot be deterministically
+   * entered from a test"*. That was a statement about `spawnGit` being a
+   * module-level import, not a statement about the window. With the spawner
+   * injected (`MergeWorkerBranchDeps`), the window is a fixture.
+   *
+   * ## Where the hook is placed, and why NOT on the `rev-parse`
+   *
+   * The obvious hook is "when the spawner is asked for `rev-parse
+   * refs/pifleet/incoming/eng-19`, interfere first". It is also the trap this
+   * ISA has already walked into once. The mutation this test exists to catch
+   * REWRITES that argv — `rev-parse <incomingRef>` becomes `rev-parse
+   * FETCH_HEAD` — so a hook keyed on the ref name would stop firing under
+   * exactly the mutation it is meant to detect, the interleaving would never
+   * happen, and the test would go green over the bug. Verified, not reasoned
+   * about: the mutation was run.
+   *
+   * So the hook fires when the module's own FETCH returns, which is the moment
+   * the window opens and is the same argv either way. The foreign fetch — the
+   * operator's terminal, a scratchpad script, an editor's background sync —
+   * lands while the window is open, and `mergeWorkerBranch` then reads whatever
+   * it reads.
+   *
+   * ## The fixture is asymmetric, which is the other half of the trap
+   *
+   * A first attempt at this mutation "did not redden at all, because every
+   * fixture left `FETCH_HEAD` and the owned ref equal". Here they cannot be
+   * equal: the interloper is a SECOND worker with a different commit, and the
+   * test asserts the divergence directly (`fetchHead` is eng-20's head and is
+   * not eng-19's) before asserting anything about the merge. The interloper's
+   * branch is also deliberately CLEAN and cleanly mergeable — a conflicting one
+   * would redden the mutation for the wrong reason, by failing the merge rather
+   * than by merging the wrong head.
+   */
+  test("ISC-562: a concurrent fetch driven into the window cannot change the head that is inspected, merged and recorded", async () => {
+    const operator = await setupOperatorRepo();
+    const mine = await addWorkerFixture(operator, "eng-19", async (dir) => {
+      await writeFile(join(dir, "src", "mine.ts"), "export const mine = 1;\n");
+    });
+    const interloper = await addWorkerFixture(operator, "eng-20", async (dir) => {
+      await writeFile(join(dir, "src", "interloper.ts"), "export const interloper = 1;\n");
+    });
+    expect(mine.workerHead).not.toBe(interloper.workerHead);
+
+    const seen: string[][] = [];
+    let interleaved = 0;
+    // Real git, plus one extra thing at one exact moment — a decorator over
+    // `spawnGit`, never a replacement for it.
+    const withForeignFetch: GitSpawner = async (cwd, args) => {
+      seen.push([...args]);
+      const res = await spawnGit(cwd, args);
+      if (args[0] === "fetch" && interleaved === 0) {
+        interleaved += 1;
+        // Another process, fetching into the same checkout. This rewrites the
+        // one shared `FETCH_HEAD` file and touches nothing this call owns.
+        await git(operator.repo, "fetch", interloper.remote, interloper.branch);
+      }
+      return res;
+    };
+
+    const result = await mergeWorkerBranch(
+      {
+        repoRoot: operator.repo,
+        worker: "eng-19",
+        remote: mine.remote,
+        branch: mine.branch,
+        taskId: "T-562",
+      },
+      { git: withForeignFetch },
+    );
+
+    // The window was entered exactly once, and it left the two sources of truth
+    // DIFFERENT. Without this pair the rest of the test could pass vacuously.
+    expect(interleaved).toBe(1);
+    const fetchHead = (await git(operator.repo, "rev-parse", "FETCH_HEAD")).trim();
+    expect(fetchHead).toBe(interloper.workerHead);
+    expect(fetchHead).not.toBe(mine.workerHead);
+
+    // RECORDED — the row written under eng-19's task_id names eng-19's head.
+    expect(result.head).toBe(mine.workerHead);
+    expect(toIntegrationWorkerRow(result).head).toBe(mine.workerHead);
+
+    // INSPECTED — the gate diffed the owned ref's head, not the interloper's.
+    const diffCall = seen.find((a) => a[0] === "diff");
+    expect(diffCall).toBeDefined();
+    expect(diffCall?.join(" ")).toContain(mine.workerHead);
+    expect(diffCall?.join(" ")).not.toContain(interloper.workerHead);
+
+    // MERGED — and `merge`'s last argument is the commit-ish it merged.
+    const mergeCall = seen.find((a) => a.includes("merge"));
+    expect(mergeCall?.at(-1)).toBe(mine.workerHead);
+    expect(result.outcome.kind).toBe("merged");
+    expect((await git(operator.repo, "rev-parse", "HEAD^2")).trim()).toBe(mine.workerHead);
+
+    // And what actually landed in the operator's tree agrees with all of it.
+    expect(await fileExists(join(operator.repo, "src", "mine.ts"))).toBe(true);
+    expect(await fileExists(join(operator.repo, "src", "interloper.ts"))).toBe(false);
+  });
+
+  /**
+   * The seam is load-bearing, not decorative.
+   *
+   * A `deps` parameter that some later edit stops threading through — `const
+   * git = deps.git` quietly becoming `spawnGit` again — would leave every test
+   * above green while the test above this one silently stopped testing
+   * anything, because its interleaving would never fire. This asserts the
+   * injected spawner sees ALL of it: the precondition checks before the fetch,
+   * the fetch, the read, the inspection, the merge. It is the guard on the
+   * guard.
+   */
+  test("ISC-562: the injected spawner runs every git command the merge issues, not merely some of them", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-21", async (dir) => {
+      await writeFile(join(dir, "src", "seam.ts"), "export const seam = 1;\n");
+    });
+    const seen: string[][] = [];
+    const result = await mergeWorkerBranch(
+      { repoRoot: operator.repo, worker: "eng-21", remote: w.remote, branch: w.branch, taskId: "T-562b" },
+      {
+        git: async (cwd, args) => {
+          seen.push([...args]);
+          return spawnGit(cwd, args);
+        },
+      },
+    );
+    expect(result.outcome.kind).toBe("merged");
+
+    const first = seen.map((a) => a[0]);
+    expect(first).toContain("symbolic-ref"); // precondition, before anything is fetched
+    expect(first).toContain("status");
+    expect(first).toContain("remote"); // the pre-fetch clone scan's remote lookup
+    expect(first).toContain("fetch");
+    expect(first).toContain("rev-parse");
+    expect(first).toContain("diff");
+    expect(seen.some((a) => a.includes("merge"))).toBe(true);
+    // The fetch keeps `--refmap=`, which is what makes the owned ref the ONLY
+    // ref a fetch writes — see `incomingRefFor`.
+    const fetchCall = seen.find((a) => a[0] === "fetch");
+    expect(fetchCall).toContain("--refmap=");
+    expect(fetchCall?.at(-1)).toBe(`+${w.branch}:refs/pifleet/incoming/eng-21`);
   });
 
   test("the merge records the head it actually fetched, and parks it under refs/pifleet/", async () => {

@@ -271,7 +271,30 @@ export interface GitResult {
   stderr: string;
 }
 
-async function spawnGit(cwd: string, args: readonly string[]): Promise<GitResult> {
+/**
+ * How this module runs git — one signature, and the seam every function below
+ * takes as a defaulted trailing argument.
+ *
+ * The signature is deliberately the WHOLE of git: a working directory and an
+ * argv, in and out, with the exit code carried rather than thrown. Nothing
+ * narrower would do, because the property this seam exists to test is an
+ * ORDERING property — what is true about the repository between two git
+ * invocations — and a seam that only stubbed the two commands a test happens to
+ * care about could not observe the ones in between.
+ */
+export type GitSpawner = (cwd: string, args: readonly string[]) => Promise<GitResult>;
+
+/**
+ * The default {@link GitSpawner}, and the reason it is exported.
+ *
+ * A test that wants to interleave something into the middle of
+ * `mergeWorkerBranch` needs to WRAP this, not replace it: the interesting
+ * scenarios are all "real git, plus one extra thing at one exact moment", and a
+ * test that re-implemented the spawn instead would be a second copy of this
+ * function that drifts the day an argument is added here. Exporting it keeps
+ * the injected spawner a decorator over production's own behaviour.
+ */
+export async function spawnGit(cwd: string, args: readonly string[]): Promise<GitResult> {
   const proc = Bun.spawn(["git", "-C", cwd, "--no-pager", ...args], {
     stdout: "pipe",
     stderr: "pipe",
@@ -352,8 +375,9 @@ export async function incomingTreeChanges(
   repoRoot: string,
   baseRef: string,
   headRef: string,
+  git: GitSpawner = spawnGit,
 ): Promise<string[]> {
-  const res = await spawnGit(repoRoot, ["diff", "--name-only", "-z", `${baseRef}...${headRef}`]);
+  const res = await git(repoRoot, ["diff", "--name-only", "-z", `${baseRef}...${headRef}`]);
   if (res.code !== 0) {
     throw new IntegrationGitError(`git diff --name-only -z ${baseRef}...${headRef}`, res);
   }
@@ -395,6 +419,49 @@ export interface MergeWorkerBranchInput {
    */
   unrestoredPriorWorkers?: readonly string[];
 }
+
+/**
+ * The side effects {@link mergeWorkerBranch} has, so its ORDER is testable —
+ * `fresh-dispatch.ts`'s `FreshDispatchDeps` convention, applied to the one
+ * effect this function has (ISC-562).
+ *
+ * ## Why a second parameter rather than a field on `MergeWorkerBranchInput`
+ *
+ * Every field of `MergeWorkerBranchInput` is DATA ABOUT THE MERGE, and five of
+ * the six are copied verbatim into `MergeWorkerBranchResult` and from there
+ * into the integration record (`toIntegrationWorkerRow`) — the artifact §6.4
+ * step 6 is re-derived from. A function is not data about the merge, it is not
+ * serialisable, and putting it on that type would make the input the one
+ * argument in this module that is part record and part machinery. This repo
+ * already separates the two everywhere it needs a seam: `recreateThenDispatch`
+ * takes `(deps, opts)`, and `withConsoleRestart` takes `(opts, deps)`. This is
+ * that convention, not a second one.
+ *
+ * It differs from `FreshDispatchDeps` in exactly one respect, and only because
+ * of what was counted rather than guessed: 37 existing call sites in this
+ * module's own suite, and one in `src` (this definition). The parameter is
+ * therefore OPTIONAL and defaults to {@link DEFAULT_MERGE_DEPS}, so injecting
+ * the seam changed no caller and no test that was not about the seam. A
+ * required deps object would have been the better shape on a new function.
+ *
+ * ## What the seam is for, stated so it is not mistaken for a mock point
+ *
+ * It is NOT here so tests can avoid real git — every test in this module's
+ * suite runs against real repositories on purpose, because the gate's whole
+ * subject is what git actually does. It is here because the race ISC-562
+ * describes lives in the window BETWEEN two git calls, and the only way to
+ * enter that window deterministically is to be the thing that returns from the
+ * first one. A test wraps {@link spawnGit}, lets the real fetch run, does its
+ * interfering work, and returns; production passes the default and behaves
+ * exactly as it did before.
+ */
+export interface MergeWorkerBranchDeps {
+  /** Runs one git command. Defaults to {@link spawnGit}. */
+  readonly git: GitSpawner;
+}
+
+/** What {@link mergeWorkerBranch} uses when a caller injects nothing. */
+export const DEFAULT_MERGE_DEPS: MergeWorkerBranchDeps = { git: spawnGit };
 
 export type MergeWorkerBranchOutcome =
   | { kind: "refused_hazard"; hazards: HazardTouch[] }
@@ -515,15 +582,16 @@ export class IntegrationPreconditionError extends Error {
 async function assertMergePreconditions(
   repoRoot: string,
   unrestoredPriorWorkers: readonly string[] = [],
+  git: GitSpawner = spawnGit,
 ): Promise<void> {
-  const symref = await spawnGit(repoRoot, ["symbolic-ref", "--quiet", "HEAD"]);
+  const symref = await git(repoRoot, ["symbolic-ref", "--quiet", "HEAD"]);
   if (symref.code !== 0) {
     throw new IntegrationPreconditionError(
       `refused: ${repoRoot} has a detached HEAD, so a merge here would land on no branch — ` +
         "check out the integration branch before merging worker branches into it",
     );
   }
-  const dirty = await spawnGit(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
+  const dirty = await git(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
   if (dirty.code !== 0) throw new IntegrationGitError("git status --porcelain", dirty);
   const changed = dirty.stdout.split("\n").filter((l) => l.trim().length > 0);
   if (changed.length === 0) return;
@@ -538,7 +606,7 @@ async function assertMergePreconditions(
         "row records tree_restored: false",
     );
   }
-  const midMerge = await spawnGit(repoRoot, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
+  const midMerge = await git(repoRoot, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
   if (midMerge.code === 0) evidence.push("MERGE_HEAD is present, so this checkout is still mid-merge");
   // Porcelain v1 status codes: `U` on either side is an unmerged path, and
   // `AA`/`DD` are the two unmerged shapes that carry no `U` at all.
@@ -639,12 +707,21 @@ function incomingRefFor(worker: string): string {
  * head this call fetched, so if anything else has moved the ref since, the
  * delete declines instead of discarding whatever is there now.
  */
-async function deleteIncomingRef(repoRoot: string, ref: string, fetchedHead: string): Promise<void> {
-  await spawnGit(repoRoot, ["update-ref", "-d", ref, fetchedHead]);
+async function deleteIncomingRef(
+  repoRoot: string,
+  ref: string,
+  fetchedHead: string,
+  git: GitSpawner = spawnGit,
+): Promise<void> {
+  await git(repoRoot, ["update-ref", "-d", ref, fetchedHead]);
 }
 
-export async function workerCloneLocalPath(repoRoot: string, remote: string): Promise<string | null> {
-  const res = await spawnGit(repoRoot, ["remote", "get-url", remote]);
+export async function workerCloneLocalPath(
+  repoRoot: string,
+  remote: string,
+  git: GitSpawner = spawnGit,
+): Promise<string | null> {
+  const res = await git(repoRoot, ["remote", "get-url", remote]);
   if (res.code !== 0) return null;
   const url = res.stdout.trim();
   if (url.length === 0) return null;
@@ -731,8 +808,12 @@ export async function workerCloneLocalPath(repoRoot: string, remote: string): Pr
  * machine to look at, and the function returns an empty list rather than a
  * misleading clean one.
  */
-async function scanWorkerCloneBeforeFetch(repoRoot: string, remote: string): Promise<RepoHazard[]> {
-  const clonePath = await workerCloneLocalPath(repoRoot, remote);
+async function scanWorkerCloneBeforeFetch(
+  repoRoot: string,
+  remote: string,
+  git: GitSpawner = spawnGit,
+): Promise<RepoHazard[]> {
+  const clonePath = await workerCloneLocalPath(repoRoot, remote, git);
   if (clonePath === null) return [];
   // A remote whose directory is gone is the FETCH's error to report, with
   // git's own wording — not something this scan should pre-empt with a
@@ -796,10 +877,13 @@ async function scanWorkerCloneBeforeFetch(repoRoot: string, remote: string): Pro
  * answer is written into the record as a fact about the operator's checkout,
  * and "we could not tell" must never be recorded as "it is fine".
  */
-export async function restoreAfterFailedMerge(repoRoot: string): Promise<{ treeRestored: boolean; detail: string }> {
-  const abort = await spawnGit(repoRoot, ["merge", "--abort"]);
-  const midMerge = await spawnGit(repoRoot, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
-  const status = await spawnGit(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
+export async function restoreAfterFailedMerge(
+  repoRoot: string,
+  git: GitSpawner = spawnGit,
+): Promise<{ treeRestored: boolean; detail: string }> {
+  const abort = await git(repoRoot, ["merge", "--abort"]);
+  const midMerge = await git(repoRoot, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
+  const status = await git(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
   const dirty = status.stdout.split("\n").filter((l) => l.trim().length > 0);
 
   const problems: string[] = [];
@@ -848,6 +932,31 @@ export async function restoreAfterFailedMerge(repoRoot: string): Promise<{ treeR
  * that ref by name. A concurrent fetch cannot move it, because nothing else
  * names it.
  *
+ * ## And the race is now TESTED, not only closed by construction (ISC-562)
+ *
+ * The mechanism above was mutation-proved from the day it landed; the RACE was
+ * not, and the entry said so — with the justification that the window "cannot
+ * be deterministically entered from a test". That was true of the code and not
+ * of the window: `spawnGit` was a module-level import, so no test could be the
+ * thing that returned from the fetch. It is a {@link MergeWorkerBranchDeps}
+ * now, and the test wraps it, lets the real fetch run, drives a SECOND, foreign
+ * fetch into the operator's checkout while the window is open, and then asserts
+ * that what this function inspected, merged and recorded is the owned ref's
+ * head rather than the one that fetch left in `FETCH_HEAD`.
+ *
+ * Three things were measured rather than argued, and each changed the test:
+ *
+ *  - Replacing `rev-parse <incomingRef>` with `rev-parse FETCH_HEAD` makes the
+ *    function record the INTERLOPER's head — the failure, reproduced end to end
+ *    under this worker's task_id, not merely described.
+ *  - A test hook keyed on the `rev-parse`'s argv passes GREEN under that same
+ *    mutation, because the mutation rewrites the argv the hook was watching
+ *    for. The hook is keyed on the fetch's RETURN instead. This was run, and it
+ *    is why the trap is worth a paragraph.
+ *  - Dropping the `git` argument at a single call site — the shape a later edit
+ *    would produce by accident — is caught, because a second test asserts the
+ *    injected spawner sees every command this function issues.
+ *
  * ## And it is dropped again unless the merge lands
  *
  * Every exit from here that is not `merged` deletes the ref it fetched into:
@@ -857,15 +966,19 @@ export async function restoreAfterFailedMerge(repoRoot: string): Promise<{ treeR
  * The `catch` re-throws untouched; it exists to stop a thrown `rev-parse` or
  * `diff` from being the one way refused content stays reachable forever.
  */
-export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<MergeWorkerBranchResult> {
+export async function mergeWorkerBranch(
+  input: MergeWorkerBranchInput,
+  deps: MergeWorkerBranchDeps = DEFAULT_MERGE_DEPS,
+): Promise<MergeWorkerBranchResult> {
   const { repoRoot, worker, remote, branch, taskId } = input;
   const baseRef = input.baseRef ?? "HEAD";
+  const git = deps.git;
 
   // ---- Part -1: the operator's checkout must be fit to merge into. ----
-  await assertMergePreconditions(repoRoot, input.unrestoredPriorWorkers ?? []);
+  await assertMergePreconditions(repoRoot, input.unrestoredPriorWorkers ?? [], git);
 
   // ---- Part 0: look at the clone git is about to run its SERVER side inside. ----
-  const preFetchHazards = await scanWorkerCloneBeforeFetch(repoRoot, remote);
+  const preFetchHazards = await scanWorkerCloneBeforeFetch(repoRoot, remote, git);
 
   // ---- Part 1: fetch freely, into a ref THIS call owns. ----
   const incomingRef = incomingRefFor(worker);
@@ -883,17 +996,21 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
   // and use only what this command names, and with it the fetch writes exactly
   // one ref: the one this call owns and can therefore drop again. It also makes
   // finding 6's property literal — one fetch, one ref, named here.
-  const fetchRes = await spawnGit(repoRoot, ["fetch", "--refmap=", remote, `+${branch}:${incomingRef}`]);
+  const fetchRes = await git(repoRoot, ["fetch", "--refmap=", remote, `+${branch}:${incomingRef}`]);
   if (fetchRes.code !== 0) {
     throw new IntegrationGitError(`git fetch --refmap= ${remote} +${branch}:${incomingRef}`, fetchRes);
   }
-  const headRes = await spawnGit(repoRoot, ["rev-parse", incomingRef]);
+  // THE WINDOW. Everything between the line above and the line below is time in
+  // which any other process in this checkout can run a fetch of its own, and
+  // `FETCH_HEAD` — the file this used to read — would be whatever theirs left
+  // behind. `incomingRef` is asked for by name because nothing else writes it.
+  const headRes = await git(repoRoot, ["rev-parse", incomingRef]);
   if (headRes.code !== 0) {
     throw new IntegrationGitError(`git rev-parse ${incomingRef}`, headRes);
   }
   const head = headRes.stdout.trim();
 
-  const countRes = await spawnGit(repoRoot, ["rev-list", "--count", `${baseRef}..${head}`]);
+  const countRes = await git(repoRoot, ["rev-list", "--count", `${baseRef}..${head}`]);
   // `null`, not `NaN`, and emphatically not `0`: the undetermined value is
   // killed HERE, at the point it enters the module, rather than rendered into
   // a determinate-looking `0` three hundred lines downstream (finding 8). A
@@ -906,11 +1023,11 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
   let postMergeHazards: RepoHazard[];
   try {
     // ---- Part 2: inspect BEFORE materialising. ----
-    const changed = await incomingTreeChanges(repoRoot, baseRef, head);
+    const changed = await incomingTreeChanges(repoRoot, baseRef, head, git);
     const hazards = findHazardTouches(changed, head);
     if (hazards.length > 0) {
       // Refused content does not stay reachable from the operator's repository.
-      await deleteIncomingRef(repoRoot, incomingRef, head);
+      await deleteIncomingRef(repoRoot, incomingRef, head, git);
       return {
         worker,
         remote,
@@ -925,7 +1042,7 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
 
     // ---- Part 3: merge with hooks and the attributes file disabled. ----
     const mergeMessage = `Merge worker ${worker} (${remote}/${branch} @ ${head.slice(0, 12)}) into the integration branch`;
-    const mergeRes = await spawnGit(repoRoot, [
+    const mergeRes = await git(repoRoot, [
       "-c",
       "core.hooksPath=/dev/null",
       "-c",
@@ -938,12 +1055,12 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
       head,
     ]);
     if (mergeRes.code !== 0) {
-      const cleanup = await restoreAfterFailedMerge(repoRoot);
+      const cleanup = await restoreAfterFailedMerge(repoRoot, git);
       // Same argument as the refusal above, and it holds even when the cleanup
       // could not restore the tree: the ref is what would keep this head
       // reachable FOREVER, and dropping it is independent of whatever hand
       // cleanup the checkout still needs.
-      await deleteIncomingRef(repoRoot, incomingRef, head);
+      await deleteIncomingRef(repoRoot, incomingRef, head, git);
       return {
         worker,
         remote,
@@ -960,7 +1077,7 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
         },
       };
     }
-    const mergeCommitRes = await spawnGit(repoRoot, ["rev-parse", "HEAD"]);
+    const mergeCommitRes = await git(repoRoot, ["rev-parse", "HEAD"]);
     if (mergeCommitRes.code !== 0) {
       throw new IntegrationGitError("git rev-parse HEAD", mergeCommitRes);
     }
@@ -978,7 +1095,7 @@ export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<
     // fetched" convenience `incomingRefFor` describes, on a call that is
     // throwing anyway. Re-thrown untouched: this handler adds cleanup, never a
     // second, worse-worded error.
-    await deleteIncomingRef(repoRoot, incomingRef, head);
+    await deleteIncomingRef(repoRoot, incomingRef, head, git);
     throw err;
   }
 
