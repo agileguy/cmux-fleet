@@ -265,9 +265,36 @@
       },
       "verified_commit": "034054b",
       "verified_note": "eng-1 7da3e21 (18 mutations, 0 survivors); eng-2 034054b (17 mutations, 17 killed). eng-1 also touched relay-console.test.ts outside its list - an ADAPTATION (fixture derives shape from the roster), not a loosening; accepted. 5.1b done by orchestrator after the round."
+    },
+    {
+      "round": 9,
+      "tasks": {
+        "eng-1": [
+          "5.5",
+          "5.5a"
+        ],
+        "eng-2": [
+          "5.6",
+          "5.6a"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/run/triage-incident.ts",
+          "test/unit/triage-incident.test.ts",
+          "src/run/triage-document.ts",
+          "test/unit/triage-document.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-notify.ts",
+          "test/unit/triage-notify.test.ts"
+        ]
+      },
+      "verified_commit": null,
+      "deferred": "5.6b touches triage-incident.ts AND triage-notify.ts - collides with both engineers this round, so it goes to round 10."
     }
   ],
-  "status": "in_progress_hold_after_round_8",
+  "status": "in_progress_round_9",
   "version_file": "package.json",
   "open_operator_items": [
     "Q11: mint ntfy token for the Alerts topic, set notify.token_env (gates Phase 8 only)"
@@ -310,15 +337,17 @@
     "5.3c",
     "5.5a"
   ],
-  "hold": {
-    "set": "2026-09-06, by the operator: 'hold at the end of this round'",
-    "means": "Verify round 8 from the diff, grade it into ISA.md, commit, report. Then STOP: no round 9 dispatch, no push, no PR.",
-    "resume_with": "Round 9 candidates: 5.5 + 5.5a (incident record + triage.json schemas), 5.6/5.6a/5.6b (the notifier chain), 5.3c (window echo, specified), 5.3a (saturation), 5.4a (console-health identities), 4.5a (two source probes), 5.7 (fixtures). Then Phase 6: 6.1 and 6.2 are what make one hand-run sweep possible.",
-    "open_decision": "RESOLVED 2026-09-06 by the operator: grow the field. \u00a77.4 now requires window_opened_at; task 5.3c is a spec, not a decision. It touches triage-verdict.ts which round 8 holds, so it lands round 9.",
-    "state_at_hold": "Round 8 verified and graded. 5.1b and 5.4c both landed by the orchestrator after the round, each with a mutation proof. ISA 623/648."
-  },
   "orchestrator_tasks_done_after_round_8": [
     "5.1b",
     "5.4c"
+  ],
+  "round_10_candidates": [
+    "5.6b",
+    "5.3c",
+    "5.3a",
+    "5.4a",
+    "4.5a",
+    "5.7",
+    "then Phase 6: 6.1 + 6.2 make one hand-run sweep possible"
   ]
 }
