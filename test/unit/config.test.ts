@@ -118,12 +118,16 @@ function assertDistinctThemes(attended: readonly { id: string; theme?: string }[
 // ---------------------------------------------------------------------------
 
 describe("worked example", () => {
-  // ISC-67: all seven shipped roles load from the shipped default config.
+  // ISC-67: all eight shipped roles load from the shipped default config.
   // observer replaces investigator (SRD-OBSERVER-001 D2) — ISC-391.
-  test("fleet.example.yaml loads with all seven shipped roles", async () => {
+  // `triage` is the eighth (SRD-TRIAGE-CONSOLE §6.1): the console with no
+  // keyboard. It is asserted as a NAME in the set rather than by a bumped
+  // count, for the same reason the worker list below is — a count says one
+  // changed and never which.
+  test("fleet.example.yaml loads with all eight shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
+      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "triage", "verifier"].sort(),
     );
     // Every worker resolves without error, and the SET is asserted rather than
     // its size. A bare `toHaveLength` fails on a number when a worker is added
@@ -143,6 +147,14 @@ describe("worked example", () => {
       "tst-1",
       "tst-2",
       "tick-1",
+      // The `triage` console's four seats (SRD-TRIAGE-CONSOLE §6.1). One run,
+      // four ids, and the three observers are the EXISTING observer role at a
+      // cadence rather than a fourth role — which is why they appear here and
+      // nowhere in the roles assertion above.
+      "tri-1",
+      "obs-t1",
+      "obs-t2",
+      "obs-t3",
     ];
     expect(loaded.config.workers).toHaveLength(expected.length);
     const resolved = resolveAllWorkers(loaded);
