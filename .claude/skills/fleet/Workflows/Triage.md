@@ -107,8 +107,12 @@ down because nobody could answer.
 
 ## Gotchas
 
-- **`--cadence` on `scripts/triage` is parsed and NOT honoured**, and the script
-  says so rather than pretending. The cadence lives in `triage/console.yaml`.
+- **`--cadence` reaches the actor as `--poll <seconds>`, and only when you type
+  it.** A bare run passes no `--poll` at all, so `triage/console.yaml`'s
+  `cadence_s` stays the source. Combined with `--actor-stop` or `--no-actor` it
+  is refused — there is no actor for it to reach, and dropping an override
+  silently is worse than declining it. `./scripts/triage --dry-run --cadence 5m`
+  prints the actor's argv without starting anything.
 - **A second `pifleet triage --poll` against a held lock refuses by name and exits
   nonzero**, dispatching nothing. That is not an error to route around: an actor
   is already serving this console. A lock left by a **dead** pid is taken over

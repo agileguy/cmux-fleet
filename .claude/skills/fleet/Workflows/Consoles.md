@@ -121,8 +121,12 @@ command the fleet — the two privileged things it genuinely needs, dispatching 
 sweep and recycling a seat, are built at the composition root and handed in as
 plain functions, so no module the console owns can reach them.
 
-**`--cadence` is parsed and NOT honoured, and the script says so rather than
-pretending.** The cadence comes from `triage/console.yaml`.
+**`--cadence` reaches the actor as `--poll <seconds>`, and only when you type it.**
+A bare run passes no `--poll` at all, so `triage/console.yaml`'s `cadence_s` stays
+the source. Combined with `--actor-stop` or `--no-actor` it is refused — there is
+no actor for it to reach, and dropping an override silently is worse than
+declining it. `./scripts/triage --dry-run --cadence 5m` prints the actor's argv
+without starting anything.
 
 **A second `pifleet triage --poll` against a held lock refuses by name and exits
 nonzero**, dispatching nothing. That is not an error to route around: it means an

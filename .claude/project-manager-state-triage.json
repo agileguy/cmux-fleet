@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 18,
+  "current_round": 19,
   "completed_phases": [
     0,
     1,
@@ -574,6 +574,25 @@
       "note": "6.5c and 6.9 both need src/cli/commands/triage.ts, so they are ONE slice \u2014 the acceptance-closure rule applied before dispatch this time rather than after. 6.7 owns scripts/triage and explicitly nothing in src/; 6.8's console-side budget accounting goes in triage-actor.ts to keep the halves disjoint. If 6.8 turns out to need triage.ts, eng-2 reports and it moves to round 19.",
       "graded": "2026-09-07 \u2014 eng-1 ISC-1010..1016 + ISC-809/850 re-stated (6.5c, 6.9); eng-2 ISC-1030..1037 (6.8). Orchestrator landed the budget wire that closed ISC-891, retired ISC-1034, and wrote all of Phase 7.",
       "orchestrator_landed": "budget: productionConsoleBudgetPorts(e.env) in cli/commands/triage.ts; TriageConsolePorts.budget made REQUIRED; actor_unbudgeted + its two tests deleted. eng-2 could not do it \u2014 that file was eng-1's this round."
+    },
+    {
+      "round": 19,
+      "tasks": {
+        "eng-1": [
+          "6.7a",
+          "6.9a"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "scripts/triage",
+          "test/unit/triage-command.test.ts",
+          "test/integration/triage-console.test.ts"
+        ]
+      },
+      "verified_commit": "52186c4",
+      "graded": "2026-09-07 \u2014 ISC-1035 closed, ISC-608 retired behind ISC-1053, ISC-1050..1056 filed, ISC-1057 OPEN. Orchestrator fixed the two Phase 7 doc sentences --cadence falsified.",
+      "note": "ONE engineer: the two tasks shared triage-command.test.ts. It used three of the five files I granted and told me my reason for granting the other two was wrong \u2014 the actor became its own record's only writer, so the command needed nothing."
     }
   ],
   "status": "in_progress_round_9",
@@ -678,5 +697,13 @@
     "6.9a \u2014 assertions inside --poll fixtures are swallowed by the loop's catch",
     "ISC-1037 \u2014 \u00a76.10's budget paragraph vs \u00a76.1's four-run correction: an operator ruling",
     "Phase 8 is OUT of branch scope: the live run happens on main"
+  ],
+  "branch_scope_complete": "2026-09-07 \u2014 the branch ends after task 7.4 by the operator's 2026-09-06 ruling. Phases 5, 6 and 7 are done. Phase 8's live run happens on main and is OUT of scope.",
+  "remaining_in_scope": [],
+  "open_for_operator": [
+    "ISC-1057 \u2014 scripts/triage's idempotency check disagrees with the actor's record under --workers; restarts a healthy actor every invocation. Latency, not correctness. Narrowing servesConsole is a \u00a76.4 adoption-rule decision.",
+    "\u00a76.9 vs \u00a713 5.8 \u2014 the operator gets a sentence in the json envelope and still only a ref on ntfy. Resolving it means changing \u00a712's body === message probe, which \u00a76.9 itself calls the tell that it is a design change and not a fix.",
+    "\u00a76.7 rule 3 scopes a saturation announcement to the environment; \u00a76.8a scopes the record to _console. Left differing because it changes what the phone reads.",
+    "\u00a711 Q4 \u2014 6,000,000 tokens is now explicitly a four-seat total. Whether that is the right number is unanswered."
   ]
 }

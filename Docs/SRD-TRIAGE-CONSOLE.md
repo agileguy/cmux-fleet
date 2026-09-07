@@ -3535,8 +3535,7 @@ and SRD-FLEET-PM-001 D7's.
   `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`.
   *Acceptance: whichever way it goes, BOTH ISC-809 and ISC-850 are re-stated to match — a refusal
   that becomes a repair leaves two criteria asserting a message nobody emits.*
-- **6.7a** **Re-point `triageActorArgv` at `pifleet triage`. Added 2026-09-07; ISC-1035 is `[~]`
-  against it.** `scripts/triage:54-57` says task 6.7 *"re-points `triageActorArgv` at it and nothing
+- **6.7a** **DONE 2026-09-07 — ISC-1035 closed, ISC-1050..1054.** Re-point `triageActorArgv` at `pifleet triage`. Added 2026-09-07. `scripts/triage:54-57` says task 6.7 *"re-points `triageActorArgv` at it and nothing
   else here changes"*. **That sentence is false and task 6.8 measured why — three things move with the
   argv, none of them visible to `tsc`:**
   1. **The starter would DEADLOCK the actor it starts.** `triageActorLockPath(env)` and
@@ -3557,8 +3556,21 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: ISC-1035's three arms flip to their `clock` branches and stay green; the integration
   test's refusal arm is re-stated rather than deleted; and `--status` reports a healthy actor from its
   first pass.*
-- **6.9a** **An assertion inside a `--poll` fixture's dispatch stub is SILENTLY SWALLOWED. Added
-  2026-09-07 by task 6.9, pre-existing and not caused by it.** `triageActorLoop` catches everything
+  **The enumeration above said three blockers and the count was at least five — corrected 2026-09-07 by
+  the task itself.** Two more, neither visible to `tsc`: (d) **`--run` and `--console` have no home on
+  the clock.** `consoleRelayArgv` emits `["bun","run",entry,"relay","--run",<id>]` and the script
+  appended `"--console", CONSOLE`; `pifleet triage`'s whole option set is `--once`, `--poll`,
+  `--status`, `--json`. Either flag carried over is a bare usage error handed to a DETACHED process —
+  §6.4's failure shape a third time, and a reader following *"nothing else here changes"* carries them
+  over. (e) **The idempotency comparison silently changes whose record it reads**, which is ISC-1057.
+  **And blocker (2)'s stated remedy was wrong in the brief:** it said the fix reaches
+  `src/cli/commands/triage.ts`. It does not, on the branch taken — the actor became its own record's
+  only writer, and any record write from the script or the command's wiring happens BEFORE §6.3b's
+  lock, so a second actor that correctly refuses would clobber a live actor's record on its way out.
+  The command needed nothing.
+
+- **6.9a** **DONE 2026-09-07 — ISC-1055, ISC-1056.** An assertion inside a `--poll` fixture's dispatch stub is SILENTLY SWALLOWED. Added
+  2026-09-07 by task 6.9, pre-existing and not caused by it. `triageActorLoop` catches everything
   `deps.pass()` throws — correctly, by §6.4, because an actor that dies on one bad sweep stops
   watching — so an `expect(...)` inside a fixture's `dispatchFor` is a **real assertion under `--once`
   and a discarded one under every `--poll` test in the file.** A test can therefore assert a settle
@@ -3568,7 +3580,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: every assertion a `--poll` fixture makes about a dispatch is made OUTSIDE the loop, on
   recorded values; and the anti-criterion — a deliberately wrong expectation inside a stub must FAIL
   the test, which is the measurement that proves the swallow is gone rather than moved.*
-- **6.7** **PART DONE — the `quiesce` half shipped in Phase 4 and is pinned by ISC-604, ISC-605, ISC-631 and ISC-697; the ARGV re-point is not done and is now task 6.7a.** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:
+- **6.7** **DONE 2026-09-07 — the `quiesce` half shipped in Phase 4 (ISC-604, ISC-605, ISC-631, ISC-697) and the argv re-point landed as task 6.7a.** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:
   `scripts/triage`, and **nothing in `src/` that Phase 4.3's test does not already pin**.
 
 ### Phase 7 — The skill

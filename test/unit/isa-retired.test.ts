@@ -162,6 +162,14 @@ export function retirementProblems(isa: string): string[] {
  */
 const NO_CLAIMS_BY_CONSTRUCTION = new Map<string, string>([
   [
+    "ISC-608",
+    "Its subject was a BLANKET `--cadence` refusal in `scripts/triage`, and task 6.7a removed the " +
+      "blanket: the flag now reaches the actor as `--poll <seconds>`. `scripts/` is invisible to both " +
+      "`tsc` and the test loader (ISC-600), so this criterion never had a registry claim to lose — its " +
+      "evidence was always a source probe in `fresh-dispatch.test.ts`, and that probe survives as " +
+      "ISC-1053's, asserting the half that is still true.",
+  ],
+  [
     "ISC-1034",
     "Its subject was `actor_unbudgeted`, an EVENT whose whole purpose was to announce that §6.10's " +
       "producer was built and not yet wired — and whose retirement is the wire landing. The event, " +
@@ -201,7 +209,7 @@ describe("every retirement in ISA.md is a supersession (ISC-368)", () => {
    * without touching this file is not.
    */
   test("the retired set is exactly the criteria whose premises were superseded", () => {
-    expect(retiredIds(ISA)).toEqual(["ISC-307", "ISC-360", "ISC-698", "ISC-1034"]);
+    expect(retiredIds(ISA)).toEqual(["ISC-307", "ISC-360", "ISC-608", "ISC-698", "ISC-1034"]);
   });
 
   /**
