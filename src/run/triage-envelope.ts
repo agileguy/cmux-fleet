@@ -543,7 +543,27 @@ export function windowOpenedAt(dispatchedAt: string, defaultWindowS: number): st
 /** One service's line, with its OWN window rather than the environment's. */
 function serviceBlock(service: TriageService, defaultWindowS: number): string {
   const windowS = service.window ?? defaultWindowS;
-  const workload = service.workload ?? "(resolved by selector — no single workload name)";
+  /*
+   * **An undeclared workload is an instruction, not a blank.**
+   *
+   * `workload` is optional (§6.2 rule 2 declares the NAMESPACE; the workload may
+   * be left to the observer), and what goes here is the only thing the observer
+   * will ever see about it. The previous text said "resolved by selector", which
+   * named a mechanism this schema does not have — there is no `selector` field —
+   * so an observer reading it was told something else would do the resolving and
+   * nothing did.
+   *
+   * It says instead what the observer must DO, because the alternative failure is
+   * the expensive one: a service whose workload nobody identified comes back
+   * `indeterminate`, three sweeps of that is a coverage incident, and the operator
+   * is sent to a cluster over a field that was simply left empty on purpose.
+   */
+  const workload =
+    service.workload ??
+    "NOT DECLARED — identify the workload behind this service yourself, from the " +
+      "namespace and the service name, and NAME what you identified in your report. " +
+      "If you cannot identify exactly one, say so and report indeterminate rather " +
+      "than guessing.";
   return [
     `- service: ${service.name}`,
     `  namespace: ${service.namespace}`,

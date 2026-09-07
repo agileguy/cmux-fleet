@@ -1103,10 +1103,11 @@ current-context: gke-cni-dev
 `;
 
 /** `tri-1`'s partition, fixed so the host's completeness check has one answer. */
-const SLICE_OF: Readonly<Record<string, string>> = {
-  "obs-t1": "routing",
-  "obs-t2": "authorization",
-  "obs-t3": "authentication",
+const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
+  // ONE observer, so its slice is the whole environment. This was one service per
+  // seat when the console had three; the partition's completeness check is
+  // unchanged and still refuses a request that misses any declared service.
+  "obs-t1": ["routing", "authorization", "authentication"],
 };
 
 /**
@@ -1206,8 +1207,8 @@ function fixtureFleetDispatch(
         requests: TRIAGE_CONSOLE_ASPECTS.map((s) => ({
           worker: s.worker,
           title: `${taskId} ${s.worker}`,
-          brief: `Observe ${SLICE_OF[s.worker]} and report one row per service.`,
-          services: [SLICE_OF[s.worker]!],
+          brief: `Observe ${SLICE_OF[s.worker]!.join(", ")} and report one row per service.`,
+          services: [...SLICE_OF[s.worker]!],
         })),
       });
     } else if (worker !== TRIAGE_COLLATOR) {
@@ -1216,19 +1217,19 @@ function fixtureFleetDispatch(
         sweep_id: sweepId,
         window_opened_at: windows[windows.length - 1],
         status: "success",
-        services: [
-          {
-            service: SLICE_OF[worker],
-            assessment: documentRow(SLICE_OF[worker]!, worker)["assessment"],
-          },
-        ],
+        services: SLICE_OF[worker]!.map((service) => ({
+          service,
+          assessment: documentRow(service, worker)["assessment"],
+        })),
       });
     } else {
       // Turn two — §7.5's collation document.
       await writeJson(triageDocumentPath(run, taskId), {
         schema: TRIAGE_DOCUMENT_SCHEMA,
         sweep_id: sweepId,
-        services: TRIAGE_CONSOLE_ASPECTS.map((s) => documentRow(SLICE_OF[s.worker]!, s.worker)),
+        services: TRIAGE_CONSOLE_ASPECTS.flatMap((s) =>
+          SLICE_OF[s.worker]!.map((service) => documentRow(service, s.worker)),
+        ),
         unaccounted: [],
       });
     }
@@ -1496,9 +1497,10 @@ function expectDispatchesWereWellFormed(
 ): void {
   const { sweeps } = expected;
   // THE COMPLETENESS CLAIM, and the one that makes every line below meaningful:
-  // five dispatches per sweep — the parent, three observers, the collation.
+  // three dispatches per sweep — the parent, this console's one observer, the
+  // collation. It was five when the console had three observers.
   expect(fleet.dispatched.length, "the recorded dispatch sequence is short — a stub threw").toBe(
-    5 * sweeps,
+    (2 + TRIAGE_CONSOLE_ASPECTS.length) * sweeps,
   );
   // ENTERED equals FINISHED. This is the arm that catches a throw from the LAST
   // line of the stub, where everything has already been recorded and only the
@@ -1630,7 +1632,7 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
    * because building it here would either reach the network or reach a module
    * §12's read-only block forbids.
    */
-  test("dispatches the sweep, then all three observers, then the collation", async () => {
+  test("dispatches the sweep, then every observer, then the collation", async () => {
     const fleet = await fixtureFleet("2026-09-06T01-00-00Z-1111");
     const deps = productionTriageDeps(async () => fleet.effects);
     const { err, out } = await runTriage(["--once"], deps);
@@ -1651,17 +1653,19 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
      * the fan-out serial in the first place — which cost this console two of three
      * observers on its first live sweep.
      */
-    expect(fleet.dispatched).toHaveLength(5);
+    expect(fleet.dispatched).toHaveLength(2 + TRIAGE_CONSOLE_ASPECTS.length);
     expect(fleet.dispatched[0]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1`);
-    expect(fleet.dispatched[4]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1-collate`);
-    // The middle three by NAME and as a whole set — a missing or duplicated slice
-    // still fails, which is every failure this line was built to catch.
-    expect(fleet.dispatched.slice(1, 4).sort()).toEqual([
-      "obs-t1:T-sweep-1-slice1",
-      "obs-t2:T-sweep-1-slice2",
-      "obs-t3:T-sweep-1-slice3",
-    ]);
-    expect(out).toContain("T-sweep-1: swept 3 observers");
+    expect(fleet.dispatched[2]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1-collate`);
+    /*
+     * COVERAGE DROPPED 2026-09-07, deliberately and on the operator's call: this
+     * console now has ONE observer, so the middle of the sequence is a single
+     * slice. What is no longer asserted anywhere is that a partition reaches
+     * SEVERAL seats in one sweep — a fan-out that dropped or duplicated a slice
+     * across observers would not fail here, because there is no longer more than
+     * one. Restore this to a set assertion if the console regains a second seat.
+     */
+    expect(fleet.dispatched.slice(1, 2)).toEqual(["obs-t1:T-sweep-1-slice1"]);
+    expect(out).toContain("T-sweep-1: swept 1 observers");
     // Deadline, titles, window and §12's closing anti-criterion, all out here.
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
@@ -1678,7 +1682,7 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     const outcome = await productionTriageDeps(async () => fleet.effects).pass();
 
     expect(outcome.kind).toBe("swept");
-    expect([...outcome.dispatched]).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+    expect([...outcome.dispatched]).toEqual(["obs-t1"]);
     // §12: *"A first `unhealthy` observation notifies nothing."*
     expect(outcome.notifications).toEqual([]);
     expect(fleet.delivered).toEqual([]);
@@ -1885,7 +1889,7 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     const doc = JSON.parse(out) as { schema: string; kind: string; dispatched: string[] };
     expect(doc.schema).toBe("pifleet.triagepass/v1");
     expect(doc.kind).toBe("swept");
-    expect(doc.dispatched).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+    expect(doc.dispatched).toEqual(["obs-t1"]);
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 });
@@ -2335,7 +2339,7 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
    *
    * It also pins the `downSeat` contract that the composition root satisfies
    * structurally rather than with a branch: *"Must be a no-op on a seat that is
-   * already down."* `obs-t3` has no run, so the console's own `resolveSeatRuns`
+   * already down."* `obs-t1` has no run, so the console's own `resolveSeatRuns`
    * finds nothing to hand `downRun` and the root's teardown is never reached —
    * asserted by the recycle log holding an `up` and NO `down`.
    */
@@ -2343,13 +2347,13 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
     const fleet = await fixtureFleet("2026-09-06T03-00-00Z-2001");
     const first = fleet.run;
     /*
-     * `obs-t3` is the seat this console lost, and the directory is removed AFTER
+     * `obs-t1` is the seat this console lost, and the directory is removed AFTER
      * `fixtureFleet` rather than before: that helper materialises all four seats
      * itself, so a run tree built short would be silently made whole again and
      * the boundary would find nothing due — a vacuous pass rather than a test.
      */
-    await rm(join(first.workersDir, "obs-t3"), { recursive: true, force: true });
-    expect((await resolveSeatRuns(ALL_SEATS, fleet.effects.env))["obs-t3"]).toBeUndefined();
+    await rm(join(first.workersDir, "obs-t1"), { recursive: true, force: true });
+    expect((await resolveSeatRuns(ALL_SEATS, fleet.effects.env))["obs-t1"]).toBeUndefined();
     let repaired: RunPaths | null = null;
     const stop = new AbortController();
     const effects: TriageProductionEffects = boundedByTheWatch(
@@ -2375,7 +2379,7 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
 
     expect(exit).toEqual({ kind: "stopped", passes: 1 });
     // The repair, and the `down` that correctly did not happen.
-    expect(fleet.recycled).toEqual(["up obs-t3"]);
+    expect(fleet.recycled).toEqual(["up obs-t1"]);
     expect(repaired).not.toBeNull();
     // The sweep was admitted only after the pin re-derivation found the seat.
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
@@ -2383,7 +2387,7 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
     const record = await readTriageActorRecord(effects.env);
     expect(record.kind).toBe("ok");
     if (record.kind !== "ok") return;
-    expect(record.record.runs["obs-t3"]).toBe(repaired!.runId);
+    expect(record.record.runs["obs-t1"]).toBe(repaired!.runId);
     expect(record.record.runs[TRIAGE_COLLATOR]).toBe(first.runId);
     expect(Object.keys(record.record.recycled_at ?? {}).sort()).toEqual([...ALL_SEATS].sort());
   });

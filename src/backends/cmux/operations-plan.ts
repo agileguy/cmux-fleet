@@ -966,12 +966,7 @@ export const TRIAGE_WORKSPACE = "triage";
  * is a `max_concurrent` decision before it is a worker line
  * (`fleet.example.yaml:67-82`).
  */
-export const DEFAULT_TRIAGE_WORKERS: readonly string[] = [
-  "tri-1",
-  "obs-t1",
-  "obs-t2",
-  "obs-t3",
-];
+export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
 
 /**
  * The triage console's panes are EQUAL, and `null` says so — but the argument

@@ -122,7 +122,13 @@ export const TriageServiceSchema = z
     name: triageToken,
     /** DECLARED, never derived (§6.2 rule 2). */
     namespace: shortStr,
-    /** Optional: a service resolved by selector has no single workload name. */
+    /**
+     * OPTIONAL, and `null` is a deliberate choice rather than a gap: it hands the
+     * workload to the observer to identify, which is right whenever one service is
+     * several deployments or the operator does not want to pin a name that drifts.
+     * The namespace is still DECLARED (§6.2 rule 2) — what is delegated is which
+     * workload inside it, never which cluster or which namespace.
+     */
     workload: shortStr.nullable().default(null),
     checks: z.array(z.enum(TRIAGE_CHECKS)).min(1).max(TRIAGE_CHECKS.length),
     /** Per-service override of the environment's `default_window`. */

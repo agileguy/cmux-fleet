@@ -1,21 +1,18 @@
 #!/usr/bin/env bun
 /**
- * `scripts/triage` — open the standing four-pane scheduled triage console.
+ * `scripts/triage` — open the standing scheduled triage console.
  *
- *   ./scripts/triage                                # tri-1, obs-t1, obs-t2, obs-t3
+ *   ./scripts/triage                                # tri-1, obs-t1
  *   ./scripts/triage --dry-run                      # print the plan, touch nothing
- *   ./scripts/triage --restart obs-t2               # respawn one observer
+ *   ./scripts/triage --restart obs-t1               # respawn the observer
  *   ./scripts/triage --restart tri-1 --task t.json  # fresh reconciler, then dispatch
  *
- * Four EQUAL panes in a square. The reconciler takes pane 1 — the seat the
- * keyboard would land in, if anybody were typing — and the three observers sit
- * around it:
+ * EQUAL panes. The reconciler takes pane 1 — the seat the keyboard would land
+ * in, if anybody were typing — and the observer sits beside it:
  *
  * ```
  * +---------------+---------------+
  * |     tri-1     |    obs-t1     |
- * +---------------+---------------+
- * |    obs-t2     |    obs-t3     |
  * +---------------+---------------+
  * ```
  *
@@ -44,7 +41,7 @@
  *
  * ## THE FIFTH PROCESS
  *
- * Four panes are four workers and none of them is the ACTOR. `tri-1` can only
+ * The panes are workers and none of them is the ACTOR. `tri-1` can only
  * ask for a fan-out by writing `dispatch-request.json` into its outbox;
  * something host-side has to read that and perform the dispatches, and on this
  * console that same something is also the CLOCK (§6.4 — one process, because a
@@ -179,7 +176,7 @@ const USAGE = `Usage: scripts/triage [options]
   --cadence <dur>   override the sweep cadence for this actor ("5m", "300s").
                     Reaches it as --poll; without it the actor reads cadence_s
                     from triage/console.yaml. Not persisted.
-  --no-actor        do not start the actor. The console then has four workers,
+  --no-actor        do not start the actor. The console then has its workers,
                     no clock and nothing that turns tri-1's dispatch request
                     into observations; use it when running the actor by hand.
   --actor-stop      stop this console's actor and exit, touching no pane.
@@ -278,7 +275,7 @@ async function main(argv: string[]): Promise<number> {
   };
 
   /**
-   * The console's four workers, resolved ONCE.
+   * The console's workers, resolved ONCE.
    *
    * The actor's `PIFLEET_RELAY_RUNS` pin has to name the same set the panes were
    * built from, or it pins three of four and `consoleRunResolution` — which
@@ -741,7 +738,7 @@ async function startActor(
         `run is this console's is not decidable from the outside`
       : `no live run holds ${reconciler} yet`;
     process.stdout.write(
-      `triage: the actor was NOT started — ${why}. The console has four workers, no clock and ` +
+      `triage: the actor was NOT started — ${why}. The console has its workers, no clock and ` +
         `nothing that turns ${reconciler}'s dispatch request into observations until it is. Run ` +
         `./scripts/triage again once the panes have come up.\n`,
     );

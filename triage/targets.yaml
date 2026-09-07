@@ -56,6 +56,11 @@ environments:
     # control plane on every sweep, 288 times a day, so the list is the ones
     # that earn their place rather than all four by default.
     services:
-      - {name: mia,            namespace: cni-dev, workload: mia,            checks: [rollout, logs]}
-      - {name: authorization,  namespace: cni-dev, workload: authorization,  checks: [rollout, logs, sink]}
-      - {name: authentication, namespace: cni-dev, workload: authentication, checks: [rollout, logs, sink]}
+      # `workload` is deliberately OMITTED on all three. Each of these namespaces
+      # holds more than one deployment, and naming one here would be the host
+      # deciding what the observer is for. The observer identifies the workload
+      # behind the service and names what it found; a service it cannot resolve to
+      # exactly one comes back indeterminate, which is the honest answer.
+      - {name: alert-notifier, namespace: aodapnc-alerts-notifier-dev, checks: [rollout, logs]}
+      - {name: prometheus,     namespace: aodapnc-prometheus-dev,      checks: [rollout, logs]}
+      - {name: grafana,        namespace: aodapnc-grafana-dev,         checks: [rollout, logs]}

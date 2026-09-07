@@ -164,8 +164,6 @@ export const REVIEW_CONSOLE_ASPECTS: readonly AspectSeat[] = [
  */
 export const TRIAGE_CONSOLE_ASPECTS: readonly AspectSeat[] = [
   { worker: "obs-t1", aspect: "slice1" },
-  { worker: "obs-t2", aspect: "slice2" },
-  { worker: "obs-t3", aspect: "slice3" },
 ];
 
 /**

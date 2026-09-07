@@ -53,6 +53,30 @@ task envelope. Discover only what dispatch itself mechanically requires — the
 worker's run id — and nothing else. If the instruction is genuinely
 undispatchable, ask the user; do not research your way to an answer.
 
+### This applies to CONFIGURING a console, not only to dispatching one
+
+**Recorded 2026-09-07, because it was violated while fixing the triage console.**
+Told *"use alert notifier, prometheus and grafana in cni-dev"*, the right next
+action was to write those three names into `triage/targets.yaml` and start the
+console. What happened instead was a `kubectl get ns` to find the real namespace
+spellings, and then a `kubectl get deploy,statefulset` in each one to enumerate
+the workloads — through an observer's own container, which is the tell that the
+worker equipped to do it was right there.
+
+**Filling a config field is dispatch preparation and the rule covers it.** The
+operator gave three service names and an environment; expanding those into
+namespaces, workload names and check lists is the discernment the console exists
+to perform. An observer that is handed a workload list has been told what it was
+supposed to find out, and — worse — it will believe the list. A wrong name in a
+targets file becomes `indeterminate`, then a coverage incident, then an operator
+sent to a cluster over a typo the host invented.
+
+The narrow exception is unchanged and is worth stating so it is not stretched:
+running a read to DIAGNOSE a fault the user reported ("the observers had auth
+problems") is answering their question, not doing a worker's job. The line is
+whether the answer becomes an instruction you hand a worker. Diagnosis, yes;
+pre-filling the brief or the targets file, no.
+
 Corollary: **do not summarise, second-guess or "improve" the worker's output
 either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 

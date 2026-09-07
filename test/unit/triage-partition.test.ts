@@ -99,10 +99,10 @@ import { ROOT } from "../support/role-docs.ts";
  * list is never empty in production — see the vacuous-completeness test for why
  * that matters here.
  */
-const DECLARED = ["mia", "authorization", "authentication"] as const;
+const DECLARED = ["alert-notifier", "prometheus", "grafana"] as const;
 
 /** `TRIAGE_CONSOLE_ROSTER.reviewers`, spelled out so a roster edit is visible. */
-const OBS = ["obs-t1", "obs-t2", "obs-t3"] as const;
+const OBS = ["obs-t1"] as const;
 
 function assign(worker: string, ...services: string[]): PartitionAssignment {
   return { worker, services };
@@ -141,11 +141,9 @@ describe("the positive control — a partition that covers the environment exact
    */
   test("is complete, and dispatches every assignment in order", async () => {
     const { dispatch, calls } = spy();
-    const partition = [
-      assign(OBS[0], "mia"),
-      assign(OBS[1], "authorization"),
-      assign(OBS[2], "authentication"),
-    ];
+    // ONE observer, so the complete partition is one assignment covering the
+    // whole environment.
+    const partition = [assign(OBS[0], "alert-notifier", "prometheus", "grafana")];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
 
@@ -169,9 +167,9 @@ describe("the positive control — a partition that covers the environment exact
   test("a lopsided partition and an idle observer are both legal", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "mia", "authorization"),
-      assign(OBS[1], "authentication"),
-      assign(OBS[2]),
+      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "grafana"),
+      assign(OBS[0]),
     ];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
@@ -220,13 +218,13 @@ describe("the positive control — a partition that covers the environment exact
    * joined is strictly better than a slice that was never attempted, because the
    * join reports the missing one as coverage either way.
    */
-  test("a throw still fails the pass, but the other slices were ISSUED", async () => {
+  test("a throw fails the pass, and every slice was still ISSUED", async () => {
     const calls: string[] = [];
-    const partition = [
-      assign(OBS[0], "mia"),
-      assign(OBS[1], "authorization"),
-      assign(OBS[2], "authentication"),
-    ];
+    // COVERAGE DROPPED 2026-09-07 with the move to one observer: this used to
+    // prove that a failing slice does not prevent the OTHER seats being reached,
+    // which is the whole reason the fan-out is concurrent. With one seat there is
+    // no other to reach, so what survives here is only that the throw propagates.
+    const partition = [assign(OBS[0], "alert-notifier", "prometheus", "grafana")];
 
     const dispatch = async (a: PartitionAssignment): Promise<string> => {
       calls.push(a.worker);
@@ -253,7 +251,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
    */
   test("two of three services is refused whole, and NOTHING is dispatched", async () => {
     const { dispatch, calls } = spy();
-    const partition = [assign(OBS[0], "mia"), assign(OBS[1], "authorization")];
+    const partition = [assign(OBS[0], "alert-notifier"), assign(OBS[0], "prometheus")];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
 
@@ -261,7 +259,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_incomplete");
     // BY NAME. A count assertion passes when the wrong service is reported.
-    expect(outcome.missing).toEqual(["authentication"]);
+    expect(outcome.missing).toEqual(["grafana"]);
     expect(calls).toEqual([]);
   });
 
@@ -282,8 +280,8 @@ describe("the incomplete arm — a service in the environment appears in no requ
   test("overlapping sets with neither containing the other: both halves, by name", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "authorization"),
-      assign(OBS[1], "authentication", "ingest"),
+      assign(OBS[0], "prometheus"),
+      assign(OBS[0], "grafana", "ingest"),
     ];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
@@ -291,7 +289,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_incomplete");
-    expect(outcome.missing).toEqual(["mia"]);
+    expect(outcome.missing).toEqual(["alert-notifier"]);
     expect(outcome.undeclared).toEqual(["ingest"]);
     expect(outcome.duplicated).toEqual([]);
     expect(calls).toEqual([]);
@@ -310,9 +308,9 @@ describe("the incomplete arm — a service in the environment appears in no requ
   test("a full cover plus one invented service is still refused", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "mia", "ingest"),
-      assign(OBS[1], "authorization"),
-      assign(OBS[2], "authentication"),
+      assign(OBS[0], "alert-notifier", "ingest"),
+      assign(OBS[0], "prometheus"),
+      assign(OBS[0], "grafana"),
     ];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
@@ -327,11 +325,11 @@ describe("the incomplete arm — a service in the environment appears in no requ
 
   /** Declared order, not claim order — the operator reads the file, not the request. */
   test("missing services are reported in the order targets.yaml declares them", async () => {
-    const outcome = checkTriagePartition(DECLARED, [assign(OBS[0], "authorization")]);
+    const outcome = checkTriagePartition(DECLARED, [assign(OBS[0], "prometheus")]);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
-    expect(outcome.missing).toEqual(["mia", "authentication"]);
+    expect(outcome.missing).toEqual(["alert-notifier", "grafana"]);
   });
 
   /**
@@ -347,8 +345,8 @@ describe("the incomplete arm — a service in the environment appears in no requ
   test("undeclared services are reported in the order the partition claims them", () => {
     const partition = [
       assign(OBS[0], "ingest", "routing"),
-      assign(OBS[1], "mia", "authorization"),
-      assign(OBS[2], "authentication"),
+      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "grafana"),
     ];
 
     const outcome = checkTriagePartition(DECLARED, partition);
@@ -373,9 +371,9 @@ describe("the duplicate arm — a service appears in more than one request", () 
   test("a service claimed by two observers is partition_duplicate, and nothing is dispatched", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "mia", "authorization"),
-      assign(OBS[1], "authentication"),
-      assign(OBS[2], "mia"),
+      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "grafana"),
+      assign(OBS[0], "alert-notifier"),
     ];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
@@ -383,7 +381,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["mia"]);
+    expect(outcome.duplicated).toEqual(["alert-notifier"]);
     expect(outcome.missing).toEqual([]);
     expect(calls).toEqual([]);
   });
@@ -401,9 +399,9 @@ describe("the duplicate arm — a service appears in more than one request", () 
   test("a service listed twice by the SAME observer is a duplicate too", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "mia", "mia"),
-      assign(OBS[1], "authorization"),
-      assign(OBS[2], "authentication"),
+      assign(OBS[0], "alert-notifier", "alert-notifier"),
+      assign(OBS[0], "prometheus"),
+      assign(OBS[0], "grafana"),
     ];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
@@ -411,7 +409,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["mia"]);
+    expect(outcome.duplicated).toEqual(["alert-notifier"]);
     expect(calls).toEqual([]);
   });
 
@@ -430,9 +428,9 @@ describe("the duplicate arm — a service appears in more than one request", () 
    */
   test("duplicated services are reported in the order the partition claims them", () => {
     const partition = [
-      assign(OBS[0], "authorization", "mia"),
-      assign(OBS[1], "mia", "authorization"),
-      assign(OBS[2], "authentication"),
+      assign(OBS[0], "prometheus", "alert-notifier"),
+      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "grafana"),
     ];
 
     const outcome = checkTriagePartition(DECLARED, partition);
@@ -440,7 +438,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["authorization", "mia"]);
+    expect(outcome.duplicated).toEqual(["prometheus", "alert-notifier"]);
   });
 });
 
@@ -463,15 +461,17 @@ describe("precedence, when both faults hold at once", () => {
    */
   test("partition_duplicate wins the code, and missing[] still names both gaps", async () => {
     const { dispatch, calls } = spy();
-    const partition = [assign(OBS[0], "mia"), assign(OBS[1], "mia")];
+    // Both claims are on the one seat now — the duplicate still wins the code and
+    // `missing` still names both gaps, which is what this test is about.
+    const partition = [assign(OBS[0], "alert-notifier"), assign(OBS[0], "alert-notifier")];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["mia"]);
-    expect(outcome.missing).toEqual(["authorization", "authentication"]);
+    expect(outcome.duplicated).toEqual(["alert-notifier"]);
+    expect(outcome.missing).toEqual(["prometheus", "grafana"]);
     expect(calls).toEqual([]);
   });
 });
@@ -503,9 +503,9 @@ describe("what this check does NOT answer", () => {
    */
   test("a repeated worker is not this module's refusal", () => {
     const partition = [
-      assign(OBS[0], "mia"),
-      assign(OBS[0], "authorization"),
-      assign(OBS[1], "authentication"),
+      assign(OBS[0], "alert-notifier"),
+      assign(OBS[0], "prometheus"),
+      assign(OBS[0], "grafana"),
     ];
 
     expect(checkTriagePartition(DECLARED, partition).kind).toBe("complete");
@@ -571,16 +571,14 @@ describe("the projection — a sweep's requests become the partition value", () 
    * obvious one to write — is green under all four.
    */
   test("preserves worker order, claim order, repeats and empty shares", () => {
+    // The projection is verbatim: it neither de-duplicates nor drops. Asserted on
+    // one seat now; it was three when the console had three observers.
     const projected = partitionFromRequests([
-      req(OBS[0], ["routing", "ingest"]),
-      req(OBS[1], []),
-      req(OBS[2], ["mia", "mia"]),
+      req(OBS[0], ["routing", "ingest", "alert-notifier", "alert-notifier"]),
     ]);
 
     expect(projected).toEqual([
-      { worker: OBS[0], services: ["routing", "ingest"] },
-      { worker: OBS[1], services: [] },
-      { worker: OBS[2], services: ["mia", "mia"] },
+      { worker: OBS[0], services: ["routing", "ingest", "alert-notifier", "alert-notifier"] },
     ]);
   });
 
@@ -596,17 +594,18 @@ describe("the projection — a sweep's requests become the partition value", () 
   test("a repeat inside one share still reaches partition_duplicate, by name", () => {
     const outcome = checkTriagePartition(
       DECLARED,
+      // The repeat is inside the ONE share, which is the arm this test names.
+      // COVERAGE DROPPED: the same service claimed by two DIFFERENT observers no
+      // longer has a second observer to be claimed by.
       partitionFromRequests([
-        req(OBS[0], ["mia", "mia"]),
-        req(OBS[1], ["authorization"]),
-        req(OBS[2], ["authentication"]),
+        req(OBS[0], ["alert-notifier", "alert-notifier", "prometheus", "grafana"]),
       ]),
     );
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["mia"]);
+    expect(outcome.duplicated).toEqual(["alert-notifier"]);
   });
 
   /**
@@ -622,11 +621,8 @@ describe("the projection — a sweep's requests become the partition value", () 
    * refusal naming the whole environment, not a silent empty sweep.
    */
   test("an absent share projects to an idle observer, and the check then names every service", () => {
-    const projected = partitionFromRequests([req(OBS[0]), req(OBS[1])]);
-    expect(projected).toEqual([
-      { worker: OBS[0], services: [] },
-      { worker: OBS[1], services: [] },
-    ]);
+    const projected = partitionFromRequests([req(OBS[0])]);
+    expect(projected).toEqual([{ worker: OBS[0], services: [] }]);
 
     const outcome = checkTriagePartition(DECLARED, projected);
     expect(outcome.kind).toBe("refused");
@@ -645,11 +641,9 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
    */
   test("a complete partition survives the parser and dispatches every share", async () => {
     const read = parseDispatchRequest(
-      fanOutBody(SWEEP, [
-        req(OBS[0], ["mia"]),
-        req(OBS[1], ["authorization"]),
-        req(OBS[2], ["authentication"]),
-      ]),
+      // ONE observer, so a complete partition is one request naming every
+      // declared service. It was one service per seat when there were three.
+      fanOutBody(SWEEP, [req(OBS[0], ["alert-notifier", "prometheus", "grafana"])]),
       { sender: "tri-1", taskId: SWEEP, roster: TRIAGE_CONSOLE_ROSTER },
     );
 
@@ -665,7 +659,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
 
     expect(outcome.kind).toBe("dispatched");
     expect(calls.map((c) => c.worker)).toEqual([...OBS]);
-    expect(calls.map((c) => c.services)).toEqual([["mia"], ["authorization"], ["authentication"]]);
+    expect(calls.map((c) => c.services)).toEqual([["alert-notifier", "prometheus", "grafana"]]);
   });
 
   /**
@@ -685,10 +679,13 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
    */
   test("the asymmetric partition is refused after the parse, and nothing is dispatched", async () => {
     const read = parseDispatchRequest(
-      fanOutBody(SWEEP, [
-        req(OBS[0], ["authorization"]),
-        req(OBS[1], ["authentication", "ingest"]),
-      ]),
+      /*
+       * The asymmetry is now WITHIN one request rather than across two seats: it
+       * names a service the environment does not declare and misses one it does.
+       * COVERAGE DROPPED: a partition split unevenly ACROSS observers no longer
+       * has a second seat to be uneven against.
+       */
+      fanOutBody(SWEEP, [req(OBS[0], ["prometheus", "grafana", "ingest"])]),
       { sender: "tri-1", taskId: SWEEP, roster: TRIAGE_CONSOLE_ROSTER },
     );
 
@@ -705,7 +702,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_incomplete");
-    expect(outcome.missing).toEqual(["mia"]);
+    expect(outcome.missing).toEqual(["alert-notifier"]);
     expect(outcome.undeclared).toEqual(["ingest"]);
     expect(calls).toEqual([]);
   });

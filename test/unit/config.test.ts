@@ -67,7 +67,7 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
  * ISC-526's lens map above — and the roster test below is the one place that
  * has to change.
  */
-const TRIAGE_SEATS = ["tri-1", "obs-t1", "obs-t2", "obs-t3"] as const;
+const TRIAGE_SEATS = ["tri-1", "obs-t1"] as const;
 
 /**
  * D1, settled 2026-09-06 as arm 3: all four seats run the LOCAL 20b, in both
@@ -394,7 +394,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
     // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
     // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
     // of them pass while checking nothing.
-    expect(TRIAGE_SEATS).toHaveLength(4);
+    expect(TRIAGE_SEATS).toHaveLength(2);
 
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     // ONE set-shaped comparison rather than four independent expectations: a
@@ -451,7 +451,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
     // Set-shaped again, and over the WHOLE worker list rather than over the
     // three ids: an override that appears on a fourth worker — the copied-line
     // defect, arriving on `obs-1` or `tst-2` — fails here too.
-    expect(stated).toEqual(["obs-t1", "obs-t2", "obs-t3"].map((id) => `${id}=${TRIAGE_MODEL}`));
+    expect(stated).toEqual(["obs-t1"].map((id) => `${id}=${TRIAGE_MODEL}`));
 
     // `tri-1` is the mirror and the reason the list above has three entries and
     // not four: the `triage` role declares the model itself, so §6.1's "no

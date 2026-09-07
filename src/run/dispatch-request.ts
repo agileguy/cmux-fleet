@@ -421,7 +421,7 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
  */
 export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
   collators: ["tri-1"],
-  reviewers: ["obs-t1", "obs-t2", "obs-t3"],
+  reviewers: ["obs-t1"],
   /*
    * §7.3's triage row, and the half that makes the completeness check
    * REACHABLE. §6.5 puts the count on the host — *"a model that partitions can

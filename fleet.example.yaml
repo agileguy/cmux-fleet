@@ -165,8 +165,8 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
     # STARTS AND ONE THAT DOES NOT. The allowlist gates the ROLE, not the
     # server, and `config validate` never reads it — that command stops at
     # `resolveAllWorkers` and does not call `assertModelAllowed`. Omit this
-    # entry and the example validates clean, then `up` refuses tri-1, obs-t1,
-    # obs-t2 and obs-t3 with ModelNotAllowedError: the operator has been told
+    # entry and the example validates clean, then `up` refuses tri-1 and obs-t1
+    # with ModelNotAllowedError: the operator has been told
     # the file is fine and then had it rejected, which is precisely the failure
     # `src/cli/commands/config.ts` argues against in its own words.
     - gpt-oss-20b-MXFP4-Q8
@@ -736,7 +736,7 @@ workers:
   # watching cannot afford. The panes are VIEWS, not terminals.
   #
   # ONE RUN, one run id, stable for the console's whole life:
-  #   pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3
+  #   pifleet up --workers tri-1,obs-t1
   # `run.max_concurrent` must be at least 3 or the three-way fan-out serialises
   # and a five-minute cadence stops being one. It is 4 at :82, so this console
   # fits with nothing to spare — a fourth environment is a `max_concurrent`
@@ -763,5 +763,3 @@ workers:
   # four seats run gpt-oss-20b. Read as a reversal of §6.11 this looks wrong; it
   # is the same outcome reached from a file whose `observer` role differs.
   - {id: obs-t1, role: observer, model: gpt-oss-20b-MXFP4-Q8}
-  - {id: obs-t2, role: observer, model: gpt-oss-20b-MXFP4-Q8}
-  - {id: obs-t3, role: observer, model: gpt-oss-20b-MXFP4-Q8}

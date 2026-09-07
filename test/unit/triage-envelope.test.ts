@@ -45,7 +45,12 @@ import { join } from "node:path";
 
 import { OUTBOX_FILES_DIR } from "../../src/harvest/outbox.ts";
 import { runPaths, workerOutboxDir, type RunPaths } from "../../src/run/paths.ts";
-import { childTaskId, collationTaskId, sweepTaskId } from "../../src/run/task-ids.ts";
+import {
+  TRIAGE_CONSOLE_ASPECTS,
+  childTaskId,
+  collationTaskId,
+  sweepTaskId,
+} from "../../src/run/task-ids.ts";
 import { TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
 import type { TriageDocument } from "../../src/run/triage-verdict.ts";
 import type { TriageService } from "../../src/run/triage-targets.ts";
@@ -787,19 +792,22 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     await write("obs-t1", "slice1", {
       sweep_id: sweepId,
       window_opened_at: "2026-09-06T12:00:00.000Z",
-      status: "success",
+      status: "blocked",
     });
-    await write("obs-t2", "slice2", { sweep_id: sweepId, status: "blocked" });
-    // obs-t3 wrote nothing at all.
 
+    /*
+     * COVERAGE DROPPED 2026-09-07 with the move to one observer. This used to run
+     * three seats at once — one success, one blocked, one that wrote nothing —
+     * which is what proved that `artifacts[]` and `blocked[]` are computed
+     * independently and that an absent seat is absent rather than present-with-
+     * nulls. With a single seat those three states can only be exercised one at a
+     * time, and the "absent" arm is covered by the empty-join test below.
+     */
     const { producers } = producerFixture(run);
     const joined = await producers.join(sweepId);
-    expect(joined.artifacts.map((a) => a.worker)).toEqual(["obs-t1", "obs-t2"]);
+    expect(joined.artifacts.map((a) => a.worker)).toEqual(["obs-t1"]);
     expect(joined.artifacts[0]!.window_opened_at).toBe("2026-09-06T12:00:00.000Z");
-    // The seat that wrote nothing is ABSENT from `artifacts[]` — presence IS the
-    // whole of "the reply files present" (`ObserverArtifact`'s own docblock).
-    expect(joined.artifacts.map((a) => a.worker)).not.toContain("obs-t3");
-    expect(joined.blocked).toEqual(["obs-t2"]);
+    expect(joined.blocked).toEqual(["obs-t1"]);
   });
 
   test("join of a sweep nobody answered is empty on both members, not a throw", async () => {
@@ -854,8 +862,10 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     const { sent, producers } = producerFixture(run);
     await producers.collate(sweepTaskId(41));
     const brief = sent[0]!.brief;
-    for (const aspect of ["slice1", "slice2", "slice3"]) {
-      expect(brief).toContain(childTaskId(sweepTaskId(41), aspect));
+    // Derived from the roster rather than a fixed list, so the assertion follows
+    // the console rather than needing an edit each time its seats change.
+    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+      expect(brief).toContain(childTaskId(sweepTaskId(41), seat.aspect));
     }
     expect(envelopeIssues(brief, null)).toEqual([]);
   });

@@ -117,9 +117,12 @@ describe("the fan-out example is a document the real parser accepts", () => {
     const body = jsonBlocks().find((b) => b.includes(DISPATCH_REQUEST_SCHEMA))!;
     const parsed = JSON.parse(body) as { requests: { services: string[] }[] };
     const union = parsed.requests.flatMap((r) => r.services);
-    expect(union).toEqual(["routing", "ingest", "authorization", "telemetry", "alert-db"]);
+    // ONE observer, so the example is one request naming the whole environment.
+    // Disjointness is still asserted — it is now disjointness WITHIN the share,
+    // which is what `partition_duplicate` spends itself on.
+    expect(union).toEqual(["routing", "ingest", "authorization"]);
     expect(new Set(union).size).toBe(union.length);
-    expect(parsed.requests.map((r) => r.services.length)).toEqual([2, 1, 2]);
+    expect(parsed.requests.map((r) => r.services.length)).toEqual([3]);
   });
 });
 

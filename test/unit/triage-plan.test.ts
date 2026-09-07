@@ -113,13 +113,13 @@ describe("the triage console is a 2x2 of views with the reconciler in the landin
    * fleet.
    */
   it("names one reconciler and three observers, in pane order", () => {
-    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
+    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "obs-t1"]);
   });
 
   it("titles panes by WORKER ID — the four named seats, in order", () => {
     // A role title would print `observer` on three of the four panes. The id is
     // also what `dispatch --worker` takes, so the title is the argument.
-    expect(unattended().map((p) => p.title)).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
+    expect(unattended().map((p) => p.title)).toEqual(["tri-1", "obs-t1"]);
   });
 
   /**
@@ -337,8 +337,6 @@ describe("the four seats the plan names are the four seats the tracked config de
     expect([...DEFAULT_TRIAGE_WORKERS].map((id) => [id, roles.get(id)])).toEqual([
       ["tri-1", "triage"],
       ["obs-t1", "observer"],
-      ["obs-t2", "observer"],
-      ["obs-t3", "observer"],
     ]);
   });
 });

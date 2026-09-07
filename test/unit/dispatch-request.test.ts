@@ -1542,7 +1542,7 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
 
     expect(read.kind).toBe("ok");
     if (read.kind !== "ok") return;
-    expect(read.request.requests.map((r) => r.worker)).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+    expect(read.request.requests.map((r) => r.worker)).toEqual(["obs-t1"]);
   });
 
   /**
@@ -1558,7 +1558,7 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    */
   test("refuses a partition naming one observer twice, on the existing code", () => {
     const read = parseDispatchRequest(
-      triageFanOut(SWEEP, ["obs-t1", "obs-t2", "obs-t1"]),
+      triageFanOut(SWEEP, ["obs-t1", "obs-t1"]),
       triageCtx(SWEEP),
     );
 
@@ -1651,8 +1651,7 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
     ]);
     expect(TRIAGE_CONSOLE_ROSTER.reviewers.map((id) => [id, roles.get(id)])).toEqual([
       ["obs-t1", "observer"],
-      ["obs-t2", "observer"],
-      ["obs-t3", "observer"],
+
     ]);
   });
 
@@ -1866,13 +1865,13 @@ describe("the partition's two refusal codes join the request plane's alphabet", 
    */
   test("a two-of-three partition is accepted HERE — completeness is not this module's question", () => {
     const read = parseDispatchRequest(
-      triageFanOut(SWEEP, ["obs-t1", "obs-t2"]),
+      triageFanOut(SWEEP, ["obs-t1"]),
       triageCtx(SWEEP),
     );
 
     expect(read.kind).toBe("ok");
     if (read.kind !== "ok") return;
-    expect(read.request.requests).toHaveLength(2);
+    expect(read.request.requests).toHaveLength(1);
   });
 });
 
@@ -1925,13 +1924,9 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
     expect(read.kind).toBe("ok");
     if (read.kind !== "ok") return;
     // BY VALUE. A parse that dropped the field would leave `partitionFromRequests`
-    // projecting three idle observers and the sweep refused as incomplete — a
+    // projecting an idle observer and the sweep refused as incomplete — a
     // failure whose message points at the model rather than at the schema.
-    expect(read.request.requests.map((r) => r.services)).toEqual([
-      ["mia"],
-      ["authorization"],
-      ["authentication"],
-    ]);
+    expect(read.request.requests.map((r) => r.services)).toEqual([["mia"]]);
   });
 
   /**
@@ -2007,7 +2002,7 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
    * block's header names, applied to a discriminator rather than to a set.
    */
   test("the roster decides, not the sender and not the worker ids", () => {
-    const onTriageIds = parseDispatchRequest(triageFanOut(SWEEP, ["obs-t1", "obs-t2"]), {
+    const onTriageIds = parseDispatchRequest(triageFanOut(SWEEP, ["obs-t1"]), {
       sender: "tri-1",
       taskId: SWEEP,
       roster: TRIAGE_IDS_NO_SERVICES,
@@ -2043,11 +2038,9 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
     const body = JSON.stringify({
       schema: DISPATCH_REQUEST_SCHEMA,
       parent_task_id: SWEEP,
-      requests: [
-        item("obs-t1", { services: ["mia"] }),
-        item("obs-t2"),
-        item("obs-t3", { services: ["authentication"] }),
-      ],
+      // The console has one observer, so the file is one entry — and that entry
+      // omits `services` entirely, which is the refusal this test is about.
+      requests: [item("obs-t1")],
     });
 
     const read = parseDispatchRequest(body, triageCtx(SWEEP));
@@ -2055,7 +2048,7 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
     expect(read.kind).toBe("refused");
     if (read.kind !== "refused") return;
     expect(read.code).toBe("services_missing");
-    expect(read.reason).toContain("request 2");
+    expect(read.reason).toContain("request 1");
   });
 
   /**
@@ -2076,17 +2069,14 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
     const body = JSON.stringify({
       schema: DISPATCH_REQUEST_SCHEMA,
       parent_task_id: SWEEP,
-      requests: [
-        item("obs-t1", { services: ["mia", "authorization", "authentication"] }),
-        item("obs-t2", { services: [] }),
-      ],
+      requests: [item("obs-t1", { services: [] })],
     });
 
     const read = parseDispatchRequest(body, triageCtx(SWEEP));
 
     expect(read.kind).toBe("ok");
     if (read.kind !== "ok") return;
-    expect(read.request.requests[1]!.services).toEqual([]);
+    expect(read.request.requests[0]!.services).toEqual([]);
   });
 
   /**
@@ -2106,7 +2096,7 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
    */
   test("a roster fault outranks a missing share", () => {
     const read = parseDispatchRequest(
-      triageFanOutWithoutServices(SWEEP, ["obs-t1", "rev-arch-1", "obs-t3"]),
+      triageFanOutWithoutServices(SWEEP, ["obs-t1", "rev-arch-1"]),
       triageCtx(SWEEP),
     );
 
@@ -2117,7 +2107,7 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
 
   test("the same missing share, with every target legal, reports the share", () => {
     const read = parseDispatchRequest(
-      triageFanOutWithoutServices(SWEEP, ["obs-t1", "obs-t2", "obs-t3"]),
+      triageFanOutWithoutServices(SWEEP, ["obs-t1"]),
       triageCtx(SWEEP),
     );
 

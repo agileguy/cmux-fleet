@@ -128,3 +128,41 @@ down because nobody could answer.
   started for is gone.
 - **`pifleet triage --status` works with no run at all.** It is the one surface
   that must answer when the sweep half cannot.
+
+---
+
+## Standing one up, from the first live run (2026-09-07)
+
+**`./scripts/triage` twice is not a workaround, it is the procedure.** The first
+call builds four panes and deliberately starts no actor; the four `up`s are still
+running when it returns. The second call starts the actor. If the first says
+*"workspace … is already in place — selected it, changed nothing"* while
+`status --all` shows no `tri-1`, the workspace is a stale shell from an earlier
+session and `--recreate` is what rebuilds its panes.
+
+**Set BOTH placeholders in `triage/targets.yaml` before the first sweep, and set
+them in the right place.** The file says which two — `kube_context` and
+`namespace` — and §0.3 keeps them out of it, because it is tracked.
+
+- `kube_context` is a LOGICAL token. If your filtered kubeconfig still carries
+  GKE's generated `gke_<project>_<region>_<cluster>`, **rename it there** —
+  `kubectl --kubeconfig <copy> config rename-context <generated> <env>` — rather
+  than pasting the generated name into the targets file, which would commit a
+  cloud project id. The console refuses to start until the two agree, and that
+  refusal is the design working (§6.10, D11).
+- The services are the OPERATOR's to name. Do not go and enumerate namespaces or
+  workloads to fill them in — see the cardinal rule in `SKILL.md`; that is the
+  observers' discernment and handing it to them pre-decided is how a host's typo
+  becomes a coverage incident.
+
+**The actor's lock outlives a console you replaced.** `--actor-stop` stops an
+actor only *once it has written `triage-relay.json`*, which it does at the end of
+its FIRST completed sweep and not before — so an actor whose every pass failed
+cannot be stopped that way and will refuse the next one with *"another triage
+actor holds …/triage-relay.lock"*. The lock file names its pid; a lock held by a
+DEAD pid is taken over automatically, so the remedy after a crash is to run the
+script again rather than delete a file.
+
+**`fleet.yaml` is gitignored.** Changing the triage seats' `pane_mode` or model
+is a local edit that no commit will carry to another machine — say so rather than
+reporting it as a change that landed.

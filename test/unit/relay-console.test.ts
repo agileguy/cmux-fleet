@@ -376,7 +376,7 @@ describe("the selected roster decides whether a request is acceptable", () => {
   test("tri-1's sweep request is ok under triage and refused under review", async () => {
     const { run } = await runsRootWith(["tri-1"]);
     const taskId = "T-sweep-7";
-    await plantRequest(run, "tri-1", taskId, ["obs-t1", "obs-t2", "obs-t3"]);
+    await plantRequest(run, "tri-1", taskId, ["obs-t1"]);
 
     const asTriage = await readDispatchRequest({
       runRoot: run.root,
@@ -452,7 +452,7 @@ describe("the selected roster decides whether a request is acceptable", () => {
   test("under triage the pass dispatches tri-1 and refuses obs-t1; under review it sees neither", async () => {
     const { run } = await runsRootWith(["tri-1", "obs-t1"]);
     await plantInbox(run, "T-sweep-7", "tri-1");
-    await plantRequest(run, "tri-1", "T-sweep-7", ["obs-t1", "obs-t2", "obs-t3"]);
+    await plantRequest(run, "tri-1", "T-sweep-7", ["obs-t1"]);
     await plantInbox(run, "T-sweep-7-slice1", "obs-t1");
     await plantRequest(run, "obs-t1", "T-sweep-7-slice1", ["obs-t2"]);
 
