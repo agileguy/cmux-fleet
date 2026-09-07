@@ -1914,7 +1914,13 @@ row-level `window` field does not cover it either: §6.7's gate tests that a win
 it was opened when it should have been.
 
 **The bound needs no new knob**, which is what makes this affordable. The host dispatched the sweep at
-a known instant and §7.8 already holds the two values that fix the legal range:
+a known instant and the configuration already holds the two values that fix the legal range —
+**though they live in two different files, corrected 2026-09-06**: `reserve_s` is §7.8's
+(`triage/console.yaml`), and `default_window` is **§7.1's** (`environments.<env>.default_window` in
+`triage/targets.yaml`). This sentence named §7.8 for both. It costs nothing structurally — §7.8's
+`default_window ≤ cadence_s` refusal already requires one loader to hold both, and states that it
+*"spans two files and therefore lives in neither schema"* — but it sent a reader to the wrong file for
+half of the bound.
 
 | condition | verdict |
 |---|---|
@@ -1929,6 +1935,23 @@ carries. It spends its own reason, `stale_window`, because the operator response
 sweep id is a worker replaying an old answer, and a wrong window is a worker answering the wrong
 question. Shaped as a `windowEcho` beside `sweepIdEcho`, three states for the refusal's two, so a log
 can say which of `absent` and `out_of_range` occurred.
+
+**OPEN — §7.1's per-service `window` override can make a truthful observer fail this check, found
+2026-09-06 while implementing it.** §7.1:1771 makes `services[].window` *"an optional per-service
+override of `default_window`"* with **nothing bounding it above**, and the table here bounds the check
+by `default_window` alone. So an observer holding a service whose override is LONGER than
+`default_window` echoes a `window_opened_at` that is truthful and out of range — and because the check
+is artifact-level, that discards **every row that observer produced**, including rows for services
+carrying no override at all. Three resolutions, and this is an operator's decision rather than an
+implementer's: bound the check by the widest override in that observer's share; refuse
+`window > default_window` in §7.1's schema; or move the check per-row, which the paragraph above
+explicitly rejects. **Implemented as written and flagged rather than chosen** — the table is what
+task 5.3c built.
+
+**Available strengthening, not taken.** §7.2:1784 has the host sending `window_opened_at` in the
+envelope. If the host dictates the exact instant, an EQUALITY check is available and is strictly
+stronger than this range, which admits a worker that ignored the instant it was given and picked
+another one inside the band. The range is what this table says, so the range is what was built.
 
 ### 7.5 `triage.json` — new
 
@@ -2932,10 +2955,16 @@ and SRD-FLEET-PM-001 D7's.
   `reason: "coverage"` and `evidenceRef: null`; a flapping service observed unhealthy across a
   `flap_window` opens with the observed reason and its artifact; and neither fixture produces two
   notifications.*
-- **4.5a** Two source probes task 4.5 left open, both in round 6's files. (a) `scripts/triage` spells
-  its four seats as literals rather than importing `DEFAULT_TRIAGE_WORKERS` — behaviourally
-  equivalent today and a silent divergence the day a seat is added; probe it beside the `CONSOLE`
-  probes already in `test/unit/fresh-dispatch.test.ts`. (b) `test/unit/console-restart.test.ts:471`
+- **4.5a** **DONE 2026-09-06.** Two source probes task 4.5 left open, both in round 6's files.
+  (a) ~~`scripts/triage` spells its four seats as literals rather than importing
+  `DEFAULT_TRIAGE_WORKERS`~~ — **this premise was STALE and the correction is the finding.** The
+  script has imported the constant since round 6 (`scripts/triage:93`, resolved once at `:263`) and
+  no seat id appears anywhere in its **code**. What still spells the four as literals is its
+  **prose**: the usage banner `:5-8`, the pane diagram `:14-20`, the `--no-actor` help text `:156`,
+  and comments at `:47`, `:358`, `:491`, `:515`. The divergence the task names is real; it moved into
+  the documentation. The probe was split to match — one arm counts the single resolution site with
+  comments and the banner stripped, the other parses the pane diagram's cells and asserts them equal
+  to the constant in both directions. (b) `test/unit/console-restart.test.ts:471`
   asserts ISC-572 for triage by reading source text, while `test/integration/triage-console.test.ts`
   now EXECUTES it — keep both and say which is load-bearing. Touches:
   `test/unit/fresh-dispatch.test.ts`, `test/unit/console-restart.test.ts`, `ISA.md`.
@@ -2951,7 +2980,7 @@ and SRD-FLEET-PM-001 D7's.
   Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`, `ISA.md`.
   *Acceptance: an all-`not_attempted` fixture and an empty-`coverage[]` fixture reach the same
   assessment and the same gap by name; a mixed fixture with one `answered` entry does not.*
-- **5.3c** Implement §7.4's `window_opened_at` echo, **decided 2026-09-06: the field grows.** A
+- **5.3c** **DONE 2026-09-06.** Implement §7.4's `window_opened_at` echo, **decided 2026-09-06: the field grows.** A
   `windowEcho(dispatchedAt, openedAt, policy)` beside `sweepIdEcho`, three states (`fresh`,
   `absent`, `out_of_range`) spent as one reason `stale_window`; `SweepCoverage` carries the dispatch
   instant and the environment's `default_window`. Artifact-level, so a bad window discards every row
@@ -2967,6 +2996,18 @@ and SRD-FLEET-PM-001 D7's.
   `test/unit/triage-document.test.ts` (new), `ISA.md`.
   *Acceptance: a document with a row missing `assessment`, one with an unknown assessment value, and
   one that is not an object each refuse by name rather than reaching `assessTriageSweep`.*
+- **5.3d** **Make the window fields required, added 2026-09-06 as recorded debt from task 5.3c.**
+  `SweepCoverage.window` and `ObserverArtifact.window_opened_at` shipped OPTIONAL, and the reason is a
+  process constraint rather than a design judgement: making either required is a compile error at
+  `test/unit/triage-document.test.ts:251` and `:254` and a red test at `:286`, and that file is
+  outside task 5.3c's *Touches* line. The hazard is closed rather than hidden — `SweepAssessment`
+  publishes `window_checked`, so a caller reading `stale_window: []` can tell a clean sweep from one
+  where nobody looked — but a required member is what actually makes the check unskippable. Touches:
+  `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`, `test/unit/triage-document.test.ts`,
+  `ISA.md`.
+  *Acceptance: both `?` dropped, the three literals in `triage-document.test.ts` updated, and
+  `window_checked` either retired or kept with a stated reason — it is the skip's own witness, so
+  retiring it is a decision and not a cleanup.*
 - **5.7** Add every §12 fixture in the issue-predicate, saturation, dedup, console-health and
   notification blocks. Touches: `ISA.md`.
 
