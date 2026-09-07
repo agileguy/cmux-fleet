@@ -471,7 +471,12 @@ So the rule travels in the brief. §7.2 makes it a required, host-rendered block
 rather than something a triage worker composes, because a rule a model writes is a rule that drifts
 between sweeps and this console's whole value is that consecutive sweeps are comparable.
 
-### 2.7 The budget ceiling is per run, and this console is one run that never ends
+### 2.7 The budget ceiling is per run, and this console never ends
+
+> **Superseded in part 2026-09-07 — see §6.1's correction and §6.10's ruling.** This heading read
+> *"this console is one run that never ends"*. It is FOUR runs, and the ceiling is ruled to be the
+> collator's with all four seats' spend summed against it. What survives unchanged is the half this
+> section is actually about: **the console never ends, so a per-run ceiling is a lifetime.**
 
 Finding C. `run.budget.tokens_ceiling: 6000000` (`fleet.yaml:79`) is *"THE ceiling — local models have
 no price table"*, and `per_task_reserve_tokens: 400000` (`:85`) makes the last slice unreachable:
@@ -685,7 +690,19 @@ folds the clock into the same process as the fan-out for that reason rather than
 > "one run" is what the design intended and not what the fleet does; the same measurement is what
 > closed §13 task 0.4, where `run.max_concurrent` turned out to have had nothing to bind on at any
 > value. **Nothing in Phases 1–5 depends on the difference** — `consoleRunPins` reads live status, so
-> the pin machinery works either way. **Phase 6's recycling does**: "`down` then `up` between sweeps"
+> the pin machinery works either way.
+>
+> **EXTENDED 2026-09-07: Phase 6 has TWO consumers, not one, and this correction originally named only
+> the first.** §6.10's `run.budget.tokens_ceiling` is *"per run"*, and against the one-run reading that
+> is the console's whole lifetime — against the four-run reality it is a **factor of four out**. Task
+> 6.8 found it while building that ceiling's producer (ISC-1037), a round after recycling was settled,
+> and it is the cost of a correction that enumerates SOME of what depends on it and stops. **A
+> correction that lists its consequences should say whether the list is exhaustive**; this one read as
+> though it were. §6.10 rules the ceiling: the collator's run, all four seats' spend summed against it.
+> The remaining one-run sentences in §2.7, D3 and §11 Q3 describe the design as INTENDED and are
+> superseded by this paragraph rather than rewritten in place.
+>
+> **Phase 6's recycling does**: "`down` then `up` between sweeps"
 > is written against the one-run reading and must be re-read as four runs before 6.6 is implemented.
 > **Settled 2026-09-06:** four `down`s and four `up`s, with a per-seat boundary so a partial recycle
 > is finished rather than restarted. See §6.6 layer 4.
@@ -1730,8 +1747,26 @@ is that **it is the first thing in this fleet that can starve the fleet's own in
 the clock**, and the console has to be able to say so about itself.
 
 The one hard ceiling that does bind is `run.budget.tokens_ceiling: 6000000` (`fleet.yaml:79`), which
-is **per run** (Finding C), and a triage console is one run — so the console has a hard lifetime
-measured in tokens, after which `up`'s budget refuses admission and the run ends on exit 5. **Nothing
+is **per run** (Finding C) — so the console has a hard lifetime measured in tokens, after which `up`'s
+budget refuses admission and the run ends on exit 5.
+
+**RULED 2026-09-07: the ceiling is the COLLATOR's run, and the whole console's spend is summed against
+it.** This paragraph used to read *"and a triage console is one run"*, which §6.1's own correction
+had already overturned — *"this console is four runs, not one"*. That correction enumerates what
+depends on the difference, names **Phase 6's recycling**, and stops there; the ceiling is the OTHER
+Phase-6 consumer and was never revisited, and **the difference is a factor of four in the console's
+lifetime.** Task 6.8 found it while building the producer (ISC-1037) and resolved it in the only
+direction the code allows; this ratifies that resolution rather than leaving it in a docblock.
+
+**Why the collator's run and not four ceilings.** `refuseOnExhaustedBudget` is handed ONE `RunPaths`
+— the collator's, from `resolveCollatorRun` — so the collator's `budget.json` is the only file a
+dispatch refusal can read. Per-seat halting would publish three files nothing reads and leave the
+fourth carrying `tri-1`'s spend alone, **which is the smallest of the four**: the reconciler collates,
+while the three observers query live environments. The console would then run to a ceiling it can
+never reach. Summing all four against one ceiling is the conservative reading and the one §6.10 argues
+for everywhere else — this section's whole subject is a console that must not become the outage it
+watches for. **§11 Q4's question is now sharper rather than answered:** 6,000,000 tokens is a
+four-seat total, not a per-seat allowance. **Nothing
 announces that today**, so this design makes it a notification: `budget_exhausted` is a console-health
 issue on §6.8a's table, with §6.8a's identity and §6.8a's dedup, and the actor emits it on the way
 down. §11 Q4 asks whether 6,000,000 is the right number for a console whose job is to keep running.
