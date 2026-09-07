@@ -315,7 +315,8 @@ to be long.
       ],
       "selector": "app=authorization",
       "window": "5m",
-      "evidence_ref": ["obs-t2:observer-ops.json#services[0]"]
+      "evidence_ref": ["obs-t2:observer-ops.json#services[0]"],
+      "note": "0 of 3 replicas available since 11:42; the rollout is stuck on a readiness probe and obs-t2 quotes repeated 'connection refused: token-store:5432' in the logs."
     }
   ],
   "unaccounted": ["authentication"]
@@ -359,6 +360,32 @@ does not exist.
   observer's ledger references through. **Each `evidence_ref` entry names the observer and the
   row inside its artifact** — the host already holds that reply and resolves the reference
   against it, so it needs no path, and it must never carry a host path.
+- **`note` is optional, and it is the only prose this file carries.** One or two sentences on a
+  row, saying what was observed — the sentence a person needs in order to know *what broke*
+  before they go and find out *where to look*. It is the one thing you write that can reach an
+  operator directly, so it is worth writing well and it is worth leaving out.
+  - **ENFORCED: 4000 bytes.** Above that the document is refused with `note` named and the sweep
+    produces nothing. **Bytes, not characters** — accented text and box-drawing glyphs cost two
+    to four bytes each, so a note that looks half the length of the limit can be over it. It is
+    a ceiling on a pasted log dump, not a target: one or two sentences is the shape, and that
+    part is not enforced by anything but this line.
+  - **ENFORCED: it is not evidence, and it substitutes for nothing above it.** A `healthy` row
+    with an excellent note and no selector is still downgraded to `indeterminate` and recorded
+    as unevidenced. The gate reads `coverage`, `selector`, `window` and `evidence_ref` and does
+    not read this field, deliberately: a check that could be satisfied by writing about it is
+    not a check.
+  - **Omit it when you have nothing to add, and that is the normal case for a healthy row.** A
+    note restating the assessment — *"this service is unhealthy"* — is worse than no note. It
+    costs a person a read and tells them what the `assessment` field already told them. The
+    example above carries one on the `unhealthy` row and none on the `healthy` one for exactly
+    that reason.
+  - **It is not a place to argue for a response, and this field is where that temptation
+    lands.** No severity, no urgency, no recommendation, no sentence addressed to the operator.
+    See `YOU DO NOT DECIDE WHETHER ANYONE IS NOTIFIED` below — every word of it is about this
+    field more than any other, because this is the one that reaches a person.
+  - **Your full account still goes in `triage.md`.** The note is the one line that travels; the
+    report beside it is where the reasoning, the per-observer attribution and the long quotes
+    belong. A note is not a summary of the report and the report is not a longer note.
 - **A service you could not account for goes in `unaccounted`, never in `services` with a
   guess.** No row at all is better than a row you invented, and **a `healthy` you wrote for a
   service nobody looked at is the single most damaging thing this console can emit** — because
@@ -374,7 +401,9 @@ does not exist.
 - **Nothing in this file may resemble a decision about who is told.** See the next section. No
   severity, no priority, no urgency, no `notify`, no `alert`, no `page`. Those are not fields
   you have, and a document that carries them is a document arguing for a decision that is not
-  yours.
+  yours. **The `note` field does not reopen this**: a severity written as a sentence is the same
+  document arguing for the same decision, and it is harder to refuse because a schema cannot see
+  it. The refusal there is yours to make.
 
 ### `/outbox/<task-id>/files/triage.md` — the document a person reads
 
@@ -422,24 +451,35 @@ message composed from that prose and delivered to the operator arrives out of ba
 operator's own surface, in the operator's own voice, with no diff to inspect and nothing to
 review before they act on it. That is the highest-leverage path anything in this fleet has into
 a person's attention. So the message is not composed from your prose at all: the host builds it
-from typed fields — environment, service, assessment, transition, timestamps, counts — and any
-prose that travels with it travels inside a marked evidence block that is not the message.
+from typed fields — environment, service, assessment, transition, timestamps, counts.
 **This holds whether or not your report is honest, which is exactly why it is not a rule about
 your honesty.**
+
+**Exactly one string you write can travel with that message, and it is the row's `note`.**
+Nothing else in either file leaves this run. The note does not become the message and cannot be
+mistaken for it: the host puts it inside a block opened and closed by banner lines of its own,
+and prefixes **every** line of it, so no line you write — however it is punctuated, whatever it
+claims to be, even if it is itself a banner line or a `Title:` header — can be read as a line
+the host wrote. That containment is mechanical and does not consult your intent, which is why
+the field can exist at all. It is also why the field is bounded, and why a note is one or two
+sentences rather than a transcript.
 
 **And the failure this section is most likely to meet is not disobedience — it is
 compensation.** A model that has understood it cannot notify will try to make the report
 louder instead: capitals, urgency language, a service name with `CRITICAL` in front of it, a
 closing paragraph addressed to the operator. That is composing a notification by another route,
-and it lands in the one place the host copies through verbatim. **State the assessment and let
-its amplitude do the work.** `unhealthy` already means the service is not doing its job; it
-does not get more true in capitals. Write the evidence, attribute it, and stop.
+and it lands in the one place the host copies through verbatim. **`note` is now that place, so
+read this twice for that field.** The fence stops your prose being read as the host's; it does
+not stop you writing a plea inside it, and a fenced plea is still a plea arriving on somebody's
+phone at three in the morning. **State the assessment and let its amplitude do the work.**
+`unhealthy` already means the service is not doing its job; it does not get more true in
+capitals. Write the evidence, attribute it, and stop.
 
 So: no severity or urgency fields, no recommendation that anyone be paged, no sentence in
-`triage.md` addressed to the operator telling them what to do, and no "this should be escalated"
-anywhere. If a service is in a state you think somebody urgently needs to know about, the
-correct action is the same one as always — record the assessment and the evidence accurately.
-**That IS how they find out.**
+`triage.md` or in a `note` addressed to the operator telling them what to do, and no "this
+should be escalated" anywhere. If a service is in a state you think somebody urgently needs to
+know about, the correct action is the same one as always — record the assessment and the
+evidence accurately. **That IS how they find out.**
 
 ## STATUS, AND THE ONE PLACE A CLEAN SWEEP IS DIFFERENT
 

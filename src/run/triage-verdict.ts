@@ -199,6 +199,40 @@ export interface CoverageEntry {
 }
 
 /**
+ * The byte ceiling on {@link TriageRow.note} — §13 task 5.8's *"bounded in bytes
+ * and refused above the bound by name"*.
+ *
+ * ## Bytes, and the two units are not interchangeable for this field
+ *
+ * Every other bound on this document is a `z.string().max()` in
+ * `triage-document.ts`, which counts UTF-16 **code units**. This is the one field
+ * whose contents are re-emitted into a place measured in **bytes**: `fenceEvidence`
+ * caps with `Buffer.byteLength`, ntfy's own limits are byte limits, and §6.9's
+ * header rule is about a byte boundary. A 4,000-character note of accented text is
+ * 8,000 bytes, so a code-unit bound would admit a note twice the size of the block
+ * that has to carry it — the bound would be nominal rather than real.
+ *
+ * ## The value, and it is derived from a downstream fact rather than picked
+ *
+ * **A note this host ACCEPTED must never be silently truncated by the thing that
+ * renders it.** `fenceEvidence` (`triage-notify.ts`) truncates above
+ * `EVIDENCE_MAX_BYTES`, appending a marker but losing the tail; a schema bound
+ * above that would mean admitting bytes the operator never sees, with the loss
+ * recorded on no surface. So the rule is
+ * `TRIAGE_NOTE_MAX_BYTES <= EVIDENCE_MAX_BYTES`, and at equality the refusal lands
+ * one byte before the truncation ever can.
+ *
+ * **Pinned by a test rather than by an import**, on the precedent this console
+ * already uses for `CONSOLE_HEALTH_KINDS`/`CONSOLE_HEALTH_ASSESSMENTS`: the
+ * notifier deliberately imports nothing from the state machine and is a sibling of
+ * this module, not a dependency of it, so a source-level `import` here to borrow a
+ * number would add a module edge for no behaviour.
+ * `test/unit/triage-verdict.test.ts` asserts the relation, so lowering the
+ * notifier's cap reddens here instead of starting a silent truncation.
+ */
+export const TRIAGE_NOTE_MAX_BYTES = 4_000;
+
+/**
  * One service's row in `triage.json` — §7.5, and the fields §7.4 requires on the
  * `observer-ops.json` row it is derived from.
  *
@@ -219,6 +253,50 @@ export interface TriageRow {
   readonly evidence_ref: readonly string[];
   /** The observer the WORKER says produced this row. Recorded, never trusted. */
   readonly observer: string | null;
+  /**
+   * §13 task 5.8 — the ONE piece of worker prose this contract carries, bounded
+   * by {@link TRIAGE_NOTE_MAX_BYTES} and destined for `Announcement.evidence`.
+   *
+   * ## Why the field exists, stated as the defect it closes
+   *
+   * §6.9's containment machinery — `fenceEvidence`, `EVIDENCE_BANNER_OPEN`,
+   * `EVIDENCE_LINE_PREFIX` — was built because worker prose flows into a
+   * notification. With no prose field on this document it guarded a road nobody
+   * used: the pass had nothing to put in `evidence`, so it passed `null` to every
+   * announcement and the whole banner block was **structurally unreachable in
+   * production**. The operator got `evidence: <ref>` and no sentence, which moves
+   * their first question from *"what broke"* to *"where do I look"*.
+   *
+   * ## It is NOT an input to the evidence gate, and that direction matters
+   *
+   * {@link evidenceGaps} does not read this field and must never be widened to.
+   * §6.7 rule 2 grades a `healthy` on structured citations — coverage, selector,
+   * window, ledger — precisely so the gate cannot be satisfied with words. A note
+   * that counted toward the gate would let a worker clear its own downgrade by
+   * writing a paragraph, which is the claim-over-count inversion the gate exists
+   * to prevent, arriving through the one field that is pure claim.
+   *
+   * ## OPTIONAL here, where {@link ObserverArtifact.window_opened_at} is required
+   *
+   * The 5.3d ruling made that field a required `string | null` because §7.4 lists
+   * it among *"three required fields"*, so an artifact that omitted it commits a
+   * contract violation the host must be able to RECORD — and an optional member
+   * would spell that fault with the same token as *"the host never read the
+   * field"*. **No such second fact exists here.** §13 task 5.8 says *"one
+   * OPTIONAL `note` per row"*: a row with nothing worth saying is the ordinary
+   * case, not a violation, so `undefined` and `null` denote the same thing and
+   * there is nothing for the distinction to lose. Every value this host acts on
+   * comes from `parseTriageDocument`, whose schema `.default(null)`s the key, so
+   * production never sees `undefined` at all.
+   *
+   * **Recorded rather than dressed up: the optional member is also what keeps
+   * this change inside its slice.** Four files outside it build `TriageRow`
+   * literals (`triage-pass.test.ts`, `triage-envelope.test.ts`,
+   * `triage-command.test.ts`), and a required member is a compile error in each.
+   * The design reason above is the one that decides it; had the two disagreed,
+   * the field would have been required and the literals updated.
+   */
+  readonly note?: string | null;
 }
 
 /**
@@ -654,6 +732,37 @@ export interface ServiceAssessment {
    * ledger and a missing selector clear an incident.
    */
   readonly evidence_ref: string | null;
+  /**
+   * THIS service's own {@link TriageRow.note} — the worker prose the announcement
+   * for this subject carries, or `null`.
+   *
+   * ## Required here where the row's member is optional, and the asymmetry is the
+   * ## point rather than an inconsistency
+   *
+   * {@link TriageRow} is a **worker's** document and may omit the key.
+   * {@link ServiceAssessment} is the **host's** answer, produced by exactly one
+   * function, and a host that is silent about a field is a host that forgot to
+   * read it. `string | null` makes *"this service has no note"* an answer this
+   * type can only give on purpose, and `tsc` requires every arm of the precedence
+   * ladder below to give it.
+   *
+   * ## Populated on the same two rows as {@link evidence_ref}, and for its reason
+   *
+   * The two `observed`/`unevidenced_healthy` arms carry it, because on both of
+   * those the host read a row and the row's contents are the fact being reported.
+   * Every {@link blank} row is `null`: there was no row the host was willing to
+   * read, so there is no prose it is entitled to quote. **An announcement about a
+   * service nobody observed must not carry a sentence from a document the host
+   * refused** — that is the absence-as-evidence mistake in its most persuasive
+   * form, since the prose would read as an observation.
+   *
+   * ## Still untrusted, and carried no further than the fence
+   *
+   * Reaching this type does not launder it. It is the string §6.9 requirement 1
+   * holds out of the title and the message; `fenceEvidence` is what makes it
+   * safe to show at all, and nothing may interpolate it anywhere else.
+   */
+  readonly note: string | null;
 }
 
 /**
@@ -982,6 +1091,15 @@ export function assessTriageSweep(
     counted += 1;
     if (named(row.observer) && row.observer !== observer) misattributed.push(service);
 
+    /*
+     * Read AFTER the gate has been computed and never as an input to it —
+     * `ServiceAssessment.note`'s docblock states the rule and this is the line
+     * that keeps it: `evidenceGaps(row)` above is handed the row and reads four
+     * structured fields, and widening it to consult prose would let a worker
+     * clear its own downgrade by writing a paragraph.
+     */
+    const note = rowNote(row);
+
     const gaps = evidenceGaps(row);
     if (row.assessment === "healthy" && gaps.length > 0) {
       return {
@@ -992,6 +1110,7 @@ export function assessTriageSweep(
         claimed: "healthy",
         gaps,
         evidence_ref: firstEvidenceRef(row),
+        note,
       };
     }
 
@@ -1003,6 +1122,7 @@ export function assessTriageSweep(
       claimed: row.assessment,
       gaps,
       evidence_ref: firstEvidenceRef(row),
+      note,
     };
   });
 
@@ -1040,6 +1160,12 @@ export function assessTriageSweep(
  * discarded artifact's ledger is not a citation. A `stale_replay` row that
  * carried last sweep's `evidence_ref` forward would hand the incident machine a
  * reference to the very file the host has just refused to read.
+ *
+ * **`note` is `null` on the same argument and it is the sharpest instance of it**
+ * (§13 task 5.8). The prose is what an operator's phone shows; a `no_artifact` or
+ * `stale_replay` announcement carrying a sentence out of a document the host
+ * refused would read as an observation of a service nobody observed, which is the
+ * absence-as-evidence mistake delivered out of band with nothing to review.
  */
 function blank(
   service: string,
@@ -1054,7 +1180,30 @@ function blank(
     claimed: null,
     gaps: [],
     evidence_ref: null,
+    note: null,
   };
+}
+
+/**
+ * A row's note, normalised to the two values {@link ServiceAssessment.note} has.
+ *
+ * Three inputs collapse to `null` and they are deliberately not distinguished:
+ * the key was absent (`undefined`, which only a hand-built row can be — the schema
+ * defaults it), it was written as JSON `null`, or it was written as whitespace.
+ * The last is {@link named}'s rule applied to prose for the same reason it applies
+ * to a ledger entry: *"a citation defeatable with a space bar is not a citation"*,
+ * and a note of three spaces produces a fenced block containing one empty line —
+ * a banner around nothing, which `fenceEvidence` already refuses to emit and
+ * which this stops arriving at its door.
+ *
+ * The note is otherwise passed through UNCHANGED — not trimmed, not flattened,
+ * not truncated. Every one of those is `fenceEvidence`'s job, and doing any of
+ * them twice in two modules is how the two copies come to disagree.
+ */
+function rowNote(row: TriageRow): string | null {
+  const note = row.note;
+  if (note === undefined || note === null) return null;
+  return note.trim() === "" ? null : note;
 }
 
 // ───────────────────────────────────────────────────────────────────────────

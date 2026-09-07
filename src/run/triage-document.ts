@@ -14,7 +14,7 @@
  * ## What the absent validator was actually costing, measured rather than feared
  *
  * The hole is not theoretical and it is not merely "an unchecked cast". Drive
- * `roles/triage.md:288-317`'s own worked example — the document this fleet's
+ * `roles/triage.md:288-324`'s own worked example — the document this fleet's
  * prompt tells `tri-1` to write — into `evidenceGaps` (`triage-verdict.ts:285`)
  * and two things happen, neither of them a refusal:
  *
@@ -89,6 +89,28 @@
  * working to a contract the reader does not have, and the reader cannot know
  * whether the part it could not read was the load-bearing part.
  *
+ * ## The ONE prose field, and the one bound that is measured in bytes
+ *
+ * §13 task 5.8 grew this contract a `note` — one optional sentence per row, the
+ * only worker-authored PROSE the document carries and the only string on it whose
+ * purpose is to be read by a person. Everything above is bounded in code units;
+ * {@link noteField} is bounded in **bytes**, because it is the one field that is
+ * re-emitted into a byte-measured place (`fenceEvidence`'s cap, ntfy's limits,
+ * §6.9's header boundary) and a character bound there is nominal.
+ *
+ * **The field is what makes §6.9's containment machinery reachable at all.** Until
+ * it existed the pass had no prose to carry, so it passed `evidence: null` to
+ * every announcement and the whole banner-marked block was structurally
+ * unreachable in production — a guard standing over a road nobody used. §12's D10
+ * marker criterion, which asks for a fixture *"whose prose fields contain a marker
+ * string"*, had no prose field to put one in.
+ *
+ * **And what it deliberately is NOT: an input to the evidence gate.**
+ * `evidenceGaps` reads four structured fields and does not read this one. A note
+ * that counted toward §6.7 rule 2 would let a worker clear its own `healthy`
+ * downgrade by writing a paragraph — the claim-over-count inversion the gate
+ * exists to prevent, arriving through the field that is pure claim.
+ *
  * ## The document may not say who wrote it
  *
  * `worker` is a field of {@link TriageDocument} and is NOT a field of this schema.
@@ -107,6 +129,7 @@ import { MAX_SERVICES_PER_ENVIRONMENT } from "./triage-targets.ts";
 import {
   COVERAGE_RESULTS,
   OBSERVER_ASSESSMENTS,
+  TRIAGE_NOTE_MAX_BYTES,
   type TriageDocument,
   type TriageRow,
 } from "./triage-verdict.ts";
@@ -122,13 +145,23 @@ import {
 export const TRIAGE_DOCUMENT_SCHEMA = "pifleet.triage/v1";
 
 /**
- * The divergence this module found and cannot itself repair, carried where a
- * reader of the code will meet it.
+ * The divergence this module found, carried where a reader of the code will meet
+ * it — kept after the repair, because a fixed bug with no record is one that
+ * comes back.
  *
  * Neither this constant nor the test that drives it changes any behaviour. It is
  * here for `ADVANCE_READS_NO_SUBJECT_FIELD`'s reason (`triage-incident.ts:966`):
  * a promise that lives only in a test file is one a reader of the module never
- * sees. `roles/triage.md` is not this task's file to edit.
+ * sees.
+ *
+ * **The clause *"and cannot itself repair"* was dropped by §13 task 5.8, and the
+ * deletion is the lesson rather than a tidy-up.** It was written when
+ * `roles/triage.md` was outside the editing task's reach, and it hardened a
+ * one-round scheduling accident into a sentence that read like a rule. ISC-651
+ * names the rule that actually applies: **a schema change obliges the
+ * model-facing prompt edit in the SAME task**, whatever the wire tag does — so a
+ * task that changes this file and cannot reach `roles/triage.md` is a task scoped
+ * wrongly, not a constraint to record.
  */
 export const TRIAGE_DOCUMENT_HISTORY =
   "roles/triage.md's worked example disagreed with §7.5's host contract in three places until " +
@@ -192,6 +225,54 @@ const CoverageEntrySchema = z
  * members are written down. Adding a fifth assessment to
  * `triage-verdict.ts:143` widens this schema in the same commit or not at all.
  */
+/**
+ * §13 task 5.8's `note`, *"bounded in bytes and refused above the bound by
+ * name"*.
+ *
+ * ## Why this one field does not use {@link shortStr}
+ *
+ * Every other string on this document is bounded by `z.string().max()`, which
+ * counts UTF-16 **code units**. That is adequate for a selector or a ledger
+ * reference, whose only job is to be short. It is not adequate here, because this
+ * is the one field whose contents are re-emitted into places measured in bytes —
+ * `fenceEvidence`'s cap, ntfy's own limits, §6.9's header boundary. 2,048
+ * characters of accented prose is 4,096 bytes, so a code-unit bound of 4,096 would
+ * admit twice the payload it appears to. {@link TRIAGE_NOTE_MAX_BYTES} carries the
+ * value and the reason it is the value it is.
+ *
+ * ## Refused BY NAME, which is a property of two things together
+ *
+ * The issue path is `services.<i>.note`, so the refusal points at a field; and the
+ * message names the field, the measured size and the bound, so an operator reading
+ * only the sentence knows what to cut and by how much. `Buffer.byteLength` is
+ * computed once and spent twice deliberately — a message quoting a length the
+ * predicate did not test is a message that can be wrong.
+ *
+ * ## `.nullable().default(null)` and NOT `.optional()`
+ *
+ * Absent, and present-as-`null`, are the same fact for this field — the worker had
+ * nothing to say — so the default collapses them here rather than leaving
+ * `undefined` to travel. That is the opposite of the module docblock's point 2,
+ * where `selector`, `window` and `sweep_id` keep `null` as a value a downstream
+ * gate reads: **nothing gates on `note`**, so there is no check for the
+ * distinction to feed.
+ */
+const noteField = z
+  .string()
+  .superRefine((note, ctx) => {
+    const bytes = Buffer.byteLength(note, "utf8");
+    if (bytes <= TRIAGE_NOTE_MAX_BYTES) return;
+    ctx.addIssue({
+      code: "custom",
+      message:
+        `note is ${bytes} bytes and §7.5 bounds it at ${TRIAGE_NOTE_MAX_BYTES} — the bound is in ` +
+        `BYTES rather than characters, because this string is re-emitted into a byte-measured ` +
+        `evidence block. Put the full account in triage.md; this field is one sentence.`,
+    });
+  })
+  .nullable()
+  .default(null);
+
 const TriageRowSchema = z
   .object({
     service: triageToken,
@@ -204,6 +285,8 @@ const TriageRowSchema = z
     evidence_ref: z.array(shortStr).max(MAX_SERVICES_PER_ENVIRONMENT).default([]),
     /** The observer the WORKER says produced this row. Recorded, never trusted. */
     observer: shortStr.nullable().default(null),
+    /** §13 task 5.8's one prose field. See {@link noteField}. */
+    note: noteField,
   })
   .strict();
 

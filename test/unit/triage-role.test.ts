@@ -36,6 +36,11 @@ import {
   TRIAGE_CONSOLE_ROSTER,
   parseDispatchRequest,
 } from "../../src/run/dispatch-request.ts";
+import {
+  TRIAGE_DOCUMENT_SCHEMA,
+  parseTriageDocument,
+} from "../../src/run/triage-document.ts";
+import { TRIAGE_NOTE_MAX_BYTES } from "../../src/run/triage-verdict.ts";
 
 const ROLE = readFileSync(join(import.meta.dir, "..", "..", "roles", "triage.md"), "utf8");
 
@@ -118,6 +123,65 @@ describe("the fan-out example is a document the real parser accepts", () => {
   });
 });
 
+/**
+ * ── EVERY WORKED EXAMPLE IN THIS FILE HAS A REAL PARSER BEHIND IT ───────────
+ *
+ * **ISC-658's lesson, made machine-checkable rather than remembered.** §7.5's own
+ * erratum records the shape of the miss: *"Task 5.1b fixed the request example in
+ * the same file and did not look at the rest of it … a schema change obliges an
+ * audit of every worked example a container reads, not of the one that prompted
+ * the change."* Both of this document's examples are now graded — the fan-out
+ * request above, and the `triage.json` below — but nothing stopped a THIRD example
+ * being added with no parser behind it, which is the same defect returning through
+ * a door nobody watched.
+ *
+ * So the census is asserted: exactly two fenced JSON blocks, each carrying a
+ * schema tag this repository can parse, and no block carrying neither. A new
+ * example fails here and names itself, and the fix is to grade it rather than to
+ * raise a number.
+ */
+describe("every fenced JSON example is a document some real parser accepts", () => {
+  const GRADED_TAGS = [DISPATCH_REQUEST_SCHEMA, TRIAGE_DOCUMENT_SCHEMA];
+
+  test("there are exactly two, and every one of them declares a graded schema", () => {
+    const blocks = jsonBlocks();
+    expect(blocks).toHaveLength(2);
+
+    const ungraded = blocks.filter((b) => !GRADED_TAGS.some((tag) => b.includes(tag)));
+    expect(
+      ungraded.map((b) => b.slice(0, 80)),
+      "a fenced JSON example in roles/triage.md declares no schema this repository parses; " +
+        "grade it rather than widening this assertion",
+    ).toEqual([]);
+
+    // And each tag is used ONCE, so two blocks carrying the same tag — a copied
+    // example that drifted — is not mistaken for full coverage.
+    for (const tag of GRADED_TAGS) {
+      expect(blocks.filter((b) => b.includes(tag))).toHaveLength(1);
+    }
+  });
+
+  /**
+   * The `triage.json` example, through the real schema. `triage-document.test.ts`
+   * grades its CONTENTS field by field; this asserts only that it parses, so that
+   * the census above is a claim about acceptance rather than about a tag string.
+   */
+  test("the triage.json example parses under §7.5's schema", () => {
+    const body = jsonBlocks().find((b) => b.includes(TRIAGE_DOCUMENT_SCHEMA))!;
+    const got = parseTriageDocument(body, {
+      worker: TRIAGE_CONSOLE_ROSTER.collators[0]!,
+      path: "roles/triage.md#triage.json",
+    });
+    if (got.kind !== "ok") {
+      throw new Error(
+        `roles/triage.md's triage.json example is refused ${got.code}: ` +
+          got.issues.map((i) => `${i.path} ${i.fault}`).join("; "),
+      );
+    }
+    expect(got.document.services.length).toBeGreaterThan(1);
+  });
+});
+
 describe("the prose around the example does not contradict it", () => {
   /**
    * The sentence this file was written because of. Asserted by ABSENCE of the old
@@ -135,5 +199,72 @@ describe("the prose around the example does not contradict it", () => {
 
   test("the fan-out file is still named as the poller spells it", () => {
     expect(ROLE).toContain(`/outbox/<task-id>/${DISPATCH_REQUEST_FILE}`);
+  });
+});
+
+/**
+ * ── §13 TASK 5.8's PROMPT EDIT, WHICH THE SCHEMA CHANGE OBLIGED ─────────────
+ *
+ * ISC-651's rule, and this file exists because of it: **a field obliges the
+ * model-facing prompt edit regardless of what the wire tag does.** A `note` the
+ * host accepts and the document never mentions is a field no worker writes; a
+ * `note` the document describes with the wrong bound is a document that instructs
+ * a worker to write a file the host refuses.
+ *
+ * Four claims are graded, and each is one a model ACTS on. The judgement in the
+ * surrounding prose is not checkable and is not checked.
+ */
+describe("the document teaches `note`, and teaches it the way the host enforces it", () => {
+  /**
+   * THE BOUND, READ FROM THE CODE. A document naming `2000` against a schema
+   * enforcing 4,000 teaches a worker to truncate for no reason; one naming
+   * `40000` teaches it to write a document that is refused whole. Either way the
+   * number in the prose is a claim about this host, so it is compared to this
+   * host.
+   */
+  test("the enforced byte bound in the prose is the one the schema enforces", () => {
+    expect(ROLE).toContain(String(TRIAGE_NOTE_MAX_BYTES));
+    // In BYTES, said in the document rather than left for a worker to assume —
+    // the distinction is invisible until a note of accented text is refused.
+    expect(ROLE).toContain("**Bytes, not characters**");
+  });
+
+  /**
+   * The anti-claim, and it is the one a helpful model is most likely to violate:
+   * a note is not evidence and repairs no gap. §6.7 rule 2 grades structure
+   * precisely so that a check cannot be satisfied by writing about it.
+   */
+  test("the prose says a note substitutes for none of the four evidence fields", () => {
+    expect(ROLE).toContain("it is not evidence, and it substitutes for nothing above it");
+    expect(ROLE).toContain("`coverage`, `selector`, `window` and `evidence_ref` and does");
+  });
+
+  /**
+   * The containment promise, which this field is what makes non-vacuous.
+   *
+   * Before task 5.8 the section said prose *"travels inside a marked evidence
+   * block"* while the document had no prose field, so the sentence described a
+   * mechanism nothing could reach. It now names the field, and it names the two
+   * mechanical facts a worker needs in order to trust it: the block is banner-
+   * delimited and EVERY line inside it is prefixed.
+   */
+  test("the notification section names the one field that travels, and how", () => {
+    expect(ROLE).toContain("Exactly one string you write can travel with that message");
+    expect(ROLE).toContain("prefixes **every** line of it");
+    // The old sentence promised this for prose in general and named no field. If
+    // it comes back, the promise is vacuous again. Asserted as a single line so
+    // the check is about the wording rather than about where the wrap fell.
+    expect(ROLE).not.toContain("prose that travels with it travels inside a marked evidence block");
+  });
+
+  /**
+   * And the smuggling route the field opens, closed in the two places a model
+   * reads: the field rules, and the section on who is told. A severity written as
+   * a sentence is the same document arguing for the same decision, and it is
+   * harder to refuse because a schema cannot see it.
+   */
+  test("the no-severity rule is restated for prose, where a schema cannot enforce it", () => {
+    expect(ROLE).toContain("The `note` field does not reopen this");
+    expect(ROLE).toContain("**`note` is now that place, so");
   });
 });

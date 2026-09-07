@@ -77,6 +77,7 @@ import {
   saturationVerdict,
   sweepIdEcho,
   sweepObservations,
+  TRIAGE_NOTE_MAX_BYTES,
   windowEcho,
   type CoverageEntry,
   type CoverageResult,
@@ -102,6 +103,15 @@ import {
   type IncidentRecord,
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
+/*
+ * §13 task 5.8. `TRIAGE_NOTE_MAX_BYTES` is bounded ABOVE by the notifier's own
+ * `EVIDENCE_MAX_BYTES`, and the two are deliberately not joined by a source
+ * import: the notifier is a sibling of the verdict rather than a dependency of
+ * it, and this console already pins one cross-module constant relation from a
+ * test rather than from an `import` (`CONSOLE_HEALTH_KINDS`). This is the only
+ * place both numbers are in scope, which is what makes the pin possible here.
+ */
+import { EVIDENCE_MAX_BYTES } from "../../src/run/triage-notify.ts";
 /*
  * §13 task 6.4b. `unreachableFrom` is the pass's, and the pair it reads is this
  * module's — so ISC-869's assertion that BOTH columns come out of one table can
@@ -3267,5 +3277,180 @@ describe("ISC-681's naming, from the verdict's side", () => {
       NEVER,
     );
     expect(outcome.subject).toBe(inferenceSubject(ENDPOINT));
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// §13 task 5.8 — the note the host carries, and the three things it must not do
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("§13 task 5.8's `note` on the host's own row", () => {
+  const NOTE = "0 of 3 replicas available since 11:42; the readiness probe is failing.";
+
+  /**
+   * ── THE CROSS-MODULE PIN, AND WHAT IT IS FOR ──────────────────────────────
+   *
+   * `fenceEvidence` truncates prose above `EVIDENCE_MAX_BYTES`. If this schema's
+   * bound were ever raised past that, the host would accept bytes the operator
+   * never sees, with the loss recorded on no surface — a silent truncation, which
+   * is the one failure mode a bounded field is supposed to remove.
+   *
+   * So the relation is asserted rather than described, and it is asserted in the
+   * direction that can actually break: **lowering the notifier's cap** reddens
+   * here. A comment in `triage-verdict.ts` saying the same thing could not.
+   *
+   * Both numbers are asserted positive first, because `0 <= 0` holds and would
+   * make this pass against a pair of deleted constants.
+   */
+  test("the note's bound sits at or below the fenced block's own cap", () => {
+    expect(TRIAGE_NOTE_MAX_BYTES).toBeGreaterThan(0);
+    expect(EVIDENCE_MAX_BYTES).toBeGreaterThan(0);
+    expect(TRIAGE_NOTE_MAX_BYTES).toBeLessThanOrEqual(EVIDENCE_MAX_BYTES);
+  });
+
+  /**
+   * The two rows the host was willing to READ carry the prose, and they are the
+   * same two that carry `evidence_ref`. `unevidenced_healthy` is the one worth
+   * naming: the host rejected the row's CLAIM and still records its contents,
+   * because on that row it did read a row and the contents are the fact being
+   * reported. That is `evidence_ref`'s *"a record, not a licence"* applied to the
+   * field an operator actually reads.
+   */
+  test("an observed row and an unevidenced_healthy row both carry the note", () => {
+    const observed = assess(
+      fullCoverage(),
+      doc([row(DECLARED[0], { assessment: "unhealthy", note: NOTE })]),
+    );
+    expect([of(observed, DECLARED[0]).reason, of(observed, DECLARED[0]).note]).toEqual([
+      "observed",
+      NOTE,
+    ]);
+
+    const gated = assess(
+      fullCoverage(),
+      doc([row(DECLARED[0], { assessment: "healthy", coverage: [], note: NOTE })]),
+    );
+    expect([of(gated, DECLARED[0]).reason, of(gated, DECLARED[0]).note]).toEqual([
+      "unevidenced_healthy",
+      NOTE,
+    ]);
+  });
+
+  /**
+   * ── THE SIX REFUSALS, BY NAME ─────────────────────────────────────────────
+   *
+   * `evidence_ref`'s own pair of tests, re-taken on `note` — and the reason is
+   * stronger here than it was there. A stale citation points an operator at a
+   * file; a stale **sentence** tells them what is wrong with a service nobody
+   * observed, on their phone, in the host's own voice, with nothing to review.
+   *
+   * Every row in both fixtures carries a note, so an implementation that read the
+   * prose off the document before applying the precedence ladder produces six
+   * non-null values and both tests redden. The reasons are asserted BY NAME
+   * alongside the values, so a fixture that stopped producing the refusal it was
+   * built for fails rather than passing on a different row's `null`.
+   */
+  test("no row the host refused to read carries a note — the four artifact-level refusals", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        declared: [...DECLARED, "ingest"],
+        artifacts: [artifact(OBS[0], PREVIOUS, OPENED), artifact(OBS[1], SWEEP, TOO_EARLY)],
+      }),
+      doc([
+        row(DECLARED[0], { note: NOTE }),
+        row(DECLARED[1], { note: NOTE }),
+        row(DECLARED[2], { note: NOTE }),
+      ]),
+    );
+
+    expect(result.services.map((s) => [s.reason, s.note])).toEqual([
+      ["stale_replay", null],
+      ["stale_window", null],
+      ["no_artifact", null],
+      ["unassigned", null],
+    ]);
+  });
+
+  test("nor the two row-level ones", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        declared: ["billing", "search"],
+        assignments: [assign(OBS[0], "billing", "search")],
+        artifacts: [artifact(OBS[0])],
+      }),
+      doc([
+        row("billing", { note: NOTE }),
+        row("billing", { note: "a second and contradictory sentence" }),
+      ]),
+    );
+
+    expect(result.services.map((s) => [s.reason, s.note])).toEqual([
+      ["duplicate_rows", null],
+      ["unreported", null],
+    ]);
+  });
+
+  /**
+   * Whitespace is not prose, and the normalisation happens HERE rather than in
+   * the schema because a bound and a blank are different questions. A note of
+   * three spaces would otherwise reach `fenceEvidence` and produce a banner
+   * around one empty line — *"a banner around nothing is a block a reader learns
+   * to skip"*.
+   */
+  test.each([[""], ["   "], ["\n"], ["\t \n "]])(
+    "a note of only whitespace %p is null on the host's row",
+    (note) => {
+      const result = assess(fullCoverage(), doc([row(DECLARED[0], { note })]));
+      // The premise: this row was READ, so a null here is the normalisation and
+      // not one of the six refusals above.
+      expect(of(result, DECLARED[0]).reason).toBe("observed");
+      expect(of(result, DECLARED[0]).note).toBeNull();
+    },
+  );
+
+  /**
+   * ── ANTI: PROSE MOVES NOTHING ─────────────────────────────────────────────
+   *
+   * Two claims in one fixture, and each fails a different plausible mistake.
+   *
+   * **1. The gate does not read it.** `evidenceGaps` is called directly on a row
+   * that fails on THREE conditions, with and without a note, and the two answers
+   * are compared by value. A gate widened to accept prose as evidence returns a
+   * shorter list for the second row.
+   *
+   * **2. The incident machine does not see it.** The observations
+   * `sweepObservations` produces are compared by full value across the same pair.
+   * A note that reached an `IncidentSignal` — as a reason, as an evidence ref, as
+   * anything — makes these two lists differ, and a `healthy` row cleared by a
+   * sentence rather than by a citation is the all-clear §6.8 calls *"the single
+   * most damaging message this console could send"*.
+   */
+  test("ANTI: adding a note changes neither the gate's answer nor the machine's input", async () => {
+    const bare = { assessment: "healthy" as const, coverage: [], selector: null, evidence_ref: [] };
+    const without = row(DECLARED[0], bare);
+    const with_ = row(DECLARED[0], { ...bare, note: NOTE });
+
+    // The premise: this row really does fail, on more than one condition, so
+    // there is something for a note to have wrongly repaired.
+    const gaps = evidenceGaps(without);
+    expect(gaps.length).toBeGreaterThan(1);
+    expect(evidenceGaps(with_)).toEqual(gaps);
+
+    const observationsFor = async (r: TriageRow): Promise<readonly IncidentObservation[]> => {
+      const graded = assess(fullCoverage(), doc([r]));
+      const outcome = await saturationVerdict(graded, ENDPOINT, NEVER);
+      return sweepObservations(graded, outcome, CTX);
+    };
+    const quiet = await observationsFor(without);
+    const noisy = await observationsFor(with_);
+
+    // The premise again: there ARE observations, so equality is not vacuous.
+    expect(quiet.length).toBeGreaterThan(0);
+    expect(noisy).toEqual(quiet);
+    // And the note appears in none of them, checked as text so a future field
+    // carrying it is caught without this test having to know the field's name.
+    expect(JSON.stringify(noisy)).not.toContain(NOTE);
   });
 });
