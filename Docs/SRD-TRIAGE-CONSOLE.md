@@ -815,7 +815,7 @@ Four properties this shape is chosen for:
 
 | # | Step | Who | Where it lands |
 |---|---|---|---|
-| 1 | tick fires; a sweep is due and none is in flight | actor | `~/.pifleet/triage.json` cursor advances |
+| 1 | tick fires; a sweep is due and none is in flight | actor | `~/.pifleet/triage-relay.json` cursor advances |
 | 2 | render the sweep envelope: the environment, the service list, the verdict rule, the sweep id | actor | `<run>/workers/tri-1/inbox/T-sweep-<n>.json` |
 | 3 | dispatch it to `tri-1` | actor | `via: rpc`, epoch allocated |
 | 4 | partition the services across the three observers and write the fan-out | `tri-1` | `<run>/outbox/tri-1/T-sweep-<n>/dispatch-request.json` |
@@ -860,7 +860,7 @@ starts and never collates. One process holds one pin set.
 **Across restarts: the run tree is authoritative and the record is a cursor.** This is
 `Docs/SRD-FLEET-PROJECT-MANAGER.md` D12's rule, and it applies here for the same reason — the record
 is written by the least durable component. On start the actor derives in-flight state by reading the
-run tree, not by trusting `~/.pifleet/triage.json`: a sweep whose parent task exists and whose
+run tree, not by trusting `~/.pifleet/triage-relay.json`: a sweep whose parent task exists and whose
 `-collate` task has not settled is in flight, and the actor resumes it rather than starting a new one.
 **A restarted actor never double-dispatches a sweep**, and that is a criterion, not a hope (§12).
 
@@ -1493,7 +1493,7 @@ which is a guard §7.8 gets for free by calling it.
 
 - **A token in the URL** — `https://user:tk_…@host/Alerts`, or ntfy's documented `?auth=` query form.
   **Refused.** `triage/console.yaml` is *tracked*, so that is a credential in git history. It is also
-  a credential in `~/.pifleet/triage.log`, which appends and is never truncated (§7.7), and in
+  a credential in `~/.pifleet/triage-relay.log`, which appends and is never truncated (§7.7), and in
   `pifleet triage --status`, which prints the endpoint. §7.8 makes this a **refusal rather than
   advice**: the schema rejects an `endpoint` carrying userinfo or a query string, so the failure is a
   `config validate` error at the moment it is written rather than a secret discovered in a log later.
@@ -2038,9 +2038,34 @@ layouts are unrepresentable as the same path — prevented rather than merely un
 
 ### 7.7 The actor record — new, and deliberately the relay's shape
 
-`~/.pifleet/triage.json` (`pid`, `started`, `runs`, `workers`, `cadence_s`, `sweep_cursor`,
+`~/.pifleet/triage-relay.json` (`pid`, `started`, `runs`, `workers`, `cadence_s`, `sweep_cursor`,
 `consecutive_skips`) — **`runs` is a per-seat MAP of worker id to run id, not a single `run_id`;
-see §6.1's correction and §6.6 layer 4's resolution** —, `~/.pifleet/triage.log` appended never truncated, `~/.pifleet/triage.lock`.
+see §6.1's correction and §6.6 layer 4's resolution** —, `~/.pifleet/triage-relay.log` appended never truncated, `~/.pifleet/triage-relay.lock`.
+
+**Three corrections to this section, all found by building it (task 6.3, 2026-09-06).**
+
+**1. The filenames were wrong and are corrected above.** This section originally named
+`~/.pifleet/triage.json`, `.log` and `.lock`. §6.4 is the operative sentence and says something else —
+*"`relayRecordPath`/`relayLogPath`/`relayLockPath` gain a console argument"* — and Phase 2.3 built
+exactly that: `consoleStem()` makes the console name a filename stem, so the shipped paths are
+`triage-relay.{json,log,lock}`, which is also what `Workflows/Consoles.md` produces. The shipped names
+win, and not on seniority: **§12's own actor probe is phrased over those three functions, so a second
+spelling means `--actor-stop` signals nobody.** Every occurrence in this document was corrected, not
+just this one.
+
+**2. `triage.json` named two different contracts.** §7.5's is the WORKER's artifact at
+`/outbox/<collate-task-id>/files/triage.json`; this section's was the ACTOR's record. No path
+collision — different roots — but §6.3's lifecycle table used both spellings within four lines of each
+other. Correction 1 fixes this for free, and the worker's artifact keeps the name.
+
+**3. `run_id` and `runs` are BOTH kept, and their relationship is pinned.** §6.6 layer 4's resolution
+says *"§7.7's `run_id` is wrong and becomes `runs`"*, but Phase 2.3 shipped `RelayRecordSchema.run_id`
+and `servesConsole` compares it — so deleting it makes every triage record **unadoptable by the
+fleet's own reader**, which answers `unreadable`, and that verdict never licenses a signal. The
+settled reading: `run_id` is **derived** from `runs["tri-1"]`, and a record whose two fields disagree
+is refused by the schema. "The record has two answers to which run" is therefore unrepresentable
+rather than merely discouraged. Keeping `pifleet.consolerelay/v1` as the schema tag is load-bearing
+for the same reason — a private literal makes a triage actor unstoppable by `readRelayStatus`.
 `Workflows/Consoles.md:64-66`'s convention, copied rather than invented — including the behaviour it
 names for a record it cannot verify: *"left exactly where it is and nothing is signalled."*
 
@@ -2064,7 +2089,7 @@ and validated by `pifleet config validate` in the same pass as `fleet.yaml` and 
 | **`fleet.yaml`** | §6.2's three reasons, unchanged and all still binding: `FleetConfigSchema` is `.strict()` with thirteen keys (`schema.ts:1486-1502`), so a `triage:` key is a schema change to the fleet's own contract for data that is not fleet configuration; it changes on a different clock than roles and models; and **it is gitignored** (`.gitignore:9`), so a notification endpoint written there is untracked, undiffable and undispatchable |
 | **A CLI flag** | **This is the arm to reject loudest, because it is the one that looks reasonable.** §6.2 already refused argv as the inventory mechanism — *"288 invocations a day against a list nobody can review. An inventory in argv is an inventory with no history."* Every word of that applies here and one more besides: the endpoint is the console's **output destination**, so an endpoint in argv is a console whose entire product is decided by a shell line nobody reviewed, changed by editing a script that `bun run typecheck` does not read (§3.3). `--cadence` survives as an **override** for a hand-run, and an override with a home is a different thing from a value with no home |
 | **Merged into `triage/targets.yaml`** | Tempting — one file is cheaper than two, and §10 D4 already books the cost of a second one. Refused on **blast radius**: the targets file is the one an operator edits *often* (§6.2 property 1, *"Adding an environment or a service is a YAML edit and nothing else"*), and this file holds the two values whose accidental edit costs the most — the cadence and the endpoint. Different edit frequency, different file. It is §6.2's own argument applied one level down, and it costs nothing extra, because both files are validated in the same `config validate` pass |
-| **`~/.pifleet/triage.json`** | That is the actor's **record** (§7.7), written by the actor, and D12 makes the run tree authoritative over it. Configuration an operator writes and state a process writes must not share a file, or a crashed actor rewrites the cadence |
+| **`~/.pifleet/triage-relay.json`** | That is the actor's **record** (§7.7), written by the actor, and D12 makes the run tree authoritative over it. Configuration an operator writes and state a process writes must not share a file, or a crashed actor rewrites the cadence |
 
 **The schema**, and it is written out because three of its properties are load-bearing rather than
 decorative:
@@ -2148,7 +2173,7 @@ reserved-prefix and reserved-name refusals with it for free.
 
 **3. `notifyEndpointIssue` refuses a credential rather than discouraging one.** Three rules, and each
 one is a thing that would otherwise become a secret in a tracked file, an appended-forever log
-(`~/.pifleet/triage.log`, §7.7) and `--status` output:
+(`~/.pifleet/triage-relay.log`, §7.7) and `--status` output:
 
 - the scheme must be `http:` or `https:`;
 - **`url.username` and `url.password` must be empty** — no `https://user:tk_…@host/Alerts`;
@@ -2203,7 +2228,7 @@ the wrong editor.
   gains the four worker ids and the word "triage", since routing is keyed on names.
 - **`Workflows/Consoles.md` becomes four consoles.** Its table gains a row, and the *"The review
   console has a fifth process"* section gains a sibling: the triage console has one too, it is both
-  the clock and the actor, and `~/.pifleet/triage.json` names the run it serves.
+  the clock and the actor, and `~/.pifleet/triage-relay.json` names the run it serves.
 - **One sentence that must be there**, because an operator reading the commission's words will look
   for the wrong thing: *the triage worker does not dispatch; it writes a request and the actor
   performs it* (§4.2).
@@ -2257,7 +2282,7 @@ So it gets four mechanisms, in the order they become available, and the ordering
    (§6.8a) with §6.8's state machine and §6.8's dedup — so a channel down for a day is one incident
    with a sweep count, not 288 records. It enters `firing` on the first `rejected` outcome
    (§6.9 requirement 4) and on the second consecutive `retryable` one.
-2. **The log, immediately.** `~/.pifleet/triage.log`, which appends and is never truncated (§7.7).
+2. **The log, immediately.** `~/.pifleet/triage-relay.log`, which appends and is never truncated (§7.7).
    This is the only surface that is guaranteed to work, because it is a file on the machine the actor
    is already running on.
 3. **`pifleet triage --status`, on demand.** It reports the channel state, the undelivered count, and
@@ -2306,7 +2331,7 @@ not close it.
 | **D9** | Notification is edge-triggered on an incident state machine, **with flapping as its own state**, a long re-notify floor, and recovery that must be **observed** | §6.8 |
 | **D10** | **SETTLED** — the notification channel is a **configurable webhook**, defaulting to `https://ntfy.agileguy.ca/Alerts`, composed host-side from typed fields only, rendered by a closed-enum adapter, bounded by `AbortSignal.timeout`, through an injected transport. Rejected: the PAI voice server; `backend.notify()`; a session; a body template in config | §6.9, §11 Q2 |
 | **D11** | `cloud.kubeconfig` becomes a **requirement** for this console, and the targets file must be a subset of it | §6.10 |
-| **D12** | The run tree is authoritative; `~/.pifleet/triage.json` is a cursor | §6.4 |
+| **D12** | The run tree is authoritative; `~/.pifleet/triage-relay.json` is a cursor | §6.4 |
 | **D13** | Console-health issues get a **`(scope, kind)` identity** over a closed `kind` enum and **reuse §6.8's state machine unchanged**. Rejected: a second machine; per-sweep emission | §6.8a |
 | **D14** | The console's nine knobs and the webhook live in a **third tracked file**, `triage/console.yaml`, with `sweep_deadline_s` **computed rather than configured**. Rejected: `fleet.yaml`; a CLI flag; merging into `targets.yaml`; the actor's record | §7.8 |
 | **D15** | **Endpoint saturation is its own verdict**, evaluated before the coverage escalation and **suppressing** it, with the provider as the announcement's subject | §6.7 rule 3, §9.16 |
@@ -2592,7 +2617,7 @@ ordering) gains a fourth console that must pass it, and its own closing note —
   `https://u:tk_x@host/Alerts`, `https://host/Alerts?auth=x`, and `ftp://host/Alerts`; assert each is
   refused at load. **The query-string case is the one that matters most**, because ntfy documents
   `?auth=` and an operator who finds that page will reach for it — and `console.yaml` is tracked,
-  `~/.pifleet/triage.log` appends forever, and `--status` prints the endpoint.*
+  `~/.pifleet/triage-relay.log` appends forever, and `--status` prints the endpoint.*
 - `notify.token_env` is a NAME and is guarded by the fleet's own function. *Probe: assert
   `token_env: PIFLEET_X` and `token_env: PATH` are both refused with `envVarNameIssue`'s messages —
   **driving the shared function, not a copy of its rules**, which is the defect
@@ -2647,6 +2672,16 @@ ordering) gains a fourth console that must pass it, and its own closing note —
   silence is not an option.***
 
 **Read-only, as a layering guard rather than a promise (§6.10)**
+
+**RULING 2026-09-06 on what "ledger" means here, because §12 uses the word twice with two senses.**
+The console-and-actor block asks the abandonment to *"ledger the reason"*; this block bans a *"ledger
+writer"* from the console's own modules. They are not in conflict, and the resolution is the narrow
+one: **the abandonment reason goes to §7.7's own append-only log** — §9.15 surface 2, *"the only
+surface that is guaranteed to work"* — and **not** to the fleet ledger. `cli/commands/relay.ts`'s
+`ledger.append("relay_console_gone", …)` is the review console's answer and is exactly the reachability
+this block forbids. So task 6.6's permitted-exception list stays at ONE entry (the dispatch path), and
+a second entry would be the tell that this ruling was quietly reversed. Task 6.3 read it this way
+before the ruling existed; the ruling ratifies rather than corrects it.
 - **Anti: no mutating verb, control-socket client or ledger writer is reachable from the triage
   console's own modules.** *Probe: mirror `test/unit/monitor-readonly.test.ts` — walk the transitive
   import closure from a pinned `ROOTS` set and assert the absences by name, not by count.* **Two
@@ -3068,8 +3103,20 @@ and SRD-FLEET-PM-001 D7's.
 
 - **6.1** `triagePass(deps)` — read the run tree, decide tick-or-skip, perform the fan-out, drive the
   incident machine, emit. Touches: `src/run/triage-pass.ts` (new),
-  `test/unit/triage-pass.test.ts` (new).
+  `test/unit/triage-pass.test.ts` (new), **`src/run/triage-incident.ts` and
+  `test/unit/triage-incident.test.ts` for `saveIncidentRecord`** (widened 2026-09-06 — see below).
   *Acceptance: every test calls the pass directly; **no test starts the loop**.*
+
+  **`saveIncidentRecord` belongs to this task, and this line was too narrow to let it.** Task 5.6b
+  left `IncidentRecord.undelivered[]` filled by `withUndelivered` with a `loadIncidentRecord` and no
+  writer. Task 6.3 argued the writer is not the actor's, and the argument holds: §7.6's record is
+  per-SUBJECT with its own schema and its own path helpers, all of which live in `triage-incident.ts`,
+  so a writer that does not sit beside its reader becomes a second definition of where those files
+  are; and **only the pass ever holds an `IncidentRecord`**. ISC-706 also pins WHERE in the sequence
+  it persists — the record must be `clear` before the transport is called — which is a decision
+  unmakeable outside the module that writes the sequence. Left unwidened, this task's implementer
+  would be outside its own *Touches* line the moment it tried to persist, **which is exactly the
+  constraint that made task 5.3c ship two `?`s it did not want** (task 5.3d).
 - **6.2** `pifleet triage` with `--once`, `--poll`, `--status`, `--json`, and the loop's
   catch-and-continue — **which `--once` deliberately does not get** (`relay.ts:700-723`). Touches:
   `src/cli/commands/triage.ts` (new), `test/unit/triage-command.test.ts` (new).
@@ -3080,6 +3127,15 @@ and SRD-FLEET-PM-001 D7's.
 - **6.3** The actor record, log and lock (per-console, from Phase 2.3) plus a `ConsoleWatch` over
   `tri-1`. Touches: `src/run/triage-actor.ts` (new), `test/unit/triage-actor.test.ts` (new).
   *Acceptance: §12's exit-when-the-console-is-gone criterion and its streak-reset mirror both pass.*
+- **6.3a** **The abandonment sentence is review-console prose, found 2026-09-06 by task 6.3.**
+  `ConsoleWatch.observe`'s exit reason (`src/run/console-relay.ts:437-446`) hard-codes
+  `scripts/review` and `SRD-REVIEW-CONSOLE §6.5, §9 Q4`, so a triage actor that reaps itself cites the
+  wrong console and the wrong document on 6.2's stderr. Task 6.3's log event is unaffected — it
+  carries worker, run and pass count as structured FIELDS rather than as prose, which is why this is
+  cosmetic rather than a correctness bug — but the string a human reads is wrong. Touches:
+  `src/run/console-relay.ts`, `test/unit/console-relay.test.ts`.
+  *Acceptance: the reason names the console it was started for, asserted for BOTH consoles in one
+  test — a fixture that only checks triage would pass an implementation that broke review.*
 - **6.4** Resume-from-run-tree, and the anti-criterion that a restart never double-dispatches.
   Touches: `src/run/triage-pass.ts`, `test/unit/triage-pass.test.ts`, `ISA.md`.
 - **6.5** Recycling (§6.6 layer 4): **four** `down`s and four `up`s between sweeps at
