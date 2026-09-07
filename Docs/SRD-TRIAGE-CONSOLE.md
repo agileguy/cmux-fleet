@@ -3497,12 +3497,33 @@ and SRD-FLEET-PM-001 D7's.
 
 **Intent.** Four consoles, and one sentence that stops an operator looking for a dispatch.
 
-- **7.1** Add the four rows and update the frontmatter description. Touches:
-  `.claude/skills/fleet/SKILL.md`.
-- **7.2** Add the console row and the actor section. Touches:
+- **7.1** **DONE 2026-09-07.** Add the four rows and update the frontmatter description. Touches:
+  `.claude/skills/fleet/SKILL.md`. The routing table also gained a **Triage** row for 7.3's workflow.
+  **A correction landed with it:** the table's caveat said the tracked `fleet.example.yaml` differs
+  from the operator's file in three ways. It now says the triage console's four seats ARE declared in
+  both, on the local model the role pins — **checked rather than assumed, and the check mattered**: the
+  `workers:` block is a LIST of `{id, role}` maps, so a `^\s+<id>:` search finds nothing and reads as
+  *"not declared"*. That is exactly how this sentence would have grown a fourth false clause, and it
+  is how the first draft of this task nearly documented a console that could not start.
+- **7.2** **DONE 2026-09-07.** Add the console row and the actor section. Touches:
   `.claude/skills/fleet/Workflows/Consoles.md`.
-- **7.3** Write the workflow. Touches: `.claude/skills/fleet/Workflows/Triage.md` (new).
-- **7.4** Update the three-console description. Touches: `README.md`.
+- **7.3** **DONE 2026-09-07.** Write the workflow. Touches:
+  `.claude/skills/fleet/Workflows/Triage.md` (new).
+- **7.4** **DONE 2026-09-07, and its premise was STALE.** *"Update the three-console description"* —
+  the README had no console description to update; its headings are Why / Install / A run, end to end
+  / Status / Tests, and the only console mentions were inside the ISA-status prose. So the README
+  GAINED a `## The consoles` section rather than having one edited: four consoles, their scripts,
+  their seats, and the three things the triage console deliberately does not do. Touches: `README.md`.
+  **Two of my own sentences in it were false on the first pass and were caught by checking rather than
+  by review:** the operations console's seats are `obs-1`/`tick-1` and not *"+ watchers"* (its watcher
+  panes were replaced by `pifleet monitor`, as the README itself already said), and *"a console … with
+  an actor that drives them"* is true of only two of the four — `CONSOLE_NAMES` is the closed list of
+  consoles that keep an actor's record, log and lock, and it holds `review` and `triage`.
+
+  **RE-CHECK OWED after round 18.** Task 6.7 edits `scripts/triage` and task 6.9 makes §7.8's
+  `cadence_s` reach `--poll`; both are documented in 7.2 and 7.3 as they stand TODAY, including the
+  sentence that `--cadence` is parsed and not honoured. Whoever grades round 18 re-reads those two
+  files against it.
 
 ### Phase 8 — The live run
 

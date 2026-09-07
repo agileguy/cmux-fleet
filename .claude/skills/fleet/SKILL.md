@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review workspace, or names any fleet worker or console by name.
+description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review/triage workspace, run or check the triage console ("start triaging", "is the triage console running", "what is triage saying", "sweep now"), or names any fleet worker or console by name.
 ---
 
 # fleet
@@ -64,9 +64,10 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 |----------|---------|------|
 | **ProjectManager** | "run ProjectManager on <repo> against <SRD>", "implement this SRD with the fleet", "run the SRD through the fleet", "have the fleet build <SRD path>", "project-manage this SRD" | `Workflows/ProjectManager.md` |
 | **DispatchTask** | "use tick-1", "send this to eng-1", "get the fleet to…", "ask the observer" | `Workflows/DispatchTask.md` |
-| **Consoles** | "recreate the operations workspace", "rebuild the development console", "open the review console", "open the consoles", "restart tst-1", "make it a python worker", "launch it from <repo>" | `Workflows/Consoles.md` |
+| **Consoles** | "recreate the operations workspace", "rebuild the development console", "open the review console", "open the triage console", "open the consoles", "restart tst-1", "make it a python worker", "launch it from <repo>" | `Workflows/Consoles.md` |
 | **Observe** | "what is the fleet doing", "is eng-1 still working", "show me the transcript" | `Workflows/Observe.md` |
 | **Intervene** | "steer eng-1", "abort that task", "unstage it", "take the terminal" | `Workflows/Intervene.md` |
+| **Triage** | "start triaging", "sweep now", "is the triage console running", "what is triage saying", "why did I get that alert" | `Workflows/Triage.md` |
 
 ---
 
@@ -80,6 +81,8 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
 | `col-1` | collator | review | `base` | writes the fan-out request; does not review |
 | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | reviewer | review | `base` | three vendors, read-only, `shared-ro` |
+| `tri-1` | triage | triage | `base` | the collator: partitions the environment's services and collates the sweep. **Local `gpt-oss-20b-MXFP4-Q8`** |
+| `obs-t1`, `obs-t2`, `obs-t3` | triage | triage | `base` | one share of services each, per sweep. Same local model; `tools: [read, write, grep, find, ls]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
 is gitignored. The tracked `fleet.example.yaml` differs in three ways worth
@@ -87,7 +90,12 @@ knowing before it is used to reason about this one: its `tester` role declares n
 `egress_access` and its `egress.allow` names no package registry, so **"egress to
 the registries" is false there**; its development seats run local oMLX models
 rather than hosted ones; and the `review` console's four seats are not declared in
-it at all. `rev-1` is gone from both — the development console's fourth seat is
+it at all. **The `triage` console's four ARE** — `{id: tri-1, role: triage}` and the three
+`obs-t*` seats appear in both files, on the local `gpt-oss-20b-MXFP4-Q8` the role pins, so the
+example can stand that console up where it cannot stand up `review`. Checked 2026-09-07 rather
+than assumed: the `workers:` block is a LIST of `{id, role}` maps, and a `^\s+<id>:` search over
+it finds nothing and reads as *"not declared"* — which is how this sentence would have grown a
+fourth false clause. `rev-1` is gone from both — the development console's fourth seat is
 `tst-2` on `role: tester`, and `role: reviewer` now serves the three `review`
 console lenses.
 

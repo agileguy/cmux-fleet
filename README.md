@@ -60,6 +60,42 @@ Supervisors are detached — their own session and process group — so they out
 started them. `up` is not "fire and forget": it returns only once every worker has reached
 `idle`, and exits nonzero naming the laggards if they do not.
 
+## The consoles
+
+A **console** is a named group of seats stood up together by one script. There are four. Two of them
+also have an **actor** — a host-side process that drives the seats rather than an operator typing at
+them — and those two are `review` and `triage`; `CONSOLE_NAMES` is the closed list of consoles that
+keep an actor's record, log and lock. The fourth console is the one that runs when nobody is
+watching at all.
+
+| Console | Script | Seats | What it is for |
+|---|---|---|---|
+| `operations` | `scripts/operations` | `obs-1`, `tick-1` | attended: cluster questions, ticketing. Its two watcher panes were replaced by `pifleet monitor` |
+| `development` | `scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` | attended: building and testing |
+| `review` | `scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | a fan-out review, three vendors, one collation |
+| `triage` | `scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3` | **unattended**: sweeps an environment on a clock and notifies |
+
+The first three are things an operator opens. **`triage` is the one with no keyboard**: a host-side
+actor is both its clock and its fan-out performer, and `pifleet triage` is how you drive it.
+
+```bash
+pifleet triage --once            # one sweep, now — the exit code means something
+pifleet triage --poll            # the loop, at triage/console.yaml's cadence
+pifleet triage --status [--json] # what the actor and the incident records say
+```
+
+Three properties are worth knowing before running it unattended, because each is a thing it
+deliberately does **not** do. It **never says a service is healthy on the strength of silence** — an
+observer that produced nothing is a coverage gap, not an all-clear, and the console will tell you it
+cannot see rather than that everything is fine. It **notifies once**, not once per sweep: a service
+firing for a day produces one message and its reminders, and a service flapping produces one
+message about the flapping. And it **cannot command the fleet** — every module the console owns is
+held read-only by a test that walks its import closure, with exactly one permitted exception, and
+the two privileged effects it genuinely needs (dispatching a sweep, recycling a seat) are built at
+the composition root and injected as plain functions rather than reachable from inside it.
+
+`SRD-TRIAGE-CONSOLE.md` is the design and `ISA.md` is what is actually proved about it.
+
 ## Status
 
 All six phases are done, and `pane_mode: tui` with them. 2909 tests pass, 124 skip, 0 fail across
