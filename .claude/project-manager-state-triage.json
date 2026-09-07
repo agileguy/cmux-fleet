@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 10,
+  "current_round": 11,
   "completed_phases": [
     0,
     1,
@@ -331,6 +331,37 @@
       "graded": "2026-09-06 \u2014 ISC-691..711 transcribed; eng-1 e97f741 (5.6b), eng-2 fded913 (5.3c, 4.5a), orchestrator 7e6fb8c + this commit",
       "eng_1_note": "did NOT relax ISC-689 as pre-authorised \u2014 inverted the dependency instead (type-only import in triage-incident.ts), so the notifier still imports nothing from the machine and the probe stands unmodified. Added the mirror probe. Requirement 7 is better guarded after 5.6b than before.",
       "eng_2_note": "found \u00a713 task 4.5a(a)'s own premise stale; the correction is the finding."
+    },
+    {
+      "round": 11,
+      "tasks": {
+        "eng-1": [
+          "5.3a"
+        ],
+        "eng-2": [
+          "6.3"
+        ],
+        "orchestrator": [
+          "ISC-690 close"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/run/triage-verdict.ts",
+          "test/unit/triage-verdict.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-actor.ts",
+          "test/unit/triage-actor.test.ts"
+        ],
+        "orchestrator": [
+          "test/unit/notify-sanitize-equivalence.test.ts",
+          "ISA.md",
+          "Docs/SRD-TRIAGE-CONSOLE.md"
+        ]
+      },
+      "verified_commit": null,
+      "note": "5.3d and 5.7 are BLOCKED on 5.3a, not deferred: 5.3d shares both of eng-1's files, and 5.7's saturation fixtures do not exist until 5.3a lands. Phase 6 opened early with 6.3 because it is two NEW files and collides with nothing. 6.6's read-only closure guard was deliberately NOT paired with it \u2014 5.3a injects a network-capable probe dep into the same subtree the guard scans, and a guard reddening on another agent's in-flight edit is noise, not a finding."
     }
   ],
   "status": "in_progress_round_9",
@@ -391,5 +422,11 @@
     "5.7 \u2014 \u00a712 fixture sweep into ISA.md",
     "ISC-690 close \u2014 move mut9/equiv.ts into test/unit/",
     "then Phase 6 \u2014 6.1 and 6.2 make one hand-run sweep possible"
+  ],
+  "round_12_candidates": [
+    "5.3d \u2014 window fields required (needs 5.3a landed; shares both verdict files)",
+    "5.7 \u2014 \u00a712 fixture sweep (needs 5.3a's saturation fixtures)",
+    "6.1 \u2014 triagePass(deps), the caller everything in Phase 5 is waiting for",
+    "6.6 \u2014 read-only closure guard, once the verdict subtree is settled"
   ]
 }
