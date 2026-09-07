@@ -103,6 +103,7 @@ import {
   saturationVerdict,
   sweepObservations,
   SATURATION_MIN_MISSING,
+  SATURATION_PAIR,
   type InferenceEndpoint,
   type ObserverArtifact,
   type SaturationOutcome,
@@ -535,49 +536,60 @@ function memoized(
  * §6.7 rule 3's `unreachable` half of §6.8a's pair — §13 task 5.4e, and the
  * criterion is ISC-824.
  *
- * ## This is ONE COLUMN of the table, and that is what stops it being a second copy
+ * ## It READS one column now, and does not spell one — §13 task 6.4b
  *
  * `ConsoleHealthFacts` takes `(saturated, unreachable)` and the two are
- * independent questions (`triage-incident.ts:1660-1702`). The `saturated` column
- * already has exactly one production home — `SaturationOutcome.saturated`,
- * computed by `saturationVerdict` — and {@link settle} reads it from there. So
- * this function writes the OTHER column and nothing else: re-deriving `saturated`
- * here from the verdict would be the ISC-804 defect exactly, two tables that agree
- * until the day one of them is edited.
+ * independent questions (`triage-incident.ts:1660-1702`). Both columns now live
+ * in `SATURATION_PAIR` (`triage-verdict.ts`, beside `SaturationOutcome`), so this
+ * function is a lookup and the only thing left in it is the `null` rule below.
  *
- * ## Only `clear` clears it, and every other non-`endpoint_down` verdict is `null`
+ * **It used to be a `switch`, and that switch was half of ISC-869's defect.** The
+ * other half was a `Record<SaturationVerdict, …>` literal inside a `describe` in
+ * `test/unit/triage-incident.test.ts` — the pair written twice, in two files, with
+ * nothing pinning the two equal. They agreed, which is what made it a duplication
+ * defect rather than a live bug, and is exactly the state ISC-804 exists to catch
+ * before it stops being one. Consolidating was the fix rather than a third
+ * assertion: an assertion that two copies agree is a third place the mapping is
+ * written and goes green the day both are edited together and wrongly.
  *
- * §6.8a's clearing fact is *"a sweep in which every observer produced an
- * artifact"*, which is `clear` and nothing else. A `saturated` verdict means the
- * probe TIMED OUT — the endpoint answered nothing, which is evidence about speed
- * and no evidence at all about reachability — so it leaves this `null` rather than
- * `false`. Returning `false` there would recover an *"endpoint is down"* incident
- * on the strength of a request that never came back, which is ISC-675's
+ * ## The rows in prose, so a reader here need not open another file
+ *
+ * `clear` is the only `false`: §6.8a's clearing fact is *"a sweep in which every
+ * observer produced an artifact"*, and that is `clear` and nothing else.
+ * `endpoint_down` is the only `true`. `uncorrelated`, `saturated` and
+ * `unconfirmed` are all `null` — and the `saturated` row is the one worth stating
+ * outright, because it is the row a hurried edit gets wrong: that verdict means
+ * the probe TIMED OUT, which is evidence about speed and no evidence at all about
+ * reachability. Returning `false` there would recover an *"endpoint is down"*
+ * incident on the strength of a request that never came back, which is ISC-675's
  * absence-as-evidence mistake wearing a different fault as a disguise.
  *
- * `null` for a `null` outcome is the same rule one level up: a pass that never
- * swept — a skip, a budget refusal — did not ask, and `ConsoleHealthFacts`'
- * optional field is documented as *"this sweep could not tell"*.
+ * **That paragraph is PROSE and `SATURATION_PAIR` is the code.** The probe that
+ * forbids a second spelling reads comment-stripped source for exactly this
+ * reason: a raw scan for those verdict names reddens right here, on the sentences
+ * that explain them, and the repair a hurried reader reaches for is to delete the
+ * explanation.
  *
- * The switch is exhaustive by construction: the `never` binding below is a `tsc`
- * error the day `SATURATION_VERDICTS` grows a sixth member, which is the same
- * guard ISC-665 puts on the kind enum.
+ * ## What is still THIS function's, and is not in the table
+ *
+ * `null` for a `null` outcome. A pass that never swept — a skip, a budget refusal
+ * — did not ask, and `ConsoleHealthFacts`' optional field is documented as *"this
+ * sweep could not tell"*. There is no verdict for *"no verdict"*, so it cannot be
+ * a row: adding one would put a sweep that did not happen into the vocabulary of
+ * sweeps that did.
+ *
+ * ## Exhaustiveness MOVED rather than weakened
+ *
+ * The `never` binding after the old switch was ISC-862's *"a sixth member is a
+ * `tsc` error rather than a silent `null`"*. `SATURATION_PAIR` is typed
+ * `Record<SaturationVerdict, …>`, so a sixth member of `SATURATION_VERDICTS` is a
+ * `tsc --noEmit` error on that literal — one error at the one place the answer is
+ * written, rather than one per reader, and a reader cannot now forget to have a
+ * guard at all.
  */
 export function unreachableFrom(saturation: SaturationOutcome | null): boolean | null {
   if (saturation === null) return null;
-  const verdict = saturation.verdict;
-  switch (verdict) {
-    case "clear":
-      return false;
-    case "endpoint_down":
-      return true;
-    case "uncorrelated":
-    case "saturated":
-    case "unconfirmed":
-      return null;
-  }
-  const exhaustive: never = verdict;
-  return exhaustive;
+  return SATURATION_PAIR[saturation.verdict].unreachable;
 }
 
 /**

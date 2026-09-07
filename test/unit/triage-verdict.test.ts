@@ -72,6 +72,7 @@ import {
   inferenceSubject,
   OBSERVER_ASSESSMENTS,
   SATURATION_MIN_MISSING,
+  SATURATION_PAIR,
   SATURATION_VERDICTS,
   saturationVerdict,
   sweepIdEcho,
@@ -101,6 +102,13 @@ import {
   type IncidentRecord,
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
+/*
+ * §13 task 6.4b. `unreachableFrom` is the pass's, and the pair it reads is this
+ * module's — so ISC-869's assertion that BOTH columns come out of one table can
+ * only be made where both are in scope, which is here, beside the table.
+ */
+import { unreachableFrom } from "../../src/run/triage-pass.ts";
+import { stripComments } from "../support/source-structure.ts";
 import type {
   FetchLike,
   HostDialConfigView,
@@ -2229,6 +2237,218 @@ describe("§6.7 rule 3 — the correlation, and what it is a statement about", (
       "endpoint_down",
       "unconfirmed",
     ]);
+  });
+});
+
+// ── §13 task 6.4b — ONE saturation pair table, and both halves read it ───────
+
+/**
+ * ISC-869's closure, and the block is shaped by what the criterion ruled OUT.
+ *
+ * The `(saturated, unreachable)` pair was written twice: as a `switch` inside
+ * `triage-pass.ts`'s `unreachableFrom`, and as a `Record<SaturationVerdict, …>`
+ * const inside a `describe` in `test/unit/triage-incident.test.ts`. They agreed,
+ * which is what made it a duplication defect rather than a live bug — the third
+ * instance of that shape on this branch, after `CONSOLE_HEALTH_ASSESSMENTS` and
+ * the duplicated `sweepTaskId` (ISC-867), and both of THOSE were found only
+ * because something happened to assert them.
+ *
+ * **ISC-869 ruled that a third assertion was the wrong fix**, so this block does
+ * not assert that two copies agree. There is one copy — `SATURATION_PAIR` — and
+ * what is graded here is three separable things:
+ *
+ *  1. the table holds the DOCUMENTED values, by full value, in one place;
+ *  2. each reader actually REACHES it, driven through the real functions rather
+ *     than compared to a re-typed list;
+ *  3. no second spelling survives, on comment-stripped source.
+ *
+ * The mutation the task exists to make possible is the check on all three at
+ * once: change one cell of `SATURATION_PAIR` and this suite, the pass's
+ * behaviour suite AND the incident composer's table test all redden. Before the
+ * consolidation, editing the pass's switch moved one side and left the other
+ * green, which is precisely the drift nothing was pinning.
+ */
+describe("§13 task 6.4b — the saturation pair is one table, and both readers reach it", () => {
+  /**
+   * The table by FULL VALUE — the one place in `src/` the ten cells are literals.
+   *
+   * `toEqual` against an object literal is exhaustive in both directions: a row
+   * this table lost fails as a missing key, and a row it grew fails as an extra
+   * one. The key ORDER is asserted separately because `toEqual` does not see it,
+   * and the order is the vocabulary's own (`SATURATION_VERDICTS`) rather than a
+   * second list — a re-typed order would be the very duplication being removed.
+   */
+  test("the saturation pair table holds the documented pair for every verdict", () => {
+    expect(SATURATION_PAIR).toEqual({
+      clear: { saturated: false, unreachable: false },
+      uncorrelated: { saturated: null, unreachable: null },
+      saturated: { saturated: true, unreachable: null },
+      endpoint_down: { saturated: null, unreachable: true },
+      unconfirmed: { saturated: null, unreachable: null },
+    });
+    expect(Object.keys(SATURATION_PAIR)).toEqual([...SATURATION_VERDICTS]);
+  });
+
+  /**
+   * PREMISE, on this branch's most expensive recorded lesson: the two columns
+   * have to DISAGREE somewhere.
+   *
+   * A table whose every row gave both fields the same value would satisfy every
+   * assertion in this block, and every assertion in the incident composer's
+   * block, against an implementation that read one column for both questions.
+   * The two rows the whole distinction is about are named rather than left to a
+   * `some(…)`, because a `some(…)` that drifted onto some other row would keep
+   * passing while the pair that matters collapsed.
+   */
+  test("premise: `saturated` and `endpoint_down` disagree on both columns", () => {
+    expect(SATURATION_PAIR.saturated).not.toEqual(SATURATION_PAIR.endpoint_down);
+    expect(SATURATION_PAIR.saturated.saturated).not.toBe(SATURATION_PAIR.endpoint_down.saturated);
+    expect(SATURATION_PAIR.saturated.unreachable).not.toBe(
+      SATURATION_PAIR.endpoint_down.unreachable,
+    );
+    // And within a row: the timeout verdict answers one question and not the
+    // other, which is what stops a reader substituting either for the pair.
+    expect(SATURATION_PAIR.saturated.saturated).not.toBe(SATURATION_PAIR.saturated.unreachable);
+    expect(SATURATION_PAIR.endpoint_down.saturated).not.toBe(
+      SATURATION_PAIR.endpoint_down.unreachable,
+    );
+  });
+
+  /**
+   * One driver per verdict, over the REAL `saturationVerdict`.
+   *
+   * `Record<SaturationVerdict, …>` so a sixth verdict is a `tsc --noEmit` error
+   * here too: a member nobody could drive would otherwise be a member nobody
+   * graded.
+   */
+  const DRIVERS: Readonly<Record<SaturationVerdict, () => Promise<SaturationOutcome>>> = {
+    clear: () =>
+      saturationVerdict(assess(fullCoverage(), doc(healthyRows(...DECLARED))), ENDPOINT, NEVER),
+    uncorrelated: () =>
+      saturationVerdict(
+        assess(
+          fullCoverage({ artifacts: [artifact(OBS[0]), artifact(OBS[1])] }),
+          doc(healthyRows(DECLARED[0], DECLARED[1])),
+        ),
+        ENDPOINT,
+        NEVER,
+      ),
+    saturated: () =>
+      saturationVerdict(
+        assess(fullCoverage({ artifacts: [artifact(OBS[0])] }), doc(healthyRows(DECLARED[0]))),
+        ENDPOINT,
+        stubProbe("timeout").probe,
+      ),
+    endpoint_down: () =>
+      saturationVerdict(
+        assess(fullCoverage({ artifacts: [artifact(OBS[0])] }), doc(healthyRows(DECLARED[0]))),
+        ENDPOINT,
+        stubProbe("unreachable").probe,
+      ),
+    // The zero-dispatch road to `unconfirmed`. Its twin — correlated, with a
+    // probe that settles neither way — is driven in the block above; either
+    // reaches the same row, and this one needs no probe at all.
+    unconfirmed: () =>
+      saturationVerdict(
+        assess(fullCoverage({ assignments: [], artifacts: [] }), doc([])),
+        ENDPOINT,
+        NEVER,
+      ),
+  };
+
+  /**
+   * **ISC-869's assertion**: both columns are read out of the table by the code
+   * that ships, over every member of `SATURATION_VERDICTS`.
+   *
+   * Not a comparison of two copies — there are none left — but a check that each
+   * reader REACHES the one copy. A `settle` that spelled `saturated: null` back
+   * into itself, or an `unreachableFrom` that answered `null` for everything,
+   * satisfies neither row below while satisfying the table test above perfectly.
+   * The two tests are therefore both needed and neither subsumes the other: one
+   * grades what the table SAYS, this one grades who LISTENS.
+   *
+   * The premise runs first, because a driver set that fell through to one verdict
+   * would compare that verdict's cell to itself five times.
+   */
+  test("every SATURATION_VERDICTS member reads both columns out of SATURATION_PAIR", async () => {
+    const outcomes = new Map<SaturationVerdict, SaturationOutcome>();
+    for (const verdict of SATURATION_VERDICTS) outcomes.set(verdict, await DRIVERS[verdict]());
+
+    // PREMISE: the five drivers really reach five DIFFERENT verdicts.
+    expect(SATURATION_VERDICTS.map((v) => outcomes.get(v)?.verdict)).toEqual([
+      ...SATURATION_VERDICTS,
+    ]);
+
+    // The `saturated` column, through `saturationVerdict`.
+    expect(SATURATION_VERDICTS.map((v) => [v, outcomes.get(v)?.saturated])).toEqual(
+      SATURATION_VERDICTS.map((v) => [v, SATURATION_PAIR[v].saturated]),
+    );
+    // The `unreachable` column, through the pass's `unreachableFrom`.
+    expect(SATURATION_VERDICTS.map((v) => [v, unreachableFrom(outcomes.get(v) ?? null)])).toEqual(
+      SATURATION_VERDICTS.map((v) => [v, SATURATION_PAIR[v].unreachable]),
+    );
+  });
+
+  /**
+   * The `null` outcome is the pass's own rule and is deliberately NOT a row.
+   *
+   * A pass that never swept — a skip, a budget refusal — did not ask, and there
+   * is no verdict for *"no verdict"*: giving it one would put a sweep that did
+   * not happen into the vocabulary of sweeps that did. Asserted here so that the
+   * consolidation is not read as having moved this case into the table.
+   */
+  test("a `null` outcome is `null` on both halves, and is not a table row", () => {
+    expect(unreachableFrom(null)).toBeNull();
+    expect(Object.keys(SATURATION_PAIR)).not.toContain("null");
+  });
+
+  /**
+   * **No second spelling left behind**, on comment-stripped source.
+   *
+   * Both scanned files still NAME what was removed, truthfully and in prose, and
+   * that is the trap this probe is built around: ISC-867's first version reddened
+   * on five honest docblocks in the file it was scanning, and the repair a hurried
+   * reader reaches for is to reword the prose — leaving a probe any future comment
+   * can redden. So each half asserts the name is present in the RAW text and
+   * absent from the stripped text, which fails in both directions: a probe whose
+   * stripper ate the file fails the raw assertion, and a second spelling that
+   * reappeared in code fails the stripped one.
+   *
+   * `test/unit/triage-pass.test.ts` is deliberately NOT scanned. It holds the
+   * pair as EXPECTATION literals (ISC-861's end-to-end rows, ISC-862's
+   * `unreachableFrom` list), which is the opposite of a second copy: nothing
+   * consults them, they ground the table from outside, and their reddening on a
+   * changed cell is the mutation signal this task was commissioned to buy.
+   */
+  test("no second spelling of the pair survives, asserted on comment-stripped source", () => {
+    const read = (...rel: string[]): string =>
+      readFileSync(join(import.meta.dir, "..", "..", ...rel), "utf8");
+    const passRaw = read("src", "run", "triage-pass.ts");
+    const passCode = stripComments(passRaw);
+    const incidentRaw = read("test", "unit", "triage-incident.test.ts");
+    const incidentCode = stripComments(incidentRaw);
+
+    // The premise, because `not.toContain` against an empty string passes: a
+    // stripper that ate either file would make every assertion below vacuous.
+    expect(passCode).toContain("export function unreachableFrom");
+    expect(passCode).toContain("SATURATION_PAIR[saturation.verdict].unreachable");
+    expect(incidentCode).toContain("SATURATION_PAIR[verdict]");
+
+    /*
+     * The pass's old switch needed the verdict NAMES. These two appear nowhere
+     * else in that module's code, so their absence from the stripped text is the
+     * switch's absence — and their presence in the raw text is the docblock that
+     * explains where the table went.
+     */
+    for (const verdict of ["endpoint_down", "uncorrelated"] as const) {
+      expect(passRaw.includes(verdict)).toBe(true);
+      expect(passCode.includes(verdict)).toBe(false);
+    }
+
+    // And the test-local copy is gone BY NAME.
+    const gone = "VERDICT" + "_PAIR";
+    expect(incidentRaw.includes(gone)).toBe(true);
+    expect(incidentCode.includes(gone)).toBe(false);
   });
 });
 

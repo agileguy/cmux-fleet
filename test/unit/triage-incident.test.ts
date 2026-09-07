@@ -82,7 +82,11 @@ import {
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
 import { TRIAGE_DOCUMENT_FAULTS } from "../../src/run/triage-document.ts";
-import { SATURATION_VERDICTS, type SaturationVerdict } from "../../src/run/triage-verdict.ts";
+import {
+  SATURATION_PAIR,
+  SATURATION_VERDICTS,
+  type SaturationVerdict,
+} from "../../src/run/triage-verdict.ts";
 import {
   ANNOUNCEMENT_ASSESSMENTS,
   ANNOUNCEMENT_TRANSITIONS,
@@ -2472,36 +2476,23 @@ describe("console-health deduplication — §6.8a's identity on §6.8's machine"
    */
 
   /**
-   * The `(saturated, unreachable)` pair each verdict hands the composer, over the
-   * REAL verdict vocabulary rather than a re-typed list of strings.
+   * The signal kind each half composes for one verdict, or `undefined` for
+   * silence — driven off the PRODUCTION table.
    *
-   * `Record<SaturationVerdict, …>` is exhaustive BY CONSTRUCTION — ISC-731's own
-   * technique — so a sixth `saturationVerdict` outcome is a `tsc --noEmit` error
-   * on this literal rather than a row nobody remembered to add.
-   *
-   * **This table is also the specification of the wiring that does not exist
-   * yet.** `triage-pass.ts` builds `ConsoleHealthFacts` and currently supplies
-   * only `saturated`; the day it supplies the pair, this is the mapping it owes.
+   * **This block held its own copy of that table until §13 task 6.4b** — a
+   * `Record<SaturationVerdict, …>` const named `VERDICT_PAIR`, spelling the same
+   * five rows `unreachableFrom` spelled in `triage-pass.ts`, with nothing pinning
+   * the two equal. ISC-869 filed it as ISC-804's shape one file over, and this
+   * paragraph is why the probe that forbids a second spelling reads
+   * comment-stripped source: a raw scan for that name reddens here, on the
+   * sentence that explains the removal. The fixture now
+   * reads `SATURATION_PAIR`, which is what makes these tests grade the composer
+   * against the pairs production actually produces rather than against a second
+   * opinion that happened to agree — and what makes a wrong cell in that table
+   * redden HERE as well as in the pass's own suite.
    */
-  const VERDICT_PAIR: Record<
-    SaturationVerdict,
-    { saturated: boolean | null; unreachable: boolean | null }
-  > = {
-    // Every dispatched observer produced an artifact — §6.8a's ONLY clearing
-    // fact, and it clears both halves because it is positive evidence the
-    // endpoint was both up and keeping up.
-    clear: { saturated: false, unreachable: false },
-    uncorrelated: { saturated: null, unreachable: null },
-    // The probe timed out: the endpoint is SLOW. It says nothing about reachable.
-    saturated: { saturated: true, unreachable: null },
-    // The probe could not connect: the endpoint is DOWN. It says nothing about slow.
-    endpoint_down: { saturated: null, unreachable: true },
-    unconfirmed: { saturated: null, unreachable: null },
-  };
-
-  /** The signal kind each half composes for one verdict, or `undefined` for silence. */
   const composedFor = (verdict: SaturationVerdict) => {
-    const obs = ranWith(VERDICT_PAIR[verdict]);
+    const obs = ranWith(SATURATION_PAIR[verdict]);
     return {
       saturated: forSubject(obs, "inference_saturated", CONSOLE_SCOPE)?.signal.kind,
       unreachable: forSubject(obs, "inference_unreachable", CONSOLE_SCOPE)?.signal.kind,
@@ -2509,23 +2500,28 @@ describe("console-health deduplication — §6.8a's identity on §6.8's machine"
   };
 
   /**
-   * PREMISE, on [[feedback_degenerate_fixtures_hide_narrowing]]: the table has to
-   * be able to TELL the two halves apart. A fixture in which every verdict gave
-   * both fields the same value would pass every assertion below against a
-   * composer that read one field for both kinds.
+   * PREMISE, on the degenerate-fixture lesson: the table has to be able to TELL
+   * the two halves apart. A table in which every verdict gave both fields the
+   * same value would pass every assertion below against a composer that read one
+   * field for both kinds.
+   *
+   * It grades the SHIPPED table now, so it is no longer a statement about a
+   * fixture this file controls — it is a standing guard on `triage-verdict.ts`.
    */
   test("premise: the pair disagrees on the two verdicts the whole task is about", () => {
-    expect(VERDICT_PAIR.saturated).not.toEqual(VERDICT_PAIR.endpoint_down);
-    expect(VERDICT_PAIR.saturated.saturated).not.toBe(VERDICT_PAIR.endpoint_down.saturated);
-    expect(VERDICT_PAIR.saturated.unreachable).not.toBe(VERDICT_PAIR.endpoint_down.unreachable);
+    expect(SATURATION_PAIR.saturated).not.toEqual(SATURATION_PAIR.endpoint_down);
+    expect(SATURATION_PAIR.saturated.saturated).not.toBe(SATURATION_PAIR.endpoint_down.saturated);
+    expect(SATURATION_PAIR.saturated.unreachable).not.toBe(
+      SATURATION_PAIR.endpoint_down.unreachable,
+    );
     // And the table covers the real vocabulary, entire — not a subset of it.
-    expect(Object.keys(VERDICT_PAIR).sort()).toEqual([...SATURATION_VERDICTS].sort());
+    expect(Object.keys(SATURATION_PAIR).sort()).toEqual([...SATURATION_VERDICTS].sort());
   });
 
   /** The task's first acceptance clause: an `endpoint_down` sweep composes. */
   test("an `endpoint_down` sweep composes an issue on the seventh kind", () => {
     const said = forSubject(
-      ranWith(VERDICT_PAIR.endpoint_down),
+      ranWith(SATURATION_PAIR.endpoint_down),
       "inference_unreachable",
       CONSOLE_SCOPE,
     );

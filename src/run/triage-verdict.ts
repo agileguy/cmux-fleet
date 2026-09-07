@@ -1129,13 +1129,19 @@ export const SATURATION_MIN_MISSING = 2;
  * hidden for {@link sweepIdEcho}'s reason: they arrive from different faults and
  * a log line should be able to say which.
  *
- * | verdict | reached when | `saturated` | suppresses |
- * |---|---|---|---|
- * | `clear` | every dispatched observer produced an artifact, and at least one was dispatched | `false` | no |
- * | `uncorrelated` | some observer produced nothing, but fewer than {@link SATURATION_MIN_MISSING} | `null` | no |
- * | `saturated` | correlated, and the probe answered `timeout` | `true` | **yes** |
- * | `endpoint_down` | correlated, and the probe answered `unreachable` | `null` | **yes** |
- * | `unconfirmed` | correlated and the probe settled neither way — or nothing was dispatched at all | `null` | no |
+ * | verdict | reached when | `saturated` | `unreachable` | suppresses |
+ * |---|---|---|---|---|
+ * | `clear` | every dispatched observer produced an artifact, and at least one was dispatched | `false` | `false` | no |
+ * | `uncorrelated` | some observer produced nothing, but fewer than {@link SATURATION_MIN_MISSING} | `null` | `null` | no |
+ * | `saturated` | correlated, and the probe answered `timeout` | `true` | `null` | **yes** |
+ * | `endpoint_down` | correlated, and the probe answered `unreachable` | `null` | `true` | **yes** |
+ * | `unconfirmed` | correlated and the probe settled neither way — or nothing was dispatched at all | `null` | `null` | no |
+ *
+ * **The middle two columns of that table are PROSE, and {@link SATURATION_PAIR}
+ * is the code.** They are written here because a reader of the enum needs them,
+ * and the probe that forbids a second spelling reads comment-stripped source for
+ * exactly this reason — ISC-867's first version reddened on five truthful
+ * docblocks, and this one would have reddened on this paragraph.
  */
 export const SATURATION_VERDICTS = [
   "clear",
@@ -1145,6 +1151,83 @@ export const SATURATION_VERDICTS = [
   "unconfirmed",
 ] as const;
 export type SaturationVerdict = (typeof SATURATION_VERDICTS)[number];
+
+/** §6.8a's two independent facts about the inference endpoint, for one verdict. */
+export interface SaturationPair {
+  /**
+   * *"Is the provider keeping up"* — §6.8a's `ConsoleHealthFacts.saturated`.
+   * `null` is not `false`, and ISC-675 is the criterion that says so.
+   */
+  readonly saturated: boolean | null;
+  /**
+   * *"Is it there at all"* — §6.8a's `ConsoleHealthFacts.unreachable`, the
+   * seventh kind's fact. `null` is not `false` for the same reason.
+   */
+  readonly unreachable: boolean | null;
+}
+
+/**
+ * The `(saturated, unreachable)` pair each verdict hands §6.8a's composer.
+ * **ONE table**, and §13 task 6.4b consolidated it here out of two.
+ *
+ * ## What it replaced, and why a third assertion was the wrong fix
+ *
+ * The `unreachable` column lived in `triage-pass.ts` as a `switch` inside
+ * `unreachableFrom`, and the whole pair lived a second time as a `Record`
+ * literal inside a `describe` in `test/unit/triage-incident.test.ts` — two copies
+ * that agreed until the day one of them was edited, with nothing pinning them
+ * equal. ISC-869 filed that as ISC-804's shape one file over, and as the THIRD
+ * instance on this branch after `CONSOLE_HEALTH_ASSESSMENTS` and the duplicated
+ * `sweepTaskId` (ISC-867).
+ *
+ * A test asserting the two copies agree would have been a THIRD place the
+ * mapping is written, and it buys nothing: two copies and an assertion still
+ * drift together the moment an editor obliges the assertion by changing both.
+ * So both readers DERIVE from this literal instead — {@link saturationVerdict}
+ * takes `saturated` from it, and `unreachableFrom` takes `unreachable` from it —
+ * and the property that buys is a mutation one: **change one cell here and the
+ * pass's behaviour tests and the incident composer's table test both redden.**
+ * If only one side moves, the consolidation did not happen.
+ *
+ * ## `Record<SaturationVerdict, …>` is the exhaustiveness guard, and it MOVED here
+ *
+ * `unreachableFrom` used to end in a `never` binding after its switch, which is
+ * ISC-862's *"a sixth member is a `tsc` error rather than a silent `null`"*. The
+ * guard is not weaker for moving: a sixth member of {@link SATURATION_VERDICTS}
+ * is a `tsc --noEmit` error on THIS literal, which is the technique the incident
+ * suite's table already used (ISC-731's). What changed is that it is now one
+ * error at the one place the answer is written, rather than one error per reader
+ * — and a reader that forgot its own `never` binding would have answered `null`
+ * forever.
+ *
+ * ## The two columns are INDEPENDENT questions
+ *
+ * `saturated` says nothing about reachability: the probe TIMED OUT, which is
+ * evidence about speed. `endpoint_down` says nothing about speed: the probe could
+ * not connect. Only `clear` answers both, because §6.8a's one clearing fact —
+ * *"a sweep in which every observer produced an artifact"* — is positive evidence
+ * the endpoint was both up and keeping up. Returning `false` anywhere else would
+ * recover an incident on the strength of a request that never came back, which is
+ * ISC-675's absence-as-evidence mistake wearing a different fault as a disguise.
+ *
+ * A table whose two columns never disagreed would satisfy every assertion
+ * downstream against a composer that read one field for both kinds, so the
+ * `saturated`/`endpoint_down` rows disagreeing is graded as a PREMISE rather than
+ * left to inspection — this branch's most expensive recorded lesson, that a
+ * degenerate fixture hides a narrowing.
+ */
+export const SATURATION_PAIR: Readonly<Record<SaturationVerdict, SaturationPair>> = {
+  // Every dispatched observer produced an artifact — §6.8a's ONLY clearing fact,
+  // and it clears both halves because it is positive evidence the endpoint was
+  // both up and keeping up.
+  clear: { saturated: false, unreachable: false },
+  uncorrelated: { saturated: null, unreachable: null },
+  // The probe timed out: the endpoint is SLOW. It says nothing about reachable.
+  saturated: { saturated: true, unreachable: null },
+  // The probe could not connect: the endpoint is DOWN. It says nothing about slow.
+  endpoint_down: { saturated: null, unreachable: true },
+  unconfirmed: { saturated: null, unreachable: null },
+};
 
 /**
  * One sweep's saturation finding.
@@ -1282,14 +1365,23 @@ export async function saturationVerdict(
   const correlated = assessment.census.observers_missing;
   const dispatched = assessment.census.observers_total;
 
+  /**
+   * The verdict decides; `saturated` is LOOKED UP rather than passed.
+   *
+   * §13 task 6.4b. It was a parameter beside `verdict` until this task, which
+   * made every call site a place the mapping is written and made
+   * `(verdict, saturated)` a pair a future edit could set inconsistently — the
+   * defect ISC-869 was filed against, one function in. {@link SATURATION_PAIR}
+   * is now the only place the answer exists, so the five settlements below
+   * choose a verdict and nothing else.
+   */
   const settle = (
     verdict: SaturationVerdict,
-    saturated: boolean | null,
     suppressed: boolean,
     result: ToolCallProbeResult | null,
   ): SaturationOutcome => ({
     verdict,
-    saturated,
+    saturated: SATURATION_PAIR[verdict].saturated,
     suppressed,
     subject,
     correlated,
@@ -1306,17 +1398,17 @@ export async function saturationVerdict(
    * answered rather than assumed away because clearing a saturation incident out
    * of an absence is the exact shape ISC-675 is filed against.
    */
-  if (dispatched === 0) return settle("unconfirmed", null, false, null);
+  if (dispatched === 0) return settle("unconfirmed", false, null);
 
-  if (correlated.length === 0) return settle("clear", false, false, null);
+  if (correlated.length === 0) return settle("clear", false, null);
   if (correlated.length < SATURATION_MIN_MISSING) {
-    return settle("uncorrelated", null, false, null);
+    return settle("uncorrelated", false, null);
   }
 
   const result = await probe();
-  if (result.failure === "timeout") return settle("saturated", true, true, result);
-  if (result.failure === "unreachable") return settle("endpoint_down", null, true, result);
-  return settle("unconfirmed", null, false, result);
+  if (result.failure === "timeout") return settle("saturated", true, result);
+  if (result.failure === "unreachable") return settle("endpoint_down", true, result);
+  return settle("unconfirmed", false, result);
 }
 
 /**

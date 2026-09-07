@@ -1295,8 +1295,23 @@ describe("the seventh kind — §6.8a's (saturated, unreachable) pair, computed 
   });
 
   /**
-   * The pure mapping, asserted separately from the pass so the exhaustiveness has
-   * a probe of its own. `clear` is the ONLY `false`.
+   * The pure mapping, asserted separately from the pass so the column has a probe
+   * of its own. `clear` is the ONLY `false`.
+   *
+   * **These five rows are an EXPECTATION and no longer a second implementation.**
+   * §13 task 6.4b moved the mapping into `SATURATION_PAIR` (`triage-verdict.ts`),
+   * which `unreachableFrom` now reads, so this list grounds that table from
+   * outside rather than racing it — a changed cell reddens here, which is the
+   * signal ISC-869's consolidation was commissioned to buy. Re-typing it against
+   * `SATURATION_PAIR` would delete the grounding and assert the table equals
+   * itself.
+   *
+   * **The exhaustiveness guard MOVED with the mapping.** This test's earlier
+   * docblock claimed the `never` binding after a `switch` in this file; that
+   * switch is gone, and a sixth member of `SATURATION_VERDICTS` is now a
+   * `tsc --noEmit` error on the `Record<SaturationVerdict, …>` literal that holds
+   * the table. One error at the one place the answer is written, rather than one
+   * per reader.
    */
   test("unreachableFrom: only `clear` is false, only `endpoint_down` is true, null otherwise", () => {
     const outcome = (verdict: SaturationVerdict): SaturationOutcome => ({
