@@ -1580,6 +1580,60 @@ Three corollaries, because the rule is easy to agree with and easy to violate in
   every transition — it just cannot announce them, and `--status` says so. Refusing to start would
   make a diagnostic console depend on a webhook, which inverts which of the two is load-bearing.
 
+#### What building §6.9 found in §6.9 — five corrections, recorded 2026-09-06
+
+Task 5.6/5.6a implemented this section and read it against §12 line by line. Four of the five are
+places where §12's acceptance criteria silently corrected this text; the fifth is a consequence this
+section states nowhere and an operator would meet on their phone.
+
+**1. Requirements 1 and §12 together push the evidence block OUT of the ntfy request.** Requirement 1
+says worker prose appears *"only in a fenced, banner-marked evidence block that is **neither the title
+nor the body**"*; §12's ntfy probe says `body` is *"the message text"*. Both cannot hold with the prose
+in the body. Resolved by making `Announcement.evidence` its own field carried only by the `json`
+adapter — **and the consequence belongs here rather than being left to be discovered**: the operator's
+phone shows `evidence: <ref>` and never the log lines, so *"the reason the report is worth reading"*
+does not reach the notification. Putting the fenced block back into the ntfy body is a legitimate later
+choice; it requires changing §12's `body === message` probe, which is the tell that it is a design
+change and not a fix.
+
+**2. Requirement 2 under-specifies the bound, and §12 silently corrects it.** Requirement 2 specifies
+`AbortSignal.timeout(notify.timeout_ms)` and nothing more. §12's fixture is a **transport** that never
+resolves — and a signal handed to `fetch` bounds `fetch`, not a transport that never calls it. The bound
+therefore has to be a race around the transport call **as well as** a signal on the request. The sharp
+edge is worth writing down because it defeats the obvious implementation: `AbortSignal.abort()` never
+emits `abort`, so a listener-only implementation **hangs on the exact fixture written to prove it cannot
+hang**. Graded as ISC-682 and ISC-683, which are deliberately two criteria: a hard-coded bound satisfies
+the first and fails the second.
+
+**3. This section names three exports and the phase needs a fourth.** The sweep-unit backoff and the
+backlog fit in none of `composeAnnouncement` (pure), `renderRequest` (pure) or `deliverAnnouncement`
+(which §13 task 5.6a forbids from returning anything but a `NotifyOutcome`). `deliverySweep` was added.
+Leaving it to the caller would have put the console's cadence rule inside task 6.1's loop, which is the
+shape §12's *"no decision lives in `scripts/triage`"* is written against.
+
+**4. The backlog sentence is illustrative and loses the date.** *"3 notifications were not delivered
+between 04:10 and 09:35"* is ambiguous across a UTC day boundary, which a 12-sweep backoff can cross.
+The implementation renders full ISO instants and asserts the line by exact value (ISC-687).
+
+**5. §7.8's priority table gives four knobs and one reason, and the reason does not decide the
+console-health recovery.** The stated reason — *"a recovery is not worth a long vibration burst at 3
+a.m."* — is about recoveries, not about services, so `recovered` takes `priority.recover` for **both**
+record kinds. All eight `(kind, transition)` pairs are asserted by value against a four-distinct-value
+knob fixture, so reversing this decision is one line with a red test to show it.
+
+**OPEN — the scope token, and it is a real fork rather than a detail.** §6.7 rule 3 gives a saturation
+announcement **the environment** as its scope; §6.8a's table gives `inference_saturated` the record
+scope **`_console`**. The implementation treats `Announcement.scope` as a display field and lets the two
+differ, which is defensible and undecided. If they are meant to be the same token, one of those two
+lines has to move. Deferred rather than resolved because it changes what an operator reads on a
+notification, which is an operator's call.
+
+**Not assigned anywhere: `DeliveryState` has no on-disk contract.** §7.6 puts `undelivered[]` on the
+incident record, which task 5.5 validates. The delivery state — the backoff countdown, the consecutive
+counters, the retained notes — lives in memory between sweeps and has no schema. That is correct while
+the actor holds it in one process, and wrong the first time the actor restarts mid-backoff. No task in
+§13 assigns it; task 6.1 is where the decision lands.
+
 ### 6.10 Safety — read-only by mechanism, and what stops a sweep becoming an outage
 
 **Read-only is inherited, not asked for.** SRD-OBSERVER-001 §10.1: the verb gate moves the real
@@ -2793,9 +2847,9 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: §12's Console-health block passes, including the 288-sweep `blocked` fixture and the
   skips-4-5-6 fixture. **If this task finds itself writing a second state machine, it has gone wrong**
   — the whole content of §6.8a is that the identity was missing and the machine was not.*
-- **5.5** The incident record's schema and validated read, for both record kinds. Touches:
+- **5.5** **DONE 2026-09-06.** The incident record's schema and validated read, for both record kinds. Touches:
   `src/run/triage-incident.ts`, `test/unit/triage-incident.test.ts`.
-- **5.6** **The composer and the adapters (D10, §6.9).** `composeAnnouncement` — typed fields in, an
+- **5.6** **The composer and the adapters (D10, §6.9). DONE 2026-09-06.** `composeAnnouncement` — typed fields in, an
   `Announcement` **value** out, pure, with `subject` distinct from `environment` so §6.7 rule 3's
   notification can name the provider — and `renderRequest(announcement, notify)` with the closed
   `["ntfy", "json"]` adapter enum. Touches: `src/run/triage-notify.ts` (new),
@@ -2807,7 +2861,7 @@ and SRD-FLEET-PM-001 D7's.
   a topic URL into the message text; and the title is asserted header-safe by `renderRequest` rather
   than trusted, because ntfy rejects a title over 1 KB with a `400` that would otherwise arrive
   looking like an endpoint failure.*
-- **5.6a** **The transport and its outcomes.** `export type NotifyTransport`, taken through
+- **5.6a** **The transport and its outcomes. DONE 2026-09-06.** `export type NotifyTransport`, taken through
   `{transport?, now?}` with a `fetch`-backed default carrying
   `AbortSignal.timeout(notify.timeout_ms)` — `src/security/model-probe.ts:252` and
   `src/cli/commands/doctor.ts:1122` are the two existing spellings. The three outcome classes
@@ -2826,6 +2880,19 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: §12's four-surfaces probe passes. **And the anti-criterion that outranks it: assert a
   delivery failure never advances or clears an incident** (§6.9 requirement 7) — the plausible
   implementation writes the transition after the `await`, and it fails only this test.*
+
+  **The seam task 5.6a left, named 2026-09-06 so this task does not re-derive it.** Four things cross:
+  (a) `reporterUndelivered(state)` is already implemented and tested with its anti-twin — `true` on the
+  **first** `rejected` and on the **second** consecutive `retryable` — so a wiring that fires on one
+  retryable reddens in `triage-notify.test.ts` before it reaches the incident machine; (b)
+  `DeliverySweepResult.disposition` (`attempted` / `held` / `disabled` / `nothing_to_send`) and
+  `.outcome` carry enough to write `undelivered[]` and a log line without inspecting anything else;
+  (c) `AnnouncementFacts` is the translation target — build one from an `IncidentNotification`, mapping
+  `kind`/`scope`/`subject` from the subject, `assessment` from `reason`, `transition` from
+  `NotificationKind`, and `first_seen` from `at − firingForMs`; (d) the *"delivered first"* ordering
+  needs no new machinery — call `deliverySweep` with the `reporter_undelivered` recovery facts before
+  the sweep's own. `triage-notify.ts` deliberately imports **nothing** from `triage-incident.ts` and a
+  source probe asserts that absence (ISC-689), so this task is where the two meet for the first time.
 - **5.1a** Implement §7.3's resolution: `services: string[]` on `pifleet.dispatchrequest/v1`,
   required on triage and refused on review with `ConsoleRoster` as the discriminator, spending the
   two new codes `services_missing` and `services_not_permitted`. **Then wire both waiting modules** —
@@ -2849,7 +2916,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: a probe reads `roles/triage.md` and asserts the example parses through
   `parseDispatchRequest` under `TRIAGE_CONSOLE_ROSTER` — the same working-tree source-probe posture
   ISC-600 forced on `scripts/`, for the same reason: nothing else checks this file.*
-- **5.1c** Correct `roles/triage.md:288-317`'s `triage.json` worked example to §7.5's contract —
+- **5.1c** **DONE 2026-09-06.** Correct `roles/triage.md:288-317`'s `triage.json` worked example to §7.5's contract —
   `coverage[]` as `{channel, result}`, `evidence_ref` as a ledger array, `unaccounted[]` as service
   names — and hold it there with a probe. **DONE 2026-09-06.** Touches: `roles/triage.md`,
   `src/run/triage-document.ts`, `test/unit/triage-document.test.ts`.
@@ -2895,7 +2962,7 @@ and SRD-FLEET-PM-001 D7's.
   (accepted), one second later (refused), and absent (refused). A correct `sweep_id` with a bad
   window still discards, and a bad `sweep_id` with a good window still discards, so neither check can
   be satisfied by the other.*
-- **5.5a** A Zod schema for `triage.json` (§7.5), refused on any violation, matching §7.6's
+- **5.5a** **DONE 2026-09-06.** A Zod schema for `triage.json` (§7.5), refused on any violation, matching §7.6's
   validated-on-read posture. Touches: `src/run/triage-document.ts` (new),
   `test/unit/triage-document.test.ts` (new), `ISA.md`.
   *Acceptance: a document with a row missing `assessment`, one with an unknown assessment value, and

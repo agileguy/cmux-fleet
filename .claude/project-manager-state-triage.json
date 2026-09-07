@@ -290,14 +290,18 @@
           "test/unit/triage-notify.test.ts"
         ]
       },
-      "verified_commit": null,
-      "deferred": "5.6b touches triage-incident.ts AND triage-notify.ts - collides with both engineers this round, so it goes to round 10."
+      "verified_commit": "8bdefe8",
+      "deferred": "5.6b touches triage-incident.ts AND triage-notify.ts - collides with both engineers this round, so it goes to round 10.",
+      "graded": "2026-09-06 \u2014 ISC-658..690 transcribed; eng-1 32e3bda, eng-2 f310156, orchestrator 742f4ca (5.1c) and 8bdefe8 (5.4a)",
+      "eng_2_note": "reported in full on a single resume; 44 mutations / 43 killed / 1 proved equivalent. The equivalence probe lives in a session scratchpad, so ISC-690 is [~]."
     }
   ],
   "status": "in_progress_round_9",
   "version_file": "package.json",
   "open_operator_items": [
-    "Q11: mint ntfy token for the Alerts topic, set notify.token_env (gates Phase 8 only)"
+    "Q11: mint ntfy token for the Alerts topic, set notify.token_env (gates Phase 8 only)",
+    "\u00a76.7 rule 3 gives a saturation announcement the ENVIRONMENT as scope; \u00a76.8a's table gives inference_saturated the record scope _console. Left differing (Announcement.scope is a display field). If they must be the same token, one of the two SRD lines moves. Operator's call \u2014 it changes what the phone shows.",
+    "DeliveryState has no on-disk contract and no \u00a713 task assigns one. Correct while one actor process holds it; wrong the first time the actor restarts mid-backoff. Decision lands in task 6.1."
   ],
   "path_note": "NOT at .claude/project-manager-state.json, and deliberately. That path is the fleet project manager's own contract -- pm-state.ts:801-803 hardcodes it as SRD-FLEET-PROJECT-MANAGER 7.6's exact path, PmStateDocumentSchema governs its shape, and pm-state.test.ts treats the real file there as evidence that the schema keeps up with practice. This run is driven by the generic /ProjectManager skill, whose state is a different shape, so it takes a named file like the -observer and -review-console runs before it.",
   "orchestrator_fixes_round_1": {
@@ -339,15 +343,18 @@
   ],
   "orchestrator_tasks_done_after_round_8": [
     "5.1b",
-    "5.4c"
+    "5.4c",
+    "5.1c",
+    "5.4a"
   ],
   "round_10_candidates": [
-    "5.6b",
-    "5.3c",
-    "5.3a",
-    "5.4a",
+    "5.6b \u2014 the seam is now named in \u00a713; it is the only task touching both triage-incident.ts and triage-notify.ts",
+    "5.3b \u2014 the fifth gate condition",
+    "5.3c \u2014 \u00a76.6 layer 3's second echo (window_opened_at)",
+    "5.3a \u2014 the saturation verdict",
     "4.5a",
     "5.7",
-    "then Phase 6: 6.1 + 6.2 make one hand-run sweep possible"
+    "ISC-690 close \u2014 move mut9/equiv.ts into test/unit/ so the equivalence re-checks",
+    "then Phase 6 \u2014 6.1 and 6.2 are what make one hand-run sweep possible"
   ]
 }
