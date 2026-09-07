@@ -3048,8 +3048,17 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: both `?` dropped, the three literals in `triage-document.test.ts` updated, and
   `window_checked` either retired or kept with a stated reason — it is the skip's own witness, so
   retiring it is a decision and not a cleanup.*
-- **5.7** Add every §12 fixture in the issue-predicate, saturation, dedup, console-health and
-  notification blocks. Touches: `ISA.md`.
+- **5.7** **PART DONE 2026-09-06 — saturation outstanding.** Add every §12 fixture in the
+  issue-predicate, saturation, dedup, console-health and notification blocks. Touches: `ISA.md`.
+  The console-health block (ISC-673..677) and the notification block (ISC-678..690a) were closed as
+  their tasks landed. The issue-predicate and dedup blocks were **not** — those fixtures were built in
+  rounds 5–7, before per-round transcription was the habit, and seven §12 bullets had a passing test
+  and no criterion: ISC-712..718. **The saturation block waits on task 5.3a**, which is what creates
+  its fixtures.
+  *Method note for whoever finishes this: match ISA's `-t "…"` filters against the test names rather
+  than matching whole names, and check the direction — a probe filter is a SUBSTRING of its test's
+  name, so a naive equality check reports most of the file as uncovered. Verify each transcribed probe
+  resolves to exactly one test and passes before recording it.*
 
 ### Phase 6 — The clock
 
