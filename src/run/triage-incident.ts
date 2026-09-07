@@ -79,7 +79,7 @@ import type { TriageConsoleConfig } from "./triage-config.ts";
 import type { AnnouncementFacts, NotifyBacklog } from "./triage-notify.ts";
 
 /**
- * §6.8a's closed `kind` set, entire — the six things this console can notify
+ * §6.8a's closed `kind` set, entire — the seven things this console can notify
  * about that are not a service.
  *
  * Closed *"on §6.2's rule for `checks[]` — a closed set cannot acquire a seventh
@@ -88,7 +88,20 @@ import type { AnnouncementFacts, NotifyBacklog } from "./triage-notify.ts";
  * because §12's console-health criterion is *"assert the enum's members by name …
  * not by count"* and a type is erased at runtime and asserts nothing.
  *
- * The order is §6.8a's own table, top to bottom.
+ * **The seventh member arrived ON PURPOSE and through the front door (task 5.4d,
+ * ruled 2026-09-06), which is the enum working rather than the enum failing.**
+ * §6.7 rule 3 separates a `timeout` from an `unreachable` because they are *"a
+ * different sentence on the operator's screen and a different thing for them to go
+ * and do"*, and `saturationVerdict` has produced an `endpoint_down` verdict since
+ * task 5.3a — but with the set closed at six there was no `kind` to carry it, so
+ * an `endpoint_down` sweep composed NOTHING. The two available resolutions were to
+ * grow the set or to strike §6.7 rule 3's `unreachable` sentence as unimplementable;
+ * striking it would throw away a distinction `probeNativeToolCalls` can already make
+ * reliably, and *"the inference endpoint is down"* is a console-health fact about
+ * the console itself, which is exactly what this enum is for.
+ *
+ * The order is §6.8a's own table, top to bottom, and `inference_unreachable` sits
+ * beside `inference_saturated` because they are the two halves of one rule.
  */
 export const CONSOLE_HEALTH_KINDS = [
   /** An observer returned `status: blocked` (SRD-OBSERVER-001 §9.3). */
@@ -97,8 +110,10 @@ export const CONSOLE_HEALTH_KINDS = [
   "sweep_produced_nothing",
   /** Consecutive skips reached `max_consecutive_skips` (§6.4). */
   "sweeps_skipped",
-  /** §6.7 rule 3. */
+  /** §6.7 rule 3, `timeout` half — the endpoint is slow. */
   "inference_saturated",
+  /** §6.7 rule 3, `unreachable` half — the endpoint is DOWN, which is not slow. */
+  "inference_unreachable",
   /** Admission refused on the run's ceiling, exit 5 (§6.10). */
   "budget_exhausted",
   /** §9.15 — the delivery path itself is failing. */
@@ -1637,10 +1652,54 @@ export type ConsoleHealthFacts =
       /** §7.8's `max_consecutive_skips`, passed rather than read, so this stays pure. */
       readonly maxConsecutiveSkips: number;
       /**
-       * §6.7 rule 3. `null` when the sweep could not tell — which is NOT `false`,
-       * and the distinction is the one §6.7 rule 3 exists to protect.
+       * §6.7 rule 3, the `timeout` half. `null` when the sweep could not tell —
+       * which is NOT `false`, and the distinction is the one §6.7 rule 3 exists
+       * to protect.
        */
       readonly saturated: boolean | null;
+      /**
+       * §6.7 rule 3, the `unreachable` half — the endpoint is DOWN. Task 5.4d.
+       *
+       * **`saturated` and this field are two questions, and one boolean cannot
+       * hold both answers.** That is ISC-731's content one layer up: *"A
+       * `timeout` verdict is saturation. An `unreachable` verdict is the server
+       * being down, which is a different sentence on the operator's screen and a
+       * different thing for them to go and do."* A sweep whose probe timed out
+       * has learned that the endpoint is SLOW and has learned nothing about
+       * whether it is reachable; a sweep whose probe could not connect has
+       * learned the opposite. Collapsing them would compose one of the two
+       * sentences for both faults.
+       *
+       * So `saturationVerdict`'s five verdicts land here as a pair, and the pair
+       * is what makes the two kinds independent:
+       *
+       * | verdict | `saturated` | `unreachable` |
+       * |---|---|---|
+       * | `clear` | `false` | `false` |
+       * | `uncorrelated` | `null` | `null` |
+       * | `saturated` (probe `timeout`) | `true` | `null` |
+       * | `endpoint_down` (probe `unreachable`) | `null` | `true` |
+       * | `unconfirmed` | `null` | `null` |
+       *
+       * **Only `clear` clears either of them**, and that is §6.8a's own rule
+       * rather than a choice made here: *"a sweep in which every observer
+       * produced an artifact"*. A `timeout` is emphatically not that, so it
+       * leaves `unreachable` at `null` — recovering an "endpoint is down"
+       * incident on the strength of a request that never came back would be the
+       * absence-as-evidence mistake ISC-675 is filed against, wearing a
+       * different fault as a disguise.
+       *
+       * **OPTIONAL, and absent means `null` — "this sweep could not tell".** The
+       * field is optional because §13 task 5.4d's *Touches* line excludes
+       * `triage-pass.ts`, so the caller that will compute the pair is not
+       * changed by this task; until it is, every sweep is silent on this kind,
+       * which is the safe direction (it composes nothing — never a false clear
+       * and never a false raise) rather than a correct-looking one. **The
+       * wiring is outstanding, not done**: task 6.1 was already complete when
+       * this member was ruled in, so the mapping above has no task left to land
+       * in and needs one.
+       */
+      readonly unreachable?: boolean | null;
       /** §6.10's exit 5. */
       readonly budgetExhausted: boolean;
       /** §9.15. Task 5.6b is what sets it; this shape is the seam it lands on. */
@@ -1769,13 +1828,33 @@ export function consoleHealthObservations(
   }
 
   /*
+   * §6.7 RULE 3'S TWO HALVES, and they are composed independently on purpose.
+   *
    * `null` is NOT `false`. §6.7 rule 3's whole content is that a sweep which
    * could not tell whether the provider was saturated must not report that it
    * was not — that is the absence-as-evidence mistake, and here it would compose
    * a recovery.
+   *
+   * The same rule applies to `unreachable`, and applying it SEPARATELY is what
+   * keeps ISC-731's distinction alive at this layer: a `timeout` sweep carries
+   * `(saturated: true, unreachable: null)` and so raises one kind and says
+   * nothing about the other, while an `endpoint_down` sweep carries
+   * `(saturated: null, unreachable: true)` and does the mirror. A single
+   * combined branch — or one field feeding both — would put "the endpoint is
+   * down" on the operator's screen for a server that is merely slow, which is
+   * the misdiagnosis `probeNativeToolCalls` carries the incident report for.
+   *
+   * `?? null` is the OPTIONAL field's whole handling: a caller that says nothing
+   * about the endpoint's reachability is a caller that could not tell, and could
+   * not tell is exactly `null`.
    */
   if (facts.saturated !== null) {
     say(console_("inference_saturated"), raised(facts.saturated, "inference_saturated", ref));
+  }
+
+  const unreachable = facts.unreachable ?? null;
+  if (unreachable !== null) {
+    say(console_("inference_unreachable"), raised(unreachable, "inference_unreachable", ref));
   }
 
   say(console_("budget_exhausted"), raised(facts.budgetExhausted, "budget_exhausted", ref));

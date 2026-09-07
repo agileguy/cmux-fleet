@@ -82,6 +82,7 @@ import {
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
 import { TRIAGE_DOCUMENT_FAULTS } from "../../src/run/triage-document.ts";
+import { SATURATION_VERDICTS, type SaturationVerdict } from "../../src/run/triage-verdict.ts";
 import {
   ANNOUNCEMENT_ASSESSMENTS,
   ANNOUNCEMENT_TRANSITIONS,
@@ -2175,12 +2176,13 @@ describe("the two record kinds are one machine — §6.8a, and 5.5's half of it"
    * §6.8a's table, not by count — naming the permitted set is what makes a
    * seventh member fail"*.
    */
-  test("CONSOLE_HEALTH_KINDS is exactly §6.8a's six", () => {
+  test("CONSOLE_HEALTH_KINDS is exactly §6.8a's seven", () => {
     expect([...CONSOLE_HEALTH_KINDS]).toEqual([
       "observer_blocked",
       "sweep_produced_nothing",
       "sweeps_skipped",
       "inference_saturated",
+      "inference_unreachable",
       "budget_exhausted",
       "reporter_undelivered",
     ]);
@@ -2453,6 +2455,164 @@ describe("console-health deduplication — §6.8a's identity on §6.8's machine"
     expect(said?.signal.kind).toBe("observed_clear");
     const bad = forSubject(ranWith({ saturated: true }), "inference_saturated", CONSOLE_SCOPE);
     expect(bad?.signal.kind).toBe("issue");
+  });
+
+  /*
+   * ── TASK 5.4d — §6.7 rule 3's TWO halves, and they do not collapse ─────────
+   *
+   * ISC-731 keeps `timeout` and `unreachable` apart inside `saturationVerdict`.
+   * Until this task the separation died one layer later: §6.8a's `kind` enum was
+   * closed at six with no member for an outage, so an `endpoint_down` sweep
+   * composed NOTHING and the distinction the probe had just made reliably was
+   * thrown away at the composer. The seventh member is what carries it, and the
+   * ANTI-TWIN below is the assertion that matters — a `timeout` must still
+   * compose `inference_saturated` and must still say nothing about the new kind,
+   * because a growth that merged the two would pass every positive fixture here
+   * while announcing an outage for a server that is merely slow.
+   */
+
+  /**
+   * The `(saturated, unreachable)` pair each verdict hands the composer, over the
+   * REAL verdict vocabulary rather than a re-typed list of strings.
+   *
+   * `Record<SaturationVerdict, …>` is exhaustive BY CONSTRUCTION — ISC-731's own
+   * technique — so a sixth `saturationVerdict` outcome is a `tsc --noEmit` error
+   * on this literal rather than a row nobody remembered to add.
+   *
+   * **This table is also the specification of the wiring that does not exist
+   * yet.** `triage-pass.ts` builds `ConsoleHealthFacts` and currently supplies
+   * only `saturated`; the day it supplies the pair, this is the mapping it owes.
+   */
+  const VERDICT_PAIR: Record<
+    SaturationVerdict,
+    { saturated: boolean | null; unreachable: boolean | null }
+  > = {
+    // Every dispatched observer produced an artifact — §6.8a's ONLY clearing
+    // fact, and it clears both halves because it is positive evidence the
+    // endpoint was both up and keeping up.
+    clear: { saturated: false, unreachable: false },
+    uncorrelated: { saturated: null, unreachable: null },
+    // The probe timed out: the endpoint is SLOW. It says nothing about reachable.
+    saturated: { saturated: true, unreachable: null },
+    // The probe could not connect: the endpoint is DOWN. It says nothing about slow.
+    endpoint_down: { saturated: null, unreachable: true },
+    unconfirmed: { saturated: null, unreachable: null },
+  };
+
+  /** The signal kind each half composes for one verdict, or `undefined` for silence. */
+  const composedFor = (verdict: SaturationVerdict) => {
+    const obs = ranWith(VERDICT_PAIR[verdict]);
+    return {
+      saturated: forSubject(obs, "inference_saturated", CONSOLE_SCOPE)?.signal.kind,
+      unreachable: forSubject(obs, "inference_unreachable", CONSOLE_SCOPE)?.signal.kind,
+    };
+  };
+
+  /**
+   * PREMISE, on [[feedback_degenerate_fixtures_hide_narrowing]]: the table has to
+   * be able to TELL the two halves apart. A fixture in which every verdict gave
+   * both fields the same value would pass every assertion below against a
+   * composer that read one field for both kinds.
+   */
+  test("premise: the pair disagrees on the two verdicts the whole task is about", () => {
+    expect(VERDICT_PAIR.saturated).not.toEqual(VERDICT_PAIR.endpoint_down);
+    expect(VERDICT_PAIR.saturated.saturated).not.toBe(VERDICT_PAIR.endpoint_down.saturated);
+    expect(VERDICT_PAIR.saturated.unreachable).not.toBe(VERDICT_PAIR.endpoint_down.unreachable);
+    // And the table covers the real vocabulary, entire — not a subset of it.
+    expect(Object.keys(VERDICT_PAIR).sort()).toEqual([...SATURATION_VERDICTS].sort());
+  });
+
+  /** The task's first acceptance clause: an `endpoint_down` sweep composes. */
+  test("an `endpoint_down` sweep composes an issue on the seventh kind", () => {
+    const said = forSubject(
+      ranWith(VERDICT_PAIR.endpoint_down),
+      "inference_unreachable",
+      CONSOLE_SCOPE,
+    );
+    expect(said?.signal.kind).toBe("issue");
+    expect(said?.signal).toEqual({
+      kind: "issue",
+      reason: "inference_unreachable",
+      evidenceRef: "sweep/1",
+    });
+    expect(said?.subject).toEqual({
+      kind: "console_health",
+      scope: CONSOLE_SCOPE,
+      health: "inference_unreachable",
+    });
+  });
+
+  /**
+   * **THE ANTI-TWIN, and it is the reason this task is a growth rather than a
+   * rename.** A `timeout` sweep still says the provider is saturated and still
+   * says NOTHING about reachability. A composer that fed one field to both kinds
+   * — or that treated "not clear" as "down" — passes the test above and fails
+   * here, which is the only way to tell the two implementations apart.
+   */
+  test("ANTI-TWIN: a `timeout` sweep composes `inference_saturated` and NOT the new kind", () => {
+    expect(composedFor("saturated")).toEqual({ saturated: "issue", unreachable: undefined });
+    // And the mirror, so the silence above is a RULE and not a composer that
+    // never speaks about the new kind at all.
+    expect(composedFor("endpoint_down")).toEqual({ saturated: undefined, unreachable: "issue" });
+  });
+
+  /**
+   * All five verdicts by full value, so a verdict whose row nobody thought about
+   * cannot pass by being absent from a narrower assertion.
+   *
+   * **Only `clear` clears either half.** §6.8a reserves recovery for *"a sweep in
+   * which every observer produced an artifact"*, and a probe result is not that
+   * fact — clearing an outage on the strength of a request that never came back
+   * is ISC-675's absence-as-evidence mistake wearing a different fault.
+   */
+  test("every saturation verdict composes its own pair, and only `clear` clears", () => {
+    const composed = Object.fromEntries(SATURATION_VERDICTS.map((v) => [v, composedFor(v)]));
+    expect(composed).toEqual({
+      clear: { saturated: "observed_clear", unreachable: "observed_clear" },
+      uncorrelated: { saturated: undefined, unreachable: undefined },
+      saturated: { saturated: "issue", unreachable: undefined },
+      endpoint_down: { saturated: undefined, unreachable: "issue" },
+      unconfirmed: { saturated: undefined, unreachable: undefined },
+    });
+  });
+
+  /**
+   * The optional field's whole contract, stated rather than left to `??`. A
+   * caller that has not been taught about reachability yet is a caller that could
+   * not tell, and could not tell composes nothing — never a false clear.
+   *
+   * `false` is asserted beside it so the silence is attributable to ABSENCE and
+   * not to the composer ignoring the field.
+   */
+  test("an absent `unreachable` is `null`, not `false`", () => {
+    expect(forSubject(ranWith({}), "inference_unreachable", CONSOLE_SCOPE)).toBeUndefined();
+    expect(
+      forSubject(ranWith({ unreachable: null }), "inference_unreachable", CONSOLE_SCOPE),
+    ).toBeUndefined();
+    expect(
+      forSubject(ranWith({ unreachable: false }), "inference_unreachable", CONSOLE_SCOPE)?.signal.kind,
+    ).toBe("observed_clear");
+  });
+
+  /**
+   * The seventh kind inherits §6.8's machine untouched, like the other six: two
+   * consecutive `endpoint_down` sweeps are one notification, not two.
+   */
+  test("the seventh kind dedups on the same machine", () => {
+    const DOWN: IncidentSubject = {
+      kind: "console_health",
+      scope: CONSOLE_SCOPE,
+      health: "inference_unreachable",
+    };
+    const { record, notifications } = driveSubject(
+      DOWN,
+      12,
+      () => issue("inference_unreachable", "sweep/1"),
+      NO_RENOTIFY,
+    );
+    expect(kinds(notifications)).toEqual(["opened"]);
+    expect(notifications[0]!.reason).toBe("inference_unreachable");
+    expect(record.state).toBe("firing");
   });
 
   /**
