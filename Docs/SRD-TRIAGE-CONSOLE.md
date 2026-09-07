@@ -1045,7 +1045,19 @@ reads as done. Two consequences, both Phase 6's to build:
 
 - **No sweep is admitted while any seat's pin is unresolved.** Constraint B is the reason: a pinned
   worker the relay cannot resolve *refuses every fan-out*, so a sweep dispatched into a half-recycled
-  console fails four times and reads as a model problem. **The gate is four pins re-derived, not four
+  console fails four times and reads as a model problem.
+  **The gate holds the PASS and never the WATCH — clarified 2026-09-07 by task 6.5, because both
+  readings of the sentence above are natural and one of them is fatal.** An actor that withheld its
+  liveness observation along with its sweep would poll a console that is gone **forever**, with
+  `sweep_withheld` as the only line in its log — §12's exit-when-the-console-is-gone criterion
+  defeated by this very gate (ISC-926).
+  **And `recycle_after_sweeps: 0` stops the CLOCK, not the REPAIR — clarified 2026-09-07.** Read as
+  disabling the absent-pin clause too, `0` is a **deadlock**: this gate shuts on an unresolved pin and
+  nothing would be permitted to reopen it, so a console under `0` that lost a seat withholds every
+  sweep for the rest of its life (ISC-927).
+  **The boundary runs BEFORE the pass**, so an interrupted console is repaired *and* swept in one
+  cadence rather than losing one — both edges are *"between sweeps"* and this is the one that repairs
+  soonest. **The gate is four pins re-derived, not four
   containers running** — those are different moments and only the later one is safe.
 - **§7.7's `run_id` is wrong and becomes `runs`**, a per-seat map of worker id to run id. D12 keeps
   the run tree authoritative over the record, so recovery still reads run trees — four of them now;
@@ -2082,6 +2094,11 @@ layouts are unrepresentable as the same path — prevented rather than merely un
 ### 7.7 The actor record — new, and deliberately the relay's shape
 
 `~/.pifleet/triage-relay.json` (`pid`, `started`, `runs`, `workers`, `cadence_s`, `sweep_cursor`,
+**`recycled_at`** — added 2026-09-07 by task 6.5, because **nothing in the original list could answer
+§6.6's own question.** Layer 4 asks whether a seat's run is older than `recycle_after_sweeps`, and
+neither a run id nor `sweep_cursor` carries a seat's age; `recycled_at` is a per-seat map from seat to
+the sweep at which that run was minted or first observed. It is `.optional()` rather than defaulted,
+so a record written before recycling existed still parses (ISC-933) —,
 `consecutive_skips`) — **`runs` is a per-seat MAP of worker id to run id, not a single `run_id`;
 see §6.1's correction and §6.6 layer 4's resolution** —, `~/.pifleet/triage-relay.log` appended never truncated, `~/.pifleet/triage-relay.lock`.
 
@@ -3324,7 +3341,7 @@ and SRD-FLEET-PM-001 D7's.
   permitted-exception list still at ONE entry**; and the anti-criterion — `cli/commands/triage.ts`
   still names neither `dispatch.ts` nor `LedgerWriter`, so the capability arrived by injection and not
   by import.*
-- **6.2a** **Move `incidentCensus` beside its readers. Added 2026-09-06 from task 6.2.** It lives in
+- **6.2a** **DONE 2026-09-07** (ISC-945; ISC-804's probe moved with it). **Move `incidentCensus` beside its readers. Added 2026-09-06 from task 6.2.** It lives in
   `src/cli/commands/triage.ts` because that is what 6.2's *Touches* line allowed, and by task 6.1's
   own recorded argument — *"a writer that does not sit beside its reader becomes a second definition
   of where those files are"* — it belongs in `triage-incident.ts` beside `incidentRecordPath` and
@@ -3344,7 +3361,7 @@ and SRD-FLEET-PM-001 D7's.
   test — a fixture that only checks triage would pass an implementation that broke review.*
 - **6.4** **PART DONE 2026-09-06 — the cursor half landed, the collate-resume half is ISC-868 and task 6.4a.** Resume-from-run-tree, and the anti-criterion that a restart never double-dispatches.
   Touches: `src/run/triage-pass.ts`, `test/unit/triage-pass.test.ts`, `ISA.md`.
-- **6.4a** **Carry an abandoned sweep to collation. Added 2026-09-06 as task 6.4's named residue;
+- **6.4a** **DONE 2026-09-07 — ISC-868 closed.** Carry an abandoned sweep to collation. Added 2026-09-06 as task 6.4's named residue;
   ISC-868 is filed OPEN against it.** `SweepDriver.inFlight` reports a sweep exactly while a WORKER
   task is outstanding, and neither of those is a step the host may take. The states worth resuming —
   the actor died between the join and the collation dispatch — read `inFlight === null` and are
@@ -3368,7 +3385,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: one exported table; `unreachableFrom` and `SaturationOutcome.saturated` both derived
   from it or asserted equal to it over every member of `SATURATION_VERDICTS`; and no second spelling
   left behind, asserted on comment-stripped source.*
-- **6.3b** **Wire the actor lock. Added 2026-09-07 by task 6.1b.** `acquireTriageActorLock` shipped
+- **6.3b** **DONE 2026-09-07** (ISC-929..931; the call site is landed by the orchestrator, see 6.5b). **Wire the actor lock. Added 2026-09-07 by task 6.1b.** `acquireTriageActorLock` shipped
   with task 6.3 and **nothing calls it** — `runTriageActor` does not take it. So two
   `pifleet triage --poll` processes would both sweep the same run, which is §6.4's *"two concurrent
   sweeps against one control plane"* reached from the other side: the console causing the overload it
@@ -3399,7 +3416,7 @@ and SRD-FLEET-PM-001 D7's.
   at the default cannot tell the file from the fallback.*
   *This needs `TriageCommandDeps.loop`'s `cadenceS` to become nullable so "not overridden" is
   spellable — a contract change task 6.1b deliberately left alone in a round about the dispatch effect.*
-- **6.5** Recycling (§6.6 layer 4): **four** `down`s and four `up`s between sweeps at
+- **6.5** **PART DONE 2026-09-07 — the decision landed; the privileged `down`/`up` effect is task 6.5b.** Recycling (§6.6 layer 4): **four** `down`s and four `up`s between sweeps at
   `recycle_after_sweeps`, per-seat boundary condition, sweep counter carried across. Touches:
   `src/run/triage-actor.ts`, `test/unit/triage-actor.test.ts`, `ISA.md`.
   *Acceptance: the in-flight fixture recycles nothing; the idle fixture recycles all four; the sweep
@@ -3411,6 +3428,23 @@ and SRD-FLEET-PM-001 D7's.
 - **6.6** **DONE 2026-09-06.** Add the read-only closure guard, mirroring `test/unit/monitor-readonly.test.ts` and scoped
   to the console's own subtree with its one dispatch exception **named**. Touches:
   `test/unit/triage-readonly.test.ts` (new), `ISA.md`.
+- **6.5b** **Build the recycle's `down`/`up` at the COMPOSITION ROOT. Added 2026-09-07; ISC-932 is
+  filed OPEN against it, and this is task 6.1b's finding one effect over.** Task 6.5 shipped the
+  decision — which seats are due, resumably, gated — and **cannot ship the effect**:
+  `test/unit/triage-readonly.test.ts` bans `cli/commands/up.ts` and `cli/commands/down.ts` as direct
+  imports from the whole console subtree and bans `Bun.spawn`/`child_process` by name in its
+  comment-stripped source. The answer is the one 6.1b established: build it in `src/cli/index.ts` as a
+  `TriageProductionEffects` member and thread it down as a plain function. **The permitted-exception
+  list stays at ONE entry** — that is now the fourth round in which pressure to add a second was
+  refused, and ISC-826 is what keeps refusing it.
+  This task also lands the `ports:` member on `productionLoop` that task 6.3b's lock needs, because the
+  two are one fact about the same call site and splitting them would wire an actor that locks and
+  cannot repair itself. Touches: `src/cli/index.ts`, `src/cli/commands/triage.ts`,
+  `test/unit/triage-command.test.ts`, `test/unit/cli.test.ts`.
+  *Acceptance: a shipped `--poll` takes the lock and recycles; ISC-932's `actor_unsupervised` probe
+  goes RED because the production actor stops emitting it, and `TriageActorDeps.ports` becomes
+  REQUIRED, which turns the un-ported fixture into a `tsc` error. **Both are the point** — the guard
+  was pinned to the blocker's absence on purpose, so landing the unblocker must break it.*
 - **6.7** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:
   `scripts/triage`, and **nothing in `src/` that Phase 4.3's test does not already pin**.
 

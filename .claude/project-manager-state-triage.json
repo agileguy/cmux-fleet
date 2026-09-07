@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 16,
+  "current_round": 17,
   "completed_phases": [
     0,
     1,
@@ -509,8 +509,40 @@
           "test/unit/triage-incident.test.ts"
         ]
       },
+      "verified_commit": "7e0b839",
+      "note": "6.5 and 6.3b are both triage-actor.ts \u2014 one slice. 6.4a and 6.2a both touch triage.ts + triage-command.test.ts, so they pair; 6.2a adds the incident pair and 6.4a the pass pair. eng-2 gets six files as one unit and it is said out loud. 6.8 and 6.9 held for round 17: 6.9 needs a TriageCommandDeps contract change that would collide with 6.4a.",
+      "graded": "2026-09-07 \u2014 eng-1 ISC-920..933 (6.5, 6.3b; ISC-932 OPEN), eng-2 ISC-868 closed + ISC-940..947 (6.4a, 6.2a). Orchestrator: \u00a76.6's gate/watch and zero-knob clarified, \u00a77.7 gained recycled_at, task 6.5b filed.",
+      "resumes_used": 1,
+      "decision": "Did NOT land 6.3b's ports call site alone. eng-1 recommended landing it with 6.5b and that is right: ports with throwing down/up stand-ins ships an actor that locks and cannot repair itself. Both go in 6.5b."
+    },
+    {
+      "round": 17,
+      "tasks": {
+        "eng-1": [
+          "6.5b"
+        ],
+        "eng-2": [
+          "5.8"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/cli/index.ts",
+          "src/cli/commands/triage.ts",
+          "test/unit/triage-command.test.ts",
+          "test/unit/cli.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-document.ts",
+          "src/run/triage-verdict.ts",
+          "test/unit/triage-document.test.ts",
+          "test/unit/triage-verdict.test.ts",
+          "roles/triage.md",
+          "test/unit/triage-role.test.ts"
+        ]
+      },
       "verified_commit": null,
-      "note": "6.5 and 6.3b are both triage-actor.ts \u2014 one slice. 6.4a and 6.2a both touch triage.ts + triage-command.test.ts, so they pair; 6.2a adds the incident pair and 6.4a the pass pair. eng-2 gets six files as one unit and it is said out loud. 6.8 and 6.9 held for round 17: 6.9 needs a TriageCommandDeps contract change that would collide with 6.4a."
+      "note": "6.8 and 6.9 both touch src/cli/commands/triage.ts and collide with 6.5b, so they wait for round 18. 5.8 is fully disjoint and is Phase 5's last gap \u2014 it makes \u00a76.9's containment reachable in production instead of guarding a road nobody uses. eng-2 gets six files as one unit: a schema change obliges the roles/ edit in the SAME task (ISC-651)."
     }
   ],
   "status": "in_progress_round_9",
@@ -599,6 +631,12 @@
     "6.9 \u2014 cadence_s reaches --poll",
     "6.7 \u2014 wire the actor into scripts/triage",
     "5.8 \u2014 the bounded prose field + roles/triage.md",
+    "Phase 7 \u2014 7.1 to 7.4 close the branch"
+  ],
+  "round_18_candidates": [
+    "6.7 \u2014 wire the actor into scripts/triage",
+    "6.8 \u2014 a producer for budget_exhausted (ISC-891)",
+    "6.9 \u2014 cadence_s reaches --poll",
     "Phase 7 \u2014 7.1 to 7.4 close the branch"
   ]
 }
