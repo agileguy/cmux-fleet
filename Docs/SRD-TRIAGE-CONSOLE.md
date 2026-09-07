@@ -3024,12 +3024,12 @@ container and no network, and that is what makes it the one phase CI can fully r
 **Does not.** Read the collator's `status` as the sweep's verdict — `roles/collator.md:228-235`'s rule,
 and SRD-FLEET-PM-001 D7's.
 
-- **5.1** The partition completeness check. Touches: `src/run/triage-partition.ts` (new),
+- **5.1** **DONE** (ISC-639, ISC-640). The partition completeness check. Touches: `src/run/triage-partition.ts` (new),
   `test/unit/triage-partition.test.ts` (new).
-- **5.2** The verdict mapping: `triage.json` + host-counted coverage → per-service assessment,
+- **5.2** **DONE** (ISC-648..650, ISC-666). The verdict mapping: `triage.json` + host-counted coverage → per-service assessment,
   including the structural gate that downgrades an unevidenced `healthy`. Touches:
   `src/run/triage-verdict.ts` (new), `test/unit/triage-verdict.test.ts` (new).
-- **5.3** The `sweep_id` echo check. Touches: `src/run/triage-verdict.ts`,
+- **5.3** **DONE** (ISC-691, ISC-694). The `sweep_id` echo check. Touches: `src/run/triage-verdict.ts`,
   `test/unit/triage-verdict.test.ts`.
 - **5.3a** **The saturation verdict (D15, §6.7 rule 3). DONE 2026-09-06.** The correlation rule, the suppression of the
   coverage escalation, and the confirming probe — which is `probeNativeToolCalls`
@@ -3039,7 +3039,7 @@ and SRD-FLEET-PM-001 D7's.
   saturate. **Write the suppression before the verdict** — a saturation verdict that does not stop
   `consecutive_indeterminate` advancing is a console that reports both findings and lets the operator
   pick the wrong one.*
-- **5.4** The incident state machine, as a pure `(record, observation) => {record, notifications[]}`.
+- **5.4** **DONE** (ISC-712..718, ISC-744..749). The incident state machine, as a pure `(record, observation) => {record, notifications[]}`.
   Touches: `src/run/triage-incident.ts` (new), `test/unit/triage-incident.test.ts` (new).
   *Acceptance: the 288-consecutive-sweeps fixture asserts exactly one notification; the alternating
   fixture reaches `flapping` and emits once; the `unhealthy → indeterminate` fixture does **not**
@@ -3121,7 +3121,7 @@ and SRD-FLEET-PM-001 D7's.
   `reporter_undelivered` is unexercised: `renotify_after_s` defaults to 21600 s = 72 sweeps, so a
   channel down over six hours composes a reminder about the reporter that it cannot deliver. Correct by
   construction, untested, and it needs a 72-sweep fixture that belongs with the actor.
-- **5.1a** Implement §7.3's resolution: `services: string[]` on `pifleet.dispatchrequest/v1`,
+- **5.1a** **DONE** (ISC-638..643). Implement §7.3's resolution: `services: string[]` on `pifleet.dispatchrequest/v1`,
   required on triage and refused on review with `ConsoleRoster` as the discriminator, spending the
   two new codes `services_missing` and `services_not_permitted`. **Then wire both waiting modules** —
   `checkTriagePartition` and `assessTriageSweep` project their partition out of the sweep's requests.
@@ -3137,7 +3137,7 @@ and SRD-FLEET-PM-001 D7's.
   files and that is the correct outcome rather than an unfinished one. Saying so here because a brief
   that demands a caller which cannot exist is the shape that has cost this phase twice (ISC-600,
   ISC-609).
-- **5.1b** Edit `roles/triage.md:115-130` so the `dispatch-request.json` example carries `services`
+- **5.1b** **DONE** (ISC-651..653). Edit `roles/triage.md:115-130` so the `dispatch-request.json` example carries `services`
   and the sentence under it stops saying *"and nothing else"*. **Without this the live console
   refuses its own first sweep**, and no host-side test can see it. Touches: `roles/triage.md`,
   `test/unit/roles.test.ts` (or wherever a role-prompt probe can live), `ISA.md`.
@@ -3151,7 +3151,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: the example parses through `parseTriageDocument`, AND the three shapes are asserted
   on the parsed value so a later relaxation cannot re-open the silent failure; the example carries
   both an attempted and a `not_attempted` channel so it teaches the whole enum.*
-- **5.4c** Blind flapping records escalate as COVERAGE, not as an issue (§6.8). Widen
+- **5.4c** **DONE** (ISC-654..657). Blind flapping records escalate as COVERAGE, not as an issue (§6.8). Widen
   `onUnobserved`'s coverage escalation to include `flapping` — the same `COVERAGE_THRESHOLD` applied
   to one more state, not a new judgement — and narrow the `flapping → firing` edge to require an
   OBSERVED issue, so the two paths cannot both fire. Touches: `src/run/triage-incident.ts`,
@@ -3173,7 +3173,7 @@ and SRD-FLEET-PM-001 D7's.
   asserts ISC-572 for triage by reading source text, while `test/integration/triage-console.test.ts`
   now EXECUTES it — keep both and say which is load-bearing. Touches:
   `test/unit/fresh-dispatch.test.ts`, `test/unit/console-restart.test.ts`, `ISA.md`.
-- **5.4b** The `flapping → firing` edge (§6.8, added 2026-09-06): after `flap_window` with no
+- **5.4b** **DONE** (ISC-644..647). The `flapping → firing` edge (§6.8, added 2026-09-06): after `flap_window` with no
   observed clear, a flapping record opens once and restarts the re-notify floor. Touches:
   `src/run/triage-incident.ts`, `test/unit/triage-incident.test.ts`, `ISA.md`.
   *Acceptance: a fixture that flaps and then goes hard down notifies exactly once more and its
@@ -3417,7 +3417,7 @@ and SRD-FLEET-PM-001 D7's.
   of where those files are"* — it belongs in `triage-incident.ts` beside `incidentRecordPath` and
   `parseIncidentRecord`. ISC-804 travels with it unchanged. Touches: `src/run/triage-incident.ts`,
   `test/unit/triage-incident.test.ts`, `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`.
-- **6.3** The actor record, log and lock (per-console, from Phase 2.3) plus a `ConsoleWatch` over
+- **6.3** **DONE** (ISC-719..727). The actor record, log and lock (per-console, from Phase 2.3) plus a `ConsoleWatch` over
   `tri-1`. Touches: `src/run/triage-actor.ts` (new), `test/unit/triage-actor.test.ts` (new).
   *Acceptance: §12's exit-when-the-console-is-gone criterion and its streak-reset mirror both pass.*
 - **6.3a** **The abandonment sentence is review-console prose, found 2026-09-06 by task 6.3. DONE 2026-09-06** (ISC-780; a `Record<ConsoleName, …>` rather than a `switch`, so a third console is a `tsc` error rather than a silent fall-through).**
