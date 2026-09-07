@@ -9,6 +9,9 @@
 
 import { Command } from "commander";
 import { EXIT, type ExitCode, isExitCoded } from "../contracts.ts";
+import type { RunPaths } from "../run/paths.ts";
+import type { SweepDispatch, SweepDispatchOutcome } from "../run/triage-envelope.ts";
+import type { TriageProductionEffects } from "./commands/triage.ts";
 
 /**
  * Thrown by a command to exit with a specific ladder code and a clean message.
@@ -71,6 +74,169 @@ export function exitCodeForError(err: unknown): ExitCode {
   return EXIT.INTERNAL;
 }
 
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-CONSOLE §13 task 6.1b — the triage console's privileged effects
+// ---------------------------------------------------------------------------
+
+/**
+ * The modules the triage effects are built out of, loaded LAZILY and ONCE.
+ *
+ * ## Why dynamic imports rather than four `import` statements at the top
+ *
+ * Two reasons, and the first is a correctness one. `cli/commands/dispatch.ts`
+ * imports {@link CliError} from THIS file, so a static import of it here is a
+ * module cycle whose evaluation order decides whether `CliError` is initialised
+ * when the other module's body runs. `src/run/relay.ts` met exactly this and
+ * solved it exactly this way (`loadEffectModules`, `:3067`); this is that
+ * pattern, not a new one.
+ *
+ * The second is the entry point's standing property: `pifleet --help` must not
+ * load the fleet's control plane. Every command module below is already loaded
+ * under one `Promise.all` because registration is cheap; the dispatch path's
+ * transitive closure is 145 modules (measured in
+ * `test/unit/triage-readonly.test.ts`) and none of them has any business being
+ * evaluated because somebody typed `pifleet status`.
+ */
+let triageEffectModules: Promise<{
+  config: typeof import("../config/load.ts");
+  relay: typeof import("../run/relay.ts");
+  actor: typeof import("../run/triage-actor.ts");
+  config_triage: typeof import("../run/triage-config.ts");
+  notify: typeof import("../run/triage-notify.ts");
+  verdict: typeof import("../run/triage-verdict.ts");
+}> | null = null;
+
+function loadTriageEffectModules(): NonNullable<typeof triageEffectModules> {
+  triageEffectModules ??= (async () => ({
+    config: await import("../config/load.ts"),
+    relay: await import("../run/relay.ts"),
+    actor: await import("../run/triage-actor.ts"),
+    config_triage: await import("../run/triage-config.ts"),
+    notify: await import("../run/triage-notify.ts"),
+    verdict: await import("../run/triage-verdict.ts"),
+  }))();
+  return triageEffectModules;
+}
+
+/**
+ * **§6.3 step 5's per-observer dispatch, and it is the reason task 6.1b exists.**
+ *
+ * `sendTaskEnvelope` is THE dispatch path and it takes a fleet-ledger writer.
+ * Both are banned from `src/run/triage-*` and from `src/cli/commands/triage.ts`
+ * by name in `test/unit/triage-readonly.test.ts` — a dynamic `await import`
+ * included, because the ban is a substring check over comment-stripped source.
+ * **That is the guard working.** §12 grants this console one permitted exception
+ * and the exception it grants is `run/dispatch-request.ts`, the request BUILDER;
+ * the privileged EFFECT belongs at the composition root, which is here. The
+ * one-entry list (ISC-826) is untouched, which is the point.
+ *
+ * ## `consoleTransport` rather than a second call to `sendTaskEnvelope`
+ *
+ * `productionRelayEffects.sendTask` already binds the dispatch path to a
+ * `LedgerWriter` and derives a content-addressed attempt id so a re-issue
+ * REPLAYS instead of running the work twice; `consoleTransport` already wraps it
+ * in the three refusals a resolved `accepted: false` needs — a supervisor
+ * refusal, a `via: "pane"` delivery that would TYPE a container's brief into a
+ * surface, and a stage whose trigger was never sent. Rebuilding any of that here
+ * would be a second, untested copy of decisions the review console already pays
+ * for. This console's seats are `rpc` by §2.3's anti-criterion, so the preflight
+ * that refuses a typed plane is a backstop rather than a live path.
+ *
+ * ## The settle wait is the caller's bound, not `RELAY_SETTLE_DEADLINE_MS`
+ *
+ * {@link SweepDispatch} *"returns when the task has SETTLED, not when it was
+ * accepted"* — `collate` reads the document the task it dispatched wrote and
+ * §6.3 gives `SweepDriver` no member between the two steps. The relay's own
+ * 30-minute default is sized for a review; this console ticks every five minutes
+ * by default, so waiting half an hour on one child would wedge the actor for six
+ * cadences. §7.8's `sweep_deadline_s` (`cadence_s − reserve_s`) is the right
+ * bound and the CONSOLE computes it — see `TriageProductionEffects.dispatchFor`.
+ *
+ * ## What is a value here and what is a throw
+ *
+ * A `RelayDispatchError` becomes `{kind: "refused"}` — a VALUE — because §6.5's
+ * *"refused whole"* is a partition outcome an operator acts on. Everything else
+ * propagates: a settle timeout in particular is NOT a refusal, because the task
+ * was accepted and may still be running, and reporting it as refused would let
+ * `collate` be skipped for a sweep that later produced a document.
+ * `budget_exhausted` is not produced here at all — §6.10's ceiling is a decision
+ * the console makes from its own read (`refuseOnExhaustedBudget`), one layer up.
+ */
+function productionSweepDispatchFor(
+  run: RunPaths,
+  opts: { readonly settleDeadlineMs: number },
+): SweepDispatch {
+  return async ({ taskId, worker, title, brief }): Promise<SweepDispatchOutcome> => {
+    const m = await loadTriageEffectModules();
+    const transport = m.relay.consoleTransport(
+      m.actor.TRIAGE_COLLATOR,
+      m.relay.productionRelayEffects,
+      { deadlineMs: opts.settleDeadlineMs },
+    );
+    try {
+      await transport.dispatch(run, { worker, taskId, title, brief });
+    } catch (err) {
+      if (err instanceof m.relay.RelayDispatchError) {
+        return { kind: "refused", reason: err.message };
+      }
+      throw err;
+    }
+    await transport.awaitSettled(run, { worker, taskId });
+    return { kind: "accepted" };
+  };
+}
+
+/**
+ * Everything `pifleet triage` cannot build for itself, assembled from ONE load
+ * of the fleet config.
+ *
+ * `loaded.dir` and not the cwd, on `config/load.ts`'s standing rule — *"a config
+ * that renders differently depending on where the command was typed is not a
+ * config"* — and it is read here rather than in the console so that the two
+ * tracked triage files, the kubeconfig the fence checks and the model a
+ * saturation announcement names all come from one reading of one file.
+ *
+ * The probe dials `hostReachableBaseUrl` and NOT `llm.base_url`: this runs on the
+ * HOST, in the actor's process, and `base_url` is what a WORKER dials — on the
+ * shipped default it names the relay's bridge alias, which the host cannot
+ * resolve at all (ISC-291), so a probe that dialled it would report the endpoint
+ * down on a healthy machine and turn every saturation candidate into an
+ * `endpoint_down`.
+ *
+ * The provider and model are `tri-1`'s own resolved pair rather than
+ * `llm.provider`/`llm.model`, because §6.7 rule 3's subject is *"the model every
+ * seat resolves to"* and a `role:` or per-worker `model:` override is exactly the
+ * thing the flat keys do not see.
+ */
+export async function productionTriageEffects(): Promise<TriageProductionEffects> {
+  const m = await loadTriageEffectModules();
+  const loaded = await m.config.loadConfig();
+  const seat = m.config.resolveWorker(loaded, m.actor.TRIAGE_COLLATOR);
+  const dial = m.config.providerHostDialView(loaded.config, seat.provider) ?? loaded.config;
+  const apiKey = process.env[m.config.providerApiKeyEnv(loaded.config, seat.provider)] ?? "";
+
+  return {
+    dispatchFor: productionSweepDispatchFor,
+    isCollatorLive: async (run) =>
+      await m.relay.productionRunSources.isLiveWorker(run, m.actor.TRIAGE_COLLATOR),
+    triageFiles: m.config_triage.triagePaths(loaded.dir),
+    kubeconfigPath:
+      loaded.config.cloud.kubeconfig === null
+        ? null
+        : m.config.expandPath(loaded.config.cloud.kubeconfig, loaded.dir),
+    endpoint: { provider: seat.provider, model: seat.model },
+    probe: m.verdict.inferenceSaturationProbe(
+      dial,
+      apiKey,
+      seat.model,
+      fetch,
+      m.config.providerProbeTimeoutMs(loaded.config, seat.provider),
+    ),
+    transport: m.notify.DEFAULT_NOTIFY_TRANSPORT,
+    env: process.env,
+  };
+}
+
 export function buildProgram(): Command {
   const program = new Command();
   program
@@ -131,15 +297,38 @@ async function main(argv: string[]): Promise<number> {
     import("./commands/exec.ts"),
     import("./commands/shell.ts"),
     import("./commands/down.ts"),
-    // SRD-TRIAGE-CONSOLE §13 task 6.2. Registered here and not only in
-    // `test/unit/cli.test.ts`'s set: a command module that exists, is tested,
-    // appears in `Docs/SRD.md` §10 and is absent from THIS list is a command an
-    // operator cannot run, and every one of those four surfaces reports it as
-    // present. Task 6.2's own Touches line omitted this file, which is how it
-    // was nearly shipped that way.
-    import("./commands/triage.ts"),
   ]);
   for (const m of modules) m.register(program);
+
+  /**
+   * SRD-TRIAGE-CONSOLE §13 tasks 6.2 and 6.1b — **the one command the uniform
+   * loop above cannot register, and the reason is the point.**
+   *
+   * Task 6.2: registered here and not only in `test/unit/cli.test.ts`'s set. A
+   * command module that exists, is tested, appears in `Docs/SRD.md` §10 and is
+   * absent from this file is a command an operator cannot run, and every one of
+   * those four surfaces reports it as present. Task 6.2's own *Touches* line
+   * omitted `src/cli/index.ts`, which is how it was nearly shipped that way, and
+   * `test/unit/cli.test.ts` now reads this file as TEXT to stop it happening
+   * again (ISC-830).
+   *
+   * Task 6.1b: `register`'s second parameter is REQUIRED, so this command cannot
+   * be registered without a deps factory and `m.register(program)` above would
+   * not compile for it. That is deliberate. The triage console needs one
+   * capability §12's read-only block forbids it to build — the per-observer
+   * dispatch — and making the omission a `tsc` error is what keeps the effect at
+   * the composition root instead of drifting back into the console's own subtree
+   * as a second allowlist entry.
+   *
+   * `productionTriageEffects` is passed as a THUNK, not called: `--status` must
+   * work on a machine with no `fleet.yaml` and no fleet, and the builder loads
+   * the config and resolves a worker.
+   *
+   * Registered LAST, which is where it was in the loop — registration order is
+   * `--help` order.
+   */
+  const triage = await import("./commands/triage.ts");
+  triage.register(program, () => triage.productionTriageDeps(productionTriageEffects));
 
   // No subcommand at all did nothing and reported success. Naming no command
   // is a usage error, and an orchestrator switching on the integer has to be

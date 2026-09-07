@@ -51,6 +51,7 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -68,26 +69,49 @@ import {
   type IncidentSubject,
 } from "../../src/run/triage-incident.ts";
 import { freshDeliveryState, reporterStatus } from "../../src/run/triage-notify.ts";
-import { runTriageActor, TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
-import { runPaths } from "../../src/run/paths.ts";
+import {
+  readTriageActorRecord,
+  runTriageActor,
+  TRIAGE_COLLATOR,
+} from "../../src/run/triage-actor.ts";
+import { inboxTaskPath, runPaths, type RunPaths } from "../../src/run/paths.ts";
+import {
+  DISPATCH_REQUEST_SCHEMA,
+  dispatchRequestPath,
+} from "../../src/run/dispatch-request.ts";
+import { TRIAGE_CONSOLE_ASPECTS } from "../../src/run/task-ids.ts";
+import { TRIAGE_DOCUMENT_SCHEMA } from "../../src/run/triage-document.ts";
 import type { TriagePassOutcome } from "../../src/run/triage-pass.ts";
-import type { SweepProducerDeps } from "../../src/run/triage-envelope.ts";
-import type { TriageService } from "../../src/run/triage-targets.ts";
+import {
+  observerArtifactPath,
+  triageDocumentPath,
+  type SweepDispatch,
+  type SweepProducerDeps,
+} from "../../src/run/triage-envelope.ts";
+import type { NotifyRequest } from "../../src/run/triage-notify.ts";
+import { statusOutcome } from "../../src/run/triage-notify.ts";
+import type { TriageEnvironment, TriageService } from "../../src/run/triage-targets.ts";
 import {
   DEFAULT_CENSUS_DEPS,
-  SWEEP_NOT_WIRED,
+  NO_COLLATOR_RUN,
   buildSweepDriver,
   buildTriageSweepDriver,
   highestSweepNumber,
   incidentCensus,
   inFlightSweep,
+  previousSweepDocument,
+  productionIncidentStore,
   productionTriageDeps,
+  refuseOnExhaustedBudget,
   register,
   renderStatus,
+  resolveCollatorRun,
   resolveSeatRuns,
+  soleEnvironment,
   triageStatus,
   type CensusDeps,
   type TriageCommandDeps,
+  type TriageProductionEffects,
   type TriageStatus,
 } from "../../src/cli/commands/triage.ts";
 
@@ -412,39 +436,16 @@ describe("§6.4: the loop catches a thrown pass and --once does not", () => {
     expect(loops).toBe(0);
   });
 
-  /**
-   * The production deps REFUSE a sweep rather than reporting a success they did
-   * not have. `relay.ts`'s recorded posture: *"a stub that dispatched nothing and
-   * returned success would be indistinguishable from a working relay"*.
+  /*
+   * The two tests that used to sit here asserted that the production `--once`
+   * and `--poll` REFUSED by name (ISC-809, ISC-850). §13 task 6.1b removes the
+   * thing they were about: the production deps now sweep. They are superseded
+   * rather than deleted — see the two blocks at the foot of this file, which
+   * assert the same POSTURE against the new subject: a console that cannot
+   * sweep still refuses by name, and the refusals now name a missing run or a
+   * targets file that declares the wrong number of environments rather than a
+   * missing producer.
    */
-  test("the production pass refuses by name until §7.2's renderer exists", async () => {
-    const { err } = await runTriage(["--once"], productionTriageDeps());
-    expect(err).toBeInstanceOf(CliError);
-    expect((err as CliError).message).toBe(SWEEP_NOT_WIRED);
-    expect(SWEEP_NOT_WIRED).toContain("§7.2");
-  });
-
-  /**
-   * **`--poll` refuses UP FRONT and does not enter a loop around a pass that
-   * cannot work**, which is §6.4's supervision argument turned on this half-built
-   * state. The loop catches a thrown pass and continues *by design*, so a
-   * production `--poll` wired to a refusing pass would log the same refusal every
-   * five minutes for days while the actor record said an actor was armed — *"a
-   * console that dispatched nothing is indistinguishable from one with nothing to
-   * dispatch"*, manufactured by the resilience mechanism rather than prevented by
-   * it.
-   *
-   * Asserted with a wall clock rather than only on the error, because "refused
-   * immediately" and "refused after one 300-second cadence" are the same value
-   * and different behaviours, and it is the second one that would hang a suite.
-   */
-  test("the production loop refuses up front rather than spinning on a refusing pass", async () => {
-    const started = Date.now();
-    const { err } = await runTriage(["--poll", "300"], productionTriageDeps());
-    expect(err).toBeInstanceOf(CliError);
-    expect((err as CliError).message).toBe(SWEEP_NOT_WIRED);
-    expect(Date.now() - started).toBeLessThan(1_000);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -970,39 +971,690 @@ describe("buildTriageSweepDriver: nine members from one dep set", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Task 6.1a — what the refusal now names
+// §13 task 6.1b — the effects are compulsory, and the console sweeps
 // ---------------------------------------------------------------------------
 
-describe("§6.4: the refusal names the ONE thing that is missing", () => {
+/**
+ * The environment this fixture fleet sweeps. `default_window: 2m` sits under the
+ * default `sweep_deadline_s` of 240 (`cadence_s 300 − reserve_s 60`), so the
+ * loader's own cross-file refusals are satisfied by a value rather than by luck.
+ *
+ * THREE services and three observers, one each, because a partition is only
+ * exercised by a fixture it can be wrong about: with one service two of the
+ * three seats would have nothing to be assigned and `checkTriagePartition` would
+ * be satisfied by a request that named one worker.
+ */
+const FIXTURE_TARGETS = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    default_window: 2m
+    services:
+      - {name: routing,        namespace: ns-routing, workload: routing-api, checks: [rollout, logs]}
+      - {name: authorization,  namespace: ns-auth,    workload: authz,       checks: [rollout, logs]}
+      - {name: authentication, namespace: ns-auth,    workload: authn,       checks: [rollout, logs]}
+`;
+
+const FIXTURE_KUBECONFIG = `
+apiVersion: v1
+kind: Config
+contexts:
+  - name: gke-cni-dev
+    context: {cluster: a, user: b}
+current-context: gke-cni-dev
+`;
+
+/** `tri-1`'s partition, fixed so the host's completeness check has one answer. */
+const SLICE_OF: Readonly<Record<string, string>> = {
+  "obs-t1": "routing",
+  "obs-t2": "authorization",
+  "obs-t3": "authentication",
+};
+
+/**
+ * `routing` is the one service that reports badly, and the asymmetry is the
+ * point: a fixture in which every row is `healthy` proves the sweep ran and
+ * nothing about the incident machine, because `advanceIncident` would have
+ * nothing to advance. One unhealthy row makes the first pass `provisional` with
+ * no notification and the second pass notify exactly once — §12's two
+ * highest-value deduplication criteria, reached through the SHIPPED wiring
+ * rather than through a hand-built `TriagePassDeps`.
+ */
+const UNHEALTHY_SERVICE = "routing";
+
+async function writeJson(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(value), "utf8");
+}
+
+/** One §7.5 row, in the shape `TriageDocumentSchema` accepts. */
+function documentRow(service: string, observer: string): Record<string, unknown> {
+  return {
+    service,
+    assessment: service === UNHEALTHY_SERVICE ? "unhealthy" : "healthy",
+    // NON-EMPTY, because §6.7 rule 2 downgrades a `healthy` row with no evidence
+    // to `unevidenced_healthy`, and a fixture that tripped that would be
+    // asserting the downgrade rather than the sweep.
+    coverage: [
+      { channel: "rollout", result: "answered" },
+      { channel: "logs", result: "answered" },
+    ],
+    selector: `app=${service}`,
+    window: "2m",
+    evidence_ref: [`${observer}:observer-ops.json#services[0]`],
+    observer,
+  };
+}
+
+/**
+ * A dispatch that behaves like the fleet it stands in for, and writes every file
+ * the real one would.
+ *
+ * **This is what "a fixture fleet" has to mean if the sweep is to be real.** The
+ * shipped effect writes the durable inbox record, waits for the task to SETTLE,
+ * and leaves behind whatever the worker produced. A fixture that only recorded
+ * the call would leave `highestSweepNumber` at 0 and `inFlightSweep` at null
+ * forever — so a second pass would mint `T-sweep-1` again and the multi-sweep
+ * assertions below would be testing one sweep twice.
+ *
+ * So each call writes three things: the inbox record (the host's), the artifact
+ * the addressed worker's turn would produce, and the settled task record (the
+ * supervisor's). Nothing here touches a container, a socket or a network.
+ */
+function fixtureFleetDispatch(run: RunPaths, log: string[], windows: string[]): SweepDispatch {
+  let sweepId = "";
+  return async ({ taskId, worker, title, brief }) => {
+    expect(title.length).toBeGreaterThan(0);
+    log.push(`${worker}:${taskId}`);
+    await writeJson(inboxTaskPath(run, taskId), { schema: "pifleet.task/v1", task_id: taskId });
+
+    if (worker === TRIAGE_COLLATOR && !taskId.endsWith("-collate")) {
+      /*
+       * Turn one. The window instant is read back OUT OF THE BRIEF rather than
+       * recomputed, which is exactly what §7.2 instructs the collator to do —
+       * *"Copy the sweep id and the window instant from this brief … from here
+       * and from nowhere else"* — and it is why the observer artifacts below
+       * echo a value the HOST minted. A fixture that computed its own would pass
+       * §7.4's freshness gate only by coincidence, and would go on passing it if
+       * the host stopped minting one.
+       */
+      sweepId = taskId;
+      const window = /- observation window opens at: (\S+)/.exec(brief);
+      expect(window, "the sweep brief named no observation window").not.toBeNull();
+      windows.push(window![1]!);
+      await writeJson(dispatchRequestPath(run.root, TRIAGE_COLLATOR, taskId), {
+        schema: DISPATCH_REQUEST_SCHEMA,
+        parent_task_id: taskId,
+        requests: TRIAGE_CONSOLE_ASPECTS.map((s) => ({
+          worker: s.worker,
+          title: `${taskId} ${s.worker}`,
+          brief: `Observe ${SLICE_OF[s.worker]} and report one row per service.`,
+          services: [SLICE_OF[s.worker]!],
+        })),
+      });
+    } else if (worker !== TRIAGE_COLLATOR) {
+      // An observer's turn — §7.4's artifact, echoing both host-minted values.
+      await writeJson(observerArtifactPath(run, worker, taskId), {
+        sweep_id: sweepId,
+        window_opened_at: windows[windows.length - 1],
+        status: "success",
+        services: [
+          {
+            service: SLICE_OF[worker],
+            assessment: documentRow(SLICE_OF[worker]!, worker)["assessment"],
+          },
+        ],
+      });
+    } else {
+      // Turn two — §7.5's collation document.
+      await writeJson(triageDocumentPath(run, taskId), {
+        schema: TRIAGE_DOCUMENT_SCHEMA,
+        sweep_id: sweepId,
+        services: TRIAGE_CONSOLE_ASPECTS.map((s) => documentRow(SLICE_OF[s.worker]!, s.worker)),
+        unaccounted: [],
+      });
+    }
+
+    // The supervisor's settle, which is what makes `SweepDispatch`'s
+    // returns-when-settled contract true of this fixture too.
+    await writeJson(join(run.workersDir, worker, "tasks", `${taskId}.json`), {
+      schema: "pifleet.taskrecord/v1",
+      task_id: taskId,
+      attempt_id: "a1",
+      worker,
+      run_id: run.runId,
+      epoch: 1,
+      verdict: "success",
+      reason: "",
+      settled_at: "2026-09-06T00:00:00Z",
+      tree_hash: null,
+    });
+    return { kind: "accepted" };
+  };
+}
+
+interface FixtureFleet {
+  readonly run: RunPaths;
+  readonly effects: TriageProductionEffects;
+  /** `worker:taskId`, in dispatch order. */
+  readonly dispatched: string[];
+  readonly delivered: NotifyRequest[];
+  /** How many times the saturation probe was reached. MUST stay 0. */
+  readonly probes: { count: number };
+}
+
+/**
+ * A run tree, two tracked triage files, a kubeconfig, and the eight effects the
+ * composition root would otherwise build.
+ *
+ * `env` is the CURRENT `process.env` snapshot, which `beforeEach` has already
+ * pointed at a fresh temp `HOME` and `PIFLEET_RUNS_DIR` — so every incident
+ * record this sweep writes lands under the temp tree and `~/.pifleet` is never
+ * opened.
+ */
+async function fixtureFleet(runId: string): Promise<FixtureFleet> {
+  const base = process.env["HOME"]!;
+  const run = runPaths(runId, process.env["PIFLEET_RUNS_DIR"]!);
+  await mkdir(run.inboxDir, { recursive: true });
+  await writeFile(join(run.root, "run.json"), JSON.stringify({ run_id: runId }));
+  // The collator's directory is what `resolveCollatorRun` scans for.
+  for (const w of [TRIAGE_COLLATOR, ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker)]) {
+    await mkdir(join(run.workersDir, w), { recursive: true });
+  }
+
+  const configDir = join(base, "fleet");
+  await mkdir(join(configDir, "triage"), { recursive: true });
+  await writeFile(join(configDir, "triage", "targets.yaml"), FIXTURE_TARGETS);
+  const kubeconfig = join(configDir, "kubeconfig.yaml");
+  await writeFile(kubeconfig, FIXTURE_KUBECONFIG);
+
+  const dispatched: string[] = [];
+  const delivered: NotifyRequest[] = [];
+  const windows: string[] = [];
+  const probes = { count: 0 };
+
+  const effects: TriageProductionEffects = {
+    dispatchFor: (r, opts) => {
+      // §7.8's `sweep_deadline_s` — `cadence_s − reserve_s` — reaches the effect
+      // as a bound, which is the half of the split task 6.1b decided: the
+      // deadline is the console's decision, the dispatch is the root's
+      // capability.
+      expect(opts.settleDeadlineMs).toBe(240_000);
+      return fixtureFleetDispatch(r, dispatched, windows);
+    },
+    isCollatorLive: async () => true,
+    triageFiles: {
+      targets: join(configDir, "triage", "targets.yaml"),
+      console: join(configDir, "triage", "console.yaml"),
+    },
+    kubeconfigPath: kubeconfig,
+    endpoint: { provider: "omlx", model: "gpt-oss-20b-MXFP4-Q8" },
+    probe: async () => {
+      probes.count += 1;
+      throw new Error("the fixture probe must never be reached — it would be a real POST");
+    },
+    transport: async (req) => {
+      delivered.push(req);
+      return statusOutcome(200, Date.now());
+    },
+    env: { ...process.env },
+  };
+
+  return { run, effects, dispatched, delivered, probes };
+}
+
+describe("§13 task 6.1b: the effects the console may not build are COMPULSORY", () => {
   /**
-   * **The message was narrowed from four missing producers to one missing
-   * effect, and the narrowing is the assertion.** A refusal reading *"four
-   * members have no producer"* after three of them shipped sends the operator to
-   * Phase 5 to write code that is already there; the thing actually missing is a
-   * wiring decision §12's read-only ruling constrains, and the operator has to be
-   * told which.
+   * **The arity IS the guard**, and it is the repository's own instrument for
+   * this exact class: `saturationVerdict` takes its probe as a required
+   * parameter and the suite asserts `saturationVerdict.length`, because *"a
+   * default would drop the arity and redden"*.
    *
-   * Asserted on the phrases rather than by full value, because the sentence is
-   * prose and will be rewritten; what must survive a rewrite is that it names the
-   * dispatch, names where the four producers went, and does not claim they are
-   * absent.
+   * Here the stake is the read-only ruling. The per-observer dispatch is a
+   * capability §12's block forbids this console's own modules to hold; a
+   * defaulted `effectsFor` would let a `productionTriageDeps()` exist somewhere,
+   * and whatever that returned would either refuse (a hole in the wiring layer
+   * §3.3 says the coverage gate keeps catching) or build the effect here (a
+   * second allowlist entry, which ISC-826 refuses).
    */
-  test("the refusal names the dispatch, the module, and the ruling that blocks it", () => {
-    expect(SWEEP_NOT_WIRED).toContain("per-observer dispatch");
-    expect(SWEEP_NOT_WIRED).toContain("triage-envelope.ts");
-    expect(SWEEP_NOT_WIRED).toContain("run/dispatch-request.ts");
-    expect(SWEEP_NOT_WIRED).toContain("§7.2");
-    // And it does NOT still claim the four have no producer.
-    expect(SWEEP_NOT_WIRED).not.toContain("four of the sweep driver's nine members have no");
+  test("productionTriageDeps cannot be called without its effects", () => {
+    expect(productionTriageDeps.length).toBe(1);
   });
 
   /**
-   * **The refusal is honest about `--status`**, which is the field an operator
-   * checks when the sweep half refuses. A message that said the console was
-   * broken would send somebody to restart a process whose only working surface is
-   * the one they were about to read.
+   * The same guard one layer out. `register` defaulted to `productionTriageDeps`
+   * while that took no arguments; it cannot now, and asserting the arity is what
+   * stops a refusing default being reintroduced as a convenience.
+   *
+   * This is also what makes `src/cli/index.ts` register this command by NAME
+   * rather than through its uniform `for (const m of modules) m.register(program)`
+   * loop — see `test/unit/cli.test.ts`.
    */
-  test("the refusal still says --status works", () => {
-    expect(SWEEP_NOT_WIRED).toContain("--status is fully wired");
+  test("register cannot put triage on a program without a deps factory", () => {
+    expect(register.length).toBe(2);
+  });
+
+  /**
+   * **THE ANTI-CRITERION, on the raw bytes.**
+   *
+   * §13 task 6.1b: *"`cli/commands/triage.ts` still names neither `dispatch.ts`
+   * nor `LedgerWriter`, so the capability arrived by injection and not by
+   * import."* `test/unit/triage-readonly.test.ts` checks the second spelling
+   * over COMMENT-STRIPPED source, which is right for a guard that must not fail
+   * on a docblock quoting a verb. This assertion is deliberately stricter — the
+   * file as it sits on disk, comments included — because there is no reason for
+   * this module to utter either token at all, and a prose mention is how the
+   * next reader learns that reaching for it is normal.
+   *
+   * `dispatch-request.ts` is NOT a false positive: "dispatch.ts" is not a
+   * substring of it. That is asserted below rather than assumed, because the
+   * whole probe would be worthless if the two collided.
+   */
+  test("the console's command names neither banned spelling, comments included", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "..", "..", "src", "cli", "commands", "triage.ts"),
+      "utf8",
+    );
+    expect(source).not.toContain("dispatch.ts");
+    expect(source).not.toContain("LedgerWriter");
+    // The premise: the module DOES hold the one permitted exception, so the two
+    // absences above are about the effect and not about a file that imports
+    // nothing.
+    expect(source).toContain("dispatch-request.ts");
+    expect("dispatch-request.ts").not.toContain("dispatch.ts");
+  });
+});
+
+describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => {
+  /**
+   * **The acceptance criterion, end to end through the shipped command.**
+   *
+   * Everything between `pifleet triage --once` and the incident records on disk
+   * is production code: `productionTriageDeps` resolves the run, loads and
+   * fences both tracked files, seeds the cursor from §7.7's record, builds all
+   * nine `SweepDriver` members and runs `triagePass`. The only things injected
+   * are the effects `TriageProductionEffects` names, and each is injected
+   * because building it here would either reach the network or reach a module
+   * §12's read-only block forbids.
+   */
+  test("dispatches the sweep, all three observers and the collation, in order", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-00Z-1111");
+    const deps = productionTriageDeps(async () => fleet.effects);
+    const { err, out } = await runTriage(["--once"], deps);
+
+    expect(err).toBeNull();
+    expect(fleet.dispatched).toEqual([
+      `${TRIAGE_COLLATOR}:T-sweep-1`,
+      "obs-t1:T-sweep-1-slice1",
+      "obs-t2:T-sweep-1-slice2",
+      "obs-t3:T-sweep-1-slice3",
+      `${TRIAGE_COLLATOR}:T-sweep-1-collate`,
+    ]);
+    expect(out).toContain("T-sweep-1: swept 3 observers");
+    // §12's closing anti-criterion: no criterion here requires a real model.
+    expect(fleet.probes.count).toBe(0);
+  });
+
+  /**
+   * The pass's own value, which is what `--json` publishes and what the incident
+   * machine acted on. Asserted separately from the dispatch order because they
+   * fail for different reasons: an empty `dispatched[]` is a partition that was
+   * refused, and an empty `written[]` with a full `dispatched[]` is a sweep
+   * whose artifacts never reached the assessment.
+   */
+  test("a first unhealthy observation is provisional and notifies NOTHING", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-01Z-2222");
+    const outcome = await productionTriageDeps(async () => fleet.effects).pass();
+
+    expect(outcome.kind).toBe("swept");
+    expect([...outcome.dispatched]).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+    // §12: *"A first `unhealthy` observation notifies nothing."*
+    expect(outcome.notifications).toEqual([]);
+    expect(fleet.delivered).toEqual([]);
+    const routing = outcome.written.find(
+      (r) => r.subject.kind === "service" && r.subject.service === UNHEALTHY_SERVICE,
+    );
+    expect(routing?.state).toBe("provisional");
+    // And it really landed on disk, under the temp HOME rather than the
+    // operator's own — `incidentRecordRoot` is `dirname(runsRoot(env))/triage`.
+    const onDisk = incidentRecordPath(
+      { kind: "service", environment: "cni-dev", service: UNHEALTHY_SERVICE },
+      fleet.effects.env,
+    );
+    expect(onDisk.startsWith(process.env["HOME"]!)).toBe(true);
+    expect(readFileSync(onDisk, "utf8")).toContain("provisional");
+  });
+
+  /**
+   * **Two passes over ONE deps object, which is the only way to see the carried
+   * state at all.**
+   *
+   * §12's second incident criterion — *"A second consecutive `unhealthy`
+   * notifies exactly once"* — is a claim about two passes, and it is reached
+   * here through the shipped wiring rather than through a hand-built
+   * `TriagePassDeps`. Three things had to be right for it to pass and each fails
+   * differently: the cursor has to advance (or the second pass mints `T-sweep-1`
+   * again and the epoch fence eats it), the incident record has to be re-loaded
+   * from disk (or the second `unhealthy` is another first one), and the fixture
+   * fleet has to settle its collation (or the second pass SKIPS on an in-flight
+   * sweep and notifies nothing for a reason that looks the same).
+   */
+  test("a second consecutive unhealthy notifies exactly once, and it is delivered", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-02Z-3333");
+    const deps = productionTriageDeps(async () => fleet.effects);
+
+    const first = await deps.pass();
+    expect(first.kind).toBe("swept");
+    expect(first.sweepId).toBe("T-sweep-1");
+
+    const second = await deps.pass();
+    // NOT a skip: the fixture settled the collation, so the sweep is over.
+    expect(second.kind).toBe("swept");
+    expect(second.sweepId).toBe("T-sweep-2");
+    expect(second.notifications.length).toBe(1);
+    expect(second.notifications[0]?.kind).toBe("opened");
+    expect(fleet.delivered.length).toBe(1);
+    // The ntfy adapter carries the announcement title in a HEADER, so this is
+    // the request field an operator's phone actually shows.
+    const title = fleet.delivered[0]?.headers["Title"] ?? "";
+    expect(title).toContain(UNHEALTHY_SERVICE);
+    // The two healthy services stayed quiet, so the one notification is about
+    // the service that reported badly rather than about the sweep happening.
+    expect(title).not.toContain("authentication");
+  });
+
+  /**
+   * **The `--poll` half, driven once with no timer.**
+   *
+   * ISC-809's second clause asserted that the production LOOP refused up front
+   * rather than spinning on a refusing pass. It no longer refuses, so the thing
+   * that needs pinning is that it works — and the loop wiring is a layer with
+   * four members nothing else drives: the collator-liveness binding, the actor
+   * identity (whose `started` capture has two failure shapes, ISC-272), the
+   * cursor writer, and the log. §3.3: *"the command-wiring layer is the layer
+   * the coverage gate keeps catching."*
+   *
+   * **`cadenceS: 1` and an abort inside the pass, so the wait is one second and
+   * is bounded by the assertion below.** §13 task 6.1's *"no test starts the
+   * loop"* forbids a test that WAITS on one — `relay.ts:82-88`'s *"a test that
+   * measures its own timeout"* — and `runTriageActor` checks `isStopped`
+   * immediately after `sleep`, so aborting during the first pass makes the loop
+   * provably terminate after it with no timer outstanding. The `sleep` is the
+   * shipped `setTimeout` rather than an injected one, which is the point: this
+   * test drives the production wiring, not a rebuild of it.
+   *
+   * **One and not zero**, because `TriageActorRecordSchema` requires
+   * `cadence_s` to be POSITIVE and `writeTriageActorRecord` throws on a record
+   * the schema rejects — which `runTriageActor` catches into
+   * `record_write_failed` rather than ending the actor. A zero cadence would
+   * therefore have driven the loop, written nothing, and left every assertion
+   * below testing a record that was never saved. Measured, not assumed: it is
+   * how the first draft of this test failed.
+   */
+  test("--poll's loop runs one pass, persists §7.7's record, and stops on its signal", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-06Z-7777");
+    const deps = productionTriageDeps(async () => fleet.effects);
+    const stop = new AbortController();
+
+    const started = Date.now();
+    const exit = await deps.loop(
+      async () => {
+        const outcome = await deps.pass();
+        stop.abort();
+        return outcome;
+      },
+      { cadenceS: 1, signal: stop.signal },
+    );
+    expect(exit).toEqual({ kind: "stopped", passes: 1 });
+    // One cadence, not two: a loop that ignored the signal would sit here.
+    expect(Date.now() - started).toBeLessThan(10_000);
+    // The sweep really happened through the loop, not only through `--once`.
+    expect(fleet.dispatched.length).toBe(5);
+
+    // §7.7's record, written by the PRODUCTION `saveCursor`.
+    const record = await readTriageActorRecord(fleet.effects.env);
+    expect(record.kind).toBe("ok");
+    if (record.kind !== "ok") return;
+    expect(record.record.run_id).toBe(fleet.run.runId);
+    expect(record.record.sweep_cursor).toBe(1);
+    expect(record.record.pid).toBe(process.pid);
+    expect(record.record.cadence_s).toBe(1);
+    // And the log the actor is required to have — §9.15 surface 2.
+    expect(readFileSync(record.record.log_path, "utf8")).toContain("actor_started");
+  });
+
+  /**
+   * `--json` publishes the pass, and the wire tag is what a machine caller
+   * switches on. Driven through the production deps rather than a stub, because
+   * the shape of a REAL outcome is the thing a consumer will meet.
+   */
+  test("--json emits the pass under its wire tag", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-03Z-4444");
+    const { err, out } = await runTriage(
+      ["--once", "--json"],
+      productionTriageDeps(async () => fleet.effects),
+    );
+    expect(err).toBeNull();
+    const doc = JSON.parse(out) as { schema: string; kind: string; dispatched: string[] };
+    expect(doc.schema).toBe("pifleet.triagepass/v1");
+    expect(doc.kind).toBe("swept");
+    expect(doc.dispatched).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+  });
+});
+
+describe("§13 task 6.1b: what the production deps still REFUSE, and by name", () => {
+  /**
+   * ISC-809's posture, transplanted onto its new subject. The old refusal said
+   * *"this console has no dispatch"*; that is now false. What is still true is
+   * that a console with nowhere to sweep must say so rather than report a sweep
+   * that did not happen — `relay.ts`'s recorded rule, *"a stub that dispatched
+   * nothing and returned success would be indistinguishable from a working
+   * relay"*.
+   *
+   * The premise is asserted first: on a run tree that DOES hold `tri-1` the same
+   * deps sweep. Without it a refusal here would be satisfied by a console that
+   * refuses everything.
+   */
+  test("no run holding tri-1 is a refusal that names the seat and says --status works", async () => {
+    const present = await fixtureFleet("2026-09-06T01-00-04Z-5555");
+    const { err: swept } = await runTriage(
+      ["--once"],
+      productionTriageDeps(async () => present.effects),
+    );
+    expect(swept).toBeNull();
+
+    // The same fixture, pointed at a runs root that holds nothing.
+    const orphaned: TriageProductionEffects = {
+      ...present.effects,
+      env: { ...present.effects.env, PIFLEET_RUNS_DIR: join(process.env["HOME"]!, "no-such-runs") },
+    };
+    const { err: refused } = await runTriage(
+      ["--once"],
+      productionTriageDeps(async () => orphaned),
+    );
+    expect(refused).toBeInstanceOf(CliError);
+    expect((refused as CliError).message).toBe(NO_COLLATOR_RUN);
+    expect((refused as CliError).exitCode).toBe(EXIT.USAGE);
+    expect(NO_COLLATOR_RUN).toContain(TRIAGE_COLLATOR);
+    expect(NO_COLLATOR_RUN).toContain("--status works");
+  });
+
+  /**
+   * `resolveCollatorRun` picks the newest run that materialised `tri-1` and not
+   * simply the newest run — §6.6 layer 4's D4, *"a console is four runs and the
+   * newest is not necessarily the collator's"*.
+   */
+  test("the run is the newest one holding tri-1, not the newest run", async () => {
+    const older = await fixtureFleet("2026-09-06T02-00-00Z-aaaa");
+    // A NEWER run that holds only an observer. Recency alone would pick it.
+    const newer = runPaths("2026-09-06T03-00-00Z-bbbb", process.env["PIFLEET_RUNS_DIR"]!);
+    await mkdir(join(newer.workersDir, "obs-t1"), { recursive: true });
+    expect((await resolveCollatorRun(process.env)).runId).toBe(older.run.runId);
+  });
+
+  /**
+   * **One sweep is ONE environment, and both wrong counts are refused by name.**
+   *
+   * `triage-pass.ts` states the limit — *"`ConsoleHealthFacts` takes a LIST of
+   * environments, which is the seam a multi-environment console would grow
+   * into; nothing in Phase 6 asks for it"* — and a loader that silently took the
+   * first would sweep one environment and report health for a fleet.
+   */
+  test("a targets file that declares zero or two environments is refused by name", () => {
+    const env = (kube: string): TriageEnvironment =>
+      ({ kube_context: kube, default_window: 120, services: [] }) as unknown as TriageEnvironment;
+    expect(soleEnvironment({ "cni-dev": env("a") }).name).toBe("cni-dev");
+    expect(() => soleEnvironment({})).toThrow(/declares 0 environments \(none\)/);
+    expect(() => soleEnvironment({ "cni-dev": env("a"), "cni-verify": env("b") })).toThrow(
+      /declares 2 environments \(cni-dev, cni-verify\)/,
+    );
+  });
+});
+
+describe("§6.10 exit 5: the budget gate is a READ the console makes for itself", () => {
+  const ARGS = { taskId: "T-sweep-1", worker: TRIAGE_COLLATOR, title: "t", brief: "b" };
+
+  /**
+   * With no `budget.json` the gate is transparent, which is the ordinary state:
+   * the file is written by the `--auto` scheduler's `onChange` and by nothing
+   * else, so a console run started by `scripts/triage` has none. **That is
+   * reported as a gap in §6.10's own wiring rather than papered over here** —
+   * this test pins the mapping, not a claim that the notification can fire.
+   */
+  test("no budget file is not a refusal — the dispatch goes through", async () => {
+    const run = runPaths("2026-09-06T04-00-00Z-cccc", process.env["PIFLEET_RUNS_DIR"]!);
+    const calls: string[] = [];
+    const gated = refuseOnExhaustedBudget(run, async (a) => {
+      calls.push(a.taskId);
+      return { kind: "accepted" };
+    });
+    expect(await gated(ARGS)).toEqual({ kind: "accepted" });
+    expect(calls).toEqual(["T-sweep-1"]);
+  });
+
+  /**
+   * A halted budget refuses BEFORE the effect, and the reason carries the three
+   * numbers an operator needs — §6.10: *"the console has a hard lifetime
+   * measured in tokens … **Nothing announces that today**, so this design makes
+   * it a notification."*
+   *
+   * `calls` is asserted EMPTY rather than the outcome asserted alone: the whole
+   * value of a gate is that the thing behind it did not run, and an
+   * implementation that dispatched and then relabelled the result would satisfy
+   * an outcome-only assertion.
+   */
+  test("a halted budget is budget_exhausted, and the dispatch is never reached", async () => {
+    const run = runPaths("2026-09-06T04-00-01Z-dddd", process.env["PIFLEET_RUNS_DIR"]!);
+    await writeJson(run.budgetJson, {
+      schema: "pifleet.budget/v1",
+      run_id: run.runId,
+      tokens_ceiling: 6_000_000,
+      tokens_spent: 6_000_001,
+      halted_at: "2026-09-06T04:00:00.000Z",
+      halted_reason: "tokens_ceiling crossed",
+    });
+    const calls: string[] = [];
+    const gated = refuseOnExhaustedBudget(run, async (a) => {
+      calls.push(a.taskId);
+      return { kind: "accepted" };
+    });
+    const outcome = await gated(ARGS);
+    expect(outcome.kind).toBe("budget_exhausted");
+    expect(outcome.kind === "budget_exhausted" && outcome.reason).toContain(
+      "tokens_ceiling crossed",
+    );
+    expect(outcome.kind === "budget_exhausted" && outcome.reason).toContain("6000001 of 6000000");
+    expect(calls).toEqual([]);
+  });
+
+  /**
+   * A budget that is present and NOT halted is the discriminating case: an
+   * implementation that refused on the file's mere existence would pass both
+   * tests above and stop every sweep on a run that had a ceiling.
+   */
+  test("a present but unhalted budget does not refuse", async () => {
+    const run = runPaths("2026-09-06T04-00-02Z-eeee", process.env["PIFLEET_RUNS_DIR"]!);
+    await writeJson(run.budgetJson, {
+      schema: "pifleet.budget/v1",
+      run_id: run.runId,
+      tokens_ceiling: 6_000_000,
+      tokens_spent: 12,
+      halted_at: null,
+    });
+    expect(await refuseOnExhaustedBudget(run, async () => ({ kind: "accepted" }))(ARGS)).toEqual({
+      kind: "accepted",
+    });
+  });
+});
+
+describe("§6.6 layer 3: the previous sweep's document, and the store that keeps records", () => {
+  test("a console that has never swept has no previous document", async () => {
+    const fleet = await fixtureFleet("2026-09-06T05-00-00Z-ffff");
+    expect(await previousSweepDocument(fleet.run)).toBeNull();
+  });
+
+  /**
+   * After one sweep the previous document is the one THAT sweep collated, found
+   * from the run tree rather than from a cursor — so a restarted actor with an
+   * empty record still carries state forward (D12).
+   */
+  test("after a sweep it is that sweep's collation, read from the run tree", async () => {
+    const fleet = await fixtureFleet("2026-09-06T05-00-01Z-0001");
+    await productionTriageDeps(async () => fleet.effects).pass();
+    const doc = await previousSweepDocument(fleet.run);
+    expect(doc?.sweep_id).toBe("T-sweep-1");
+    expect(doc?.services.map((s) => s.service).sort()).toEqual([
+      "authentication",
+      "authorization",
+      "routing",
+    ]);
+  });
+
+  /**
+   * An unreadable collation is `null` rather than a throw: a worker's malformed
+   * document must not stop the NEXT sweep being dispatched, and `null` is the
+   * value `renderSweepEnvelope` already treats as *"there is no previous
+   * state"*.
+   */
+  test("a malformed collation is null, not a thrown pass", async () => {
+    const fleet = await fixtureFleet("2026-09-06T05-00-02Z-0002");
+    await productionTriageDeps(async () => fleet.effects).pass();
+    await writeFile(triageDocumentPath(fleet.run, "T-sweep-1-collate"), "{not json", "utf8");
+    expect(await previousSweepDocument(fleet.run)).toBeNull();
+  });
+
+  /** The store round-trips through the temp HOME and nothing else. */
+  test("the incident store loads back exactly what it saved", async () => {
+    const env = { ...process.env };
+    const store = productionIncidentStore(env);
+    const subject: IncidentSubject = {
+      kind: "service",
+      environment: "cni-dev",
+      service: "routing",
+    };
+    /*
+     * A MISSING file is a FRESH record, not a refusal, and the distinction is
+     * §7.6's whole posture: *"A console watching nine services has nine missing
+     * files on its first sweep, which is the ordinary state and costs nothing; a
+     * file that exists and cannot be read is a fact about a service whose
+     * incident state is now unknown."* Asserted here so the store's `load` is
+     * pinned as a pass-through of that decision rather than a second one.
+     */
+    const before = await store.load(subject);
+    expect(before.kind).toBe("ok");
+    expect(before.kind === "ok" && before.record.state).toBe("clear");
+    expect(before.kind === "ok" && before.record.sweep_count).toBe(0);
+
+    await store.save({ ...freshIncidentRecord(subject), state: "firing", sweep_count: 7 });
+    const read = await store.load(subject);
+    expect(read.kind).toBe("ok");
+    expect(read.kind === "ok" && read.record.state).toBe("firing");
+    expect(read.kind === "ok" && read.record.sweep_count).toBe(7);
+
+    // And a file that EXISTS and cannot be parsed refuses, which is the arm the
+    // fresh-record default must never absorb.
+    await writeFile(incidentRecordPath(subject, env), "{not json", "utf8");
+    expect((await store.load(subject)).kind).toBe("refused");
   });
 });

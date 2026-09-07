@@ -108,12 +108,55 @@ function commandModulesOnDisk(): string[] {
     .sort();
 }
 
+/**
+ * The one command whose `register` takes a second, REQUIRED argument, and the
+ * deps this file hands it.
+ *
+ * SRD-TRIAGE-CONSOLE §13 task 6.1b makes `triage`'s deps factory compulsory: the
+ * console needs a per-observer dispatch that §12's read-only block forbids its
+ * own modules to build, so `src/cli/index.ts` builds it and hands it in. Every
+ * other command module registers with the program alone.
+ *
+ * **It THROWS rather than returning a stub, and that is the point.** No test in
+ * this file runs a command's action — they inspect the surface — so a factory
+ * that quietly returned something would make "did anything call this?"
+ * unanswerable. Before task 6.1b the helpers below cast every module to
+ * `(p) => void` and called `register(program)`, which for a two-parameter
+ * `register` passes `undefined` and builds a `triage` whose first action throws
+ * a `TypeError`. The cast hid it and no test here could ever see it.
+ */
+const UNUSED_TRIAGE_DEPS = (): never => {
+  throw new Error(
+    "test/unit/cli.test.ts registers commands to inspect the CLI SURFACE and never runs an " +
+      "action; a deps factory being called here means a test started doing something else.",
+  );
+};
+
+/**
+ * Register every {@link SRD_COMMANDS} module onto one program.
+ *
+ * Shared by the three tests below so the `triage` special case is spelled once:
+ * two copies of it is how one of them ends up back on the cast.
+ */
+async function registerAll(program: ReturnType<typeof buildProgram>): Promise<void> {
+  const modules = await Promise.all(
+    SRD_COMMANDS.map(async (n) => [n, await import(`../../src/cli/commands/${n}.ts`)] as const),
+  );
+  for (const [name, m] of modules) {
+    if (name === "triage") {
+      (m as { register: (p: typeof program, d: () => never) => void }).register(
+        program,
+        UNUSED_TRIAGE_DEPS,
+      );
+    } else {
+      (m as { register: (p: typeof program) => void }).register(program);
+    }
+  }
+}
+
 async function registeredCommands(): Promise<Set<string>> {
   const program = buildProgram();
-  const modules = await Promise.all(
-    SRD_COMMANDS.map((n) => import(`../../src/cli/commands/${n}.ts`)),
-  );
-  for (const m of modules) (m as { register: (p: typeof program) => void }).register(program);
+  await registerAll(program);
   return new Set(program.commands.map((c) => c.name()));
 }
 
@@ -132,10 +175,7 @@ describe("CLI surface", () => {
   // Every command supports --json (SRD §10).
   test("every command accepts --json", async () => {
     const program = buildProgram();
-    const modules = await Promise.all(
-      SRD_COMMANDS.map((n) => import(`../../src/cli/commands/${n}.ts`)),
-    );
-    for (const m of modules) (m as { register: (p: typeof program) => void }).register(program);
+    await registerAll(program);
     for (const cmd of program.commands) {
       const flags = cmd.options.map((o) => o.long);
       expect(flags).toContain("--json");
@@ -209,6 +249,43 @@ describe("CLI surface", () => {
       `${missing.join(", ")} registered in no import in src/cli/index.ts. A command module that ` +
         `exists, is tested and has a §10 row is still not runnable until main() imports it.`,
     ).toEqual([]);
+  });
+
+  /**
+   * **The composition root supplies `triage`'s effects, and nothing else may**
+   * (SRD-TRIAGE-CONSOLE §13 task 6.1b).
+   *
+   * The triage console needs one capability §12's read-only block forbids its own
+   * modules to hold — the per-observer dispatch, which lives in a command module
+   * this console may not import and takes a fleet-ledger writer it may not name.
+   * The answer is not a second entry on ISC-826's one-entry allowlist; it is that
+   * `src/cli/index.ts` builds the effect and injects it.
+   *
+   * Two halves, and each fails differently:
+   *
+   *   - **Structural.** `register` takes two parameters, so `main()`'s uniform
+   *     `for (const m of modules) m.register(program)` loop CANNOT register this
+   *     command — the omission is a `tsc` error rather than a runtime surprise.
+   *     A one-parameter `register` here means a refusing or defaulted deps
+   *     factory came back, which puts the hole straight back in the wiring layer
+   *     §3.3 names as the one the coverage gate keeps catching.
+   *   - **Textual**, on ISC-830's own reasoning: importing `index.ts` to inspect
+   *     it would run its registration side effects, so the entry point is read as
+   *     TEXT. `productionTriageEffects` is the builder and it must be passed as a
+   *     THUNK — calling it at registration time would load `fleet.yaml` and
+   *     resolve a worker on every `pifleet --help`, and would make `--status`
+   *     fail on a machine with no fleet.
+   */
+  test("the entry point injects triage's effects rather than defaulting them", async () => {
+    const triage = await import("../../src/cli/commands/triage.ts");
+    expect(triage.register.length).toBe(2);
+    expect(triage.productionTriageDeps.length).toBe(1);
+
+    const entry = readFileSync(join(import.meta.dir, "..", "..", "src", "cli", "index.ts"), "utf8");
+    expect(entry).toContain("productionTriageDeps(productionTriageEffects)");
+    // A THUNK: the builder's name appears without a call at the injection site.
+    expect(entry).not.toContain("productionTriageDeps(await productionTriageEffects()");
+    expect(entry).not.toContain("productionTriageDeps(productionTriageEffects())");
   });
 });
 
