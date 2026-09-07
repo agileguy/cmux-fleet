@@ -410,6 +410,25 @@ export async function writeRelayRecord(path: string, record: RelayRecord): Promi
 export const RELAY_ABANDON_PASSES = 5;
 
 /**
+ * Which script an operator re-runs, and which document explains why, per console.
+ *
+ * **This table exists because the sentence was wrong for a year of one console
+ * and then shipped to a second.** The abandonment reason named `scripts/review`
+ * and `SRD-REVIEW-CONSOLE` unconditionally, so a triage actor that reaped itself
+ * told the operator to re-run the wrong script and read the wrong document —
+ * cosmetic, in that the structured log fields were right either way, and exactly
+ * the kind of cosmetic that wastes somebody's evening at 3 a.m.
+ *
+ * A `Record<ConsoleName, …>` rather than a `switch`: a third console is a
+ * `tsc --noEmit` error on this literal rather than a silent fall-through to
+ * whichever arm was written first, which is the failure this table is repairing.
+ */
+const ABANDON_PROSE: Record<ConsoleName, { script: string; srd: string }> = {
+  review: { script: "scripts/review", srd: "SRD-REVIEW-CONSOLE §6.5, §9 Q4" },
+  triage: { script: "scripts/triage", srd: "SRD-TRIAGE-CONSOLE §6.4, §9 Q4" },
+};
+
+/**
  * The watch, as a state machine with no I/O so the policy is testable without a
  * fleet. The caller supplies the observation; this decides what it means.
  */
@@ -430,19 +449,23 @@ export class ConsoleWatch {
    * answered once is a console that exists, and carrying a partial count forward
    * would let a run of unrelated transient failures accumulate into an exit.
    */
-  observe(collatorIsLive: boolean, opts: { worker: string; runId: string }): string | null {
+  observe(
+    collatorIsLive: boolean,
+    opts: { worker: string; runId: string; console: ConsoleName },
+  ): string | null {
     if (collatorIsLive) {
       this.consecutiveGone = 0;
       return null;
     }
     this.consecutiveGone += 1;
     if (this.consecutiveGone < this.tolerance) return null;
+    const { script, srd } = ABANDON_PROSE[opts.console];
     return (
       `${opts.worker} has not been live in run ${opts.runId} for ${this.consecutiveGone} ` +
-      `consecutive passes, so the console this relay was started for is gone. Exiting rather ` +
-      `than polling an inbox that can never answer: a relay attached to a dead console reports ` +
-      `nothing forever and makes the next \`scripts/review\` believe an actor is already ` +
-      `serving the new one (SRD-REVIEW-CONSOLE §6.5, §9 Q4)`
+      `consecutive passes, so the console this actor was started for is gone. Exiting rather ` +
+      `than polling an inbox that can never answer: an actor attached to a dead console reports ` +
+      `nothing forever and makes the next \`${script}\` believe an actor is already ` +
+      `serving the new one (${srd})`
     );
   }
 }

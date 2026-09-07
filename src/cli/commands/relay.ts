@@ -952,7 +952,7 @@ export function register(program: Command): void {
         try {
           emit(await relayPass({ run, fanOut, cache, ledger, roster: spec.roster }));
           const live = await productionRunSources.isLiveWorker(run, collator);
-          const abandon = watch.observe(live, { worker: collator, runId: run.runId });
+          const abandon = watch.observe(live, { worker: collator, runId: run.runId, console: "review" });
           if (abandon !== null) {
             process.stderr.write(`pifleet relay: ${abandon}\n`);
             await ledger

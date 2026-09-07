@@ -347,7 +347,7 @@ describe("§6.10 — the console does not adopt a workspace it did not create", 
  * own failure shape, reached through the mechanism built to close it.
  */
 describe("the watch — the actor's lifetime is bounded by its console's", () => {
-  const AT = { worker: "col-1", runId: "r-1" };
+  const AT = { worker: "col-1", runId: "r-1", console: "review" as const };
 
   test("a live console is never abandoned, however long it runs", () => {
     const w = new ConsoleWatch(3);
@@ -389,6 +389,46 @@ describe("the watch — the actor's lifetime is bounded by its console's", () =>
     const w = new ConsoleWatch();
     for (let i = 1; i < RELAY_ABANDON_PASSES; i += 1) expect(w.observe(false, AT)).toBeNull();
     expect(w.observe(false, AT)).not.toBeNull();
+  });
+
+  /**
+   * §13 task 6.3a — the abandonment sentence names the console it was started
+   * for, and this asserts BOTH so the fix cannot be half-made.
+   *
+   * The sentence used to say `scripts/review` and `SRD-REVIEW-CONSOLE`
+   * unconditionally, so a triage actor that reaped itself sent the operator to
+   * the wrong script and the wrong document. Task 6.3 found it and could not fix
+   * it — the file was not in its slice.
+   *
+   * **A fixture that only checked triage would pass an implementation that broke
+   * review**, which is the whole reason both are asserted here, together with
+   * the cross-assertions: each console's reason must NOT carry the other's
+   * script. A single-console check passes a table whose two rows are identical.
+   */
+  test("the reason names the console it was started for, for BOTH consoles", () => {
+    const reasonFor = (console_: "review" | "triage") => {
+      const w = new ConsoleWatch(1);
+      const reason = w.observe(false, { worker: "col-1", runId: "r-1", console: console_ });
+      expect(reason, `${console_} produced no reason at tolerance 1`).not.toBeNull();
+      return reason!;
+    };
+
+    const review = reasonFor("review");
+    expect(review).toContain("scripts/review");
+    expect(review).toContain("SRD-REVIEW-CONSOLE");
+    expect(review).not.toContain("scripts/triage");
+    expect(review).not.toContain("SRD-TRIAGE-CONSOLE");
+
+    const triage = reasonFor("triage");
+    expect(triage).toContain("scripts/triage");
+    expect(triage).toContain("SRD-TRIAGE-CONSOLE");
+    expect(triage).not.toContain("scripts/review");
+    expect(triage).not.toContain("SRD-REVIEW-CONSOLE");
+
+    // The premise that makes the four negatives above meaningful: the two
+    // reasons are genuinely different strings, so a table with two identical
+    // rows cannot satisfy this test by accident.
+    expect(review).not.toBe(triage);
   });
 });
 

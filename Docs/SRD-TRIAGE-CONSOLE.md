@@ -3167,7 +3167,7 @@ and SRD-FLEET-PM-001 D7's.
 - **6.3** The actor record, log and lock (per-console, from Phase 2.3) plus a `ConsoleWatch` over
   `tri-1`. Touches: `src/run/triage-actor.ts` (new), `test/unit/triage-actor.test.ts` (new).
   *Acceptance: §12's exit-when-the-console-is-gone criterion and its streak-reset mirror both pass.*
-- **6.3a** **The abandonment sentence is review-console prose, found 2026-09-06 by task 6.3.**
+- **6.3a** **The abandonment sentence is review-console prose, found 2026-09-06 by task 6.3. DONE 2026-09-06** (ISC-780; a `Record<ConsoleName, …>` rather than a `switch`, so a third console is a `tsc` error rather than a silent fall-through).**
   `ConsoleWatch.observe`'s exit reason (`src/run/console-relay.ts:437-446`) hard-codes
   `scripts/review` and `SRD-REVIEW-CONSOLE §6.5, §9 Q4`, so a triage actor that reaps itself cites the
   wrong console and the wrong document on 6.2's stderr. Task 6.3's log event is unaffected — it

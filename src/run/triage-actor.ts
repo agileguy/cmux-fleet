@@ -583,7 +583,7 @@ export async function runTriageActor(
       await deps.log({ kind: "console_unobservable", worker: TRIAGE_COLLATOR, reason: why(err) });
     }
     if (live !== null) {
-      const abandon = watch.observe(live, { worker: TRIAGE_COLLATOR, runId });
+      const abandon = watch.observe(live, { worker: TRIAGE_COLLATOR, runId, console: "triage" });
       if (abandon !== null) {
         await deps.log({
           kind: "console_gone",
