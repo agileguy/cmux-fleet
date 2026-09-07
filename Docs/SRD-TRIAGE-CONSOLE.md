@@ -3305,7 +3305,7 @@ and SRD-FLEET-PM-001 D7's.
   cannot reach the next sweep's brief as prose, on a fixture where the previous report contains a
   marker string.*
 - **6.1b** **Construct the per-observer dispatch at the COMPOSITION ROOT and inject it. RULED
-  2026-09-06; this is the last thing between the console and a real sweep.** Task 6.1a shipped four of
+  2026-09-06, DONE 2026-09-07 — `pifleet triage --once` performs a real sweep (ISC-882); this is the last thing between the console and a real sweep.** Task 6.1a shipped four of
   five producers and found the fifth structurally blocked rather than merely unwritten:
   `sendTaskEnvelope` lives in `src/cli/commands/dispatch.ts` and takes a ledger writer, and
   `test/unit/triage-readonly.test.ts` bans **both** that module and the `LedgerWriter` token from
@@ -3319,7 +3319,7 @@ and SRD-FLEET-PM-001 D7's.
   is the point.
   Touches: `src/cli/index.ts`, `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`,
   `test/unit/cli.test.ts`.
-  *Acceptance: `productionTriageDeps()` no longer refuses, and `pifleet triage --once` performs one
+  *Acceptance: `productionTriageDeps(effects)` no longer refuses (**the empty parens this line used to carry are now a COMPILE ERROR, which is the structural half of the task rather than a typo — ISC-880**), and `pifleet triage --once` performs one
   real sweep against a fixture fleet; `test/unit/triage-readonly.test.ts` stays green **with the
   permitted-exception list still at ONE entry**; and the anti-criterion — `cli/commands/triage.ts`
   still names neither `dispatch.ts` nor `LedgerWriter`, so the capability arrived by injection and not
@@ -3368,6 +3368,37 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: one exported table; `unreachableFrom` and `SaturationOutcome.saturated` both derived
   from it or asserted equal to it over every member of `SATURATION_VERDICTS`; and no second spelling
   left behind, asserted on comment-stripped source.*
+- **6.3b** **Wire the actor lock. Added 2026-09-07 by task 6.1b.** `acquireTriageActorLock` shipped
+  with task 6.3 and **nothing calls it** — `runTriageActor` does not take it. So two
+  `pifleet triage --poll` processes would both sweep the same run, which is §6.4's *"two concurrent
+  sweeps against one control plane"* reached from the other side: the console causing the overload it
+  exists to notice, this time by being started twice. Touches: `src/run/triage-actor.ts`,
+  `src/cli/commands/triage.ts`, their tests.
+  *Acceptance: a second `--poll` against a held lock refuses by name and dispatches nothing; and the
+  anti-twin — a lock left by a DEAD pid does not refuse, or the remedy for a crash becomes an
+  operator deleting a file nobody documented.*
+- **6.8** **Give `budget_exhausted` a producer. Added 2026-09-07; ISC-891 is filed OPEN against it.**
+  §6.10 promises *"Nothing announces that today, so this design makes it a notification"*, and the
+  notification cannot fire: `run.budgetJson` is written by exactly one thing in the repository, the
+  `--auto` scheduler's `onChange`, so a console run started by `scripts/triage` never has the file and
+  `halted_at` is never set. **The whole chain below it is therefore unreachable in production** —
+  `SweepDispatchOutcome`'s arm, the pass's handling, §6.8a's console-health kind and the renderer's
+  case — while every test over it passes. Touches: `src/run/triage-actor.ts` or
+  `src/cli/commands/triage.ts` for console-side accounting, and their tests.
+  *Acceptance: a console run whose spend crosses `run.budget.tokens_ceiling` produces ONE
+  `budget_exhausted` console-health announcement; and the anti-twin, that a run under the ceiling
+  produces none — because a producer that always halts satisfies the first alone.*
+- **6.9** **Let §7.8's `cadence_s` reach `--poll`. Added 2026-09-07 by task 6.1b.** §7.8 calls
+  `--poll` *"an override for a hand-run"*, which presupposes the file is the source. It is not:
+  `DEFAULT_POLL_S = 300` is the fallback when `--poll` is absent, and the action computes the poll
+  interval before the loop is reached, so an operator setting `cadence_s: 600` still gets 300.
+  **They coincide at the schema default, which is exactly what makes it silent.** Touches:
+  `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`.
+  *Acceptance: a `console.yaml` with `cadence_s: 600` and no `--poll` polls at 600, asserted by value
+  at the seam; `--poll 120` overrides it; and the premise that the two numbers DIFFER, since a fixture
+  at the default cannot tell the file from the fallback.*
+  *This needs `TriageCommandDeps.loop`'s `cadenceS` to become nullable so "not overridden" is
+  spellable — a contract change task 6.1b deliberately left alone in a round about the dispatch effect.*
 - **6.5** Recycling (§6.6 layer 4): **four** `down`s and four `up`s between sweeps at
   `recycle_after_sweeps`, per-seat boundary condition, sweep counter carried across. Touches:
   `src/run/triage-actor.ts`, `test/unit/triage-actor.test.ts`, `ISA.md`.

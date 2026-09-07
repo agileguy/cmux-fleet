@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 15,
+  "current_round": 16,
   "completed_phases": [
     0,
     1,
@@ -477,8 +477,40 @@
           "test/unit/triage-incident.test.ts"
         ]
       },
+      "verified_commit": "6a59ab3",
+      "note": "6.1b is the last thing between the console and a real sweep. eng-2 gets FIVE files because 6.4b is one ownership unit under the pinned-invariant rule \u2014 VERDICT_PAIR spans triage-incident.test.ts and unreachableFrom spans triage-pass.ts, and consolidating them into triage-verdict.ts requires all three. Deliberately over the four-file guideline, and said so.",
+      "graded": "2026-09-07 \u2014 eng-2 ISC-869 closed + ISC-900..903 + ISC-862 rewritten; eng-1 ISC-880..890 + ISC-809/850 superseded, ISC-891 filed OPEN. Orchestrator: resolved ISC-889's unexplained survivor and fixed the degenerate fixture behind it.",
+      "orchestrator_error": "I restored a 'left-applied mutant' that was in fact the agent's background battery MID-FLIGHT. An agent's background job can outlive its turn limit; the tree being dirty after a stall is not proof of abandonment. Cost: one mutant's result was suspect until I re-ran it. Check for a running battery before restoring under an agent.",
+      "resumes_used": 1
+    },
+    {
+      "round": 16,
+      "tasks": {
+        "eng-1": [
+          "6.5",
+          "6.3b"
+        ],
+        "eng-2": [
+          "6.4a",
+          "6.2a"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/run/triage-actor.ts",
+          "test/unit/triage-actor.test.ts"
+        ],
+        "eng-2": [
+          "src/cli/commands/triage.ts",
+          "test/unit/triage-command.test.ts",
+          "src/run/triage-pass.ts",
+          "test/unit/triage-pass.test.ts",
+          "src/run/triage-incident.ts",
+          "test/unit/triage-incident.test.ts"
+        ]
+      },
       "verified_commit": null,
-      "note": "6.1b is the last thing between the console and a real sweep. eng-2 gets FIVE files because 6.4b is one ownership unit under the pinned-invariant rule \u2014 VERDICT_PAIR spans triage-incident.test.ts and unreachableFrom spans triage-pass.ts, and consolidating them into triage-verdict.ts requires all three. Deliberately over the four-file guideline, and said so."
+      "note": "6.5 and 6.3b are both triage-actor.ts \u2014 one slice. 6.4a and 6.2a both touch triage.ts + triage-command.test.ts, so they pair; 6.2a adds the incident pair and 6.4a the pass pair. eng-2 gets six files as one unit and it is said out loud. 6.8 and 6.9 held for round 17: 6.9 needs a TriageCommandDeps contract change that would collide with 6.4a."
     }
   ],
   "status": "in_progress_round_9",
@@ -558,6 +590,13 @@
     "6.4a \u2014 carry an abandoned sweep to collation (ISC-868)",
     "6.2a \u2014 move incidentCensus",
     "6.5 \u2014 recycling (\u00a76.6 layer 4)",
+    "6.7 \u2014 wire the actor into scripts/triage",
+    "5.8 \u2014 the bounded prose field + roles/triage.md",
+    "Phase 7 \u2014 7.1 to 7.4 close the branch"
+  ],
+  "round_17_candidates": [
+    "6.8 \u2014 a producer for budget_exhausted (ISC-891)",
+    "6.9 \u2014 cadence_s reaches --poll",
     "6.7 \u2014 wire the actor into scripts/triage",
     "5.8 \u2014 the bounded prose field + roles/triage.md",
     "Phase 7 \u2014 7.1 to 7.4 close the branch"

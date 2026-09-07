@@ -74,7 +74,7 @@ import {
   runTriageActor,
   TRIAGE_COLLATOR,
 } from "../../src/run/triage-actor.ts";
-import { inboxTaskPath, runPaths, type RunPaths } from "../../src/run/paths.ts";
+import { inboxTaskPath, runPaths, type RunPaths, runIdsAscending } from "../../src/run/paths.ts";
 import {
   DISPATCH_REQUEST_SCHEMA,
   dispatchRequestPath,
@@ -1490,6 +1490,21 @@ describe("§13 task 6.1b: what the production deps still REFUSE, and by name", (
     // A NEWER run that holds only an observer. Recency alone would pick it.
     const newer = runPaths("2026-09-06T03-00-00Z-bbbb", process.env["PIFLEET_RUNS_DIR"]!);
     await mkdir(join(newer.workersDir, "obs-t1"), { recursive: true });
+    // `run.json` is not decoration: `runIdsAscending` skips any directory
+    // without one, so a bare `mkdir` is invisible to the scan and this fixture
+    // would not contain a newer run at all.
+    await writeFile(join(newer.root, "run.json"), JSON.stringify({ run_id: newer.runId }));
+
+    // THE PREMISE, asserted a step earlier and the reason this test is worth
+    // anything. Without it the fixture passed for the wrong reason: the newer
+    // run was skipped by the scan BOTH implementations use, so a mutant that
+    // took the newest run outright survived — reachable, compiled, and
+    // indistinguishable, because the candidate it would have wrongly picked was
+    // never a candidate. Measured 2026-09-07; the mutant dies now.
+    const candidates = await runIdsAscending(process.env["PIFLEET_RUNS_DIR"]!);
+    expect(candidates).toContain(newer.runId);
+    expect(candidates[candidates.length - 1]).toBe(newer.runId);
+
     expect((await resolveCollatorRun(process.env)).runId).toBe(older.run.runId);
   });
 
