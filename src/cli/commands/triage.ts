@@ -113,6 +113,11 @@ import {
   readDispatchRequest,
 } from "../../run/dispatch-request.ts";
 import { partitionFromRequests } from "../../run/triage-partition.ts";
+import {
+  sweepProducers,
+  type SweepProducerDeps,
+  type SweepProducers,
+} from "../../run/triage-envelope.ts";
 import { triagePass, type InFlightSweep, type SweepDriver, type TriagePassOutcome } from "../../run/triage-pass.ts";
 import {
   CONSOLE_HEALTH_KINDS,
@@ -442,48 +447,44 @@ export function renderStatus(status: TriageStatus): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The four {@link SweepDriver} members that need a producer NOBODY HAS WRITTEN,
- * taken as a port rather than faked.
+ * The four {@link SweepDriver} members this module does not derive from the run
+ * tree — **and as of task 6.1a they have a producer.**
  *
  * §7.2's sweep envelope, §7.4's `observer-ops.json` reader, SRD-OBSERVER-001
  * §9.3's `blocked` extractor and a path-reading wrapper around
- * `parseTriageDocument` (which takes text only, deliberately) do not exist in
- * `src/` — measured 2026-09-06 by walking every export of `triage-targets.ts`,
- * `triage-document.ts` and `triage-verdict.ts`. §13 assigns them to no task in
- * Phase 5 or Phase 6.
+ * `parseTriageDocument` (which takes text only, deliberately) existed nowhere in
+ * `src/` when task 6.2 walked every export of `triage-targets.ts`,
+ * `triage-document.ts` and `triage-verdict.ts`. They now live in
+ * `run/triage-envelope.ts`, and {@link sweepProducers} assembles all four.
  *
- * **They are a port here and not an inline implementation, and `relay.ts`'s own
- * recorded posture is the reason**: *"There is deliberately no fallback
- * implementation. A stub that dispatched nothing and returned success would be
- * indistinguishable from a working relay on every observable this console has"* —
- * which is §6.4's failure shape, *"a console that dispatched nothing is
- * indistinguishable from one with nothing to dispatch"*, reached through the very
- * command written to prevent it.
+ * **An ALIAS of {@link SweepProducers} rather than a second interface with the
+ * same four members.** Two structurally identical types in two files are one
+ * type that nothing keeps identical: the day `SweepDriver` grows a member, a
+ * separate spelling here would still compile against a producer that had not
+ * grown it, and the failure would be a member silently supplied by neither. The
+ * alias makes that a `tsc` error at the assignment below.
  *
- * Two further reasons the envelope in particular must not be improvised here.
- * §7.2 gives it a security contract — no credential, no absolute host path, no
- * raw command, and above all *"the contents of a previous worker's report as
- * instruction"*, which §12.6 makes a criterion — and an envelope written in a CLI
- * command is an envelope with no test of its own. And §12's mirror anti-criterion
- * for `scripts/triage` states the layering rule this obeys: a decision belongs in
- * an `src/` export that something can pin, not in the layer that types the verb.
+ * §7.2's security contract is the reason the envelope is not improvised in this
+ * file — no credential, no absolute host path, no raw command, and above all
+ * *"the contents of a previous worker's report as instruction"*, which §12.6
+ * makes a criterion — and an envelope written in a CLI command is an envelope
+ * with no test of its own. §12's mirror anti-criterion for `scripts/triage`
+ * states the same layering rule one level down: a decision belongs in an `src/`
+ * export something can pin, not in the layer that types the verb.
  *
- * Keeping the DISPATCH here too is deliberate and is the read-only block's doing.
- * §12 permits this console exactly ONE mutating exception — its dispatch path —
- * and the 2026-09-06 RULING says *"a second entry would be the tell that this
- * ruling was quietly reversed"*. The production dispatch is `sendTaskEnvelope`,
- * which requires a `LedgerWriter`; taking it as an injected port instead of a
- * static import means this module's own import closure reaches no mutating verb
- * and no ledger writer at all, which is a strictly stronger posture than the one
- * the guard demands and costs nothing to hold until §7.2's renderer lands beside
- * it.
+ * **What still has no producer is the one EFFECT the four are built over**, and
+ * it is the read-only block that stops it living here. §12 permits this console
+ * exactly ONE mutating exception — `run/dispatch-request.ts` — and the
+ * 2026-09-06 RULING says *"a second entry would be the tell that this ruling was
+ * quietly reversed"*. The production dispatch is `sendTaskEnvelope`, which sits
+ * in `cli/commands/dispatch.ts` and takes a `LedgerWriter`; both are banned from
+ * this console's subtree by name in `test/unit/triage-readonly.test.ts`, and this
+ * file is in that subtree. So `SweepDispatch` stays injected, this module's
+ * import closure still reaches no mutating verb and no ledger writer, and who
+ * constructs the production effect is recorded against §13 rather than answered
+ * by widening the allowlist. See {@link SWEEP_NOT_WIRED}.
  */
-export interface SweepBriefing {
-  readonly openSweep: SweepDriver["openSweep"];
-  readonly dispatchObserver: SweepDriver["dispatchObserver"];
-  readonly join: SweepDriver["join"];
-  readonly collate: SweepDriver["collate"];
-}
+export type SweepBriefing = SweepProducers;
 
 /**
  * §6.6 layer 2's counter, re-derived from the run tree.
@@ -613,7 +614,7 @@ export async function readSweepPartition(
   return read.kind === "ok" ? partitionFromRequests(read.request.requests) : [];
 }
 
-/** The run-tree half, plus the four members {@link SweepBriefing} still owes. */
+/** The run-tree half, plus the four members {@link SweepBriefing} supplies. */
 export function buildSweepDriver(
   run: RunPaths,
   briefing: SweepBriefing,
@@ -629,6 +630,24 @@ export function buildSweepDriver(
     join: briefing.join,
     collate: briefing.collate,
   };
+}
+
+/**
+ * All nine members, from one dep set — the composition point a production
+ * `--once` needs and the ONE argument it is still missing.
+ *
+ * **The run is taken from `producers.run` rather than as a second parameter**,
+ * and that is §6.4's own argument at a smaller scale. Two values that must agree
+ * about a run id is *"a new failure mode with no observable"*: a caller handed
+ * both could pin the run-tree half to one run and the producers to another, and
+ * the symptom would be a sweep that dispatches into a run nothing joins from.
+ * One run, one source, no way to spell the disagreement.
+ */
+export function buildTriageSweepDriver(
+  producers: SweepProducerDeps,
+  env: Record<string, string | undefined> = process.env,
+): SweepDriver {
+  return buildSweepDriver(producers.run, sweepProducers(producers), env);
 }
 
 // ---------------------------------------------------------------------------
@@ -661,20 +680,29 @@ export interface TriageCommandDeps {
 }
 
 /**
- * The sentence a `--once` or `--poll` gets until §7.2's renderer exists.
+ * The sentence a `--once` or `--poll` gets, NARROWED by task 6.1a from four
+ * missing producers to one missing effect.
  *
  * Named producers and named SRD sections, because the operator reading it is the
  * person who has to decide whether the console is broken or unfinished, and those
- * are different things to go and do.
+ * are different things to go and do. The narrowing matters for the same reason:
+ * *"four members have no producer"* sent a reader to Phase 5, and the one thing
+ * actually missing is a wiring decision §12's read-only ruling constrains.
  */
 export const SWEEP_NOT_WIRED =
-  "pifleet triage cannot sweep yet: four of the sweep driver's nine members have no producer in " +
-  "src/ — SRD-TRIAGE-CONSOLE §7.2's sweep-envelope renderer (openSweep), §7.4's observer-ops.json " +
-  "reader and SRD-OBSERVER-001 §9.3's blocked extractor (join), a path-reading wrapper around " +
-  "parseTriageDocument (collate), and the per-observer dispatch. §13 assigns them to no task. " +
-  "--status is fully wired and reads the actor record and the incident record set. Refusing " +
-  "rather than sweeping nothing and reporting success: a console that dispatched nothing must not " +
-  "be indistinguishable from one with nothing to dispatch (§6.4).";
+  "pifleet triage cannot sweep yet, and exactly one thing is missing. SRD-TRIAGE-CONSOLE §7.2's " +
+  "sweep-envelope renderer, §7.4's observer-ops.json reader, SRD-OBSERVER-001 §9.3's blocked " +
+  "extractor and the path-reading wrapper around parseTriageDocument now all live in " +
+  "src/run/triage-envelope.ts, and sweepProducers assembles all four of SweepDriver's remaining " +
+  "members out of them (task 6.1a). What has no producer is the single EFFECT those four are " +
+  "built over: the per-observer dispatch. sendTaskEnvelope lives in cli/commands/dispatch.ts and " +
+  "takes a ledger writer, and §12's read-only block bans both from this console's own subtree with " +
+  "exactly ONE permitted exception, run/dispatch-request.ts, which the 2026-09-06 ruling says must " +
+  "not gain a second entry. So the effect has to be constructed outside src/run/triage-* and " +
+  "outside this file, and §13 assigns that to no task. --status is fully wired and reads the actor " +
+  "record and the incident record set. Refusing rather than sweeping nothing and reporting " +
+  "success: a console that dispatched nothing must not be indistinguishable from one with nothing " +
+  "to dispatch (§6.4).";
 
 /**
  * The loop, wired to {@link runTriageActor} exactly as production wires it.

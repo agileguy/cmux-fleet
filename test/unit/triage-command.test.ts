@@ -71,10 +71,13 @@ import { freshDeliveryState, reporterStatus } from "../../src/run/triage-notify.
 import { runTriageActor, TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
 import { runPaths } from "../../src/run/paths.ts";
 import type { TriagePassOutcome } from "../../src/run/triage-pass.ts";
+import type { SweepProducerDeps } from "../../src/run/triage-envelope.ts";
+import type { TriageService } from "../../src/run/triage-targets.ts";
 import {
   DEFAULT_CENSUS_DEPS,
   SWEEP_NOT_WIRED,
   buildSweepDriver,
+  buildTriageSweepDriver,
   highestSweepNumber,
   incidentCensus,
   inFlightSweep,
@@ -882,5 +885,124 @@ describe("buildSweepDriver", () => {
       process.env,
     );
     expect(await driver.readPartition("T-sweep-1")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 6.1a — the composition point, and the ONE argument it is still missing
+// ---------------------------------------------------------------------------
+
+describe("buildTriageSweepDriver: nine members from one dep set", () => {
+  const SERVICES: readonly TriageService[] = [
+    {
+      name: "routing",
+      namespace: "aodapn-routing",
+      workload: "routing-api",
+      checks: ["rollout", "logs"],
+      window: null,
+    },
+  ];
+
+  function producerDeps(run: ReturnType<typeof runPaths>, sent: string[]): SweepProducerDeps {
+    return {
+      run,
+      environment: "cni-dev",
+      services: SERVICES,
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(`${args.worker}:${args.taskId}`);
+        return { kind: "accepted" };
+      },
+    };
+  }
+
+  /**
+   * **ALL NINE, by name.** §13 task 6.1a's whole subject is that four of them
+   * were a refusing port; asserting the members by name rather than counting
+   * them is what makes a tenth — or a quietly dropped fourth — fail here, on
+   * `monitor-readonly.test.ts:363-369`'s rule.
+   */
+  test("every SweepDriver member is present and callable", async () => {
+    const run = await seedRun("2026-09-06T00-00-20Z-5555");
+    const sent: string[] = [];
+    const driver = buildTriageSweepDriver(producerDeps(run, sent), process.env);
+    expect(Object.keys(driver).sort()).toEqual([
+      "collate",
+      "dispatchObserver",
+      "highestSweepNumber",
+      "inFlight",
+      "join",
+      "openSweep",
+      "readPartition",
+      "runs",
+    ]);
+    // Eight keys, nine members: `SweepDriver` counts `inFlight` and
+    // `highestSweepNumber` separately from the six below. Driven rather than
+    // merely present, because a member assigned `undefined` also has a key.
+    expect(await driver.openSweep("T-sweep-3", "2026-09-06T12:00:00.000Z")).toEqual({
+      kind: "opened",
+    });
+    expect(await driver.join("T-sweep-3")).toEqual({ artifacts: [], blocked: [] });
+    expect((await driver.collate("T-sweep-3")).document).toBeNull();
+    expect(await driver.readPartition("T-sweep-3")).toEqual([]);
+    expect(await driver.highestSweepNumber()).toBe(0);
+    expect(await driver.inFlight()).toBeNull();
+    expect(sent).toEqual(["tri-1:T-sweep-3", "tri-1:T-sweep-3-collate"]);
+  });
+
+  /**
+   * The run comes from ONE place. §6.4 refuses two processes because *"two
+   * processes that must agree about a run id is a new failure mode with no
+   * observable"*, and two PARAMETERS that must agree is the same hazard with a
+   * shorter fuse — the run-tree half pinned to one run and the producers to
+   * another dispatches into a run nothing joins from.
+   */
+  test("the run-tree half and the producers cannot be pinned to different runs", async () => {
+    const run = await seedRun("2026-09-06T00-00-21Z-6666");
+    await inboxTask(run, "T-sweep-9");
+    const sent: string[] = [];
+    const driver = buildTriageSweepDriver(producerDeps(run, sent), process.env);
+    // The run-tree member reads the run the producers were built over, and there
+    // is no second argument that could have said otherwise.
+    expect(await driver.highestSweepNumber()).toBe(9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 6.1a — what the refusal now names
+// ---------------------------------------------------------------------------
+
+describe("§6.4: the refusal names the ONE thing that is missing", () => {
+  /**
+   * **The message was narrowed from four missing producers to one missing
+   * effect, and the narrowing is the assertion.** A refusal reading *"four
+   * members have no producer"* after three of them shipped sends the operator to
+   * Phase 5 to write code that is already there; the thing actually missing is a
+   * wiring decision §12's read-only ruling constrains, and the operator has to be
+   * told which.
+   *
+   * Asserted on the phrases rather than by full value, because the sentence is
+   * prose and will be rewritten; what must survive a rewrite is that it names the
+   * dispatch, names where the four producers went, and does not claim they are
+   * absent.
+   */
+  test("the refusal names the dispatch, the module, and the ruling that blocks it", () => {
+    expect(SWEEP_NOT_WIRED).toContain("per-observer dispatch");
+    expect(SWEEP_NOT_WIRED).toContain("triage-envelope.ts");
+    expect(SWEEP_NOT_WIRED).toContain("run/dispatch-request.ts");
+    expect(SWEEP_NOT_WIRED).toContain("§7.2");
+    // And it does NOT still claim the four have no producer.
+    expect(SWEEP_NOT_WIRED).not.toContain("four of the sweep driver's nine members have no");
+  });
+
+  /**
+   * **The refusal is honest about `--status`**, which is the field an operator
+   * checks when the sweep half refuses. A message that said the console was
+   * broken would send somebody to restart a process whose only working surface is
+   * the one they were about to read.
+   */
+  test("the refusal still says --status works", () => {
+    expect(SWEEP_NOT_WIRED).toContain("--status is fully wired");
   });
 });
