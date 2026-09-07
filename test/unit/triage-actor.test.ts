@@ -181,6 +181,23 @@ function harness(opts: {
       sleeps.push(ms);
       if (sleeps.length >= max) controller.abort();
     },
+    /**
+     * **A SEATLESS console, because §13 task 6.5b made `ports` REQUIRED and this
+     * harness serves the tests that are about something else.**
+     *
+     * `seats: []` is what makes this ports object decide nothing: the boundary
+     * finds nobody due, the gate finds no pin unresolved, and the lock is a fake
+     * one that touches no file — so every test below that spreads
+     * `{ ...deps, ports: p.ports }` still states its own ports, and every test
+     * that does not is running the same loop it ran when `ports` was optional.
+     *
+     * The one visible difference is that a ported actor always folds its
+     * per-seat clock into the saved cursor, so a seatless one saves
+     * `recycled_at: {}` where an un-ported one saved nothing. That is asserted
+     * by value in *"the pass's cursor is what reaches the record"* rather than
+     * left to be discovered.
+     */
+    ports: recyclePorts({ seats: [], runs: [{}] }).ports,
   };
   return {
     deps,
@@ -962,7 +979,16 @@ describe("the actor exits when its console is gone (§12, §6.4, §9 Q4)", () =>
       },
     };
     await runTriageActor(deps, { cadenceS: 300, runId: "r-tri", signal: h.signal });
-    expect(saved).toEqual([{ runs: fourRuns(), sweep_cursor: 99, consecutive_skips: 2 }]);
+    /*
+     * `recycled_at: {}` is the ACTOR's field and the only one it adds — the pass
+     * owns the other three and they arrive byte for byte. Before §13 task 6.5b
+     * made `ports` required an un-ported actor passed the cursor through
+     * untouched; now every actor has a clock, and an empty one is what a console
+     * with no seats has recycled.
+     */
+    expect(saved).toEqual([
+      { runs: fourRuns(), sweep_cursor: 99, consecutive_skips: 2, recycled_at: {} },
+    ]);
   });
 
   /**
@@ -1658,50 +1684,43 @@ describe("two `pifleet triage --poll` processes cannot both sweep one run (§6.3
 });
 
 // ---------------------------------------------------------------------------
-// The un-ported actor — the shape production has until the call site lands
+// The un-ported actor — RETIRED 2026-09-07 by §13 task 6.5b
 // ---------------------------------------------------------------------------
 
-describe("an actor with no console ports says so, and changes nothing else", () => {
-  /**
-   * **`ports` IS OPTIONAL AND THAT IS A REPORTED RESIDUE, not a design choice.**
-   *
-   * Making it required is a `tsc` error in `src/cli/commands/triage.ts` and in
-   * `test/unit/triage-command.test.ts`, both of which another task owns this
-   * round, and the brief's own rule is that a slice must not be completable only
-   * by editing a file it does not own. So the absence is legal — and LOUD: an
-   * actor with no ports announces on §7.7's log, on every start, that it holds no
-   * lock and will never recycle. That line firing in production is the tell that
-   * the wiring has not landed (or was reverted), which is the same instrument
-   * ISC-891 asks for one file over.
-   */
-  test("it announces `actor_unsupervised` and still runs the loop it always ran", async () => {
-    const h = harness({ live: [true], maxPasses: 1 });
-    const exit = await runTriageActor(h.deps, {
-      cadenceS: 300,
-      runId: "r-tri",
-      signal: h.signal,
-    });
-    expect(exit.kind).toBe("stopped");
-    expect(h.counts().passes).toBe(1);
-    expect(h.spy.events.map((e) => e.kind)).toEqual([
-      "actor_started",
-      "actor_unsupervised",
-      "pass_completed",
-      "actor_stopped",
-    ]);
-  });
-
-  /** And a ported actor does NOT say it, or the tell would be noise. */
-  test("a ported actor never announces it", async () => {
-    const h = harness({ live: [true], maxPasses: 1 });
-    const p = recyclePorts({ runs: [fourRuns(), fourRuns()], resume: resumed() });
-    await runTriageActor(
-      { ...h.deps, ports: p.ports },
-      { cadenceS: 300, runId: "r-tri", signal: h.signal },
-    );
-    expect(h.spy.events.some((e) => e.kind === "actor_unsupervised")).toBe(false);
-  });
-});
+/*
+ * TWO TESTS STOOD HERE AND THEY ARE GONE ON PURPOSE, which is the tripwire
+ * firing rather than coverage being lost.
+ *
+ * They were `"it announces `actor_unsupervised` and still runs the loop it
+ * always ran"` and `"a ported actor never announces it"`, and ISC-932's probe
+ * named them by those exact strings. The pair existed for one round, while
+ * `TriageActorDeps.ports` was OPTIONAL: an un-ported actor announced
+ * `actor_unsupervised` on §7.7's log at every start, and that line firing in
+ * production was the only available tell that task 6.5b's call site had not
+ * landed. ISC-932 was pinned to the BLOCKER's absence deliberately, so that
+ * landing the call site would turn the guard RED instead of leaving it quietly
+ * green.
+ *
+ * Task 6.5b landed it. `ports` is now REQUIRED, so an un-ported actor is not a
+ * shape TypeScript can construct and a test of it is a test of nothing — and
+ * `bun test` strips types rather than checking them, so leaving these two here
+ * would have left ISC-932's probe PASSING against a fixture the compiler
+ * rejects. Deleting them is what makes the probe say what the criterion always
+ * meant it to say.
+ *
+ * WHERE THE GUARANTEE LIVES NOW, which is strictly stronger than the log line:
+ *
+ *   - the compiler, at every construction site of `TriageActorDeps`;
+ *   - `test/unit/triage-command.test.ts`'s *"--poll takes §7.7's lock…"* and
+ *     *"a held lock refuses…"*, which drive the SHIPPED `productionTriageDeps`
+ *     loop and assert the lock and the recycle positively rather than asserting
+ *     an announcement about their absence.
+ *
+ * `actor_unsupervised` itself is deliberately left in `TRIAGE_ACTOR_EVENT_KINDS`
+ * and in `actorLogLine`: the `ports === undefined` branches are still reachable
+ * from a caller that is not TypeScript, and the closed-union test above is what
+ * would notice if somebody removed the arm without removing the branch.
+ */
 
 describe("the record schema refuses what the actor could not have written", () => {
   test("a negative or fractional counter is refused", async () => {

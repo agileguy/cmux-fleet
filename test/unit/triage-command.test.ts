@@ -73,9 +73,16 @@ import {
 } from "../../src/run/triage-incident.ts";
 import { freshDeliveryState, reporterStatus } from "../../src/run/triage-notify.ts";
 import {
+  acquireTriageActorLock,
   readTriageActorRecord,
   runTriageActor,
+  triageActorLockPath,
+  triageActorLogPath,
+  triageActorRecord,
+  triageActorRecordPath,
+  writeTriageActorRecord,
   TRIAGE_COLLATOR,
+  type TriageConsolePorts,
 } from "../../src/run/triage-actor.ts";
 import { inboxTaskPath, runPaths, type RunPaths, runIdsAscending } from "../../src/run/paths.ts";
 import {
@@ -286,6 +293,40 @@ function stubDeps(over: Partial<TriageCommandDeps> = {}): TriageCommandDeps {
   };
 }
 
+/**
+ * `TriageConsolePorts` for a test that is about something else — §13 task 6.5b
+ * made `TriageActorDeps.ports` REQUIRED, so a test driving the shipped
+ * `runTriageActor` has to supply one.
+ *
+ * **Every member is inert, and the two privileged ones THROW.** A unit suite
+ * that recycled a worker would tear down a real container it cannot rebuild, so
+ * `downSeat` and `upSeat` are not stubs that quietly succeed — they are the same
+ * posture `fixtureFleet`'s saturation probe takes (*"the fixture probe must never
+ * be reached — it would be a real POST"*), for the same reason.
+ *
+ * `acquireLock` hands back a lock it never took: a real
+ * {@link acquireTriageActorLock} would write under `$HOME/.pifleet`, and while
+ * `beforeEach` redirects `HOME`, a lock is the one piece of state whose leak can
+ * wedge an operator's machine. `seats: []` and `sweepInFlight: true` are what
+ * make this ports object decide nothing — the gate finds no unresolved pin and
+ * the boundary never opens.
+ */
+const inertPorts = (): TriageConsolePorts => ({
+  acquireLock: async () => ({ release: async () => {} }),
+  lockPath: "/fixture/triage-relay.lock",
+  seats: [],
+  recycleAfterSweeps: 0,
+  sweepInFlight: async () => true,
+  seatRuns: async () => ({}),
+  downSeat: async (seat) => {
+    throw new Error(`the inert ports must never recycle: down ${seat}`);
+  },
+  upSeat: async (seat) => {
+    throw new Error(`the inert ports must never recycle: up ${seat}`);
+  },
+  resume: async () => null,
+});
+
 describe("pifleet triage — the wiring layer (§13 task 6.2, §3.3)", () => {
   test("register puts `triage` on a real buildProgram()", () => {
     const program = buildProgram();
@@ -375,6 +416,7 @@ describe("§6.4: the loop catches a thrown pass and --once does not", () => {
               sleep: async () => {
                 controller.abort();
               },
+              ports: inertPorts(),
             },
             { cadenceS: opts.cadenceS, runId: "r", signal: controller.signal },
           ),
@@ -1164,6 +1206,8 @@ interface FixtureFleet {
   /** `worker:taskId`, in dispatch order. */
   readonly dispatched: string[];
   readonly delivered: NotifyRequest[];
+  /** `down <runId>` / `up <seat>`, in the order the recycle asked for them. */
+  readonly recycled: string[];
   /** How many times the saturation probe was reached. MUST stay 0. */
   readonly probes: { count: number };
 }
@@ -1196,6 +1240,7 @@ async function fixtureFleet(runId: string): Promise<FixtureFleet> {
   const dispatched: string[] = [];
   const delivered: NotifyRequest[] = [];
   const windows: string[] = [];
+  const recycled: string[] = [];
   const probes = { count: 0 };
 
   const effects: TriageProductionEffects = {
@@ -1208,6 +1253,18 @@ async function fixtureFleet(runId: string): Promise<FixtureFleet> {
       return fixtureFleetDispatch(r, dispatched, windows);
     },
     isCollatorLive: async () => true,
+    /*
+     * §13 task 6.5b's two privileged effects, RECORDED and never performed. The
+     * production pair drives `pifleet down --run` and `pifleet up --workers`;
+     * a fixture that reached them would recycle a real worker, which the
+     * round's own rule forbids and which no unit test could undo.
+     */
+    downRun: async (runId) => {
+      recycled.push(`down ${runId}`);
+    },
+    upSeat: async (seat) => {
+      recycled.push(`up ${seat}`);
+    },
     triageFiles: {
       targets: join(configDir, "triage", "targets.yaml"),
       console: join(configDir, "triage", "console.yaml"),
@@ -1225,7 +1282,7 @@ async function fixtureFleet(runId: string): Promise<FixtureFleet> {
     env: { ...process.env },
   };
 
-  return { run, effects, dispatched, delivered, probes };
+  return { run, effects, dispatched, delivered, recycled, probes };
 }
 
 describe("§13 task 6.1b: the effects the console may not build are COMPULSORY", () => {
@@ -1418,18 +1475,20 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
    */
   test("--poll's loop runs one pass, persists §7.7's record, and stops on its signal", async () => {
     const fleet = await fixtureFleet("2026-09-06T01-00-06Z-7777");
-    const deps = productionTriageDeps(async () => fleet.effects);
     const stop = new AbortController();
+    /*
+     * Bounded by the WATCH rather than by the pass — see `boundedByTheWatch`.
+     * Since §13 task 6.5b wired the ports, §6.6's gate can withhold the sweep,
+     * so a stop that only fires inside the pass is no longer a stop at all: the
+     * loop would spin past this test and into the next file.
+     */
+    const deps = productionTriageDeps(async () => boundedByTheWatch(fleet.effects, stop));
 
     const started = Date.now();
-    const exit = await deps.loop(
-      async () => {
-        const outcome = await deps.pass();
-        stop.abort();
-        return outcome;
-      },
-      { cadenceS: 1, signal: stop.signal },
-    );
+    const exit = await deps.loop(async () => await deps.pass(), {
+      cadenceS: 1,
+      signal: stop.signal,
+    });
     expect(exit).toEqual({ kind: "stopped", passes: 1 });
     // One cadence, not two: a loop that ignored the signal would sit here.
     expect(Date.now() - started).toBeLessThan(10_000);
@@ -1695,5 +1754,315 @@ describe("§6.6 layer 3: the previous sweep's document, and the store that keeps
     // fresh-record default must never absorb.
     await writeFile(incidentRecordPath(subject, env), "{not json", "utf8");
     expect((await store.load(subject)).kind).toBe("refused");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §13 task 6.5b — the ports at the composition root: the lock, and the recycle
+// ---------------------------------------------------------------------------
+
+/** Every seat this console has, spelled from the roster rather than typed. */
+const ALL_SEATS = [TRIAGE_COLLATOR, ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker)];
+
+/**
+ * Effects whose loop is BOUNDED BY THE WATCH, not by the pass — and the reason
+ * is a measured one rather than a preference.
+ *
+ * The obvious way to stop a production `--poll` in a test is to abort inside the
+ * pass it was handed. That bound is not a bound: **the pass does not run on every
+ * iteration.** §6.6's gate withholds the sweep whenever a seat's pin is
+ * unresolved, so any defect that leaves a pin unresolved — and a mutation that
+ * empties `seatRuns` is exactly that — makes the loop spin forever at the test's
+ * one-second cadence, with `bun test`'s per-test timeout failing the test while
+ * the loop's promise keeps running into the NEXT test file. It was measured
+ * during this task's mutation battery, and the tell was a run directory created
+ * under the real `~/.pifleet` after `afterAll` had put `PIFLEET_RUNS_DIR` back.
+ *
+ * `isCollatorLive` is the member that cannot be skipped: `triageActorLoop`
+ * observes liveness whether the pass ran, threw, or was withheld (§6.4's *"the
+ * observation happens whether the pass threw or not"*). So the bound lives there,
+ * which is `triage-actor.test.ts`'s own `harness` rule — *"a loop harness whose
+ * every exit is BOUNDED"* — applied to the production wiring.
+ */
+function boundedByTheWatch(
+  effects: TriageProductionEffects,
+  stop: AbortController,
+  opts: { readonly maxObservations?: number; readonly onObserve?: (run: RunPaths) => void } = {},
+): TriageProductionEffects {
+  const max = opts.maxObservations ?? 1;
+  let observations = 0;
+  return {
+    ...effects,
+    isCollatorLive: async (run) => {
+      observations += 1;
+      opts.onObserve?.(run);
+      if (observations >= max) stop.abort();
+      return true;
+    },
+  };
+}
+
+/**
+ * A run tree holding exactly the seats named, so a test can state a console's
+ * shape by listing it.
+ *
+ * `run.json` is what the run walk expects and `workers/<id>/` is what
+ * `resolveSeatRuns` looks for, so a seat is pinned iff its directory is there.
+ */
+async function runHolding(runId: string, seats: readonly string[]): Promise<RunPaths> {
+  const run = runPaths(runId, process.env["PIFLEET_RUNS_DIR"]!);
+  await mkdir(run.inboxDir, { recursive: true });
+  await writeFile(join(run.root, "run.json"), JSON.stringify({ run_id: runId }));
+  for (const seat of seats) await mkdir(join(run.workersDir, seat), { recursive: true });
+  return run;
+}
+
+describe("§13 task 6.5b: --poll takes §7.7's lock (§6.3b)", () => {
+  /**
+   * **The lock is the half of task 6.3b that only a call site can land**, and
+   * this is that call site driven end to end: `productionTriageDeps().loop`
+   * builds `TriageConsolePorts.acquireLock` out of the real
+   * {@link acquireTriageActorLock}, so a second actor meets the first one's file.
+   *
+   * Both directions in one test, because each is meaningless alone: an assertion
+   * that a held lock refuses passes against an actor that refuses always, and an
+   * assertion that a free lock sweeps passes against an actor that has no lock at
+   * all. The refusal NAMES the file (§6.3b — *"the only thing an operator can do
+   * about it is look at that file"*) and it dispatches NOTHING, which is the
+   * property §6.4's *"two concurrent sweeps against one control plane"* is about.
+   */
+  test("a held lock refuses BY NAME and sweeps nothing; a free one sweeps and gives it back", async () => {
+    const fleet = await fixtureFleet("2026-09-06T02-00-00Z-1001");
+    const env = fleet.effects.env;
+    await mkdir(dirname(triageActorLockPath(env)), { recursive: true });
+
+    const held = await acquireTriageActorLock(env);
+    expect(held, "the fixture could not take the lock it is about to contend for").not.toBeNull();
+    try {
+      const stopBlocked = new AbortController();
+      const blocked = productionTriageDeps(async () =>
+        boundedByTheWatch(fleet.effects, stopBlocked),
+      );
+      const exit = await blocked.loop(async () => await blocked.pass(), {
+        cadenceS: 1,
+        signal: stopBlocked.signal,
+      });
+      expect(exit.kind).toBe("refused");
+      expect(exit.kind === "refused" && exit.reason).toContain(triageActorLockPath(env));
+      // `passes: 0` and an empty dispatch log are the same fact from two sides.
+      expect(exit.kind === "refused" && exit.passes).toBe(0);
+      expect(fleet.dispatched).toEqual([]);
+    } finally {
+      await held!.release();
+    }
+
+    const stop = new AbortController();
+    const free = productionTriageDeps(async () => boundedByTheWatch(fleet.effects, stop));
+    const exit = await free.loop(async () => await free.pass(), {
+      cadenceS: 1,
+      signal: stop.signal,
+    });
+    expect(exit).toEqual({ kind: "stopped", passes: 1 });
+    expect(fleet.dispatched.length).toBe(5);
+
+    // And the lock did not outlive the actor — `runTriageActor` releases in a
+    // `finally`, so a third actor can start. Asserted by TAKING it rather than
+    // by stat-ing a path, which is the property that actually matters.
+    const after = await acquireTriageActorLock(env);
+    expect(after, "the actor kept §7.7's lock past its own exit").not.toBeNull();
+    await after!.release();
+  });
+
+  /**
+   * §6.3b's refusal reaches the OPERATOR as a nonzero exit, and this is the
+   * policy stated as a test.
+   *
+   * A `--poll` that returns `0` having never polled is indistinguishable — over
+   * the only channel a machine caller has — from one that ran all day and stopped
+   * cleanly. `console_gone` is the contrast and it stays `0`: that actor ran, and
+   * its console ending is the end of a life rather than a refusal to start.
+   *
+   * The reason goes to stderr in BOTH cases and to stdout in NEITHER, because a
+   * `--json` consumer parses stdout line by line.
+   */
+  test("`refused` exits BACKEND_UNAVAILABLE and `console_gone` still exits 0", async () => {
+    const reason = "another triage actor holds /fixture/triage-relay.lock; this one started nothing";
+    const refused = await runTriage(
+      ["--poll", "300"],
+      stubDeps({ loop: async () => ({ kind: "refused", reason, passes: 0 }) }),
+    );
+    expect(refused.err).toBeInstanceOf(CliError);
+    expect((refused.err as CliError).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    expect((refused.err as CliError).message).toBe(reason);
+    expect(refused.out).toBe("");
+
+    const gone = await runTriage(
+      ["--poll", "300"],
+      stubDeps({
+        loop: async () => ({
+          kind: "console_gone",
+          worker: TRIAGE_COLLATOR,
+          run_id: "r-1",
+          passes: 5,
+          reason: "tri-1 was not live for 5 passes",
+        }),
+      }),
+    );
+    expect(gone.err).toBeNull();
+    expect(gone.errOut).toContain("tri-1 was not live for 5 passes");
+    expect(gone.out).toBe("");
+  });
+});
+
+describe("§13 task 6.5b: --poll recycles, through the composition root's own effects", () => {
+  /**
+   * **§6.6 layer 4 clause 1 end to end: a seat with no pin is REPAIRED and the
+   * console is swept in the same cadence**, which is the edge §6.6 chose
+   * deliberately (*"The boundary runs BEFORE the pass … this is the one that
+   * repairs soonest"*).
+   *
+   * It also pins the `downSeat` contract that the composition root satisfies
+   * structurally rather than with a branch: *"Must be a no-op on a seat that is
+   * already down."* `obs-t3` has no run, so the console's own `resolveSeatRuns`
+   * finds nothing to hand `downRun` and the root's teardown is never reached —
+   * asserted by the recycle log holding an `up` and NO `down`.
+   */
+  test("a seat with no run is brought back, and only THEN is the sweep admitted", async () => {
+    const fleet = await fixtureFleet("2026-09-06T03-00-00Z-2001");
+    const first = fleet.run;
+    /*
+     * `obs-t3` is the seat this console lost, and the directory is removed AFTER
+     * `fixtureFleet` rather than before: that helper materialises all four seats
+     * itself, so a run tree built short would be silently made whole again and
+     * the boundary would find nothing due — a vacuous pass rather than a test.
+     */
+    await rm(join(first.workersDir, "obs-t3"), { recursive: true, force: true });
+    expect((await resolveSeatRuns(ALL_SEATS, fleet.effects.env))["obs-t3"]).toBeUndefined();
+    let repaired: RunPaths | null = null;
+    const stop = new AbortController();
+    const effects: TriageProductionEffects = boundedByTheWatch(
+      {
+        ...fleet.effects,
+        upSeat: async (seat) => {
+          fleet.recycled.push(`up ${seat}`);
+          // A REAL new run, because the gate re-derives its pins from the run
+          // tree and a stub that only recorded would leave the seat unresolved
+          // forever — which is also the shape that spins the loop, hence the
+          // watch-side bound.
+          repaired = await runHolding("2026-09-06T03-30-00Z-2002", [seat]);
+        },
+      },
+      stop,
+    );
+
+    const deps = productionTriageDeps(async () => effects);
+    const exit = await deps.loop(async () => await deps.pass(), {
+      cadenceS: 1,
+      signal: stop.signal,
+    });
+
+    expect(exit).toEqual({ kind: "stopped", passes: 1 });
+    // The repair, and the `down` that correctly did not happen.
+    expect(fleet.recycled).toEqual(["up obs-t3"]);
+    expect(repaired).not.toBeNull();
+    // The sweep was admitted only after the pin re-derivation found the seat.
+    expect(fleet.dispatched.length).toBe(5);
+    // §7.7's record carries the repaired pin and every seat's stamp.
+    const record = await readTriageActorRecord(effects.env);
+    expect(record.kind).toBe("ok");
+    if (record.kind !== "ok") return;
+    expect(record.record.runs["obs-t3"]).toBe(repaired!.runId);
+    expect(record.record.runs[TRIAGE_COLLATOR]).toBe(first.runId);
+    expect(Object.keys(record.record.recycled_at ?? {}).sort()).toEqual([...ALL_SEATS].sort());
+  });
+
+  /**
+   * **THE WATCH FOLLOWS A COLLATOR THIS ACTOR RECYCLED, AND ONLY THAT ONE.**
+   *
+   * §12 reads *"a `tri-1` that comes back in a NEW run is a console that went
+   * away — correctly — rather than one that silently followed it"*, and that
+   * sentence predates the actor being able to mint a run. Taken whole it makes
+   * §6.6 layer 4 self-defeating: the first recycle of `tri-1` replaces the
+   * collator's run, `isLiveWorker` reads the OLD run's dead state, and
+   * `RELAY_ABANDON_PASSES` negatives later the actor abandons a console it had
+   * just repaired.
+   *
+   * So `TriageConsolePorts.upSeat` re-derives the watched run at the moment its
+   * `up` resolves, and nothing else moves it. The assertion is by VALUE and the
+   * counterfactual is what makes it sharp: the watch observed the NEW run and
+   * never the old one, on a fixture where the old one is what a naive binding
+   * would have kept.
+   */
+  test("the run the watch observes moves to the recycled collator's, and to nothing else", async () => {
+    const before = await runHolding("2026-09-06T04-00-00Z-3001", ALL_SEATS);
+    const fleet = await fixtureFleet(before.runId);
+    const env = fleet.effects.env;
+
+    // §7.7's record makes `tri-1` — and ONLY `tri-1` — due at the first boundary.
+    await mkdir(dirname(triageActorRecordPath(env)), { recursive: true });
+    await writeTriageActorRecord(
+      triageActorRecordPath(env),
+      triageActorRecord(
+        {
+          pid: process.pid,
+          started: "fixture-start-token",
+          started_at: "2026-09-06T03:59:00.000Z",
+          log_path: triageActorLogPath(env),
+          pinned: null,
+          cadence_s: 300,
+          workers: ALL_SEATS,
+        },
+        {
+          runs: Object.fromEntries(ALL_SEATS.map((s) => [s, before.runId])),
+          sweep_cursor: 100,
+          consecutive_skips: 0,
+          // 100 - 0 ≥ 48 for the collator; 100 - 100 < 48 for the three observers.
+          recycled_at: Object.fromEntries(
+            ALL_SEATS.map((s) => [s, s === TRIAGE_COLLATOR ? 0 : 100]),
+          ),
+        },
+      ),
+    );
+
+    let after: RunPaths | null = null;
+    const watched: string[] = [];
+    const stop = new AbortController();
+    const effects: TriageProductionEffects = boundedByTheWatch(
+      {
+        ...fleet.effects,
+        upSeat: async (seat) => {
+          fleet.recycled.push(`up ${seat}`);
+          after = await runHolding("2026-09-06T04-30-00Z-3002", [seat]);
+        },
+      },
+      stop,
+      // The bound and the observation are the same call, which is the point: the
+      // watch is what this test measures AND what stops the loop.
+      { onObserve: (run) => watched.push(run.runId) },
+    );
+
+    const deps = productionTriageDeps(async () => effects);
+    /*
+     * A STUB pass, because this test is about the WATCH and not about a sweep:
+     * the recycle moves the collator into a run with no inbox, and a real pass
+     * there would be asserting `triagePass`'s behaviour on a bare run tree
+     * instead of the one fact this test exists for.
+     */
+    const exit = await deps.loop(
+      async () => ({
+        ...NOTHING_OUTCOME,
+        cursor: { runs: {}, sweep_cursor: 101, consecutive_skips: 0 },
+      }),
+      { cadenceS: 1, signal: stop.signal },
+    );
+
+    expect(exit).toEqual({ kind: "stopped", passes: 1 });
+    // THE PREMISE: the collator really was recycled, out of the run the actor
+    // started watching. Without this the assertion below is vacuous.
+    expect(fleet.recycled).toEqual([`down ${before.runId}`, `up ${TRIAGE_COLLATOR}`]);
+    expect(after).not.toBeNull();
+    // THE POINT: the watch observed the new run and never the old one.
+    expect(watched).toEqual([after!.runId]);
+    expect(watched).not.toContain(before.runId);
   });
 });

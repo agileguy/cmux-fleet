@@ -96,6 +96,16 @@ export function exitCodeForError(err: unknown): ExitCode {
  * transitive closure is 145 modules (measured in
  * `test/unit/triage-readonly.test.ts`) and none of them has any business being
  * evaluated because somebody typed `pifleet status`.
+ *
+ * ## `up` and `down` are here too, and they are the ONE pair that is not lazy
+ *
+ * §13 task 6.5b's recycle needs both verbs, and `main()`'s registration loop
+ * already imports both eagerly — so the laziness argument above buys nothing for
+ * these two and the entries are here for the OTHER reason: one loader means one
+ * place a reader checks to see everything the triage effects are built out of.
+ * They are named here rather than imported statically because the module cycle
+ * argument is the same one — `commands/up.ts` and `commands/down.ts` both import
+ * {@link CliError} from this file.
  */
 let triageEffectModules: Promise<{
   config: typeof import("../config/load.ts");
@@ -104,6 +114,8 @@ let triageEffectModules: Promise<{
   config_triage: typeof import("../run/triage-config.ts");
   notify: typeof import("../run/triage-notify.ts");
   verdict: typeof import("../run/triage-verdict.ts");
+  up: typeof import("./commands/up.ts");
+  down: typeof import("./commands/down.ts");
 }> | null = null;
 
 function loadTriageEffectModules(): NonNullable<typeof triageEffectModules> {
@@ -114,6 +126,8 @@ function loadTriageEffectModules(): NonNullable<typeof triageEffectModules> {
     config_triage: await import("../run/triage-config.ts"),
     notify: await import("../run/triage-notify.ts"),
     verdict: await import("../run/triage-verdict.ts"),
+    up: await import("./commands/up.ts"),
+    down: await import("./commands/down.ts"),
   }))();
   return triageEffectModules;
 }
@@ -186,6 +200,92 @@ function productionSweepDispatchFor(
   };
 }
 
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-CONSOLE §13 task 6.5b — §6.6 layer 4's recycle, at the same root
+// ---------------------------------------------------------------------------
+
+/**
+ * Run one shipped `pifleet` verb IN THIS PROCESS, on a program of its own.
+ *
+ * ## Why the shipped command and not a lower-level call
+ *
+ * There is no programmatic `up()` or `down()` in this repository — both verbs
+ * are ~700-line commander actions, and every refusal that makes them safe lives
+ * inside those actions: `up`'s MLX-training guard, its model allowlist, its
+ * secret resolution and its one-tui-worker check; `down`'s pinned-identity
+ * anchoring, which is the thing that stops a stale pid being signalled. A
+ * recycle that reached past them would be a second, untested copy of the fleet's
+ * whole safety posture, owned by the composition root, exercised six times a day
+ * with nobody watching. So the effect IS the command.
+ *
+ * ## In-process rather than a subprocess, and what that buys
+ *
+ * `scripts/triage` spawns `bun run src/cli/index.ts down --run <id>` because a
+ * shell script has no other way to call one. This is in-process, and what that
+ * buys is the failure shape: a failure arrives as a THROW, which is exactly what
+ * {@link TriageConsolePorts.upSeat}'s contract asks for —
+ * `runTriageActor` logs a throwing seat as `recycle_failed`, leaves it unpinned
+ * and lets the next boundary finish the job. Translating an exit integer back
+ * into a throw would be a second copy of the §10 ladder, in the one place that
+ * has no test that could catch it drifting.
+ *
+ * {@link buildProgram} is what makes this safe to call from a long-lived actor:
+ * it sets `exitOverride()`, which commander copies onto every subcommand, so a
+ * usage error inside a recycle cannot call `process.exit` on the console's own
+ * clock.
+ */
+async function runFleetVerb(args: readonly string[]): Promise<void> {
+  const m = await loadTriageEffectModules();
+  const program = buildProgram();
+  m.up.register(program);
+  m.down.register(program);
+  await program.parseAsync([...args], { from: "user" });
+}
+
+/**
+ * **`--keep-panes`, and it is the difference between a recycle and an outage.**
+ *
+ * Without it `down` calls `backend.destroy(ref, { keepPanes: false })` for every
+ * distinct `workspace_ref` the run's workers recorded (`commands/down.ts:807-825`)
+ * — and all four triage seats are panes of ONE cmux workspace, because
+ * `scripts/triage` creates the workspace and each pane then runs
+ * `pifleet up --workers <one worker>` inside it (§6.1's correction,
+ * `operations-plan.ts:310` — *"Each pane creates its own run"*). So an unattended
+ * per-seat `down` without this flag would destroy the operator's whole triage
+ * workspace — all four panes — to recycle one seat, 24 times a day.
+ *
+ * The actor is not in the presentation business and cannot recreate a pane
+ * anyway (cmux is confined to `src/backends/cmux/` by ISC-137, and this console
+ * may not reach a backend at all). Keeping the pane leaves a dead view an
+ * operator can see and `scripts/triage` can re-plan; destroying it would
+ * dismantle the console monotonically over a day with nothing able to rebuild it.
+ *
+ * `--json` so the one line this writes to the actor's stdout is a document
+ * rather than prose.
+ */
+async function productionDownRun(runId: string): Promise<void> {
+  await runFleetVerb(["down", "--run", runId, "--keep-panes", "--json"]);
+}
+
+/**
+ * §6.6 layer 4's other half: the seat comes back in a NEW run.
+ *
+ * `--workers <one seat>` and no `--attach-here`, which is the whole reason this
+ * console can be recycled by a process with no terminal: *"`up --attach-here` is
+ * what demands a TTY on both streams (`src/attended/adopt.ts:96-114`), and an
+ * `rpc` worker is not attached."* (§6.6). One seat per `up` is also what makes
+ * the result the four-run shape §6.1's correction measured, rather than a
+ * five-seat run nothing else in this console expects.
+ *
+ * **The run id is not returned, deliberately.** D12 makes the run tree the
+ * authority and `TriageConsolePorts.seatRuns` is how it is read; a value returned
+ * here would be a second source for the same fact, and the two would be spelled
+ * in different places the first time an `up` half-succeeded.
+ */
+async function productionUpSeat(seat: string): Promise<void> {
+  await runFleetVerb(["up", "--workers", seat, "--json"]);
+}
+
 /**
  * Everything `pifleet triage` cannot build for itself, assembled from ONE load
  * of the fleet config.
@@ -219,6 +319,8 @@ export async function productionTriageEffects(): Promise<TriageProductionEffects
     dispatchFor: productionSweepDispatchFor,
     isCollatorLive: async (run) =>
       await m.relay.productionRunSources.isLiveWorker(run, m.actor.TRIAGE_COLLATOR),
+    downRun: productionDownRun,
+    upSeat: productionUpSeat,
     triageFiles: m.config_triage.triagePaths(loaded.dir),
     kubeconfigPath:
       loaded.config.cloud.kubeconfig === null

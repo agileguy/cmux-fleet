@@ -622,18 +622,24 @@ export interface TriageActorDeps {
   /** The wait between passes, injected so the cadence is assertable by value. */
   readonly sleep: (ms: number) => Promise<void>;
   /**
-   * §6.6 layer 4's recycle, §6.6's sweep gate and §6.3b's lock — or nothing.
+   * §6.6 layer 4's recycle, §6.6's sweep gate and §6.3b's lock.
    *
-   * **OPTIONAL, AND THAT IS A REPORTED RESIDUE RATHER THAN A DESIGN CHOICE.**
-   * Making it required is a `tsc` error at `cli/commands/triage.ts`'s
-   * `productionLoop` call and at `test/unit/triage-command.test.ts`'s loop
-   * harness, and neither file belongs to the task that wrote this. So the absence
-   * is legal — and it is LOUD rather than silent: an actor started without ports
-   * writes `actor_unsupervised` to §7.7's log on every start, saying in the one
-   * place guaranteed to work that it holds no lock and will never recycle. That
-   * line firing in production is the tell that the wiring has not landed.
+   * **REQUIRED as of §13 task 6.5b, and the arity is the guard.** It was
+   * optional for exactly one round, as a reported residue: making it required
+   * was a `tsc` error at `cli/commands/triage.ts`'s `productionLoop` call, and
+   * that file belonged to another task. While it was optional an un-ported actor
+   * announced `actor_unsupervised` on §7.7's log on every start — the loud tell
+   * that the wiring had not landed. The tell is now the COMPILER, which is
+   * strictly better: `actor_unsupervised` could only report the omission after a
+   * console had already been started without a lock, 288 times a day, with
+   * nobody watching.
+   *
+   * The `ports === undefined` branches below are therefore unreachable through
+   * this type and are kept as the one thing a required field cannot express: a
+   * caller that is not TypeScript. They cost three comparisons per pass and they
+   * are why {@link triageActorLoop} still takes `TriageConsolePorts | undefined`.
    */
-  readonly ports?: TriageConsolePorts;
+  readonly ports: TriageConsolePorts;
 }
 
 /**
@@ -718,9 +724,17 @@ export type TriageActorExit =
   /**
    * §6.3b: another actor holds §7.7's lock, so this one started nothing.
    *
-   * It carries `reason` under the same name `console_gone` does, so the command's
-   * `if (exit.kind === "console_gone")` stderr line extends to it by adding one
-   * disjunct rather than by growing a `switch`.
+   * It carries `reason` under the same name `console_gone` does, so a caller can
+   * report both from one field.
+   *
+   * **The two do NOT share the command's stderr line, and §13 task 6.5b decided
+   * why**: `console_gone` exits `0` — that actor ran, and its console ending is
+   * the end of a life — while `refused` exits `EXIT.BACKEND_UNAVAILABLE`, because
+   * a `--poll` that returns success having never polled is indistinguishable,
+   * over the only channel a machine caller has, from one that ran all day. A
+   * nonzero exit is a `CliError`, and `main()` writes a `CliError`'s message to
+   * stderr itself, so sharing the line would print the same sentence twice. See
+   * `cli/commands/triage.ts`'s action.
    */
   | { kind: "refused"; reason: string; passes: 0 };
 

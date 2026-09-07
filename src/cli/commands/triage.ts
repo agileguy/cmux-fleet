@@ -160,9 +160,11 @@ import {
 } from "../../run/triage-incident.ts";
 import {
   TRIAGE_COLLATOR,
+  acquireTriageActorLock,
   appendActorLog,
   readTriageActorRecord,
   runTriageActor,
+  triageActorLockPath,
   triageActorLogPath,
   triageActorRecord,
   triageActorRecordPath,
@@ -172,6 +174,7 @@ import {
   type TriageActorExit,
   type TriageActorIdentity,
   type TriageActorRecordRead,
+  type TriageConsolePorts,
 } from "../../run/triage-actor.ts";
 
 // ---------------------------------------------------------------------------
@@ -636,16 +639,17 @@ export interface TriageCommandDeps {
  * The things `pifleet triage` cannot build for itself, supplied by
  * `src/cli/index.ts`.
  *
- * ## The membership rule, so a tenth member has to justify itself
+ * ## The membership rule, so an eleventh member has to justify itself
  *
  * A member belongs here when building it inside this console's subtree is
  * either FORBIDDEN or LIVE, and nowhere else:
  *
- *   - **Forbidden.** {@link dispatchFor} and {@link isCollatorLive} are reached
- *     only through modules `test/unit/triage-readonly.test.ts` bans from this
- *     subtree by name. That ban is the design working (§12's read-only block),
- *     so the capability arrives by INJECTION and the one-entry permitted-
- *     exception list (ISC-826) is untouched.
+ *   - **Forbidden.** {@link dispatchFor}, {@link isCollatorLive},
+ *     {@link downRun} and {@link upSeat} are reached only through modules
+ *     `test/unit/triage-readonly.test.ts` bans from this subtree by name. That
+ *     ban is the design working (§12's read-only block), so the capability
+ *     arrives by INJECTION and the one-entry permitted-exception list (ISC-826)
+ *     is untouched.
  *   - **Live.** {@link probe} and {@link transport} each perform a real POST —
  *     §6.7 rule 3's saturation probe against the operator's own inference
  *     server, and §6.9's webhook. `saturationVerdict` already refuses to give
@@ -694,6 +698,30 @@ export interface TriageProductionEffects {
    * from this subtree by name.
    */
   readonly isCollatorLive: (run: RunPaths) => Promise<boolean>;
+  /**
+   * §6.6 layer 4's teardown — **and it takes a RUN, not a seat.**
+   *
+   * The asymmetry with {@link upSeat} is `pifleet`'s and not this console's
+   * invention: `down` is a run verb (`--run <id>`) and `up` is a worker verb
+   * (`--workers <ids>`). Spelling the root's member as `downSeat(seat)` would
+   * have made it resolve the seat's run for itself — a run-tree READ, which the
+   * membership rule above puts on the console's side of the line and which
+   * {@link resolveSeatRuns} already performs and already has tests. So the
+   * console resolves and the root tears down, and there is no second reading of
+   * the run tree to disagree with the first.
+   *
+   * `TriageConsolePorts.downSeat`'s *"must be a no-op on a seat that is already
+   * down"* is therefore satisfied structurally: a seat with no pin never reaches
+   * this function.
+   */
+  readonly downRun: (runId: string) => Promise<void>;
+  /**
+   * §6.6 layer 4's other half — one seat, a NEW run, and no terminal.
+   *
+   * The run id is deliberately not returned; D12 makes the run tree the
+   * authority and `TriageConsolePorts.seatRuns` is how it is read back.
+   */
+  readonly upSeat: (seat: string) => Promise<void>;
   /** §7.1 and §7.8's two tracked files, resolved against the fleet config's dir. */
   readonly triageFiles: TriageFileNames;
   /** The fleet's `cloud.kubeconfig`, resolved, or `null` when it is unset. */
@@ -1095,7 +1123,43 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
      */
     loop: async (p, opts) => {
       const e = await effectsFor();
-      const run = await resolveCollatorRun(e.env);
+      /**
+       * **The run the WATCH observes, and it is a `let` because §6.6 layer 4
+       * moves it — but only when this actor moves it itself.**
+       *
+       * §12's criterion reads *"a `tri-1` that comes back in a NEW run is a
+       * console that went away — correctly — rather than one that silently
+       * followed it"*, and that sentence was written before the actor could mint
+       * a run. Left alone it is now a self-terminating console, and the numbers
+       * are not marginal: the first recycle of `tri-1` (four hours in, at
+       * §7.8's defaults) replaces the collator's run, `isLiveWorker` reads the
+       * OLD run's dead state file, and `RELAY_ABANDON_PASSES` (5) negatives
+       * later — twenty-five minutes — the actor exits `console_gone` on a console
+       * it had just successfully repaired.
+       *
+       * So the watch follows exactly one thing: a run **this actor minted**,
+       * re-derived inside {@link TriageConsolePorts.upSeat} at the moment the
+       * `up` resolves. Every other way `tri-1` can appear in a newer run — an
+       * operator's `pifleet down` and `up`, a second console, a stray fleet — is
+       * still an abandonment, because nothing else runs this line. §12's
+       * distinction survives with its subject narrowed from *"a new run"* to
+       * *"a new run somebody else minted"*, which is what it always meant.
+       */
+      let watched = await resolveCollatorRun(e.env);
+      /**
+       * §7.8's knobs, read ONCE for the actor's life.
+       *
+       * `recycle_after_sweeps` joins `cadence_s` in being fixed at start rather
+       * than per pass: `TriageConsolePorts.recycleAfterSweeps` is a number and
+       * not a reader, deliberately, so that a boundary cannot change its mind
+       * about the window halfway through a recycle it has already begun. An
+       * operator who edits the file restarts the actor, which is already true of
+       * the cadence.
+       */
+      const pair = await loadTriagePair({
+        paths: e.triageFiles,
+        kubeconfigPath: e.kubeconfigPath,
+      });
       const logPath = triageActorLogPath(e.env);
       const log = async (event: TriageActorEvent): Promise<void> =>
         await appendActorLog(logPath, event);
@@ -1113,8 +1177,85 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
           ...TRIAGE_CONSOLE_ROSTER.reviewers,
         ],
       };
+      /**
+       * §13 task 6.5b — **the ports, and the split down the middle of them.**
+       *
+       * Seven of the nine are READS this console is allowed to make and already
+       * has functions for; two are the privileged effect §12's read-only block
+       * forbids it to hold, and those two arrive from the composition root. The
+       * boundary is the same one task 6.1b drew for the dispatch, and drawing it
+       * again here is what keeps ISC-826's permitted-exception list at ONE entry.
+       *
+       * They are assembled here rather than at the root for the reason
+       * {@link TriageProductionEffects}' own membership rule gives: a root that
+       * built `seatRuns` or `sweepInFlight` would be the second place this
+       * console's paths are decided.
+       */
+      const ports: TriageConsolePorts = {
+        acquireLock: async () => await acquireTriageActorLock(e.env),
+        lockPath: triageActorLockPath(e.env),
+        seats: identity.workers,
+        recycleAfterSweeps: pair.console.recycle_after_sweeps,
+        sweepInFlight: async () => (await inFlightSweep(watched)) !== null,
+        seatRuns: async () => await resolveSeatRuns(identity.workers, e.env),
+        downSeat: async (seat) => {
+          /*
+           * The seat's run, resolved by the SAME function `seatRuns` above uses,
+           * so the actor's boundary decision and this teardown cannot be looking
+           * at different run trees. A seat with no pin is already down and the
+           * port's contract is that this is a no-op — which it is, structurally,
+           * because there is nothing to hand `downRun`.
+           */
+          const runId = (await resolveSeatRuns([seat], e.env))[seat];
+          if (runId === undefined) return;
+          await e.downRun(runId);
+        },
+        upSeat: async (seat) => {
+          try {
+            await e.upSeat(seat);
+          } finally {
+            /*
+             * In a `finally` rather than after the await: an `up` that minted
+             * the run and then failed later still moved the collator, and a
+             * watch left pointing at the old run would reap this actor for the
+             * recycle's own success. The re-derivation cannot throw usefully
+             * here — with no run holding `tri-1` at all there is nothing to
+             * follow — so the watch stays where it was and the existing
+             * five-negative abandonment answers it.
+             */
+            if (seat === TRIAGE_COLLATOR) {
+              try {
+                watched = await resolveCollatorRun(e.env);
+              } catch {
+                /* no run holds the collator: leave the watch, let it abandon */
+              }
+            }
+          }
+        },
+        /*
+         * §7.7's record as the per-seat clock's seed. A separate read from
+         * `seedCursor`'s, and deliberately: that one seeds the PASS and drops
+         * `recycled_at` (the pass does not own it), this one seeds the ACTOR's
+         * boundary and is only about that field. `null` for an absent or
+         * unreadable record is the port's own spelling of "nothing to resume" —
+         * D12 makes the record a hint, and a hint that is not there is not an
+         * error.
+         */
+        resume: async () => {
+          const record = await readTriageActorRecord(e.env);
+          if (record.kind !== "ok") return null;
+          return {
+            runs: record.record.runs,
+            sweep_cursor: record.record.sweep_cursor,
+            consecutive_skips: record.record.consecutive_skips,
+            ...(record.record.recycled_at === undefined
+              ? {}
+              : { recycled_at: record.record.recycled_at }),
+          };
+        },
+      };
       return await productionLoop({
-        isCollatorLive: () => e.isCollatorLive(run),
+        isCollatorLive: () => e.isCollatorLive(watched),
         saveCursor: async (next) =>
           await writeTriageActorRecord(
             triageActorRecordPath(e.env),
@@ -1122,6 +1263,7 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
           ),
         log,
         sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+        ports,
       })(p, opts);
     },
     status: async () => await triageStatus(),
@@ -1213,6 +1355,37 @@ export function register(program: Command, deps: () => TriageCommandDeps): void 
         // stderr, not stdout: `--json` consumers parse stdout line by line and a
         // diagnostic in that stream is a parse error at the caller.
         process.stderr.write(`pifleet triage: ${exit.reason}\n`);
+        return;
+      }
+      /**
+       * §6.3b's lock refusal, and **the exit code is a POLICY CALL made here.**
+       *
+       * `refused` exits NONZERO — `EXIT.BACKEND_UNAVAILABLE`, on `up`'s own
+       * stated reading of that code: *"nothing is wrong with the command line,
+       * the host is busy"*. The host already has a triage actor; that is a fact
+       * about the machine, not a mistake by the caller, and it is the same class
+       * as `up`'s MLX-training and egress refusals.
+       *
+       * **Why not `0`.** A `--poll` that returns success having never polled is
+       * indistinguishable, over the only channel a machine caller has, from a
+       * `--poll` that ran all day and stopped cleanly — which is this
+       * repository's own recorded anti-pattern (*"a stub that dispatched nothing
+       * and returned success would be indistinguishable from a working relay"*)
+       * and the exact confusion ISC-216 closed one ladder rung over. The cost is
+       * real and is stated rather than hidden: a supervisor configured
+       * `Restart=on-failure` will retry against a healthy held lock. It retries
+       * against a *healthy* console, `acquireRelayLock` takes over a lock left by
+       * a DEAD pid, and the alternative is a console that reports it is polling
+       * when it is not.
+       *
+       * **Why not the shared stderr line `console_gone` uses.** `TriageActorExit`
+       * carries `reason` under the same name so the two *could* share it, and
+       * they would if this exited `0`. They do not, because `main()` writes a
+       * `CliError`'s message to stderr itself — so writing the line here as well
+       * would print the same sentence twice. One reason, one stream, one code.
+       */
+      if (exit.kind === "refused") {
+        throw new CliError(exit.reason, EXIT.BACKEND_UNAVAILABLE);
       }
     });
 }

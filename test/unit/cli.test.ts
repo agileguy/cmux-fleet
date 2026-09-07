@@ -287,6 +287,38 @@ describe("CLI surface", () => {
     expect(entry).not.toContain("productionTriageDeps(await productionTriageEffects()");
     expect(entry).not.toContain("productionTriageDeps(productionTriageEffects())");
   });
+
+  /**
+   * **§13 task 6.5b: the recycle's ARGV, pinned by value, because both of its
+   * dangerous edits are one word long and neither has a symptom a test could
+   * otherwise see.**
+   *
+   * The effect itself is unreachable from any test — a unit suite that ran it
+   * would tear down a real container — so what is checkable is the argv the
+   * composition root builds, and this file already reads the entry point as TEXT
+   * for ISC-830's reason (importing it runs its registration side effects).
+   *
+   *   - **`--keep-panes` is load-bearing and its absence is silent.** All four
+   *     triage seats are panes of ONE cmux workspace (§6.1's correction: the
+   *     workspace is `scripts/triage`'s and each pane then runs
+   *     `pifleet up --workers <one worker>`), and `commands/down.ts` destroys
+   *     every distinct `workspace_ref` a run's workers recorded unless told to
+   *     keep it. Dropping the flag turns "recycle one seat" into "destroy the
+   *     operator's whole triage console", 24 times a day, unattended.
+   *   - **`--attach-here` must never appear.** It is what demands a TTY on both
+   *     streams (`src/attended/adopt.ts:96-114`) and §6.6's whole claim that this
+   *     console is recyclable at all is that an `rpc` recreate needs no terminal.
+   *     Pinning the argv by full value is what forbids it, rather than a
+   *     `not.toContain` that a docblock naming the flag would defeat.
+   */
+  test("the triage recycle's argv keeps the operator's panes and asks for no terminal", () => {
+    const entry = readFileSync(join(import.meta.dir, "..", "..", "src", "cli", "index.ts"), "utf8");
+    expect(entry).toContain('["down", "--run", runId, "--keep-panes", "--json"]');
+    expect(entry).toContain('["up", "--workers", seat, "--json"]');
+    // And the two are really the effects the console is handed, not dead code.
+    expect(entry).toContain("downRun: productionDownRun");
+    expect(entry).toContain("upSeat: productionUpSeat");
+  });
 });
 
 describe("CliError", () => {
