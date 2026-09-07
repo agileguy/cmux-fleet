@@ -26,6 +26,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { DEFAULT_TRIAGE_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import {
   busyRefusal,
   recreateThenDispatch,
@@ -785,5 +786,112 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
       }
       for (const c of calls) expect(`${fn}(${c[1]})`).toBe(`${fn}(CONSOLE)`);
     }
+  });
+
+  /**
+   * ── §13 TASK 4.5a(a): THE SEAT LIST HAS ONE HOME ──────────────────────────
+   *
+   * **THE TASK'S PREMISE IS STALE AND THIS SAYS SO RATHER THAN PRETENDING TO
+   * FIX IT.** §13:2935-2937 reads *"`scripts/triage` spells its four seats as
+   * literals rather than importing `DEFAULT_TRIAGE_WORKERS`"*. It does not, and
+   * did not when the line was written: `scripts/triage:93` imports the constant
+   * and `:263` is the single site that resolves it. What the file DOES spell as
+   * literals is its prose — the usage banner at `:5-8`, the pane diagram at
+   * `:14-20`, and the `--no-actor` help text at `:156` — and that is a real
+   * instance of the divergence the task names, in the one place a compiler was
+   * never going to catch it either way.
+   *
+   * So the claim is split to match what is actually there: the CODE takes the
+   * list from one import, and the DIAGRAM is held to the same four names.
+   *
+   * **A source-text probe is the only instrument available, and that is
+   * measured rather than assumed.** ISC-600: `tsconfig.json`'s `include` is
+   * `src/**` and `test/**`, so `tsc` never opens `scripts/`; the scripts run
+   * `main()` at import, so no test can pull one into the program; and every
+   * mutation applied to `scripts/review` in that round survived a fully green
+   * suite. Reading the working tree is not a stylistic preference here, it is
+   * the only reading there is.
+   */
+  const codeOnly = (src: string): string => {
+    /*
+     * Prose removed, and BOTH kinds are removed by a marker that throws when it
+     * moves. The usage banner is carved out by name because it is prose a human
+     * reads on `--help` rather than a value the program compares against — the
+     * same category as a comment, wearing a template literal.
+     */
+    const usageStart = at(src, "const USAGE = `", 0, "scripts/triage prints no usage banner");
+    const usageEnd = at(src, "\n`;", usageStart, "the usage banner is unterminated");
+    return (src.slice(0, usageStart) + src.slice(usageEnd))
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+  };
+
+  test("the four seats reach its code only through DEFAULT_TRIAGE_WORKERS", async () => {
+    const src = await source("triage");
+    const code = codeOnly(src);
+
+    /*
+     * ONE resolution site. `scripts/triage:254-262` states the hazard itself —
+     * *"Re-deriving `opts.workers ?? DEFAULT_TRIAGE_WORKERS` at each site is how
+     * those two sets come to differ under a `--workers` flag"* — and a second
+     * one would pin the actor's runs to a different set than the panes were
+     * built from.
+     *
+     * COUNTED OVER THE WHOLE STRING, not per line: the expression is one line
+     * here, but a line-wise count of a multi-line needle is an OR of its lines
+     * and miscounts, which is this branch's recorded way of skipping a check
+     * while looking like one. The count runs on `code` and not `src` for a
+     * second reason of the same shape — the docblock above the binding quotes
+     * the expression verbatim, so counting the raw file would answer two.
+     */
+    const RESOLVE = "opts.workers ?? DEFAULT_TRIAGE_WORKERS";
+    expect(code.split(RESOLVE).length - 1).toBe(1);
+
+    /*
+     * And no seat id survives anywhere else in the code. A `--workers` default
+     * re-spelled as a literal, a seat compared by name, a hard-coded reconciler
+     * — each is the divergence §13 names, and each would land here.
+     */
+    for (const seat of DEFAULT_TRIAGE_WORKERS) {
+      expect(code, `scripts/triage spells ${seat} in code, not through the constant`).not.toContain(
+        seat,
+      );
+    }
+  });
+
+  /**
+   * The pane diagram in its header is held to the same four, in the same order.
+   *
+   * This is where the divergence actually lives now: add a fifth seat to
+   * `DEFAULT_TRIAGE_WORKERS` and the code adapts while `scripts/triage:14-20`
+   * goes on drawing a 2x2 of four names, in a file no compiler opens. The
+   * diagram is parsed rather than string-matched, so the assertion is an
+   * EQUALITY in both directions — a seat removed from the constant but left in
+   * the picture reddens too, which a `toContain` per seat would not catch.
+   *
+   * It pins the DIAGRAM against the list and says nothing about pane geometry:
+   * `console-restart.test.ts`'s header records that cmux's reported index and
+   * the `--workers` order disagree, and `triage-plan.test.ts` owns that.
+   */
+  test("its pane diagram names those same four, in the same order", async () => {
+    const src = await source("triage");
+    const open = at(src, "```", 0, "scripts/triage's header draws no pane diagram");
+    const close = at(src, "```", open + 3, "the pane diagram's fence is unterminated");
+
+    const cells = src
+      .slice(open, close)
+      .split("\n")
+      .map((l) => l.replace(/^\s*\*\s?/, "").trim())
+      .filter((l) => l.startsWith("|"))
+      .flatMap((l) =>
+        l
+          .split("|")
+          .map((c) => c.trim())
+          .filter((c) => c !== ""),
+      );
+
+    expect(cells).toEqual([...DEFAULT_TRIAGE_WORKERS]);
   });
 });

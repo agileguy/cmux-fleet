@@ -1,6 +1,6 @@
 /**
- * The verdict mapping and the freshness echo — SRD-TRIAGE-CONSOLE §6.6 layer 3,
- * §6.7 rules 1-2, §7.4, §7.5; §13 tasks 5.2 and 5.3.
+ * The verdict mapping and the freshness echoes — SRD-TRIAGE-CONSOLE §6.6 layer
+ * 3, §6.7 rules 1-2, §7.4, §7.5; §13 tasks 5.2, 5.3, 5.3b and 5.3c.
  *
  * ## The gate is graded on FOUR separable fixtures, and that is not a stylistic choice
  *
@@ -68,11 +68,13 @@ import {
   evidenceGaps,
   OBSERVER_ASSESSMENTS,
   sweepIdEcho,
+  windowEcho,
   type CoverageEntry,
   type CoverageResult,
   type ObserverArtifact,
   type ObserverAssessment,
   type SweepCoverage,
+  type SweepWindow,
   type TriageDocument,
   type TriageRow,
 } from "../../src/run/triage-verdict.ts";
@@ -117,8 +119,43 @@ function assign(worker: string, ...services: string[]): PartitionAssignment {
   return { worker, services };
 }
 
-function artifact(worker: string, sweep_id: string | null = SWEEP): ObserverArtifact {
-  return { worker, sweep_id };
+/**
+ * §7.4's bound, spelled as the two configured values and the dispatch instant.
+ *
+ * `300` is §7.8's `cadence_s` default expressed as §7.1's `default_window`
+ * (`5m`) and `60` is §7.8's `reserve_s` default, so the legal range is the six
+ * minutes ending at the dispatch. Both are spelled here rather than imported:
+ * this file grades the ARITHMETIC, and a fixture that took its bound from the
+ * same constant the code reads would agree with any bound at all.
+ */
+const DISPATCHED_AT = "2026-09-06T12:00:00.000Z";
+const WINDOW: SweepWindow = {
+  dispatched_at: DISPATCHED_AT,
+  default_window_s: 300,
+  reserve_s: 60,
+};
+
+/** `dispatched_at − default_window − reserve_s`, to the millisecond. Accepted. */
+const EARLIEST = "2026-09-06T11:54:00.000Z";
+/** One second before it. Refused — *"looked further back than configured"*. */
+const TOO_EARLY = "2026-09-06T11:53:59.000Z";
+/** One second after the dispatch. Refused — *"a window that opens in the future"*. */
+const TOO_LATE = "2026-09-06T12:00:01.000Z";
+/**
+ * The ordinary case: STRICTLY INSIDE the range, on neither boundary.
+ *
+ * Every fixture that is not about a boundary uses this, so an off-by-one at
+ * either edge is answered by the boundary block alone and cannot be masked by a
+ * general fixture that happened to sit on the edge.
+ */
+const OPENED = "2026-09-06T11:56:00.000Z";
+
+function artifact(
+  worker: string,
+  sweep_id: string | null = SWEEP,
+  window_opened_at: string | null = OPENED,
+): ObserverArtifact {
+  return { worker, sweep_id, window_opened_at };
 }
 
 /** The whole environment, one service per observer, every reply present and fresh. */
@@ -825,6 +862,390 @@ describe("§6.6 layer 3 — the sweep_id echo (task 5.3)", () => {
   });
 });
 
+/**
+ * ── §7.4's SECOND ECHO — `window_opened_at` (task 5.3c) ────────────────────
+ *
+ * §6.6 layer 3's *other* half, and §7.4 says in as many words why it is not a
+ * duplicate of the first: *"An observer can echo the correct sweep id, name a
+ * window in every row, and have queried six hours against a five-minute
+ * configuration — **reporting stale data as fresh, which is the exact failure
+ * layer 3 exists to prevent**."*
+ *
+ * ## THE PAIR AT THE BOTTOM IS THE BLOCK, AND THE BOUNDARIES ARE THE REST
+ *
+ * Two checks that both discard an artifact are two checks a suite cannot tell
+ * apart on any fixture where both are wrong. So the two fixtures that matter
+ * most here are the ASYMMETRIC ones — a correct `sweep_id` with a bad window,
+ * and a bad `sweep_id` with a good window — and each asserts the reason BY NAME.
+ * Without that pair either check can be deleted whole and every other test in
+ * this file stays green, which is this branch's recorded defect arriving in the
+ * one shape §7.4 invites.
+ *
+ * The four boundary instants are spelled as literals and their arithmetic is
+ * asserted one test EARLIER, against `dispatched_at − default_window −
+ * reserve_s` computed from the same two numbers the policy carries. A
+ * hand-typed instant that was not actually the boundary would make two of the
+ * four cases vacuous, and no assertion inside them could see it.
+ *
+ * ## WHAT IS NOT ASSERTED, so the silence is not read as coverage
+ *
+ * **`triage.json` has no window.** §7.4 puts `window_opened_at` on
+ * `observer-ops.json`; §7.5 does not put it on the collator's document, so
+ * `stale_window` never names `tri-1` the way `stale_replay` does. That is the
+ * contract's asymmetry rather than an omission here, and the census test below
+ * asserts the collator's absence rather than leaving it unstated.
+ */
+describe("§7.4 — the window_opened_at echo (task 5.3c)", () => {
+  /**
+   * THE PREMISE, one step earlier than the fixtures that rest on it.
+   *
+   * `EARLIEST` is a string this file typed by hand. If it is not exactly
+   * `dispatched_at − default_window − reserve_s` then the accepted-boundary case
+   * below is testing some other instant, the refused one is testing a second
+   * other instant, and both pass against an implementation with the bound in the
+   * wrong place. A comment claiming the arithmetic cannot go red; this can.
+   */
+  test("the fixture instants are the boundary §7.4's table names", () => {
+    const dispatched = Date.parse(DISPATCHED_AT);
+    expect(Date.parse(EARLIEST)).toBe(
+      dispatched - (WINDOW.default_window_s + WINDOW.reserve_s) * 1_000,
+    );
+    expect(Date.parse(TOO_EARLY)).toBe(Date.parse(EARLIEST) - 1_000);
+    expect(Date.parse(TOO_LATE)).toBe(dispatched + 1_000);
+    // And the ordinary fixture is INSIDE, touching neither edge.
+    expect(Date.parse(OPENED)).toBeGreaterThan(Date.parse(EARLIEST));
+    expect(Date.parse(OPENED)).toBeLessThan(dispatched);
+  });
+
+  /** §7.4's table, one row at a time, asserted BY VALUE at each boundary. */
+  test.each([
+    [EARLIEST, "fresh"],
+    [TOO_EARLY, "out_of_range"],
+    [DISPATCHED_AT, "fresh"],
+    [TOO_LATE, "out_of_range"],
+    [OPENED, "fresh"],
+    [null, "absent"],
+    ["", "absent"],
+    ["   ", "absent"],
+  ] as const)("a window opened at %p is %s", (openedAt, expected) => {
+    expect(windowEcho(DISPATCHED_AT, openedAt, WINDOW)).toBe(expected);
+  });
+
+  /**
+   * An artifact that omitted the field entirely, which is what `undefined` is.
+   *
+   * Separate from the `null` row because they arrive from different readers — a
+   * schema that maps a missing key to `null` and a value read straight off a
+   * parsed object are both real, and a check that handled one would silently
+   * accept the other.
+   */
+  test("an omitted field is absent, not fresh", () => {
+    expect(windowEcho(DISPATCHED_AT, undefined, WINDOW)).toBe("absent");
+  });
+
+  /**
+   * A string that is not an instant is `absent` rather than `out_of_range`.
+   *
+   * Three states and no fourth, so the question is which existing one it spends.
+   * `out_of_range` means *"the observer looked at the wrong stretch of time"* and
+   * a garbage value says nothing of the kind; `absent` is the honest one — the
+   * artifact carries no usable window instant, which is the same thing to go and
+   * fix. **Both refuse**, so nothing turns on the choice except the log line.
+   */
+  test("a value that is not an instant is absent", () => {
+    expect(windowEcho(DISPATCHED_AT, "yesterday", WINDOW)).toBe("absent");
+    expect(windowEcho(DISPATCHED_AT, "2026-13-45T99:00:00Z", WINDOW)).toBe("absent");
+  });
+
+  /**
+   * A HOST bound that is not a number THROWS, and this is the arm that stops the
+   * check failing open.
+   *
+   * `Date.parse` answers `NaN` for a malformed instant, and every comparison
+   * against `NaN` is false — so a `windowEcho` that shrugged at its own bound
+   * would find no artifact earlier than the earliest and none later than the
+   * dispatch, and would return `fresh` for **every** artifact in every sweep.
+   * A check that accepts everything when its own configuration is malformed is
+   * precisely the silent pass this console exists to catch, and it is invisible
+   * in the outcome: `stale_window` would simply never appear again.
+   *
+   * Throwing is also the module's own rule for this class — *"a value, with
+   * throwing reserved for host arguments that are wrong for the life of the
+   * run"*. The dispatch instant and the two knobs are host values; the artifact's
+   * echo is the container's, and that one is answered with a state.
+   */
+  test("a host bound that is not a number throws instead of accepting everything", () => {
+    expect(() => windowEcho("not-an-instant", OPENED, WINDOW)).toThrow(RangeError);
+    expect(() => windowEcho(DISPATCHED_AT, OPENED, { ...WINDOW, default_window_s: NaN })).toThrow(
+      RangeError,
+    );
+    expect(() => windowEcho(DISPATCHED_AT, OPENED, { ...WINDOW, reserve_s: NaN })).toThrow(
+      RangeError,
+    );
+  });
+
+  /**
+   * THE POSITIVE CONTROL for the whole block.
+   *
+   * Every other test here asserts a discard, and a mapping that returned
+   * `stale_window` whenever a policy was supplied would satisfy all of them —
+   * a console that reports a stale window on all three services every five
+   * minutes and never once accepts a sweep.
+   */
+  test("a sweep whose windows are all in range is observed, and counted", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({ window: WINDOW }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+
+    expect(result.services.map((s) => s.reason)).toEqual(["observed", "observed", "observed"]);
+    expect(result.stale_window).toEqual([]);
+    expect(result.census.counted).toBe(3);
+    expect(result.census.observers_reported).toBe(3);
+    expect(result.window_checked).toBe(true);
+  });
+
+  /**
+   * ── THE PAIR §13 CALLS *"the criterion that matters most"* ─────────────────
+   *
+   * *"A correct `sweep_id` with a bad window still discards, and a bad
+   * `sweep_id` with a good window still discards, so neither check can be
+   * satisfied by the other."*
+   *
+   * Both arms are in ONE test on purpose: the claim is about the two together,
+   * and a reader who deleted one of two adjacent tests would not be told the
+   * pair had stopped being a pair. Each names its reason, so an implementation
+   * that spent both echoes as one code passes neither arm.
+   */
+  test("a good id with a bad window discards, and a bad id with a good window discards", () => {
+    const goodIdBadWindow = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        window: WINDOW,
+        artifacts: [artifact(OBS[0], SWEEP, TOO_EARLY), artifact(OBS[1]), artifact(OBS[2])],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+
+    expect(of(goodIdBadWindow, DECLARED[0]).assessment).toBe("indeterminate");
+    expect(of(goodIdBadWindow, DECLARED[0]).reason).toBe("stale_window");
+    expect(of(goodIdBadWindow, DECLARED[0]).claimed).toBeNull();
+    // The id check had nothing to say about it, and says nothing.
+    expect(goodIdBadWindow.stale_replay).toEqual([]);
+    expect(goodIdBadWindow.stale_window).toEqual([OBS[0]]);
+
+    const badIdGoodWindow = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        window: WINDOW,
+        artifacts: [artifact(OBS[0], PREVIOUS, OPENED), artifact(OBS[1]), artifact(OBS[2])],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+
+    expect(of(badIdGoodWindow, DECLARED[0]).assessment).toBe("indeterminate");
+    expect(of(badIdGoodWindow, DECLARED[0]).reason).toBe("stale_replay");
+    expect(badIdGoodWindow.stale_replay).toEqual([OBS[0]]);
+    expect(badIdGoodWindow.stale_window).toEqual([]);
+
+    // And in BOTH, the two clean observers survive — an implementation that
+    // discarded the sweep on one bad artifact reddens here rather than passing
+    // on the half of the fixture it got right.
+    for (const result of [goodIdBadWindow, badIdGoodWindow]) {
+      expect(of(result, DECLARED[1]).reason).toBe("observed");
+      expect(of(result, DECLARED[2]).reason).toBe("observed");
+      expect(result.census.counted).toBe(2);
+    }
+  });
+
+  /**
+   * ARTIFACT-LEVEL, and that is the half a per-row check would satisfy.
+   *
+   * §7.4: *"It is an ARTIFACT-level check, so it discards the artifact rather
+   * than gapping a row … a wrong window applies to every row the document
+   * carries."* So the observer with the bad window is given TWO services and
+   * both fall, while the third observer's service stands. A check that
+   * downgraded only the row whose own `window` field disagreed would pass a
+   * one-service fixture and fail this one.
+   *
+   * The discarded rows claim `healthy` **with full evidence**: a window six
+   * hours wide is a well-formed answer to the wrong question, and a check that
+   * only refused malformed rows would never fire on the failure §7.4 describes.
+   */
+  test("one bad window takes every service that observer covered, and no others", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        window: WINDOW,
+        assignments: [assign(OBS[0], DECLARED[0], DECLARED[1]), assign(OBS[1], DECLARED[2])],
+        artifacts: [artifact(OBS[0], SWEEP, TOO_EARLY), artifact(OBS[1])],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+
+    expect(of(result, DECLARED[0]).reason).toBe("stale_window");
+    expect(of(result, DECLARED[1]).reason).toBe("stale_window");
+    expect(of(result, DECLARED[2]).reason).toBe("observed");
+    expect(result.census.counted).toBe(1);
+    expect(result.census.observers_reported).toBe(1);
+    expect(result.census.observers_stale_window).toEqual([OBS[0]]);
+  });
+
+  /** §7.4's first table row: absent is refused, like every other artifact echo. */
+  test("an artifact that omitted the field discards its services", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        window: WINDOW,
+        artifacts: [{ worker: OBS[0], sweep_id: SWEEP }, artifact(OBS[1]), artifact(OBS[2])],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+
+    expect(of(result, DECLARED[0]).reason).toBe("stale_window");
+    expect(result.stale_window).toEqual([OBS[0]]);
+    expect(result.census.counted).toBe(2);
+  });
+
+  /**
+   * THE FOUR LISTS ARE MUTUALLY DIFFERENT AND NEITHER CONTAINS THE OTHER.
+   *
+   * This branch's MEMORY carries the defect four times: a set-shaped assertion
+   * survives mutation whenever every fixture makes the two sets equal, and one
+   * recorded instance survived REVERSING two output arrays. So one sweep makes
+   * `observers_missing`, `observers_stale`, `observers_stale_window` and the
+   * reported count simultaneously non-empty and different, and swapping any two
+   * of them reddens.
+   */
+  test("stale-id and stale-window are different lists, and a fixture separates them", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        window: WINDOW,
+        assignments: [
+          assign(OBS[0], DECLARED[0]),
+          assign(OBS[1], DECLARED[1]),
+          assign(OBS[2], DECLARED[2]),
+          assign("obs-t4", "ingest"),
+        ],
+        declared: [...DECLARED, "ingest"],
+        artifacts: [
+          artifact(OBS[0], PREVIOUS, OPENED), // stale id, good window
+          artifact(OBS[1], SWEEP, TOO_LATE), // good id, bad window
+          artifact(OBS[2]), // clean
+          // obs-t4 wrote nothing at all.
+        ],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2]), row("ingest")]),
+    );
+
+    expect(result.census.observers_stale).toEqual([OBS[0]]);
+    expect(result.census.observers_stale_window).toEqual([OBS[1]]);
+    expect(result.census.observers_missing).toEqual(["obs-t4"]);
+    expect(result.census.observers_reported).toBe(1);
+    expect(result.stale_replay).toEqual([OBS[0]]);
+    expect(result.stale_window).toEqual([OBS[1]]);
+
+    // The four exhaust the dispatched set, so a seat cannot fall out of all of
+    // them — the same arithmetic the three-way partition asserted before the
+    // fourth class existed.
+    const c = result.census;
+    expect(c.observers_total).toBe(4);
+    expect(
+      c.observers_reported +
+        c.observers_missing.length +
+        c.observers_stale.length +
+        c.observers_stale_window.length,
+    ).toBe(c.observers_total);
+  });
+
+  /**
+   * THE COLLATOR IS NOT IN THIS LIST, and the contract is why.
+   *
+   * §7.4 puts `window_opened_at` on `observer-ops.json`; §7.5's `triage.json`
+   * carries the sweep id and no window. So `stale_replay` names `tri-1` when the
+   * document is stale and `stale_window` never can. Asserted rather than left
+   * implicit: a later reader adding a window to the document contract should
+   * find a test that says where the boundary was, not silence.
+   */
+  test("a stale document names the collator; a bad window names only observers", () => {
+    const staleDoc = assessTriageSweep(
+      SWEEP,
+      fullCoverage({ window: WINDOW }),
+      doc([row(DECLARED[0])], { sweep_id: PREVIOUS }),
+    );
+    expect(staleDoc.stale_replay).toContain(TRI);
+    expect(staleDoc.stale_window).toEqual([]);
+
+    const badWindow = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        window: WINDOW,
+        artifacts: [artifact(OBS[0], SWEEP, TOO_EARLY), artifact(OBS[1]), artifact(OBS[2])],
+      }),
+      doc([row(DECLARED[0])]),
+    );
+    expect(badWindow.stale_window).not.toContain(TRI);
+  });
+
+  /**
+   * A stale id and a bad window on the SAME artifact resolves to `stale_replay`.
+   *
+   * Both are true and the row is discarded either way, so the only question is
+   * which fact the operator is handed. The id is the narrower and more
+   * actionable one — a replaying session returns last sweep's answer entire, and
+   * last sweep's window comes with it, so the window fault is a CONSEQUENCE
+   * rather than a second finding. `no_artifact` sits above `stale_replay` for
+   * the same reason and the module's docblock states it.
+   */
+  test("a stale id and a bad window together report the id", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        window: WINDOW,
+        artifacts: [artifact(OBS[0], PREVIOUS, TOO_EARLY), artifact(OBS[1]), artifact(OBS[2])],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+
+    expect(of(result, DECLARED[0]).reason).toBe("stale_replay");
+    expect(result.census.observers_stale).toEqual([OBS[0]]);
+    expect(result.census.observers_stale_window).toEqual([]);
+  });
+
+  /**
+   * A SWEEP ASSESSED WITH NO POLICY SAYS SO, IN THE OUTCOME.
+   *
+   * `SweepCoverage.window` is optional, which means a caller can leave the check
+   * unrun. That is a fact about the sweep and the only place it would otherwise
+   * appear is nowhere — the same argument `observers_unsolicited` is published
+   * under. `window_checked` is the fact, and asserting BOTH values is what makes
+   * it a claim rather than a constant: an implementation that hardcoded `true`
+   * passes the first arm and fails the second.
+   */
+  test("window_checked is false without a policy and true with one", () => {
+    const unchecked = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        artifacts: [artifact(OBS[0], SWEEP, TOO_EARLY), artifact(OBS[1]), artifact(OBS[2])],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+    expect(unchecked.window_checked).toBe(false);
+    // And with nothing to check against, the out-of-range window is not spent.
+    expect(of(unchecked, DECLARED[0]).reason).toBe("observed");
+    expect(unchecked.stale_window).toEqual([]);
+
+    const checked = assessTriageSweep(
+      SWEEP,
+      fullCoverage({ window: WINDOW }),
+      doc([row(DECLARED[0])]),
+    );
+    expect(checked.window_checked).toBe(true);
+  });
+});
+
 describe("§6.7 — coverage is counted host-side, never from triage.json's claim", () => {
   /**
    * §12's ANTI-CRITERION, verbatim: *"a fixture where `triage.json` claims three
@@ -932,16 +1353,21 @@ describe("§6.7 — coverage is counted host-side, never from triage.json's clai
   });
 
   /**
-   * The three lists PARTITION the dispatched set.
+   * The lists PARTITION the dispatched set.
    *
-   * `observers_total = reported + missing + stale` is what makes the census
-   * readable as a denominator (§7.5, `CollationCensus`'s *"A count of readers who
-   * agreed is not `3/3` without it"*). A seat that fell out of all three — an
-   * observer counted as neither reporting, missing nor stale — would make the
-   * arithmetic silently wrong, and every individual list assertion above would
-   * still pass.
+   * `observers_total = reported + missing + stale + stale_window` is what makes
+   * the census readable as a denominator (§7.5, `CollationCensus`'s *"A count of
+   * readers who agreed is not `3/3` without it"*). A seat that fell out of all
+   * of them — an observer counted as neither reporting, missing, stale nor
+   * out-of-window — would make the arithmetic silently wrong, and every
+   * individual list assertion above would still pass.
+   *
+   * **The fourth term is zero in THIS fixture**, which supplies no window policy
+   * and so cannot separate it; §7.4's block carries the version where all four
+   * are non-empty and mutually different. Both are kept: this one is the sweep
+   * an actor without a policy produces, and the arithmetic has to hold there too.
    */
-  test("every dispatched observer lands in exactly one of reported, missing, stale", () => {
+  test("every dispatched observer lands in exactly one of the census's classes", () => {
     const result = assessTriageSweep(
       SWEEP,
       fullCoverage({
@@ -950,12 +1376,21 @@ describe("§6.7 — coverage is counted host-side, never from triage.json's clai
       doc([]),
     );
 
-    const { observers_total, observers_reported, observers_missing, observers_stale } =
-      result.census;
-    expect(observers_total).toBe(3);
-    expect(observers_reported + observers_missing.length + observers_stale.length).toBe(
+    const {
       observers_total,
-    );
+      observers_reported,
+      observers_missing,
+      observers_stale,
+      observers_stale_window,
+    } = result.census;
+    expect(observers_total).toBe(3);
+    expect(observers_stale_window).toEqual([]);
+    expect(
+      observers_reported +
+        observers_missing.length +
+        observers_stale.length +
+        observers_stale_window.length,
+    ).toBe(observers_total);
   });
 
   /**
@@ -1202,11 +1637,12 @@ describe("the closed sets, asserted by name", () => {
     expect([...EVIDENCE_GAPS]).toEqual(["coverage", "selector", "window", "ledger"]);
   });
 
-  test("ASSESSMENT_REASONS is closed at seven", () => {
+  test("ASSESSMENT_REASONS is closed at eight", () => {
     expect([...ASSESSMENT_REASONS]).toEqual([
       "observed",
       "unevidenced_healthy",
       "stale_replay",
+      "stale_window",
       "no_artifact",
       "unreported",
       "duplicate_rows",
@@ -1234,6 +1670,14 @@ describe("the closed sets, asserted by name", () => {
       assessTriageSweep(SWEEP, fullCoverage(), doc([])),
       assessTriageSweep(SWEEP, fullCoverage({ assignments: [] }), doc([])),
       assessTriageSweep(SWEEP, fullCoverage(), doc([row(DECLARED[0]), row(DECLARED[0])])),
+      assessTriageSweep(
+        SWEEP,
+        fullCoverage({
+          window: WINDOW,
+          artifacts: [artifact(OBS[0], SWEEP, TOO_EARLY), artifact(OBS[1]), artifact(OBS[2])],
+        }),
+        doc([row(DECLARED[0])]),
+      ),
     ];
     for (const result of cases) for (const s of result.services) seen.add(s.reason);
 

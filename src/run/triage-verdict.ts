@@ -94,6 +94,22 @@
  * failure being caught."* A signature that let the document supply its own
  * comparand would compare a value to itself and pass forever.
  *
+ * ## §7.4's SECOND echo, and why one does not imply the other
+ *
+ * `window_opened_at` is the third required field on `observer-ops.json` and
+ * {@link windowEcho} grades it. §7.4's argument for a third field rather than a
+ * second reading of the second: *"`sweep_id` proves the observer ran THIS sweep;
+ * `window_opened_at` proves it looked at the right stretch of time. An observer
+ * can echo the correct sweep id, name a window in every row, and have queried
+ * six hours against a five-minute configuration"*. Two checks, two faults,
+ * neither reachable from the other — and the pair of fixtures that proves it is
+ * the asymmetric one: a good id with a bad window discards, and a bad id with a
+ * good window discards. Without both, either check can be deleted whole.
+ *
+ * It spends its own reason, `stale_window`, *"because the operator response
+ * differs"*, and it is ARTIFACT-level like `stale_replay` — a wrong window
+ * applies to every row the document carries.
+ *
  * ## What is deliberately NOT decided here, so the silence is not read as coverage
  *
  * **Confirmation (§6.7 rule 1) is not this module's.** *"A notification fires on
@@ -214,6 +230,45 @@ export interface ObserverArtifact {
   readonly worker: string;
   /** §7.4's required echo. `null` when the artifact omitted it. */
   readonly sweep_id: string | null;
+  /**
+   * §7.4's THIRD required field — the instant the observer's queries looked back
+   * from. `null` or absent when the artifact omitted it, which
+   * {@link windowEcho} answers as `absent` and {@link assessTriageSweep} spends
+   * as `stale_window`.
+   *
+   * Optional in the TYPE for the reason {@link SweepCoverage.window} records,
+   * and not because the contract is optional: §7.4 lists it among *"three
+   * required fields"*, and an artifact that omits it is refused whenever a
+   * policy is supplied.
+   */
+  readonly window_opened_at?: string | null;
+}
+
+/**
+ * The two configured values that fix §7.4's legal range.
+ *
+ * **They come from two different files, which is worth stating because §7.4 says
+ * otherwise.** §7.4:1916-1918 has *"§7.8 already holds the two values"*;
+ * `default_window` is §7.1's — `environments.<env>.default_window` in
+ * `triage/targets.yaml` (§7.1:1766) — and only `reserve_s` is §7.8's
+ * (`triage/console.yaml`, :2065). Whatever assembles a {@link SweepCoverage}
+ * therefore reads both files, which is the same pairing §7.8:2147-2151 already
+ * requires of the loader for the `default_window ≤ cadence_s` refusal.
+ *
+ * Seconds, both, because that is how §7.8 spells `reserve_s` and how
+ * `parseDuration` resolves §7.1's `default_window`.
+ */
+export interface WindowPolicy {
+  /** §7.1 `environments.<env>.default_window`, resolved to seconds. */
+  readonly default_window_s: number;
+  /** §7.8 `reserve_s`. */
+  readonly reserve_s: number;
+}
+
+/** {@link WindowPolicy} plus the instant the range is measured back from. */
+export interface SweepWindow extends WindowPolicy {
+  /** The instant the HOST dispatched this sweep. ISO-8601, minted host-side. */
+  readonly dispatched_at: string;
 }
 
 /**
@@ -231,6 +286,29 @@ export interface SweepCoverage {
   readonly assignments: readonly PartitionAssignment[];
   /** The observers whose reply artifact is present. Never the worker's claim of same. */
   readonly artifacts: readonly ObserverArtifact[];
+  /**
+   * §7.4's window bound — the dispatch instant and the environment's configured
+   * window. Absent leaves the window echo UNRUN, and
+   * {@link SweepAssessment.window_checked} says so in the outcome.
+   *
+   * **Optional against this module's own grain, and the reason is a process one
+   * rather than a design one.** Everything else here is required precisely so a
+   * caller cannot skip it — the posture the header calls *"a property of the
+   * code"* rather than caller discipline. A required member would be the right
+   * shape; it would also be a compile error in
+   * `test/unit/triage-document.test.ts:251`, which builds a `SweepCoverage`
+   * literal and belongs to no task in §13's round-10 slice, and §13 task 5.3c's
+   * own *"Touches"* line does not list that file. So the member is optional, the
+   * skip is PUBLISHED rather than silent, and the note is here for whoever
+   * closes it: making `window` required is a three-line change to that literal
+   * and to `ObserverArtifact` above, and it should be made.
+   *
+   * A caller that supplies it cannot then be lied to — the dispatch instant is
+   * the host's own value and is never read out of an artifact, for exactly the
+   * reason `sweepIdEcho`'s dispatched id is a parameter: a comparand the
+   * document supplied would compare a value to itself and pass forever.
+   */
+  readonly window?: SweepWindow;
 }
 
 /**
@@ -344,6 +422,95 @@ export function sweepIdEcho(
 }
 
 /**
+ * How an artifact's echoed `window_opened_at` stands against the range §7.4
+ * fixes — §6.6 layer 3's *other* half, and §13 task 5.3c.
+ *
+ * ## Why this is not a duplicate of {@link sweepIdEcho}
+ *
+ * §7.4, and the sentence is the whole justification for a third required field:
+ * *"`sweep_id` proves the observer ran THIS sweep; `window_opened_at` proves it
+ * looked at THE RIGHT STRETCH OF TIME. An observer can echo the correct sweep
+ * id, name a window in every row, and have queried six hours against a
+ * five-minute configuration — **reporting stale data as fresh, which is the
+ * exact failure layer 3 exists to prevent**."* The row-level `window` field does
+ * not cover it either: §6.7's structural gate tests that a window was NAMED, not
+ * that it was opened when it should have been.
+ *
+ * ## The table, verbatim
+ *
+ * | condition | verdict |
+ * |---|---|
+ * | absent | refused |
+ * | earlier than `dispatched_at − default_window − reserve_s` | refused |
+ * | later than `dispatched_at` | refused |
+ * | otherwise | accepted |
+ *
+ * Both boundaries are INCLUSIVE, which is what *"earlier than"* and *"later
+ * than"* say. §7.4 needs no new knob for either: the host dispatched the sweep
+ * at a known instant, and the two values that fix the range are already
+ * configured (see {@link WindowPolicy}).
+ *
+ * ## Three states for the refusal's two, so a log can say which
+ *
+ * `sweepIdEcho`'s posture exactly. `out_of_range` is the observer looking at the
+ * wrong stretch of time; `absent` is an artifact that ignored a required field
+ * of §7.4 — a contract violation by a worker that may never have been told, and
+ * a different thing to go and fix. {@link assessTriageSweep} spends both as
+ * `stale_window`, because §7.4 named one code.
+ *
+ * **An unparseable value is `absent` rather than `out_of_range`**, and there is
+ * no fourth state to give it. `out_of_range` asserts something specific about
+ * WHEN the observer looked, and `"yesterday"` asserts nothing of the kind; what
+ * is true of it is that the artifact carries no usable window instant, which is
+ * what `absent` already means. Both refuse, so the choice reaches the log line
+ * and nothing else.
+ *
+ * ## A malformed HOST bound THROWS, and that arm is load-bearing
+ *
+ * `Date.parse` answers `NaN`, and every comparison against `NaN` is false — so
+ * an implementation that shrugged at its own bound would find no artifact
+ * earlier than the earliest and none later than the dispatch, and would answer
+ * `fresh` for **every artifact in every sweep**. The check would not merely
+ * weaken, it would invert into a rubber stamp, and the only visible symptom
+ * would be a `stale_window` that never appeared again. Throwing is also this
+ * module's own rule for the class — *"a value, with throwing reserved for host
+ * arguments that are wrong for the life of the run"* — and the three inputs
+ * split cleanly along it: `dispatchedAt` and `policy` are the host's, `openedAt`
+ * is a container's and is answered with a state.
+ *
+ * A NEGATIVE bound is left to the arithmetic on purpose: it narrows the range
+ * and eventually empties it, so a mis-signed knob refuses artifacts rather than
+ * accepting them. §7.8's schema bounds both values above zero anyway; this notes
+ * which way the unguarded case falls, which is the one that matters.
+ */
+export function windowEcho(
+  dispatchedAt: string,
+  openedAt: string | null | undefined,
+  policy: WindowPolicy,
+): "fresh" | "absent" | "out_of_range" {
+  const dispatched = Date.parse(dispatchedAt);
+  if (
+    !Number.isFinite(dispatched) ||
+    !Number.isFinite(policy.default_window_s) ||
+    !Number.isFinite(policy.reserve_s)
+  ) {
+    throw new RangeError(
+      `windowEcho: the host's own bound is not a number — dispatched_at=${dispatchedAt}, ` +
+        `default_window_s=${policy.default_window_s}, reserve_s=${policy.reserve_s}. ` +
+        `Comparing against NaN would accept every window in every sweep.`,
+    );
+  }
+
+  if (openedAt === null || openedAt === undefined || openedAt.trim() === "") return "absent";
+  const opened = Date.parse(openedAt);
+  if (!Number.isFinite(opened)) return "absent";
+
+  const earliest = dispatched - (policy.default_window_s + policy.reserve_s) * 1_000;
+  if (opened < earliest || opened > dispatched) return "out_of_range";
+  return "fresh";
+}
+
+/**
  * Why a service's assessment is what it is. Closed, and asserted by name.
  *
  * `observed` is the only member meaning *"the row was taken as the observer
@@ -357,6 +524,15 @@ export const ASSESSMENT_REASONS = [
   "unevidenced_healthy",
   /** §6.6 layer 3: the artifact echoed the wrong `sweep_id`, or none. */
   "stale_replay",
+  /**
+   * §7.4: the artifact echoed a `window_opened_at` outside the legal range, or
+   * none.
+   *
+   * Its own code beside `stale_replay` *"because the operator response differs —
+   * a stale sweep id is a worker replaying an old answer, and a wrong window is
+   * a worker answering the wrong question"*.
+   */
+  "stale_window",
   /** The assigned observer produced no reply file. §6.5's join, host-counted. */
   "no_artifact",
   /** The observer replied, freshly, and its document carries no row for this service. */
@@ -423,6 +599,20 @@ export interface SweepCensus {
   /** Dispatched observers whose artifact echoed the wrong id, or none, by name. */
   readonly observers_stale: readonly string[];
   /**
+   * Dispatched observers whose artifact echoed THIS sweep and a window outside
+   * §7.4's range, or no window at all, by name.
+   *
+   * **A fourth class rather than a widening of `observers_stale`**, so the four
+   * still partition the dispatched set and `observers_total` is still their sum.
+   * Keeping it out of `observers_reported` is the same rule that keeps a stale
+   * id out of it: the observer produced a file, every row of that file was
+   * discarded, and counting it as a report is how stale data becomes coverage.
+   *
+   * Empty on every sweep assessed without a window policy, which
+   * {@link SweepAssessment.window_checked} distinguishes from a clean one.
+   */
+  readonly observers_stale_window: readonly string[];
+  /**
    * Artifacts present for workers this sweep did not dispatch, by name.
    *
    * Recorded rather than ignored: a reply from a seat that was not asked is
@@ -476,6 +666,26 @@ export interface SweepAssessment {
    * {@link SweepCensus.counted} rather than merely labelled.
    */
   readonly stale_replay: readonly string[];
+  /**
+   * Every artifact whose window echo failed §7.4, by producing worker. Empty on
+   * a clean sweep, and empty on every sweep assessed without a policy.
+   *
+   * **The collator can never appear here, and that is the contract rather than
+   * an omission.** §7.4 puts `window_opened_at` on `observer-ops.json`; §7.5's
+   * `triage.json` carries the sweep id and no window, so `stale_replay` names
+   * `tri-1` when the document is stale and this list names observers only.
+   */
+  readonly stale_window: readonly string[];
+  /**
+   * Whether §7.4's window echo ran at all — `coverage.window` was supplied.
+   *
+   * Published rather than inferred, for {@link SweepCensus.observers_unsolicited}'s
+   * reason: a check that did not run is a fact about the sweep, and the only
+   * place it would otherwise appear is nowhere. A caller reading
+   * `stale_window: []` cannot otherwise tell a sweep whose windows were all in
+   * range from one where nobody looked.
+   */
+  readonly window_checked: boolean;
 }
 
 /**
@@ -501,12 +711,14 @@ export interface SweepAssessment {
  *    yields an `indeterminate` third **whatever the row said**.
  * 3. **`stale_replay`** — the observer's artifact, or the collator's document,
  *    echoed the wrong id. §6.6 layer 3.
- * 4. **`unreported`** — a fresh observer answered and its document has no row for
+ * 4. **`stale_window`** — the artifact echoed a window outside §7.4's range, or
+ *    none. Artifact-level, so it takes the observer's whole share.
+ * 5. **`unreported`** — a fresh observer answered and its document has no row for
  *    a service it was assigned.
- * 5. **`duplicate_rows`** — the document gave the service more than one row, and
+ * 6. **`duplicate_rows`** — the document gave the service more than one row, and
  *    picking one of them is judgement rather than counting.
- * 6. **`unevidenced_healthy`** — §6.7 rule 2's gate.
- * 7. **`observed`** — taken as written.
+ * 7. **`unevidenced_healthy`** — §6.7 rule 2's gate.
+ * 8. **`observed`** — taken as written.
  *
  * `no_artifact` is ordered above `stale_replay` deliberately. When the collator's
  * own document is stale, every service falls to step 3; a service whose observer
@@ -535,6 +747,8 @@ export function assessTriageSweep(
 
   const dispatched = new Set(coverage.assignments.map((a) => a.worker));
   const echoes = new Map<string, "fresh" | "stale" | "absent">();
+  const windows = new Map<string, "fresh" | "absent" | "out_of_range">();
+  const policy = coverage.window;
   const unsolicited: string[] = [];
   for (const artifact of coverage.artifacts) {
     if (!dispatched.has(artifact.worker)) {
@@ -542,23 +756,42 @@ export function assessTriageSweep(
       continue;
     }
     echoes.set(artifact.worker, sweepIdEcho(dispatchedSweepId, artifact.sweep_id));
+    if (policy !== undefined) {
+      windows.set(
+        artifact.worker,
+        windowEcho(policy.dispatched_at, artifact.window_opened_at, policy),
+      );
+    }
   }
+
+  /** §7.4's echo, failed. Always `false` when no policy was supplied. */
+  const badWindow = (worker: string): boolean => {
+    const echo = windows.get(worker);
+    return echo !== undefined && echo !== "fresh";
+  };
 
   /*
    * Dispatch order, because that is the order the actor's log already reads in.
    *
-   * The three lists PARTITION the dispatched set — missing, stale, reported —
-   * so `observers_total` is their sum and a seat cannot fall out of all three.
-   * An observer that replied with the wrong id is `stale`, not `reported`: it
-   * produced a file, and counting it as a report is how a replay becomes
-   * coverage.
+   * The four lists PARTITION the dispatched set — missing, stale, out-of-window,
+   * reported — so `observers_total` is their sum and a seat cannot fall out of
+   * all four. An observer that replied with the wrong id is `stale`, not
+   * `reported`: it produced a file, and counting it as a report is how a replay
+   * becomes coverage. §7.4's window failure is kept out of `reported` by the
+   * same rule and for the same reason — every row of that artifact is discarded,
+   * so an observer that reported nothing usable did not report.
    */
   const observersMissing = [...dispatched].filter((worker) => !echoes.has(worker));
   const observersStale = [...dispatched].filter((worker) => {
     const echo = echoes.get(worker);
     return echo === "stale" || echo === "absent";
   });
-  const observersReported = [...dispatched].filter((w) => echoes.get(w) === "fresh").length;
+  const observersStaleWindow = [...dispatched].filter(
+    (worker) => echoes.get(worker) === "fresh" && badWindow(worker),
+  );
+  const observersReported = [...dispatched].filter(
+    (w) => echoes.get(w) === "fresh" && !badWindow(w),
+  ).length;
 
   /*
    * The collator's own echo. §7.5 requires it and §6.6 layer 3 is why: `tri-1`
@@ -615,6 +848,20 @@ export function assessTriageSweep(
     const echo = echoes.get(observer);
     if (echo === undefined) return blank(service, observer, "no_artifact");
     if (echo !== "fresh" || !documentFresh) return blank(service, observer, "stale_replay");
+    /*
+     * §7.4's second echo, ARTIFACT-LEVEL: *"a wrong window applies to every row
+     * the document carries"*, so it discards here — where the whole of an
+     * observer's assigned share falls — rather than gapping a row inside the
+     * gate below.
+     *
+     * Ordered BELOW `stale_replay` deliberately, and the argument is the one
+     * this docblock already makes for `no_artifact` sitting above it. When both
+     * are wrong, the id is the narrower and more actionable fact: a replaying
+     * session returns last sweep's answer entire and last sweep's window comes
+     * with it, so the window fault is a consequence rather than a second
+     * finding, and the operator's next move is decided by the id.
+     */
+    if (badWindow(observer)) return blank(service, observer, "stale_window");
 
     const held = rows.get(service);
     if (held === undefined) return blank(service, observer, "unreported");
@@ -663,11 +910,14 @@ export function assessTriageSweep(
     sweep_id: dispatchedSweepId,
     services,
     stale_replay: staleReplay,
+    stale_window: observersStaleWindow,
+    window_checked: policy !== undefined,
     census: {
       observers_total: dispatched.size,
       observers_reported: observersReported,
       observers_missing: observersMissing,
       observers_stale: observersStale,
+      observers_stale_window: observersStaleWindow,
       observers_unsolicited: unsolicited,
       declared: document.services.length,
       counted,

@@ -499,4 +499,73 @@ describe("every console script hands its --restart ordering to the module", () =
       }
     });
   }
+
+  /**
+   * ── §13 TASK 4.5a(b): TWO PROBES FOR ISC-572 ON TRIAGE, AND WHICH IS
+   * LOAD-BEARING FOR WHAT ─────────────────────────────────────────────────────
+   *
+   * §13:2938-2940: *"`test/unit/console-restart.test.ts:471` asserts ISC-572 for
+   * triage by reading source text, while `test/integration/triage-console.test.ts`
+   * now EXECUTES it — keep both and say which is load-bearing."* Both run in CI
+   * (`.github/workflows/ci.yml` runs `bun test test/unit` AND
+   * `bun test test/integration`), so this is not a question of one being skipped.
+   * It is a question of what each one can see, and **neither subsumes the other**:
+   *
+   * **The source probe above is the only one that can see the stop being
+   * DROPPED.** Delete the `quiesce` property from `recreateThenDispatch`'s dep
+   * object and the actor is simply never stopped — which is `quiesce: null`'s
+   * behaviour, the defect ISC-572 records wearing the fix's clothes. The
+   * executing test asserts the actor is *still live several polls into the
+   * wait*, and an actor that is never stopped at all is **more** live, so it
+   * stays green. Measured, not reasoned: with the property removed,
+   * `test/integration/triage-console.test.ts` passed and this arm failed.
+   *
+   * **The executing test is the only one that can see the ORDER being wrong in a
+   * way the markers do not span.** The source probe reads two bounded spans; a
+   * stop performed through some path those spans do not cover — a different
+   * helper, an earlier branch, a dep the module calls too early — is a green
+   * source probe and a dead actor. The integration test watches the real record
+   * across real poll cycles and does not care how the script got there.
+   *
+   * So: the source probe is load-bearing for **delegation**, the executing test
+   * for **timing**. The one thing that would make this file's arm redundant is
+   * an executing test that fails when the stop is dropped, and there is no such
+   * test — you cannot observe a stop that never happens by watching a process
+   * stay alive.
+   *
+   * ## THE CLAIM IS PINNED, BECAUSE A COMMENT CANNOT GO RED
+   *
+   * Two arms, and both are about the OTHER file. The first keeps *"keep both"*
+   * honest: if the executing test is deleted or renamed, this reddens and names
+   * it, rather than leaving a paragraph describing a test that no longer exists.
+   * The second pins the division of labour itself — the integration file drives
+   * `scripts/triage` as a PROCESS and never reads it as TEXT, which is exactly
+   * why it cannot see a dropped dep. Someone who adds a source read there has
+   * changed which probe is load-bearing, and should find a red test asking them
+   * to update this paragraph rather than a stale paragraph.
+   */
+  test("the executing half of ISC-572 exists, and cannot see what this file sees", async () => {
+    const integration = await readFile(
+      join(import.meta.dir, "..", "integration", "triage-console.test.ts"),
+      "utf8",
+    );
+
+    // 1. It is still there, by the name that carries the claim.
+    expect(
+      integration,
+      "test/integration/triage-console.test.ts no longer executes the ISC-572 wait — " +
+        "the source probe above is now the ONLY check on this console's actor stop",
+    ).toContain("the actor is still live several polls into the wait");
+
+    // 2. And it reads the script as a PROCESS, never as text. `source(` is this
+    //    file's and `fresh-dispatch.test.ts`'s instrument; the integration file
+    //    spawns `bun run scripts/triage` instead, which is what makes a dropped
+    //    `quiesce` invisible to it and this file's arm irreplaceable.
+    expect(integration).toContain("scripts/triage");
+    expect(
+      integration.includes("readFile(") || integration.includes("readFileSync("),
+      "test/integration/triage-console.test.ts now reads source text — re-read task " +
+        "4.5a(b): which probe is load-bearing may have changed",
+    ).toBe(false);
+  });
 });
