@@ -973,9 +973,21 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     const child = childTaskId(sweepId, seat.aspect);
     const dir = join(workerOutboxDir(run.root, seat.worker), child, SWEEP_FILES_DIR);
     await mkdir(dir, { recursive: true });
+    /*
+     * The fixture carries a FINDING, and that is the point of it. The first
+     * version of this test asserted only `reply.worker`, which the narrow
+     * `ObserverArtifact` also satisfies — so it passed while the collator was
+     * being handed a 73-byte envelope with the report stripped out. The payload
+     * must be the artifact the observer wrote, whole.
+     */
     await writeFile(
       join(dir, OBSERVER_ARTIFACT_FILE),
-      JSON.stringify({ sweep_id: sweepId, window_opened_at: "2026-09-06T12:00:00.000Z", status: "success" }),
+      JSON.stringify({
+        sweep_id: sweepId,
+        window_opened_at: "2026-09-06T12:00:00.000Z",
+        status: "success",
+        services: [{ service: "alert-notifier", assessment: "healthy" }],
+      }),
       "utf8",
     );
 
@@ -990,7 +1002,15 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     expect(joined.artifacts.map((a) => a.worker)).toEqual([seat.worker]);
     // BY NAME: the child task id the collation brief will name, not just "one call".
     expect(published.map((p) => p.child)).toEqual([child]);
-    expect((published[0]!.reply as { worker?: string }).worker).toBe(seat.worker);
+    /*
+     * THE REPORT SURVIVES, asserted by value. `worker` alone is satisfied by the
+     * narrow freshness echo, which is exactly the bug this replaces: the collator
+     * got `{worker, sweep_id: null, window_opened_at: null}` and correctly found
+     * no services in it.
+     */
+    const reply = published[0]!.reply as { services?: unknown; status?: string };
+    expect(reply.services).toEqual([{ service: "alert-notifier", assessment: "healthy" }]);
+    expect(reply.status).toBe("success");
   });
 
   test("a seat with no artifact publishes NOTHING", async () => {

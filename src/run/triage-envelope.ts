@@ -1099,8 +1099,29 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
         /*
          * §6.3 step 7: hand it to the collator. The collation brief will name
          * `/replies/<taskId>.json`, so this is what makes that path exist.
+         *
+         * **The WHOLE artifact, never `reply.artifact`.** {@link ObserverArtifact}
+         * is deliberately narrow — §7.4's freshness echo and nothing else, three
+         * fields the host gates on. Publishing that is publishing the envelope and
+         * dropping the report: measured 2026-09-07, the collator received a
+         * 73-byte file reading `{worker, sweep_id: null, window_opened_at: null}`,
+         * found no services in it, and correctly recorded all three as
+         * `unaccounted` — a right answer to the wrong document.
+         *
+         * So the file is re-read and forwarded verbatim. A second read of a small
+         * local file is the cheap half of this; the expensive half was a collation
+         * that looked like a worker failure and was a host one.
          */
-        await deps.publishReply?.(taskId, found.reply.artifact);
+        const rawArtifact = await read(path);
+        if (rawArtifact !== null) {
+          try {
+            await deps.publishReply?.(taskId, JSON.parse(rawArtifact));
+          } catch {
+            // Unparseable here is impossible in practice — `readObserverArtifactAt`
+            // just parsed it — but a throw inside the join would cost the whole
+            // sweep, and the artifact is already counted.
+          }
+        }
         continue;
       }
       /*
