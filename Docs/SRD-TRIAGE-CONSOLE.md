@@ -3358,9 +3358,8 @@ and SRD-FLEET-PM-001 D7's.
   and NO artifacts, which must mint the next id rather than collate forever. Resuming on "the record
   is behind the run tree" alone is the wrong signal and would open a firing incident on a single
   sweep's evidence — it is worse than the one wasted cadence it saves.*
-- **6.4b** **Consolidate the saturation pair table. Added 2026-09-06; ISC-869 is filed OPEN against
-  it.** `VERDICT_PAIR` in `test/unit/triage-incident.test.ts` and `unreachableFrom` in
-  `triage-pass.ts` are one table in two files with **nothing pinning them equal** — ISC-804's shape a
+- **6.4b** **Consolidate the saturation pair table. Added 2026-09-06, DONE 2026-09-06 — ISC-869 closed.** `VERDICT_PAIR` in `test/unit/triage-incident.test.ts` and `unreachableFrom` in
+  `src/run/triage-pass.ts` (**path corrected 2026-09-06 — it read bare where every neighbouring entry is repo-relative, and a *Touches* line is what gets copied into a slice**) are one table in two files with **nothing pinning them equal** — ISC-804's shape a
   file over, and the third instance on this branch after `CONSOLE_HEALTH_ASSESSMENTS` and the
   duplicated `sweepTaskId`. The pair belongs beside `SaturationOutcome` in `triage-verdict.ts`, read
   by both. Touches: `src/run/triage-verdict.ts`, `src/run/triage-pass.ts`,
