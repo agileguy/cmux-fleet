@@ -2901,7 +2901,7 @@ and SRD-FLEET-PM-001 D7's.
   `src/run/triage-verdict.ts` (new), `test/unit/triage-verdict.test.ts` (new).
 - **5.3** The `sweep_id` echo check. Touches: `src/run/triage-verdict.ts`,
   `test/unit/triage-verdict.test.ts`.
-- **5.3a** **The saturation verdict (D15, §6.7 rule 3).** The correlation rule, the suppression of the
+- **5.3a** **The saturation verdict (D15, §6.7 rule 3). DONE 2026-09-06.** The correlation rule, the suppression of the
   coverage escalation, and the confirming probe — which is `probeNativeToolCalls`
   (`src/security/model-probe.ts:230`) over `hostReachableBaseUrl` (`:603`), **injected as a dep, never
   called in a fixture**. Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`.
@@ -3071,6 +3071,33 @@ and SRD-FLEET-PM-001 D7's.
   `test/unit/triage-document.test.ts` (new), `ISA.md`.
   *Acceptance: a document with a row missing `assessment`, one with an unknown assessment value, and
   one that is not an object each refuse by name rather than reaching `assessTriageSweep`.*
+- **5.4d** **§6.8a's `kind` enum grows a SEVENTH member, `inference_unreachable`. RULED 2026-09-06.**
+  Task 5.3a found the gap and could not close it: §6.7 rule 3 makes `unreachable` a first-class
+  outcome — *"a different sentence on the operator's screen and a different thing for them to go and
+  do"* — while §6.8a's `kind` enum is closed at six with no member for it, and §9's table has only
+  §9.16, whose title is *"The inference server is slow, **not down**"*. So an `endpoint_down` sweep
+  composes **nothing**. The two available resolutions were to grow the enum or to strike §6.7 rule 3's
+  `unreachable` sentence as unimplementable.
+  **Grow it.** Striking the sentence throws away a distinction the probe can already make reliably —
+  `probeNativeToolCalls` separates the two classes and carries the incident report for a system that
+  conflated them — and "the inference endpoint is down" is a console-health fact about the console
+  itself, which is precisely what §6.8a's record kind is for. The cost is one enum member and one
+  §6.8a table row; ISC-665 asserts the enum BY NAME, so the change is one line with a red test to
+  prove it landed. Touches: `src/run/triage-incident.ts`, `test/unit/triage-incident.test.ts`,
+  `Docs/SRD-TRIAGE-CONSOLE.md` §6.8a's table, `ISA.md`.
+  *Acceptance: `CONSOLE_HEALTH_KINDS` is seven and ISC-665's probe names the seventh; an
+  `endpoint_down` sweep composes an observation on the new kind; and the anti-twin — a `timeout` sweep
+  still composes `inference_saturated` and NOT the new kind, because the whole point of ISC-731 is
+  that the two do not collapse into one.*
+  **The mitigation that makes this a one-cadence hole rather than a silence:** when the endpoint is
+  really down, NO observer produces an artifact, so §6.5's zero-row raises `sweep_produced_nothing`
+  and the console does speak. The uncovered case is the PARTIAL one.
+- **5.3e** **A per-row `evidence_ref`, added 2026-09-06 from task 5.3a.** `sweepObservations` cites one
+  sweep-level ref because `ServiceAssessment` carries none, following `consoleHealthObservations`'
+  precedent rather than changing 5.2's output shape from outside its *Touches* line. §6.8 wants *"the
+  evidence that closed it"*, singular and per-incident, so a per-row ref is strictly better. One field
+  on `ServiceAssessment` and one line in `assessTriageSweep`. Touches: `src/run/triage-verdict.ts`,
+  `test/unit/triage-verdict.test.ts`, `ISA.md`.
 - **5.3d** **Make the window fields required, added 2026-09-06 as recorded debt from task 5.3c.**
   `SweepCoverage.window` and `ObserverArtifact.window_opened_at` shipped OPTIONAL, and the reason is a
   process constraint rather than a design judgement: making either required is a compile error at
@@ -3106,6 +3133,17 @@ and SRD-FLEET-PM-001 D7's.
   `test/unit/triage-pass.test.ts` (new), **`src/run/triage-incident.ts` and
   `test/unit/triage-incident.test.ts` for `saveIncidentRecord`** (widened 2026-09-06 — see below).
   *Acceptance: every test calls the pass directly; **no test starts the loop**.*
+
+  **Two things task 5.3a built that this task must REUSE rather than rewrite, recorded 2026-09-06.**
+  (a) `sweepObservations(assessment, saturation, context)` in `triage-verdict.ts` is the
+  service-observation mapper. §12's Saturation block asks for *"no coverage issue was composed"*,
+  which no probe could assert before a mapper existed, so it landed with 5.3a rather than here — the
+  same hazard §13 named for task 5.4a, and the answer is the same: reuse it, and do not write a second
+  one. (b) **The confirming probe is deduplicated HERE, not there.** §6.7 says the probe runs *"once
+  per saturation candidate and never per sweep"*; Phase 5 has no cross-sweep state, so twelve
+  consecutive saturated sweeps currently make twelve probes. ISC-730 pins one-per-candidate WITHIN a
+  sweep; the across-sweeps half is this task's, and it is the half that decides whether the console
+  can starve the inference server it is diagnosing.
 
   **`saveIncidentRecord` belongs to this task, and this line was too narrow to let it.** Task 5.6b
   left `IncidentRecord.undelivered[]` filled by `withUndelivered` with a `loadIncidentRecord` and no
