@@ -563,6 +563,24 @@ export async function readSweepPartition(
   // reason an operator can act on. A throw here would reach the loop's catch and
   // be reported as a fault instead, losing the distinction §6.8a draws between a
   // console that malfunctioned and a worker that answered badly.
+  //
+  // But `refused` and `missing` are NOT the same fault, and collapsing both into
+  // `[]` silently is what made the first live console unreadable: `tri-1` wrote a
+  // well-formed partition for eleven consecutive sweeps with `brief` as an object
+  // instead of a string, every one was refused on the schema, and the only thing
+  // the operator ever saw was `sweep_produced_nothing` — the console reporting it
+  // could not see the environment, when what it could not do was read its own
+  // collator. The refusal reason is COMPUTED here and was being dropped one line
+  // later. `missing` stays quiet because it is the ordinary state of a sweep whose
+  // collator has not answered yet; `refused` is always a defect in something and
+  // is always worth a line in §7.7's log.
+  if (read.kind === "refused") {
+    console.error(
+      `triage: ${TRIAGE_COLLATOR}'s partition for ${sweepId} was REFUSED (${read.code}): ` +
+        `${read.reason}. No observer is dispatched for this sweep, so it will settle having ` +
+        `produced nothing — the cause is this refusal and not the environment.`,
+    );
+  }
   return read.kind === "ok" ? partitionFromRequests(read.request.requests) : [];
 }
 

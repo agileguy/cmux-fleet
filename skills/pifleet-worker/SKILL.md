@@ -148,6 +148,25 @@ it into place. A half-written envelope is **worse than a missing one**: unparsea
 *refused*, which records a discrepancy against you and caps the harvest at `partial`, whereas a
 file that was never written simply removes you from the grading.
 
+**Write it as ONE LINE, and never put a JSON document inside one of its string fields.** The
+file's whole content travels as a single string argument to your write tool, so every newline
+and every quote in it has to be escaped — and a pretty-printed envelope is hundreds of escapes
+long. Past a certain length that write fails with `arguments must be valid JSON, got parse
+error`, and it fails *after* you have done the work: the artifacts are on disk, the envelope is
+not, and your task never settles. Measured on this fleet — a collator dispatched a sweep
+correctly and then could not write its receipt, so the whole sweep reported nothing.
+
+The rule that follows is mechanical rather than stylistic:
+
+- **One line.** No indentation, no newlines inside the JSON. The example below is pretty-printed
+  so a person can read it; what you write is the same object on a single line.
+- **Structured output belongs in its own FILE, alongside the envelope — never quoted inside
+  it.** If you have a document to hand over, write it to `/outbox/<task-id>/files/<name>.json`
+  and name that path in `artifacts[]`. A JSON document escaped into `notes`, `summary` or any
+  other string is the shape that breaks, and it is never necessary.
+- **`notes` and `summary` are plain prose.** One or two sentences a person reads. Not a
+  serialised object, not a fenced block, not a list of key-value pairs.
+
 **This is the last thing you do, and it is the only thing you get to say.** A missing envelope
 does not fail your task — it removes you from the grading. The verdict is then rebuilt without
 you, from the git diff on your branch, the acceptance commands re-run against your base

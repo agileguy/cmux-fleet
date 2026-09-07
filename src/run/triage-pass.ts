@@ -861,11 +861,20 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
   }
 
   const assignments = await deps.sweep.readPartition(sweepId);
-  const dispatched: string[] = [];
+  /*
+   * The fan-out runs CONCURRENTLY, so `dispatched` is derived from the results in
+   * ASSIGNMENT order rather than appended as each dispatch finishes. Pushing from
+   * inside the callback would order this list by whichever observer settled first,
+   * which is a schedule and not a fact: it reaches §7.7's record and the `--json`
+   * envelope, where two identical sweeps would differ for no reason a reader could
+   * act on. `Promise.all` preserves input order in `results`, so this is the
+   * partition's own order and it is stable.
+   */
   const fanOut = await dispatchPartition(deps.declared, assignments, async (assignment) => {
     await deps.sweep.dispatchObserver(sweepId, assignment);
-    dispatched.push(assignment.worker);
+    return assignment.worker;
   });
+  const dispatched: string[] = fanOut.kind === "dispatched" ? [...fanOut.results] : [];
 
   const refusedPartition = fanOut.kind === "refused" ? fanOut : null;
 

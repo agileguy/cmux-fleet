@@ -114,6 +114,7 @@ import {
   refuseOnExhaustedBudget,
   register,
   renderStatus,
+  readSweepPartition,
   resolveCollatorRun,
   resolveSeatRuns,
   soleEnvironment,
@@ -1503,9 +1504,19 @@ function expectDispatchesWereWellFormed(
   // line of the stub, where everything has already been recorded and only the
   // pass's own success is missing — measured, because the first draft of this
   // helper let exactly that through.
-  expect(fleet.settled, "a dispatch stub was entered and did not finish — it threw").toEqual(
-    fleet.dispatched,
-  );
+  //
+  // **Compared as a MULTISET, since the fan-out became concurrent (2026-09-07).**
+  // The claim here is completeness — every dispatch that was entered also
+  // finished — and it never was a claim about order; the two arrays agreed
+  // element-for-element only because a serial loop made finishing order and entry
+  // order the same thing by accident. Three observers dispatched concurrently may
+  // settle in any order, and asserting the raw sequence would fail on a schedule
+  // rather than on a defect. Sorting keeps every failure this was built to catch —
+  // a missing entry, a duplicate, an extra — and drops only the coincidence.
+  expect(
+    [...fleet.settled].sort(),
+    "a dispatch stub was entered and did not finish — it threw",
+  ).toEqual([...fleet.dispatched].sort());
   // One factory call per pass that reached the driver, each carrying §7.8's
   // deadline. `toEqual` on the whole array, so a second pass at a different
   // deadline cannot hide behind a `toContain`.
@@ -1619,18 +1630,36 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
    * because building it here would either reach the network or reach a module
    * §12's read-only block forbids.
    */
-  test("dispatches the sweep, all three observers and the collation, in order", async () => {
+  test("dispatches the sweep, then all three observers, then the collation", async () => {
     const fleet = await fixtureFleet("2026-09-06T01-00-00Z-1111");
     const deps = productionTriageDeps(async () => fleet.effects);
     const { err, out } = await runTriage(["--once"], deps);
 
     expect(err).toBeNull();
-    expect(fleet.dispatched).toEqual([
-      `${TRIAGE_COLLATOR}:T-sweep-1`,
+    /*
+     * **The ordering that is real, and the ordering that was a coincidence.**
+     *
+     * §6.3's sequence is a claim about three PHASES: the parent envelope goes
+     * first because the partition does not exist until the collator writes it, and
+     * the collation goes last because it names the children. Those two are causal
+     * and are asserted exactly, by position.
+     *
+     * The three observers between them are NOT ordered by anything. They are
+     * dispatched concurrently (§6.5 — a slice is independent of every other slice
+     * by construction), so their entry order is a scheduling detail. Asserting it
+     * would fail on a schedule rather than on a defect, and pinning it is what made
+     * the fan-out serial in the first place — which cost this console two of three
+     * observers on its first live sweep.
+     */
+    expect(fleet.dispatched).toHaveLength(5);
+    expect(fleet.dispatched[0]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1`);
+    expect(fleet.dispatched[4]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1-collate`);
+    // The middle three by NAME and as a whole set — a missing or duplicated slice
+    // still fails, which is every failure this line was built to catch.
+    expect(fleet.dispatched.slice(1, 4).sort()).toEqual([
       "obs-t1:T-sweep-1-slice1",
       "obs-t2:T-sweep-1-slice2",
       "obs-t3:T-sweep-1-slice3",
-      `${TRIAGE_COLLATOR}:T-sweep-1-collate`,
     ]);
     expect(out).toContain("T-sweep-1: swept 3 observers");
     // Deadline, titles, window and §12's closing anti-criterion, all out here.
@@ -2866,5 +2895,99 @@ describe("§13 task 6.5c: an actor may START into a console with no collator", (
     expect(exit.kind).toBe("console_gone");
     expect(observations.count).toBe(0);
     expectDispatchesWereWellFormed(fleet, { sweeps: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §6.3 step 4's read — and the difference between "not yet" and "refused"
+// ---------------------------------------------------------------------------
+
+/**
+ * `readSweepPartition` collapses BOTH non-`ok` arms of `DispatchRequestRead` into
+ * an empty partition, and that is deliberate — the pass turns an empty partition
+ * into `partition_incomplete` naming every declared service, which is the reason
+ * an operator can act on. What was NOT deliberate is that the refusal's own
+ * `reason` was computed and then dropped, so the two arms became
+ * indistinguishable from outside.
+ *
+ * **This is not hypothetical and the fixture below is the real one.** On the first
+ * live triage console `tri-1` wrote a well-formed partition for ELEVEN consecutive
+ * sweeps with `brief` as a JSON object rather than a string. Every one was refused
+ * on the schema; no observer was ever dispatched; and the only thing the console
+ * ever said was `sweep_produced_nothing` — which reads as *"I could not see the
+ * environment"* when the truth was *"I could not read my own collator"*. Those are
+ * different faults with different fixes, and the console pointed at the cluster.
+ *
+ * So the assertion is two-sided, and the second side is the load-bearing one: a
+ * refusal MUST reach §7.7's log, and a merely-absent request must NOT — an actor
+ * that logged every sweep whose collator had not answered yet would write a line
+ * every tick, forever, into a file that is never truncated.
+ */
+describe("readSweepPartition tells a refused partition from an absent one", () => {
+  const collatorRequest = (taskId: string, brief: unknown): Record<string, unknown> => ({
+    schema: DISPATCH_REQUEST_SCHEMA,
+    parent_task_id: taskId,
+    requests: TRIAGE_CONSOLE_ASPECTS.map((s) => ({
+      worker: s.worker,
+      title: `${taskId} ${s.worker}`,
+      brief,
+      services: [`svc-${s.worker}`],
+    })),
+  });
+
+  /** Captures stderr around one call, so the NEGATIVE case can be asserted too. */
+  async function partitionWithLog(
+    run: RunPaths,
+    sweepId: string,
+  ): Promise<{ assignments: readonly unknown[]; logged: string[] }> {
+    const logged: string[] = [];
+    const before = console.error;
+    console.error = (...args: unknown[]): void => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      const assignments = await readSweepPartition(run, sweepId);
+      return { assignments, logged };
+    } finally {
+      console.error = before;
+    }
+  }
+
+  test("a well-formed partition is returned and says nothing", async () => {
+    const run = runPaths("2026-09-07T10-00-00Z-ok01", process.env["PIFLEET_RUNS_DIR"]!);
+    await writeJson(
+      dispatchRequestPath(run.root, TRIAGE_COLLATOR, "T-sweep-1"),
+      collatorRequest("T-sweep-1", "Observe one service and report one row."),
+    );
+    const { assignments, logged } = await partitionWithLog(run, "T-sweep-1");
+    expect(assignments.length).toBe(TRIAGE_CONSOLE_ASPECTS.length);
+    expect(logged).toEqual([]);
+  });
+
+  test("an OBJECT brief is refused, empty, and NAMED in the log", async () => {
+    const run = runPaths("2026-09-07T10-00-00Z-ok02", process.env["PIFLEET_RUNS_DIR"]!);
+    await writeJson(
+      dispatchRequestPath(run.root, TRIAGE_COLLATOR, "T-sweep-2"),
+      // The exact shape the live collator produced.
+      collatorRequest("T-sweep-2", { sweep_id: "T-sweep-2", services: [{ service: "mia" }] }),
+    );
+    const { assignments, logged } = await partitionWithLog(run, "T-sweep-2");
+    expect(assignments).toEqual([]);
+    expect(logged.length).toBe(1);
+    // Asserted on the CAUSE, not merely on "something was logged": a line that
+    // did not name the field would leave the next operator where this one was.
+    expect(logged[0]).toContain("brief");
+    expect(logged[0]).toContain("REFUSED");
+    expect(logged[0]).toContain("T-sweep-2");
+    // And it must say the sweep produces nothing FOR THIS REASON, because
+    // `sweep_produced_nothing` is what the operator will otherwise read.
+    expect(logged[0]).toContain("not the environment");
+  });
+
+  test("an ABSENT request is empty and silent — the negative half", async () => {
+    const run = runPaths("2026-09-07T10-00-00Z-ok03", process.env["PIFLEET_RUNS_DIR"]!);
+    const { assignments, logged } = await partitionWithLog(run, "T-sweep-3");
+    expect(assignments).toEqual([]);
+    expect(logged).toEqual([]);
   });
 });

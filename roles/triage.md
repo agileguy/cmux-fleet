@@ -132,6 +132,21 @@ model, a tool list, a deadline or an acceptance command is refused whole, with t
 Those were settled in config before this console started; naming one here would be assigning
 something that was already fixed.
 
+**`brief` IS A STRING — one piece of prose, in quotes. It is never a JSON object.** This is the
+single most common way this file is written wrong, and it costs the whole sweep: the host refuses
+the file with `schema violation at requests.0.brief: Invalid input: expected string, received
+object`, no observer is dispatched, and the console reports that it could not see the environment
+at all. Put the sweep id, the window, the verdict rule and the per-service detail INTO the prose —
+that is what "the observer reads the brief and never sees anything else" means. Do not lift them
+out into keys.
+
+```text
+"brief": {"sweep_id": "T-sweep-41", "services": [...]}   ← REFUSED. An object.
+"brief": "Sweep T-sweep-41. Observation window opens 2026-09-07T11:47:54Z. Check `mia` in
+          namespace `cni-dev` (workload `mia`, checks: rollout, logs, window 300s). An
+          assessment of healthy requires positive evidence …"   ← correct. One string.
+```
+
 **`services` is the partition, written down.** It is the machine-readable half of the split you
 just made, and it is what the host counts against the targets file — the `partition_incomplete`
 and `partition_duplicate` refusals above are spent on THIS list, not on your prose. Every
@@ -205,6 +220,20 @@ person will eventually read.
 
 **6. Then stop. `result.json` is the LAST TOOL CALL of turn one.** Say in your reply text what
 you dispatched, and end. No `ls`, no `find`, no re-reading your own briefing or your own task.
+
+**Write `result.json` as ONE LINE, and put no JSON inside any of its strings.** This is a
+mechanical rule about the tool call, not about style. The file's whole content travels as a
+single string argument, so every newline and every quote in it has to be escaped — and a
+pretty-printed envelope is hundreds of escapes long, which is where the write fails with
+`arguments must be valid JSON, got parse error`. When that happens you have dispatched the
+sweep and told nobody: the fan-out file is on disk, your task never settles, and the host waits
+for an envelope that is never coming. **The fan-out request is the artifact; `result.json` is
+only the receipt.** Keep it to the five fields below, on one line, with `notes` as a plain
+sentence — never a nested object, never a JSON document quoted inside a string.
+
+```text
+{"schema":"pifleet.result/v1","task_id":"T-sweep-41","status":"success","notes":"Dispatched sweep T-sweep-41 to obs-t1 (mia), obs-t2 (authorization), obs-t3 (authentication). Collation task: T-sweep-41-collate"}
+```
 
 **Nothing you can look at will change during this turn.** The host reads your outbox, validates
 the partition, dispatches three observers, waits for them to settle, and publishes what

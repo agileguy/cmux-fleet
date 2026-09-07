@@ -314,7 +314,30 @@ export async function dispatchPartition<T>(
   const check = checkTriagePartition(declared, assignments);
   if (check.kind === "refused") return check;
 
-  const results: T[] = [];
-  for (const assignment of assignments) results.push(await dispatch(assignment));
+  /*
+   * **CONCURRENT, and this is an anti-criterion rather than a preference.**
+   *
+   * Every brief is already built — `checkTriagePartition` accepted the whole
+   * partition above — so a slice is byte-independent of every other slice by
+   * CONSTRUCTION. Nothing here needs an earlier observer's answer, and nothing
+   * may have it: §7.2 forbids one worker's prose reaching another's brief, and a
+   * sequential fan-out is the shape that eventually gets "improved" into passing
+   * one observer's finding to the next.
+   *
+   * The cost of getting this wrong is not throughput, it is COVERAGE. Each
+   * dispatch waits for its own child to settle, so `for … await` serialises three
+   * observers end to end against ONE `sweep_deadline_s` (`cadence_s − reserve_s`,
+   * 240s by default). Measured on the first live console: `obs-t1` received its
+   * slice, the other two received nothing at all before the pass ended, and the
+   * sweep reported two services it "could not see" — pointing the operator at a
+   * cluster that was healthy and reachable. The review console's relay has always
+   * fanned out concurrently and says why in the same words (`relay.ts`); this is
+   * that rule in the console that was missing it.
+   *
+   * `Promise.all` rather than `allSettled` keeps the existing contract exactly: a
+   * dispatch that does not land still fails the pass. What changes is only that
+   * the other two were already issued rather than never attempted.
+   */
+  const results = await Promise.all(assignments.map((assignment) => dispatch(assignment)));
   return { kind: "dispatched", results };
 }

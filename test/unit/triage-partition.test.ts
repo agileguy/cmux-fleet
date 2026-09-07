@@ -196,7 +196,31 @@ describe("the positive control — a partition that covers the environment exact
    * a half-dispatched sweep is three observer passes the join will wait on and a
    * sweep that reports a failure it did not cleanly cause.
    */
-  test("a dispatch that throws stops the fan-out where it failed", async () => {
+  /*
+   * **REVERSED 2026-09-07, by the first live console rather than by an argument.**
+   *
+   * This test used to assert the opposite — that a throw stopped the fan-out where
+   * it failed, and that `Promise.all` "would be wrong here". That reasoning rested
+   * on a premise that was true when it was written and is not true now: it assumed
+   * a dispatch RETURNS once the child accepts. It does not. `SweepDispatch`
+   * "returns when the task has SETTLED, not when it was accepted", so a serial
+   * loop does not merely order three dispatches — it runs three observer TASKS end
+   * to end against one `sweep_deadline_s`.
+   *
+   * Measured, not reasoned: on the first live sweep `obs-t1` received its slice and
+   * `obs-t2`/`obs-t3` received nothing before the pass ended. The console then
+   * reported two services it could not see, against a cluster that was healthy and
+   * reachable — the §6.10 misdiagnosis this design fears most, produced by the
+   * guard that was meant to prevent a half-dispatched sweep.
+   *
+   * The old property is genuinely lost and it is worth naming: a failing fan-out
+   * now leaves the other observers RUNNING rather than unstarted. That is the trade
+   * the review console already made in the same words — *"a dispatch that does not
+   * land costs its own lens and nothing else"* — and a slice that runs and is
+   * joined is strictly better than a slice that was never attempted, because the
+   * join reports the missing one as coverage either way.
+   */
+  test("a throw still fails the pass, but the other slices were ISSUED", async () => {
     const calls: string[] = [];
     const partition = [
       assign(OBS[0], "mia"),
@@ -212,8 +236,13 @@ describe("the positive control — a partition that covers the environment exact
     await expect(dispatchPartition(DECLARED, partition, dispatch)).rejects.toThrow(
       "dispatch refused for obs-t1",
     );
-    // BY NAME, and exactly one: `Promise.all` records all three here.
-    expect(calls).toEqual([OBS[0]]);
+    /*
+     * ALL THREE, asserted by name and sorted: the failure is still surfaced — the
+     * rejection above is the half that has not changed — but the two slices that
+     * could have run were reached. A serial loop records exactly one here, which is
+     * what made this the coverage bug rather than a throughput one.
+     */
+    expect([...calls].sort()).toEqual([...OBS].sort());
   });
 });
 

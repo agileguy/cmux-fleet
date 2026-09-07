@@ -116,6 +116,9 @@ let triageEffectModules: Promise<{
   verdict: typeof import("../run/triage-verdict.ts");
   up: typeof import("./commands/up.ts");
   down: typeof import("./commands/down.ts");
+  /* §6.3 step 5 routes each observer to its OWN run — see the dispatch below. */
+  triage_cmd: typeof import("./commands/triage.ts");
+  paths: typeof import("../run/paths.ts");
 }> | null = null;
 
 function loadTriageEffectModules(): NonNullable<typeof triageEffectModules> {
@@ -128,6 +131,8 @@ function loadTriageEffectModules(): NonNullable<typeof triageEffectModules> {
     verdict: await import("../run/triage-verdict.ts"),
     up: await import("./commands/up.ts"),
     down: await import("./commands/down.ts"),
+    triage_cmd: await import("./commands/triage.ts"),
+    paths: await import("../run/paths.ts"),
   }))();
   return triageEffectModules;
 }
@@ -187,15 +192,42 @@ function productionSweepDispatchFor(
       m.relay.productionRelayEffects,
       { deadlineMs: opts.settleDeadlineMs },
     );
+    /*
+     * **Each seat is its own run, and the dispatch must go to the SEAT's run.**
+     *
+     * `run` here is the COLLATOR's, because that is what every other member of
+     * `SweepDriver` is pinned to (§6.4: two values that must agree about a run id
+     * is "a new failure mode with no observable"). That argument is right for the
+     * run TREE — the inbox to count sweeps in, the outbox to join from — and wrong
+     * for the control socket, because D4's own note says a console is FOUR runs and
+     * `resolveSeatRuns` exists precisely to say which.
+     *
+     * Dispatching an observer through the collator's run looks for that observer's
+     * socket inside `tri-1`'s run directory and fails `worker <id> is unreachable:
+     * SocketRequestError` — which reads as a dead worker and is not one. It is the
+     * fleet's own documented trap ("that error means WRONG RUN, not dead worker"),
+     * and it cost this console every sweep of its first live run: the fan-out was
+     * composed correctly, written correctly, and posted to the wrong door.
+     *
+     * The review console's relay has always done this right — it routes each child
+     * to `p.run` from a worker→run map and refuses `run_unresolved` rather than
+     * guessing. This is that rule, applied to the console that was missing it.
+     */
+    const seatRuns = await m.triage_cmd.resolveSeatRuns(undefined, process.env);
+    const seatRunId = seatRuns[worker];
+    const target =
+      worker === m.actor.TRIAGE_COLLATOR || seatRunId === undefined
+        ? run
+        : m.paths.runPaths(seatRunId, m.paths.runsRoot(process.env));
     try {
-      await transport.dispatch(run, { worker, taskId, title, brief });
+      await transport.dispatch(target, { worker, taskId, title, brief });
     } catch (err) {
       if (err instanceof m.relay.RelayDispatchError) {
         return { kind: "refused", reason: err.message };
       }
       throw err;
     }
-    await transport.awaitSettled(run, { worker, taskId });
+    await transport.awaitSettled(target, { worker, taskId });
     return { kind: "accepted" };
   };
 }
