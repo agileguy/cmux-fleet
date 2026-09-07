@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 14,
+  "current_round": 15,
   "completed_phases": [
     0,
     1,
@@ -447,8 +447,38 @@
           "test/unit/triage-pass.test.ts"
         ]
       },
+      "verified_commit": "aac8f22",
+      "note": "6.2a moved OUT: it touches src/cli/commands/triage.ts, which 6.1a owns. Paired 5.4e with 6.4 instead \u2014 both are triage-pass.ts, disjoint from eng-1 in every file. Ownership checked against the pinned-invariant rule this time: CONSOLE_HEALTH_KINDS/CONSOLE_HEALTH_ASSESSMENTS is the known pair and neither slice touches it.",
+      "briefing_defect": "Second instance of the pinned-invariant rule, new shape: triage-readonly.test.ts asserts the guarded SUBTREE by full value, so any new src/run/triage-*.ts module obliges a one-line edit there. My brief listed the file as another agent-s and warned about the EXCEPTION list, which is the wrong line in the right file. eng-1-s edit is forced and correct; the one-entry exception list is untouched.",
+      "graded": "2026-09-06 \u2014 eng-2 ISC-824 closed + ISC-860..867, ISC-868/869 filed OPEN; eng-1 ISC-840..850. Orchestrator: \u00a77.4's window_opened_at corrected, \u00a712's clock criterion corrected, tasks 6.1b/6.4a/6.4b filed."
+    },
+    {
+      "round": 15,
+      "tasks": {
+        "eng-1": [
+          "6.1b"
+        ],
+        "eng-2": [
+          "6.4b"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/cli/index.ts",
+          "src/cli/commands/triage.ts",
+          "test/unit/triage-command.test.ts",
+          "test/unit/cli.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-verdict.ts",
+          "src/run/triage-pass.ts",
+          "test/unit/triage-verdict.test.ts",
+          "test/unit/triage-pass.test.ts",
+          "test/unit/triage-incident.test.ts"
+        ]
+      },
       "verified_commit": null,
-      "note": "6.2a moved OUT: it touches src/cli/commands/triage.ts, which 6.1a owns. Paired 5.4e with 6.4 instead \u2014 both are triage-pass.ts, disjoint from eng-1 in every file. Ownership checked against the pinned-invariant rule this time: CONSOLE_HEALTH_KINDS/CONSOLE_HEALTH_ASSESSMENTS is the known pair and neither slice touches it."
+      "note": "6.1b is the last thing between the console and a real sweep. eng-2 gets FIVE files because 6.4b is one ownership unit under the pinned-invariant rule \u2014 VERDICT_PAIR spans triage-incident.test.ts and unreachableFrom spans triage-pass.ts, and consolidating them into triage-verdict.ts requires all three. Deliberately over the four-file guideline, and said so."
     }
   ],
   "status": "in_progress_round_9",
@@ -523,5 +553,13 @@
     "6.7 \u2014 wire the actor into scripts/triage",
     "5.8 \u2014 the bounded prose field + roles/triage.md",
     "Phase 7 \u2014 7.1 to 7.4"
+  ],
+  "round_16_candidates": [
+    "6.4a \u2014 carry an abandoned sweep to collation (ISC-868)",
+    "6.2a \u2014 move incidentCensus",
+    "6.5 \u2014 recycling (\u00a76.6 layer 4)",
+    "6.7 \u2014 wire the actor into scripts/triage",
+    "5.8 \u2014 the bounded prose field + roles/triage.md",
+    "Phase 7 \u2014 7.1 to 7.4 close the branch"
   ]
 }

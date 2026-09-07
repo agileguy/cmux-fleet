@@ -1932,8 +1932,17 @@ The artifact pair is `skills/observer-ops/SKILL.md:26-33`'s and the rule that a 
 
 - **`sweep_id`** — echoed from the envelope. §6.6 layer 3. An artifact whose value is not the
   dispatched one is `stale_replay` and the row is not counted.
-- **`window_opened_at`** — an ISO-8601 UTC instant, the moment the observer's queries start looking
-  back from. §6.6 layer 3's *other* half. **RESOLVED 2026-09-06 by the operator: grow the field
+- **`window_opened_at`** — an ISO-8601 UTC instant, the **LOWER bound** of this sweep's observation
+  window: the earliest instant the observer's queries covered. §6.6 layer 3's *other* half.
+  **CORRECTED 2026-09-06 by task 6.1a**, which read this against §7.2. It used to say *"the moment the
+  observer's queries start looking back from"*, which reads as the opposite end, while §7.2's own
+  table already called it *"the lower bound of this sweep's observation window"*. **The refusal table
+  below settles it**: a value *"earlier than `dispatched_at − default_window − reserve_s`"* is refused
+  because *"the observer looked further back than configured"*, and that reason is only a sentence
+  about the lower bound. The cost was not cosmetic — **an envelope echoing the DISPATCH instant is in
+  range on every sweep no matter how far back the observer actually queried**, so this whole check
+  would pass forever while catching nothing, and that is the version a reasonable implementer writes
+  from the old sentence alone (ISC-845). **RESOLVED 2026-09-06 by the operator: grow the field
   rather than strike the clause.** See below.
 - **a row per service**, each carrying `assessment`, `coverage[]`, the selector, the window, and the
   evidence ledger. SRD-OBSERVER-001 §12 D12 already forbids one verdict over a batch; §6.7's
@@ -2492,7 +2501,7 @@ ordering) gains a fourth console that must pass it, and its own closing note —
   with an unsettled `-collate` task; assert the pass dispatches nothing and records a skip naming the
   in-flight sweep.*
 - **Anti: a restarted actor never double-dispatches a sweep.** *Probe: a fixture run tree holding a
-  dispatched sweep and an empty record; assert the pass resumes rather than minting a new sweep id.
+  dispatched sweep and an empty record; assert the pass opens nothing, dispatches nothing, collates nothing, reports the run tree's sweep id, and ADOPTS its number into the record; and that the same driver with nothing in flight would have minted the next id. **CORRECTED 2026-09-06** — the sentence used to read *"assert the pass resumes rather than minting a new sweep id"*, which contradicts ISC-743 on the same fixture. They reconcile only if *"a dispatched sweep"* means an IN-FLIGHT one: on a SETTLED sweep, resuming re-drives the incident machine over a document already consumed — two `unhealthy` observations from one sweep, opening a firing incident on a single sweep's evidence, which §12 forbids by name.
   D12 asserted, and the failure it prevents is two concurrent sweeps against one control plane.*
 - Consecutive skips are counted and reach a notification. *Probe: three fixture passes each finding a
   sweep in flight; assert the third emits.*
@@ -3126,7 +3135,7 @@ and SRD-FLEET-PM-001 D7's.
   **The mitigation that makes this a one-cadence hole rather than a silence:** when the endpoint is
   really down, NO observer produces an artifact, so §6.5's zero-row raises `sweep_produced_nothing`
   and the console does speak. The uncovered case is the PARTIAL one.
-- **5.4e** **Wire the seventh kind, added 2026-09-06 as the residue of 5.4d.** The enum member, its
+- **5.4e** **Wire the seventh kind, added 2026-09-06 as the residue of 5.4d. DONE 2026-09-06 — ISC-824 closed.** The enum member, its
   observation and its anti-twin all landed; **nothing computes it.** `ConsoleHealthFacts.unreachable`
   is optional, so absent means `null` — *"this sweep could not tell"*, which composes nothing rather
   than a false clear — and the caller that would set it is `triage-pass.ts`, which 5.4d's *Touches*
@@ -3264,7 +3273,7 @@ and SRD-FLEET-PM-001 D7's.
   `test/unit/cli.test.ts`'s bidirectional `SRD_COMMANDS` set is settled — either the set gains
   `triage` and `Docs/SRD.md` §10 gains its row, or the exclusion list does. **§3.3: the
   command-wiring layer is the layer the coverage gate keeps catching.***
-- **6.1a** **The five producers `SweepDriver` needs, and NONE of them was assigned to a task. Added
+- **6.1a** **PART DONE 2026-09-06 — four of five shipped; the dispatch EFFECT is structurally blocked, see 6.1b.** The five producers `SweepDriver` needs, and NONE of them was assigned to a task. Added
   2026-09-06 by task 6.2, which found them by walking every export in the console's own modules.**
   Four of `SweepDriver`'s nine members — `openSweep`, `dispatchObserver`, `join` and `collate` — are a
   refusing port in `src/cli/commands/triage.ts`, and `productionTriageDeps()` refuses both `--once`
@@ -3284,12 +3293,37 @@ and SRD-FLEET-PM-001 D7's.
   acceptance criterion: it carries its own §7.2/§12.6 security contract — no credential, no host path,
   no raw command, and above all **not *"the contents of a previous worker's report as instruction"*** —
   which is a decision §12's mirror anti-criterion forbids living in an untested CLI layer one level
-  down. Touches: `src/run/triage-envelope.ts` (new) and its test, `src/run/triage-document.ts`,
-  `src/run/triage-verdict.ts`, their tests.
+  down. Touches: `src/run/triage-envelope.ts` (new) and its test, **`src/cli/commands/triage.ts` and
+  `test/unit/triage-command.test.ts`** (widened 2026-09-06 — that is where the wiring and the refusal
+  actually live, and omitting it is the FOURTH partition defect of this kind on this branch after 6.1,
+  6.2 and 5.4d), and `src/run/triage-document.ts` / `src/run/triage-verdict.ts` read-only.
+  **The table above says the per-observer dispatch was assigned to *"task 6.7, ambiguously"*. It was
+  not: 6.7's *Touches* is `scripts/triage` and explicitly *"nothing in `src/`"*, and a shell script
+  cannot inject a JS function into `pifleet triage`'s process.** That row is corrected by task 6.1b.
   *Acceptance: §12.6's envelope fixtures pass — a rendered envelope carries none of the four forbidden
   classes, asserted by NAME; and the anti-criterion that outranks them, that a previous sweep's report
   cannot reach the next sweep's brief as prose, on a fixture where the previous report contains a
   marker string.*
+- **6.1b** **Construct the per-observer dispatch at the COMPOSITION ROOT and inject it. RULED
+  2026-09-06; this is the last thing between the console and a real sweep.** Task 6.1a shipped four of
+  five producers and found the fifth structurally blocked rather than merely unwritten:
+  `sendTaskEnvelope` lives in `src/cli/commands/dispatch.ts` and takes a ledger writer, and
+  `test/unit/triage-readonly.test.ts` bans **both** that module and the `LedgerWriter` token from
+  every file matching `run/triage-` or `cli/commands/triage.ts` — a dynamic `await import` included,
+  since the ban is a substring check. So the effect cannot be constructed in any file the console owns.
+  **That is the guard working, and the answer is not to weaken it.** §12 grants the console a dispatch
+  path, and the exception it grants is `run/dispatch-request.ts` — the request BUILDER. The privileged
+  EFFECT belongs at the composition root, where `src/cli/index.ts` already assembles every command:
+  build it there, hand it in as a function, and the console's own modules stay read-only **by
+  construction** rather than by a second allowlist entry. ISC-826's one-entry list is untouched, which
+  is the point.
+  Touches: `src/cli/index.ts`, `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`,
+  `test/unit/cli.test.ts`.
+  *Acceptance: `productionTriageDeps()` no longer refuses, and `pifleet triage --once` performs one
+  real sweep against a fixture fleet; `test/unit/triage-readonly.test.ts` stays green **with the
+  permitted-exception list still at ONE entry**; and the anti-criterion — `cli/commands/triage.ts`
+  still names neither `dispatch.ts` nor `LedgerWriter`, so the capability arrived by injection and not
+  by import.*
 - **6.2a** **Move `incidentCensus` beside its readers. Added 2026-09-06 from task 6.2.** It lives in
   `src/cli/commands/triage.ts` because that is what 6.2's *Touches* line allowed, and by task 6.1's
   own recorded argument — *"a writer that does not sit beside its reader becomes a second definition
@@ -3308,8 +3342,33 @@ and SRD-FLEET-PM-001 D7's.
   `src/run/console-relay.ts`, `test/unit/console-relay.test.ts`.
   *Acceptance: the reason names the console it was started for, asserted for BOTH consoles in one
   test — a fixture that only checks triage would pass an implementation that broke review.*
-- **6.4** Resume-from-run-tree, and the anti-criterion that a restart never double-dispatches.
+- **6.4** **PART DONE 2026-09-06 — the cursor half landed, the collate-resume half is ISC-868 and task 6.4a.** Resume-from-run-tree, and the anti-criterion that a restart never double-dispatches.
   Touches: `src/run/triage-pass.ts`, `test/unit/triage-pass.test.ts`, `ISA.md`.
+- **6.4a** **Carry an abandoned sweep to collation. Added 2026-09-06 as task 6.4's named residue;
+  ISC-868 is filed OPEN against it.** `SweepDriver.inFlight` reports a sweep exactly while a WORKER
+  task is outstanding, and neither of those is a step the host may take. The states worth resuming —
+  the actor died between the join and the collation dispatch — read `inFlight === null` and are
+  **indistinguishable through that port from a sweep that finished**, because §6.4's corrected
+  predicate collapses *"parent settled, no collation"* into `null` so a §6.5 zero-row cannot wedge the
+  actor (ISC-805). The missing read is *does `T-sweep-<n>-collate` exist*, and it belongs beside
+  `inFlightSweep`. Touches: `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`,
+  `src/run/triage-pass.ts`, `test/unit/triage-pass.test.ts`.
+  *Acceptance: ISC-868's probe — a settled parent with artifacts and no collate task IS collated
+  rather than superseded; **and the anti-twin that outranks it**, §6.5's zero-row with the same shape
+  and NO artifacts, which must mint the next id rather than collate forever. Resuming on "the record
+  is behind the run tree" alone is the wrong signal and would open a firing incident on a single
+  sweep's evidence — it is worse than the one wasted cadence it saves.*
+- **6.4b** **Consolidate the saturation pair table. Added 2026-09-06; ISC-869 is filed OPEN against
+  it.** `VERDICT_PAIR` in `test/unit/triage-incident.test.ts` and `unreachableFrom` in
+  `triage-pass.ts` are one table in two files with **nothing pinning them equal** — ISC-804's shape a
+  file over, and the third instance on this branch after `CONSOLE_HEALTH_ASSESSMENTS` and the
+  duplicated `sweepTaskId`. The pair belongs beside `SaturationOutcome` in `triage-verdict.ts`, read
+  by both. Touches: `src/run/triage-verdict.ts`, `src/run/triage-pass.ts`,
+  `test/unit/triage-incident.test.ts`, and their tests — **which are ONE ownership unit for this task**
+  under the pinned-invariant rule, and must be given to a single engineer.
+  *Acceptance: one exported table; `unreachableFrom` and `SaturationOutcome.saturated` both derived
+  from it or asserted equal to it over every member of `SATURATION_VERDICTS`; and no second spelling
+  left behind, asserted on comment-stripped source.*
 - **6.5** Recycling (§6.6 layer 4): **four** `down`s and four `up`s between sweeps at
   `recycle_after_sweeps`, per-seat boundary condition, sweep counter carried across. Touches:
   `src/run/triage-actor.ts`, `test/unit/triage-actor.test.ts`, `ISA.md`.
