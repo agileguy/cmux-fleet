@@ -21,7 +21,7 @@
 #   cadence_s              300     §6.4's tick. `--cadence` overrides a hand-run
 #   reserve_s               60     the margin sweep_deadline_s is derived against
 #   max_consecutive_skips    3     fifteen minutes of not sweeping (§6.8a)
-#   recycle_after_sweeps    48     four hours; 0 disables (§6.6, Q5)
+#   recycle_after_sweeps     1     ONE SWEEP PER SESSION; 0 disables (§6.6, Q5)
 #   flap_threshold           3     §6.8
 #   flap_window_s         3600     §6.8
 #   renotify_after_s     21600     six hours; 0 disables. §6.8 and §8 both warn
@@ -53,3 +53,33 @@
 # ------------------------------------------------------------------------------
 
 version: 1
+
+# ONE SWEEP PER SESSION. §6.6 layer 4's recycle, at its tightest setting.
+#
+# A `pane_mode: tui` worker keeps its session across dispatches, so without this
+# `tri-1` accumulates every sweep of the day into one transcript — and a model
+# holding four previous sweeps answers the cheapest way it can, from what it
+# already has. `src/run/fresh-dispatch.ts` records the measured version of that:
+# a worker auto-triggered for `T-unit-tests-3` answered about `T-unit-tests-2`,
+# reciting the previous envelope without opening the new one, and settled
+# `success` seven seconds later. Nothing in the status table flagged it.
+#
+# The recycle boundary runs BEFORE the pass, so each sweep is dispatched into
+# seats that were just recreated: one sweep, one session, no carry-over.
+#
+# THE COST IS REAL and is the reason this is not the default: both seats are
+# taken down and brought back every cadence, which spends container teardown,
+# start and agent boot out of every 300s tick. 1 is now the shipped default;
+# 48 (four hours) was, and is the setting for a console that values throughput
+# over a collator that cannot answer from memory.
+recycle_after_sweeps: 1
+
+# The channel. Only the env var NAME is here — §6.9 requirement 4 and the block
+# comment above: a token in a tracked file is the thing `notifyEndpointIssue`
+# exists to refuse, and `pifleet triage --status` prints the endpoint.
+#
+# Measured 2026-09-07 before this was set: anonymous POSTs to the endpoint below
+# were answered 403 and every announcement was recorded undelivered, which is the
+# "out of the box this console will not publish" case the comment above predicts.
+notify:
+  token_env: NTFY_TOKEN

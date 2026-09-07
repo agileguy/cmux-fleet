@@ -396,8 +396,29 @@ export const TriageConsoleConfigSchema = z
     reserve_s: z.number().int().min(15).max(600).default(60),
     /** Fifteen minutes of not sweeping, at the default cadence. Raises `sweeps_skipped` (§6.8a). */
     max_consecutive_skips: z.number().int().min(1).max(24).default(3),
-    /** Four hours. `0` disables — the setting for measuring §11 Q5. §6.6. */
-    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(48),
+    /**
+     * ONE SWEEP PER SESSION, by default. `0` disables — the setting for
+     * measuring §11 Q5. §6.6.
+     *
+     * **Changed from 48 (four hours) on 2026-09-07, by operator decision, and the
+     * reason is a measured failure rather than tidiness.** A `pane_mode: tui`
+     * worker keeps its session across dispatches, so at 48 the collator
+     * accumulates a day of sweeps into one transcript — and a model holding four
+     * previous sweeps answers the cheapest way it can, from what it already has.
+     * `fresh-dispatch.ts` records the measured version: a worker auto-triggered
+     * for `T-unit-tests-3` answered about `T-unit-tests-2`, recited that
+     * envelope without opening the new one, and settled `success` seven seconds
+     * later. Nothing in the status table flagged it, and nothing would.
+     *
+     * The recycle boundary runs BEFORE the pass, so a default of 1 means every
+     * sweep is dispatched into seats that were just recreated.
+     *
+     * **The cost is real and is why 48 was chosen first:** every seat is taken
+     * down and brought back each cadence, spending container teardown, start and
+     * agent boot out of every tick. That is the trade — a slower console that
+     * cannot answer from memory, over a faster one that sometimes does.
+     */
+    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(1),
     flap_threshold: z.number().int().min(2).max(20).default(3),
     flap_window_s: z.number().int().min(300).max(86_400).default(3_600),
     /**

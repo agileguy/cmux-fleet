@@ -1025,9 +1025,10 @@ and one comparison host-side, and it is the only thing in this design that would
 03:00 with nobody watching. **A worker cannot forge it into correctness by accident**: the value is
 minted host-side, per sweep, and echoing last sweep's id is exactly the failure being caught.
 
-**Layer 4 — recycling, because accumulation is certain.** After `recycle_after_sweeps` (default 48,
-i.e. four hours at the default cadence) the actor takes the console down and brings it back up: a new
-run id, a new `<run>/sessions/` directory, four empty transcripts. It does this **between** sweeps,
+**Layer 4 — recycling, because accumulation is certain.** After `recycle_after_sweeps` (default **1**
+since 2026-09-07 — one sweep per session; it was 48, four hours at the default cadence) the actor
+takes the console down and brings it back up: a new run id, a new `<run>/sessions/` directory, empty
+transcripts. It does this **between** sweeps,
 never during one, and it re-derives its own pins afterwards because it minted the new run itself.
 
 Three things make this implementable here and nowhere else in this fleet:
@@ -1043,11 +1044,21 @@ Three things make this implementable here and nowhere else in this fleet:
 - **The idempotency rules are the same ones §6.4 already needs**: recycle only with no sweep in
   flight, and re-derive from the run tree afterwards.
 
-**This is not the same knob as a per-sweep restart, and the difference is the whole reason it is
-affordable.** A restart per sweep is 288 container recreations a day; a recycle every 48 sweeps is 6.
-`recycle_after_sweeps: 0` disables it, which is the setting to use while measuring Q5 — but leaving
-it there indefinitely means accepting a transcript that grows until Pi compacts it, which is a
-decision rather than a default.
+**This was written as an argument AGAINST a per-sweep restart, and the operator has since overruled
+it — deliberately, so the paragraph stays and is answered rather than deleted.** The arithmetic is
+unchanged and was never wrong: at `1` this console pays a recreate every tick, which at a 5-minute
+cadence is the 288-a-day figure this section called unaffordable, against 6 at `48`.
+
+What the arithmetic left out is what the 48 buys with the saving. A `tui` seat keeps its session, so
+between recycles the collator accumulates every sweep of the interval into one transcript — and
+`fresh-dispatch.ts` has the measured consequence: a worker auto-triggered for one task answered about
+the PREVIOUS one, recited that envelope without opening the new one, and settled `success` seven
+seconds later with nothing in the status table flagging it. A console that cheaply reports last
+sweep's answer is worse than a slow one, because the whole product is a claim about *now*.
+
+So the default is `1`: one sweep, one session. `recycle_after_sweeps: 0` still disables it, which is
+the setting to use while measuring Q5 — but leaving it there indefinitely means accepting a
+transcript that grows until Pi compacts it, which is a decision rather than a default.
 
 **RESOLVED 2026-09-06 by the operator: recycle all four seats, and make the recycle RESUMABLE.**
 A four-run recycle can half-succeed where a one-run recycle could not — three seats up, one down, and
@@ -2248,7 +2259,7 @@ export const TriageConsoleConfigSchema = z
     cadence_s: z.number().int().min(60).max(3_600).default(300),
     reserve_s: z.number().int().min(15).max(600).default(60),
     max_consecutive_skips: z.number().int().min(1).max(24).default(3),
-    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(48),
+    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(1),
     flap_threshold: z.number().int().min(2).max(20).default(3),
     flap_window_s: z.number().int().min(300).max(86_400).default(3_600),
     renotify_after_s: z.number().int().min(0).max(604_800).default(21_600),
@@ -2307,7 +2318,7 @@ one is a thing that would otherwise become a secret in a tracked file, an append
 | `cadence_s` | `300` | §6.4's tick. `--cadence` overrides it for a hand-run and does not persist |
 | `reserve_s` | `60` | the margin `sweep_deadline_s` is derived against. §6.5 |
 | `max_consecutive_skips` | `3` | fifteen minutes of not sweeping. Raises `sweeps_skipped` (§6.8a) |
-| `recycle_after_sweeps` | `48` | four hours. `0` disables — the setting for measuring Q5, and §6.6 records that leaving it there is a decision rather than a default |
+| `recycle_after_sweeps` | `1` | ONE SWEEP PER SESSION — the boundary runs before the pass, so every sweep is dispatched into freshly recreated seats. `0` disables. **Was `48` (four hours) until 2026-09-07**; the operator changed it because a `tui` seat keeps its session and a collator holding four previous sweeps answers from what it already has (`fresh-dispatch.ts`'s measured case). The cost is a recreate per tick |
 | `flap_threshold` | `3` | §6.8 |
 | `flap_window_s` | `3600` | §6.8 |
 | `renotify_after_s` | `21600` | six hours. `0` disables. **The knob that undoes the design if it is set small** — §6.8 and §8 both say so, and the schema's `min(0)`/`max(604800)` bound it but cannot protect it |

@@ -108,7 +108,7 @@
  * which READ this file.
  */
 
-import { closeSync, openSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -745,6 +745,52 @@ async function startActor(
     return;
   }
 
+/**
+ * `~/.env`, parsed for the ACTOR — the one process on this console that needs it
+ * and the only one that was not getting it.
+ *
+ * **The asymmetry this closes.** Every pane command begins
+ * `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a`, so the four workers
+ * have always had the operator's environment. The actor is spawned from this
+ * script with a bare `process.env`, which is whatever shell happened to run
+ * `./scripts/triage`. That is fine for everything the actor did until §6.9 gave
+ * it a notification channel: `notify.token_env` names a variable that lives in
+ * `~/.env`, and the actor is the ONLY process that ever reads it.
+ *
+ * Measured 2026-09-07: with a valid token minted and `token_env: NTFY_TOKEN` set,
+ * every announcement was still recorded undelivered, because the actor's
+ * environment had no `NTFY_TOKEN` in it. The endpoint was fine, the token was
+ * fine, the config was fine, and nothing said so — the console reported a
+ * delivery failure that was really a missing variable two layers away.
+ *
+ * **The shell's values WIN.** This fills gaps rather than overriding: an operator
+ * who exported a different token for one run means it, and a file quietly
+ * replacing an explicit export is the surprise this must not be. Parsing is
+ * deliberately minimal — `KEY=VALUE`, `#` comments, optional surrounding quotes,
+ * `export ` prefix tolerated — because this reads one operator's file on one
+ * machine and a general dotenv parser here would be a second, untested contract.
+ */
+function hostEnvFile(): Record<string, string> {
+  const path = `${process.env["HOME"] ?? ""}/.env`;
+  if (path === "/.env" || !existsSync(path)) return {};
+  const out: Record<string, string> = {};
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    const line = raw.trim().replace(/^export\s+/, "");
+    if (line === "" || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = line.slice(eq + 1).trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
   const pinned = relayRunPinValue(map, workers);
   const logPath = relayLogPath(CONSOLE);
   // Appended to, never truncated: the log is the only place a refusal a
@@ -758,7 +804,12 @@ async function startActor(
   try {
     proc = Bun.spawn(triageActorArgv(`${repoRoot}/src/cli/index.ts`, cadenceS), {
       cwd: repoRoot,
-      env: pinned === null ? process.env : { ...process.env, PIFLEET_RELAY_RUNS: pinned },
+      // `~/.env` UNDER `process.env`, so an explicit export always wins.
+      env: {
+        ...hostEnvFile(),
+        ...process.env,
+        ...(pinned === null ? {} : { PIFLEET_RELAY_RUNS: pinned }),
+      },
       stdin: "ignore",
       stdout: fd,
       stderr: fd,
