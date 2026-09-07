@@ -259,7 +259,7 @@ replaced with the positive assertion rather than deleted. ISC-405's fired twice:
 `llm.providers` appeared in the schema, and again when `resolveWorker` started passing the tag-style
 predicate. That is the pattern paying for itself — nobody had to remember either criterion.
 
-Two are retired `[-]` — ISC-307 and ISC-360 — a marker introduced by ISC-368 on 2026-08-30 for a
+Three are retired `[-]` — ISC-307 and ISC-360 — a marker introduced by ISC-368 on 2026-08-30 for a
 criterion whose *premise* was superseded rather than left unproved. ISC-307 is about a secret's
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the

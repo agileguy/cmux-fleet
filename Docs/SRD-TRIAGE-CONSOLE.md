@@ -1628,6 +1628,27 @@ differ, which is defensible and undecided. If they are meant to be the same toke
 lines has to move. Deferred rather than resolved because it changes what an operator reads on a
 notification, which is an operator's call.
 
+**RESOLVED 2026-09-06 by task 6.1: `DeliveryState` stays in MEMORY.** It is threaded in as
+`deps.delivery` and out as `outcome.delivery`. `undelivered[]` survives on §7.6's record, because an
+operator must be able to see what was lost; **the countdown does not.** A restarted actor retries on
+its next pass rather than continuing a twelve-sweep wait it can no longer justify — *the endpoint may
+be what was restarted* — and a persisted wait would keep a healthy actor silent for an hour over an
+outage that ended while it was down. The cost is one extra attempt per restart, which is the cheaper
+of the two errors by a wide margin. Reasoning recorded on `TriagePassOutcome.delivery`'s docblock so a
+later reader does not re-derive it.
+
+**RULED 2026-09-06 on §6.8a's `budget_exhausted` clearing rule, which the table and the shipped code
+disagreed about.** The table says it is *"cleared by … a new run — which in practice means a recycle
+or a restart"*; `consoleHealthObservations` clears it on ANY sweep that ran, same run included. **The
+code is right and the table is corrected to match.** A granted admission IS a positive observation —
+it is the console watching itself succeed at the thing it was refused for — and §6.8's whole rule is
+that a clear must be *observed*, which this is. What would be indefensible is a PASS that never asked
+clearing it, and task 6.1 handles exactly that case: on the `budget_exhausted` and `skipped` exits the
+pass supplies its own honest values with `environments: []`. On the skip path it reports
+`budgetExhausted: false`, justified in its own code as *"a skip happens because a sweep the actor
+already dispatched is still running, which is the presence of an admitted task rather than the absence
+of a refusal"* — which is the same argument, and it holds.
+
 **Not assigned anywhere: `DeliveryState` has no on-disk contract.** §7.6 puts `undelivered[]` on the
 incident record, which task 5.5 validates. The delivery state — the backoff countdown, the consecutive
 counters, the retained notes — lives in memory between sweeps and has no schema. That is correct while
@@ -3092,13 +3113,36 @@ and SRD-FLEET-PM-001 D7's.
   **The mitigation that makes this a one-cadence hole rather than a silence:** when the endpoint is
   really down, NO observer produces an artifact, so §6.5's zero-row raises `sweep_produced_nothing`
   and the console does speak. The uncovered case is the PARTIAL one.
-- **5.3e** **A per-row `evidence_ref`, added 2026-09-06 from task 5.3a.** `sweepObservations` cites one
+- **5.3e** **A per-row `evidence_ref`, added 2026-09-06 from task 5.3a. DONE 2026-09-06.** `sweepObservations` cites one
   sweep-level ref because `ServiceAssessment` carries none, following `consoleHealthObservations`'
   precedent rather than changing 5.2's output shape from outside its *Touches* line. §6.8 wants *"the
   evidence that closed it"*, singular and per-incident, so a per-row ref is strictly better. One field
   on `ServiceAssessment` and one line in `assessTriageSweep`. Touches: `src/run/triage-verdict.ts`,
   `test/unit/triage-verdict.test.ts`, `ISA.md`.
-- **5.3d** **Make the window fields required, added 2026-09-06 as recorded debt from task 5.3c.**
+
+  **RULED 2026-09-06, because 5.3e's own sentence did not cover the ordinary case.** *"Cites the
+  row's own"* says nothing about a row that HAS none, and that case is ordinary rather than
+  exceptional: §6.7 rule 2's gate applies to `healthy` alone, so a `degraded` row with an empty ledger
+  is legal. `IncidentSignal["issue"].evidenceRef` is `string | null`; `observed_clear`'s is a required
+  `string`. **The two are ASYMMETRIC and the asymmetry is a consequence, not a preference.** A clear
+  cites the row's ref or REFUSES — becoming `unobserved` — because substituting the sweep's ref would
+  turn a null citation into a well-formed clear wearing the collation document as a disguise, and
+  `observed_clear` moves a record toward `clear` on its own and is §6.8's most expensive message. An
+  issue cites the row's ref and falls back to the sweep's, because dropping the fallback buys no
+  stricter type — the field is already nullable — and just hands the operator `null` instead of a
+  document. An issue is confirmable and never notifies alone. **The bar differs because the
+  consequence differs** (ISC-764, ISC-768).
+
+  **Three count errors in the two task lines above, corrected 2026-09-06 by the engineer who hit
+  them.** (a) *"the three literals in `triage-document.test.ts`"* — that file has TWO literal sites;
+  the real count across the slice is SEVEN, the other five being in `triage-verdict.test.ts`, which is
+  also on the *Touches* line, so it was a count error and not a scope error. (b) *"a compile error at
+  `:251` and `:254`"* — only `:254` is reported, because TypeScript stops at the first assignability
+  failure for that literal and `:251` surfaces only once `:254` is fixed. (c) *"a red test at
+  `:286`"* is CONDITIONAL — it reddens only if the fixture is completed without an in-range
+  `window_opened_at`; a valid echo keeps it green throughout. The prediction read as unconditional.
+  Recorded because a task line that predicts compiler output is a claim like any other.
+- **5.3d** **Make the window fields required, added 2026-09-06 as recorded debt from task 5.3c. DONE 2026-09-06.**
   `SweepCoverage.window` and `ObserverArtifact.window_opened_at` shipped OPTIONAL, and the reason is a
   process constraint rather than a design judgement: making either required is a compile error at
   `test/unit/triage-document.test.ts:251` and `:254` and a red test at `:286`, and that file is
@@ -3110,6 +3154,30 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: both `?` dropped, the three literals in `triage-document.test.ts` updated, and
   `window_checked` either retired or kept with a stated reason — it is the skip's own witness, so
   retiring it is a decision and not a cleanup.*
+- **5.8** **§7.5 grows a bounded prose field. RULED 2026-09-06, found by task 6.1.**
+  §12's D10 marker criterion asks for *"a fixture `triage.json` whose **prose fields** contain a marker
+  string … assert the marker appears only inside the fenced evidence block."* **§7.5 has no prose
+  field**, and neither does `TriageRow`. The consequence task 6.1 measured is the one that matters:
+  the pass passes `evidence: null` to every announcement, so `Announcement.evidence` and the
+  `EVIDENCE_BANNER_*` block are **structurally unreachable in production**. ISC-680 grades the
+  containment against a synthetic prose string, which is the right unit test and is not the end-to-end
+  criterion §12 asks for.
+  Two resolutions were available: grow the field, or restate §12's criterion as composer-level.
+  **Grow it.** §6.9's containment machinery exists *because* worker prose flows into a notification;
+  with no prose field it is a guard standing over a road nobody uses, and §6.9's own complaint —
+  recorded in round 9 — is that *"the reason the report is worth reading"* never reaches the operator,
+  who gets `evidence: <ref>` and no sentence. A console that notifies without a reason has moved the
+  operator's first question from *"what broke"* to *"where do I look"*.
+  Touches: `src/run/triage-document.ts`, `src/run/triage-verdict.ts`, their tests,
+  **`roles/triage.md`** and `test/unit/triage-role.test.ts`, `ISA.md`.
+  *Acceptance: one optional `note` per row, bounded in bytes and refused above the bound by name;
+  the pass carries it into `Announcement.evidence`; §12's marker fixture passes END TO END, with the
+  marker appearing only between the banners. **And the anti-criterion that is really the point:** a
+  `note` containing a `Title:` line and a newline still lands inside the fence with every line
+  prefixed, so ISC-680's guarantee is proved on the production path rather than on a fixture.*
+  **This is a schema change, so it obliges the model-facing prompt edit in the SAME task** — §7.3's
+  ruling learned that the hard way (ISC-651), and `roles/triage.md` is on the Touches line above for
+  that reason, with its worked example parsed through the real parser.
 - **5.7** **DONE 2026-09-06.** Add every §12 fixture in the
   issue-predicate, saturation, dedup, console-health and notification blocks. Touches: `ISA.md`.
   The console-health block (ISC-673..677) and the notification block (ISC-678..690a) were closed as
@@ -3130,7 +3198,7 @@ and SRD-FLEET-PM-001 D7's.
 
 **Does not.** Start a second scheduler anywhere. §4.4.
 
-- **6.1** `triagePass(deps)` — read the run tree, decide tick-or-skip, perform the fan-out, drive the
+- **6.1** **DONE 2026-09-06.** `triagePass(deps)` — read the run tree, decide tick-or-skip, perform the fan-out, drive the
   incident machine, emit. Touches: `src/run/triage-pass.ts` (new),
   `test/unit/triage-pass.test.ts` (new), **`src/run/triage-incident.ts` and
   `test/unit/triage-incident.test.ts` for `saveIncidentRecord`** (widened 2026-09-06 — see below).

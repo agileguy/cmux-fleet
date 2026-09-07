@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 12,
+  "current_round": 13,
   "completed_phases": [
     0,
     1,
@@ -390,8 +390,36 @@
           "test/unit/triage-document.test.ts"
         ]
       },
+      "verified_commit": "14748aa",
+      "note": "6.1 is the caller everything in Phase 5 has been waiting for, and it now owns saveIncidentRecord (6.1's Touches widened in round 11). 5.4d needs triage-incident.ts, which eng-1 holds, so it goes to round 13. 6.3a needs console-relay.ts and is free but small \u2014 held so eng-2's round stays two tasks.",
+      "graded": "2026-09-06 \u2014 eng-1 ISC-740..753 (6.1), eng-2 ISC-760..769 (5.3d, 5.3e). ISC-698 RETIRED behind ISC-760. Orchestrator: 6.3a (ISC-780).",
+      "rulings": "DeliveryState stays in memory (countdown not persisted). \u00a76.8a's budget_exhausted table corrected to match the code. \u00a77.5 grows a bounded prose field -> task 5.8. clear/issue evidence citation is asymmetric."
+    },
+    {
+      "round": 13,
+      "tasks": {
+        "eng-1": [
+          "6.2"
+        ],
+        "eng-2": [
+          "5.4d",
+          "6.6"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/cli/commands/triage.ts",
+          "test/unit/triage-command.test.ts",
+          "test/unit/cli.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-incident.ts",
+          "test/unit/triage-incident.test.ts",
+          "test/unit/triage-readonly.test.ts"
+        ]
+      },
       "verified_commit": null,
-      "note": "6.1 is the caller everything in Phase 5 has been waiting for, and it now owns saveIncidentRecord (6.1's Touches widened in round 11). 5.4d needs triage-incident.ts, which eng-1 holds, so it goes to round 13. 6.3a needs console-relay.ts and is free but small \u2014 held so eng-2's round stays two tasks."
+      "note": "6.2 needs 6.1, which landed. 6.6's ROOTS set can now be pinned because triage-pass.ts exists. 5.4d and 6.6 pair cleanly: both are eng-2's and share no file with 6.2. 6.4/6.5 need triage-pass.ts and triage-actor.ts -> round 14. 5.8 is a worker-contract change and gets its own brief."
     }
   ],
   "status": "in_progress_round_9",
@@ -453,12 +481,11 @@
     "ISC-690 close \u2014 move mut9/equiv.ts into test/unit/",
     "then Phase 6 \u2014 6.1 and 6.2 make one hand-run sweep possible"
   ],
-  "round_13_candidates": [
-    "5.4d \u2014 the seventh console-health kind (needs triage-incident.ts, held by 6.1 this round)",
-    "6.2 \u2014 pifleet triage CLI (needs 6.1)",
-    "6.3a \u2014 the abandonment prose in console-relay.ts",
-    "6.4, 6.5 \u2014 resume and recycling (need 6.1/6.3)",
-    "6.6 \u2014 the read-only closure guard, now that the verdict subtree is settled",
+  "round_14_candidates": [
+    "6.4 \u2014 resume-from-run-tree (triage-pass.ts)",
+    "6.5 \u2014 recycling (triage-actor.ts)",
+    "6.7 \u2014 wire the actor into scripts/triage",
+    "5.8 \u2014 the bounded prose field, with roles/triage.md in the same task",
     "Phase 7 \u2014 7.1 to 7.4, the skill and the README"
   ]
 }
