@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 11,
+  "current_round": 12,
   "completed_phases": [
     0,
     1,
@@ -360,8 +360,38 @@
           "Docs/SRD-TRIAGE-CONSOLE.md"
         ]
       },
+      "verified_commit": "3016a6c",
+      "note": "5.3d and 5.7 are BLOCKED on 5.3a, not deferred: 5.3d shares both of eng-1's files, and 5.7's saturation fixtures do not exist until 5.3a lands. Phase 6 opened early with 6.3 because it is two NEW files and collides with nothing. 6.6's read-only closure guard was deliberately NOT paired with it \u2014 5.3a injects a network-capable probe dep into the same subtree the guard scans, and a guard reddening on another agent's in-flight edit is noise, not a finding.",
+      "graded": "2026-09-06 \u2014 eng-2 ISC-719..727 (6.3), eng-1 ISC-728..739 (5.3a, renumbered: both agents started at 719). Orchestrator: ISC-690/690a close, 5.7 in full.",
+      "rulings": "\u00a712's two senses of 'ledger' -> the actor's own log, not the fleet ledger (6.6 stays at one permitted exception). \u00a76.8a's kind enum grows a seventh, inference_unreachable -> task 5.4d."
+    },
+    {
+      "round": 12,
+      "tasks": {
+        "eng-1": [
+          "6.1"
+        ],
+        "eng-2": [
+          "5.3d",
+          "5.3e"
+        ],
+        "orchestrator": []
+      },
+      "files": {
+        "eng-1": [
+          "src/run/triage-pass.ts",
+          "test/unit/triage-pass.test.ts",
+          "src/run/triage-incident.ts",
+          "test/unit/triage-incident.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-verdict.ts",
+          "test/unit/triage-verdict.test.ts",
+          "test/unit/triage-document.test.ts"
+        ]
+      },
       "verified_commit": null,
-      "note": "5.3d and 5.7 are BLOCKED on 5.3a, not deferred: 5.3d shares both of eng-1's files, and 5.7's saturation fixtures do not exist until 5.3a lands. Phase 6 opened early with 6.3 because it is two NEW files and collides with nothing. 6.6's read-only closure guard was deliberately NOT paired with it \u2014 5.3a injects a network-capable probe dep into the same subtree the guard scans, and a guard reddening on another agent's in-flight edit is noise, not a finding."
+      "note": "6.1 is the caller everything in Phase 5 has been waiting for, and it now owns saveIncidentRecord (6.1's Touches widened in round 11). 5.4d needs triage-incident.ts, which eng-1 holds, so it goes to round 13. 6.3a needs console-relay.ts and is free but small \u2014 held so eng-2's round stays two tasks."
     }
   ],
   "status": "in_progress_round_9",
@@ -423,10 +453,12 @@
     "ISC-690 close \u2014 move mut9/equiv.ts into test/unit/",
     "then Phase 6 \u2014 6.1 and 6.2 make one hand-run sweep possible"
   ],
-  "round_12_candidates": [
-    "5.3d \u2014 window fields required (needs 5.3a landed; shares both verdict files)",
-    "5.7 \u2014 \u00a712 fixture sweep (needs 5.3a's saturation fixtures)",
-    "6.1 \u2014 triagePass(deps), the caller everything in Phase 5 is waiting for",
-    "6.6 \u2014 read-only closure guard, once the verdict subtree is settled"
+  "round_13_candidates": [
+    "5.4d \u2014 the seventh console-health kind (needs triage-incident.ts, held by 6.1 this round)",
+    "6.2 \u2014 pifleet triage CLI (needs 6.1)",
+    "6.3a \u2014 the abandonment prose in console-relay.ts",
+    "6.4, 6.5 \u2014 resume and recycling (need 6.1/6.3)",
+    "6.6 \u2014 the read-only closure guard, now that the verdict subtree is settled",
+    "Phase 7 \u2014 7.1 to 7.4, the skill and the README"
   ]
 }
