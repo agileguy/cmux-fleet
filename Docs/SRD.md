@@ -1714,6 +1714,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet exec --worker <id> -- <cmd>` | run a command in that worker's container (debugging) |
 | `pifleet shell --worker <id>` | open an interactive shell in that worker's container, on any backend |
 | `pifleet down [--run r] [--keep-panes] [--prune]` | quiesce, stop containers, optional worktree prune |
+| `pifleet triage --once\|--poll [--status] [--json]` | the triage console's clock and fan-out performer: one sweep with `--once`, the loop with `--poll`, the reporter's own health with `--status` (SRD-TRIAGE-CONSOLE §6.4, §13 task 6.2) |
 
 **Exit codes** — a strict severity ladder, highest wins, because one `wait --all` can legitimately have a timeout *and* a budget trip *and* a failed task:
 

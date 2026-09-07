@@ -289,7 +289,10 @@ describe("the composer produces a VALUE, and every field is distinguishable (§6
   test("the closed enums are the documented sets, and the assessment set is their union", () => {
     expect([...ANNOUNCEMENT_KINDS]).toEqual(["service", "console_health"]);
     expect([...ANNOUNCEMENT_TRANSITIONS]).toEqual(["opened", "recovered", "flapping", "reminder"]);
-    // §6.8a's six console-health kinds, plus §6.7's three service reasons.
+    // §6.8a's seven console-health kinds, plus §6.7's three service reasons.
+    // The seventh arrived in task 5.4d; this list and `CONSOLE_HEALTH_KINDS` are
+    // independently spelled on purpose (ISC-689) and pinned equal by a test, so
+    // the two files are ONE unit for any change to the table.
     expect([...ANNOUNCEMENT_ASSESSMENTS]).toEqual([
       "unhealthy",
       "degraded",
@@ -298,6 +301,7 @@ describe("the composer produces a VALUE, and every field is distinguishable (§6
       "sweep_produced_nothing",
       "sweeps_skipped",
       "inference_saturated",
+      "inference_unreachable",
       "budget_exhausted",
       "reporter_undelivered",
     ]);

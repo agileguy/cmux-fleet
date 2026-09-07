@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 13,
+  "current_round": 14,
   "completed_phases": [
     0,
     1,
@@ -418,8 +418,39 @@
           "test/unit/triage-readonly.test.ts"
         ]
       },
+      "verified_commit": "8174894",
+      "note": "6.2 needs 6.1, which landed. 6.6's ROOTS set can now be pinned because triage-pass.ts exists. 5.4d and 6.6 pair cleanly: both are eng-2's and share no file with 6.2. 6.4/6.5 need triage-pass.ts and triage-actor.ts -> round 14. 5.8 is a worker-contract change and gets its own brief.",
+      "briefing_defect": "My slice was wrong, not the agent. triage-notify.ts carries CONSOLE_HEALTH_ASSESSMENTS, the same table as CONSOLE_HEALTH_KINDS, pinned equal by a test \u2014 so 5.4d could not be completed inside its own brief. eng-2's 3-line edit there is forced and correct. Rule for future rounds: files joined by a cross-file equality assertion are ONE ownership unit.",
+      "graded": "2026-09-06 \u2014 eng-2 ISC-820..828 (5.4d, 6.6), eng-1 ISC-800..809 (6.2). Orchestrator: the forced triage-notify vocabulary edit, Docs/SRD.md \u00a710 row, CLI registration + ISC-830, ISC-665 probe repair, ISC-824 filed OPEN.",
+      "findings": "\u00a76.4's in-flight predicate can wedge the actor forever on a zero-row sweep (corrected). pifleet triage was not registered in the shipped CLI. Five SweepDriver producers assigned to no task -> 6.1a. incidentCensus misplaced -> 6.2a. Seventh kind has no caller -> 5.4e."
+    },
+    {
+      "round": 14,
+      "tasks": {
+        "eng-1": [
+          "6.1a"
+        ],
+        "eng-2": [
+          "5.4e",
+          "6.2a"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/run/triage-envelope.ts",
+          "test/unit/triage-envelope.test.ts",
+          "src/cli/commands/triage.ts",
+          "test/unit/triage-command.test.ts"
+        ],
+        "eng-2": [
+          "src/run/triage-pass.ts",
+          "test/unit/triage-pass.test.ts",
+          "src/run/triage-incident.ts",
+          "test/unit/triage-incident.test.ts"
+        ]
+      },
       "verified_commit": null,
-      "note": "6.2 needs 6.1, which landed. 6.6's ROOTS set can now be pinned because triage-pass.ts exists. 5.4d and 6.6 pair cleanly: both are eng-2's and share no file with 6.2. 6.4/6.5 need triage-pass.ts and triage-actor.ts -> round 14. 5.8 is a worker-contract change and gets its own brief."
+      "note": "6.1a is the task that makes the console able to sweep at all. It owns triage.ts because that is where the refusing port lives. 6.2a's move of incidentCensus also touches triage.ts, so it goes to eng-1's slice as a follow-on rather than eng-2's \u2014 REVISED: 6.2a stays with eng-2 for the triage-incident.ts half only if it can be split; otherwise defer. 5.4e is small and self-contained in triage-pass.ts."
     }
   ],
   "status": "in_progress_round_9",
@@ -487,5 +518,12 @@
     "6.7 \u2014 wire the actor into scripts/triage",
     "5.8 \u2014 the bounded prose field, with roles/triage.md in the same task",
     "Phase 7 \u2014 7.1 to 7.4, the skill and the README"
+  ],
+  "round_15_candidates": [
+    "6.4 \u2014 resume-from-run-tree",
+    "6.5 \u2014 recycling (\u00a76.6 layer 4)",
+    "6.7 \u2014 wire the actor into scripts/triage",
+    "5.8 \u2014 the bounded prose field + roles/triage.md",
+    "Phase 7 \u2014 7.1 to 7.4"
   ]
 }

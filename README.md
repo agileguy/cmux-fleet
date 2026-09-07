@@ -80,7 +80,7 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-**There are zero `[ ]` criteria.** The last one, ISC-572, was filed 2026-09-06 while
+**One criterion is unattempted `[ ]`: ISC-824**, the residue of a design change ruled in after the task that would have carried it had shipped — §6.8a's console-health `kind` set grew a seventh member and nothing computes it, so an `endpoint_down` sweep composes nothing in production. Task 5.4e carries it. Before that the count was zero, and the run that took it there is worth keeping: The last one, ISC-572, was filed 2026-09-06 while
 verifying a different fix and closed the same day: `scripts/review --restart <id> --task
 <file>` stopped the review relay BEFORE the settle wait whose whole value is refusing
 having torn nothing down, so on that one console the refusal's promise was false. The
@@ -202,7 +202,7 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-There are zero `[ ]` criteria; the last, ISC-572, closed on 2026-09-06.
+**One `[ ]` criterion is open: ISC-824.** The `[ ]` count had been zero since ISC-572 closed on 2026-09-06, and ISC-824 opened later the same day rather than being closed on arrival. It is the residue of a design change ruled in *after* the task that would have carried it had already shipped: §6.8a's console-health `kind` set grew a seventh member, `inference_unreachable`, and nothing computes it — the enum, its observation and its anti-twin all landed and are green, and an `endpoint_down` sweep still composes nothing in production. It is filed `[ ]` rather than `[~]` on purpose: `[~]` means the behaviour is built and the evidence is thin, and here the behaviour is not built. Task 5.4e carries it.
 Twenty-five are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard — with one departure worth stating plainly, because it is the only

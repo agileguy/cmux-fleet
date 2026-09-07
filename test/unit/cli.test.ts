@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildProgram, CliError, exitCodeForError } from "../../src/cli/index.ts";
 import { EXIT, isExitCoded, worstExit } from "../../src/contracts.ts";
@@ -182,6 +182,33 @@ describe("CLI surface", () => {
     for (const [name, why] of Object.entries(EXCLUDED_COMMANDS)) {
       expect(why.length, `${name} needs a reason`).toBeGreaterThan(20);
     }
+  });
+
+  /**
+   * The surface that reports a command as present when it is NOT runnable.
+   *
+   * `pifleet triage` nearly shipped unregistered: the command module existed,
+   * `triage-command.test.ts` drove its `register` onto a real `buildProgram()`,
+   * `Docs/SRD.md` §10 carried its row, and `SRD_COMMANDS` above listed it — four
+   * surfaces all reporting it as present — while `main()` in `src/cli/index.ts`
+   * never imported it, so an operator typing the command got nothing. §13 task
+   * 6.2's own *Touches* line omitted that file, which is how it happened.
+   *
+   * Every other test in this file drives `buildProgram()` and registers
+   * commands itself, so none of them can see this: the module under test is
+   * always reachable BECAUSE the test imported it. Only the shipped entry
+   * point's own import list answers "can an operator run this", and that list
+   * is read as TEXT here for the same reason `scripts/` probes are — importing
+   * `index.ts` to inspect it would run its registration side effects.
+   */
+  test("every command in SRD_COMMANDS is imported by the shipped entry point", () => {
+    const entry = readFileSync(join(import.meta.dir, "..", "..", "src", "cli", "index.ts"), "utf8");
+    const missing = SRD_COMMANDS.filter((c) => !entry.includes(`./commands/${c}.ts`));
+    expect(
+      missing,
+      `${missing.join(", ")} registered in no import in src/cli/index.ts. A command module that ` +
+        `exists, is tested and has a §10 row is still not runnable until main() imports it.`,
+    ).toEqual([]);
   });
 });
 

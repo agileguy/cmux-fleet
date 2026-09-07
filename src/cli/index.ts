@@ -131,6 +131,13 @@ async function main(argv: string[]): Promise<number> {
     import("./commands/exec.ts"),
     import("./commands/shell.ts"),
     import("./commands/down.ts"),
+    // SRD-TRIAGE-CONSOLE §13 task 6.2. Registered here and not only in
+    // `test/unit/cli.test.ts`'s set: a command module that exists, is tested,
+    // appears in `Docs/SRD.md` §10 and is absent from THIS list is a command an
+    // operator cannot run, and every one of those four surfaces reports it as
+    // present. Task 6.2's own Touches line omitted this file, which is how it
+    // was nearly shipped that way.
+    import("./commands/triage.ts"),
   ]);
   for (const m of modules) m.register(program);
 

@@ -1178,7 +1178,14 @@ export type SaturationVerdict = (typeof SATURATION_VERDICTS)[number];
  * actually occurs — an endpoint that is down produces no artifact from ANY
  * observer — §6.5's zero-row raises `sweep_produced_nothing` for the environment
  * and the console does speak. The uncovered case is the partial one, and it is one
- * cadence long: the next sweep has nothing at all. Recorded for task 6.1.
+ * cadence long: the next sweep has nothing at all.
+ *
+ * **Updated 2026-09-06.** This said *"Recorded for task 6.1"*, and 6.1 shipped
+ * without it — the seventh `kind` (`inference_unreachable`) was ruled in AFTER
+ * that task was complete, so no task owned the wiring. It is task 5.4e now, and
+ * ISC-824 is filed OPEN against it: the enum member and its observation exist and
+ * are green, and nothing computes the pair, so the case is still silent in
+ * production. A pointer to a finished task is worse than no pointer.
  */
 export interface SaturationOutcome {
   readonly verdict: SaturationVerdict;

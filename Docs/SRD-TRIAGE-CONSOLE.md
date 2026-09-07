@@ -864,6 +864,18 @@ run tree, not by trusting `~/.pifleet/triage-relay.json`: a sweep whose parent t
 `-collate` task has not settled is in flight, and the actor resumes it rather than starting a new one.
 **A restarted actor never double-dispatches a sweep**, and that is a criterion, not a hope (§12).
 
+**CORRECTION 2026-09-06, found by task 6.2 and it is the sharpest defect this document has had.** The
+in-flight predicate above — *"a sweep whose parent task exists and whose `-collate` task has not
+settled"* — **has a state it can never leave.** §6.5's zero-row sweep dispatches **no collation at
+all**, so *"the `-collate` task has not settled"* is true, true for the same reason forever, and can
+never become false. An actor reading this sentence literally skips every subsequent tick, counts to
+`max_consecutive_skips`, notifies once that it has stopped triaging, and **never sweeps again —
+silently, because a skip is not an error and the console is otherwise behaving exactly as designed.**
+One zero-row sweep would end the console. The discrimination is the PARENT's own task record: a
+settled parent with no collation is a finished zero-row sweep, not an in-flight one. Task 6.2
+implemented the corrected predicate and pinned all four quadrants (ISC-805); this sentence is
+corrected here, and §12's skip criterion quotes it, so the quote moves with it.
+
 **When a sweep is still running as the next tick falls due: SKIP, never queue.** Record the skip with
 its reason and the sweep it is waiting on. A queue of skipped ticks becomes a thundering herd the
 moment the stall clears, which converts one slow sweep into three concurrent ones against the same
@@ -1259,7 +1271,7 @@ derived from carries a positive check rather than a silence.
 
 ### 6.8a Console-health issues reuse that machine, and this is the hole that closes
 
-**The machine above is keyed per `(environment, service)`. Six of the things this console can notify
+**The machine above is keyed per `(environment, service)`. Seven of the things this console can notify
 about are not a service, and until this section they had no dedup identity at all** — which is not a
 small omission. §6.7 makes an observer's `blocked` notifiable, and a tunnel that is down for a day is
 `blocked` on **every** sweep: 288 identical notifications, from the console whose §6.8 exists
@@ -1272,7 +1284,7 @@ fix: a state machine with no key deduplicates nothing.
 **The identity is `(scope, kind)`**, recorded at `~/.pifleet/triage/<scope>/_console/<kind>.json`,
 where `scope` is an environment token for the kinds that are about an environment and the literal
 `_console` for the kinds that are about the console itself. `kind` is a closed enum, on §6.2's rule
-for `checks[]` — a closed set cannot acquire a seventh member by accident, and a `kind` a reader
+for `checks[]` — a closed set cannot acquire a seventh member by accident, and a `kind` a reader **It acquired one ON PURPOSE in task 5.4d, and the two independently spelled copies of the table caught it — which is the rule working, not failing.**
 cannot enumerate is a `kind` nobody writes a criterion for.
 
 | `kind` | `scope` | Raised when | Cleared by |
@@ -1281,6 +1293,7 @@ cannot enumerate is a `kind` nobody writes a criterion for.
 | `sweep_produced_nothing` | environment | §6.5's zero-row: no child succeeded, so no collation was dispatched | a sweep that collated |
 | `sweeps_skipped` | `_console` | consecutive skips reach `max_consecutive_skips` (§6.4) — **raised one skip earlier, see below** | a sweep that ran |
 | `inference_saturated` | `_console` | §6.7 rule 3 | a sweep in which every observer produced an artifact |
+| `inference_unreachable` | `_console` | §6.7 rule 3's `unreachable` half — the confirming probe could not reach the endpoint at all | a sweep in which every observer produced an artifact |
 | `budget_exhausted` | `_console` | admission refused on the run's ceiling, exit 5 (§6.10) | a new run — which in practice means a recycle or a restart |
 | `reporter_undelivered` | `_console` | §9.15 — the delivery path itself is failing | a delivery that succeeds |
 
@@ -3092,7 +3105,7 @@ and SRD-FLEET-PM-001 D7's.
   `test/unit/triage-document.test.ts` (new), `ISA.md`.
   *Acceptance: a document with a row missing `assessment`, one with an unknown assessment value, and
   one that is not an object each refuse by name rather than reaching `assessTriageSweep`.*
-- **5.4d** **§6.8a's `kind` enum grows a SEVENTH member, `inference_unreachable`. RULED 2026-09-06.**
+- **5.4d** **§6.8a's `kind` enum grows a SEVENTH member, `inference_unreachable`. RULED 2026-09-06, DONE 2026-09-06 — but see 5.4e: the member exists and nothing computes it.**
   Task 5.3a found the gap and could not close it: §6.7 rule 3 makes `unreachable` a first-class
   outcome — *"a different sentence on the operator's screen and a different thing for them to go and
   do"* — while §6.8a's `kind` enum is closed at six with no member for it, and §9's table has only
@@ -3113,6 +3126,22 @@ and SRD-FLEET-PM-001 D7's.
   **The mitigation that makes this a one-cadence hole rather than a silence:** when the endpoint is
   really down, NO observer produces an artifact, so §6.5's zero-row raises `sweep_produced_nothing`
   and the console does speak. The uncovered case is the PARTIAL one.
+- **5.4e** **Wire the seventh kind, added 2026-09-06 as the residue of 5.4d.** The enum member, its
+  observation and its anti-twin all landed; **nothing computes it.** `ConsoleHealthFacts.unreachable`
+  is optional, so absent means `null` — *"this sweep could not tell"*, which composes nothing rather
+  than a false clear — and the caller that would set it is `triage-pass.ts`, which 5.4d's *Touches*
+  line excluded and which task 6.1 had already completed by the time the seventh member was ruled in.
+  **So ISC-820..823 are all satisfiable by hand-built facts and an `endpoint_down` sweep still
+  composes nothing in production.** ISC-824 is filed OPEN against exactly this. Touches:
+  `src/run/triage-pass.ts`, `test/unit/triage-pass.test.ts`, `ISA.md`.
+  *Acceptance: a pass fixture whose saturation outcome is `endpoint_down` produces
+  `unreachable: true` with `saturated: null`, and the anti-twin on a `timeout` outcome produces the
+  reverse — the mapping table is already written down as `VERDICT_PAIR` in
+  `test/unit/triage-incident.test.ts`, so this task consumes it rather than inventing one.*
+  **A lesson recorded with the task, because it cost a round:** 5.4d was ruled in AFTER 6.1 shipped,
+  and its *Touches* line was drawn from the sections it changed rather than from the callers it
+  obliged. A criterion satisfiable entirely by hand-built fixtures is a criterion that has not
+  reached an operator, and the acceptance clause has to say so or the gap ships looking closed.
 - **5.3e** **A per-row `evidence_ref`, added 2026-09-06 from task 5.3a. DONE 2026-09-06.** `sweepObservations` cites one
   sweep-level ref because `ServiceAssessment` carries none, following `consoleHealthObservations`'
   precedent rather than changing 5.2's output shape from outside its *Touches* line. §6.8 wants *"the
@@ -3225,13 +3254,48 @@ and SRD-FLEET-PM-001 D7's.
   unmakeable outside the module that writes the sequence. Left unwidened, this task's implementer
   would be outside its own *Touches* line the moment it tried to persist, **which is exactly the
   constraint that made task 5.3c ship two `?`s it did not want** (task 5.3d).
-- **6.2** `pifleet triage` with `--once`, `--poll`, `--status`, `--json`, and the loop's
+- **6.2** **DONE 2026-09-06 — but see 6.1a: four of `SweepDriver`'s nine members are a refusing port.** `pifleet triage` with `--once`, `--poll`, `--status`, `--json`, and the loop's
   catch-and-continue — **which `--once` deliberately does not get** (`relay.ts:700-723`). Touches:
-  `src/cli/commands/triage.ts` (new), `test/unit/triage-command.test.ts` (new).
+  `src/cli/commands/triage.ts` (new), `test/unit/triage-command.test.ts` (new), **`src/cli/index.ts`**
+  (widened 2026-09-06 — omitting it meant the command was not registered in the shipped CLI, and
+  `pifleet triage` nearly shipped where four separate surfaces reported it as present and an operator
+  typing it got nothing; ISC-830 is now the guard).
   *Acceptance: the command is imported in-process by its own test, and its place in
   `test/unit/cli.test.ts`'s bidirectional `SRD_COMMANDS` set is settled — either the set gains
   `triage` and `Docs/SRD.md` §10 gains its row, or the exclusion list does. **§3.3: the
   command-wiring layer is the layer the coverage gate keeps catching.***
+- **6.1a** **The five producers `SweepDriver` needs, and NONE of them was assigned to a task. Added
+  2026-09-06 by task 6.2, which found them by walking every export in the console's own modules.**
+  Four of `SweepDriver`'s nine members — `openSweep`, `dispatchObserver`, `join` and `collate` — are a
+  refusing port in `src/cli/commands/triage.ts`, and `productionTriageDeps()` refuses both `--once`
+  and `--poll` by name (ISC-809) rather than sweeping nothing and reporting success. **This is the
+  task that makes the console able to sweep at all.**
+
+  | Missing producer | Feeds | Was assigned to |
+  |---|---|---|
+  | §7.2's sweep-envelope renderer | `openSweep` | **nothing** |
+  | §7.4's `observer-ops.json` → `ObserverArtifact` reader | `join` | **nothing** |
+  | SRD-OBSERVER-001 §9.3's `blocked` extractor | `join` | **nothing** |
+  | A path-reading wrapper around `parseTriageDocument` (it takes text only, deliberately) | `collate` | **nothing** |
+  | The per-observer dispatch (`sendTaskEnvelope`) | `dispatchObserver` | task 6.7, ambiguously |
+
+  **§7.2 in particular is described in full and assigned nowhere** — not in Phase 5, not in Phase 6.
+  Writing the envelope inline in the command was refused for a stated reason and the reason is the
+  acceptance criterion: it carries its own §7.2/§12.6 security contract — no credential, no host path,
+  no raw command, and above all **not *"the contents of a previous worker's report as instruction"*** —
+  which is a decision §12's mirror anti-criterion forbids living in an untested CLI layer one level
+  down. Touches: `src/run/triage-envelope.ts` (new) and its test, `src/run/triage-document.ts`,
+  `src/run/triage-verdict.ts`, their tests.
+  *Acceptance: §12.6's envelope fixtures pass — a rendered envelope carries none of the four forbidden
+  classes, asserted by NAME; and the anti-criterion that outranks them, that a previous sweep's report
+  cannot reach the next sweep's brief as prose, on a fixture where the previous report contains a
+  marker string.*
+- **6.2a** **Move `incidentCensus` beside its readers. Added 2026-09-06 from task 6.2.** It lives in
+  `src/cli/commands/triage.ts` because that is what 6.2's *Touches* line allowed, and by task 6.1's
+  own recorded argument — *"a writer that does not sit beside its reader becomes a second definition
+  of where those files are"* — it belongs in `triage-incident.ts` beside `incidentRecordPath` and
+  `parseIncidentRecord`. ISC-804 travels with it unchanged. Touches: `src/run/triage-incident.ts`,
+  `test/unit/triage-incident.test.ts`, `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`.
 - **6.3** The actor record, log and lock (per-console, from Phase 2.3) plus a `ConsoleWatch` over
   `tri-1`. Touches: `src/run/triage-actor.ts` (new), `test/unit/triage-actor.test.ts` (new).
   *Acceptance: §12's exit-when-the-console-is-gone criterion and its streak-reset mirror both pass.*
@@ -3255,7 +3319,7 @@ and SRD-FLEET-PM-001 D7's.
   again; and **a fixture with one pin unresolved admits no sweep**. **This task is what makes an
   unattended console possible at all** — §2.3a — and it is buildable only because an `rpc` recreate
   needs no TTY. The four-run shape is §6.1's correction, not the heading's intent.*
-- **6.6** Add the read-only closure guard, mirroring `test/unit/monitor-readonly.test.ts` and scoped
+- **6.6** **DONE 2026-09-06.** Add the read-only closure guard, mirroring `test/unit/monitor-readonly.test.ts` and scoped
   to the console's own subtree with its one dispatch exception **named**. Touches:
   `test/unit/triage-readonly.test.ts` (new), `ISA.md`.
 - **6.7** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:

@@ -70,12 +70,21 @@ export type AnnouncementTransition = (typeof ANNOUNCEMENT_TRANSITIONS)[number];
 /** §6.7's two observed reasons plus the escalation the state machine mints. */
 export const SERVICE_ASSESSMENTS = ["unhealthy", "degraded", "coverage"] as const;
 
-/** §6.8a's table, verbatim and in its order. Six, and a seventh is a schema change. */
+/**
+ * §6.8a's table, verbatim and in its order. Seven, and an eighth is a schema change.
+ *
+ * This is an INDEPENDENTLY SPELLED copy of `CONSOLE_HEALTH_KINDS`, and the
+ * duplication is load-bearing rather than sloppy: ISC-689 requires this module to
+ * import nothing from the state machine, so the two cannot be one constant. A
+ * test asserts they have the same members, which is what makes the copy safe —
+ * and it means the two files are ONE unit for any change to this table.
+ */
 export const CONSOLE_HEALTH_ASSESSMENTS = [
   "observer_blocked",
   "sweep_produced_nothing",
   "sweeps_skipped",
   "inference_saturated",
+  "inference_unreachable",
   "budget_exhausted",
   "reporter_undelivered",
 ] as const;
