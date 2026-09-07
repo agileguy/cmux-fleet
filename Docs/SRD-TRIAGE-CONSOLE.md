@@ -2063,6 +2063,29 @@ observer that produced it; the services it could **not** account for, named; and
 resembles a decision to notify. **The notify decision is the actor's**, because §6.8's state lives
 across sweeps and a worker sees one.
 
+**Corrected 2026-09-07 by task 5.8: the row also carries an optional `note`, and the list above did
+not move when the contract did.** That is this section's own erratum — *"a schema change obliges an
+audit of every worked example a container reads"* — returning one layer up, in the contract PROSE
+rather than in a worked example. A `note` is bounded in BYTES (`TRIAGE_NOTE_MAX_BYTES`, and at or
+below the fenced block's own cap so an accepted note is never silently truncated, ISC-982), it is
+**not an input to §6.7 rule 2's evidence gate** (ISC-984 — prose that could repair a gap would let a
+worker overturn its own downgrade with a paragraph), and it is carried on the two rows the host was
+willing to read and on **none of the six it refused** (ISC-985), because a stale citation points an
+operator at a file while a stale SENTENCE tells them what is wrong with a service nobody observed.
+
+**The rule that a document carries nothing resembling a decision to notify still holds, with one
+clause: a `note` is prose that REACHES a notification without BEING one.** No severity, no priority,
+no urgency — and because a schema cannot see a severity written as a sentence, `roles/triage.md`
+restates the ban for prose where the model reads it (ISC-998).
+
+**OPEN — the operator's call, and §6.9 names the tell itself.** Task 5.8's rationale argues the
+operator should get a sentence rather than a bare `evidence: <ref>`. §6.9 correction 1 records that
+`Announcement.evidence` is carried only by the `json` adapter, so **on ntfy they still get the ref and
+no sentence.** These two now disagree in substance rather than in wording. §6.9 already states what
+resolving it costs: *"Putting the fenced block back into the ntfy body … requires changing §12's
+`body === message` probe, which is the tell that it is a design change and not a fix."* Flagged rather
+than decided — it changes what an operator reads at 3 a.m.
+
 **The host's counterpart already exists and should be reused rather than re-shaped.**
 `CollationCensusSchema` (`src/contracts.ts:1077-1152`) is the only structure in this repository that
 expresses *"how many independent readers reported, and how many agreed"*: `lenses_total`,
@@ -3209,7 +3232,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: both `?` dropped, the three literals in `triage-document.test.ts` updated, and
   `window_checked` either retired or kept with a stated reason — it is the skip's own witness, so
   retiring it is a decision and not a cleanup.*
-- **5.8** **§7.5 grows a bounded prose field. RULED 2026-09-06, found by task 6.1.**
+- **5.8** **§7.5 grows a bounded prose field. RULED 2026-09-06, DONE 2026-09-07 — ISC-980..1000.**
   §12's D10 marker criterion asks for *"a fixture `triage.json` whose **prose fields** contain a marker
   string … assert the marker appears only inside the fenced evidence block."* **§7.5 has no prose
   field**, and neither does `TriageRow`. The consequence task 6.1 measured is the one that matters:

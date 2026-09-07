@@ -666,12 +666,13 @@ function extrasFor(
   notification: IncidentNotification,
   environment: string,
   saturationSubject: string,
+  note: string | null,
 ): { readonly extras: AnnouncementExtras; readonly subject: string | null } {
   const subject = notification.subject;
   if (subject.kind === "console_health" && subject.health === "inference_saturated") {
     return { extras: { environment }, subject: saturationSubject };
   }
-  return { extras: {}, subject: null };
+  return { extras: { evidence: note }, subject: null };
 }
 
 /**
@@ -1100,8 +1101,27 @@ async function settle(deps: TriagePassDeps, s: Settlement): Promise<TriagePassOu
   }
 
   const saturationSubject = s.saturation?.subject ?? "";
+  /*
+   * §13 task 5.8 — the row's own `note`, carried into `Announcement.evidence`.
+   *
+   * Keyed by SERVICE because an announcement is about one subject and a note is
+   * about one row: a sweep-level note would attribute one service's prose to
+   * another service's incident, in the host's own voice, on somebody's phone.
+   * `s.assessment` is null on the three exits that dispatched nothing, and a
+   * sweep that read no rows has no prose to quote.
+   *
+   * The `inference_saturated` arm above deliberately carries no `evidence`: a
+   * console-health incident is about the CONSOLE, and a note belongs to a
+   * service row. `announcementFacts` reads `extras.evidence ?? null`, so that
+   * arm is unchanged in behaviour.
+   */
+  const noteFor = new Map<string, string | null>(
+    (s.assessment?.services ?? []).map((a) => [a.service, a.note]),
+  );
   const pairs = notifications.map((notification) => {
-    const { extras, subject } = extrasFor(notification, deps.environment, saturationSubject);
+    const subj = notification.subject;
+    const note = subj.kind === "service" ? (noteFor.get(subj.service) ?? null) : null;
+    const { extras, subject } = extrasFor(notification, deps.environment, saturationSubject, note);
     const composed = announcementFacts(notification, extras);
     return {
       key: subjectKey(notification.subject),

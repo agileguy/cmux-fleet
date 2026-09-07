@@ -149,10 +149,15 @@ const MARKER = "ZZMARKERZZ-previous-report-prose";
  * The previous sweep's `triage.json`, with the marker in **every** worker-authored
  * string a renderer could plausibly reach for.
  *
- * Five carriers, not one: the selector, the window spelling, an evidence-ledger
- * entry, a coverage channel name, and an `unaccounted[]` entry. A fixture with
+ * SIX carriers, not one: the selector, the window spelling, an evidence-ledger
+ * entry, a coverage channel name, an `unaccounted[]` entry, and — since §13 task
+ * 5.8 grew §7.5 a prose field on 2026-09-07 — the row's `note`. A fixture with
  * the marker in a single field would be satisfied by a renderer that dropped that
- * one field and copied the other four, which is the shape a partial fix takes.
+ * one field and copied the other five, which is the shape a partial fix takes.
+ *
+ * `note` is the carrier that most deserves to be here, because it is the only
+ * field on this document whose PURPOSE is to be a sentence: every other carrier
+ * is a token that happens to be worker-authored.
  */
 const PREVIOUS: TriageDocument = {
   worker: TRIAGE_COLLATOR,
@@ -165,6 +170,7 @@ const PREVIOUS: TriageDocument = {
       selector: `app=routing ${MARKER}`,
       window: `5m ${MARKER}`,
       evidence_ref: [`obs-t1:observer-ops.json#services[0] ${MARKER}`],
+      note: `the routing pods are crashlooping ${MARKER}`,
       observer: "obs-t1",
     },
     {
@@ -318,6 +324,47 @@ describe("§7.2: a previous sweep's report cannot reach the next sweep's brief a
    * §13 ranks this above the four classes because *"the obvious way to give a
    * sweep continuity is to paste the last sweep's prose into it"*.
    */
+  /**
+   * The RE-AUDIT knows about `note`, isolated from the projection that feeds it.
+   *
+   * §13 task 5.8 grew §7.5 a prose field on 2026-09-07, and ISC-841's guarantee
+   * has two mechanisms in order: the projection emits only `{service,
+   * assessment}` so nothing can cross, and then the renderer **re-audits its own
+   * output** against the document it projected from. The second is the backstop
+   * for a future edit that widens the first.
+   *
+   * **This test exists because the obvious mutation cannot see the difference.**
+   * Widening `projectPreviousState` to carry a note is caught by the marker
+   * assertion below whether or not `workerAuthoredStrings` knows the field — the
+   * brief simply contains the marker, and the test fails either way. So the
+   * carrier list is asserted HERE, through `envelopeIssues` directly, where a
+   * missing entry is the only thing that can change the answer.
+   *
+   * A re-audit blind to a carrier is worse than no re-audit, because it looks
+   * like coverage.
+   */
+  test("the re-audit counts a row's note as worker-authored prose", () => {
+    const note = PREVIOUS.services[0]?.note ?? null;
+    // The premise: the fixture's first row really does carry a note, and it is
+    // the marker-bearing one. Without this the assertion below is vacuous.
+    expect(typeof note).toBe("string");
+    expect(note).toContain(MARKER);
+
+    const issues = envelopeIssues(`a brief that quotes it: ${note}`, PREVIOUS);
+    expect(issues.map((i) => i.forbidden)).toContain("worker_prose");
+
+    // And the anti-half: the same text with the note absent from the document is
+    // clean, so the issue is attributable to the carrier rather than to the
+    // prose happening to look like something else.
+    const withoutNote: TriageDocument = {
+      ...PREVIOUS,
+      services: PREVIOUS.services.map((r) => ({ ...r, note: null })),
+    };
+    expect(
+      envelopeIssues(`a brief that quotes it: ${note}`, withoutNote).map((i) => i.forbidden),
+    ).not.toContain("worker_prose");
+  });
+
   test("no marker from the previous report appears anywhere in the envelope", () => {
     const envelope = renderSweepEnvelope(envelopeInput({ previousDocument: PREVIOUS }));
     expect(envelope.brief).not.toContain(MARKER);

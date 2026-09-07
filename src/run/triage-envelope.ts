@@ -312,6 +312,17 @@ function workerAuthoredStrings(document: TriageDocument): readonly string[] {
   for (const row of document.services) {
     keep(row.selector);
     keep(row.window);
+    // §13 task 5.8's carrier, added 2026-09-07. `note` is the one field on this
+    // document whose PURPOSE is to be a sentence, so it is never a member of the
+    // host's vocabulary and never short by accident — `MIN_PROSE_LENGTH`'s floor
+    // matters least for it and the ban matters most.
+    //
+    // Nothing can leak through it today: `projectPreviousState` emits only
+    // `{service, assessment}`, so no note crosses into the next brief. This list
+    // is the SECOND mechanism — the re-audit that exists to catch a widened
+    // projection — and a re-audit blind to a carrier is worse than no re-audit,
+    // because it looks like coverage.
+    keep(row.note ?? null);
     for (const ref of row.evidence_ref) keep(ref);
     for (const entry of row.coverage) keep(entry.channel);
   }
