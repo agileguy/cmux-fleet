@@ -1832,21 +1832,36 @@ export function observerTuiWorkers(cfg: FleetConfig): string[] {
  *
  * NOT a refusal — a fleet may deliberately want this pane visible, and
  * `scripts/operations` already reads `paneMode === "tui"` to decide whether
- * to attach one for exactly this role. What must not stay silent is the
- * mechanism: `tui` allocates no epoch, so there is no `already_completed`
- * fence, and a re-dispatched pass runs the same task twice. An observer
- * watch is BUILT on repeated dispatch of near-identical tasks (§7.5), which
- * makes this the one role least able to afford that gap.
+ * to attach one for exactly this role.
+ *
+ * **NARROWED 2026-09-07, because the unconditional claim was false.** This used
+ * to say flatly that *"`tui` allocates no epoch"*. That is true of ONE of the two
+ * tui routes. `stageForAdoptedTerminal` calls the supervisor's `stage` verb,
+ * which allocates through the same `em.allocate` against the same durable
+ * `attempts` map as the RPC route — delivery and allocation are separate concerns
+ * and only delivery needs a socket (SRD-TUI-DISPATCH D6). Measured on the triage
+ * console the day this was narrowed: `tri-1` held epochs 1-7 and `obs-t1` 1-4 in
+ * their `fence.json`, every one from a `via: "staged"` dispatch.
+ *
+ * The gap is real on the OTHER route — a non-adopted pane, where the prompt is
+ * typed at the surface and nothing allocates (ISC-84/85) — so the warning stays.
+ * It now says which route it means, because an operator who reads the old wording,
+ * checks `fence.json` and finds epochs will conclude the warning is noise and stop
+ * reading the rest of them.
  */
 export function observerTuiEpochWarning(workerIds: readonly string[]): string | null {
   if (workerIds.length === 0) return null;
   const n = workerIds.length;
   return (
     `warning: ${n} observer worker(s) resolve pane_mode: tui (${workerIds.join(", ")})\n` +
-    `  tui allocates no epoch (SRD-OBSERVER-001 §6.2): there is no already_completed fence, so ` +
-    `a re-dispatched pass runs the same task twice. An observer watch is built on repeated ` +
-    `dispatch of near-identical tasks (§7.5), which makes this the role least able to afford ` +
-    `it. Set pane_mode: rpc unless a person is deliberately driving this pane by hand.\n`
+    `  a tui pane that is NOT adopted allocates no epoch (SRD-OBSERVER-001 §6.2, ISC-84/85): ` +
+    `the prompt is typed at the surface, nothing allocates, so there is no already_completed ` +
+    `fence and a re-dispatched pass runs the same task twice. An adopted pane IS fenced — ` +
+    `'stage' allocates the same way the rpc route does — so check the delivery plane before ` +
+    `acting on this. An observer watch is built on ` +
+    `repeated dispatch of near-identical tasks (§7.5), which makes this the role least able to ` +
+    `afford the unadopted case. Set pane_mode: rpc unless a person is deliberately driving ` +
+    `this pane by hand.\n`
   );
 }
 
