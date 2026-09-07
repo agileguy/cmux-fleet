@@ -418,7 +418,20 @@ describe("§6.4: the loop catches a thrown pass and --once does not", () => {
               },
               ports: inertPorts(),
             },
-            { cadenceS: opts.cadenceS, runId: "r", signal: controller.signal },
+            /*
+             * `--poll 300` was typed, so §13 task 6.9's nullable cadence is a
+             * NUMBER on this path — asserted rather than coalesced, because a
+             * `?? 300` here would hide the very defect that task closed: the
+             * override and the schema default are the same number.
+             */
+            {
+              cadenceS: (() => {
+                expect(opts.cadenceS).toBe(300);
+                return opts.cadenceS ?? 0;
+              })(),
+              runId: "r",
+              signal: controller.signal,
+            },
           ),
       }),
     );
@@ -1208,8 +1221,48 @@ interface FixtureFleet {
   readonly delivered: NotifyRequest[];
   /** `down <runId>` / `up <seat>`, in the order the recycle asked for them. */
   readonly recycled: string[];
+  /**
+   * Every `settleDeadlineMs` the console handed the root's dispatch factory, in
+   * order — RECORDED rather than only asserted inside `dispatchFor`.
+   *
+   * `triageActorLoop` catches everything `deps.pass()` throws into
+   * `pass_failed`, an `expect` inside the fixture's dispatch included. So an
+   * in-fixture assertion is a real assertion under `--once` and a SWALLOWED one
+   * under `--poll`, and §13 task 6.9's deadline claim is a `--poll` claim.
+   */
+  readonly deadlines: number[];
   /** How many times the saturation probe was reached. MUST stay 0. */
   readonly probes: { count: number };
+}
+
+/**
+ * What a fixture may vary about the console it builds. Everything here defaults
+ * to the shape the tests written before §13 tasks 6.5c and 6.9 assumed, so the
+ * two options are additive rather than a rewrite of nine call sites.
+ */
+interface FixtureFleetOptions {
+  /**
+   * Which seats the run materialises. The default is all four; a list WITHOUT
+   * {@link TRIAGE_COLLATOR} is the cold console task 6.5c is about, and it has
+   * to be built by omission rather than by deleting a directory afterwards —
+   * see the note on `seats` below.
+   */
+  readonly seats?: readonly string[];
+  /**
+   * `triage/console.yaml`'s body. **Absent means the file is NOT WRITTEN**,
+   * which is not the same as writing an empty one and is the state every test
+   * before task 6.9 ran in: `loadTriageConsoleConfig` turns a missing file into
+   * the empty string and `parseTriageConsoleConfig`'s empty-document arm is the
+   * only place §7.8's defaults are produced.
+   */
+  readonly console?: string;
+  /**
+   * What `dispatchFor` must be handed, in ms. §7.8 computes it as
+   * `(cadence_s − reserve_s) × 1000`, so a fixture that moves `cadence_s` moves
+   * this with it — and the assertion stays an assertion rather than becoming a
+   * value the fixture reads back out of the thing it is testing.
+   */
+  readonly settleDeadlineMs?: number;
 }
 
 /**
@@ -1221,19 +1274,26 @@ interface FixtureFleet {
  * record this sweep writes lands under the temp tree and `~/.pifleet` is never
  * opened.
  */
-async function fixtureFleet(runId: string): Promise<FixtureFleet> {
+async function fixtureFleet(
+  runId: string,
+  fixture: FixtureFleetOptions = {},
+): Promise<FixtureFleet> {
   const base = process.env["HOME"]!;
   const run = runPaths(runId, process.env["PIFLEET_RUNS_DIR"]!);
   await mkdir(run.inboxDir, { recursive: true });
   await writeFile(join(run.root, "run.json"), JSON.stringify({ run_id: runId }));
   // The collator's directory is what `resolveCollatorRun` scans for.
-  for (const w of [TRIAGE_COLLATOR, ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker)]) {
+  for (const w of fixture.seats ??
+    [TRIAGE_COLLATOR, ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker)]) {
     await mkdir(join(run.workersDir, w), { recursive: true });
   }
 
   const configDir = join(base, "fleet");
   await mkdir(join(configDir, "triage"), { recursive: true });
   await writeFile(join(configDir, "triage", "targets.yaml"), FIXTURE_TARGETS);
+  if (fixture.console !== undefined) {
+    await writeFile(join(configDir, "triage", "console.yaml"), fixture.console);
+  }
   const kubeconfig = join(configDir, "kubeconfig.yaml");
   await writeFile(kubeconfig, FIXTURE_KUBECONFIG);
 
@@ -1241,6 +1301,7 @@ async function fixtureFleet(runId: string): Promise<FixtureFleet> {
   const delivered: NotifyRequest[] = [];
   const windows: string[] = [];
   const recycled: string[] = [];
+  const deadlines: number[] = [];
   const probes = { count: 0 };
 
   const effects: TriageProductionEffects = {
@@ -1249,7 +1310,8 @@ async function fixtureFleet(runId: string): Promise<FixtureFleet> {
       // as a bound, which is the half of the split task 6.1b decided: the
       // deadline is the console's decision, the dispatch is the root's
       // capability.
-      expect(opts.settleDeadlineMs).toBe(240_000);
+      deadlines.push(opts.settleDeadlineMs);
+      expect(opts.settleDeadlineMs).toBe(fixture.settleDeadlineMs ?? 240_000);
       return fixtureFleetDispatch(r, dispatched, windows);
     },
     isCollatorLive: async () => true,
@@ -1282,7 +1344,7 @@ async function fixtureFleet(runId: string): Promise<FixtureFleet> {
     env: { ...process.env },
   };
 
-  return { run, effects, dispatched, delivered, recycled, probes };
+  return { run, effects, dispatched, delivered, recycled, deadlines, probes };
 }
 
 describe("§13 task 6.1b: the effects the console may not build are COMPULSORY", () => {
@@ -1803,6 +1865,44 @@ function boundedByTheWatch(
 }
 
 /**
+ * The bound for a loop whose cadence is a REAL one, and it is the only bound
+ * that costs no wall clock (§13 task 6.9).
+ *
+ * `boundedByTheWatch` stops the loop by aborting the signal inside the
+ * observation — and `runTriageActor` checks `isStopped` *after* `deps.sleep`, so
+ * that bound always pays one full cadence. At `cadenceS: 1` that is a second and
+ * nobody notices. **Task 6.9's whole subject is a cadence that comes from
+ * `triage/console.yaml`, and `TriageConsoleConfigSchema` floors `cadence_s` at
+ * 60** — so no file a fixture can legally write makes the post-sleep bound
+ * affordable, and the production `sleep` is the shipped `setTimeout` rather than
+ * an injected one (deliberately: `productionLoop`'s docblock).
+ *
+ * So this bound exits BEFORE the sleep instead. `triageActorLoop`'s only
+ * pre-sleep return is `console_gone`, reached when `ConsoleWatch` runs out of
+ * tolerance — which is why these tests pass `tolerance: 1` and this helper
+ * answers the watch with a NEGATIVE. One observation, one abandonment, no timer,
+ * and the record under assertion is written before either (the actor saves the
+ * cursor, then observes).
+ *
+ * Rule 4 of this round is what makes the distinction worth a helper: a loop that
+ * outlives its test keeps running into the NEXT file, by which point `afterAll`
+ * has put `PIFLEET_RUNS_DIR` back and the writes land in the operator's own
+ * `~/.pifleet`.
+ */
+function boundedBeforeTheSleep(
+  effects: TriageProductionEffects,
+  observations: { count: number },
+): TriageProductionEffects {
+  return {
+    ...effects,
+    isCollatorLive: async () => {
+      observations.count += 1;
+      return false;
+    },
+  };
+}
+
+/**
  * A run tree holding exactly the seats named, so a test can state a console's
  * shape by listing it.
  *
@@ -2064,5 +2164,413 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
     // THE POINT: the watch observed the new run and never the old one.
     expect(watched).toEqual([after!.runId]);
     expect(watched).not.toContain(before.runId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §13 task 6.9 — §7.8's `cadence_s` reaches the clock
+// ---------------------------------------------------------------------------
+
+/**
+ * §7.8's schema default for `cadence_s`, which is also the number the deleted
+ * `DEFAULT_POLL_S` fallback held.
+ *
+ * **The two coinciding is what made the defect silent**, so every fixture below
+ * moves off it deliberately and says so: a console left at 300 cannot tell a
+ * cadence that came from the file apart from one that came from a literal in the
+ * action.
+ */
+const SCHEMA_DEFAULT_CADENCE_S = 300;
+/** What `triage/console.yaml` says. Deliberately not the default above. */
+const FILE_CADENCE_S = 600;
+/** What the operator types. Deliberately neither of the two above. */
+const HAND_RUN_CADENCE_S = 120;
+
+const FIXTURE_CONSOLE_SLOW = `
+version: 1
+cadence_s: ${FILE_CADENCE_S}
+`;
+
+describe("§13 task 6.9: §7.8's cadence_s reaches --poll, and --poll overrides it", () => {
+  /**
+   * **THE PREMISE, and it is the whole reason the two tests below are worth
+   * anything.** §7.8's default and the action's old fallback are the same
+   * number, so a fixture that left `cadence_s` at 300 would pass against the
+   * defect: 300 reaches the actor whether the file was read or not.
+   */
+  test("the three cadences these fixtures use are three DIFFERENT numbers", () => {
+    expect(FILE_CADENCE_S).not.toBe(SCHEMA_DEFAULT_CADENCE_S);
+    expect(HAND_RUN_CADENCE_S).not.toBe(SCHEMA_DEFAULT_CADENCE_S);
+    expect(HAND_RUN_CADENCE_S).not.toBe(FILE_CADENCE_S);
+  });
+
+  /**
+   * **The ACTION's half: an absent `--poll` is `null`, not a number.**
+   *
+   * This is the contract change task 6.9 names — *"`TriageCommandDeps.loop`'s
+   * `cadenceS` becomes nullable so 'not overridden' is spellable"*. Without it
+   * the action resolved the interval itself and the file could not be consulted,
+   * because the loop had already been handed an answer.
+   *
+   * Both directions in one test, because each is vacuous alone: that a bare run
+   * passes `null` holds against an action that passes `null` always, and that
+   * `--poll 120` passes `120` holds against the shipped defect.
+   */
+  test("an absent --poll reaches the loop as null; --poll reaches it as its number", async () => {
+    const seen: (number | null)[] = [];
+    const capture = stubDeps({
+      loop: async (_pass, opts) => {
+        seen.push(opts.cadenceS);
+        return { kind: "stopped", passes: 0 };
+      },
+    });
+
+    expect((await runTriage([], capture)).err).toBeNull();
+    expect((await runTriage(["--poll", String(HAND_RUN_CADENCE_S)], capture)).err).toBeNull();
+
+    expect(seen).toEqual([null, HAND_RUN_CADENCE_S]);
+    // Stated by value rather than left to the reader: the action holds no
+    // fallback of its own any more, so the schema default cannot appear here.
+    expect(seen).not.toContain(SCHEMA_DEFAULT_CADENCE_S);
+  });
+
+  /**
+   * **The PRODUCTION half, end to end, asserted by value at the seam.**
+   *
+   * A `triage/console.yaml` saying `cadence_s: 600` and no `--poll` at all: the
+   * number that reaches the actor is the file's, and it is observable in §7.7's
+   * record — written from the same `identity` the actor's `sleep` is driven by,
+   * so the record cannot say 600 while the clock ticks at 300.
+   *
+   * **The cross-check is the deadline**, and it is what makes this more than one
+   * number moving: `sweep_deadline_s` is `cadence_s − reserve_s` (§7.8 property
+   * 1) and reaches the root's dispatch factory as a bound. At `cadence_s: 600`
+   * and the default `reserve_s: 60` that is 540 s. The SAME file value arrives at
+   * two consumers by two different routes, and a mutant that hardcoded either
+   * one disagrees with the other.
+   *
+   * Bounded by {@link boundedBeforeTheSleep}: 600 s is a real cadence, and no
+   * post-sleep bound can afford one.
+   */
+  test("console.yaml's cadence_s is what the actor records and what the deadline is cut from", async () => {
+    const fleet = await fixtureFleet("2026-09-06T05-00-00Z-6001", {
+      console: FIXTURE_CONSOLE_SLOW,
+      settleDeadlineMs: (FILE_CADENCE_S - 60) * 1_000,
+    });
+    const observations = { count: 0 };
+    const deps = productionTriageDeps(async () =>
+      boundedBeforeTheSleep(fleet.effects, observations),
+    );
+
+    const started = Date.now();
+    const exit = await deps.loop(async () => await deps.pass(), {
+      cadenceS: null,
+      tolerance: 1,
+    });
+
+    // The loop ended at the WATCH, before any sleep — so no timer outlived it
+    // and the next test file cannot inherit one (round 18 rule 4).
+    expect(exit.kind).toBe("console_gone");
+    expect(observations.count).toBe(1);
+    expect(Date.now() - started).toBeLessThan(10_000);
+
+    // THE POINT: §7.8's number, and not the schema default the action held.
+    const record = await readTriageActorRecord(fleet.effects.env);
+    expect(record.kind).toBe("ok");
+    if (record.kind !== "ok") return;
+    expect(record.record.cadence_s).toBe(FILE_CADENCE_S);
+    expect(record.record.cadence_s).not.toBe(SCHEMA_DEFAULT_CADENCE_S);
+
+    // THE CROSS-CHECK: the same file value reached by the other route. Asserted
+    // out here and not inside `dispatchFor`, because the loop swallows what the
+    // pass throws and a swallowed `expect` is not an assertion.
+    expect(fleet.deadlines).toEqual([(FILE_CADENCE_S - 60) * 1_000]);
+    expect(fleet.dispatched.length).toBe(5);
+  });
+
+  /**
+   * **`--poll` overrides the CLOCK and deliberately not the DEADLINE**, and the
+   * second half of that sentence is the one a later edit gets wrong.
+   *
+   * §7.8 property 1 computes `sweep_deadline_s` from `cadence_s`, so propagating
+   * the override into it looks like consistency. It is not: `--poll` is validated
+   * only as *a positive number of seconds*, while `cadence_s` carries `min(60)`
+   * AND `reserveFitsCadence` — so `--poll 30` against the default `reserve_s: 60`
+   * would compute a deadline of −30 s, a sweep late before it started, reached
+   * through a path with none of the schema's refusals in it.
+   *
+   * A `--poll` shorter than the deadline is not unhandled, it is ALREADY handled:
+   * the next tick meets a sweep still in flight, §6.4's gate skips it by name and
+   * `max_consecutive_skips` announces it. A degradation the console reports beats
+   * a negative deadline it cannot.
+   */
+  test("--poll moves the actor's clock and leaves §7.8's deadline where the file put it", async () => {
+    const fleet = await fixtureFleet("2026-09-06T05-30-00Z-6002", {
+      console: FIXTURE_CONSOLE_SLOW,
+      settleDeadlineMs: (FILE_CADENCE_S - 60) * 1_000,
+    });
+    const observations = { count: 0 };
+    const deps = productionTriageDeps(async () =>
+      boundedBeforeTheSleep(fleet.effects, observations),
+    );
+
+    const exit = await deps.loop(async () => await deps.pass(), {
+      cadenceS: HAND_RUN_CADENCE_S,
+      tolerance: 1,
+    });
+    expect(exit.kind).toBe("console_gone");
+
+    const record = await readTriageActorRecord(fleet.effects.env);
+    expect(record.kind).toBe("ok");
+    if (record.kind !== "ok") return;
+    // The clock is the operator's.
+    expect(record.record.cadence_s).toBe(HAND_RUN_CADENCE_S);
+    // The deadline is still the file's, cut from `cadence_s` and not from
+    // `--poll`. Both numbers in one test, because either alone is satisfied by
+    // an implementation that moved both or neither.
+    expect(fleet.deadlines).toEqual([(FILE_CADENCE_S - 60) * 1_000]);
+    expect(fleet.deadlines).not.toContain((HAND_RUN_CADENCE_S - 60) * 1_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §13 task 6.5c — a console with no collator at start
+// ---------------------------------------------------------------------------
+
+/** The three observers, i.e. every seat EXCEPT the one the watch is pinned to. */
+const OBSERVER_SEATS = TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker);
+
+describe("§13 task 6.5c: an actor may START into a console with no collator", () => {
+  /**
+   * **THE DECISION, and both of its halves in one test because each alone is
+   * satisfied by the wrong implementation.**
+   *
+   * §6.6 layer 4's boundary condition is *"is this seat's run older than
+   * `recycle_after_sweeps`, or ABSENT"*, and the absent arm repaired three seats
+   * of four. `tri-1` was the exception, and nothing decided that it should be:
+   * `productionTriageDeps.loop` resolved the collator before it built the ports,
+   * so the repair machinery was unreachable from exactly the state it exists to
+   * repair. A console whose collator was gone at START could not be repaired by
+   * the thing built to repair it; one whose collator went away a minute LATER
+   * could.
+   *
+   * **So the refusal narrows from the COMMAND to the PASS.** `--once` is
+   * somebody's command and its exit code should mean something (§6.4), so it
+   * still refuses by name on this very tree — asserted first, because without it
+   * the second half would be satisfied by deleting the refusal outright.
+   * `--poll` is a request to keep a console running, and standing an absent seat
+   * up at minute zero is the same act it already performs at hour four.
+   *
+   * The third assertion is the one that makes this a repair rather than a log
+   * line: the GATE opened. §6.6 withholds every sweep while any pin is
+   * unresolved, so a pass that ran is proof the re-derivation found `tri-1`.
+   */
+  test("--once still refuses by name where --poll now stands the collator up", async () => {
+    const fleet = await fixtureFleet("2026-09-06T06-00-00Z-7001", { seats: OBSERVER_SEATS });
+    const env = fleet.effects.env;
+    // THE PREMISE: this really is a console with no collator.
+    expect((await resolveSeatRuns([TRIAGE_COLLATOR], env))[TRIAGE_COLLATOR]).toBeUndefined();
+
+    // HALF ONE — the pass refuses, by name, with the message it always had.
+    const { err } = await runTriage(["--once"], productionTriageDeps(async () => fleet.effects));
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).message).toBe(NO_COLLATOR_RUN);
+    expect((err as CliError).exitCode).toBe(EXIT.USAGE);
+
+    // HALF TWO — the loop starts anyway, and repairs the seat the pass refused
+    // to sweep into.
+    let repaired: RunPaths | null = null;
+    let passes = 0;
+    const watched: string[] = [];
+    const stop = new AbortController();
+    const effects: TriageProductionEffects = boundedByTheWatch(
+      {
+        ...fleet.effects,
+        upSeat: async (seat) => {
+          fleet.recycled.push(`up ${seat}`);
+          repaired = await runHolding("2026-09-06T06-30-00Z-7002", [seat]);
+        },
+      },
+      stop,
+      { onObserve: (run) => watched.push(run.runId) },
+    );
+
+    const deps = productionTriageDeps(async () => effects);
+    const exit = await deps.loop(
+      async () => {
+        passes += 1;
+        return { ...NOTHING_OUTCOME, cursor: { runs: {}, sweep_cursor: 1, consecutive_skips: 0 } };
+      },
+      { cadenceS: 1, signal: stop.signal },
+    );
+
+    expect(exit).toEqual({ kind: "stopped", passes: 1 });
+    // ONLY the collator was due: the three observers are present and unstamped,
+    // and there was no run to hand `downRun`, so the repair is one `up`.
+    expect(fleet.recycled).toEqual([`up ${TRIAGE_COLLATOR}`]);
+    expect(repaired).not.toBeNull();
+    // THE GATE OPENED — the repair reached the pass and not merely the log.
+    expect(passes).toBe(1);
+    // And the thing that used to throw now resolves, to the run this actor minted.
+    expect((await resolveCollatorRun(env)).runId).toBe(repaired!.runId);
+    // The watch followed it, so the console it observes is the one it repaired.
+    expect(watched).toEqual([repaired!.runId]);
+  });
+
+  /**
+   * **THE ANTI-TWIN: a cold console whose repair FAILS abandons rather than
+   * polling forever.**
+   *
+   * This is the cost of the decision above, paid deliberately. Starting into a
+   * missing collator means the watch has no run to observe on its first
+   * iteration, and the two ways to spell that are not equally safe:
+   *
+   *   - **`unverifiable`** — the posture `triageActorLoop` gives a probe that
+   *     THROWS, which leaves the streak where it is. Spelt that way here, an
+   *     actor whose `up` can never succeed is IMMORTAL: it withholds every sweep
+   *     on §6.6's gate, never observes a negative, and polls a console that does
+   *     not exist for the rest of the host's life. That is ISC-926's defect
+   *     reached through a different door.
+   *   - **`false`** — a negative observation, which is what this console ships.
+   *     No run holds `tri-1`; that is the most definitive possible answer to
+   *     *"is the console still there"*, and it is the same answer the shipped
+   *     mid-life path already gives (`upSeat`'s `finally` leaves the watch on a
+   *     dead run, which reads `false`). Cold and mid-life now agree.
+   *
+   * `observations.count` is the assertion that makes this exact rather than
+   * approximate: the INJECTED `isCollatorLive` is never reached, so the `false`
+   * came from the absent run and not from an effect that happened to say so.
+   */
+  test("a cold console whose repair keeps failing abandons instead of polling forever", async () => {
+    const fleet = await fixtureFleet("2026-09-06T07-00-00Z-7003", { seats: OBSERVER_SEATS });
+    const observations = { count: 0 };
+    let ups = 0;
+    let passes = 0;
+    const effects: TriageProductionEffects = {
+      ...fleet.effects,
+      // The root's effect, which MUST NOT be reached: there is no run to hand it.
+      isCollatorLive: async () => {
+        observations.count += 1;
+        return true;
+      },
+      upSeat: async () => {
+        ups += 1;
+        throw new Error("the host refused to start the collator");
+      },
+    };
+
+    const deps = productionTriageDeps(async () => effects);
+    const exit = await deps.loop(
+      async () => {
+        passes += 1;
+        return NOTHING_OUTCOME;
+      },
+      { cadenceS: 1, tolerance: 1 },
+    );
+
+    // It ended, and it ended for the right reason.
+    expect(exit.kind).toBe("console_gone");
+    expect(exit.kind === "console_gone" && exit.worker).toBe(TRIAGE_COLLATOR);
+    // THE PREMISE: it really did try to repair the seat first.
+    expect(ups).toBe(1);
+    // §6.6's gate held the sweep while `tri-1` was unresolved, which is the
+    // clause that would make an `unverifiable` watch immortal.
+    expect(passes).toBe(0);
+    // THE POINT: the negative came from the absent run, not from the effect.
+    expect(observations.count).toBe(0);
+  });
+
+  /**
+   * **The same rule MID-LIFE: a recycle whose `up` fails drops the watch rather
+   * than leaving it on a run that is gone.**
+   *
+   * `TriageConsolePorts.upSeat`'s `finally` re-derives the watched run, and
+   * task 6.5c changed which reader it uses — {@link collatorRun} rather than
+   * {@link resolveCollatorRun}, so *"no run holds `tri-1`"* is recorded as the
+   * `null` it is instead of arriving as a throw and being swallowed by a
+   * `catch` that was written for a broken run tree.
+   *
+   * **That edit is invisible on every other fixture in this file, which is why
+   * this test exists.** When the `up` SUCCEEDS both readers return the new run;
+   * when it fails and the old directory survives both return the old one. The
+   * two disagree on exactly one state — the collator's directory is gone — and
+   * there the old spelling left the watch pointing at a run that no longer
+   * exists and then OBSERVED it. Measured: without this test the revert
+   * survived the whole battery.
+   *
+   * `observations.count` is again the instrument, and it is exact rather than
+   * approximate: the injected `isCollatorLive` says the console is HEALTHY, so
+   * an actor that reached it would not abandon at all.
+   */
+  test("a recycle whose up fails drops the watch instead of observing a run that is gone", async () => {
+    const fleet = await fixtureFleet("2026-09-06T08-00-00Z-7005");
+    const env = fleet.effects.env;
+
+    // §7.7's record makes `tri-1` — and only `tri-1` — due at the first boundary.
+    await mkdir(dirname(triageActorRecordPath(env)), { recursive: true });
+    await writeTriageActorRecord(
+      triageActorRecordPath(env),
+      triageActorRecord(
+        {
+          pid: process.pid,
+          started: "fixture-start-token",
+          started_at: "2026-09-06T07:59:00.000Z",
+          log_path: triageActorLogPath(env),
+          pinned: null,
+          cadence_s: 300,
+          workers: ALL_SEATS,
+        },
+        {
+          runs: Object.fromEntries(ALL_SEATS.map((s) => [s, fleet.run.runId])),
+          sweep_cursor: 100,
+          consecutive_skips: 0,
+          recycled_at: Object.fromEntries(
+            ALL_SEATS.map((s) => [s, s === TRIAGE_COLLATOR ? 0 : 100]),
+          ),
+        },
+      ),
+    );
+
+    const observations = { count: 0 };
+    let ups = 0;
+    const effects: TriageProductionEffects = {
+      ...fleet.effects,
+      /*
+       * A teardown that really removes the seat, which is the state the two
+       * readers disagree about. A `down` alone does not produce it — run
+       * directories outlive a stopped container — so the fixture reaches it the
+       * way the run tree otherwise would, by the directory being gone.
+       */
+      downRun: async (runId) => {
+        fleet.recycled.push(`down ${runId}`);
+        await rm(join(runPaths(runId, env["PIFLEET_RUNS_DIR"]!).workersDir, TRIAGE_COLLATOR), {
+          recursive: true,
+          force: true,
+        });
+      },
+      upSeat: async () => {
+        ups += 1;
+        throw new Error("the host refused to start the collator");
+      },
+      // HEALTHY, so an actor that observed the stale run would not abandon.
+      isCollatorLive: async () => {
+        observations.count += 1;
+        return true;
+      },
+    };
+
+    const deps = productionTriageDeps(async () => effects);
+    const exit = await deps.loop(async () => NOTHING_OUTCOME, { cadenceS: 1, tolerance: 1 });
+
+    // THE PREMISE, in two halves: the recycle was attempted, and it left a
+    // console no run holds the collator for.
+    expect(fleet.recycled).toEqual([`down ${fleet.run.runId}`]);
+    expect(ups).toBe(1);
+    expect((await resolveSeatRuns([TRIAGE_COLLATOR], env))[TRIAGE_COLLATOR]).toBeUndefined();
+
+    // THE POINT: the watch was dropped, so the healthy-looking stale run was
+    // never observed and the actor abandoned on the absence itself.
+    expect(exit.kind).toBe("console_gone");
+    expect(observations.count).toBe(0);
   });
 });

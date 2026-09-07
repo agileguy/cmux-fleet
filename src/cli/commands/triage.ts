@@ -623,10 +623,36 @@ export interface TriageCommandDeps {
   /**
    * The loop. `runTriageActor` in production, which is where the
    * catch-and-continue lives (`relay.ts:700-723`, measured).
+   *
+   * **`cadenceS` is NULLABLE, and that is §13 task 6.9's whole contract change.**
+   * §7.8 calls `--poll` *"an override for a hand-run"*, which presupposes the
+   * file is the source — and it was not: the action resolved the interval before
+   * the loop was reached, so `cadence_s: 600` in `triage/console.yaml` still
+   * polled at 300. `null` is how *"the operator did not override it"* is spelt,
+   * and it has to be spellable HERE because this is the only layer that has read
+   * the file. **They coincide at the schema default, which is exactly what made
+   * it silent.**
    */
   readonly loop: (
     pass: () => Promise<TriagePassOutcome>,
-    opts: { readonly cadenceS: number; readonly signal?: AbortSignal },
+    opts: {
+      /** `null` ⇒ §7.8's `cadence_s`. A number ⇒ `--poll`, and it wins. */
+      readonly cadenceS: number | null;
+      readonly signal?: AbortSignal;
+      /**
+       * `ConsoleWatch`'s tolerance, forwarded to `runTriageActor`.
+       *
+       * A test seam, and it says so — but it is the SECOND one on this contract
+       * rather than the first: the shipped action passes no `signal` either, and
+       * for the same reason. `runTriageActor` has always taken both; what
+       * changed with task 6.9 is that a cadence read from a file cannot be
+       * driven by a test that bounds the loop AFTER a sleep, because
+       * `TriageConsoleConfigSchema` floors `cadence_s` at 60 s. `console_gone`
+       * is `triageActorLoop`'s only pre-sleep exit, so the tolerance is the only
+       * bound a real cadence can afford.
+       */
+      readonly tolerance?: number;
+    },
   ) => Promise<TriageActorExit>;
   readonly status: () => Promise<TriageStatus>;
 }
@@ -756,26 +782,50 @@ export type TriageEffectsFor = () => Promise<TriageProductionEffects>;
  * and the newest is not necessarily the collator's), so the run is the newest one
  * that materialised `tri-1` and nothing else.
  *
- * **A refusal rather than a `null`.** Every one of `SweepDriver`'s nine members
- * is pinned to this run; with no run there is no inbox to count sweeps in, no
- * outbox to join from and nowhere to dispatch. A `null` would have to be handled
- * nine times and would eventually be handled as *"no sweeps yet"*, which is
- * §6.4's own indistinguishability defect.
+ * **A refusal rather than a `null`, and §13 task 6.5c narrowed WHOSE refusal it
+ * is.** Every one of `SweepDriver`'s nine members is pinned to this run; with no
+ * run there is no inbox to count sweeps in, no outbox to join from and nowhere
+ * to dispatch. A `null` would have to be handled nine times and would eventually
+ * be handled as *"no sweeps yet"*, which is §6.4's own indistinguishability
+ * defect. That argument is about a PASS and it is unchanged.
+ *
+ * It does not transfer to the LOOP, which uses the run for exactly one thing —
+ * the watch — and already has a spelling for a collator it cannot resolve: see
+ * {@link TriageConsolePorts.upSeat}'s `finally`, where a failed re-derivation
+ * deliberately leaves the watch and lets the abandonment answer it. So the loop
+ * takes {@link collatorRun} and the pass takes this.
  */
 export const NO_COLLATOR_RUN =
   `pifleet triage found no run holding ${TRIAGE_COLLATOR}, so there is nothing to sweep into. ` +
-  `Start the console first (scripts/triage, or pifleet up --workers ` +
-  `${[...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ROSTER.reviewers].join(",")}), then ` +
-  `run this again. --status works without a run and reports the actor record and the incident ` +
+  `Start the console first (scripts/triage, pifleet up --workers ` +
+  `${[...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ROSTER.reviewers].join(",")}, or ` +
+  `pifleet triage --poll, which stands an absent seat up itself), then run this again. ` +
+  `--status works without a run and reports the actor record and the incident ` +
   `record set (SRD-TRIAGE-CONSOLE §6.4).`;
+
+/**
+ * The collator's run, or `null` — **the read, without the policy.**
+ *
+ * §13 task 6.5c: the two callers want different things from the same fact. A
+ * pass cannot proceed and must say so by name; the actor's loop can, because
+ * §6.6 layer 4's *"absent ⇒ due"* boundary is what repairs the seat, and the
+ * loop is where that boundary runs. Splitting the read from the throw is what
+ * lets both be true without a second scan of the run tree.
+ */
+export async function collatorRun(
+  env: Record<string, string | undefined> = process.env,
+): Promise<RunPaths | null> {
+  const runs = await resolveSeatRuns([TRIAGE_COLLATOR], env);
+  const runId = runs[TRIAGE_COLLATOR];
+  return runId === undefined ? null : runPaths(runId, runsRoot(env));
+}
 
 export async function resolveCollatorRun(
   env: Record<string, string | undefined> = process.env,
 ): Promise<RunPaths> {
-  const runs = await resolveSeatRuns([TRIAGE_COLLATOR], env);
-  const runId = runs[TRIAGE_COLLATOR];
-  if (runId === undefined) throw new CliError(NO_COLLATOR_RUN, EXIT.USAGE);
-  return runPaths(runId, runsRoot(env));
+  const run = await collatorRun(env);
+  if (run === null) throw new CliError(NO_COLLATOR_RUN, EXIT.USAGE);
+  return run;
 }
 
 /**
@@ -905,14 +955,34 @@ export async function previousSweepDocument(run: RunPaths): Promise<TriageDocume
  * shipped loop and still terminate. A loop only reachable through the production
  * thunk could be tested only by starting it and killing it, which is
  * `relay.ts:82-88`'s named anti-pattern: *"a test that measures its own timeout"*.
+ *
+ * **It takes a RESOLVED cadence, and the type says so** (§13 task 6.9).
+ * {@link TriageCommandDeps.loop} accepts `number | null` because `null` is how
+ * the command spells *"the operator did not override it"*; by the time the actor
+ * is reached that question is answered, and it was answered by the one layer
+ * that has read `triage/console.yaml`. A `null` arriving here would mean a
+ * second place decided the cadence — §7.8's own objection to a value with no
+ * home, one layer in.
  */
 export function productionLoop(
   deps: Omit<Parameters<typeof runTriageActor>[0], "pass">,
-): TriageCommandDeps["loop"] {
+): (
+  pass: () => Promise<TriagePassOutcome>,
+  opts: {
+    readonly cadenceS: number;
+    readonly signal?: AbortSignal;
+    readonly tolerance?: number;
+  },
+) => Promise<TriageActorExit> {
   return async (pass, opts) =>
     await runTriageActor(
       { ...deps, pass: async () => (await pass()).cursor },
-      { cadenceS: opts.cadenceS, runId: "", ...(opts.signal ? { signal: opts.signal } : {}) },
+      {
+        cadenceS: opts.cadenceS,
+        runId: "",
+        ...(opts.signal ? { signal: opts.signal } : {}),
+        ...(opts.tolerance === undefined ? {} : { tolerance: opts.tolerance }),
+      },
     );
 }
 
@@ -1144,8 +1214,25 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
        * still an abandonment, because nothing else runs this line. §12's
        * distinction survives with its subject narrowed from *"a new run"* to
        * *"a new run somebody else minted"*, which is what it always meant.
+       *
+       * **And it is NULLABLE from the first line, which is §13 task 6.5c.**
+       * This read used to be {@link resolveCollatorRun}, so a console whose
+       * collator was gone at start threw `NO_COLLATOR_RUN` before a single port
+       * was built — and §6.6 layer 4's *"absent ⇒ due"* boundary, the thing that
+       * repairs an absent seat, is built out of those ports. Three seats of four
+       * were repairable from cold and the fourth was not, and **nothing decided
+       * that**: the ordering of two calls did. A console whose collator is gone
+       * at start could not be repaired by the machinery built to repair it,
+       * while one whose collator went away a minute later could.
+       *
+       * The refusal is not deleted, it is narrowed to the caller it was always
+       * about: `--once` is somebody's command and its exit code should mean
+       * something (§6.4), so {@link TriageCommandDeps.pass} still throws. A
+       * `--poll` is a request to keep a console running, and standing an absent
+       * seat up at minute zero is the same act this actor already performs at
+       * hour four.
        */
-      let watched = await resolveCollatorRun(e.env);
+      let watched: RunPaths | null = await collatorRun(e.env);
       /**
        * §7.8's knobs, read ONCE for the actor's life.
        *
@@ -1160,6 +1247,32 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
         paths: e.triageFiles,
         kubeconfigPath: e.kubeconfigPath,
       });
+      /**
+       * §13 task 6.9 — **where `--poll` becomes an override instead of the only
+       * source.**
+       *
+       * §7.8 already called it *"an override for a hand-run"*, and the word
+       * presupposes a source. There was none: the action held `DEFAULT_POLL_S`
+       * and resolved the interval before this function was reached, so an
+       * operator who set `cadence_s: 600` still polled at 300. **The schema
+       * default is 300 too, which is exactly what kept it quiet.**
+       *
+       * This is the only place both facts exist — the file is loaded two lines
+       * up, and `null` is the command's spelling of *"nobody typed `--poll`"* —
+       * so it is the only place the join can honestly happen.
+       *
+       * **It does NOT move `sweep_deadline_s`.** That stays cut from
+       * `pair.console.cadence_s` where {@link buildTriageSweepDriver}'s caller
+       * computes it, and the asymmetry is deliberate: `--poll` is validated only
+       * as a positive number, while `cadence_s` carries `min(60)` and
+       * `reserveFitsCadence`, so a `--poll 30` propagated into the deadline
+       * would compute −30 s through a path with none of those refusals in it. A
+       * `--poll` shorter than the deadline is already handled — the next tick
+       * meets a sweep in flight, §6.4's gate skips it by name and
+       * `max_consecutive_skips` announces it. A degradation the console reports
+       * beats a negative deadline it cannot.
+       */
+      const cadenceS = opts.cadenceS ?? pair.console.cadence_s;
       const logPath = triageActorLogPath(e.env);
       const log = async (event: TriageActorEvent): Promise<void> =>
         await appendActorLog(logPath, event);
@@ -1171,7 +1284,7 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
         started_at: new Date().toISOString(),
         log_path: logPath,
         pinned: e.env["PIFLEET_RELAY_RUNS"] ?? null,
-        cadence_s: opts.cadenceS,
+        cadence_s: cadenceS,
         workers: [
           ...TRIAGE_CONSOLE_ROSTER.collators,
           ...TRIAGE_CONSOLE_ROSTER.reviewers,
@@ -1196,7 +1309,14 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
         lockPath: triageActorLockPath(e.env),
         seats: identity.workers,
         recycleAfterSweeps: pair.console.recycle_after_sweeps,
-        sweepInFlight: async () => (await inFlightSweep(watched)) !== null,
+        /*
+         * A console with no collator run has no inbox, so it has no sweep in
+         * flight — `false` here is the TRUE answer rather than a permissive
+         * default (§13 task 6.5c). It is also the answer the boundary needs: the
+         * recycle that repairs the missing seat is gated on this, and a `true`
+         * would deadlock the repair on the absence it exists to fix.
+         */
+        sweepInFlight: async () => watched !== null && (await inFlightSweep(watched)) !== null,
         seatRuns: async () => await resolveSeatRuns(identity.workers, e.env),
         downSeat: async (seat) => {
           /*
@@ -1218,16 +1338,23 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
              * In a `finally` rather than after the await: an `up` that minted
              * the run and then failed later still moved the collator, and a
              * watch left pointing at the old run would reap this actor for the
-             * recycle's own success. The re-derivation cannot throw usefully
-             * here — with no run holding `tri-1` at all there is nothing to
-             * follow — so the watch stays where it was and the existing
-             * five-negative abandonment answers it.
+             * recycle's own success.
+             *
+             * **`collatorRun` and not `resolveCollatorRun` since §13 task
+             * 6.5c**, so *"no run holds `tri-1`"* is recorded as the `null` it
+             * is instead of being swallowed as a throw. Both spellings abandon —
+             * a stale run reads dead and a `null` reads not-live — but only one
+             * of them is honest about which console this actor is watching, and
+             * the cold start now produces exactly this state on its first
+             * iteration. A run tree that cannot be READ is still a `catch`: that
+             * is a broken instrument, not an absent console, and it leaves the
+             * watch where it was.
              */
             if (seat === TRIAGE_COLLATOR) {
               try {
-                watched = await resolveCollatorRun(e.env);
+                watched = await collatorRun(e.env);
               } catch {
-                /* no run holds the collator: leave the watch, let it abandon */
+                /* the run tree could not be read: leave the watch, let it abandon */
               }
             }
           }
@@ -1255,7 +1382,26 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
         },
       };
       return await productionLoop({
-        isCollatorLive: () => e.isCollatorLive(watched),
+        /**
+         * **No run holding `tri-1` is a NEGATIVE observation, not an
+         * unverifiable one** (§13 task 6.5c), and the choice is between two
+         * failure modes rather than between right and wrong.
+         *
+         * `triageActorLoop` gives a probe that THROWS the `unverifiable`
+         * posture: the streak stays where it is, which protects a healthy actor
+         * from a broken `ps`. Spelt that way here, an actor whose repair can
+         * never succeed would be IMMORTAL — §6.6's gate withholds every sweep
+         * while a pin is unresolved, so it would never observe anything, and it
+         * would poll a console that does not exist for the life of the host.
+         * That is ISC-926's defect reached through a different door.
+         *
+         * `false` is also simply the true answer: no run holds the collator is
+         * the most definitive available *"the console is not there"*. And it
+         * agrees with the mid-life path — `upSeat`'s `finally` leaves the watch
+         * on a run whose state file reads dead — so cold and mid-life abandon
+         * for the same reason after the same five negatives.
+         */
+        isCollatorLive: async () => watched !== null && (await e.isCollatorLive(watched)),
         saveCursor: async (next) =>
           await writeTriageActorRecord(
             triageActorRecordPath(e.env),
@@ -1264,7 +1410,7 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
         log,
         sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
         ports,
-      })(p, opts);
+      })(p, { ...opts, cadenceS });
     },
     status: async () => await triageStatus(),
   };
@@ -1278,10 +1424,20 @@ interface TriageCommandOptions {
 }
 
 /**
- * §7.8 keeps the cadence in `triage/console.yaml`; `--poll` is *"an override for a
- * hand-run"* and this is only its fallback when the file has not been read.
+ * §7.8's `cadence_s` is the default, named rather than duplicated (§13 task 6.9).
+ *
+ * **There is no `DEFAULT_POLL_S` here any more, and its deletion is the fix.**
+ * It held `300`; `TriageConsoleConfigSchema.cadence_s` defaults to `300`; so the
+ * two agreed on every console that had not tuned the file and disagreed silently
+ * on every console that had. A second home for a tuning value is precisely what
+ * §7.8 built `triage/console.yaml` to prevent — *"a default with no contract is a
+ * default that becomes a literal in whichever module reads it first"* — and this
+ * module was reading it first.
+ *
+ * The flag's help text names the file for the same reason: `(default: 300)` on a
+ * console configured at 600 is the same lie in the operator's terminal.
  */
-const DEFAULT_POLL_S = 300;
+const POLL_DEFAULT_HELP = "cadence_s from triage/console.yaml";
 
 /**
  * **`deps` is REQUIRED, and that is what keeps the composition root honest**
@@ -1304,7 +1460,7 @@ export function register(program: Command, deps: () => TriageCommandDeps): void 
         "(--once does a single sweep and exits; --status reports sweeps, incidents and undelivered)",
     )
     .option("--once", "make a single pass and exit, rather than polling")
-    .option("--poll <seconds>", `seconds between sweeps (default: ${DEFAULT_POLL_S})`)
+    .option("--poll <seconds>", `seconds between sweeps (default: ${POLL_DEFAULT_HELP})`)
     .option("--status", "report sweeps completed, incidents by state, and the undelivered count")
     .option("--json", "emit machine-readable output")
     .action(async (opts: TriageCommandOptions) => {
@@ -1318,8 +1474,19 @@ export function register(program: Command, deps: () => TriageCommandDeps): void 
         return;
       }
 
-      const pollS = opts.poll === undefined ? DEFAULT_POLL_S : Number(opts.poll);
-      if (!Number.isFinite(pollS) || pollS <= 0) {
+      /*
+       * §13 task 6.9: `null` is *"the operator did not override it"*, and the
+       * action is the only layer that knows. It does NOT get to say what the
+       * cadence is instead — that answer lives in `triage/console.yaml` and is
+       * read by the deps, which is the layer that has the file open.
+       *
+       * The validation still happens HERE and still on argv only, because the
+       * file's own bounds are the schema's job (`cadence_s.min(60)`,
+       * `reserveFitsCadence`) and a flag that reached the loop unchecked would
+       * hand `NaN` to a `setTimeout`.
+       */
+      const pollS = opts.poll === undefined ? null : Number(opts.poll);
+      if (pollS !== null && (!Number.isFinite(pollS) || pollS <= 0)) {
         throw new CliError(
           `--poll must be a positive number of seconds, not ${JSON.stringify(opts.poll)}`,
           EXIT.USAGE,
