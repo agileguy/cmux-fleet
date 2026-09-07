@@ -51,17 +51,47 @@
  * tick that lands in a run the fan-out no longer serves is a sweep that starts
  * and never collates).
  *
- * Today it is `pifleet relay --console triage`, which is the fan-out half. The
- * clock half is `pifleet triage` and it is SRD-TRIAGE-CONSOLE §13 Phase 6; task
- * 6.7 re-points {@link triageActorArgv} at it and nothing else here changes.
- * That is why `--cadence` is refused below rather than accepted and dropped.
+ * It is `pifleet triage` — the clock AND the fan-out in one process — since
+ * SRD-TRIAGE-CONSOLE §13 task 6.7a. It was `pifleet relay --console triage`, the
+ * fan-out half with no clock, and the sentence that stood here said the re-point
+ * *"changes nothing else here"*. **That was false and three things moved with
+ * the argv, none of them visible to a compiler:**
  *
- * **`--console triage` is spelled HERE and that is not a stylistic choice.**
- * `consoleRelayArgv` emits no `--console`, and `DEFAULT_CONSOLE` is `"review"`,
- * so spawning its argv unchanged would start a REVIEW actor from this script:
- * the triage console would have no actor, the review console would quietly
- * acquire a second one, and both symptoms are silent. §9.13's risk row, reached
- * through the one caller that did not exist when the row was written.
+ *   1. **THE STARTER NO LONGER TAKES A LOCK.** `runTriageActor` holds
+ *      `triageActorLockPath`, which IS `relayLockPath(CONSOLE)` — the same
+ *      inode this script used to hold across its own `Bun.spawn`. `pifleet
+ *      relay` took no lock, so the overlap was harmless; against the clock the
+ *      fresh actor's claim `EEXIST`s on a LIVE script pid, the takeover
+ *      correctly declines, and the actor exits having started nothing. The
+ *      exclusion did not go away, it MOVED to the actor, which is where §6.3b
+ *      put it: two `./scripts/triage` racing now spawn two actors and the loser
+ *      refuses by name and exits nonzero. That is strictly better than a
+ *      starter-side mutex, because it also excludes an actor nobody started
+ *      from this script.
+ *   2. **THE ACTOR IS ITS OWN RECORD'S ONLY WRITER.** `writeRelayRecord` parses
+ *      through a non-strict `z.object` and STRIPS unknown keys, while §7.7's
+ *      `TriageActorRecordSchema` requires `cadence_s` with no default — so a
+ *      record written from here would make `pifleet triage --status` report
+ *      `actor: refused` for a perfectly healthy actor. Adding the field to the
+ *      literal does not help; the schema strips it on the way out. So this
+ *      script writes NOTHING and the actor writes §7.7's record itself, at the
+ *      end of its first sweep. The cost is stated rather than hidden: between
+ *      the spawn and that first `saveCursor` there is no record, so
+ *      `--actor-stop` cannot name the actor yet.
+ *   3. **`--cadence` IS HONOURED.** `pifleet triage` takes `--poll` and, since
+ *      §13 task 6.9, that override wins over `triage/console.yaml`'s
+ *      `cadence_s`. So the flag is forwarded rather than refused, and it is
+ *      forwarded ONLY when the operator gave it — a script that always passed
+ *      one would silently defeat the file that task 6.9 exists to consult.
+ *
+ * **THERE IS NO `--console` FLAG ON THE CLOCK, and its absence is not an
+ * oversight.** `pifleet triage` IS this console's actor by subcommand: §7.7's
+ * three paths are bound to `TRIAGE_CONSOLE` inside `triage-actor.ts` and no
+ * caller can name the review console at all. That closes §9.13's row here by
+ * construction rather than by remembering a flag — which is what the relay argv
+ * needed, because `consoleRelayArgv` emits no `--console` and `DEFAULT_CONSOLE`
+ * is `"review"`, so spawning it unchanged started a REVIEW actor from this
+ * script and both halves of that were silent.
  *
  * WHY THE ACTOR IS NOT WAITED FOR. On a fresh `--recreate` or a first run the
  * four `pifleet up`s have not finished when this returns, so no run exists to
@@ -102,19 +132,15 @@ import {
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
 import {
-  acquireRelayLock,
-  consoleRelayArgv,
   readRelayStatus,
   relayLockPath,
   relayLogPath,
   relayRecordPath,
   servesConsole,
   signalRelay,
-  writeRelayRecord,
 } from "../src/run/console-relay.ts";
 import { TRIAGE_CONSOLE_ROSTER } from "../src/run/dispatch-request.ts";
 import { recreateThenDispatch, resolveThenRestart } from "../src/run/fresh-dispatch.ts";
-import { processStartTime } from "../src/safety/procstart.ts";
 import { consoleRunPins, relayRunPinValue, runsHoldingAny } from "../src/run/status-runs.ts";
 
 /**
@@ -150,8 +176,9 @@ const USAGE = `Usage: scripts/triage [options]
   --task <path>     with --restart: recreate the worker, then dispatch this
                     task to the run it comes back in. Waits for any task it
                     is already holding to finish; never recreates over work.
-  --cadence <dur>   override the sweep cadence for this run ("5m", "300s").
-                    NOT YET HONOURED — see the refusal it prints.
+  --cadence <dur>   override the sweep cadence for this actor ("5m", "300s").
+                    Reaches it as --poll; without it the actor reads cadence_s
+                    from triage/console.yaml. Not persisted.
   --no-actor        do not start the actor. The console then has four workers,
                     no clock and nothing that turns tri-1's dispatch request
                     into observations; use it when running the actor by hand.
@@ -180,44 +207,43 @@ async function main(argv: string[]): Promise<number> {
   const watchDir = process.cwd();
 
   /*
-   * `--cadence` IS REFUSED, AND THE REFUSAL IS THE HONEST HALF OF SHIPPING THE
-   * FLAG EARLY.
+   * `--cadence` IS PARSED HERE AND HONOURED BY THE ACTOR (§13 task 6.7a).
    *
    * §7.8 gives the cadence a home — `cadence_s`, default 300, in
-   * `triage/console.yaml` — and says this flag "overrides it for a hand-run and
-   * does not persist". An override needs a process to override, and the process
-   * is `pifleet triage`, which is §13 Phase 6. The actor this script starts
-   * TODAY is `pifleet relay --console triage`: it performs the fan-out and has
-   * no clock, and `relay` has no `--cadence`, so passing the value through would
-   * hand a bare `commander` usage error to a DETACHED process. The record would
-   * be written for a pid that had already exited, and the console would be
-   * silently actorless with a healthy-looking record naming it — the exact
-   * failure shape §6.4 is about.
+   * `triage/console.yaml` — and calls this flag *"an override for a hand-run
+   * that does not persist"*. An override needs a process to override and now
+   * there is one: `pifleet triage` takes `--poll`, and since §13 task 6.9 that
+   * flag WINS over the file rather than being the only source. So the value
+   * travels to {@link triageActorArgv} as a number of seconds, and travels only
+   * when the operator typed it — `null` is this script's spelling of *"consult
+   * the file"*, and a script that always passed a number would silently defeat
+   * the file task 6.9 exists to consult.
    *
-   * The value is parsed BEFORE it is refused, so `--cadence 5x` is answered as a
-   * malformed duration rather than as an unimplemented feature: the operator who
-   * mistyped it learns that now and not in Phase 6. `parseDuration` is imported
-   * rather than re-spelled here for §3.3's reason — nothing in this file is
-   * typechecked, so a second duration grammar in it would be a second grammar
-   * nobody checks.
+   * `parseDuration` is imported rather than re-spelled here for §3.3's reason —
+   * nothing in this file is typechecked, so a second duration grammar in it
+   * would be a second grammar nobody checks. It throws on `5x`, which is why a
+   * malformed duration is still answered as a duration.
    *
-   * Answered before `--actor-stop` because it is a pure judgement about argv and
-   * needs no filesystem: `--actor-stop --cadence 5m` is a command that means two
-   * incompatible things, and doing half of it silently is worse than refusing
-   * both.
+   * Parsed before `--actor-stop` because it is a pure judgement about argv and
+   * needs no filesystem, and REFUSED in combination with the two flags that
+   * start no actor: `--actor-stop --cadence 5m` and `--no-actor --cadence 5m`
+   * each name a cadence with nothing to reach, and silently dropping an override
+   * an operator typed is the failure the old unconditional refusal was really
+   * protecting against.
    */
   const cadenceFlag = flag(argv, "--cadence");
-  if (cadenceFlag !== undefined) {
-    const seconds = parseDuration(cadenceFlag);
-    throw new Error(
-      `triage: --cadence ${cadenceFlag} is a valid duration (${seconds}s) with nothing to ` +
-        `reach yet. The cadence belongs to the clock, the clock is 'pifleet triage' ` +
-        `(SRD-TRIAGE-CONSOLE §6.4, §13 Phase 6), and the actor this script starts today is ` +
-        `'pifleet relay --console ${CONSOLE}' — the fan-out half, which takes no cadence. ` +
-        `Passing it through would kill the actor on startup and leave a record naming a dead ` +
-        `pid. Set 'cadence_s' in triage/console.yaml instead; it is the value's home and ` +
-        `${cadenceFlag} is the override that will apply once Phase 6 lands.`,
-    );
+  const cadenceS = cadenceFlag === undefined ? null : parseDuration(cadenceFlag);
+  if (cadenceS !== null) {
+    const noActor = ["--actor-stop", "--no-actor"].find((f) => argv.includes(f));
+    if (noActor !== undefined) {
+      throw new Error(
+        `triage: --cadence ${cadenceFlag} is a valid duration (${cadenceS}s) and ${noActor} ` +
+          `starts no actor for it to reach. The cadence is the CLOCK's — it reaches ` +
+          `'pifleet triage' as --poll — so the two flags together mean two incompatible ` +
+          `things. Drop one, or set 'cadence_s' in triage/console.yaml, which is the ` +
+          `value's durable home (SRD-TRIAGE-CONSOLE §7.8).`,
+      );
+    }
   }
 
   /*
@@ -298,6 +324,22 @@ async function main(argv: string[]): Promise<number> {
     for (const [i, p] of panes.entries()) {
       process.stdout.write(`pane ${i + 1} (${p.title}):\n  ${p.command}\n\n`);
     }
+    /*
+     * THE FIFTH PROCESS IS PREVIEWED TOO, and on this console that matters more
+     * than it would anywhere else: `--dry-run` is how an operator inspects a
+     * console nobody has open, and the actor is the half that runs when nobody
+     * is watching. Printed from {@link triageActorArgv} rather than described,
+     * so a preview that disagreed with what is spawned is unreachable — the
+     * hazard `operations-console.test.ts` records for the pane commands, applied
+     * to the one command those four panes do not carry.
+     *
+     * It is also the only place `--cadence`'s effect is VISIBLE without starting
+     * anything, which is what makes an honoured flag inspectable at all.
+     */
+    process.stdout.write(
+      `actor (${argv.includes("--no-actor") ? "--no-actor: NOT started" : "started last"}):\n` +
+        `  ${triageActorArgv(`${repoRoot}/src/cli/index.ts`, cadenceS).join(" ")}\n\n`,
+    );
     return EXIT.SUCCESS;
   }
 
@@ -423,7 +465,7 @@ async function main(argv: string[]): Promise<number> {
           `stopped ${r.stopped.length === 0 ? "nothing" : r.stopped.join(", ")}) ` +
           `and dispatched ${taskFlag}\n${r.dispatched}`,
       );
-      if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers);
+      if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers, cadenceS);
       return EXIT.SUCCESS;
     }
 
@@ -450,7 +492,7 @@ async function main(argv: string[]): Promise<number> {
       `triage: respawned the ${restartFlag} pane (surface ${r.pane}); ` +
         `the other panes were not touched\n`,
     );
-    if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers);
+    if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers, cadenceS);
     return EXIT.SUCCESS;
   }
 
@@ -476,35 +518,47 @@ async function main(argv: string[]): Promise<number> {
    * what the operator asked for; `startActor` prints the remedy on every path it
    * declines.
    */
-  if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers);
+  if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers, cadenceS);
   return EXIT.SUCCESS;
 }
 
 /**
- * The argv this console's actor is launched with, and the ONE line Phase 6.7
- * changes.
+ * The argv this console's actor is launched with — `pifleet triage`, the CLOCK
+ * and the fan-out in one process (§13 task 6.7a).
  *
- * **`--console` IS APPENDED HERE BECAUSE `consoleRelayArgv` DOES NOT EMIT IT.**
- * That function returns `["bun", "run", <entry>, "relay", "--run", <id>]`, and
- * `relay`'s `--console` defaults to `DEFAULT_CONSOLE`, which is `"review"`. So a
- * triage script that spawned the shared argv unchanged would start a REVIEW
- * actor: it would poll `col-1`'s inbox, refuse every request from `tri-1` as
- * `worker_not_in_console`, and — because `resolveConsole` refuses nothing it was
- * never asked — log like a healthy actor while dispatching nothing. Meanwhile
- * the review console would have two actors and this one would have none. Both
- * halves are silent, which is §9.13's row and the reason `servesConsole`
- * compares the name FIRST.
+ * ## Three flags this deliberately does not spell
  *
- * The right long-term home for this is `consoleRelayArgv` itself, taking the
- * console as a required argument the way `relayRecordPath` already does. That is
- * a change to a `src/` module with three callers and it is not this task's file
- * list, so it is spelled here and recorded rather than done quietly: see the
- * round report. Until then `test/unit/fresh-dispatch.test.ts` reads this
- * function and asserts the flag is present and carries {@link CONSOLE} rather
- * than a bare literal — ISC-600's remedy, because nothing typechecks this file.
+ * **No `--console`.** `pifleet triage` has no such option, so one here would be
+ * a bare `commander` usage error handed to a DETACHED process — a record naming
+ * a pid that had already exited, which is §6.4's own failure shape. The flag was
+ * needed by the relay argv because `consoleRelayArgv` emits none and
+ * `DEFAULT_CONSOLE` is `"review"`; the clock closes §9.13's row by construction
+ * instead, because `triage-actor.ts` binds §7.7's three paths to
+ * `TRIAGE_CONSOLE` and no caller can name the other console.
+ *
+ * **No `--run`.** The relay was pointed at one run for its whole life. The clock
+ * re-derives every seat's pin each pass (§6.6 layer 4), and mints new runs
+ * itself when a seat is due, so a run id fixed at spawn would be stale by the
+ * first recycle.
+ *
+ * **No `--poll` unless the operator typed `--cadence`.** `null` means *"consult
+ * `triage/console.yaml`"*, which is exactly what §13 task 6.9 made possible — a
+ * script that always passed a number would silently defeat the file.
+ *
+ * `"triage"` is a SUBCOMMAND name and not this console's identity, which is why
+ * it is a literal here while every path below goes through {@link CONSOLE}: the
+ * subcommand would still be spelled `triage` on a console called something else,
+ * and `test/unit/fresh-dispatch.test.ts` reads this body to decide which world
+ * the file is in.
  */
-function triageActorArgv(cliEntry: string, runId: string): string[] {
-  return [...consoleRelayArgv(cliEntry, runId), "--console", CONSOLE];
+function triageActorArgv(cliEntry: string, cadenceS: number | null): string[] {
+  return [
+    "bun",
+    "run",
+    cliEntry,
+    "triage",
+    ...(cadenceS === null ? [] : ["--poll", String(cadenceS)]),
+  ];
 }
 
 /**
@@ -560,6 +614,27 @@ async function stopActor(why: string): Promise<void> {
  * alone and a dead record is replaced, and running `./scripts/triage` twice never
  * produces two.
  *
+ * **The record this reads is now written by the ACTOR and never by this script**
+ * (§13 task 6.7a). §7.7's `TriageActorRecordSchema` requires `cadence_s`, which
+ * `writeRelayRecord`'s non-strict schema would strip on the way to disk, so a
+ * record written from here is one `pifleet triage --status` reports as
+ * `actor: refused` — a healthy actor wearing a broken record's costume. One
+ * writer, and it is the process the record is about. The window that opens is
+ * named rather than hidden: from the spawn until the actor's first `saveCursor`
+ * there is no record, so a `./scripts/triage` in that gap starts a second actor
+ * and the second one refuses on §7.7's lock and exits nonzero.
+ *
+ * ## NOTHING IS LOCKED ACROSS THE SPAWN, and that is the same fact from the
+ * other side
+ *
+ * `runTriageActor` takes `triageActorLockPath` — which IS
+ * `relayLockPath(CONSOLE)`, one inode — for the actor's whole life. A
+ * one-starter-at-a-time mutex held here across `Bun.spawn` would therefore
+ * `EEXIST` against a LIVE script pid, the takeover would correctly decline, and
+ * the actor would exit having started nothing. The exclusion moved to §6.3b's
+ * own lock, which is a better place for it: it also excludes an actor this
+ * script did not start.
+ *
  * ## The pin is all-or-nothing and usually absent on a fresh create
  *
  * `relayRunPinValue` refuses to spell a partial pin, because
@@ -568,7 +643,11 @@ async function stopActor(why: string): Promise<void> {
  * exists yet, so nothing is pinned and nothing is started; on the re-run that
  * adopts the console, all four are live and the pin is exact.
  */
-async function startActor(repoRoot: string, workers: readonly string[]): Promise<void> {
+async function startActor(
+  repoRoot: string,
+  workers: readonly string[],
+  cadenceS: number | null,
+): Promise<void> {
   /**
    * THE CONSOLE IS RESOLVED FIRST, and the order is what makes the comparison
    * possible at all: asking whether *an* actor is running answers yes for one
@@ -669,90 +748,63 @@ async function startActor(repoRoot: string, workers: readonly string[]): Promise
     return;
   }
 
-  /**
-   * ONE STARTER AT A TIME. `acquireRelayLock` publishes the lock whole or not at
-   * all, so two invocations racing cannot both spawn — the loser is told rather
-   * than silently adding a second actor to a console that can only account for
-   * one.
-   */
-  const lock = await acquireRelayLock(relayLockPath(CONSOLE));
-  if (lock === null) {
-    process.stderr.write(
-      `triage: another ./scripts/triage is starting the actor right now ` +
-        `(${relayLockPath(CONSOLE)} is held), so this one did not\n`,
-    );
-    return;
-  }
-
+  const pinned = relayRunPinValue(map, workers);
+  const logPath = relayLogPath(CONSOLE);
+  // Appended to, never truncated: the log is the only place a refusal a
+  // detached process printed can be read afterwards, and a restart must not
+  // erase the reason the previous actor stopped. On this console it is also
+  // the only place ANYTHING is read from — nobody is watching the panes, and
+  // between the spawn and the actor's first `saveCursor` it is the ONLY thing
+  // naming the actor at all.
+  const fd = openSync(logPath, "a");
+  let proc: Bun.Subprocess;
   try {
-    const pinned = relayRunPinValue(map, workers);
-    const logPath = relayLogPath(CONSOLE);
-    // Appended to, never truncated: the log is the only place a refusal a
-    // detached process printed can be read afterwards, and a restart must not
-    // erase the reason the previous actor stopped. On this console it is also
-    // the only place ANYTHING is read from — nobody is watching the panes.
-    const fd = openSync(logPath, "a");
-    let proc: Bun.Subprocess;
-    try {
-      proc = Bun.spawn(triageActorArgv(`${repoRoot}/src/cli/index.ts`, runId), {
-        cwd: repoRoot,
-        env: pinned === null ? process.env : { ...process.env, PIFLEET_RELAY_RUNS: pinned },
-        stdin: "ignore",
-        stdout: fd,
-        stderr: fd,
-        /**
-         * A NEW SESSION, not merely an unreferenced child. `proc.unref()`
-         * releases Bun's event loop and does nothing to the OS: the child stays
-         * in this script's process group, so a SIGINT to the terminal that
-         * launched the console — or closing it — takes the actor with it.
-         * `detached` is what makes the actor outlive the command that started
-         * it, and on a console meant to run unattended for days that is not a
-         * nicety.
-         */
-        detached: true,
-      });
-    } finally {
-      closeSync(fd);
-    }
-    proc.unref();
-
-    /**
-     * The identity is captured AFTER the spawn and from the OS, never invented.
-     * `""` means capture failed, and `readRelayStatus` recognises it as
-     * `unverifiable` rather than comparing it — see `isPinnedIdentity`.
-     */
-    let started: string;
-    try {
-      started = (await processStartTime(proc.pid)) ?? "";
-    } catch {
-      started = "";
-    }
-    await writeRelayRecord(path, {
-      schema: "pifleet.consolerelay/v1",
-      pid: proc.pid,
-      started,
-      console: CONSOLE,
-      run_id: runId,
-      pinned,
-      workers: [...workers],
-      started_at: new Date().toISOString(),
-      log_path: logPath,
+    proc = Bun.spawn(triageActorArgv(`${repoRoot}/src/cli/index.ts`, cadenceS), {
+      cwd: repoRoot,
+      env: pinned === null ? process.env : { ...process.env, PIFLEET_RELAY_RUNS: pinned },
+      stdin: "ignore",
+      stdout: fd,
+      stderr: fd,
+      /**
+       * A NEW SESSION, not merely an unreferenced child. `proc.unref()`
+       * releases Bun's event loop and does nothing to the OS: the child stays
+       * in this script's process group, so a SIGINT to the terminal that
+       * launched the console — or closing it — takes the actor with it.
+       * `detached` is what makes the actor outlive the command that started
+       * it, and on a console meant to run unattended for days that is not a
+       * nicety.
+       */
+      detached: true,
     });
-    process.stdout.write(
-      `triage: started the actor (pid ${proc.pid}) polling run ${runId}` +
-        `${pinned === null ? " with no worker pin — it will scan for the observers' runs" : ` pinned to ${pinned}`}\n` +
-        `triage: its output is in ${logPath}; it exits on its own when this console goes away, ` +
-        `and ./scripts/triage --actor-stop stops it now\n`,
-    );
-    if (started === "") {
-      process.stderr.write(
-        `triage: the actor's start time could not be captured, so its record cannot be compared ` +
-          `later — the next run of this script will refuse to touch it and name pid ${proc.pid}\n`,
-      );
-    }
   } finally {
-    await lock.release();
+    closeSync(fd);
   }
+  proc.unref();
+
+  process.stdout.write(
+    `triage: started the actor (pid ${proc.pid}) for run ${runId}` +
+      `${pinned === null ? " with no worker pin — it resolves each seat from the run tree" : ` pinned to ${pinned}`}` +
+      `${cadenceS === null ? ", at triage/console.yaml's cadence_s" : `, at --poll ${cadenceS}s`}\n` +
+      `triage: its output is in ${logPath}; it exits on its own when this console goes away, ` +
+      `and ./scripts/triage --actor-stop stops it once it has written ${path} — which it does ` +
+      `at the end of its first sweep and not before (§7.7)\n`,
+  );
+  /*
+   * WHY THIS SCRIPT CANNOT REPORT A REFUSAL, said rather than left to be
+   * discovered. `pifleet triage` takes `relayLockPath(CONSOLE)` for its own life
+   * (§6.3b) and exits nonzero if another actor already holds it — but this spawn
+   * is DETACHED and unwaited, deliberately (see the header: a console script
+   * that blocks for minutes is one an operator kills), so that refusal lands in
+   * the log and nowhere else. Naming the file is what makes the log line
+   * actionable, and taking the name from {@link CONSOLE} is what stops it
+   * naming the review console's lock — §9.13 in a sentence rather than in a
+   * signal.
+   */
+  process.stdout.write(
+    `triage: if it refused instead, the reason is in that log and the file to look at is ` +
+      `${relayLockPath(CONSOLE)} — this console's one-actor-at-a-time lock, which the actor ` +
+      `takes itself and this script deliberately does not\n`,
+  );
 }
 
 /**

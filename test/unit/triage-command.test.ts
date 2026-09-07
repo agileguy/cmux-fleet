@@ -58,7 +58,7 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { Command } from "commander";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1157,11 +1157,28 @@ function documentRow(service: string, observer: string): Record<string, unknown>
  * So each call writes three things: the inbox record (the host's), the artifact
  * the addressed worker's turn would produce, and the settled task record (the
  * supervisor's). Nothing here touches a container, a socket or a network.
+ *
+ * **IT ASSERTS NOTHING — §13 task 6.9a.** `triageActorLoop` catches everything
+ * `deps.pass()` throws into `pass_failed`, correctly and by §6.4, so an
+ * `expect(...)` in here is a real assertion under `--once` and a DISCARDED one
+ * under every `--poll` test in this file: a test could assert a settle deadline,
+ * be wrong about it, and pass. Every claim this fixture used to make from inside
+ * itself is now a RECORDED value, re-made outside the swallow by
+ * {@link expectDispatchesWereWellFormed}. What makes that a fix rather than a
+ * relocation is that the recorded arrays are asserted by LENGTH out there: a
+ * throw from in here — including a deliberately wrong expectation somebody adds
+ * back — truncates the sequence and reddens the test that used to swallow it.
  */
-function fixtureFleetDispatch(run: RunPaths, log: string[], windows: string[]): SweepDispatch {
+function fixtureFleetDispatch(
+  run: RunPaths,
+  log: string[],
+  windows: (string | null)[],
+  titles: string[],
+  settled: string[],
+): SweepDispatch {
   let sweepId = "";
   return async ({ taskId, worker, title, brief }) => {
-    expect(title.length).toBeGreaterThan(0);
+    titles.push(title);
     log.push(`${worker}:${taskId}`);
     await writeJson(inboxTaskPath(run, taskId), { schema: "pifleet.task/v1", task_id: taskId });
 
@@ -1177,8 +1194,11 @@ function fixtureFleetDispatch(run: RunPaths, log: string[], windows: string[]): 
        */
       sweepId = taskId;
       const window = /- observation window opens at: (\S+)/.exec(brief);
-      expect(window, "the sweep brief named no observation window").not.toBeNull();
-      windows.push(window![1]!);
+      // RECORDED, never asserted here: a `null` reaches the observer artifacts
+      // below as a missing `window_opened_at` — which §7.4's freshness gate
+      // refuses, so the pass changes shape too — and the claim itself is made
+      // outside the loop's swallow.
+      windows.push(window?.[1] ?? null);
       await writeJson(dispatchRequestPath(run.root, TRIAGE_COLLATOR, taskId), {
         schema: DISPATCH_REQUEST_SCHEMA,
         parent_task_id: taskId,
@@ -1226,6 +1246,26 @@ function fixtureFleetDispatch(run: RunPaths, log: string[], windows: string[]): 
       settled_at: "2026-09-06T00:00:00Z",
       tree_hash: null,
     });
+    /*
+     * THE LAST STATEMENT, and it is what makes the swallow OBSERVABLE rather
+     * than merely avoided (§13 task 6.9a).
+     *
+     * `log` above records that this stub was ENTERED; this records that it ran
+     * to the end. `triageActorLoop` catches everything the pass throws, so a
+     * throw from anywhere in here — a deliberately wrong `expect` on the very
+     * last line included — is invisible to the loop's own exit value and to a
+     * `dispatched` array that was already full. It is not invisible to a
+     * comparison of the two: `expectDispatchesWereWellFormed` asserts they are
+     * EQUAL, so entered-but-did-not-finish is a red test.
+     *
+     * MEASURED, not assumed. Before this line, a wrong expectation placed on
+     * the last line of this stub survived `--poll takes §7.7's lock`'s free
+     * half — five dispatches recorded, `{ kind: "stopped", passes: 1 }`
+     * returned, nothing asserting the pass had SUCCEEDED. That is the exact
+     * failure §13 task 6.9a names, and it is the one the first draft of this
+     * fix still let through.
+     */
+    settled.push(`${worker}:${taskId}`);
     return { kind: "accepted" };
   };
 }
@@ -1240,7 +1280,7 @@ interface FixtureFleet {
   readonly recycled: string[];
   /**
    * Every `settleDeadlineMs` the console handed the root's dispatch factory, in
-   * order — RECORDED rather than only asserted inside `dispatchFor`.
+   * order — RECORDED rather than asserted inside `dispatchFor`.
    *
    * `triageActorLoop` catches everything `deps.pass()` throws into
    * `pass_failed`, an `expect` inside the fixture's dispatch included. So an
@@ -1248,6 +1288,41 @@ interface FixtureFleet {
    * under `--poll`, and §13 task 6.9's deadline claim is a `--poll` claim.
    */
   readonly deadlines: number[];
+  /**
+   * Every dispatch TITLE the console minted, in order (§13 task 6.9a).
+   *
+   * `title.length > 0` used to be an `expect` inside the dispatch stub. It is a
+   * real claim — `renderSweepEnvelope` builds the title and a worker's inbox
+   * record with an empty one is a task nobody can name — and it was discarded on
+   * every `--poll` path in this file.
+   */
+  readonly titles: string[];
+  /**
+   * The observation window the HOST minted, read back out of each sweep brief —
+   * one per sweep, and `null` when the brief carried none (§13 task 6.9a).
+   *
+   * §7.2 tells the collator to copy the instant *"from here and from nowhere
+   * else"*, so a fixture that invented its own would satisfy §7.4's freshness
+   * gate by coincidence. The absence is recorded rather than thrown for the same
+   * reason as the titles: a throw here is swallowed and a `null` out there is not.
+   */
+  readonly windows: (string | null)[];
+  /**
+   * The same `worker:taskId` entries as {@link dispatched}, pushed by the LAST
+   * statement of the dispatch stub instead of its first (§13 task 6.9a).
+   *
+   * `dispatched` says the stub was entered; this says it finished. The loop
+   * swallows what the pass throws, so the two disagreeing is the only evidence
+   * that an assertion inside the stub failed — and it is evidence that survives
+   * a stub which had already recorded everything before it threw.
+   */
+  readonly settled: string[];
+  /**
+   * What every entry of {@link deadlines} must equal — §7.8's
+   * `(cadence_s − reserve_s) × 1000`, fixed by the fixture's own options rather
+   * than read back out of the thing under test.
+   */
+  readonly settleDeadlineMs: number;
   /** How many times the saturation probe was reached. MUST stay 0. */
   readonly probes: { count: number };
 }
@@ -1316,20 +1391,28 @@ async function fixtureFleet(
 
   const dispatched: string[] = [];
   const delivered: NotifyRequest[] = [];
-  const windows: string[] = [];
+  const windows: (string | null)[] = [];
+  const titles: string[] = [];
+  const settled: string[] = [];
   const recycled: string[] = [];
   const deadlines: number[] = [];
   const probes = { count: 0 };
 
   const effects: TriageProductionEffects = {
     dispatchFor: (r, opts) => {
-      // §7.8's `sweep_deadline_s` — `cadence_s − reserve_s` — reaches the effect
-      // as a bound, which is the half of the split task 6.1b decided: the
-      // deadline is the console's decision, the dispatch is the root's
-      // capability.
+      /*
+       * §7.8's `sweep_deadline_s` — `cadence_s − reserve_s` — reaches the effect
+       * as a bound, which is the half of the split task 6.1b decided: the
+       * deadline is the console's decision, the dispatch is the root's
+       * capability.
+       *
+       * RECORDED AND NOT ASSERTED (§13 task 6.9a). This factory is called from
+       * inside `deps.pass()`, so an `expect` here is discarded by the loop's
+       * catch on every `--poll` path — which is how a test could assert this
+       * deadline, be wrong about it, and pass.
+       */
       deadlines.push(opts.settleDeadlineMs);
-      expect(opts.settleDeadlineMs).toBe(fixture.settleDeadlineMs ?? 240_000);
-      return fixtureFleetDispatch(r, dispatched, windows);
+      return fixtureFleetDispatch(r, dispatched, windows, titles, settled);
     },
     isCollatorLive: async () => true,
     /*
@@ -1361,7 +1444,105 @@ async function fixtureFleet(
     env: { ...process.env },
   };
 
-  return { run, effects, dispatched, delivered, recycled, deadlines, probes };
+  return {
+    run,
+    effects,
+    dispatched,
+    delivered,
+    recycled,
+    deadlines,
+    titles,
+    windows,
+    settled,
+    settleDeadlineMs: fixture.settleDeadlineMs ?? 240_000,
+    probes,
+  };
+}
+
+/**
+ * **Every claim the dispatch fixture makes about a dispatch, made OUT HERE —
+ * §13 task 6.9a.**
+ *
+ * ## The defect this replaces
+ *
+ * `triageActorLoop` catches everything `deps.pass()` throws and turns it into a
+ * `pass_failed` log line, which is right: §6.4 decides that *"an actor that dies
+ * on one bad sweep stops watching"*. The consequence is that an `expect(...)`
+ * inside a stub the pass reaches is a REAL assertion under `--once` and a
+ * DISCARDED one under `--poll`. Three lived in this file's fixture — the settle
+ * deadline, the dispatch title, the observation window — and every `--poll` test
+ * here ran them for nothing. A test could assert a deadline, be wrong about it,
+ * and pass.
+ *
+ * ## Why this is a fix and not a relocation
+ *
+ * Moving an assertion out only helps if the recorded evidence is COMPLETE, and
+ * that is what {@link FixtureFleet.dispatched}'s length is for: a throw from
+ * inside any stub — a deliberately wrong expectation somebody adds back
+ * included — ends the pass early, truncates every recorded array, and reddens
+ * this function. So the swallow is not merely avoided, it is OBSERVED. That is
+ * the anti-criterion §13 names, and it is measured rather than argued: the
+ * mutation battery for this round put `expect(1).toBe(2)` inside `dispatchFor`
+ * and every `--poll` test that reaches a real sweep went red.
+ *
+ * `sweeps` is how many passes reached the dispatch factory — 0 for a test whose
+ * pass is a stub, which is a claim rather than an exemption: it says the stub
+ * really did dispatch nothing.
+ */
+function expectDispatchesWereWellFormed(
+  fleet: FixtureFleet,
+  expected: { readonly sweeps: number },
+): void {
+  const { sweeps } = expected;
+  // THE COMPLETENESS CLAIM, and the one that makes every line below meaningful:
+  // five dispatches per sweep — the parent, three observers, the collation.
+  expect(fleet.dispatched.length, "the recorded dispatch sequence is short — a stub threw").toBe(
+    5 * sweeps,
+  );
+  // ENTERED equals FINISHED. This is the arm that catches a throw from the LAST
+  // line of the stub, where everything has already been recorded and only the
+  // pass's own success is missing — measured, because the first draft of this
+  // helper let exactly that through.
+  expect(fleet.settled, "a dispatch stub was entered and did not finish — it threw").toEqual(
+    fleet.dispatched,
+  );
+  // One factory call per pass that reached the driver, each carrying §7.8's
+  // deadline. `toEqual` on the whole array, so a second pass at a different
+  // deadline cannot hide behind a `toContain`.
+  expect(fleet.deadlines).toEqual(Array.from({ length: sweeps }, () => fleet.settleDeadlineMs));
+  // A title per dispatch, none of them empty.
+  expect(fleet.titles.length).toBe(fleet.dispatched.length);
+  expect(fleet.titles.filter((t) => t.trim() === "")).toEqual([]);
+  // One host-minted observation window per sweep, none of them missing.
+  expect(fleet.windows.length).toBe(sweeps);
+  expect(fleet.windows.filter((w) => w === null)).toEqual([]);
+  // §12's closing anti-criterion: no criterion in this file requires a real
+  // model. The fixture's probe THROWS, and a throw inside the pass is exactly
+  // what the loop swallows — so the count is asserted rather than the throw.
+  expect(fleet.probes.count).toBe(0);
+  /*
+   * AND NO PASS FAILED, wherever a loop actually ran.
+   *
+   * `settled` above catches a throw from anywhere inside the dispatch stub up
+   * to its completion marker. This catches the whole of the rest of the
+   * surface — `dispatchFor` itself, a stub the BOUNDARY reaches, and an
+   * assertion somebody adds AFTER that marker — because `triageActorLoop`
+   * writes a `pass_failed` line for every throw it swallows. §9.15 makes that
+   * log the actor's guaranteed surface, so this reads the one channel a
+   * swallowed throw cannot avoid.
+   *
+   * Conditional on the log existing, and the condition is EXACT rather than
+   * convenient: only the loop writes one, and `--once` needs no guard here
+   * because §6.4 has it propagate the throw to the caller — where every
+   * `--once` test above already asserts `err` is null.
+   */
+  const actorLog = triageActorLogPath(fleet.effects.env);
+  if (existsSync(actorLog)) {
+    expect(
+      readFileSync(actorLog, "utf8"),
+      "the loop swallowed a thrown pass — something inside a fixture stub failed",
+    ).not.toContain("pass_failed");
+  }
 }
 
 describe("§13 task 6.1b: the effects the console may not build are COMPULSORY", () => {
@@ -1452,8 +1633,8 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
       `${TRIAGE_COLLATOR}:T-sweep-1-collate`,
     ]);
     expect(out).toContain("T-sweep-1: swept 3 observers");
-    // §12's closing anti-criterion: no criterion here requires a real model.
-    expect(fleet.probes.count).toBe(0);
+    // Deadline, titles, window and §12's closing anti-criterion, all out here.
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
   /**
@@ -1484,6 +1665,7 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     );
     expect(onDisk.startsWith(process.env["HOME"]!)).toBe(true);
     expect(readFileSync(onDisk, "utf8")).toContain("provisional");
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
   /**
@@ -1522,6 +1704,9 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     // The two healthy services stayed quiet, so the one notification is about
     // the service that reported badly rather than about the sweep happening.
     expect(title).not.toContain("authentication");
+    // TWO sweeps' worth, which is also how this test knows the second pass was
+    // a second sweep rather than the first one counted twice.
+    expectDispatchesWereWellFormed(fleet, { sweeps: 2 });
   });
 
   /**
@@ -1571,8 +1756,13 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     expect(exit).toEqual({ kind: "stopped", passes: 1 });
     // One cadence, not two: a loop that ignored the signal would sit here.
     expect(Date.now() - started).toBeLessThan(10_000);
-    // The sweep really happened through the loop, not only through `--once`.
-    expect(fleet.dispatched.length).toBe(5);
+    /*
+     * The sweep really happened through the loop, not only through `--once` —
+     * and every claim the dispatch fixture makes is checked HERE, because this
+     * is a `--poll` test and the loop discards what its stubs throw (§13 task
+     * 6.9a). Before that fix this test ran three assertions for nothing.
+     */
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
 
     // §7.7's record, written by the PRODUCTION `saveCursor`.
     const record = await readTriageActorRecord(fleet.effects.env);
@@ -1584,6 +1774,71 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     expect(record.record.cadence_s).toBe(1);
     // And the log the actor is required to have — §9.15 surface 2.
     expect(readFileSync(record.record.log_path, "utf8")).toContain("actor_started");
+  });
+
+  /**
+   * **§13 TASK 6.7a's ACCEPTANCE: `--status` REPORTS A HEALTHY ACTOR FROM ITS
+   * FIRST PASS.**
+   *
+   * The re-point of `scripts/triage`'s `triageActorArgv` from `pifleet relay
+   * --console triage` to `pifleet triage` moved three things, and this is the
+   * second: the script used to write the actor's record itself, through
+   * `writeRelayRecord`, whose schema is a **non-strict `z.object` and therefore
+   * STRIPS unknown keys**. §7.7's `TriageActorRecordSchema` requires `cadence_s`
+   * and gives it no default, so a record written that way parses as
+   * `{ kind: "refused" }` — and `--status` would report `actor: refused` for a
+   * perfectly healthy actor until its first `saveCursor` overwrote the file.
+   * Adding `cadence_s` to the literal does not help; the schema removes it on
+   * the way to disk.
+   *
+   * So the script writes NOTHING and the actor is its own record's only writer.
+   * The consequence is a state worth asserting in both directions, which is what
+   * this test does:
+   *
+   *   - **before** the first pass there is no record and `--status` says
+   *     `absent` — not `refused`, and not `0` sweeps. That is the honest answer
+   *     and it is a DIFFERENT one from the defect's;
+   *   - **after** it, every field §7.7 carries is the running actor's own: the
+   *     pid, the cadence it is actually ticking at, and the sweep it completed.
+   *
+   * The premise arm is what makes this more than a re-run of the record test
+   * above: without it, an implementation that wrote a healthy record at startup
+   * — which is where a fourth blocker would hide, because that write happens
+   * BEFORE §6.3b's lock and would let a refused actor clobber a live one's
+   * record — passes the second half and fails the first.
+   *
+   * `cadenceS: 1` for `boundedByTheWatch`'s reason, and the number is asserted:
+   * a record that said 300 would be one written by something other than this
+   * actor.
+   */
+  test("--status reports absent before the first pass and a healthy actor after it", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-07Z-8888");
+    const env = fleet.effects.env;
+
+    // THE PREMISE: nothing wrote §7.7's record — not the script, not the actor.
+    const before = await triageStatus(env, censusOver(new Map()));
+    expect(before.actor, "something wrote the actor's record before the actor did").toBe("absent");
+    expect(before.actor_reason).toBeNull();
+    expect(before.sweeps_completed).toBeNull();
+
+    const stop = new AbortController();
+    const deps = productionTriageDeps(async () => boundedByTheWatch(fleet.effects, stop));
+    const exit = await deps.loop(async () => await deps.pass(), {
+      cadenceS: 1,
+      signal: stop.signal,
+    });
+    expect(exit).toEqual({ kind: "stopped", passes: 1 });
+
+    // THE POINT: one pass, and the record parses as §7.7's — `present`, never
+    // the `refused` a stripped `cadence_s` produces.
+    const after = await triageStatus(env, censusOver(new Map()));
+    expect(after.actor).toBe("present");
+    expect(after.actor_reason).toBeNull();
+    expect(after.pid).toBe(process.pid);
+    expect(after.cadence_s).toBe(1);
+    expect(after.sweeps_completed).toBe(1);
+    // And the sweep it counted really happened.
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
   /**
@@ -1602,6 +1857,7 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     expect(doc.schema).toBe("pifleet.triagepass/v1");
     expect(doc.kind).toBe("swept");
     expect(doc.dispatched).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 });
 
@@ -1640,6 +1896,9 @@ describe("§13 task 6.1b: what the production deps still REFUSE, and by name", (
     expect((refused as CliError).exitCode).toBe(EXIT.USAGE);
     expect(NO_COLLATOR_RUN).toContain(TRIAGE_COLLATOR);
     expect(NO_COLLATOR_RUN).toContain("--status works");
+    // ONE sweep across both halves: the premise swept, the orphaned run refused
+    // before the driver was built, and the two share these recorded arrays.
+    expectDispatchesWereWellFormed(present, { sweeps: 1 });
   });
 
   /**
@@ -1668,6 +1927,8 @@ describe("§13 task 6.1b: what the production deps still REFUSE, and by name", (
     expect(candidates[candidates.length - 1]).toBe(newer.runId);
 
     expect((await resolveCollatorRun(process.env)).runId).toBe(older.run.runId);
+    // Nothing swept here, and that is a claim rather than an omission.
+    expectDispatchesWereWellFormed(older, { sweeps: 0 });
   });
 
   /**
@@ -1769,6 +2030,7 @@ describe("§6.6 layer 3: the previous sweep's document, and the store that keeps
   test("a console that has never swept has no previous document", async () => {
     const fleet = await fixtureFleet("2026-09-06T05-00-00Z-ffff");
     expect(await previousSweepDocument(fleet.run)).toBeNull();
+    expectDispatchesWereWellFormed(fleet, { sweeps: 0 });
   });
 
   /**
@@ -1786,6 +2048,7 @@ describe("§6.6 layer 3: the previous sweep's document, and the store that keeps
       "authorization",
       "routing",
     ]);
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
   /**
@@ -1799,6 +2062,7 @@ describe("§6.6 layer 3: the previous sweep's document, and the store that keeps
     await productionTriageDeps(async () => fleet.effects).pass();
     await writeFile(triageDocumentPath(fleet.run, "T-sweep-1-collate"), "{not json", "utf8");
     expect(await previousSweepDocument(fleet.run)).toBeNull();
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
   /** The store round-trips through the temp HOME and nothing else. */
@@ -1980,7 +2244,9 @@ describe("§13 task 6.5b: --poll takes §7.7's lock (§6.3b)", () => {
       signal: stop.signal,
     });
     expect(exit).toEqual({ kind: "stopped", passes: 1 });
-    expect(fleet.dispatched.length).toBe(5);
+    // ONE sweep across both halves: the blocked actor dispatched nothing, so
+    // every recorded array here belongs to the free one (§13 task 6.9a).
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
 
     // And the lock did not outlive the actor — `runTriageActor` releases in a
     // `finally`, so a third actor can start. Asserted by TAKING it rather than
@@ -2083,7 +2349,7 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
     expect(fleet.recycled).toEqual(["up obs-t3"]);
     expect(repaired).not.toBeNull();
     // The sweep was admitted only after the pin re-derivation found the seat.
-    expect(fleet.dispatched.length).toBe(5);
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
     // §7.7's record carries the repaired pin and every seat's stamp.
     const record = await readTriageActorRecord(effects.env);
     expect(record.kind).toBe("ok");
@@ -2181,6 +2447,8 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
     // THE POINT: the watch observed the new run and never the old one.
     expect(watched).toEqual([after!.runId]);
     expect(watched).not.toContain(before.runId);
+    // The stub pass dispatched nothing, stated rather than assumed.
+    expectDispatchesWereWellFormed(fleet, { sweeps: 0 });
   });
 });
 
@@ -2302,7 +2570,7 @@ describe("§13 task 6.9: §7.8's cadence_s reaches --poll, and --poll overrides 
     // out here and not inside `dispatchFor`, because the loop swallows what the
     // pass throws and a swallowed `expect` is not an assertion.
     expect(fleet.deadlines).toEqual([(FILE_CADENCE_S - 60) * 1_000]);
-    expect(fleet.dispatched.length).toBe(5);
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
   /**
@@ -2347,6 +2615,10 @@ describe("§13 task 6.9: §7.8's cadence_s reaches --poll, and --poll overrides 
     // an implementation that moved both or neither.
     expect(fleet.deadlines).toEqual([(FILE_CADENCE_S - 60) * 1_000]);
     expect(fleet.deadlines).not.toContain((HAND_RUN_CADENCE_S - 60) * 1_000);
+    // And the sweep whose deadline that is really happened — without this, an
+    // empty `deadlines` would satisfy neither line above but a one-element one
+    // built by a truncated pass still would (§13 task 6.9a).
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 });
 
@@ -2432,6 +2704,9 @@ describe("§13 task 6.5c: an actor may START into a console with no collator", (
     expect((await resolveCollatorRun(env)).runId).toBe(repaired!.runId);
     // The watch followed it, so the console it observes is the one it repaired.
     expect(watched).toEqual([repaired!.runId]);
+    // Neither half dispatched: the `--once` refused before the driver, and the
+    // loop's pass is a stub.
+    expectDispatchesWereWellFormed(fleet, { sweeps: 0 });
   });
 
   /**
@@ -2495,6 +2770,7 @@ describe("§13 task 6.5c: an actor may START into a console with no collator", (
     expect(passes).toBe(0);
     // THE POINT: the negative came from the absent run, not from the effect.
     expect(observations.count).toBe(0);
+    expectDispatchesWereWellFormed(fleet, { sweeps: 0 });
   });
 
   /**
@@ -2589,5 +2865,6 @@ describe("§13 task 6.5c: an actor may START into a console with no collator", (
     // never observed and the actor abandoned on the absence itself.
     expect(exit.kind).toBe("console_gone");
     expect(observations.count).toBe(0);
+    expectDispatchesWereWellFormed(fleet, { sweeps: 0 });
   });
 });

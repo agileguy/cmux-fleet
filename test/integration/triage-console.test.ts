@@ -62,7 +62,13 @@
  *  - **`--recreate`, `--no-actor`'s start path, and `restartConsolePane`.** All
  *    three tear something down or open a pane; the stub refuses them and this
  *    file does not drive them.
- *  - **`pifleet triage` and `--status`.** §13 Phase 6 and Phase 7. Not built.
+ *  - **`pifleet triage` itself.** §13 task 6.7a re-points `triageActorArgv` at
+ *    it, so this file now reads that argv out of `--dry-run`'s preview — but it
+ *    never SPAWNS the actor. Starting one would take §7.7's lock and write §7.7's
+ *    record, and the rig's `PIFLEET_RUNS_DIR` guard is the only thing standing
+ *    between that and the operator's own console. The clock's own behaviour is
+ *    driven in-process by `test/unit/triage-command.test.ts`, which is where
+ *    `--status`, `--poll` and the actor's record are asserted by value.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
@@ -434,31 +440,78 @@ describe("no seat in this console has a keyboard — §2.3, §6.1", () => {
   );
 });
 
-describe("--cadence is refused, and the refusal names the value's home", () => {
+describe("--cadence is HONOURED, and only where there is an actor to honour it", () => {
   /**
-   * §7.8 gives `cadence_s` a home and §13 Phase 6 owns the process that would
-   * honour an override. The script ships the flag and refuses it, and the
-   * refusal is worth a test because *"the actor this script starts today is
-   * `pifleet relay --console triage`"* — passing the value through would hand a
-   * usage error to a DETACHED process and leave a record naming a dead pid.
+   * **RE-STATED, NOT DELETED — §13 task 6.7a.**
    *
-   * Two arms, and the second is the interesting one: a MALFORMED duration must
-   * be answered as a duration error rather than as "unimplemented", because the
-   * value is parsed before it is refused. A script that refused first would tell
-   * an operator who typed `5x` that the feature does not exist yet and never
-   * that they mistyped it.
+   * This block used to assert *"a valid duration is refused, naming console.yaml
+   * and Phase 6"*, and that was the honest answer while the actor was `pifleet
+   * relay --console triage`: the relay has no clock and no `--cadence`, so
+   * passing the value through would have handed a bare `commander` usage error
+   * to a DETACHED process and left a record naming a pid that had already
+   * exited. The re-point makes the actor `pifleet triage`, which takes `--poll`
+   * — and since §13 task 6.9 that override WINS over `triage/console.yaml`'s
+   * `cadence_s` rather than being the only source. A flag that went on refusing
+   * would be a flag declining to do the thing it exists for.
+   *
+   * So the claim moves from *"it is refused"* to *"it arrives, and only when
+   * typed"*, and it is asserted through `--dry-run` because that is the only
+   * channel a test can read without starting an actor: §13 task 6.7a added the
+   * fifth process to the preview for exactly this reason, and on a console
+   * nobody has open the preview is how an operator inspects it at all.
+   *
+   * **Three arms, and the second is what stops the first being vacuous.** A
+   * script that hard-coded `--poll 300` into every argv satisfies arm 1 and
+   * silently defeats the file task 6.9 exists to consult; arm 2 is the bare run
+   * where no `--poll` may appear. Arm 3 keeps the honest half of the old
+   * refusal: an override handed to a flag that starts NO actor has nothing to
+   * reach, and dropping it silently is what the original refusal was really
+   * protecting against.
    */
   test.skipIf(!EXEC_TMP)(
-    "a valid duration is refused, naming console.yaml and Phase 6",
+    "a valid duration reaches the actor's argv as --poll, in seconds",
     async () => {
       const rig = await makeRig("cadence");
-      const r = await triage(rig, ["--cadence", "5m"]);
+      const r = await triage(rig, ["--dry-run", "--cadence", "5m"]);
+      expect(r.code).toBe(0);
+      // The parse happened AND the unit is seconds: `5m` is 300, not 5.
+      expect(r.out).toContain("triage --poll 300");
+      // And the refusal is gone rather than merely reworded.
+      expect(r.err).not.toContain("Phase 6");
+      expect(r.out).not.toContain("Phase 6");
+      // `pifleet triage` has no `--console`, so one here would be a usage error
+      // handed to a detached process — §6.4's own failure shape.
+      expect(r.out).not.toContain("--console");
+    },
+    cliBudget(1),
+  );
+
+  test.skipIf(!EXEC_TMP)(
+    "a bare run passes NO --poll, so console.yaml is what the actor consults",
+    async () => {
+      const rig = await makeRig("cadence-absent");
+      const r = await triage(rig, ["--dry-run"]);
+      expect(r.code).toBe(0);
+      // The actor line is there — without this the absence below proves nothing.
+      expect(r.out).toContain("index.ts triage");
+      expect(r.out).not.toContain("--poll");
+    },
+    cliBudget(1),
+  );
+
+  test.skipIf(!EXEC_TMP)(
+    "an override with no actor to reach is REFUSED rather than dropped",
+    async () => {
+      const rig = await makeRig("cadence-no-actor");
+      const r = await triage(rig, ["--no-actor", "--cadence", "5m"]);
       expect(r.code).not.toBe(0);
+      expect(r.err).toContain("--no-actor");
+      // The parse still happened first: the refusal quotes the seconds.
+      expect(r.err).toContain("300s");
+      // And it still names the value's durable home, which is the half of the
+      // old refusal that was always true.
       expect(r.err).toContain("triage/console.yaml");
       expect(r.err).toContain("cadence_s");
-      expect(r.err).toContain("--console triage");
-      // The parse happened: the refusal quotes the seconds it computed.
-      expect(r.err).toContain("300s");
     },
     cliBudget(1),
   );
@@ -471,6 +524,9 @@ describe("--cadence is refused, and the refusal names the value's home", () => {
       expect(r.code).not.toBe(0);
       expect(r.err).toContain("invalid duration");
       expect(r.err).not.toContain("Phase 6");
+      // It is answered as a DURATION and not as the no-actor combination either:
+      // the parse is the first thing that happens to this flag.
+      expect(r.err).not.toContain("--no-actor");
     },
     cliBudget(1),
   );
