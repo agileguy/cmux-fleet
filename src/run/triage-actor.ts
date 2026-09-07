@@ -1,6 +1,31 @@
 /**
- * THE TRIAGE ACTOR'S RECORD, LOG, LOCK AND WATCH — SRD-TRIAGE-CONSOLE §7.7,
- * §6.4, §6.6 layer 4, §13 task 6.3.
+ * THE TRIAGE ACTOR'S RECORD, LOG, LOCK, WATCH AND RECYCLE — SRD-TRIAGE-CONSOLE
+ * §7.7, §6.4, §6.6 layer 4, §13 tasks 6.3, 6.3b and 6.5.
+ *
+ * ## WHAT ROUND 16 ADDED, AND WHY IT IS ALL IN THE LOOP RATHER THAN BESIDE IT
+ *
+ * §2.3a calls layer 4 *"what makes an unattended console possible at all"*, and
+ * unattended is the whole of it: nobody is watching, so every property has to be
+ * a property of the loop rather than of an operator's judgement. Three of them,
+ * and each closes a failure the console would otherwise CAUSE:
+ *
+ * 1. **A lock (§13 task 6.3b).** {@link acquireTriageActorLock} shipped with task
+ *    6.3 and nothing called it, so two `pifleet triage --poll` processes would
+ *    both sweep the same run — §6.4's *"two concurrent sweeps against one control
+ *    plane"* reached from the other side, the console causing the overload it
+ *    exists to notice by being started twice. It is taken before the first pass
+ *    and released in a `finally`, and a lock left by a DEAD pid does not refuse.
+ * 2. **A per-seat, RESUMABLE recycle (§6.6 layer 4, §13 task 6.5).** Four `down`s
+ *    and four `up`s between sweeps, decided seat by seat, because *"a four-run
+ *    recycle can half-succeed where a one-run recycle could not"* and there is no
+ *    transaction across four `up`s. See {@link seatsDueForRecycle}.
+ * 3. **A gate.** *"No sweep is admitted while any seat's pin is unresolved"* —
+ *    Constraint B, because a pinned worker the relay cannot resolve refuses every
+ *    fan-out, so a sweep into a half-recycled console fails four times and reads
+ *    as a model problem rather than a console one.
+ *
+ * The privileged half of (2) — the `down` and the `up` themselves — is NOT here
+ * and structurally cannot be: see {@link TriageConsolePorts}.
  *
  * §6.4 decides the console's clock: *"a host-side actor, `pifleet triage`,
  * started last by `scripts/triage`, that is both the console's clock and its
@@ -183,6 +208,20 @@ export interface TriageActorCursor {
   readonly sweep_cursor: number;
   /** §6.4's skip count, notified at `max_consecutive_skips`. */
   readonly consecutive_skips: number;
+  /**
+   * §6.6 layer 4's PER-SEAT CLOCK — the sweep at which each seat's run was last
+   * minted, or first seen. The field the boundary condition is computed from.
+   *
+   * **OPTIONAL because the PASS does not mint runs and the ACTOR does.** Task
+   * 6.1's `triagePass` re-derives `runs`, `sweep_cursor` and `consecutive_skips`
+   * every pass and returns a fresh cursor; it has no way to know when a seat was
+   * recycled, because recycling happens BETWEEN passes and it is this module's
+   * effect. So the pass returns a cursor without this field and
+   * {@link runTriageActor} folds its own answer back in before persisting. The
+   * split is the reason the field is optional rather than a hole: the one writer
+   * is the one thing that knows.
+   */
+  readonly recycled_at?: Readonly<Record<string, number>>;
 }
 
 /** The half of the record that does not change between passes. */
@@ -209,6 +248,19 @@ export interface TriageActorIdentity {
 
 export const TriageActorRecordSchema = RelayRecordSchema.extend({
   runs: z.record(z.string(), z.string()).default({}),
+  /**
+   * §6.6 layer 4's per-seat clock.
+   *
+   * **`.optional()` rather than `.default({})`, and the difference is a cross-file
+   * pin rather than taste.** A `.default({})` makes the field required on the
+   * PARSED type, which turns every hand-built `TriageActorRecordRead` literal in
+   * the console's other test files into a `tsc` error — a contract change
+   * arriving as breakage in files this task does not own. Optional keeps a record
+   * written before recycling existed readable (it means *"no seat has been
+   * recycled"*), keeps {@link triageActorRecord} the one writer that always emits
+   * it, and leaves every reader spelling the absence once.
+   */
+  recycled_at: z.record(z.string(), z.number().int().nonnegative()).optional(),
   cadence_s: z.number().int().positive(),
   sweep_cursor: z.number().int().nonnegative().default(0),
   consecutive_skips: z.number().int().nonnegative().default(0),
@@ -231,6 +283,27 @@ export const TriageActorRecordSchema = RelayRecordSchema.extend({
         message:
           `${seat} is not one of this console's seats (${rec.workers.join(", ")}), so no pass ` +
           `could have resolved a run for it`,
+      });
+    }
+  }
+  /**
+   * The stamps are checked against the SEATS and deliberately NOT against
+   * `runs`.
+   *
+   * A seat may carry a stamp while carrying no run: that pair is exactly §6.6's
+   * half-recycled console, where `down` succeeded and `up` had not run when the
+   * actor died. Requiring the keys to be a subset of `runs` would make the one
+   * state the resumable recycle exists to recover unrepresentable, which is the
+   * failure the record's `runs` field was widened for one paragraph up.
+   */
+  for (const seat of Object.keys(rec.recycled_at ?? {})) {
+    if (!rec.workers.includes(seat)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["recycled_at", seat],
+        message:
+          `${seat} is not one of this console's seats (${rec.workers.join(", ")}), so this actor ` +
+          `could not have recycled it (§6.6 layer 4)`,
       });
     }
   }
@@ -277,6 +350,7 @@ export function triageActorRecord(
     started_at: identity.started_at,
     log_path: identity.log_path,
     runs: { ...cursor.runs },
+    recycled_at: { ...(cursor.recycled_at ?? {}) },
     cadence_s: identity.cadence_s,
     sweep_cursor: cursor.sweep_cursor,
     consecutive_skips: cursor.consecutive_skips,
@@ -351,11 +425,17 @@ export async function writeTriageActorRecord(
 
 export const TRIAGE_ACTOR_EVENT_KINDS = [
   "actor_started",
+  "actor_refused",
+  "actor_unsupervised",
   "pass_completed",
   "pass_failed",
   "record_write_failed",
   "console_unobservable",
   "console_gone",
+  "boundary_unreadable",
+  "seat_recycled",
+  "recycle_failed",
+  "sweep_withheld",
   "actor_stopped",
 ] as const;
 export type TriageActorEventKind = (typeof TRIAGE_ACTOR_EVENT_KINDS)[number];
@@ -372,11 +452,22 @@ export type TriageActorEventKind = (typeof TRIAGE_ACTOR_EVENT_KINDS)[number];
  */
 export type TriageActorEvent =
   | { kind: "actor_started"; pid: number; run_id: string; cadence_s: number }
+  /** §6.3b: somebody else holds {@link TriageConsolePorts.lockPath}. Nothing ran. */
+  | { kind: "actor_refused"; reason: string }
+  /** No {@link TriageConsolePorts}: no lock, no recycle, no gate. See its docblock. */
+  | { kind: "actor_unsupervised" }
   | { kind: "pass_completed"; sweep_cursor: number; consecutive_skips: number }
   | { kind: "pass_failed"; reason: string }
   | { kind: "record_write_failed"; reason: string }
   | { kind: "console_unobservable"; worker: string; reason: string }
   | { kind: "console_gone"; worker: string; run_id: string; passes: number }
+  /** The two reads that decide the boundary. Nothing torn down, no sweep admitted. */
+  | { kind: "boundary_unreadable"; reason: string }
+  /** §6.6 layer 4: one seat went down and came back up, at this sweep. */
+  | { kind: "seat_recycled"; worker: string; sweep_cursor: number }
+  | { kind: "recycle_failed"; worker: string; reason: string }
+  /** §6.6 layer 4's gate: these seats had no resolved pin, so no sweep was dispatched. */
+  | { kind: "sweep_withheld"; seats: readonly string[] }
   | { kind: "actor_stopped"; passes: number };
 
 /**
@@ -402,15 +493,31 @@ export function actorLogLine(event: TriageActorEvent, at: number): string {
     switch (event.kind) {
       case "actor_started":
         return `pid=${event.pid} run=${event.run_id} cadence_s=${event.cadence_s}`;
+      case "actor_unsupervised":
+        return "ports=absent";
       case "pass_completed":
         return `sweep=${event.sweep_cursor} skips=${event.consecutive_skips}`;
+      case "actor_refused":
       case "pass_failed":
       case "record_write_failed":
+      case "boundary_unreadable":
         return reason(event.reason);
       case "console_unobservable":
+      case "recycle_failed":
         return `worker=${event.worker} ${reason(event.reason)}`;
       case "console_gone":
         return `worker=${event.worker} run=${event.run_id} passes=${event.passes}`;
+      case "seat_recycled":
+        return `worker=${event.worker} sweep=${event.sweep_cursor}`;
+      /*
+       * The seat list goes through `sanitizeToken` even though every value in it
+       * is host-minted from the roster. The log never shrinks, so the question
+       * is not whether today's ids are safe but whether a newline has anywhere
+       * to sit — and one inside a seat id would forge a second record in the one
+       * file an operator greps after a half-recycle.
+       */
+      case "sweep_withheld":
+        return `seats=${sanitizeToken(event.seats.join(","), ACTOR_LOG_REASON_MAX_BYTES)}`;
       case "actor_stopped":
         return `passes=${event.passes}`;
     }
@@ -440,6 +547,69 @@ export async function appendActorLog(
 // The loop — §12's exit-when-the-console-is-gone, and its streak-reset mirror
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// §6.6 layer 4 and §6.3b — what an UNATTENDED actor needs that a pass does not
+// ---------------------------------------------------------------------------
+
+/**
+ * The exclusion that stops two actors, and the four things a recycle is made of.
+ *
+ * ## WHY THESE ARRIVE AS FUNCTIONS AND NOT AS IMPORTS
+ *
+ * §6.6 layer 4's recycle is **four `down`s and four `up`s**, and `pifleet down`
+ * and `pifleet up` are the fleet's control plane. `test/unit/triage-readonly.ts`
+ * bans `cli/commands/up.ts`, `cli/commands/down.ts` and `Bun.spawn` from this
+ * console's whole subtree BY NAME, and §12 grants the console exactly one
+ * permitted exception (`run/dispatch-request.ts`) which is not this one. So the
+ * privileged effect belongs at the composition root, exactly as task 6.1b decided
+ * for the dispatch effect, and reaches this module as a port. That is a
+ * structural fact rather than a taste: an implementation that imported the verbs
+ * instead would go red in that file naming itself.
+ *
+ * ## WHY IT IS ONE OBJECT AND NOT EIGHT MEMBERS ON {@link TriageActorDeps}
+ *
+ * So that "this actor is unattended" is ONE fact with ONE answer. A caller either
+ * supplies the console's ports or it does not; there is no half-ported actor that
+ * holds a lock and never recycles, or recycles without exclusion — and the second
+ * of those is §6.4's *"two concurrent sweeps against one control plane"* with a
+ * `down` in its hand.
+ */
+export interface TriageConsolePorts {
+  /**
+   * §7.7's lock. {@link acquireTriageActorLock} in production.
+   *
+   * `null` means somebody holds it — **and a lock left by a DEAD pid is not
+   * somebody**: `acquireRelayLock`'s `(pid, start time)` takeover already answers
+   * that, which is why this port is that function rather than an `exists` check.
+   * Without the takeover *"the remedy for a crash becomes an operator deleting a
+   * file nobody documented"*.
+   */
+  readonly acquireLock: () => Promise<{ release: () => Promise<void> } | null>;
+  /** Where that lock is, so the refusal names the file rather than describing it. */
+  readonly lockPath: string;
+  /** Every seat this console has. The recycle's domain and the gate's. */
+  readonly seats: readonly string[];
+  /** §7.8's `recycle_after_sweeps`. `0` stops the clock; see {@link seatsDueForRecycle}. */
+  readonly recycleAfterSweeps: number;
+  /** §9.11: *"A recycle is due while a sweep is in flight → the recycle waits."* */
+  readonly sweepInFlight: () => Promise<boolean>;
+  /** The per-seat pins, re-derived from the run tree. D12 makes this the authority. */
+  readonly seatRuns: () => Promise<Readonly<Record<string, string>>>;
+  /** Tear ONE seat down. Must be a no-op on a seat that is already down. */
+  readonly downSeat: (seat: string) => Promise<void>;
+  /** Bring ONE seat back up in a NEW run. The run id is read back, never returned. */
+  readonly upSeat: (seat: string) => Promise<void>;
+  /**
+   * §7.7's record at start, for the per-seat clock the first boundary needs.
+   *
+   * A resumed actor may WITHHOLD its first sweep — that is the half-recycled case
+   * — so it cannot wait for a pass to hand it the stamps. Without this read the
+   * resume degrades into a restart, which is the one outcome §6.6's resolution
+   * names as wrong.
+   */
+  readonly resume: () => Promise<TriageActorCursor | null>;
+}
+
 export interface TriageActorDeps {
   /** Task 6.1's `triagePass`, injected so no test starts a clock or a fleet. */
   readonly pass: () => Promise<TriageActorCursor>;
@@ -451,6 +621,78 @@ export interface TriageActorDeps {
   readonly log: (event: TriageActorEvent) => Promise<void>;
   /** The wait between passes, injected so the cadence is assertable by value. */
   readonly sleep: (ms: number) => Promise<void>;
+  /**
+   * §6.6 layer 4's recycle, §6.6's sweep gate and §6.3b's lock — or nothing.
+   *
+   * **OPTIONAL, AND THAT IS A REPORTED RESIDUE RATHER THAN A DESIGN CHOICE.**
+   * Making it required is a `tsc` error at `cli/commands/triage.ts`'s
+   * `productionLoop` call and at `test/unit/triage-command.test.ts`'s loop
+   * harness, and neither file belongs to the task that wrote this. So the absence
+   * is legal — and it is LOUD rather than silent: an actor started without ports
+   * writes `actor_unsupervised` to §7.7's log on every start, saying in the one
+   * place guaranteed to work that it holds no lock and will never recycle. That
+   * line firing in production is the tell that the wiring has not landed.
+   */
+  readonly ports?: TriageConsolePorts;
+}
+
+/**
+ * §6.6 layer 4's BOUNDARY CONDITION — *"is this seat's run older than
+ * `recycle_after_sweeps`, or absent"*, asked of each seat and never of the
+ * console.
+ *
+ * ## Why per-seat, in the SRD's own words
+ *
+ * *"A four-run recycle can half-succeed where a one-run recycle could not — three
+ * seats up, one down, and a console that fans out to nobody. There is no
+ * transaction available across four `up`s, so the answer is re-entrancy
+ * instead."* A console-wide *"have N sweeps elapsed since the last full
+ * recycle"* reads a crash between the second seat and the third **as done**. This
+ * predicate reads it as two seats still owed, which is what makes the next
+ * boundary finish the job rather than start it over.
+ *
+ * ## The three clauses, and the one that is derived rather than chosen
+ *
+ * 1. **Absent ⇒ due.** The seat has no pin: it is either mid-recycle or gone, and
+ *    both are repaired the same way.
+ * 2. **Pinned and unstamped ⇒ stamped here, NOT due.** The other reading —
+ *    *"unknown age means recycle"* — makes every actor restart tear the whole
+ *    console down, which is precisely the *"restarted rather than completed"*
+ *    outcome §6.6's resolution rules out. The cost of this clause is that an age
+ *    the actor never witnessed is under-counted by at most one window.
+ * 3. **Pinned and older than the window ⇒ due.**
+ *
+ * ## `recycle_after_sweeps: 0` stops the CLOCK and not the repair
+ *
+ * §7.8 says `0` disables recycling, *"the setting to use while measuring Q5"*.
+ * Read as disabling clause 1 as well, it turns the knob into a deadlock: §6.6
+ * admits no sweep while a pin is unresolved, so a console that lost a seat under
+ * `0` would withhold every sweep forever with nothing permitted to repair it.
+ * Clause 1 is not a freshness decision and does not answer to the freshness knob.
+ */
+export function seatsDueForRecycle(input: {
+  readonly seats: readonly string[];
+  readonly runs: Readonly<Record<string, string>>;
+  readonly stamps: Readonly<Record<string, number>>;
+  readonly sweepCursor: number;
+  readonly recycleAfterSweeps: number;
+}): { readonly due: readonly string[]; readonly stamps: Readonly<Record<string, number>> } {
+  const stamps: Record<string, number> = { ...input.stamps };
+  const due: string[] = [];
+  for (const seat of input.seats) {
+    if (input.runs[seat] === undefined) {
+      due.push(seat);
+      continue;
+    }
+    const stamp = stamps[seat];
+    if (stamp === undefined) {
+      stamps[seat] = input.sweepCursor;
+      continue;
+    }
+    if (input.recycleAfterSweeps <= 0) continue;
+    if (input.sweepCursor - stamp >= input.recycleAfterSweeps) due.push(seat);
+  }
+  return { due, stamps };
 }
 
 export interface TriageActorOptions {
@@ -472,7 +714,15 @@ export type TriageActorExit =
       /** `ConsoleWatch`'s sentence, for the caller's stderr. */
       reason: string;
     }
-  | { kind: "stopped"; passes: number };
+  | { kind: "stopped"; passes: number }
+  /**
+   * §6.3b: another actor holds §7.7's lock, so this one started nothing.
+   *
+   * It carries `reason` under the same name `console_gone` does, so the command's
+   * `if (exit.kind === "console_gone")` stderr line extends to it by adding one
+   * disjunct rather than by growing a `switch`.
+   */
+  | { kind: "refused"; reason: string; passes: 0 };
 
 function why(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -534,46 +784,213 @@ export async function runTriageActor(
   deps: TriageActorDeps,
   opts: TriageActorOptions,
 ): Promise<TriageActorExit> {
+  /*
+   * The stop check runs before the lock, so an actor asked to stop before it
+   * began takes nothing — and cannot leave a lock behind if the release path
+   * were ever to change.
+   */
+  if (isStopped(opts.signal)) {
+    await deps.log({ kind: "actor_stopped", passes: 0 });
+    return { kind: "stopped", passes: 0 };
+  }
+
+  const ports = deps.ports;
+  let lock: { release: () => Promise<void> } | null = null;
+  if (ports !== undefined) {
+    lock = await ports.acquireLock();
+    if (lock === null) {
+      /*
+       * §6.3b: *"two `pifleet triage --poll` processes would both sweep the same
+       * run"*, which is §6.4's *"two concurrent sweeps against one control
+       * plane"* reached from the other side. The refusal NAMES the lock, because
+       * the only thing an operator can do about it is look at that file.
+       */
+      const reason =
+        `another ${TRIAGE_CONSOLE} actor holds ${ports.lockPath}; this one started nothing ` +
+        `(§6.3b — two sweeps against one control plane is the overload the console exists to notice)`;
+      await deps.log({ kind: "actor_refused", reason });
+      return { kind: "refused", reason, passes: 0 };
+    }
+  }
+  try {
+    return await triageActorLoop(deps, opts, ports);
+  } finally {
+    // A lock this process holds past its own exit is a console nothing can
+    // restart, so the release is a `finally` and not a line after the loop.
+    if (lock !== null) await lock.release();
+  }
+}
+
+async function triageActorLoop(
+  deps: TriageActorDeps,
+  opts: TriageActorOptions,
+  ports: TriageConsolePorts | undefined,
+): Promise<TriageActorExit> {
   const watch = new ConsoleWatch(opts.tolerance ?? RELAY_ABANDON_PASSES);
   let runId = opts.runId;
   let passes = 0;
 
-  if (isStopped(opts.signal)) {
-    await deps.log({ kind: "actor_stopped", passes });
-    return { kind: "stopped", passes };
-  }
   await deps.log({
     kind: "actor_started",
     pid: opts.pid ?? process.pid,
     run_id: runId,
     cadence_s: opts.cadenceS,
   });
+  if (ports === undefined) await deps.log({ kind: "actor_unsupervised" });
+
+  /*
+   * §7.7's record at start. The per-seat clock has to be here before the first
+   * boundary because that boundary may be the one finishing an interrupted
+   * recycle, and a resumed actor that started from an empty clock would stamp
+   * every surviving seat fresh and read the half-recycle as done.
+   */
+  let cursor: TriageActorCursor | null = null;
+  if (ports !== undefined) {
+    try {
+      cursor = await ports.resume();
+    } catch (err) {
+      // The clock is a HINT (D12), so a record that cannot be read degrades the
+      // resume into a restart rather than ending the actor — but it says so,
+      // because a silent degrade here is a whole console recycled for nothing.
+      await deps.log({ kind: "boundary_unreadable", reason: why(err) });
+    }
+  }
+  let stamps: Record<string, number> = { ...(cursor?.recycled_at ?? {}) };
 
   for (;;) {
     passes += 1;
-    try {
-      const cursor = await deps.pass();
-      /*
-       * A recycle (task 6.5) mints new runs mid-life, so the run the actor was
-       * STARTED for stops being the run it is watching. Following the cursor is
-       * what keeps the abandonment message naming a run that exists.
-       */
-      runId = cursor.runs[TRIAGE_COLLATOR] ?? runId;
+
+    /*
+     * THE BOUNDARY, and it is BEFORE the pass rather than after it. §6.6 says
+     * "between sweeps" and both edges qualify; this edge is the one that lets a
+     * half-recycled console be repaired and swept within a single cadence
+     * instead of two, and it is the edge at which "no sweep is in flight" is a
+     * fact about the sweep this iteration is about to decide on.
+     */
+    let pins: Readonly<Record<string, string>> | null = null;
+    if (ports !== undefined) {
+      let inFlight = true;
       try {
-        await deps.saveCursor(cursor);
-        await deps.log({
-          kind: "pass_completed",
-          sweep_cursor: cursor.sweep_cursor,
-          consecutive_skips: cursor.consecutive_skips,
-        });
+        pins = await ports.seatRuns();
+        inFlight = await ports.sweepInFlight();
       } catch (err) {
-        // D12: the run tree is authoritative and the record is a cursor, so a
-        // record that cannot be written is not a reason to end the actor — but
-        // it is a reason to say so on the surface guaranteed to work.
-        await deps.log({ kind: "record_write_failed", reason: why(err) });
+        /*
+         * A BOUNDARY THE ACTOR CANNOT READ WITHHOLDS, which is the OPPOSITE of
+         * the watch's rule three functions down — and deliberately, because the
+         * two answer different questions. The watch's `unverifiable` posture
+         * protects a healthy actor from being reaped by a broken `ps`. Here the
+         * costs are reversed: withholding costs one cadence, and dispatching
+         * into a console whose pins may be half-recycled costs four refused
+         * fan-outs that §6.6 says "read as a model problem".
+         */
+        pins = null;
+        await deps.log({ kind: "boundary_unreadable", reason: why(err) });
       }
-    } catch (err) {
-      await deps.log({ kind: "pass_failed", reason: why(err) });
+      if (pins !== null && !inFlight) {
+        const decision = seatsDueForRecycle({
+          seats: ports.seats,
+          runs: pins,
+          stamps,
+          sweepCursor: cursor?.sweep_cursor ?? 0,
+          recycleAfterSweeps: ports.recycleAfterSweeps,
+        });
+        stamps = { ...decision.stamps };
+        if (decision.due.length > 0) {
+          const at = cursor?.sweep_cursor ?? 0;
+          for (const seat of decision.due) {
+            try {
+              await ports.downSeat(seat);
+              await ports.upSeat(seat);
+              /*
+               * Stamped only after the `up` RESOLVES. A seat whose `up` threw
+               * minted no run, and stamping it would tell the next boundary the
+               * seat is fresh when it is not even present.
+               */
+              stamps[seat] = at;
+              await deps.log({ kind: "seat_recycled", worker: seat, sweep_cursor: at });
+            } catch (err) {
+              /*
+               * The loop CONTINUES to the seats after this one. A recycle that
+               * stopped at the first fault would leave the console more broken
+               * than the one it was repairing, and the next boundary finds this
+               * seat again anyway — it has no pin.
+               */
+              await deps.log({ kind: "recycle_failed", worker: seat, reason: why(err) });
+            }
+          }
+          /*
+           * §6.6: *"The gate is four pins RE-DERIVED, not four containers
+           * running — those are different moments and only the later one is
+           * safe."* This is the later one.
+           */
+          try {
+            pins = await ports.seatRuns();
+          } catch (err) {
+            pins = null;
+            await deps.log({ kind: "boundary_unreadable", reason: why(err) });
+          }
+          if (cursor !== null && pins !== null) {
+            cursor = { ...cursor, runs: { ...pins }, recycled_at: { ...stamps } };
+            runId = cursor.runs[TRIAGE_COLLATOR] ?? runId;
+            try {
+              await deps.saveCursor(cursor);
+            } catch (err) {
+              await deps.log({ kind: "record_write_failed", reason: why(err) });
+            }
+          }
+        }
+      }
+    }
+
+    /*
+     * THE GATE. §6.6: *"No sweep is admitted while any seat's pin is
+     * unresolved"*, because Constraint B says a pinned worker the relay cannot
+     * resolve refuses every fan-out — so a sweep into a half-recycled console
+     * fails four times and reads as a model problem rather than as a console one.
+     */
+    const unresolved =
+      ports === undefined
+        ? []
+        : pins === null
+          ? [...ports.seats]
+          : ports.seats.filter((seat) => pins[seat] === undefined);
+
+    if (unresolved.length > 0) {
+      await deps.log({ kind: "sweep_withheld", seats: [...unresolved] });
+    } else {
+      try {
+        const passed = await deps.pass();
+        /*
+         * The pass owns three of the cursor's fields and the actor owns the
+         * fourth (see {@link TriageActorCursor.recycled_at}), so the clock is
+         * folded back in here and nowhere else. With no ports there is no clock
+         * and the pass's cursor reaches the record byte for byte.
+         */
+        const next: TriageActorCursor =
+          ports === undefined ? passed : { ...passed, recycled_at: { ...stamps } };
+        cursor = next;
+        /*
+         * A recycle (task 6.5) mints new runs mid-life, so the run the actor was
+         * STARTED for stops being the run it is watching. Following the cursor is
+         * what keeps the abandonment message naming a run that exists.
+         */
+        runId = next.runs[TRIAGE_COLLATOR] ?? runId;
+        try {
+          await deps.saveCursor(next);
+          await deps.log({
+            kind: "pass_completed",
+            sweep_cursor: next.sweep_cursor,
+            consecutive_skips: next.consecutive_skips,
+          });
+        } catch (err) {
+          // D12: the run tree is authoritative and the record is a cursor, so a
+          // record that cannot be written is not a reason to end the actor — but
+          // it is a reason to say so on the surface guaranteed to work.
+          await deps.log({ kind: "record_write_failed", reason: why(err) });
+        }
+      } catch (err) {
+        await deps.log({ kind: "pass_failed", reason: why(err) });
+      }
     }
 
     let live: boolean | null = null;
