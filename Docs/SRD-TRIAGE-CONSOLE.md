@@ -2946,7 +2946,7 @@ and SRD-FLEET-PM-001 D7's.
   message instants are asserted by value; the anti-twin — a fixture that keeps flapping — still
   notifies exactly once in total, so the new edge cannot be satisfied by a machine that re-opens on
   every sweep.*
-- **5.3b** §6.7 rule 2's fifth condition: a `healthy` whose `coverage[]` is non-empty and whose every
+- **5.3b** **DONE 2026-09-06 in round 8** (ISC-648, ISC-649, ISC-650; `test/unit/triage-verdict.test.ts:445`). §6.7 rule 2's fifth condition: a `healthy` whose `coverage[]` is non-empty and whose every
   entry is `not_attempted` fails the gate, spending the existing `coverage` gap rather than a new one.
   Touches: `src/run/triage-verdict.ts`, `test/unit/triage-verdict.test.ts`, `ISA.md`.
   *Acceptance: an all-`not_attempted` fixture and an empty-`coverage[]` fixture reach the same
