@@ -39,10 +39,13 @@
  * as arithmetic.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  announcementFacts,
   consoleHealthObservations,
+  withUndelivered,
   type ConsoleHealthFacts,
   type IncidentObservation,
   ADVANCE_READS_NO_ISSUE_REASON,
@@ -75,6 +78,11 @@ import {
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
 import { TRIAGE_DOCUMENT_FAULTS } from "../../src/run/triage-document.ts";
+import {
+  ANNOUNCEMENT_ASSESSMENTS,
+  ANNOUNCEMENT_TRANSITIONS,
+  CONSOLE_HEALTH_ASSESSMENTS,
+} from "../../src/run/triage-notify.ts";
 
 /** A round wall-clock start, so every timestamp below reads as an offset. */
 const T0 = Date.UTC(2026, 8, 6, 0, 0, 0);
@@ -2329,5 +2337,219 @@ describe("console-health deduplication — §6.8a's identity on §6.8's machine"
     expect(forSubject(obs, "observer_blocked", "saas-dev")?.signal.kind).toBe("observed_clear");
     expect(forSubject(obs, "sweep_produced_nothing", "cni-dev")?.signal.kind).toBe("observed_clear");
     expect(forSubject(obs, "sweep_produced_nothing", "saas-dev")?.signal.kind).toBe("issue");
+  });
+});
+
+// ── §13 task 5.6b — the seam the notifier lands on ───────────────────────────
+
+/**
+ * The translation, and the ONE field on a record a delivery may write.
+ *
+ * §13 task 5.6b names four things that cross between this module and the
+ * notifier, and two of them are here: `AnnouncementFacts` is the translation
+ * target, and `IncidentRecord.undelivered[]` is the field §7.6 declares and this
+ * module's own docblock says *"5.6b fills"*.
+ *
+ * **The direction of the dependency is the design.** This module takes a
+ * TYPE-ONLY import from the notifier and the notifier takes nothing from here, so
+ * ISC-689's structural claim — no edit in the notifier can reach the state
+ * machine — survives task 5.6b unchanged rather than being narrowed to fit it.
+ * The last test in this block is the other half of that: this module may see the
+ * announcement VOCABULARY and may never see a delivery RESULT.
+ */
+describe("§13 task 5.6b — a notification becomes announcement facts", () => {
+  const AT = T0 + 9 * CADENCE_MS;
+  const FIRING_FOR = 4 * CADENCE_MS;
+
+  const REPORTER: IncidentSubject = {
+    kind: "console_health",
+    scope: CONSOLE_SCOPE,
+    health: "reporter_undelivered",
+  };
+  const ENV_SCOPED: IncidentSubject = {
+    kind: "console_health",
+    scope: "cni-prod",
+    health: "observer_blocked",
+  };
+
+  function notification(over: Partial<IncidentNotification> = {}): IncidentNotification {
+    return {
+      kind: "opened",
+      subject: SERVICE,
+      reason: "unhealthy",
+      at: AT,
+      sweepId: "s-9",
+      firingForMs: FIRING_FOR,
+      sweepCount: 7,
+      evidenceRef: "art/authz-7",
+      ...over,
+    };
+  }
+
+  /**
+   * The premise the whole translation rests on, and it is asserted rather than
+   * assumed: `IssueReason` and `AnnouncementAssessment` are two independently
+   * spelled tuples in two modules, and the translation assigns one to the other.
+   * The day a seventh console-health kind is added to one and not the other, this
+   * goes red HERE rather than producing an announcement whose assessment is a
+   * string no adapter has a tag for.
+   */
+  test("premise: the two vocabularies this translation joins have the same members", () => {
+    expect([...ISSUE_REASONS].sort()).toEqual([...ANNOUNCEMENT_ASSESSMENTS].sort());
+    expect([...CONSOLE_HEALTH_KINDS]).toEqual([...CONSOLE_HEALTH_ASSESSMENTS]);
+    expect([...ANNOUNCEMENT_TRANSITIONS].sort().join(",")).toBe("flapping,opened,recovered,reminder");
+  });
+
+  test("a service notification names the SERVICE, and its scope is its environment", () => {
+    expect(announcementFacts(notification())).toEqual({
+      kind: "service",
+      scope: "cni-prod",
+      subject: "authorization",
+      environment: "cni-prod",
+      service: "authorization",
+      assessment: "unhealthy",
+      transition: "opened",
+      first_seen: AT - FIRING_FOR,
+      sweep_count: 7,
+      evidence: null,
+      evidence_ref: "art/authz-7",
+      backlog: null,
+    });
+  });
+
+  /**
+   * §13 task 5.6b(c) spells this mapping out: *"`first_seen` from `at −
+   * firingForMs`"*. Asserted by VALUE against a fixture whose two operands are
+   * different non-zero numbers, because `at`, `at - 0` and `0` are all plausible
+   * wrong answers that a `toBeNumber()` cannot separate.
+   */
+  test("first_seen is `at − firingForMs`, by value", () => {
+    expect(FIRING_FOR).toBeGreaterThan(0);
+    expect(announcementFacts(notification()).first_seen).toBe(AT - FIRING_FOR);
+    expect(announcementFacts(notification({ firingForMs: 0 })).first_seen).toBe(AT);
+  });
+
+  /**
+   * §6.9 requirement 1: *"`scope` is not `environment` either"*. A `_console`
+   * incident is about the console, so it has no environment — and rendering the
+   * scope token there would put the string `_console` in a field an operator
+   * reads as a cluster name.
+   */
+  test("a `_console`-scoped console-health notification has NO environment", () => {
+    const facts = announcementFacts(notification({ subject: REPORTER, reason: "reporter_undelivered" }));
+    expect(facts.kind).toBe("console_health");
+    expect(facts.scope).toBe(CONSOLE_SCOPE);
+    expect(facts.subject).toBe("reporter_undelivered");
+    expect(facts.environment).toBeNull();
+    expect(facts.service).toBeNull();
+    expect(facts.assessment).toBe("reporter_undelivered");
+  });
+
+  test("an ENVIRONMENT-scoped console-health notification keeps its environment", () => {
+    const facts = announcementFacts(notification({ subject: ENV_SCOPED, reason: "observer_blocked" }));
+    expect(facts.scope).toBe("cni-prod");
+    expect(facts.environment).toBe("cni-prod");
+    expect(facts.subject).toBe("observer_blocked");
+    expect(facts.service).toBeNull();
+  });
+
+  /**
+   * Every member of both closed sets, driven through the translation. A mapping
+   * that special-cased one reason — or that dropped `coverage`, the one this
+   * module MINTS rather than receives — passes any single-fixture test above.
+   */
+  test("every transition and every reason round-trip, with none dropped", () => {
+    for (const kind of ANNOUNCEMENT_TRANSITIONS) {
+      expect(announcementFacts(notification({ kind })).transition).toBe(kind);
+    }
+    for (const reason of ISSUE_REASONS) {
+      expect(announcementFacts(notification({ reason })).assessment).toBe(reason);
+    }
+  });
+
+  /**
+   * Anti: the translation invents nothing. `evidence` is untrusted worker prose
+   * and `backlog` is the notifier's own count — neither is on an
+   * `IncidentNotification`, and a translation that fabricated either would put a
+   * value in the message that no observation produced.
+   */
+  test("Anti: evidence and backlog are null unless the caller supplies them", () => {
+    const bare = announcementFacts(notification());
+    expect(bare.evidence).toBeNull();
+    expect(bare.backlog).toBeNull();
+    const withProse = announcementFacts(notification(), { evidence: "line one\nline two" });
+    expect(withProse.evidence).toBe("line one\nline two");
+    expect(withProse.evidence_ref).toBe("art/authz-7");
+  });
+
+  /**
+   * §6.9 requirement 7, as a shape rather than as a discipline: the only writer of
+   * `undelivered[]` is a function that cannot touch anything else, because it
+   * spreads the record and replaces exactly one key.
+   */
+  test("`undelivered[]` is filled by a writer that touches NOTHING else", () => {
+    const firing = drive(4, () => issue("unhealthy")).record;
+    expect(firing.state).toBe("firing");
+    const after = withUndelivered(firing, ["triage: a", "triage: b"]);
+    expect(after.undelivered).toEqual(["triage: a", "triage: b"]);
+    expect(after.state).toBe("firing");
+    expect({ ...after, undelivered: [] }).toEqual({ ...firing, undelivered: [] });
+  });
+
+  test("recording nothing returns the SAME object, so a quiet sweep cannot rewrite a record", () => {
+    const firing = drive(4, () => issue("unhealthy")).record;
+    expect(withUndelivered(firing, [])).toBe(firing);
+  });
+
+  /**
+   * The bound is `MAX_UNDELIVERED` and it keeps the MOST RECENT, because an
+   * operator reading a truncated backlog wants the losses nearest the outage they
+   * are looking at. The premise — that the fixture actually overflows — is
+   * asserted, so a cap that never engaged could not pass this.
+   */
+  test("the list is bounded and keeps the most recent", () => {
+    const seed = Array.from({ length: MAX_UNDELIVERED }, (_, i) => `old-${i}`);
+    const base = { ...freshIncidentRecord(SERVICE), undelivered: seed };
+    expect(base.undelivered.length).toBe(MAX_UNDELIVERED);
+    const after = withUndelivered(base, ["newest-1", "newest-2"]);
+    expect(after.undelivered.length).toBe(MAX_UNDELIVERED);
+    expect(after.undelivered.at(-1)).toBe("newest-2");
+    expect(after.undelivered.at(-2)).toBe("newest-1");
+    expect(after.undelivered).not.toContain("old-0");
+    expect(after.undelivered[0]).toBe("old-2");
+  });
+
+  /**
+   * Anti: this module may see the announcement VOCABULARY and may never see a
+   * delivery RESULT.
+   *
+   * ISC-689 states the notifier's half — *"no edit in the notifier can reach the
+   * state machine"* — and stays true because the notifier still imports nothing
+   * from here. This is the half task 5.6b adds: the coupling that now exists runs
+   * the other way, it is TYPE-ONLY, and it carries data shapes rather than
+   * outcomes. A module that could name an outcome type could branch on one, and
+   * §6.9 requirement 7's whole content is that it must not.
+   */
+  test("Anti: this module can see the announcement vocabulary and never a delivery RESULT", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "..", "..", "src", "run", "triage-incident.ts"),
+      "utf8",
+    );
+    for (const forbidden of [
+      "NotifyOutcome",
+      "DeliveryState",
+      "deliverAnnouncement",
+      "deliverySweep",
+      "reportSweep",
+      "NotifyTransport",
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+    // Exactly one reference to the notifier, and it is erased at runtime.
+    const refs = source.split('from "./triage-notify.ts"').length - 1;
+    expect(refs).toBe(1);
+    expect(source).toContain(
+      'import type { AnnouncementFacts, NotifyBacklog } from "./triage-notify.ts";',
+    );
   });
 });

@@ -742,9 +742,28 @@ export function recordOutcome(
   outcome: NotifyOutcome,
   announcement: Announcement,
   maxRetrySweeps: number,
+  reporterOpen: boolean = reporterUndelivered(state),
 ): DeliveryState {
   if (outcome.status === "delivered") {
-    return { consecutive_retryable: 0, sweeps_until_retry: 0, undelivered: [], last_rejected_at: null };
+    return {
+      consecutive_retryable: 0,
+      sweeps_until_retry: 0,
+      /*
+       * §9.15 surface 4: *"the reporter was unable to deliver for N sweeps
+       * between T1 and T2, and M notifications were LOST"*. The recovery that
+       * carries those numbers can only be composed once the reporter has been
+       * OBSERVED healthy again, which is one sweep after the channel first
+       * answers — so a success while the reporter is still accused clears the
+       * backoff and RETAINS the notes, and the message that is about them is the
+       * one that spends them.
+       *
+       * Self-limiting rather than a leak: `reporterUndelivered` is false of the
+       * state this branch returns, so the retention lasts exactly one sweep and
+       * the next delivery clears it whether or not a recovery ever arrives.
+       */
+      undelivered: reporterOpen ? state.undelivered : [],
+      last_rejected_at: null,
+    };
   }
   const note: UndeliveredNote = {
     at: outcome.at,
@@ -780,6 +799,67 @@ export function recordOutcome(
  */
 export function reporterUndelivered(state: DeliveryState): boolean {
   return state.last_rejected_at !== null || state.consecutive_retryable >= 2;
+}
+
+/**
+ * §9.15's one message whose subject is the console's own silence.
+ *
+ * Deliberately narrow — the ASSESSMENT *and* the TRANSITION, both. An `opened`
+ * about the reporter is news that must wait its turn like anything else, and a
+ * `recovered` about a service is not about the channel at all. A predicate that
+ * matched either half alone would hoist messages this ordering has no claim on.
+ */
+export function isReporterRecovery(facts: AnnouncementFacts): boolean {
+  return facts.assessment === "reporter_undelivered" && facts.transition === "recovered";
+}
+
+/**
+ * §9.15 surface 4: *"that notification is delivered FIRST, ahead of the sweep's
+ * own."*
+ *
+ * A stable partition and nothing more — §13 task 5.6b(d) is explicit that the
+ * ordering *"needs no new machinery"*. Everything that is not the reporter's own
+ * recovery keeps the order the caller supplied, because the caller is the actor
+ * and the order it built is the order §6.8a's table produced.
+ */
+export function orderForDelivery(
+  facts: readonly AnnouncementFacts[],
+): readonly AnnouncementFacts[] {
+  const recovery = facts.filter(isReporterRecovery);
+  if (recovery.length === 0) return [...facts];
+  return [...recovery, ...facts.filter((f) => !isReporterRecovery(f))];
+}
+
+/**
+ * What the PASS decided, as opposed to what this call decided.
+ *
+ * Both members exist because §6.9 requirement 6 measures its backoff in SWEEPS
+ * and a sweep may carry several announcements. A per-announcement reading of
+ * either would turn a sweep-unit rule into an attempt-unit one, and the two are
+ * the same number only on the console that never has two things to say at once.
+ */
+export interface PassOptions {
+  /**
+   * Does this call spend the pass's ONE countdown tick? {@link reportSweep} gives
+   * it to the first announcement and to nothing else. Three announcements each
+   * ticking would spend a twelve-sweep backoff in four sweeps.
+   */
+  readonly tick?: boolean;
+  /**
+   * Was the reporter already accused when the pass STARTED? Read once per pass,
+   * because a delivery that clears the accusation mid-pass would otherwise let
+   * the next announcement in the same pass spend the backlog the recovery is
+   * about.
+   */
+  readonly reporterOpen?: boolean;
+  /**
+   * May this call reach the transport at all? Defaults to *"the countdown has
+   * expired"*, which is the right answer for a pass carrying one announcement and
+   * the wrong one for every other pass: the first announcement's own tick would
+   * take the counter to zero and let the second attempt in the same sweep, and a
+   * mid-pass failure's fresh backoff would be ignored by everything behind it.
+   */
+  readonly attempt?: boolean;
 }
 
 /** What one sweep did about one announcement. */
@@ -827,14 +907,21 @@ export async function deliverySweep(
   notify: NotifyConfig | null,
   state: DeliveryState,
   deps?: DeliverDeps,
+  pass?: PassOptions,
 ): Promise<DeliverySweepResult> {
   if (notify === null) {
     return { disposition: "disabled", state, outcome: null, announcement: null, request: null };
   }
   const now = deps?.now ?? Date.now;
+  const tick = pass?.tick ?? true;
+  const reporterOpen = pass?.reporterOpen ?? reporterUndelivered(state);
 
-  if (state.sweeps_until_retry > 0) {
-    const ticked: DeliveryState = { ...state, sweeps_until_retry: state.sweeps_until_retry - 1 };
+  const waiting = state.sweeps_until_retry > 0;
+  const holding = pass?.attempt === undefined ? waiting : !pass.attempt;
+
+  if (holding) {
+    const ticked: DeliveryState =
+      tick && waiting ? { ...state, sweeps_until_retry: state.sweeps_until_retry - 1 } : state;
     if (facts === null) {
       return { disposition: "nothing_to_send", state: ticked, outcome: null, announcement: null, request: null };
     }
@@ -845,7 +932,9 @@ export async function deliverySweep(
     const note: UndeliveredNote = {
       at: now(),
       title: held.title,
-      reason: `held by backoff (${state.sweeps_until_retry} sweep(s) remaining)`,
+      reason: waiting
+        ? `held by backoff (${state.sweeps_until_retry} sweep(s) remaining)`
+        : "held: the channel already failed in this sweep",
       httpStatus: null,
     };
     return {
@@ -861,14 +950,208 @@ export async function deliverySweep(
     return { disposition: "nothing_to_send", state, outcome: null, announcement: null, request: null };
   }
 
+  /*
+   * §6.9 requirement 6, UNCONDITIONALLY: the backlog is *"appended to the next
+   * message that does go out"*. Reserving it for the reporter's own recovery was
+   * considered and refused — that would make the plainest sentence in the section
+   * conditional on which announcement a sweep happened to carry, and §9.15's
+   * recovery gets its count from the RETENTION in `recordOutcome` instead, which
+   * contradicts nothing.
+   */
   const announcement = composeAnnouncement({ ...facts, backlog: backlogWindow(state) }, notify.priority);
   const request = renderRequest(announcement, notify, { env: deps?.env });
   const outcome = await deliverAnnouncement(announcement, notify, deps);
   return {
     disposition: "attempted",
-    state: recordOutcome(state, outcome, announcement, notify.max_retry_sweeps),
+    state: recordOutcome(state, outcome, announcement, notify.max_retry_sweeps, reporterOpen),
     outcome,
     announcement,
     request,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §13 task 5.6b — §9.15's four surfaces
+// ---------------------------------------------------------------------------
+
+/**
+ * §9.15 surface 3, as a value: what `pifleet triage --status` reports about the
+ * CHANNEL.
+ *
+ * **There is no aggregate field here and there must never be one.** §6.9
+ * requirement 7: *"the absence of notifications is never evidence of health, and
+ * `--status` must not be readable that way … so 'quiet' and 'could not speak' are
+ * never the same row."* A single `ok` boolean is exactly how those two become one
+ * row, so this value reports the channel, the count, the window and the backoff
+ * as separate numbers and leaves the reader to draw the conclusion.
+ *
+ * The other two of §12's three distinct fields — sweeps completed, and incidents
+ * by state — belong to the actor, which holds the sweep counter and the record
+ * set. This value is the third, and it is deliberately not aggregated with them.
+ */
+export interface ReporterStatus {
+  /** `disabled` is a CONFIGURATION, not a failure. §6.9 requirement 7. */
+  readonly channel: "enabled" | "disabled";
+  readonly endpoint: string | null;
+  /** How many notifications were lost. Never merged with the sweep count. */
+  readonly undelivered: number;
+  /** §6.9 requirement 6's window over those losses, or `null` when there are none. */
+  readonly undelivered_window: NotifyBacklog | null;
+  readonly consecutive_retryable: number;
+  readonly sweeps_until_retry: number;
+  readonly last_rejected_at: number | null;
+  /** §9.15's own accusation, so the operator sees it without deriving it. */
+  readonly reporter_undelivered: boolean;
+}
+
+export function reporterStatus(state: DeliveryState, notify: NotifyConfig | null): ReporterStatus {
+  return {
+    channel: notify === null ? "disabled" : "enabled",
+    endpoint: notify === null ? null : notify.endpoint,
+    undelivered: state.undelivered.length,
+    undelivered_window: backlogWindow(state),
+    consecutive_retryable: state.consecutive_retryable,
+    sweeps_until_retry: state.sweeps_until_retry,
+    last_rejected_at: state.last_rejected_at,
+    reporter_undelivered: reporterUndelivered(state),
+  };
+}
+
+/**
+ * §9.15 surface 2, as a string: one line for `~/.pifleet/triage.log`.
+ *
+ * *"This is the only surface that is guaranteed to work, because it is a file on
+ * the machine the actor is already running on."* It is also append-only and never
+ * truncated (§7.7), so **a credential written here is a credential forever** —
+ * which is why nothing from `headers` reaches this line and the request is
+ * redacted before it is read at all.
+ *
+ * Every field is `key=value` and the title is quoted, because the title is the
+ * one part composed from a subject: it is already flattened to a single line of
+ * printable ASCII by {@link sanitizeToken}, so quoting is enough to keep the line
+ * parseable rather than merely readable.
+ */
+export function deliveryLogLine(result: DeliverySweepResult): string {
+  const safe = result.request === null ? null : redactRequest(result.request);
+  const parts = [
+    "triage-notify",
+    `disposition=${result.disposition}`,
+    `status=${result.outcome?.status ?? "-"}`,
+    `http=${result.outcome?.httpStatus ?? "-"}`,
+    `url=${safe?.url ?? "-"}`,
+    `title="${result.announcement?.title ?? "-"}"`,
+    `reason=${result.outcome?.reason ?? result.state.undelivered.at(-1)?.reason ?? "-"}`,
+  ];
+  return parts.join(" ");
+}
+
+/**
+ * What one sweep's reporting pass produced, on all four of §9.15's surfaces.
+ *
+ * `state` is surface 1's input rather than surface 1 itself: the caller maps
+ * {@link reporterUndelivered} onto `ConsoleHealthFacts.reporterUndelivered`, and
+ * the incident machine — which this module cannot reach — does the rest.
+ */
+export interface SweepReport {
+  readonly state: DeliveryState;
+  /** One per announcement, in the order they were attempted. */
+  readonly deliveries: readonly DeliverySweepResult[];
+  /**
+   * Surface 1's input: what the NEXT sweep's console-health facts should carry.
+   * A value, not a decision — §6.9 requirement 7 keeps the deciding elsewhere.
+   */
+  readonly reporterUndelivered: boolean;
+  /** Surface 2. Append these to `~/.pifleet/triage.log`; they carry no secret. */
+  readonly log: readonly string[];
+  /** Surface 3. */
+  readonly status: ReporterStatus;
+  /**
+   * The titles this pass LOST, for the record's `undelivered[]`.
+   *
+   * That field is `string[]` and this is what fills it — the one thing a delivery
+   * failure may write to a record, and it writes nothing else.
+   */
+  readonly lost: readonly string[];
+}
+
+/**
+ * One sweep's whole reporting pass: order the announcements, attempt them under
+ * the pass's single backoff decision, and return all four surfaces.
+ *
+ * ## The three rules that are pass-level rather than announcement-level
+ *
+ * 1. **§9.15 surface 4's ordering.** The reporter's own recovery is delivered
+ *    FIRST, ahead of the sweep's own, because it is the only message that can
+ *    carry the count and the window of what the outage lost — and the first
+ *    successful delivery is what spends them.
+ * 2. **One countdown tick per pass.** §6.9 requirement 6's backoff is measured in
+ *    SWEEPS. Three announcements each ticking would spend a twelve-sweep wait in
+ *    four sweeps, and the console would go back to hammering an endpoint it had
+ *    already decided to back off from.
+ * 3. **After the first failure in a pass, the rest are held.** Same arithmetic
+ *    from the other side: `consecutive_retryable` is the exponent of a
+ *    sweep-measured backoff, so five failures in one pass would set a
+ *    sixteen-sweep wait for an outage that has lasted one sweep. The held
+ *    announcements join the backlog rather than vanishing, which is what makes
+ *    the count the operator eventually reads the number of things they were not
+ *    told.
+ *
+ * ## Why an empty pass still calls through
+ *
+ * §6.9 requirement 6: *"the countdown elapses whether or not anything fired."* A
+ * wait measured in sweeps that only advanced on sweeps with news would never
+ * expire on a quiet console — which is the console this one is trying to be.
+ *
+ * This function never sees an incident record and could not write one if it
+ * wanted to — this module cannot even name the type. It takes VALUES the caller
+ * already translated, so §6.9 requirement 7's *"a transition is recorded before
+ * it is delivered, not after"* is a property of the call graph rather than of
+ * anyone's discipline.
+ */
+export async function reportSweep(
+  facts: readonly AnnouncementFacts[],
+  notify: NotifyConfig | null,
+  state: DeliveryState,
+  deps?: DeliverDeps,
+): Promise<SweepReport> {
+  const ordered = orderForDelivery(facts);
+  const reporterOpen = reporterUndelivered(state);
+  const deliveries: DeliverySweepResult[] = [];
+  const lost: string[] = [];
+  let current = state;
+
+  if (ordered.length === 0) {
+    const quiet = await deliverySweep(null, notify, current, deps, { tick: true, reporterOpen });
+    deliveries.push(quiet);
+    current = quiet.state;
+  } else {
+    // Rules 2 and 3, as one variable: the pass decides ONCE whether the channel
+    // may be reached, and the first failure inside it revokes that for the rest.
+    let mayAttempt = state.sweeps_until_retry === 0;
+    for (let i = 0; i < ordered.length; i += 1) {
+      const before = current.undelivered.length;
+      const result = await deliverySweep(ordered[i]!, notify, current, deps, {
+        tick: i === 0,
+        reporterOpen,
+        attempt: mayAttempt,
+      });
+      deliveries.push(result);
+      current = result.state;
+      if (result.disposition === "attempted" && result.outcome?.status !== "delivered") {
+        mayAttempt = false;
+      }
+      if (current.undelivered.length > before) {
+        for (const note of current.undelivered.slice(before)) lost.push(note.title);
+      }
+    }
+  }
+
+  return {
+    state: current,
+    deliveries,
+    reporterUndelivered: reporterUndelivered(current),
+    log: deliveries.map(deliveryLogLine),
+    status: reporterStatus(current, notify),
+    lost,
   };
 }

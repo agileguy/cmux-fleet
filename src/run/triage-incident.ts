@@ -75,6 +75,7 @@ import { z } from "zod";
 import { SESSION_ID_RE } from "../contracts.ts";
 import { runsRoot } from "./paths.ts";
 import type { TriageConsoleConfig } from "./triage-config.ts";
+import type { AnnouncementFacts, NotifyBacklog } from "./triage-notify.ts";
 
 /**
  * §6.8a's closed `kind` set, entire — the six things this console can notify
@@ -1705,4 +1706,127 @@ export function consoleHealthObservations(
     raised(facts.reporterUndelivered, "reporter_undelivered", ref),
   );
   return out;
+}
+
+// ── §9.15 task 5.6b — the seam the notifier lands on ─────────────────────────
+
+/**
+ * What a notification cannot know about itself, supplied by the caller.
+ *
+ * Both are the notifier's own facts rather than the machine's: `evidence` is the
+ * UNTRUSTED worker prose an observer quoted — held out of every field but the
+ * fenced block §6.9 requirement 1 defines — and `backlog` is §6.9 requirement 6's
+ * count and window, which only the notifier's state knows. Neither is on an
+ * {@link IncidentNotification}, so a translation that invented either would put a
+ * value in a message that no observation produced.
+ */
+export interface AnnouncementExtras {
+  readonly evidence?: string | null;
+  readonly backlog?: NotifyBacklog | null;
+  /**
+   * Overrides the derivation below. §6.9 requirement 1 notes that a
+   * `_console`-scoped announcement *"still has an environment worth naming"* —
+   * `inference_saturated` is the case, where the subject is a provider and model
+   * and the environment is only the scope of what went unobserved. That
+   * environment is not on the record, so the caller that knows it says so.
+   */
+  readonly environment?: string | null;
+}
+
+/**
+ * §13 task 5.6b(c): one {@link IncidentNotification}, translated into the
+ * notifier's typed fields. Pure, total, and the ONE place the two vocabularies
+ * meet.
+ *
+ * ## Why the translation lives here and not in the notifier
+ *
+ * ISC-689 asserts that `src/run/triage-notify.ts` imports nothing from this
+ * module, so *"no edit in the notifier can reach the state machine, whatever it
+ * intends"*. That probe is worth keeping intact, and it stays intact because the
+ * coupling task 5.6b needs runs the other way: this module takes a TYPE-ONLY
+ * import of {@link AnnouncementFacts} — erased at runtime, carrying data shapes
+ * and never an outcome — and the notifier still takes nothing from here. §6.9
+ * requirement 7's structural guarantee is therefore stronger after this task than
+ * before it rather than weaker: neither module can see the other's decisions, and
+ * the only thing that crosses is a value.
+ *
+ * ## The three mappings a reader would get wrong
+ *
+ *  - **`subject` is what the message NAMES**, so it is the service for a service
+ *    incident and the console-health `kind` for the other arm — never the
+ *    environment. §6.7 rule 3 is the whole reason those are separate fields.
+ *  - **`scope` is §6.8a's identity half.** A service incident's scope is its
+ *    environment; a console-health incident's scope is its own, which is either an
+ *    environment token or {@link CONSOLE_SCOPE}.
+ *  - **`environment` is `null` for the console itself.** Rendering
+ *    {@link CONSOLE_SCOPE} into that field would show the operator `_console` in
+ *    the position they read as a cluster name.
+ *
+ * `first_seen` is `at − firingForMs`: §6.8's *"how long it was firing"* is carried
+ * on the notification as a duration, and the message wants the instant.
+ */
+export function announcementFacts(
+  notification: IncidentNotification,
+  extras: AnnouncementExtras = {},
+): AnnouncementFacts {
+  const subject = notification.subject;
+  const derived =
+    subject.kind === "service"
+      ? {
+          kind: "service" as const,
+          scope: subject.environment,
+          subject: subject.service,
+          environment: subject.environment as string | null,
+          service: subject.service as string | null,
+        }
+      : {
+          kind: "console_health" as const,
+          scope: subject.scope,
+          subject: subject.health,
+          environment: subject.scope === CONSOLE_SCOPE ? null : subject.scope,
+          service: null,
+        };
+
+  return {
+    ...derived,
+    environment: extras.environment === undefined ? derived.environment : extras.environment,
+    assessment: notification.reason,
+    transition: notification.kind,
+    first_seen: notification.at - notification.firingForMs,
+    sweep_count: notification.sweepCount,
+    evidence: extras.evidence ?? null,
+    evidence_ref: notification.evidenceRef,
+    backlog: extras.backlog ?? null,
+  };
+}
+
+/**
+ * The ONLY writer of {@link IncidentRecord.undelivered}, and it touches nothing
+ * else. §7.6 declares the field; §13 task 5.6b fills it.
+ *
+ * §6.9 requirement 7 — *"a delivery failure never advances or clears an
+ * incident"* — is a rule about code, and this is the shape that makes it
+ * checkable rather than merely stated: the record is spread and exactly one key is
+ * replaced, so a test can assert every other field is byte-identical without
+ * enumerating them. {@link advanceIncident} never writes this field and this
+ * function never writes any other; between them there is no path from a lost
+ * message to a state.
+ *
+ * An empty list returns the caller's OWN object, so a quiet sweep cannot rewrite a
+ * record it had nothing to say about — the same identity discipline
+ * {@link advanceIncident} applies to a `suppressed` observation.
+ *
+ * The bound is {@link MAX_UNDELIVERED} and it keeps the MOST RECENT entries: an
+ * operator reading a truncated backlog is looking at an outage that is happening
+ * now, and dropping the newest to preserve the oldest would hide it.
+ */
+export function withUndelivered(
+  record: IncidentRecord,
+  entries: readonly string[],
+): IncidentRecord {
+  if (entries.length === 0) return record;
+  const merged = [...record.undelivered, ...entries];
+  const undelivered =
+    merged.length <= MAX_UNDELIVERED ? merged : merged.slice(merged.length - MAX_UNDELIVERED);
+  return { ...record, undelivered };
 }

@@ -43,7 +43,23 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { DEFAULT_NOTIFY, NotifyConfigSchema, type NotifyConfig } from "../../src/run/triage-config.ts";
+import {
+  DEFAULT_NOTIFY,
+  NotifyConfigSchema,
+  defaultTriageConsoleConfig,
+  type NotifyConfig,
+} from "../../src/run/triage-config.ts";
+import {
+  CONSOLE_SCOPE,
+  advanceIncident,
+  announcementFacts,
+  consoleHealthObservations,
+  freshIncidentRecord,
+  withUndelivered,
+  type IncidentPolicy,
+  type IncidentRecord,
+  type IncidentSubject,
+} from "../../src/run/triage-incident.ts";
 import {
   ANNOUNCEMENT_ASSESSMENTS,
   ANNOUNCEMENT_KINDS,
@@ -64,8 +80,12 @@ import {
   fetchNotifyTransport,
   freshDeliveryState,
   headerSafeIssue,
+  isReporterRecovery,
+  orderForDelivery,
   redactRequest,
   renderRequest,
+  reportSweep,
+  reporterStatus,
   reporterUndelivered,
   sanitizeToken,
   statusOutcome,
@@ -75,6 +95,7 @@ import {
   type NotifyOutcome,
   type NotifyRequest,
   type NotifyTransport,
+  type ReporterStatus,
 } from "../../src/run/triage-notify.ts";
 
 const SOURCE = readFileSync(join(import.meta.dir, "..", "..", "src", "run", "triage-notify.ts"), "utf8");
@@ -1050,5 +1071,523 @@ describe("`notify: null` disables the channel without disabling the console (§6
     };
     const out = await deliverySweep(SERVICE_FACTS, null, state, { now: () => T0 });
     expect(out.state).toEqual(state);
+  });
+});
+
+// ── §13 task 5.6b — §9.15's four surfaces ────────────────────────────────────
+
+/** §7.8's shipped policy, read from the schema rather than re-typed. */
+const CONSOLE = defaultTriageConsoleConfig();
+const POLICY: IncidentPolicy = CONSOLE;
+const CADENCE_MS = CONSOLE.cadence_s * 1_000;
+
+const REPORTER_SUBJECT: IncidentSubject = {
+  kind: "console_health",
+  scope: CONSOLE_SCOPE,
+  health: "reporter_undelivered",
+};
+
+const SERVICE_SUBJECT: IncidentSubject = {
+  kind: "service",
+  environment: "env-production",
+  service: "svc-authz-api",
+};
+
+/** The recovery §9.15 surface 4 is about, as facts. */
+const RECOVERY_FACTS: AnnouncementFacts = {
+  ...SATURATION_FACTS,
+  subject: "reporter_undelivered",
+  environment: null,
+  assessment: "reporter_undelivered",
+  transition: "recovered",
+};
+
+describe("the pass is the unit, not the announcement (§6.9 requirement 6, §13 task 5.6b)", () => {
+  test("the recovery is hoisted AHEAD of the sweep's own, and the rest keep their order", () => {
+    const a: AnnouncementFacts = { ...SERVICE_FACTS, subject: "A" };
+    const b: AnnouncementFacts = { ...SERVICE_FACTS, subject: "B" };
+    const c: AnnouncementFacts = { ...SERVICE_FACTS, subject: "C" };
+    // The premise: the recovery is NOT already first, so hoisting is observable.
+    const input = [a, b, RECOVERY_FACTS, c];
+    expect(isReporterRecovery(input[0]!)).toBe(false);
+    expect(orderForDelivery(input).map((f) => f.subject)).toEqual([
+      "reporter_undelivered",
+      "A",
+      "B",
+      "C",
+    ]);
+  });
+
+  test("Anti: only a reporter RECOVERY is hoisted — an `opened` about the reporter is not", () => {
+    const opened: AnnouncementFacts = { ...RECOVERY_FACTS, transition: "opened" };
+    const own: AnnouncementFacts = { ...SERVICE_FACTS, subject: "A" };
+    expect(isReporterRecovery(opened)).toBe(false);
+    expect(orderForDelivery([own, opened]).map((f) => f.subject)).toEqual(["A", "reporter_undelivered"]);
+    // …and a recovery about anything ELSE is not hoisted either.
+    const otherRecovery: AnnouncementFacts = { ...SERVICE_FACTS, subject: "A", transition: "recovered" };
+    expect(isReporterRecovery(otherRecovery)).toBe(false);
+    expect(orderForDelivery([own, otherRecovery]).map((f) => f.subject)).toEqual(["A", "A"]);
+  });
+
+  /**
+   * The countdown is in SWEEP units, so a pass carrying three announcements must
+   * spend ONE tick, not three. A per-announcement tick turns a twelve-sweep
+   * backoff into a four-sweep one on a busy console and back into a hammer.
+   */
+  test("a pass carrying three announcements spends ONE countdown tick", async () => {
+    const transport = statusTransport([200]);
+    const state: DeliveryState = { ...freshDeliveryState(), consecutive_retryable: 2, sweeps_until_retry: 3 };
+    const report = await reportSweep(
+      [SERVICE_FACTS, { ...SERVICE_FACTS, subject: "B" }, { ...SERVICE_FACTS, subject: "C" }],
+      notifyConfig(),
+      state,
+      { transport, now: () => T0 },
+    );
+    expect(report.deliveries.map((d) => d.disposition)).toEqual(["held", "held", "held"]);
+    expect(report.state.sweeps_until_retry).toBe(2);
+    expect(transport.seen.length).toBe(0);
+    expect(report.state.undelivered.length).toBe(3);
+  });
+
+  /**
+   * Anti: once the channel has failed IN THIS PASS, the rest are held rather than
+   * hammered — and the reason is arithmetic rather than politeness.
+   * `consecutive_retryable` is the exponent of a backoff measured in SWEEPS, so a
+   * pass that let five announcements each fail would jump the wait to sixteen
+   * sweeps for one outage of one sweep.
+   */
+  test("Anti: after the first failure in a pass, the rest are held and the counter counts SWEEPS", async () => {
+    const transport = statusTransport([503]);
+    const report = await reportSweep(
+      [SERVICE_FACTS, { ...SERVICE_FACTS, subject: "B" }, { ...SERVICE_FACTS, subject: "C" }],
+      notifyConfig(),
+      freshDeliveryState(),
+      { transport, now: () => T0 },
+    );
+    expect(transport.seen.length).toBe(1);
+    expect(report.deliveries.map((d) => d.disposition)).toEqual(["attempted", "held", "held"]);
+    expect(report.state.consecutive_retryable).toBe(1);
+    expect(report.state.sweeps_until_retry).toBe(1);
+    expect(report.lost.length).toBe(3);
+  });
+
+  test("every announcement still gets its own attempt while the channel is answering", async () => {
+    const transport = statusTransport([200]);
+    const report = await reportSweep(
+      [SERVICE_FACTS, { ...SERVICE_FACTS, subject: "B" }],
+      notifyConfig(),
+      freshDeliveryState(),
+      { transport, now: () => T0 },
+    );
+    expect(transport.seen.length).toBe(2);
+    expect(report.deliveries.map((d) => d.disposition)).toEqual(["attempted", "attempted"]);
+    expect(report.lost).toEqual([]);
+  });
+
+  /**
+   * The retention rule, and its anti-twin in the same block because the two are
+   * only meaningful against each other: a `recordOutcome` that always retained
+   * would satisfy the first half and break §6.9 requirement 6's *"nothing is
+   * re-sent as itself"* forever, and one that never retained would satisfy the
+   * second half and leave §9.15's recovery naming zero losses.
+   */
+  test("a success while the reporter is ACCUSED keeps the record of what was lost", async () => {
+    const notify = notifyConfig();
+    // Two consecutive retryables — §9.15's threshold, and the premise is asserted.
+    let state = (await reportSweep([SERVICE_FACTS], notify, freshDeliveryState(), {
+      transport: statusTransport([503]),
+      now: () => T0,
+    })).state;
+    state = { ...state, sweeps_until_retry: 0 };
+    state = (await reportSweep([SERVICE_FACTS], notify, state, {
+      transport: statusTransport([503]),
+      now: () => T0 + 1_000,
+    })).state;
+    expect(reporterUndelivered(state)).toBe(true);
+    expect(state.undelivered.length).toBe(2);
+
+    // The backoff has expired; the fixture is about the DELIVERY, not the wait.
+    state = { ...state, sweeps_until_retry: 0 };
+    const ok = await reportSweep([SERVICE_FACTS], notify, state, {
+      transport: statusTransport([200]),
+      now: () => T1,
+    });
+    expect(ok.deliveries[0]?.outcome?.status).toBe("delivered");
+    expect(ok.state.consecutive_retryable).toBe(0);
+    expect(ok.state.last_rejected_at).toBeNull();
+    expect(ok.state.undelivered.length).toBe(2);
+    // Self-limiting: the accusation is gone, so the NEXT success clears them.
+    expect(reporterUndelivered(ok.state)).toBe(false);
+    const next = await reportSweep([SERVICE_FACTS], notify, ok.state, {
+      transport: statusTransport([200]),
+      now: () => T1 + 1_000,
+    });
+    expect(next.state.undelivered).toEqual([]);
+  });
+
+  test("Anti: a success while the reporter was NEVER accused clears the record as before", async () => {
+    const notify = notifyConfig();
+    let state = (await reportSweep([SERVICE_FACTS], notify, freshDeliveryState(), {
+      transport: statusTransport([503]),
+      now: () => T0,
+    })).state;
+    state = { ...state, sweeps_until_retry: 0 };
+    // The premise that separates this fixture from the one above.
+    expect(reporterUndelivered(state)).toBe(false);
+    expect(state.undelivered.length).toBe(1);
+    const ok = await reportSweep([SERVICE_FACTS], notify, state, {
+      transport: statusTransport([200]),
+      now: () => T1,
+    });
+    expect(ok.state.undelivered).toEqual([]);
+  });
+
+  test("a pass with nothing to say still elapses the countdown (§6.9 requirement 6)", async () => {
+    const state: DeliveryState = { ...freshDeliveryState(), consecutive_retryable: 1, sweeps_until_retry: 1 };
+    const report = await reportSweep([], notifyConfig(), state, { now: () => T0 });
+    expect(report.deliveries.map((d) => d.disposition)).toEqual(["nothing_to_send"]);
+    expect(report.state.sweeps_until_retry).toBe(0);
+  });
+});
+
+describe("§9.15 — the reporter's own failure reaches all four surfaces", () => {
+  /** Five sweeps down, then up. `UP_AT` is the first sweep the channel answers. */
+  const SWEEPS = 7;
+  const UP_AT = 5;
+
+  interface Surfaces {
+    readonly record: IncidentRecord;
+    readonly recordAt: readonly IncidentRecord[];
+    readonly log: readonly string[];
+    readonly status: ReporterStatus;
+    readonly statusAt: readonly ReporterStatus[];
+    readonly bodiesAt: readonly (readonly string[])[];
+    readonly factsAt: readonly (readonly AnnouncementFacts[])[];
+    readonly state: DeliveryState;
+  }
+
+  /**
+   * One console, seven sweeps, and the ORDER inside each sweep is the design.
+   *
+   * The reporter's health is read from the delivery state the PREVIOUS sweep
+   * left, turned into an observation by `consoleHealthObservations`, and the
+   * record is advanced BEFORE anything is handed to a transport. That ordering is
+   * §6.9 requirement 7's first corollary — *"a transition is recorded before it
+   * is delivered, not after"* — expressed as a call sequence rather than as a
+   * comment, and it is what the anti-criterion below mutates.
+   */
+  async function runOutage(over: { readonly notify?: NotifyConfig | null } = {}): Promise<Surfaces> {
+    const notify = over.notify === undefined ? notifyConfig() : over.notify;
+    let channelUp = false;
+    const seen: NotifyRequest[] = [];
+    const transport: NotifyTransport = async (req) => {
+      seen.push(req);
+      return statusOutcome(channelUp ? 200 : 503, Number.NaN);
+    };
+
+    let state = freshDeliveryState();
+    let record = freshIncidentRecord(REPORTER_SUBJECT);
+    const log: string[] = [];
+    const recordAt: IncidentRecord[] = [];
+    const statusAt: ReporterStatus[] = [];
+    const bodiesAt: string[][] = [];
+    const factsAt: AnnouncementFacts[][] = [];
+    let status = reporterStatus(state, notify);
+
+    for (let n = 0; n < SWEEPS; n += 1) {
+      const at = T0 + n * CADENCE_MS;
+      channelUp = n >= UP_AT;
+
+      // 1. The reporter's own health, as an OBSERVATION of the previous state.
+      const observations = consoleHealthObservations({
+        ran: true,
+        sweepId: `s-${n}`,
+        at,
+        evidenceRef: `sweep/${n}`,
+        environments: [],
+        consecutiveSkips: 0,
+        maxConsecutiveSkips: CONSOLE.max_consecutive_skips,
+        saturated: null,
+        budgetExhausted: false,
+        reporterUndelivered: reporterUndelivered(state),
+      }).filter(
+        (o) => o.subject.kind === "console_health" && o.subject.health === "reporter_undelivered",
+      );
+      expect(observations.length).toBe(1);
+
+      // 2. The record advances on that observation, before any delivery.
+      const advance = advanceIncident(record, observations[0]!, POLICY);
+      record = advance.record;
+
+      // 3. The sweep's OWN announcement is built first and listed first, so the
+      //    hoist below has something to move past.
+      const own: AnnouncementFacts = {
+        ...SERVICE_FACTS,
+        subject: `svc-sweep-${n}`,
+        first_seen: at,
+      };
+      const facts = [own, ...advance.notifications.map((notification) => announcementFacts(notification))];
+      factsAt.push(facts);
+
+      const before = seen.length;
+      const report = await reportSweep(facts, notify, state, { transport, now: () => at });
+      state = report.state;
+      status = report.status;
+      log.push(...report.log);
+      record = withUndelivered(record, report.lost);
+      recordAt.push(record);
+      statusAt.push(report.status);
+      bodiesAt.push(seen.slice(before).map((r) => r.body));
+    }
+    return { record, recordAt, log, status, statusAt, bodiesAt, factsAt, state };
+  }
+
+  /**
+   * The premises §9.15's four assertions rest on. Every one of them would make a
+   * surface below vacuous if it silently stopped holding — a fixture that never
+   * lost a message can satisfy *"the recovery names the lost count"* with a zero.
+   */
+  test("premise: the outage really loses messages, and the recovery sweep carries TWO announcements", async () => {
+    const s = await runOutage();
+    expect(s.statusAt[UP_AT - 1]!.undelivered).toBeGreaterThan(1);
+    expect(s.statusAt[UP_AT - 1]!.reporter_undelivered).toBe(true);
+    // The sweep on which the recovery is composed carries the sweep's own too,
+    // and the recovery is NOT already first in the caller's list.
+    const recoverySweep = s.factsAt.findIndex((f) => f.some(isReporterRecovery));
+    expect(recoverySweep).toBeGreaterThanOrEqual(UP_AT);
+    expect(s.factsAt[recoverySweep]!.length).toBeGreaterThan(1);
+    expect(isReporterRecovery(s.factsAt[recoverySweep]![0]!)).toBe(false);
+  });
+
+  test("surface 1 — the record: one incident, opened while the channel was down and cleared after", async () => {
+    const s = await runOutage();
+    expect(s.recordAt[UP_AT - 1]!.state).toBe("firing");
+    expect(s.recordAt[UP_AT - 1]!.reason).toBe("reporter_undelivered");
+    expect(s.record.state).toBe("clear");
+    // §6.8's dedup: a channel down for five sweeps is ONE incident, not five.
+    expect(s.recordAt.filter((r) => r.state === "firing").length).toBeGreaterThan(0);
+    expect(s.record.subject).toEqual(REPORTER_SUBJECT);
+    // …and the losses are on the record, in the one field a delivery may write.
+    expect(s.recordAt[UP_AT - 1]!.undelivered.length).toBeGreaterThan(1);
+  });
+
+  test("surface 2 — the log: every lost message leaves a line naming its reason", async () => {
+    const s = await runOutage();
+    const failures = s.log.filter((line) => line.includes("status=retryable"));
+    expect(failures.length).toBeGreaterThan(0);
+    expect(failures[0]).toContain("http=503");
+    expect(failures[0]).toContain("disposition=attempted");
+    const held = s.log.filter((line) => line.includes("disposition=held"));
+    expect(held.length).toBeGreaterThan(0);
+    expect(s.log.some((line) => line.includes("disposition=attempted") && line.includes("status=delivered"))).toBe(
+      true,
+    );
+  });
+
+  test("Anti: no log line can carry the credential, however the channel is configured", async () => {
+    const secret = "ZZ-NTFY-TOKEN-ZZ";
+    const notify = notifyConfig({ token_env: "TRIAGE_TEST_TOKEN" });
+    const report = await reportSweep([SERVICE_FACTS], notify, freshDeliveryState(), {
+      transport: statusTransport([200]),
+      now: () => T0,
+      env: (name) => (name === "TRIAGE_TEST_TOKEN" ? secret : undefined),
+    });
+    // The premise: the credential really did reach the request.
+    expect(report.deliveries[0]?.request?.headers.Authorization).toBe(`Bearer ${secret}`);
+    for (const line of report.log) expect(line).not.toContain(secret);
+  });
+
+  test("surface 3 — `--status`: the undelivered count is its own field and is never an all-clear", async () => {
+    const s = await runOutage();
+    const down = s.statusAt[UP_AT - 1]!;
+    expect(down.channel).toBe("enabled");
+    expect(down.undelivered).toBeGreaterThan(1);
+    expect(down.undelivered_window).not.toBeNull();
+    expect(down.reporter_undelivered).toBe(true);
+    // *"quiet" and "could not speak" are never the same row*: there is no single
+    // aggregate field a reader could mistake for an all-clear.
+    expect(Object.keys(down).sort()).toEqual(
+      [
+        "channel",
+        "consecutive_retryable",
+        "endpoint",
+        "last_rejected_at",
+        "reporter_undelivered",
+        "sweeps_until_retry",
+        "undelivered",
+        "undelivered_window",
+      ].sort(),
+    );
+    expect(s.status.undelivered).toBe(0);
+    expect(s.status.reporter_undelivered).toBe(false);
+  });
+
+  /**
+   * Surface 4, and it is the one the whole task exists for: *"the `firing → clear`
+   * transition for `reporter_undelivered` composes a notification and THAT
+   * notification is delivered first, ahead of the sweep's own"*, carrying *"the
+   * reporter was unable to deliver for N sweeps … and M notifications were lost"*.
+   */
+  test("surface 4 — the FIRST message delivered on recovery names the outage and the lost count", async () => {
+    const s = await runOutage();
+    const recoverySweep = s.factsAt.findIndex((f) => f.some(isReporterRecovery));
+    const bodies = s.bodiesAt[recoverySweep]!;
+    expect(bodies.length).toBeGreaterThan(1);
+
+    const first = bodies[0]!;
+    expect(first).toContain("RECOVERED");
+    expect(first).toContain("assessment: reporter_undelivered");
+    expect(first).toMatch(/^Undelivered: \d+ notification\(s\) between .+ and .+\.$/m);
+    const lost = Number(/Undelivered: (\d+) notification/.exec(first)?.[1]);
+    expect(lost).toBeGreaterThan(1);
+
+    // …and the sweep's OWN message went second and did not carry the count.
+    expect(bodies[1]).toContain("svc-sweep-");
+    expect(bodies[1]).not.toContain("Undelivered:");
+    expect(first).not.toContain("svc-sweep-");
+  });
+
+  /**
+   * The anti-twin of surface 4, and the reason `recordOutcome` retains the notes
+   * for exactly one sweep.
+   *
+   * §6.9 requirement 6 is unconditional — the backlog is *"appended to the next
+   * message that does go out"* — so the sweep on which the channel first answers
+   * DOES carry the count. The retention is what stops that from being the last
+   * word: the recovery is composed a sweep later, from the observation that the
+   * reporter is healthy again, and without the retention it would name zero
+   * losses and §9.15's whole fourth surface would be decorative.
+   */
+  test("the first message out after the outage names the count AND does not consume it", async () => {
+    const s = await runOutage();
+    expect(s.bodiesAt[UP_AT]![0]).toContain("Undelivered:");
+    expect(s.statusAt[UP_AT]!.undelivered).toBeGreaterThan(1);
+    // …and once the recovery has carried it, it is gone rather than repeated
+    // forever: the retention lasts exactly one sweep.
+    expect(s.status.undelivered).toBe(0);
+    expect(s.statusAt[UP_AT]!.consecutive_retryable).toBe(0);
+  });
+
+  /**
+   * Anti: a console with `notify: null` still sweeps and still records
+   * transitions. §6.9 requirement 7's third corollary — refusing to work without
+   * a webhook would make a diagnostic console depend on the thing it diagnoses.
+   */
+  test("Anti: `notify: null` still advances the record, and `--status` says disabled", async () => {
+    const s = await runOutage({ notify: null });
+    expect(s.record.state).toBe("clear");
+    expect(s.recordAt.every((r) => r.undelivered.length === 0)).toBe(true);
+    expect(s.status.channel).toBe("disabled");
+    expect(s.status.endpoint).toBeNull();
+    expect(s.status.undelivered).toBe(0);
+    expect(s.status.reporter_undelivered).toBe(false);
+    expect(s.log.every((line) => line.includes("disposition=disabled"))).toBe(true);
+  });
+});
+
+describe("Anti: a delivery failure never advances or clears an incident (§6.9 requirement 7)", () => {
+  /**
+   * §12's probe, verbatim: *"a `firing` record, a sweep observing `healthy` with
+   * evidence, and a transport that fails; assert the record is `clear`, the
+   * recovery is recorded, and the failure appears only in `undelivered[]`."*
+   *
+   * The transport reads the record's state AT DELIVERY TIME, which is what makes
+   * this fail for the implementation §13 names as the plausible one — the one that
+   * writes the transition after the `await`. A test that only inspected the record
+   * afterwards would pass for both.
+   */
+  test("the record is `clear` BEFORE the transport is called, and the failure lands only in `undelivered[]`", async () => {
+    let record = freshIncidentRecord(SERVICE_SUBJECT);
+    for (let n = 0; n < 3; n += 1) {
+      record = advanceIncident(
+        record,
+        {
+          subject: SERVICE_SUBJECT,
+          sweepId: `s-${n}`,
+          at: T0 + n * CADENCE_MS,
+          signal: { kind: "issue", reason: "unhealthy", evidenceRef: `art/${n}` },
+        },
+        POLICY,
+      ).record;
+    }
+    expect(record.state).toBe("firing");
+
+    const advance = advanceIncident(
+      record,
+      {
+        subject: SERVICE_SUBJECT,
+        sweepId: "s-3",
+        at: T1,
+        signal: { kind: "observed_clear", evidenceRef: "clean/1" },
+      },
+      POLICY,
+    );
+    expect(advance.record.state).toBe("clear");
+    expect(advance.notifications.map((n) => n.kind)).toEqual(["recovered"]);
+
+    const cleared = advance.record;
+    const stateAtDelivery: string[] = [];
+    const transport: NotifyTransport = async () => {
+      stateAtDelivery.push(cleared.state);
+      return statusOutcome(503, Number.NaN);
+    };
+
+    const report = await reportSweep(
+      advance.notifications.map((n) => announcementFacts(n)),
+      notifyConfig(),
+      freshDeliveryState(),
+      { transport, now: () => T1 },
+    );
+
+    // The transition was already written when the bytes went out.
+    expect(stateAtDelivery).toEqual(["clear"]);
+    expect(report.deliveries[0]?.outcome?.status).toBe("retryable");
+
+    // The record is untouched by the failure…
+    expect(cleared.state).toBe("clear");
+    expect(cleared.undelivered).toEqual([]);
+
+    // …and the loss appears ONLY in `undelivered[]`.
+    const after = withUndelivered(cleared, report.lost);
+    expect(after.undelivered.length).toBe(1);
+    expect(after.state).toBe("clear");
+    expect({ ...after, undelivered: [] }).toEqual({ ...cleared, undelivered: [] });
+  });
+
+  /**
+   * The same sweep with a WORKING transport must reach the same record. If the
+   * two differed anywhere but in `undelivered[]`, the delivery result would be an
+   * input to the machine — which is the one thing §6.9 requirement 7 forbids.
+   */
+  test("a failing transport and a working one leave the same record apart from `undelivered[]`", async () => {
+    const base = advanceIncident(
+      { ...freshIncidentRecord(SERVICE_SUBJECT), state: "firing", reason: "unhealthy", since: T0, last_seen: T0, sweep_count: 3 },
+      {
+        subject: SERVICE_SUBJECT,
+        sweepId: "s-3",
+        at: T1,
+        signal: { kind: "observed_clear", evidenceRef: "clean/1" },
+      },
+      POLICY,
+    );
+    const facts = base.notifications.map((n) => announcementFacts(n));
+
+    const failed = await reportSweep(facts, notifyConfig(), freshDeliveryState(), {
+      transport: statusTransport([503]),
+      now: () => T1,
+    });
+    const ok = await reportSweep(facts, notifyConfig(), freshDeliveryState(), {
+      transport: statusTransport([200]),
+      now: () => T1,
+    });
+    // The premise: the two really did produce different outcomes.
+    expect(failed.deliveries[0]?.outcome?.status).toBe("retryable");
+    expect(ok.deliveries[0]?.outcome?.status).toBe("delivered");
+
+    const a = withUndelivered(base.record, failed.lost);
+    const b = withUndelivered(base.record, ok.lost);
+    expect(a.undelivered.length).toBe(1);
+    expect(b.undelivered.length).toBe(0);
+    expect({ ...a, undelivered: [] }).toEqual({ ...b, undelivered: [] });
   });
 });
