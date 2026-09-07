@@ -301,7 +301,30 @@ const HOST_VOCABULARY: ReadonlySet<string> = new Set<string>([
  * substring search and is the one that belongs to them. `unaccounted[]` IS here,
  * because it is the worker's own claim about names and nothing filters it.
  */
-function workerAuthoredStrings(document: TriageDocument): readonly string[] {
+function workerAuthoredStrings(
+  document: TriageDocument,
+  declared: readonly string[] = [],
+): readonly string[] {
+  /*
+   * A name the HOST declared is not prose the worker wrote, wherever it appears.
+   *
+   * `unaccounted[]` is a list of SERVICE NAMES, and the host puts every declared
+   * service name into every brief — so treating that list as worker prose makes a
+   * correct report ("I could not account for these three") indistinguishable from
+   * a contamination, and refuses the next sweep because it names its own targets.
+   *
+   * Measured 2026-09-07: a collation carrying
+   * `unaccounted: [alert-notifier, prometheus, grafana]` refused every subsequent
+   * sweep with `worker_prose`, quoting a service name out of the operator's own
+   * targets file. The guard was working exactly as written; what was wrong is that
+   * the host's vocabulary did not include the host's own service names.
+   *
+   * The check that DOES belong to these names is `projectPreviousState`'s filter
+   * against `declared`, which this docblock already claimed for `row.service`.
+   * An unaccounted name the host never declared is still a worker claim and is
+   * still kept — that is the arm this exemption must not widen.
+   */
+  const hostNames = new Set(declared);
   const out: string[] = [];
   const keep = (value: string | null): void => {
     if (value === null) return;
@@ -326,7 +349,10 @@ function workerAuthoredStrings(document: TriageDocument): readonly string[] {
     for (const ref of row.evidence_ref) keep(ref);
     for (const entry of row.coverage) keep(entry.channel);
   }
-  for (const name of document.unaccounted) keep(name);
+  for (const name of document.unaccounted) {
+    if (hostNames.has(name)) continue;
+    keep(name);
+  }
   return out;
 }
 
@@ -346,6 +372,7 @@ function workerAuthoredStrings(document: TriageDocument): readonly string[] {
 export function envelopeIssues(
   text: string,
   previous: TriageDocument | null,
+  declared: readonly string[] = [],
 ): readonly EnvelopeIssue[] {
   const issues: EnvelopeIssue[] = [];
 
@@ -395,7 +422,7 @@ export function envelopeIssues(
   }
 
   if (previous !== null) {
-    for (const prose of workerAuthoredStrings(previous)) {
+    for (const prose of workerAuthoredStrings(previous, declared)) {
       if (!text.includes(prose)) continue;
       issues.push({
         forbidden: "worker_prose",
@@ -649,7 +676,16 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     `state above — fields, not paragraphs.`,
   ].join("\n");
 
-  const issues = [...envelopeIssues(title, input.previousDocument), ...envelopeIssues(brief, input.previousDocument)];
+  /*
+   * The declared names are passed to the audit so a previous document that merely
+   * ECHOED them — `unaccounted[]` is exactly that — is not mistaken for prose
+   * crossing between sweeps. The host wrote these names into this very brief.
+   */
+  const declaredNames = input.services.map((s) => s.name);
+  const issues = [
+    ...envelopeIssues(title, input.previousDocument, declaredNames),
+    ...envelopeIssues(brief, input.previousDocument, declaredNames),
+  ];
   if (issues.length > 0) {
     throw new SweepEnvelopeError(
       `the rendered sweep envelope for ${input.sweepId} violates §7.2: ` +

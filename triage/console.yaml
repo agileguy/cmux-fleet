@@ -72,6 +72,19 @@ version: 1
 # settle and be resumed, while the collator still starts fresh many times a day.
 recycle_after_sweeps: 6
 
+# A 35B OBSERVER NEEDS LONGER THAN A FIVE-MINUTE TICK.
+#
+# `sweep_deadline_s` is `cadence_s - reserve_s` and is not a field. At the
+# defaults (300 - 60 = 240s) the join gave up on a live sweep at 240,087 ms while
+# the observer was still working -- measured 2026-09-07 with Qwen3.5-35B-A3B-8bit
+# in the seat, mid-way through writing its artifact. That is the deadline being
+# wrong, not the observer: 474 tool calls and 13 writes is what checking three
+# services against a live control plane actually costs on a 35B.
+#
+# 900 - 120 = 780s. Thirteen minutes for a sweep, and a tick every fifteen.
+cadence_s: 900
+reserve_s: 120
+
 # The channel. Only the env var NAME is here — §6.9 requirement 4 and the block
 # comment above: a token in a tracked file is the thing `notifyEndpointIssue`
 # exists to refuse, and `pifleet triage --status` prints the endpoint.

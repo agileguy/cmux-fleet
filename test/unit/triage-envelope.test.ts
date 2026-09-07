@@ -207,6 +207,66 @@ const PREVIOUS: TriageDocument = {
   unaccounted: [`telemetry-${MARKER}`],
 };
 
+/**
+ * **A DECLARED SERVICE NAME IN `unaccounted[]` IS NOT WORKER PROSE.**
+ *
+ * `unaccounted[]` is a list of SERVICE NAMES and the host writes every declared
+ * name into every brief, so auditing that list as worker prose makes a correct
+ * report — *"I could not account for these"* — indistinguishable from a previous
+ * sweep's prose crossing into the next brief.
+ *
+ * Measured 2026-09-07 on the live console: a collation carrying
+ * `unaccounted: [alert-notifier, prometheus, grafana]` refused EVERY subsequent
+ * sweep with `worker_prose`, quoting a service name out of the operator's own
+ * targets file. The guard was working exactly as written; what was missing is
+ * that the host's vocabulary did not contain the host's own service names. A
+ * console that cannot sweep because a worker named its targets is worse than one
+ * with no guard, because the refusal reads as a security finding.
+ *
+ * The second half is the arm this must not widen: an unaccounted name the host
+ * never declared is still the worker's own claim and must still be caught. That
+ * is the whole difference between "the worker echoed my list" and "the worker
+ * invented a name", and only the first is safe.
+ */
+describe("the prose audit exempts names the HOST declared, and only those", () => {
+  const declared = SERVICES.map((s) => s.name);
+
+  test("a declared name in unaccounted[] does not trip the audit", () => {
+    const doc = {
+      ...PREVIOUS,
+      services: [],
+      unaccounted: [...declared],
+    } as TriageDocument;
+    // The brief legitimately names every declared service — the host put them there.
+    const text = `services: ${declared.join(", ")}`;
+    expect(envelopeIssues(text, doc, declared)).toEqual([]);
+  });
+
+  test("an UNDECLARED name in unaccounted[] is still caught", () => {
+    const invented = `telemetry-${MARKER}`;
+    const doc = {
+      ...PREVIOUS,
+      services: [],
+      unaccounted: [invented],
+    } as TriageDocument;
+    const issues = envelopeIssues(`a brief mentioning ${invented}`, doc, declared);
+    expect(issues.map((i) => i.forbidden)).toEqual(["worker_prose"]);
+    expect(issues[0]!.evidence).toBe(invented);
+  });
+
+  test("without the declared list the old false positive still reproduces", () => {
+    // The DEFAULT is an empty declared list, which is the behaviour every other
+    // caller had before this change — and it is what made the live console refuse.
+    const doc = {
+      ...PREVIOUS,
+      services: [],
+      unaccounted: [...declared],
+    } as TriageDocument;
+    const issues = envelopeIssues(`services: ${declared.join(", ")}`, doc);
+    expect(issues.map((i) => i.forbidden)).toEqual(["worker_prose"]);
+  });
+});
+
 function envelopeInput(over: Partial<SweepEnvelopeInput> = {}): SweepEnvelopeInput {
   return {
     sweepId: sweepTaskId(41),
