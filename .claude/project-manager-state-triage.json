@@ -432,7 +432,7 @@
         ],
         "eng-2": [
           "5.4e",
-          "6.2a"
+          "6.4"
         ]
       },
       "files": {
@@ -444,13 +444,11 @@
         ],
         "eng-2": [
           "src/run/triage-pass.ts",
-          "test/unit/triage-pass.test.ts",
-          "src/run/triage-incident.ts",
-          "test/unit/triage-incident.test.ts"
+          "test/unit/triage-pass.test.ts"
         ]
       },
       "verified_commit": null,
-      "note": "6.1a is the task that makes the console able to sweep at all. It owns triage.ts because that is where the refusing port lives. 6.2a's move of incidentCensus also touches triage.ts, so it goes to eng-1's slice as a follow-on rather than eng-2's \u2014 REVISED: 6.2a stays with eng-2 for the triage-incident.ts half only if it can be split; otherwise defer. 5.4e is small and self-contained in triage-pass.ts."
+      "note": "6.2a moved OUT: it touches src/cli/commands/triage.ts, which 6.1a owns. Paired 5.4e with 6.4 instead \u2014 both are triage-pass.ts, disjoint from eng-1 in every file. Ownership checked against the pinned-invariant rule this time: CONSOLE_HEALTH_KINDS/CONSOLE_HEALTH_ASSESSMENTS is the known pair and neither slice touches it."
     }
   ],
   "status": "in_progress_round_9",
@@ -520,7 +518,7 @@
     "Phase 7 \u2014 7.1 to 7.4, the skill and the README"
   ],
   "round_15_candidates": [
-    "6.4 \u2014 resume-from-run-tree",
+    "6.2a \u2014 move incidentCensus (needs triage.ts, held by 6.1a)",
     "6.5 \u2014 recycling (\u00a76.6 layer 4)",
     "6.7 \u2014 wire the actor into scripts/triage",
     "5.8 \u2014 the bounded prose field + roles/triage.md",
