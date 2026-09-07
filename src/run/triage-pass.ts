@@ -113,6 +113,28 @@ import {
   type WindowPolicy,
 } from "./triage-verdict.ts";
 import { TRIAGE_COLLATOR, type TriageActorCursor } from "./triage-actor.ts";
+/*
+ * §6.6 layer 2's id, from the ONE module that mints it — and `relay.ts:116-135`
+ * wrote the rule naming this file, in advance, as the caller that would be
+ * tempted to spell it a second time:
+ *
+ *   *"names added to `task-ids.ts` after the extraction are imported FROM
+ *   `task-ids.ts`"* … *"The next consumer of these names is the triage actor's
+ *   pass, a `src/run/` module under SRD-TRIAGE-CONSOLE D7a's read-only import
+ *   guard."*
+ *
+ * This module HAD a second copy, and the two were not equivalent: the canonical
+ * one refuses an `n` that is not a safe integer ≥ 1 with a `SweepCounterError`,
+ * and the local one minted whatever it was handed. **They agreed on every value
+ * this pass can currently produce** — `resumedCursor` floors the counter at the
+ * run tree's own non-negative answer, so `number` is always ≥ 1 — so this is a
+ * duplication defect rather than a live bug, and it is recorded that way rather
+ * than dressed up. What it cost is the freedom to drift: two spellings of the id
+ * grammar that the ACTOR mints and `inFlightSweep` reads back, agreeing by
+ * coincidence, with no test pinning them equal. `task-ids.ts` imports NOTHING, so
+ * taking it costs the read-only closure exactly one leaf.
+ */
+import { sweepTaskId } from "./task-ids.ts";
 import type { NotifyConfig, TriageConsoleConfig } from "./triage-config.ts";
 import type { ToolCallProbeResult } from "../security/model-probe.ts";
 
@@ -409,9 +431,62 @@ export interface TriagePassOutcome {
 // The pass
 // ---------------------------------------------------------------------------
 
-/** §6.6 layer 2's id. One spelling, so a resumed actor derives the same one. */
-export function sweepTaskId(n: number): string {
-  return `T-sweep-${n}`;
+/**
+ * §6.4's *"the run tree is authoritative and the record is a cursor"* — D12,
+ * applied on EVERY exit rather than only on the one that mints. §13 task 6.4.
+ *
+ * ## What "resume" means here, and it is a record change rather than a re-dispatch
+ *
+ * §6.4: *"On start the actor derives in-flight state by reading the run tree, not
+ * by trusting `~/.pifleet/triage-relay.json` … and the actor resumes it rather
+ * than starting a new one."* A restarted actor that finds `T-sweep-12` in flight
+ * adopts it as ITS current sweep — it does not open a thirteenth, and its record
+ * stops disagreeing with the run tree about which sweep the console is on.
+ *
+ * ## Leaving the skip path at the record's own number is a LATENT ID REUSE
+ *
+ * Before this function the skip path returned `deps.cursor.sweep_cursor`
+ * untouched, so a restarted actor skipping a live `T-sweep-12` persisted
+ * `sweep_cursor: 0` on every one of those passes. That is correct only while the
+ * run-tree read keeps working — and `highestSweepNumber` answers `0` on an
+ * unreadable inbox by design (`triage.ts`'s `catch { return 0 }`), because an
+ * absent inbox is the ordinary state of a console that has never swept. Both
+ * sources at `0` mints `T-sweep-1`, an id the epoch fence has already seen, and
+ * §6.6 layer 2 says what happens then: *"a resumed actor that re-derives the same
+ * id is refused rather than duplicated"* — the sweep silently does nothing.
+ * **ISC-743's own words for this class are that the symptom is intermittent**, and
+ * it needed both halves to fail at once. Carrying the number in the record makes
+ * it need both halves to fail at once *and* the record to have been lost.
+ *
+ * ## Monotone by construction, which is the property that matters
+ *
+ * `max` and never an assignment: a run tree that transiently reads low can only
+ * fail to advance the cursor, never move it backwards onto an id that has been
+ * dispatched.
+ *
+ * ## What this deliberately does NOT do, and the reason is a hazard rather than scope
+ *
+ * §13 task 6.4's other half — *joining an already-dispatched sweep and carrying it
+ * to collation* — is **NOT built, and the pass could not tell when to do it
+ * safely.** `SweepDriver.inFlight` reports a sweep exactly while a WORKER task is
+ * outstanding (`inFlightSweep`: the parent's record is unsettled, or the
+ * collation's is), and neither of those is a step the host may take: the actor
+ * owes nothing, `tri-1` does. The genuinely abandoned states — the actor died
+ * between the join and the collation dispatch — read `inFlight === null` and are
+ * **indistinguishable through this port from a sweep that completed normally**,
+ * because §6.4's corrected predicate deliberately collapses *"parent settled, no
+ * collation"* into `null` so that §6.5's zero-row cannot wedge the actor
+ * (ISC-805). Resuming on *"the record is behind the run tree"* alone would
+ * therefore re-drive the incident machine over a sweep whose document it had
+ * already consumed — two `unhealthy` observations minted from ONE sweep, which
+ * opens a firing incident on a single sweep's evidence and is precisely what
+ * §12's *"a first unhealthy notifies NOTHING"* exists to forbid. That is a worse
+ * failure than the one it prevents, which is one wasted five-minute cadence. The
+ * missing discrimination is a run-tree read nothing exports — *does
+ * `T-sweep-<n>-collate` exist* — and it belongs beside `inFlightSweep`.
+ */
+export function resumedCursor(recorded: number, runTree: number): number {
+  return Math.max(recorded, runTree);
 }
 
 /**
@@ -454,6 +529,55 @@ function memoized(
     },
     taken: () => next,
   };
+}
+
+/**
+ * §6.7 rule 3's `unreachable` half of §6.8a's pair — §13 task 5.4e, and the
+ * criterion is ISC-824.
+ *
+ * ## This is ONE COLUMN of the table, and that is what stops it being a second copy
+ *
+ * `ConsoleHealthFacts` takes `(saturated, unreachable)` and the two are
+ * independent questions (`triage-incident.ts:1660-1702`). The `saturated` column
+ * already has exactly one production home — `SaturationOutcome.saturated`,
+ * computed by `saturationVerdict` — and {@link settle} reads it from there. So
+ * this function writes the OTHER column and nothing else: re-deriving `saturated`
+ * here from the verdict would be the ISC-804 defect exactly, two tables that agree
+ * until the day one of them is edited.
+ *
+ * ## Only `clear` clears it, and every other non-`endpoint_down` verdict is `null`
+ *
+ * §6.8a's clearing fact is *"a sweep in which every observer produced an
+ * artifact"*, which is `clear` and nothing else. A `saturated` verdict means the
+ * probe TIMED OUT — the endpoint answered nothing, which is evidence about speed
+ * and no evidence at all about reachability — so it leaves this `null` rather than
+ * `false`. Returning `false` there would recover an *"endpoint is down"* incident
+ * on the strength of a request that never came back, which is ISC-675's
+ * absence-as-evidence mistake wearing a different fault as a disguise.
+ *
+ * `null` for a `null` outcome is the same rule one level up: a pass that never
+ * swept — a skip, a budget refusal — did not ask, and `ConsoleHealthFacts`'
+ * optional field is documented as *"this sweep could not tell"*.
+ *
+ * The switch is exhaustive by construction: the `never` binding below is a `tsc`
+ * error the day `SATURATION_VERDICTS` grows a sixth member, which is the same
+ * guard ISC-665 puts on the kind enum.
+ */
+export function unreachableFrom(saturation: SaturationOutcome | null): boolean | null {
+  if (saturation === null) return null;
+  const verdict = saturation.verdict;
+  switch (verdict) {
+    case "clear":
+      return false;
+    case "endpoint_down":
+      return true;
+    case "uncorrelated":
+    case "saturated":
+    case "unconfirmed":
+      return null;
+  }
+  const exhaustive: never = verdict;
+  return exhaustive;
 }
 
 /**
@@ -531,6 +655,14 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
   const at = deps.now();
   const runs = await deps.sweep.runs();
   const inFlight = await deps.sweep.inFlight();
+  /*
+   * §6.6 layer 2's counter, read ONCE and read on EVERY exit — §13 task 6.4.
+   *
+   * It was previously read only on the path that mints, which left the skip path
+   * returning `deps.cursor.sweep_cursor` unchanged. See {@link resumedCursor} for
+   * why that is a latent id reuse rather than a cosmetic lag.
+   */
+  const highest = await deps.sweep.highestSweepNumber();
 
   if (inFlight !== null) {
     return await settle(deps, {
@@ -539,7 +671,11 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
       kind: "skipped",
       sweepId: inFlight.sweepId,
       waitingOn: inFlight.waitingOn,
-      sweepCursor: deps.cursor.sweep_cursor,
+      /*
+       * §13 task 6.4: the actor ADOPTS the in-flight sweep rather than leaving
+       * its record behind the run tree. See {@link resumedCursor}.
+       */
+      sweepCursor: resumedCursor(deps.cursor.sweep_cursor, highest),
       /*
        * §6.4's counter, and §6.8a's raise line reads it: `max_consecutive_skips −
        * 1`, so the OPEN lands on the threshold itself once the machine's own
@@ -581,7 +717,7 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
 
   // §6.6 layer 2: `max(record, run tree)`. D12 keeps the tree authoritative and
   // the record is the hint that makes finding the number cheap.
-  const previous = Math.max(deps.cursor.sweep_cursor, await deps.sweep.highestSweepNumber());
+  const previous = resumedCursor(deps.cursor.sweep_cursor, highest);
   const number = previous + 1;
   const sweepId = sweepTaskId(number);
   const dispatchedAt = new Date(at).toISOString();
@@ -755,6 +891,15 @@ async function settle(deps: TriagePassDeps, s: Settlement): Promise<TriagePassOu
     consecutiveSkips: s.consecutiveSkips,
     maxConsecutiveSkips: deps.config.max_consecutive_skips,
     saturated: s.saturation?.saturated ?? null,
+    /*
+     * §13 task 5.4e / ISC-824 — the seventh kind's fact, computed in PRODUCTION.
+     *
+     * Until this line existed the field was absent on every sweep, so §6.8a's
+     * `inference_unreachable` was an enum member, an observation and an anti-twin
+     * with nothing that could ever raise it: ISC-820..823 were all satisfiable by
+     * hand-built facts. This is the caller 5.4d's *Touches* line excluded.
+     */
+    unreachable: unreachableFrom(s.saturation),
     budgetExhausted: s.budgetExhausted,
     /*
      * §9.15 surface 1, read from the state as the pass STARTED.

@@ -38,7 +38,9 @@ import {
   FRESH_SATURATION_MEMO,
   TRIAGE_PASS_OUTCOMES,
   freshSaturationMemo,
+  resumedCursor,
   triagePass,
+  unreachableFrom,
   type IncidentStore,
   type SaturationMemo,
   type SweepCollation,
@@ -52,14 +54,25 @@ import {
   COVERAGE_THRESHOLD,
   freshIncidentRecord,
   subjectKey,
+  type ConsoleHealthKind,
   type IncidentRecord,
   type IncidentSubject,
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
+import { stripComments } from "../support/source-structure.ts";
 import { freshDeliveryState, type NotifyOutcome, type NotifyRequest } from "../../src/run/triage-notify.ts";
-import { SATURATION_MIN_MISSING, type ObserverArtifact, type TriageDocument, type TriageRow } from "../../src/run/triage-verdict.ts";
+import {
+  SATURATION_MIN_MISSING,
+  SATURATION_VERDICTS,
+  type ObserverArtifact,
+  type SaturationOutcome,
+  type SaturationVerdict,
+  type TriageDocument,
+  type TriageRow,
+} from "../../src/run/triage-verdict.ts";
 import type { PartitionAssignment } from "../../src/run/triage-partition.ts";
 import type { TriageActorCursor } from "../../src/run/triage-actor.ts";
+import { sweepTaskId } from "../../src/run/task-ids.ts";
 import type { ToolCallProbeResult } from "../../src/security/model-probe.ts";
 
 // ── The fixture world ───────────────────────────────────────────────────────
@@ -381,10 +394,22 @@ describe("the fan-out — every Phase 5 module has a production caller", () => {
    * raising it: *"a sweep that observed nothing is not a clean sweep, and §6.7
    * must never read the absence of findings as an all-clear."*
    *
-   * The probe answers `unreachable` rather than `timeout` so `saturated` is
-   * `null` and `inference_saturated` gets no observation at all — which isolates
-   * the kind under test. A `timeout` fixture would raise two console-health
-   * issues and the assertion could not say which one it was reading.
+   * The probe answers `unreachable` rather than `timeout`, so `saturated` stays
+   * `null` and `inference_saturated` gets no observation at all — which is still
+   * the assertion on the last line and is what keeps the two halves of §6.7 rule
+   * 3 from collapsing into one.
+   *
+   * **The isolation argument this docblock used to make expired with §13 task
+   * 5.4e (ISC-824), and the expectation below is the evidence that it landed.**
+   * When it was written, an `unreachable` verdict composed NOTHING — the pass did
+   * not compute `ConsoleHealthFacts.unreachable` — so one probe class was silent
+   * and could be used to isolate a third kind. It is no longer silent: a zero-row
+   * sweep against a dead endpoint now says both *"this sweep produced nothing"*,
+   * scoped to the environment, and *"the inference endpoint is unreachable"*,
+   * scoped to the console. That is §13 task 5.4d's own recorded mitigation — *"when
+   * the endpoint is really down, NO observer produces an artifact, so §6.5's
+   * zero-row raises `sweep_produced_nothing` and the console does speak"* — with
+   * both sentences arriving instead of one.
    */
   test("a sweep that collated nothing raises sweep_produced_nothing for the environment", async () => {
     const records = store();
@@ -413,7 +438,13 @@ describe("the fan-out — every Phase 5 module has a production caller", () => {
       memo = out.saturationMemo;
       for (const n of out.notifications) emitted.push(`${n.kind}:${subjectKey(n.subject)}`);
     }
-    expect(emitted).toEqual(["opened:console_health:cni-dev/sweep_produced_nothing"]);
+    expect(emitted).toEqual([
+      "opened:console_health:cni-dev/sweep_produced_nothing",
+      "opened:console_health:_console/inference_unreachable",
+    ]);
+    // The two halves do not collapse: a probe that could not CONNECT says nothing
+    // about whether the endpoint is slow, so the saturation record is never
+    // written at all.
     expect(records.held.get("console_health:_console/inference_saturated")).toBeUndefined();
   });
 
@@ -517,6 +548,121 @@ describe("tick or skip — §6.4, and a queue is never built", () => {
     expect(perPass).toEqual([0, 0, 1, 0, 0, 0]);
     expect(wire.requests).toHaveLength(1);
     expect(wire.requests[0]?.headers.Title).toContain("sweeps_skipped");
+  });
+
+  /**
+   * §13 task 6.4 — resume-from-run-tree, and §6.4's *"the run tree is
+   * authoritative and the record is a cursor"*.
+   *
+   * The three fixtures below are ASYMMETRIC on purpose: the record says `0`, the
+   * run tree says `12`, and a fresh sweep would be `13`. Three distinct numbers,
+   * so *"continued"*, *"restarted"* and *"reset"* are each distinguishable from the
+   * other two — a fixture in which the old sweep and the new one carried the same
+   * id could not tell any of them apart.
+   */
+  test("premise: the record, the run tree and a fresh sweep are THREE different numbers", async () => {
+    // The premise asserted a step earlier: with nothing in flight, this exact
+    // driver mints and opens `T-sweep-13` — so the resume below is a change of
+    // behaviour on one fact and not a fixture that could never have dispatched.
+    const spy = driver({ highest: 12 });
+    const out = await triagePass(deps({ driver: spy.driver, cursor: freshCursor() }));
+    expect(freshCursor().sweep_cursor).toBe(0);
+    expect(out.sweepId).toBe(sweepTaskId(13));
+    expect(spy.opened).toEqual([sweepTaskId(13)]);
+    expect(new Set([0, 12, 13]).size).toBe(3);
+  });
+
+  test("ANTI: a restarted actor with an EMPTY record RESUMES the in-flight sweep and dispatches nothing", async () => {
+    const spy = driver({
+      highest: 12,
+      inFlight: async () => ({ sweepId: sweepTaskId(12), waitingOn: "T-sweep-12-collate" }),
+    });
+    const out = await triagePass(deps({ driver: spy.driver, cursor: freshCursor() }));
+    // Nothing is opened, nothing is dispatched, nothing is collated: §12's
+    // *"the failure it prevents is two concurrent sweeps against one control
+    // plane"*, and it is a property of the code rather than of the assertion.
+    expect(spy.opened).toEqual([]);
+    expect(spy.dispatched).toEqual([]);
+    expect(spy.collated).toEqual([]);
+    // The sweep the actor is now on is the run tree's, not a new one.
+    expect(out.sweepId).toBe(sweepTaskId(12));
+    expect(out.waitingOn).toBe("T-sweep-12-collate");
+    // And the RECORD adopts it — the half that was missing. A cursor left at `0`
+    // is a record that disagrees with the run tree about which sweep this console
+    // is on, and §7.7's record is what `--status` reads.
+    expect(out.cursor.sweep_cursor).toBe(12);
+  });
+
+  /**
+   * The consequence, and the reason the line above is a correctness fix rather
+   * than cosmetics.
+   *
+   * `highestSweepNumber` answers `0` on an unreadable inbox by design — an absent
+   * inbox is the ordinary state of a console that has never swept. So the pass
+   * after the resume is driven with the run tree reading `0`: with the adopted
+   * cursor it mints `T-sweep-13`, and without it it would mint `T-sweep-1`, an id
+   * the epoch fence has already seen. **ISC-743's stated symptom class exactly**,
+   * and the fixture separates the two by ELEVEN, not by one.
+   */
+  test("after a resume the next sweep is minted from the RECORD even when the run tree reads 0", async () => {
+    const skipping = driver({
+      highest: 12,
+      inFlight: async () => ({ sweepId: sweepTaskId(12), waitingOn: "T-sweep-12-collate" }),
+    });
+    const first = await triagePass(deps({ driver: skipping.driver, cursor: freshCursor() }));
+    expect(first.kind).toBe("skipped");
+    expect(first.cursor.sweep_cursor).toBe(12);
+
+    const blind = driver({ highest: 0 });
+    const second = await triagePass(
+      deps({ driver: blind.driver, cursor: first.cursor, now: T0 + CADENCE_MS }),
+    );
+    expect(second.sweepId).toBe(sweepTaskId(13));
+    expect(blind.opened).toEqual([sweepTaskId(13)]);
+    expect(second.sweepId).not.toBe(sweepTaskId(1));
+  });
+
+  /**
+   * The pass mints sweep ids through ONE module, and this is the probe.
+   *
+   * `relay.ts:116-135` names this file in advance — *"the next consumer of these
+   * names is the triage actor's pass"* — and states the rule: *"names added to
+   * `task-ids.ts` after the extraction are imported FROM `task-ids.ts`."* The pass
+   * held a second spelling anyway, which the ACTOR mints from and `inFlightSweep`
+   * reads back, agreeing by coincidence with nothing pinning them equal. This
+   * asserts the import edge exists and that no local spelling of the prefix
+   * survives beside it.
+   *
+   * **The scan is over COMMENT-STRIPPED code, and the first version of this test
+   * proved why.** `triage-pass.ts`'s prose names the id grammar five times, all
+   * of them truthfully, so a raw substring scan reddened on documentation — the
+   * exact failure `triage-verdict.ts` records for its own fence: *"Comments are
+   * stripped rather than matched around because a docblock that QUOTES the
+   * pattern reddens the probe."* `stripComments` is the suite's own helper rather
+   * than a second one written here. The needle is still ASSEMBLED at runtime,
+   * because this file is scanned by no probe today and might be tomorrow.
+   */
+  test("the pass mints sweep ids through task-ids.ts and holds no second spelling", () => {
+    const raw = readFileSync(join(import.meta.dir, "../../src/run/triage-pass.ts"), "utf8");
+    const code = stripComments(raw);
+    expect(code).toContain('from "./task-ids.ts"');
+    expect(code).toContain("sweepTaskId");
+    const spelling = "T-" + "sweep-";
+    // The prose DOES name the grammar, repeatedly and correctly — which is why
+    // the scan is over the stripped code and the raw text is asserted to differ.
+    expect(raw.includes(spelling)).toBe(true);
+    expect(code.includes(spelling)).toBe(false);
+    // And the canonical minter is the one that refuses a counter it cannot spell.
+    expect(() => sweepTaskId(0)).toThrow();
+    expect(sweepTaskId(13)).toBe(spelling + "13");
+  });
+
+  /** The cursor is MONOTONE: a run tree that reads low never moves it back. */
+  test("resumedCursor never moves the cursor backwards onto a dispatched id", () => {
+    expect(resumedCursor(12, 0)).toBe(12);
+    expect(resumedCursor(0, 12)).toBe(12);
+    expect(resumedCursor(12, 12)).toBe(12);
+    expect(resumedCursor(11, 12)).toBe(12);
   });
 
   test("a skip says NOTHING about any environment, so a firing observer_blocked survives it", async () => {
@@ -913,6 +1059,274 @@ describe("saturation — the probe is deduplicated ACROSS sweeps, not only withi
     expect(title).toContain(`${PROVIDER}/${MODEL}`);
     expect(title).not.toContain(ENVIRONMENT);
     expect(wire.requests).toHaveLength(1);
+  });
+});
+
+/**
+ * §13 task 5.4e / ISC-824 — the seventh kind, reached through the PASS.
+ *
+ * ISC-820..823 are all satisfiable by hand-built `ConsoleHealthFacts`, which is
+ * why the enum member could ship with nothing computing it. Every fixture here
+ * drives `triagePass` end to end, so the `SaturationOutcome` under test is the one
+ * real `saturationVerdict` produced from a real fixture run tree — an assertion a
+ * hand-built fact cannot make.
+ */
+describe("the seventh kind — §6.8a's (saturated, unreachable) pair, computed in production", () => {
+  /** `probeNativeToolCalls`' `unreachable` class — the endpoint is DOWN, not slow. */
+  function unreachableProbe(): ToolCallProbeResult {
+    return { ok: false, failure: "unreachable", detail: "connect ECONNREFUSED" } as ToolCallProbeResult;
+  }
+
+  /** Neither failure class: the correlation is real and the probe settled nothing. */
+  function inconclusiveProbe(): ToolCallProbeResult {
+    return { ok: false, failure: "prose", detail: "answered in prose" } as ToolCallProbeResult;
+  }
+
+  /** Two of three observers missing — `SATURATION_MIN_MISSING`, so the probe runs. */
+  function correlatedDriver(): Spy {
+    return driver({
+      artifacts: (id) => [artifact("obs-t3", id)],
+      rows: () => [healthyRow("authentication")],
+    });
+  }
+
+  /** One of three missing — correlated, but below the gate. */
+  function uncorrelatedDriver(): Spy {
+    return driver({
+      artifacts: (id) => [artifact("obs-t2", id), artifact("obs-t3", id)],
+      rows: () => [healthyRow("authorization"), healthyRow("authentication")],
+    });
+  }
+
+  const CONSOLE_SCOPE = "_console";
+  const SATURATED_KEY = `console_health:${CONSOLE_SCOPE}/inference_saturated`;
+  const UNREACHABLE_KEY = `console_health:${CONSOLE_SCOPE}/inference_unreachable`;
+
+  /**
+   * One pass, and what it left on the two console-health records.
+   *
+   * A record's `reason` is the field that says which kind was RAISED; a record the
+   * pass never advanced is absent from the store entirely, because `store()` only
+   * holds what `save` was called with. So `undefined` here means *"this sweep said
+   * nothing about that kind"* and is the silence the anti-twin is about.
+   */
+  async function pairFrom(spy: Spy, probe: () => Promise<ToolCallProbeResult>) {
+    const records = store();
+    const out = await triagePass(
+      deps({ driver: spy.driver, records, transport: accepting().transport, probe }),
+    );
+    return {
+      verdict: out.saturation?.verdict,
+      saturated: records.held.get(SATURATED_KEY)?.reason,
+      unreachable: records.held.get(UNREACHABLE_KEY)?.reason,
+      records,
+    };
+  }
+
+  /**
+   * PREMISE, on the degenerate-fixture rule: the two fixtures this task is about
+   * must produce DIFFERENT verdicts through the real verdict function. A pair of
+   * fixtures that both landed on `saturated` would pass every assertion below
+   * against a pass that read one field for both kinds.
+   */
+  test("premise: the timeout fixture and the unreachable fixture reach DIFFERENT verdicts", async () => {
+    const down = await pairFrom(correlatedDriver(), async () => unreachableProbe());
+    const slow = await pairFrom(correlatedDriver(), async () => timeoutProbe());
+    expect(down.verdict).toBe("endpoint_down");
+    expect(slow.verdict).toBe("saturated");
+    expect(down.verdict).not.toBe(slow.verdict);
+  });
+
+  test("an `endpoint_down` sweep produces unreachable: true with saturated: null", async () => {
+    const said = await pairFrom(correlatedDriver(), async () => unreachableProbe());
+    expect(said.unreachable).toBe("inference_unreachable");
+    // `saturated: null` composes NOTHING, so the record is never written at all.
+    expect(said.saturated).toBeUndefined();
+    expect(said.records.written.map((r) => subjectKey(r.subject))).toContain(UNREACHABLE_KEY);
+    expect(said.records.written.map((r) => subjectKey(r.subject))).not.toContain(SATURATED_KEY);
+  });
+
+  test("ANTI-TWIN: a `timeout` sweep produces saturated: true and says NOTHING about reachable", async () => {
+    const said = await pairFrom(correlatedDriver(), async () => timeoutProbe());
+    expect(said.saturated).toBe("inference_saturated");
+    expect(said.unreachable).toBeUndefined();
+    expect(said.records.written.map((r) => subjectKey(r.subject))).not.toContain(UNREACHABLE_KEY);
+  });
+
+  /**
+   * §6.8a's clearing rule, and the half a naive `!== "endpoint_down"` gets wrong.
+   *
+   * A `saturated` verdict must leave `unreachable` at `null` rather than at
+   * `false`. The two are indistinguishable on a fresh record — neither writes
+   * anything — so the discrimination needs a record that is already `firing`: a
+   * `false` would CLEAR it, and that is ISC-675's absence-as-evidence mistake with
+   * a different fault as the disguise.
+   */
+  test("a `timeout` does NOT clear a firing `inference_unreachable` — null is not false", async () => {
+    const firing: IncidentRecord = {
+      ...freshIncidentRecord({
+        kind: "console_health",
+        scope: CONSOLE_SCOPE,
+        health: "inference_unreachable",
+      }),
+      state: "firing",
+      reason: "inference_unreachable",
+      since: T0 - CADENCE_MS,
+      last_seen: T0 - CADENCE_MS,
+      sweep_count: 2,
+    };
+    const records = store([firing]);
+    const out = await triagePass(
+      deps({
+        driver: correlatedDriver().driver,
+        records,
+        transport: accepting().transport,
+        probe: async () => timeoutProbe(),
+      }),
+    );
+    expect(records.held.get(UNREACHABLE_KEY)?.state).toBe("firing");
+    expect(out.notifications.map((n) => n.kind)).not.toContain("recovered");
+  });
+
+  /** And the mirror: a CLEAN sweep is the one fact that does clear it. */
+  test("a clean sweep clears a firing `inference_unreachable`, so the silence above is a rule", async () => {
+    const firing: IncidentRecord = {
+      ...freshIncidentRecord({
+        kind: "console_health",
+        scope: CONSOLE_SCOPE,
+        health: "inference_unreachable",
+      }),
+      state: "firing",
+      reason: "inference_unreachable",
+      since: T0 - CADENCE_MS,
+      last_seen: T0 - CADENCE_MS,
+      sweep_count: 2,
+    };
+    const records = store([firing]);
+    await triagePass(
+      deps({ records, transport: accepting().transport, probe: probeThatMustNotRun }),
+    );
+    expect(records.held.get(UNREACHABLE_KEY)?.state).toBe("clear");
+  });
+
+  /** A `firing` record on one console-health kind, so a CLEAR has something to move. */
+  function firingOn(health: ConsoleHealthKind): IncidentRecord {
+    return {
+      ...freshIncidentRecord({ kind: "console_health", scope: CONSOLE_SCOPE, health }),
+      state: "firing",
+      reason: health,
+      since: T0 - CADENCE_MS,
+      last_seen: T0 - CADENCE_MS,
+      sweep_count: 2,
+    };
+  }
+
+  /**
+   * One verdict's pair, read as THREE values rather than two.
+   *
+   * **A one-fixture read cannot tell `false` from `null` and that is the
+   * degenerate-fixture trap this whole task sits in.** On a fresh record, a
+   * `false` and a `null` are identical — neither writes anything — so a mapping
+   * that returned `false` everywhere it should return `null` would pass a raise-only
+   * probe on every verdict. The discrimination needs the record to be `firing`
+   * first: only a `false` moves it to `clear`, a `null` leaves it alone, and a
+   * `true` leaves it firing too but has already been separated by the raise probe.
+   *
+   * So each verdict is driven twice against the same driver and probe — once from
+   * an empty store to ask *"did it RAISE"* and once from a firing store to ask
+   * *"did it CLEAR"* — and the two answers compose the tri-state.
+   */
+  async function threeValued(
+    spy: Spy,
+    probe: () => Promise<ToolCallProbeResult>,
+  ): Promise<{ verdict: SaturationVerdict | undefined; saturated: boolean | null; unreachable: boolean | null }> {
+    const fresh = store();
+    const out = await triagePass(
+      deps({ driver: spy.driver, records: fresh, transport: accepting().transport, probe }),
+    );
+    const seeded = store([firingOn("inference_saturated"), firingOn("inference_unreachable")]);
+    await triagePass(
+      deps({ driver: spy.driver, records: seeded, transport: accepting().transport, probe }),
+    );
+    const read = (key: string, health: ConsoleHealthKind): boolean | null => {
+      if (fresh.held.get(key)?.reason === health) return true;
+      if (seeded.held.get(key)?.state === "clear") return false;
+      return null;
+    };
+    return {
+      verdict: out.saturation?.verdict,
+      saturated: read(SATURATED_KEY, "inference_saturated"),
+      unreachable: read(UNREACHABLE_KEY, "inference_unreachable"),
+    };
+  }
+
+  /**
+   * The whole vocabulary, mapped through the PASS — §6.8a's table by value.
+   *
+   * This is the assertion that makes the pair a table rather than two `if`s: every
+   * member of `SATURATION_VERDICTS` is reached through a real fixture, and the
+   * expected column is written as `boolean | null` so `clear`'s `false` and
+   * `unconfirmed`'s `null` are different assertions rather than the same one.
+   */
+  test("every SATURATION_VERDICTS member maps to its documented (saturated, unreachable) pair", async () => {
+    const cases: ReadonlyArray<{
+      verdict: SaturationVerdict;
+      spy: () => Spy;
+      probe: () => Promise<ToolCallProbeResult>;
+      pair: { saturated: boolean | null; unreachable: boolean | null };
+    }> = [
+      { verdict: "clear", spy: () => driver(), probe: probeThatMustNotRun, pair: { saturated: false, unreachable: false } },
+      { verdict: "uncorrelated", spy: uncorrelatedDriver, probe: probeThatMustNotRun, pair: { saturated: null, unreachable: null } },
+      { verdict: "saturated", spy: correlatedDriver, probe: async () => timeoutProbe(), pair: { saturated: true, unreachable: null } },
+      { verdict: "endpoint_down", spy: correlatedDriver, probe: async () => unreachableProbe(), pair: { saturated: null, unreachable: true } },
+      { verdict: "unconfirmed", spy: correlatedDriver, probe: async () => inconclusiveProbe(), pair: { saturated: null, unreachable: null } },
+    ];
+    // The table covers the real vocabulary, entire — not a subset of it.
+    expect(cases.map((c) => c.verdict).sort()).toEqual([...SATURATION_VERDICTS].sort());
+    /*
+     * PREMISE, a step earlier: the two columns must DISAGREE somewhere, or a pass
+     * that fed `saturated` to both kinds would satisfy every row below.
+     */
+    const rows = cases.map((c) => c.pair);
+    expect(rows.some((p) => p.saturated !== p.unreachable)).toBe(true);
+    for (const c of cases) {
+      expect(await threeValued(c.spy(), c.probe)).toEqual({ verdict: c.verdict, ...c.pair });
+    }
+  });
+
+  /**
+   * The pure mapping, asserted separately from the pass so the exhaustiveness has
+   * a probe of its own. `clear` is the ONLY `false`.
+   */
+  test("unreachableFrom: only `clear` is false, only `endpoint_down` is true, null otherwise", () => {
+    const outcome = (verdict: SaturationVerdict): SaturationOutcome => ({
+      verdict,
+      saturated: null,
+      suppressed: false,
+      subject: `${PROVIDER}/${MODEL}`,
+      correlated: [],
+      probe: null,
+    });
+    expect(unreachableFrom(null)).toBeNull();
+    expect(SATURATION_VERDICTS.map((v) => [v, unreachableFrom(outcome(v))])).toEqual([
+      ["clear", false],
+      ["uncorrelated", null],
+      ["saturated", null],
+      ["endpoint_down", true],
+      ["unconfirmed", null],
+    ]);
+  });
+
+  /** A pass that never swept could not tell, so both halves stay silent. */
+  test("a SKIPPED pass says nothing about either half of the pair", async () => {
+    const records = store();
+    const spy = driver({
+      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+    });
+    const out = await triagePass(deps({ driver: spy.driver, records }));
+    expect(out.kind).toBe("skipped");
+    expect(records.held.get(UNREACHABLE_KEY)).toBeUndefined();
+    expect(records.held.get(SATURATED_KEY)).toBeUndefined();
   });
 });
 
