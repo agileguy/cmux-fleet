@@ -247,11 +247,31 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
   });
 });
 
-/** One environment, one service, one observer that replied — the ordinary sweep. */
+/**
+ * One environment, one service, one observer that replied — the ordinary sweep.
+ *
+ * **§7.4's window bound and its echo are both REQUIRED** (§13 task 5.3d), so this
+ * fixture carries them rather than leaving the check unrun: the observer opened
+ * its window four minutes into the six-minute range ending at the dispatch.
+ *
+ * The instants are not asserted here, and they do not need to be — the positive
+ * control below asserts `reason: "observed"`, which is reachable only if the echo
+ * lands INSIDE §7.4's range. A fixture that drifted out of range would turn that
+ * assertion red rather than quietly making this file's join test vacuous, which is
+ * the property that matters: this file grades the parse-to-verdict seam, and a
+ * seam asserted against a discarded artifact grades nothing.
+ */
 const COVERAGE: SweepCoverage = {
   declared: ["authorization"],
   assignments: [{ worker: "obs-t2", services: ["authorization"] }],
-  artifacts: [{ worker: "obs-t2", sweep_id: "T-sweep-41" }],
+  artifacts: [
+    { worker: "obs-t2", sweep_id: "T-sweep-41", window_opened_at: "2026-09-06T11:56:00.000Z" },
+  ],
+  window: {
+    dispatched_at: "2026-09-06T12:00:00.000Z",
+    default_window_s: 300,
+    reserve_s: 60,
+  },
 };
 
 describe("a document the host can act on — the positive control", () => {

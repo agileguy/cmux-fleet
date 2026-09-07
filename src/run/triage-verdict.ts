@@ -251,16 +251,20 @@ export interface ObserverArtifact {
   readonly sweep_id: string | null;
   /**
    * §7.4's THIRD required field — the instant the observer's queries looked back
-   * from. `null` or absent when the artifact omitted it, which
+   * from. `null` when the artifact named no usable value, which
    * {@link windowEcho} answers as `absent` and {@link assessTriageSweep} spends
    * as `stale_window`.
    *
-   * Optional in the TYPE for the reason {@link SweepCoverage.window} records,
-   * and not because the contract is optional: §7.4 lists it among *"three
-   * required fields"*, and an artifact that omits it is refused whenever a
-   * policy is supplied.
+   * **REQUIRED here, and `string | null` rather than optional, because the two
+   * absences are different facts and only one of them is a worker's.** §7.4 lists
+   * it among *"three required fields"*, so an artifact that omitted it is a
+   * contract violation the host must be able to RECORD — and `null` is how it
+   * records one. An OPTIONAL member would have spelled that fault with the same
+   * token as *"the host never read the field"*, which is a bug in the host, and a
+   * reader cannot tell those apart from a missing key. §13 task 5.3d, closing the
+   * debt {@link SweepCoverage.window} records.
    */
-  readonly window_opened_at?: string | null;
+  readonly window_opened_at: string | null;
 }
 
 /**
@@ -307,27 +311,25 @@ export interface SweepCoverage {
   readonly artifacts: readonly ObserverArtifact[];
   /**
    * §7.4's window bound — the dispatch instant and the environment's configured
-   * window. Absent leaves the window echo UNRUN, and
-   * {@link SweepAssessment.window_checked} says so in the outcome.
+   * window.
    *
-   * **Optional against this module's own grain, and the reason is a process one
-   * rather than a design one.** Everything else here is required precisely so a
-   * caller cannot skip it — the posture the header calls *"a property of the
-   * code"* rather than caller discipline. A required member would be the right
-   * shape; it would also be a compile error in
-   * `test/unit/triage-document.test.ts:251`, which builds a `SweepCoverage`
-   * literal and belongs to no task in §13's round-10 slice, and §13 task 5.3c's
-   * own *"Touches"* line does not list that file. So the member is optional, the
-   * skip is PUBLISHED rather than silent, and the note is here for whoever
-   * closes it: making `window` required is a three-line change to that literal
-   * and to `ObserverArtifact` above, and it should be made.
+   * **REQUIRED, and it was optional for exactly one round.** Task 5.3c shipped it
+   * optional for a process reason rather than a design one: a required member was
+   * a compile error in `test/unit/triage-document.test.ts`, a file that belonged
+   * to no task in that round's slice. §13 task 5.3d closes it, and the reason it
+   * was worth closing is the posture this module's header states — everything
+   * else on this interface is required precisely so a caller cannot skip it,
+   * *"a property of the code"* rather than caller discipline. While the member
+   * was optional, §7.4's second echo was the one check here a caller could
+   * decline to run by omitting an argument, and omitting an argument is not a
+   * decision anybody makes on purpose.
    *
    * A caller that supplies it cannot then be lied to — the dispatch instant is
    * the host's own value and is never read out of an artifact, for exactly the
    * reason `sweepIdEcho`'s dispatched id is a parameter: a comparand the
    * document supplied would compare a value to itself and pass forever.
    */
-  readonly window?: SweepWindow;
+  readonly window: SweepWindow;
 }
 
 /**
@@ -391,6 +393,22 @@ export function evidenceGaps(row: TriageRow): readonly EvidenceGap[] {
 /** Present, and not merely a string that exists. */
 function named(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * The row's own citation — §7.5's ledger, first named entry, trimmed.
+ *
+ * The same {@link named} predicate the `ledger` gap uses, so the two cannot
+ * disagree about what counts: a row whose gaps do NOT include `ledger` has a
+ * non-null citation here, and a row whose gaps DO include it has `null`. That
+ * equivalence is what lets {@link serviceSignal} refuse a clear on a null
+ * citation without re-deriving §6.7 rule 2.
+ *
+ * Trimmed because the value is pasted into a notification and a log line, and
+ * `named` has already ruled that the surrounding space carries nothing.
+ */
+function firstEvidenceRef(row: TriageRow): string | null {
+  return row.evidence_ref.find(named)?.trim() ?? null;
 }
 
 /**
@@ -597,6 +615,45 @@ export interface ServiceAssessment {
    * evidence, and empty when there was no row to grade.
    */
   readonly gaps: readonly EvidenceGap[];
+  /**
+   * THIS service's own citation — §7.5's `evidence_ref` ledger, first named
+   * entry. `null` when there was no row to read, or when the row's ledger named
+   * nothing (§13 task 5.3e).
+   *
+   * ## Why a per-row field exists at all
+   *
+   * §6.8 asks a recovery to name *"the evidence that closed it"* — singular, and
+   * about ONE incident. Before this field, {@link sweepObservations} had only a
+   * sweep-level ref to cite, following `consoleHealthObservations`' precedent,
+   * which is right for a console-health fact (there IS one sweep) and wrong for a
+   * service (there are as many observers as the partition dispatched). A recovery
+   * on `authorization` that cited the sweep's `triage.json` pointed the operator
+   * at the collation rather than at the observation that actually cleared it.
+   *
+   * ## Singular, and the first named entry
+   *
+   * §7.5's `evidence_ref` is a LEDGER — an array — and `IncidentSignal` takes one
+   * string. Something has to choose, and the choice is made here, once, rather
+   * than at each of the call sites that would otherwise each pick differently.
+   * First-named is the observer's own ordering, and {@link named} decides what
+   * counts, so `[""]` and `["   "]` are `null` here for exactly the reason they
+   * are a `ledger` gap above: a citation defeatable with a space bar is not a
+   * citation.
+   *
+   * ## It is a RECORD, not a licence
+   *
+   * Carried on the `unevidenced_healthy` row too, beside {@link claimed} and
+   * {@link gaps}, because on that row the host did read a row and the row's
+   * contents are the fact being reported. It is `null` on every {@link blank} row
+   * for {@link claimed}'s reason: there was no row the host was willing to read.
+   *
+   * **A non-null value here is not evidence that the service is fine**, and
+   * nothing downstream may treat it as such. {@link serviceSignal} reads
+   * `assessment` to decide WHICH signal, and this field only to fill in the
+   * citation — an order that matters, because the reverse would let a row with a
+   * ledger and a missing selector clear an incident.
+   */
+  readonly evidence_ref: string | null;
 }
 
 /**
@@ -627,8 +684,8 @@ export interface SweepCensus {
    * id out of it: the observer produced a file, every row of that file was
    * discarded, and counting it as a report is how stale data becomes coverage.
    *
-   * Empty on every sweep assessed without a window policy, which
-   * {@link SweepAssessment.window_checked} distinguishes from a clean one.
+   * Empty on a clean sweep, and there is no second reading of that emptiness:
+   * {@link SweepCoverage.window} is required, so the echo ran (§13 task 5.3d).
    */
   readonly observers_stale_window: readonly string[];
   /**
@@ -687,7 +744,20 @@ export interface SweepAssessment {
   readonly stale_replay: readonly string[];
   /**
    * Every artifact whose window echo failed §7.4, by producing worker. Empty on
-   * a clean sweep, and empty on every sweep assessed without a policy.
+   * a clean sweep, and empty means clean.
+   *
+   * **`window_checked` was RETIRED from this interface by §13 task 5.3d, and the
+   * retirement is a decision rather than a tidy-up.** It published whether §7.4's
+   * echo had run at all, because {@link SweepCoverage.window} was optional and
+   * *"a caller reading `stale_window: []` cannot otherwise tell a sweep whose
+   * windows were all in range from one where nobody looked"* — it was the skip's
+   * own witness (ISC-698). With the policy required there is no skip left to
+   * witness: the echo runs on every sweep this function can be handed, so the
+   * field could only ever be `true`. A boolean that is a constant is worse than
+   * no boolean — a reader may branch on it believing a `false` case exists, and a
+   * test asserting `true` asserts nothing about the code. What ISC-698 actually
+   * wanted was an unskippable check, and the required member IS that, enforced by
+   * the compiler rather than published after the fact.
    *
    * **The collator can never appear here, and that is the contract rather than
    * an omission.** §7.4 puts `window_opened_at` on `observer-ops.json`; §7.5's
@@ -695,16 +765,6 @@ export interface SweepAssessment {
    * `tri-1` when the document is stale and this list names observers only.
    */
   readonly stale_window: readonly string[];
-  /**
-   * Whether §7.4's window echo ran at all — `coverage.window` was supplied.
-   *
-   * Published rather than inferred, for {@link SweepCensus.observers_unsolicited}'s
-   * reason: a check that did not run is a fact about the sweep, and the only
-   * place it would otherwise appear is nowhere. A caller reading
-   * `stale_window: []` cannot otherwise tell a sweep whose windows were all in
-   * range from one where nobody looked.
-   */
-  readonly window_checked: boolean;
 }
 
 /**
@@ -775,15 +835,34 @@ export function assessTriageSweep(
       continue;
     }
     echoes.set(artifact.worker, sweepIdEcho(dispatchedSweepId, artifact.sweep_id));
-    if (policy !== undefined) {
-      windows.set(
-        artifact.worker,
-        windowEcho(policy.dispatched_at, artifact.window_opened_at, policy),
-      );
-    }
+    windows.set(
+      artifact.worker,
+      windowEcho(policy.dispatched_at, artifact.window_opened_at, policy),
+    );
   }
 
-  /** §7.4's echo, failed. Always `false` when no policy was supplied. */
+  /**
+   * §7.4's echo, failed.
+   *
+   * The `undefined` arm is an observer that produced NO artifact — `windows` is
+   * keyed by the artifacts actually found, so a silent seat has no entry and must
+   * not be reported as a window fault. It is `no_artifact`, which is a different
+   * and narrower thing to go and fix.
+   *
+   * **That arm is UNREACHABLE from the three call sites below, and it is kept
+   * anyway — stated here so the next mutation round does not re-derive it.** Task
+   * 5.3d made `coverage.window` required, so `echoes` and `windows` are now
+   * populated together in one loop and `echoes.has(w)` implies `windows.has(w)`;
+   * every call site already establishes `echoes.get(w) === "fresh"` first. So
+   * deleting `echo !== undefined` is an EQUIVALENT mutant: no fixture can
+   * distinguish it, and one that appeared to would be asserting something untrue
+   * about the loop above. It survives on purpose. Before 5.3d the guard was
+   * load-bearing — `windows` was populated only when a policy was supplied — and
+   * this is the module's standing posture for the class either way: the
+   * `unassigned` precedence step and `saturationVerdict`'s zero-dispatch arm are
+   * both answered rather than assumed away, because a total function that got
+   * this wrong would report a window fault against a seat that never wrote a file.
+   */
   const badWindow = (worker: string): boolean => {
     const echo = windows.get(worker);
     return echo !== undefined && echo !== "fresh";
@@ -912,6 +991,7 @@ export function assessTriageSweep(
         observer,
         claimed: "healthy",
         gaps,
+        evidence_ref: firstEvidenceRef(row),
       };
     }
 
@@ -922,6 +1002,7 @@ export function assessTriageSweep(
       observer,
       claimed: row.assessment,
       gaps,
+      evidence_ref: firstEvidenceRef(row),
     };
   });
 
@@ -930,7 +1011,6 @@ export function assessTriageSweep(
     services,
     stale_replay: staleReplay,
     stale_window: observersStaleWindow,
-    window_checked: policy !== undefined,
     census: {
       observers_total: dispatched.size,
       observers_reported: observersReported,
@@ -955,13 +1035,26 @@ export function assessTriageSweep(
  * for this exact case. `claimed` is `null` rather than the row's value: there was
  * no row the host was willing to read, and carrying one here would put a claim
  * the host rejected into the field a log line prints.
+ *
+ * `evidence_ref` is `null` for the same reason and it is the same sentence: a
+ * discarded artifact's ledger is not a citation. A `stale_replay` row that
+ * carried last sweep's `evidence_ref` forward would hand the incident machine a
+ * reference to the very file the host has just refused to read.
  */
 function blank(
   service: string,
   observer: string | null,
   reason: Exclude<AssessmentReason, "observed" | "unevidenced_healthy">,
 ): ServiceAssessment {
-  return { service, assessment: "indeterminate", reason, observer, claimed: null, gaps: [] };
+  return {
+    service,
+    assessment: "indeterminate",
+    reason,
+    observer,
+    claimed: null,
+    gaps: [],
+    evidence_ref: null,
+  };
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1262,10 +1355,21 @@ export interface SweepObservationContext {
   /** Epoch milliseconds. A PARAMETER — Phase 5 has no clock. */
   readonly at: number;
   /**
-   * What a signal CITES. One value for the sweep, as
-   * `ConsoleHealthFacts.evidenceRef` is, and non-nullable for the reason
-   * `IncidentSignal["observed_clear"]` makes it non-nullable: a recovery that
-   * names nothing is a recovery derived from an absence.
+   * The SWEEP's own artifact — `triage.json` — as the FALLBACK citation, and no
+   * longer the only one (§13 task 5.3e).
+   *
+   * The primary citation is now the row's
+   * ({@link ServiceAssessment.evidence_ref}); this value is what an `issue` falls
+   * back to when the observer's row named no evidence of its own. That case is
+   * ordinary rather than exceptional — §6.7 rule 2's gate applies to `healthy`
+   * alone, so a `degraded` row with an empty ledger is perfectly legal — and the
+   * collation document is the one artifact the host knows exists for it. Dropping
+   * the fallback would spend a real citation to gain nothing:
+   * `IncidentSignal["issue"].evidenceRef` is nullable, so the alternative is not
+   * a stricter type, it is an operator handed `null`.
+   *
+   * **A clear NEVER falls back to it**, and that asymmetry is the task's whole
+   * point — see {@link serviceSignal}.
    */
   readonly evidenceRef: string;
 }
@@ -1307,11 +1411,11 @@ export interface SweepObservationContext {
  *
  * ## The mapping, for the unsuppressed case
  *
- * | assessment | signal |
- * |---|---|
- * | `healthy` | `observed_clear` — post-gate, so §6.7 rule 2 has already run |
- * | `degraded`, `unhealthy` | `issue`, carrying that word as the reason |
- * | `indeterminate` | `unobserved` |
+ * | assessment | signal | cites |
+ * |---|---|---|
+ * | `healthy` | `observed_clear` — post-gate, so §6.7 rule 2 has already run | the ROW's ref, always |
+ * | `degraded`, `unhealthy` | `issue`, carrying that word as the reason | the row's ref, else the sweep's |
+ * | `indeterminate` | `unobserved` | nothing — it carries no ref |
  *
  * The `healthy` row is the gated one by construction: {@link ServiceAssessment}
  * has no field carrying the worker's raw verdict into `assessment`, and an
@@ -1339,13 +1443,64 @@ export function sweepObservations(
     at: context.at,
     signal: saturation.suppressed
       ? ({ kind: "suppressed" } as const)
-      : serviceSignal(service.assessment, context.evidenceRef),
+      : serviceSignal(service, context.evidenceRef),
   }));
 }
 
-/** The unsuppressed half of {@link sweepObservations}'s table. */
-function serviceSignal(assessment: ObserverAssessment, evidenceRef: string): IncidentSignal {
-  if (assessment === "healthy") return { kind: "observed_clear", evidenceRef };
+/**
+ * The unsuppressed half of {@link sweepObservations}'s table — §13 task 5.3e.
+ *
+ * ## The citation is the ROW's, because §6.8 asks about ONE incident
+ *
+ * *"the evidence that closed it"* — singular. A sweep-level ref answers a
+ * different question: it names the document that collated every service, so an
+ * operator following a recovery on `authorization` arrives at `triage.json` and
+ * still has to find the observation inside it. {@link ServiceAssessment} now
+ * carries the row's own, and a recovery cites that.
+ *
+ * ## A `healthy` with no citation is BLINDNESS, and this is a SECOND fence
+ *
+ * §6.7 rule 2 already downgrades an unevidenced `healthy` to `indeterminate`
+ * inside `assessTriageSweep`, so — today — a `healthy` reaching this line has a
+ * non-empty ledger by construction and the `null` arm below is unreachable. It is
+ * written anyway, and it is not defensive clutter:
+ *
+ *  - **The type cannot say it.** `IncidentSignal["observed_clear"].evidenceRef`
+ *    is a required `string` (ISC-714), and {@link ServiceAssessment.evidence_ref}
+ *    is `string | null`. Something must bridge those, and there are exactly two
+ *    bridges: refuse, or substitute. Substituting the sweep's ref is the one
+ *    thing this task must not do — it would turn a `null` row citation into a
+ *    well-formed clear, which is *"a way to construct an evidence-free clear"*
+ *    wearing the collation document as a disguise.
+ *  - **It holds when the first fence moves.** Delete the `ledger` member from
+ *    {@link EVIDENCE_GAPS} and an unevidenced `healthy` walks through
+ *    `assessTriageSweep` — and arrives here with `evidence_ref: null` and is
+ *    answered as `unobserved` rather than clearing a firing incident. ISC-739's
+ *    claim (*"an unevidenced `healthy` reaches the incident machine as blindness,
+ *    never as a clear"*) stops depending on one branch in another function.
+ *
+ * `unobserved` is the right refusal rather than a lesser signal because it is
+ * already what this module says when it declines a claim: *"I could not see
+ * enough to tell you"*. A `healthy` naming no evidence is precisely that.
+ *
+ * ## An `issue` DOES fall back, and the asymmetry is the consequence, not a mood
+ *
+ * `observed_clear` is the message §6.8 calls *"the single most damaging message
+ * this console could send"* when it is wrong, and it moves a record toward
+ * `clear` on its own. An `issue` is confirmable and *"never notifies on its
+ * own"*, and its `evidenceRef` is typed `string | null` for that reason. So the
+ * evidence bar differs because the consequence differs, and the fallback costs
+ * nothing a clear would have paid for.
+ */
+function serviceSignal(service: ServiceAssessment, sweepRef: string): IncidentSignal {
+  const { assessment, evidence_ref: ref } = service;
   if (assessment === "indeterminate") return { kind: "unobserved" };
-  return { kind: "issue", reason: assessment satisfies ObservedIssueReason, evidenceRef };
+  if (assessment === "healthy") {
+    return ref === null ? { kind: "unobserved" } : { kind: "observed_clear", evidenceRef: ref };
+  }
+  return {
+    kind: "issue",
+    reason: assessment satisfies ObservedIssueReason,
+    evidenceRef: ref ?? sweepRef,
+  };
 }

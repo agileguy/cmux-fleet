@@ -187,7 +187,20 @@ function artifact(
   return { worker, sweep_id, window_opened_at };
 }
 
-/** The whole environment, one service per observer, every reply present and fresh. */
+/**
+ * The whole environment, one service per observer, every reply present and fresh.
+ *
+ * **`window` is supplied by default, and after §13 task 5.3d it has to be** —
+ * `SweepCoverage.window` is required, so there is no longer any such thing as a
+ * sweep assessed with the window echo unrun. Every fixture in this file therefore
+ * runs BOTH of §6.6 layer 3's echoes, and `artifact()`'s default `OPENED` sits
+ * strictly inside §7.4's range so that the id-only fixtures still assert what they
+ * were written to assert.
+ *
+ * That is a real strengthening rather than bookkeeping: before 5.3d, every fixture
+ * outside the window block ran with no policy, so an implementation that spent
+ * `stale_window` on a perfectly good artifact was invisible to all of them.
+ */
 function fullCoverage(over: Partial<SweepCoverage> = {}): SweepCoverage {
   return {
     declared: [...DECLARED],
@@ -197,6 +210,7 @@ function fullCoverage(over: Partial<SweepCoverage> = {}): SweepCoverage {
       assign(OBS[2], DECLARED[2]),
     ],
     artifacts: [artifact(OBS[0]), artifact(OBS[1]), artifact(OBS[2])],
+    window: WINDOW,
     ...over,
   };
 }
@@ -1032,7 +1046,7 @@ describe("§7.4 — the window_opened_at echo (task 5.3c)", () => {
     expect(result.stale_window).toEqual([]);
     expect(result.census.counted).toBe(3);
     expect(result.census.observers_reported).toBe(3);
-    expect(result.window_checked).toBe(true);
+    expect(result.census.observers_stale_window).toEqual([]);
   });
 
   /**
@@ -1121,13 +1135,26 @@ describe("§7.4 — the window_opened_at echo (task 5.3c)", () => {
     expect(result.census.observers_stale_window).toEqual([OBS[0]]);
   });
 
-  /** §7.4's first table row: absent is refused, like every other artifact echo. */
-  test("an artifact that omitted the field discards its services", () => {
+  /**
+   * §7.4's first table row: absent is refused, like every other artifact echo.
+   *
+   * `null` and not a missing key, because after §13 task 5.3d a missing key is not
+   * a value this type can hold — see the requiredness test at the foot of this
+   * block. The distinction the required member preserves is exactly the one being
+   * asserted here: `null` is *"the observer named no window"*, a worker fault the
+   * host RECORDS and spends as `stale_window`, and it is now spelled differently
+   * from *"the host never assembled the question"*, which is a host fault and no
+   * longer constructible.
+   */
+  test("an artifact that names no window discards its services", () => {
     const result = assessTriageSweep(
       SWEEP,
       fullCoverage({
-        window: WINDOW,
-        artifacts: [{ worker: OBS[0], sweep_id: SWEEP }, artifact(OBS[1]), artifact(OBS[2])],
+        artifacts: [
+          { worker: OBS[0], sweep_id: SWEEP, window_opened_at: null },
+          artifact(OBS[1]),
+          artifact(OBS[2]),
+        ],
       }),
       doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
     );
@@ -1244,34 +1271,80 @@ describe("§7.4 — the window_opened_at echo (task 5.3c)", () => {
   });
 
   /**
-   * A SWEEP ASSESSED WITH NO POLICY SAYS SO, IN THE OUTCOME.
+   * ── THE CHECK CANNOT BE SKIPPED, AND THE COMPILER IS WHAT SAYS SO ──────────
    *
-   * `SweepCoverage.window` is optional, which means a caller can leave the check
-   * unrun. That is a fact about the sweep and the only place it would otherwise
-   * appear is nowhere — the same argument `observers_unsolicited` is published
-   * under. `window_checked` is the fact, and asserting BOTH values is what makes
-   * it a claim rather than a constant: an implementation that hardcoded `true`
-   * passes the first arm and fails the second.
+   * **This test replaces `window_checked` (§13 task 5.3d), and the replacement is
+   * the task.** Until this round `SweepCoverage.window` was optional, so a caller
+   * could leave §7.4's echo unrun by omitting an argument; `SweepAssessment`
+   * published `window_checked` so that a reader of `stale_window: []` could tell a
+   * clean sweep from one where nobody looked (ISC-698). Both fields are gone,
+   * because a required member makes the skip UNCONSTRUCTIBLE rather than merely
+   * VISIBLE — and once it is unconstructible, `window_checked` can only ever be
+   * `true`, which is a constant wearing a boolean's clothes: a reader would branch
+   * on it believing a `false` case exists, and a test asserting `true` would
+   * assert nothing about the code.
+   *
+   * A requiredness claim has no runtime shadow, so it is asserted the way ISC-714
+   * asserts `observed_clear`'s non-nullable ref — with `@ts-expect-error`, graded
+   * by `bun run typecheck`. The directive is load-bearing in BOTH directions:
+   * TypeScript reports an unused `@ts-expect-error` as an error of its own, so if
+   * either member ever goes optional again this file goes red rather than silently
+   * passing. That is the property `window_checked` could not have.
+   *
+   * Both members are covered, because they are two separate fields on two separate
+   * interfaces and one of them going optional would not disturb the other. The
+   * `window_opened_at` arm is the one the SRD's own note gets wrong by omission:
+   * making only `SweepCoverage.window` required still leaves an artifact able to
+   * skip §7.4's third field entirely.
    */
-  test("window_checked is false without a policy and true with one", () => {
-    const unchecked = assessTriageSweep(
+  test("neither window member can be omitted by a caller", () => {
+    const artifacts = [artifact(OBS[1]), artifact(OBS[2])];
+
+    // @ts-expect-error — `window` is required: a coverage with no policy would
+    // leave §7.4's echo unrun, which is the skip task 5.3d removed.
+    const noPolicy: SweepCoverage = { declared: [...DECLARED], assignments: [], artifacts };
+
+    // @ts-expect-error — `window_opened_at` is required: an artifact that simply
+    // omitted §7.4's third field would be indistinguishable from one the host
+    // never read it from.
+    const noWindowEcho: ObserverArtifact = { worker: OBS[0], sweep_id: SWEEP };
+
+    // Referenced so neither binding is dead code, and so a reader can see that the
+    // claim is about the TYPES rather than about anything these values do.
+    expect(noPolicy.declared).toHaveLength(3);
+    expect(noWindowEcho.worker).toBe(OBS[0]);
+  });
+
+  /**
+   * AND THE ECHO REALLY DOES RUN ON THE FIXTURES THAT ARE NOT ABOUT IT.
+   *
+   * The positive half of the test above, and it is not redundant with it: a
+   * `@ts-expect-error` proves a caller cannot omit the policy, and this proves
+   * `assessTriageSweep` does not then ignore the one it was handed. An
+   * implementation that took the required member and never called `windowEcho`
+   * would satisfy the compiler and every id-only fixture in this file.
+   *
+   * `fullCoverage()` is used with NO override, so what is being asserted is that
+   * the file's default fixture — the one ~100 other tests are built on — is
+   * window-checked. Before 5.3d it was not, and an implementation that spent
+   * `stale_window` on a good artifact was invisible to all of them.
+   */
+  test("the default fixture runs the window echo, and passes it", () => {
+    const clean = assessTriageSweep(SWEEP, fullCoverage(), doc([row(DECLARED[0])]));
+    expect(clean.stale_window).toEqual([]);
+    expect(of(clean, DECLARED[0]).reason).toBe("observed");
+
+    // The same fixture with one window moved out of range DOES fire, so the empty
+    // list above is a check that ran rather than a check that was never made.
+    const dirty = assessTriageSweep(
       SWEEP,
       fullCoverage({
         artifacts: [artifact(OBS[0], SWEEP, TOO_EARLY), artifact(OBS[1]), artifact(OBS[2])],
       }),
-      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
-    );
-    expect(unchecked.window_checked).toBe(false);
-    // And with nothing to check against, the out-of-range window is not spent.
-    expect(of(unchecked, DECLARED[0]).reason).toBe("observed");
-    expect(unchecked.stale_window).toEqual([]);
-
-    const checked = assessTriageSweep(
-      SWEEP,
-      fullCoverage({ window: WINDOW }),
       doc([row(DECLARED[0])]),
     );
-    expect(checked.window_checked).toBe(true);
+    expect(dirty.stale_window).toEqual([OBS[0]]);
+    expect(of(dirty, DECLARED[0]).reason).toBe("stale_window");
   });
 });
 
@@ -1333,6 +1406,7 @@ describe("§6.7 — coverage is counted host-side, never from triage.json's clai
         declared: ["mia", "authorization"],
         assignments: [assign(OBS[0], "mia", "authorization")],
         artifacts: [artifact(OBS[0])],
+        window: WINDOW,
       },
       doc([row("authorization"), row("ingest")]),
     );
@@ -1599,6 +1673,7 @@ describe("§6.7 — coverage is counted host-side, never from triage.json's clai
         declared: ["mia"],
         assignments: [assign(OBS[0], "mia"), assign(OBS[1], "mia")],
         artifacts: [artifact(OBS[0])],
+        window: WINDOW,
       },
       doc([row("mia")]),
     );
@@ -1619,7 +1694,7 @@ describe("§6.7 — coverage is counted host-side, never from triage.json's clai
   test("no declared services yields no assessments and counts nothing", () => {
     const result = assessTriageSweep(
       SWEEP,
-      { declared: [], assignments: [], artifacts: [] },
+      { declared: [], assignments: [], artifacts: [], window: WINDOW },
       doc([]),
     );
     expect(result.services).toEqual([]);
@@ -1840,6 +1915,25 @@ function assess(coverage: SweepCoverage, document: TriageDocument): SweepAssessm
 /** One evidenced `healthy` row per named service. */
 function healthyRows(...services: string[]): TriageRow[] {
   return services.map((s) => row(s, { assessment: "healthy" }));
+}
+
+/**
+ * The citation `row()` puts on ONE service — §13 task 5.3e's expected value.
+ *
+ * **Read out of the fixture rather than re-typed**, so the two cannot drift: a
+ * hand-written copy of `row()`'s template would keep passing after `row()` changed
+ * its ledger, and would then be asserting a string that appears nowhere in the
+ * sweep under test.
+ *
+ * The values are per-service and none of them is {@link EVIDENCE}, which is the
+ * property the whole 5.3e block rests on — a fixture where the row's citation and
+ * the sweep's coincide cannot tell "cites the row" from "cites the sweep", and the
+ * premise test in that block asserts the non-coincidence one step earlier.
+ */
+function rowRef(service: string): string {
+  const ref = row(service).evidence_ref[0];
+  if (ref === undefined) throw new Error(`row(${service}) carries no evidence_ref to cite`);
+  return ref;
 }
 
 /**
@@ -2488,6 +2582,12 @@ describe("the unsuppressed mapping, and what §6.7 rule 2 has already done to it
    * All four assessments in ONE sweep and ONE value comparison, so a mapping that
    * returned the same signal twice reddens. Four services, four different
    * observers, four different answers.
+   *
+   * **Every citation is the ROW's own** (§13 task 5.3e), and they are four
+   * different strings, none of them {@link EVIDENCE}. So this single `toEqual`
+   * now also grades the citation axis: a mapping that cited the sweep's ref
+   * everywhere reddens on three rows at once, and one that cited the first row's
+   * ref for every service reddens on two.
    */
   test("healthy clears, degraded and unhealthy raise, indeterminate is blindness", async () => {
     const fourth = "obs-t4";
@@ -2517,19 +2617,19 @@ describe("the unsuppressed mapping, and what §6.7 rule 2 has already done to it
         subject: { kind: "service", environment: ENV, service: DECLARED[0] },
         sweepId: SWEEP,
         at: AT,
-        signal: { kind: "observed_clear", evidenceRef: EVIDENCE },
+        signal: { kind: "observed_clear", evidenceRef: rowRef(DECLARED[0]) },
       },
       {
         subject: { kind: "service", environment: ENV, service: DECLARED[1] },
         sweepId: SWEEP,
         at: AT,
-        signal: { kind: "issue", reason: "degraded", evidenceRef: EVIDENCE },
+        signal: { kind: "issue", reason: "degraded", evidenceRef: rowRef(DECLARED[1]) },
       },
       {
         subject: { kind: "service", environment: ENV, service: DECLARED[2] },
         sweepId: SWEEP,
         at: AT,
-        signal: { kind: "issue", reason: "unhealthy", evidenceRef: EVIDENCE },
+        signal: { kind: "issue", reason: "unhealthy", evidenceRef: rowRef(DECLARED[2]) },
       },
       {
         subject: { kind: "service", environment: ENV, service: "ingest" },
@@ -2562,7 +2662,10 @@ describe("the unsuppressed mapping, and what §6.7 rule 2 has already done to it
     const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
     const observations = sweepObservations(assessment, outcome, CTX);
     expect(observations[0]!.signal).toEqual({ kind: "unobserved" });
-    expect(observations[1]!.signal).toEqual({ kind: "observed_clear", evidenceRef: EVIDENCE });
+    expect(observations[1]!.signal).toEqual({
+      kind: "observed_clear",
+      evidenceRef: rowRef(DECLARED[1]),
+    });
   });
 
   /** The sweep id on every observation is the HOST's, carried from the assessment. */
@@ -2571,6 +2674,323 @@ describe("the unsuppressed mapping, and what §6.7 rule 2 has already done to it
     const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
     const ids = new Set(sweepObservations(assessment, outcome, CTX).map((o) => o.sweepId));
     expect([...ids]).toEqual([SWEEP]);
+  });
+});
+
+/**
+ * ── THE PER-ROW CITATION (§13 task 5.3e) ───────────────────────────────────
+ *
+ * §6.8 asks a recovery to name *"the evidence that closed it"* — singular, and
+ * about ONE incident. Until this round {@link sweepObservations} had only a
+ * sweep-level ref to cite, so a recovery on `authorization` pointed the operator
+ * at `triage.json`, the document that collated every service, rather than at the
+ * observation that actually cleared it. {@link ServiceAssessment} now carries the
+ * row's own citation and the mapper cites that.
+ *
+ * ## THE FIXTURE PROPERTY THE WHOLE BLOCK RESTS ON
+ *
+ * `row()`'s ledger is per-service, so the three services carry three DIFFERENT
+ * citations and none of them is {@link EVIDENCE}. Without that, "cites the row"
+ * and "cites the sweep" are the same string and every assertion below passes
+ * against either implementation — this branch's recorded defect, where *"a
+ * filter/intersection survives mutation whenever every fixture makes the two sets
+ * equal"*. The premise is asserted first, in its own test.
+ *
+ * ## AND THE HAZARD THE TASK IS ACTUALLY GRADED ON
+ *
+ * A per-row ref is `null` on any row the host would not read, and
+ * `IncidentSignal["observed_clear"]` REQUIRES a `string`. Something has to bridge
+ * that, and the wrong bridge — substituting the sweep's ref — would turn a null
+ * citation into a well-formed clear, which is an evidence-free clear wearing the
+ * collation document as a disguise. {@link serviceSignal} refuses instead, so the
+ * bridge is `unobserved`, and ISC-739's claim stops depending on a branch in
+ * another function. The two tests that pin it are the stripped-citation pair and
+ * the missing-selector row, and they pin it from opposite sides: one has a
+ * `healthy` with no citation, the other a citation on a row that must not clear.
+ */
+describe("§6.8's citation is the ROW's, not the sweep's (task 5.3e)", () => {
+  /**
+   * THE PREMISE, one step earlier than everything that rests on it.
+   *
+   * Three distinct citations, none equal to the sweep's, and the sweep's is a real
+   * non-empty string so that "cited the sweep" is a distinguishable outcome rather
+   * than a vacuous one.
+   */
+  test("the row citations are pairwise distinct, and none of them is the sweep's", () => {
+    const refs = DECLARED.map(rowRef);
+    expect(new Set(refs).size).toBe(refs.length);
+    for (const ref of refs) expect(ref).not.toBe(EVIDENCE);
+    expect(EVIDENCE.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * §7.5's `evidence_ref` is a LEDGER and `IncidentSignal` takes one string, so
+   * something must choose. The choice is FIRST NAMED, trimmed, and it is made in
+   * one place rather than at each call site that would otherwise pick differently.
+   *
+   * The rows are `degraded` throughout, which isolates the citation from §6.7 rule
+   * 2 entirely: the gate applies to `healthy` alone, so every row here is
+   * `observed` and the only thing varying is the ledger. A `healthy` fixture would
+   * conflate "the ledger named nothing" with "the gate downgraded it".
+   *
+   * `named` is the same predicate the `ledger` gap uses, which is why a blank first
+   * entry is skipped rather than cited: a citation defeatable with a space bar is
+   * not a citation, and the two readings of the ledger must not disagree.
+   */
+  test("the citation is the ledger's first named entry, trimmed", () => {
+    const cases: readonly { label: string; ledger: readonly string[]; cites: string | null }[] = [
+      { label: "one entry", ledger: ["obs:ops.json#a"], cites: "obs:ops.json#a" },
+      { label: "surrounding space", ledger: ["  obs:ops.json#a  "], cites: "obs:ops.json#a" },
+      { label: "blank first", ledger: ["", "obs:ops.json#b"], cites: "obs:ops.json#b" },
+      { label: "whitespace first", ledger: ["   ", "obs:ops.json#b"], cites: "obs:ops.json#b" },
+      { label: "two named, take the first", ledger: ["first", "second"], cites: "first" },
+      { label: "empty ledger", ledger: [], cites: null },
+      { label: "one blank", ledger: [""], cites: null },
+      { label: "all whitespace", ledger: ["   ", "  "], cites: null },
+    ];
+
+    for (const c of cases) {
+      const result = assess(
+        fullCoverage(),
+        doc([row(DECLARED[0], { assessment: "degraded", evidence_ref: c.ledger })]),
+      );
+      // The label travels into the comparison so a failure names the case rather
+      // than reporting `null !== "first"` from an unidentifiable row.
+      expect({ label: c.label, reason: of(result, DECLARED[0]).reason }).toEqual({
+        label: c.label,
+        reason: "observed",
+      });
+      expect({ label: c.label, cites: of(result, DECLARED[0]).evidence_ref }).toEqual({
+        label: c.label,
+        cites: c.cites,
+      });
+    }
+  });
+
+  /**
+   * A ROW THE HOST REFUSED TO READ CITES NOTHING, across all four artifact-level
+   * refusals in one sweep.
+   *
+   * Every one of these services has a `triage.json` row carrying a full ledger, so
+   * an implementation that read the citation off the document before applying the
+   * precedence would produce four non-null values here. That is the same
+   * claim-over-count inversion §6.7 exists to prevent: a `stale_replay` row citing
+   * its own ledger hands the incident machine a reference to the very file the
+   * host has just refused to read.
+   */
+  test("a row the host refused to read cites nothing", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        declared: [...DECLARED, "ingest"],
+        artifacts: [artifact(OBS[0], PREVIOUS, OPENED), artifact(OBS[1], SWEEP, TOO_EARLY)],
+      }),
+      doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
+    );
+
+    expect(result.services.map((s) => [s.reason, s.evidence_ref])).toEqual([
+      ["stale_replay", null],
+      ["stale_window", null],
+      ["no_artifact", null],
+      ["unassigned", null],
+    ]);
+  });
+
+  /**
+   * The two ROW-level refusals, and `duplicate_rows` is the one that matters.
+   *
+   * The two `billing` rows carry DIFFERENT ledgers, so first-row-wins and
+   * last-row-wins produce different non-null citations and both redden. That is
+   * the mutation round this module already survived once, arriving through a new
+   * field: picking one of two contradictory rows is judgement, and citing one of
+   * two contradictory ledgers is the same judgement wearing a smaller hat.
+   */
+  test("a duplicated or missing row cites nothing either", () => {
+    const result = assessTriageSweep(
+      SWEEP,
+      fullCoverage({
+        declared: ["billing", "search"],
+        assignments: [assign(OBS[0], "billing", "search")],
+        artifacts: [artifact(OBS[0])],
+      }),
+      doc([row("billing"), row("billing", { evidence_ref: ["a-second-and-different-ledger"] })]),
+    );
+
+    expect(result.services.map((s) => [s.reason, s.evidence_ref])).toEqual([
+      ["duplicate_rows", null],
+      ["unreported", null],
+    ]);
+  });
+
+  /**
+   * ── THE PAYOFF: §6.8's recovery names the observation, not the collation ────
+   *
+   * This is the sentence the whole task exists for. The recovery notification's
+   * `evidenceRef` is asserted BY VALUE against the row's citation AND asserted not
+   * to be the sweep's, so an implementation that kept citing `triage.json` fails
+   * the second assertion even though the first would have been satisfiable by any
+   * non-null string.
+   */
+  test("a real recovery names the row's evidence, and never the sweep's", async () => {
+    let records = new Map<string, IncidentRecord>();
+    for (let n = 0; n < 2; n += 1) {
+      const sick = assess(fullCoverage(), doc([row(DECLARED[0], { assessment: "unhealthy" })]));
+      const outcome = await saturationVerdict(sick, ENDPOINT, NEVER);
+      records = advanceAll(records, sweepObservations(sick, outcome, { ...CTX, at: AT + n })).records;
+    }
+    expect(records.get(DECLARED[0])!.state).toBe("firing");
+
+    const well = assess(fullCoverage(), doc(healthyRows(DECLARED[0])));
+    const outcome = await saturationVerdict(well, ENDPOINT, NEVER);
+    const step = advanceAll(records, sweepObservations(well, outcome, { ...CTX, at: AT + 2 }));
+
+    const recovered = step.notifications.filter((n) => n.kind === "recovered");
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]!.evidenceRef).toBe(rowRef(DECLARED[0]));
+    expect(recovered[0]!.evidenceRef).not.toBe(EVIDENCE);
+  });
+
+  /**
+   * ── THE GRADED HAZARD, ARM ONE: a null citation cannot become a clear ───────
+   *
+   * The sweep is assessed normally and then has ONLY its citations stripped —
+   * every other field, the `healthy` assessment included, is exactly what the gate
+   * produced. So the fixture isolates the one substitution this task must not
+   * make: an implementation that fell back to `context.evidenceRef` for a clear
+   * would answer three `observed_clear`s here, each citing a document that says
+   * nothing about the service it is clearing.
+   *
+   * The unstripped control runs first in the same test, because a mapper that
+   * returned `unobserved` for everything passes the stripped half perfectly.
+   */
+  test("stripping the citations turns three clears into three blindnesses", async () => {
+    const real = assess(fullCoverage(), doc(healthyRows(...DECLARED)));
+    const outcome = await saturationVerdict(real, ENDPOINT, NEVER);
+    expect(outcome.suppressed).toBe(false);
+
+    expect(sweepObservations(real, outcome, CTX).map((o) => o.signal)).toEqual(
+      DECLARED.map((s) => ({ kind: "observed_clear", evidenceRef: rowRef(s) })),
+    );
+
+    const stripped: SweepAssessment = {
+      ...real,
+      services: real.services.map((s) => ({ ...s, evidence_ref: null })),
+    };
+    // The premise: they are still `healthy`. Only the citation is gone.
+    expect(stripped.services.map((s) => s.assessment)).toEqual(["healthy", "healthy", "healthy"]);
+
+    expect(sweepObservations(stripped, outcome, CTX).map((o) => o.signal)).toEqual([
+      { kind: "unobserved" },
+      { kind: "unobserved" },
+      { kind: "unobserved" },
+    ]);
+  });
+
+  /**
+   * ── THE GRADED HAZARD, ARM TWO: a citation is not a licence ────────────────
+   *
+   * The mirror of the test above, and it pins the ORDER the mapper reads its two
+   * inputs in. This row carries a perfectly good ledger and fails the gate on the
+   * SELECTOR, so it arrives with `assessment: "indeterminate"` and a non-null
+   * citation. A mapper that reached for the citation first — *"there is evidence,
+   * so this is a clear"* — would recover a service on a row §6.7 rule 2 has
+   * already refused, which is §6.8's *"single most damaging message this console
+   * could send"*.
+   *
+   * The citation IS recorded, because on this row the host did read a row and its
+   * contents are the fact being reported, beside `claimed` and `gaps`. Recording
+   * it and refusing to act on it are the two halves of the same decision.
+   */
+  test("a healthy downgraded for its selector records its ledger and still does not clear", async () => {
+    const assessment = assess(
+      fullCoverage(),
+      doc([row(DECLARED[0], { assessment: "healthy", selector: null })]),
+    );
+    const target = of(assessment, DECLARED[0]);
+    expect(target.reason).toBe("unevidenced_healthy");
+    expect(target.gaps).toEqual(["selector"]);
+    expect(target.claimed).toBe("healthy");
+    expect(target.evidence_ref).toBe(rowRef(DECLARED[0]));
+    expect(target.assessment).toBe("indeterminate");
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(sweepObservations(assessment, outcome, CTX)[0]!.signal).toEqual({ kind: "unobserved" });
+  });
+
+  /**
+   * AN UNEVIDENCED `healthy` DOES NOT RECOVER A FIRING SERVICE, driven all the way
+   * through the machine (ISC-739's claim, re-asserted against the new field).
+   *
+   * ISC-714 makes the type refuse an evidence-free clear and ISC-739 makes the
+   * mapping produce blindness; this asserts the consequence at the far end, where
+   * an operator would have read the message. The suppression is explicitly NOT
+   * what saves it — the sweep is `clear` and nothing is suppressed, so the only
+   * thing standing between this row and a recovery notification is the gate and
+   * the mapper.
+   */
+  test("an unevidenced healthy leaves a firing service firing, and notifies nothing", async () => {
+    let records = new Map<string, IncidentRecord>();
+    for (let n = 0; n < 2; n += 1) {
+      const sick = assess(fullCoverage(), doc([row(DECLARED[0], { assessment: "unhealthy" })]));
+      const outcome = await saturationVerdict(sick, ENDPOINT, NEVER);
+      records = advanceAll(records, sweepObservations(sick, outcome, { ...CTX, at: AT + n })).records;
+    }
+    expect(records.get(DECLARED[0])!.state).toBe("firing");
+
+    const blind = assess(
+      fullCoverage(),
+      doc([row(DECLARED[0], { assessment: "healthy", evidence_ref: [] })]),
+    );
+    const target = of(blind, DECLARED[0]);
+    expect(target.claimed).toBe("healthy");
+    expect(target.gaps).toContain("ledger");
+    expect(target.evidence_ref).toBeNull();
+
+    const outcome = await saturationVerdict(blind, ENDPOINT, NEVER);
+    expect(outcome.suppressed).toBe(false);
+    const step = advanceAll(records, sweepObservations(blind, outcome, { ...CTX, at: AT + 2 }));
+
+    expect(step.records.get(DECLARED[0])!.state).toBe("firing");
+    expect(step.notifications.filter((n) => n.kind === "recovered")).toEqual([]);
+  });
+
+  /**
+   * AN `issue` FALLS BACK TO THE SWEEP, AND ONLY WHEN THE ROW NAMED NOTHING.
+   *
+   * The asymmetry is deliberate and it is the consequence rather than a mood:
+   * `observed_clear` moves a record toward `clear` on its own and is §6.8's most
+   * expensive message, while an `issue` is confirmable, *"never notifies on its
+   * own"*, and its `evidenceRef` is typed `string | null` for exactly that reason.
+   * So the evidence bar differs because the consequence differs.
+   *
+   * Both rows are `degraded`, so §6.7 rule 2's gate — which applies to `healthy`
+   * alone — is not what distinguishes them. The ONLY difference is the ledger, and
+   * the two expected citations are different strings, so a mapper that always used
+   * the row's ref reddens on the second and one that always used the sweep's
+   * reddens on the first.
+   */
+  test("an issue cites its own row, and falls back to the sweep only when the row named none", async () => {
+    const assessment = assess(
+      fullCoverage(),
+      doc([
+        row(DECLARED[0], { assessment: "degraded" }),
+        row(DECLARED[1], { assessment: "degraded", evidence_ref: [] }),
+        ...healthyRows(DECLARED[2]),
+      ]),
+    );
+    expect(of(assessment, DECLARED[0]).reason).toBe("observed");
+    expect(of(assessment, DECLARED[1]).reason).toBe("observed");
+    expect(of(assessment, DECLARED[0]).evidence_ref).toBe(rowRef(DECLARED[0]));
+    expect(of(assessment, DECLARED[1]).evidence_ref).toBeNull();
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    const signals = sweepObservations(assessment, outcome, CTX).map((o) => o.signal);
+    expect(signals[0]).toEqual({
+      kind: "issue",
+      reason: "degraded",
+      evidenceRef: rowRef(DECLARED[0]),
+    });
+    expect(signals[1]).toEqual({ kind: "issue", reason: "degraded", evidenceRef: EVIDENCE });
   });
 });
 
