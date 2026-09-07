@@ -2742,6 +2742,18 @@ ordering) gains a fourth console that must pass it, and its own closing note —
   for `RELAY_ABANDON_PASSES` passes; assert the loop returns and ledgers the reason. And the mirror:
   four negatives followed by one positive resets the streak — `console-relay.ts:290-301`, because
   transient read failures must not reap a healthy actor.*
+  **NARROWED 2026-09-07 by task 6.5b, and the narrowing is not optional — as written this criterion
+  and §6.6 layer 4 destroy each other.** The rule the code carried was *"a `tri-1` that comes back in
+  a NEW run is a console that went away — correctly — rather than one that silently followed it"*,
+  written before the actor could mint a run. §6.6 layer 4 then made the actor recycle the collator
+  into a new run on purpose. Taken together: **the first recycle — four hours in at §7.8's defaults —
+  replaces the collator's run, `isLiveWorker` reads the old run's dead state file, and
+  `RELAY_ABANDON_PASSES` negatives later, about twenty-five minutes, the actor exits `console_gone`
+  on a console it had just successfully repaired.** The subject narrows to **"a new run somebody else
+  minted"**, which is what it always meant: the watch follows a run THIS actor minted, re-derived
+  inside `upSeat` at the moment its own `up` resolves and nowhere else. An operator's `pifleet
+  down`/`up`, a second console and a stray fleet are all still abandonments. ISC-962 pins it.
+
 - **Anti: a thrown pass does not end the actor, and `--once` still exits nonzero.** *Probe: inject a
   throwing pass; assert the loop continues and that `--once` propagates. `relay.ts:700-723` is the
   measured version of the first half.*
@@ -3451,7 +3463,7 @@ and SRD-FLEET-PM-001 D7's.
 - **6.6** **DONE 2026-09-06.** Add the read-only closure guard, mirroring `test/unit/monitor-readonly.test.ts` and scoped
   to the console's own subtree with its one dispatch exception **named**. Touches:
   `test/unit/triage-readonly.test.ts` (new), `ISA.md`.
-- **6.5b** **Build the recycle's `down`/`up` at the COMPOSITION ROOT. Added 2026-09-07; ISC-932 is
+- **6.5b** **DONE 2026-09-07 — ISC-932 closed by going red first, ISC-960..966.** Build the recycle's `down`/`up` at the COMPOSITION ROOT. Added 2026-09-07; ISC-932 is
   filed OPEN against it, and this is task 6.1b's finding one effect over.** Task 6.5 shipped the
   decision — which seats are due, resumably, gated — and **cannot ship the effect**:
   `test/unit/triage-readonly.test.ts` bans `cli/commands/up.ts` and `cli/commands/down.ts` as direct
@@ -3468,6 +3480,16 @@ and SRD-FLEET-PM-001 D7's.
   goes RED because the production actor stops emitting it, and `TriageActorDeps.ports` becomes
   REQUIRED, which turns the un-ported fixture into a `tsc` error. **Both are the point** — the guard
   was pinned to the blocker's absence on purpose, so landing the unblocker must break it.*
+- **6.5c** **Decide whether an actor may start into a console with no collator. Added 2026-09-07 by
+  task 6.5b.** `productionTriageDeps.loop` calls `resolveCollatorRun` before it builds anything, and
+  that throws `NO_COLLATOR_RUN` — so §6.6's *"absent ⇒ due"* clause repairs `obs-t1..3` from cold and
+  repairs `tri-1` **only mid-life**, once the loop is already running. A console whose collator is
+  gone at start cannot be repaired by the thing built to repair it. The throw is ISC-809/ISC-850's
+  shipped refusal, so re-shaping it is a criterion-level decision rather than an implementation
+  detail, which is why 6.5b reported it instead of changing it. Touches:
+  `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`.
+  *Acceptance: whichever way it goes, BOTH ISC-809 and ISC-850 are re-stated to match — a refusal
+  that becomes a repair leaves two criteria asserting a message nobody emits.*
 - **6.7** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:
   `scripts/triage`, and **nothing in `src/` that Phase 4.3's test does not already pin**.
 

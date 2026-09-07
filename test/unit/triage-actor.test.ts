@@ -592,7 +592,7 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
     const path = triageActorLogPath(env);
     await appendActorLog(
       path,
-      { kind: "pass_failed", reason: "boom\nkind=console_gone worker=tri-1\r\n evil" },
+      { kind: "pass_failed", reason: "boom\nkind=console_gone worker=tri-1\r\n\u0000evil" },
       0,
     );
     const text = await readFile(path, "utf8");

@@ -6,7 +6,7 @@
   "base": "main",
   "total_phases": 9,
   "current_phase": "4+5",
-  "current_round": 17,
+  "current_round": 18,
   "completed_phases": [
     0,
     1,
@@ -541,8 +541,37 @@
           "test/unit/triage-role.test.ts"
         ]
       },
+      "verified_commit": "6bff248",
+      "note": "6.8 and 6.9 both touch src/cli/commands/triage.ts and collide with 6.5b, so they wait for round 18. 5.8 is fully disjoint and is Phase 5's last gap \u2014 it makes \u00a76.9's containment reachable in production instead of guarding a road nobody uses. eng-2 gets six files as one unit: a schema change obliges the roles/ edit in the SAME task (ISC-651).",
+      "graded": "2026-09-07 \u2014 eng-2 ISC-980..1000 (5.8) + orchestrator landed 2A/2B/2C; eng-1 ISC-932 closed + ISC-960..966 (6.5b). Orchestrator also fixed ISC-803's probe path (my round-16 error), narrowed \u00a712's exit criterion, and de-binarised triage-actor.test.ts.",
+      "resumes_used": 2
+    },
+    {
+      "round": 18,
+      "tasks": {
+        "eng-1": [
+          "6.5c",
+          "6.9"
+        ],
+        "eng-2": [
+          "6.7",
+          "6.8"
+        ]
+      },
+      "files": {
+        "eng-1": [
+          "src/cli/commands/triage.ts",
+          "test/unit/triage-command.test.ts"
+        ],
+        "eng-2": [
+          "scripts/triage",
+          "test/unit/fresh-dispatch.test.ts",
+          "src/run/triage-actor.ts",
+          "test/unit/triage-actor.test.ts"
+        ]
+      },
       "verified_commit": null,
-      "note": "6.8 and 6.9 both touch src/cli/commands/triage.ts and collide with 6.5b, so they wait for round 18. 5.8 is fully disjoint and is Phase 5's last gap \u2014 it makes \u00a76.9's containment reachable in production instead of guarding a road nobody uses. eng-2 gets six files as one unit: a schema change obliges the roles/ edit in the SAME task (ISC-651)."
+      "note": "6.5c and 6.9 both need src/cli/commands/triage.ts, so they are ONE slice \u2014 the acceptance-closure rule applied before dispatch this time rather than after. 6.7 owns scripts/triage and explicitly nothing in src/; 6.8's console-side budget accounting goes in triage-actor.ts to keep the halves disjoint. If 6.8 turns out to need triage.ts, eng-2 reports and it moves to round 19."
     }
   ],
   "status": "in_progress_round_9",
@@ -638,5 +667,10 @@
     "6.8 \u2014 a producer for budget_exhausted (ISC-891)",
     "6.9 \u2014 cadence_s reaches --poll",
     "Phase 7 \u2014 7.1 to 7.4 close the branch"
+  ],
+  "round_19_candidates": [
+    "6.9 \u2014 cadence_s reaches --poll (if 6.8 displaced it)",
+    "Phase 7 \u2014 7.1 to 7.4 close the branch",
+    "Phase 8 is OUT of branch scope: the live run happens on main"
   ]
 }
