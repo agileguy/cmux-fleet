@@ -1768,7 +1768,7 @@ and validated by `pifleet config validate` alongside `fleet.yaml`.
 | `services[].name` | the logical service name — `mia`, `authorization`, `authentication` |
 | `services[].namespace`, `services[].workload` | declared, never derived (§6.2 rule 2). `workload` optional when the service is resolved by selector |
 | `services[].checks` | array from a closed enum `[rollout, logs, sink, endpoint]`; **no free strings**, so a targets file cannot carry a command |
-| `services[].window` | optional per-service override of `default_window` |
+| `services[].window` | optional per-service override of `default_window`; **refused if greater than that environment's `default_window`** (§7.4, resolved 2026-09-06), and transitively therefore never greater than the cadence. An override may only NARROW. The cadence refusal (§6.10 rule 1) is still applied directly, so a file whose `default_window` is itself out of bounds names both faults by path |
 
 `.strict()` at every level, on `fleet.yaml`'s own rule (`schema.ts:4-7`): an unknown key is a
 field-level error, never an ignored typo.
@@ -1936,17 +1936,35 @@ sweep id is a worker replaying an old answer, and a wrong window is a worker ans
 question. Shaped as a `windowEcho` beside `sweepIdEcho`, three states for the refusal's two, so a log
 can say which of `absent` and `out_of_range` occurred.
 
-**OPEN — §7.1's per-service `window` override can make a truthful observer fail this check, found
-2026-09-06 while implementing it.** §7.1:1771 makes `services[].window` *"an optional per-service
-override of `default_window`"* with **nothing bounding it above**, and the table here bounds the check
-by `default_window` alone. So an observer holding a service whose override is LONGER than
-`default_window` echoes a `window_opened_at` that is truthful and out of range — and because the check
-is artifact-level, that discards **every row that observer produced**, including rows for services
-carrying no override at all. Three resolutions, and this is an operator's decision rather than an
-implementer's: bound the check by the widest override in that observer's share; refuse
-`window > default_window` in §7.1's schema; or move the check per-row, which the paragraph above
-explicitly rejects. **Implemented as written and flagged rather than chosen** — the table is what
-task 5.3c built.
+**RESOLVED 2026-09-06 by the operator: refuse `window > default_window` in §7.1's schema, so this
+table is correct exactly as written.** The conflict found while implementing this check was that
+§7.1 made `services[].window` an override with **nothing bounding it above**, while this table bounds
+the check by `default_window` alone — so an observer holding a service with a WIDER override echoed a
+`window_opened_at` that was truthful and out of range, and because the check is artifact-level that
+discarded **every row that observer produced**, including rows for services carrying no override at
+all.
+
+The band was narrower than it first looked: only `default_window < window ≤ cadence_s` fails, and at
+shipped defaults (`default_window: 5m`, `cadence_s: 300`) that band is **empty**, which is why it
+survived until the echo was built. Three resolutions were available and two were refused.
+
+- **Bound this check by the widest override in the observer's share — REFUSED.** It makes the check as
+  weak as the loosest service that observer happens to hold: one service with a six-hour override
+  gives every service in that share a six-hour band, which is precisely the *"queried six hours
+  against a five-minute configuration"* failure this section exists to catch. It would leave the check
+  in place and quietly stop it working.
+- **Move the check per-row — REFUSED for now**, on the paragraph above.
+- **Refuse `window > default_window` — ADOPTED.** One clause in `windowIssues`
+  (`src/run/triage-targets.ts`), a function that already carried §6.10 rule 1's cadence refusal for
+  the same field. It is a schema tightening, so the only configurations it can refuse are ones that
+  would otherwise have caused silent artifact-wide discards, and the operator learns at
+  `pifleet config validate` rather than by losing a sweep's rows.
+
+**What it narrows, stated rather than buried.** A genuinely sparse service can no longer be given a
+window wider than its environment's default. If that need arrives, the answer is to move
+`window_opened_at` onto the **row**, beside the `window` field §6.7 already gates — and the argument
+above against a per-row check holds only while there is one window per artifact, so it stops applying
+at exactly the moment you would need to.
 
 **Available strengthening, not taken.** §7.2:1784 has the host sending `window_opened_at` in the
 envelope. If the host dictates the exact instant, an EQUALITY check is available and is strictly
@@ -2896,7 +2914,7 @@ and SRD-FLEET-PM-001 D7's.
   **`deliverAnnouncement` must return a `NotifyOutcome` and never `void`** — a void return makes
   failure indistinguishable from success at the call site, which is the silent swallow this console
   exists to catch.*
-- **5.6b** **The reporter's own failure (§9.15).** Wire `reporter_undelivered` through 5.4a's
+- **5.6b** **The reporter's own failure (§9.15). DONE 2026-09-06.** Wire `reporter_undelivered` through 5.4a's
   identity, and make the recovery notification the **first** thing delivered when the channel returns.
   Touches: `src/run/triage-incident.ts`, `src/run/triage-notify.ts`,
   `test/unit/triage-notify.test.ts`.
@@ -2916,6 +2934,28 @@ and SRD-FLEET-PM-001 D7's.
   needs no new machinery — call `deliverySweep` with the `reporter_undelivered` recovery facts before
   the sweep's own. `triage-notify.ts` deliberately imports **nothing** from `triage-incident.ts` and a
   source probe asserts that absence (ISC-689), so this task is where the two meet for the first time.
+
+  **How it actually landed, recorded 2026-09-06 so a later reader does not "fix" it back.** The
+  prediction above — that the coupling arrives in the notifier — is wrong, and the other arrangement is
+  better. `src/run/triage-incident.ts` takes a **type-only** import of `AnnouncementFacts` and
+  `NotifyBacklog`; the notifier still imports nothing from the incident machine, so ISC-689's source
+  probe stands **unmodified**. The translation (`announcementFacts`) lives beside `IncidentNotification`
+  where it can read `CONSOLE_SCOPE` directly, and `reportSweep` takes `readonly AnnouncementFacts[]` —
+  values the caller has already translated — which makes §6.9 requirement 7's *"a transition is
+  recorded before it is delivered"* a property of the call graph rather than of anyone's discipline. A
+  mirror probe was added for the other direction: the incident module may see the announcement
+  vocabulary and may **never** name a delivery outcome. Requirement 7 is more structurally guarded
+  after this task than before it.
+
+  **Three residues, none of them closable in Phase 5.** (a) `withUndelivered` fills
+  `IncidentRecord.undelivered[]` and nothing persists it — there is a `loadIncidentRecord` and no
+  `saveIncidentRecord`; the schema already accepts the field and task 5.5's round-trip covers the
+  shape, so this is the actor's wiring. (b) §12's `--status` criterion asks for three fields; only the
+  undelivered count exists in Phase 5, and **the criterion must be re-checked at the actor rather than
+  marked closed by the Phase 5 probe** (ISC-705). (c) The reminder edge for a firing
+  `reporter_undelivered` is unexercised: `renotify_after_s` defaults to 21600 s = 72 sweeps, so a
+  channel down over six hours composes a reminder about the reporter that it cannot deliver. Correct by
+  construction, untested, and it needs a 72-sweep fixture that belongs with the actor.
 - **5.1a** Implement §7.3's resolution: `services: string[]` on `pifleet.dispatchrequest/v1`,
   required on triage and refused on review with `ConsoleRoster` as the discriminator, spending the
   two new codes `services_missing` and `services_not_permitted`. **Then wire both waiting modules** —

@@ -373,17 +373,47 @@ export function kubeContextIssues(
 }
 
 /**
- * §6.10 rule 1: no observation window may exceed the sweep cadence.
+ * §6.10 rule 1: no observation window may exceed the sweep cadence — and a
+ * per-service override may not exceed its environment's `default_window`.
  *
- * The rule is about READ AMPLIFICATION, so it applies to the per-service
- * override exactly as it applies to the environment default — a `6h` window on
- * one service re-read every five minutes is the same 72x against the same
- * logging API, and an override that escaped the rule would be the obvious way
- * around it.
+ * The cadence rule is about READ AMPLIFICATION, so it applies to the
+ * per-service override exactly as it applies to the environment default — a
+ * `6h` window on one service re-read every five minutes is the same 72x
+ * against the same logging API, and an override that escaped the rule would be
+ * the obvious way around it.
  *
- * EQUAL is allowed: §6.2's own worked example sets `default_window: 5m`
- * against a 300 s cadence, and a window that exactly covers the interval since
- * the last sweep is the correct one. Only GREATER is a re-read.
+ * **The override's own bound is tighter than the cadence, and the reason is
+ * §7.4 rather than §6.10** (resolved by the operator 2026-09-06). An observer
+ * echoes ONE `window_opened_at` for the whole artifact, and §7.4 bounds it by
+ * `dispatched_at − default_window − reserve_s`. So a service whose override is
+ * WIDER than `default_window` makes a truthful observer fail an artifact-level
+ * check — discarding every row that observer produced, including rows for
+ * services carrying no override at all. Bounding the override by
+ * `default_window` is what makes §7.4's table correct as written.
+ *
+ * The alternative — bounding §7.4 by the widest override in the observer's
+ * share — was refused: it makes the check as weak as the loosest service that
+ * observer happens to hold, which is exactly the *"queried six hours against a
+ * five-minute configuration"* failure §7.4 exists to catch. It would leave the
+ * check in place and quietly stop it working.
+ *
+ * **What this narrows, stated rather than buried.** A genuinely sparse service
+ * can no longer be given a window wider than its environment's default. If that
+ * need arrives, the answer is to move `window_opened_at` onto the ROW beside
+ * the `window` field §6.7 already gates — §7.4's argument against a per-row
+ * check (*"a wrong window applies to every row"*) holds only while there is one
+ * window per artifact.
+ *
+ * The cadence bound reaches the override transitively, because
+ * `default_window ≤ cadence_s` is enforced in this same pass. The explicit
+ * cadence branch below is therefore reachable only when `default_window` is
+ * ITSELF out of bounds — a file that is already refused, whose every fault is
+ * still worth naming by path.
+ *
+ * EQUAL is allowed in both directions: §6.2's own worked example sets
+ * `default_window: 5m` against a 300 s cadence, and a window that exactly
+ * covers the interval since the last sweep is the correct one. Only GREATER is
+ * a re-read.
  */
 export function windowIssues(
   environments: TriageEnvironments,
@@ -398,14 +428,28 @@ export function windowIssues(
     `live API (§6.10 rule 1). Lower it in ${files.targets}, or raise cadence_s in ` +
     `${files.console}.`;
 
+  const whyOverride = (windowS: number, defaultS: number, path: string) =>
+    `window is ${windowS}s, which is greater than the environment's default_window of ` +
+    `${defaultS}s (${files.targets}). An observer echoes ONE window_opened_at for the whole ` +
+    `artifact, and §7.4 bounds it by the default_window — so an override wider than the default ` +
+    `makes a truthful observer fail that check and discards EVERY row it produced, including ` +
+    `rows for services with no override. Lower it, or raise default_window for the environment ` +
+    `(which must itself stay within cadence_s in ${files.console}).`;
+
   for (const [name, environment] of Object.entries(environments)) {
     if (environment.default_window > cadenceS) {
       const path = `environments.${name}.default_window`;
       issues.push({ path, message: why(environment.default_window, path) });
     }
     environment.services.forEach((service, i) => {
-      if (service.window !== null && service.window > cadenceS) {
-        const path = `environments.${name}.services.${i}.window`;
+      if (service.window === null) return;
+      const path = `environments.${name}.services.${i}.window`;
+      if (service.window > environment.default_window) {
+        issues.push({
+          path,
+          message: whyOverride(service.window, environment.default_window, path),
+        });
+      } else if (service.window > cadenceS) {
         issues.push({ path, message: why(service.window, path) });
       }
     });

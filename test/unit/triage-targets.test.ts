@@ -492,6 +492,69 @@ describe("the two duration refusals (§6.10 rule 1, §7.8's cross-file note)", (
   });
 
   /**
+   * The override's own bound, resolved by the operator 2026-09-06.
+   *
+   * `withOverride` builds an environment whose `default_window` and per-service
+   * `window` are BOTH given, so the two bounds can be separated. The band that
+   * matters is `default_window < window <= cadence_s`: legal under §6.10 rule 1
+   * and refused under §7.4's, and it is empty at shipped defaults (5m / 300s),
+   * which is why it went unnoticed until the window echo was built.
+   */
+  const withOverride = (defaultWindow: string, override: string) =>
+    envsOf(
+      parseTriageTargets(
+        `version: 1\nenvironments:\n  cni-dev:\n    kube_context: gke-cni-dev\n    default_window: ${defaultWindow}\n    services:\n      - {name: mia, namespace: ns, checks: [logs]}\n      - {name: authz, namespace: ns, checks: [logs], window: ${override}}\n`,
+        TARGETS_PATH,
+      ),
+    );
+
+  test("an override WIDER than default_window is refused, though the cadence allows it", () => {
+    // The premise: this is the band the cadence rule cannot see. 5m <= 300s.
+    expect(windowIssues(withOverride("5m", "5m"), 300, files)).toEqual([]);
+
+    const issues = windowIssues(withOverride("2m", "5m"), 300, files);
+    expect(issues.map((i) => i.path)).toEqual(["environments.cni-dev.services.1.window"]);
+    expect(issues[0]!.message).toContain("default_window");
+    expect(issues[0]!.message).toContain("window_opened_at");
+  });
+
+  test("and the twins: a NARROWER override is fine, and an EQUAL one is fine", () => {
+    expect(windowIssues(withOverride("5m", "1m"), 300, files)).toEqual([]);
+    expect(windowIssues(withOverride("5m", "5m"), 300, files)).toEqual([]);
+  });
+
+  /**
+   * The tightening must not LOSE the refusal it replaces. `6h` against a 5m
+   * default is still refused — now by the narrower bound, which is the more
+   * actionable of the two — so no configuration that was refused before is
+   * accepted now.
+   */
+  test("the 72x override is still refused, by the narrower bound", () => {
+    const issues = windowIssues(withOverride("5m", "6h"), 300, files);
+    expect(issues.map((i) => i.path)).toEqual(["environments.cni-dev.services.1.window"]);
+    expect(issues[0]!.message).toContain("default_window");
+  });
+
+  /**
+   * The cadence branch for an override is reachable ONLY when `default_window`
+   * is itself out of bounds — asserted rather than left as a claim in the
+   * docblock, because an unreachable branch and a wrong one look identical.
+   * Both faults are named by path: the file is refused either way, and an
+   * operator fixing one should not have to run `config validate` again to find
+   * the other.
+   */
+  test("a broken default_window still lets the override report its own cadence fault", () => {
+    const issues = windowIssues(withOverride("6h", "6h"), 300, files);
+    expect(issues.map((i) => i.path).sort()).toEqual([
+      "environments.cni-dev.default_window",
+      "environments.cni-dev.services.1.window",
+    ]);
+    const override = issues.find((i) => i.path.endsWith("services.1.window"))!;
+    expect(override.message).toContain("cadence_s");
+    expect(override.message).not.toContain("default_window of");
+  });
+
+  /**
    * §7.8 property 1 makes `sweep_deadline_s ≥ cadence_s` unreachable by
    * construction. This predicate is what says so rather than a comment
    * claiming it — the loader that holds both files applies it.

@@ -320,14 +320,17 @@
           "test/unit/console-restart.test.ts"
         ]
       },
-      "verified_commit": null,
+      "verified_commit": "e97f741",
       "orchestrator_owns": [
         "ISA.md",
         "Docs/SRD-TRIAGE-CONSOLE.md",
         "README.md",
         ".claude/project-manager-state-triage.json"
       ],
-      "note": "5.3b was found ALREADY DONE in round 8 (ISC-648/649/650) and marked rather than dispatched. 5.3a and 5.7 held for round 11: 5.3a is a whole brief on its own (correlation rule + suppression-before-verdict + injected probe dep) and collides with 5.3c's file."
+      "note": "5.3b was found ALREADY DONE in round 8 (ISC-648/649/650) and marked rather than dispatched. 5.3a and 5.7 held for round 11: 5.3a is a whole brief on its own (correlation rule + suppression-before-verdict + injected probe dep) and collides with 5.3c's file.",
+      "graded": "2026-09-06 \u2014 ISC-691..711 transcribed; eng-1 e97f741 (5.6b), eng-2 fded913 (5.3c, 4.5a), orchestrator 7e6fb8c + this commit",
+      "eng_1_note": "did NOT relax ISC-689 as pre-authorised \u2014 inverted the dependency instead (type-only import in triage-incident.ts), so the notifier still imports nothing from the machine and the probe stands unmodified. Added the mirror probe. Requirement 7 is better guarded after 5.6b than before.",
+      "eng_2_note": "found \u00a713 task 4.5a(a)'s own premise stale; the correction is the finding."
     }
   ],
   "status": "in_progress_round_9",
@@ -364,7 +367,8 @@
   "operator_rulings_2026_09_06": {
     "7.3_service_list": "ARM 1 \u2014 a structured `services: string[]` field on pifleet.dispatchrequest/v1. Required on triage, refused on review, roster is the discriminator. Two new refusal codes: services_missing, services_not_permitted. Wire tag stays v1. Unblocks checkTriagePartition's production caller in Phase 6.",
     "6.6_recycling": "Recycle all four seats; boundary condition is PER-SEAT so a partial recycle is completed by the next boundary rather than restarted. No sweep admitted while any pin is unresolved. 7.7's run_id becomes `runs`, a per-seat map.",
-    "branch_scope": "Branch ends after task 7.4: PR and merge with the code complete. Phase 8 (the live run against cni-dev) happens on main as separate work. Q11 and the kubeconfig context no longer gate this branch."
+    "branch_scope": "Branch ends after task 7.4: PR and merge with the code complete. Phase 8 (the live run against cni-dev) happens on main as separate work. Q11 and the kubeconfig context no longer gate this branch.",
+    "window_override_bound": "\u00a77.4 fork resolved: refuse services[].window > default_window in \u00a77.1's schema (windowIssues). Overrides may only NARROW. Widest-in-share refused (guts the check); per-row deferred (the door if a sparse service ever needs a wider window)."
   },
   "branch_ends_after": "7.4",
   "new_tasks_from_round_7": [
@@ -381,9 +385,11 @@
     "5.1c",
     "5.4a"
   ],
-  "round_10_candidates": [
-    "5.3a and 5.7 -> round 11",
-    "ISC-690 close (move mut9/equiv.ts into test/unit/) -> orchestrator, after this round",
-    "then Phase 6 \u2014 6.1 and 6.2"
+  "round_11_candidates": [
+    "5.3a \u2014 the saturation verdict (whole brief: suppression before verdict, injected probe dep)",
+    "5.3d \u2014 make the window fields required (touches test/unit/triage-document.test.ts)",
+    "5.7 \u2014 \u00a712 fixture sweep into ISA.md",
+    "ISC-690 close \u2014 move mut9/equiv.ts into test/unit/",
+    "then Phase 6 \u2014 6.1 and 6.2 make one hand-run sweep possible"
   ]
 }
