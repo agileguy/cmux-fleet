@@ -3429,7 +3429,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: a second `--poll` against a held lock refuses by name and dispatches nothing; and the
   anti-twin — a lock left by a DEAD pid does not refuse, or the remedy for a crash becomes an
   operator deleting a file nobody documented.*
-- **6.8** **Give `budget_exhausted` a producer. Added 2026-09-07; ISC-891 is filed OPEN against it.**
+- **6.8** **DONE 2026-09-07 — ISC-891 closed, ISC-1030..1033.** Give `budget_exhausted` a producer. Added 2026-09-07.
   §6.10 promises *"Nothing announces that today, so this design makes it a notification"*, and the
   notification cannot fire: `run.budgetJson` is written by exactly one thing in the repository, the
   `--auto` scheduler's `onChange`, so a console run started by `scripts/triage` never has the file and
@@ -3500,6 +3500,28 @@ and SRD-FLEET-PM-001 D7's.
   `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`.
   *Acceptance: whichever way it goes, BOTH ISC-809 and ISC-850 are re-stated to match — a refusal
   that becomes a repair leaves two criteria asserting a message nobody emits.*
+- **6.7a** **Re-point `triageActorArgv` at `pifleet triage`. Added 2026-09-07; ISC-1035 is `[~]`
+  against it.** `scripts/triage:54-57` says task 6.7 *"re-points `triageActorArgv` at it and nothing
+  else here changes"*. **That sentence is false and task 6.8 measured why — three things move with the
+  argv, none of them visible to `tsc`:**
+  1. **The starter would DEADLOCK the actor it starts.** `triageActorLockPath(env)` and
+     `relayLockPath("triage", env)` are the same inode, `runTriageActor` holds it for the actor's whole
+     life, and `scripts/triage` holds that same file across its `Bun.spawn`. `pifleet relay` takes no
+     lock, so today it is harmless; the moment the argv names `triage`, the fresh actor's claim
+     `EEXIST`s against a **live script pid**, the takeover correctly declines, and the script writes a
+     record naming a pid that has already gone — **§6.4's own failure shape, caused by the fix for it.**
+  2. **The record stops parsing.** `writeRelayRecord` parses through a non-strict `z.object` and so
+     STRIPS unknown keys, while `TriageActorRecordSchema` requires `cadence_s` with no default — so
+     `--status` would report `actor: refused` for a healthy actor until its first `saveCursor`.
+  3. **`--cadence`'s refusal loses its reason**, which names *"`pifleet relay --console triage` … which
+     takes no cadence"*; `pifleet triage` takes `--poll`, and since task 6.9 that override is honoured.
+  Touches: `scripts/triage`, `test/unit/fresh-dispatch.test.ts`,
+  `test/integration/triage-console.test.ts`, `src/cli/commands/triage.ts` — **all four in ONE slice**,
+  because (2) reaches the command and honouring `--cadence` reddens the integration test's
+  *"a valid duration is refused"* arm.
+  *Acceptance: ISC-1035's three arms flip to their `clock` branches and stay green; the integration
+  test's refusal arm is re-stated rather than deleted; and `--status` reports a healthy actor from its
+  first pass.*
 - **6.9a** **An assertion inside a `--poll` fixture's dispatch stub is SILENTLY SWALLOWED. Added
   2026-09-07 by task 6.9, pre-existing and not caused by it.** `triageActorLoop` catches everything
   `deps.pass()` throws — correctly, by §6.4, because an actor that dies on one bad sweep stops
@@ -3511,7 +3533,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: every assertion a `--poll` fixture makes about a dispatch is made OUTSIDE the loop, on
   recorded values; and the anti-criterion — a deliberately wrong expectation inside a stub must FAIL
   the test, which is the measurement that proves the swallow is gone rather than moved.*
-- **6.7** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:
+- **6.7** **PART DONE — the `quiesce` half shipped in Phase 4 and is pinned by ISC-604, ISC-605, ISC-631 and ISC-697; the ARGV re-point is not done and is now task 6.7a.** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:
   `scripts/triage`, and **nothing in `src/` that Phase 4.3's test does not already pin**.
 
 ### Phase 7 — The skill

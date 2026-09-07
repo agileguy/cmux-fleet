@@ -251,12 +251,26 @@ function recyclePorts(opts: {
   readonly upSeat?: (seat: string) => Promise<void>;
   readonly seatRuns?: () => Promise<Readonly<Record<string, string>>>;
   readonly lockPath?: string;
+  readonly budget?: TriageConsolePorts["budget"];
 }) {
   const downs: string[] = [];
   const ups: string[] = [];
   let reads = 0;
   let releases = 0;
   const ports: TriageConsolePorts = {
+    /*
+     * §6.10's ports, inert: `ceiling` answers a number nothing crosses and
+     * `publish` records nothing, so the budget half of the boundary decides
+     * nothing in fixtures that are not about it. The tests that ARE about it
+     * override this member. Required as of 2026-09-07, when the composition root
+     * grew `budget: productionConsoleBudgetPorts(e.env)`.
+     */
+    budget: opts.budget ?? {
+      ceiling: async () => Number.MAX_SAFE_INTEGER,
+      persisted: async () => null,
+      seatTokens: async () => 0,
+      publish: async () => {},
+    },
     seats: opts.seats ?? [...WORKERS],
     lockPath: opts.lockPath ?? "/fixture/triage-relay.lock",
     recycleAfterSweeps: opts.recycleAfterSweeps ?? 48,
@@ -641,7 +655,6 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       "actor_refused",
       "actor_started",
       "actor_stopped",
-      "actor_unbudgeted",
       "actor_unsupervised",
       "boundary_unreadable",
       "budget_halted",
@@ -659,7 +672,6 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       { kind: "actor_started", pid: 1, run_id: "r-tri", cadence_s: 300 },
       { kind: "actor_refused", reason: "somebody holds the lock" },
       { kind: "actor_unsupervised" },
-      { kind: "actor_unbudgeted" },
       /*
        * §13 task 6.8's two arms, and the field names are the point.
        * `BudgetState` spells these `tokens_spent`/`tokens_ceiling`; copying that
@@ -704,7 +716,6 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       "seats=obs-t2,obs-t3",
     );
     expect(actorLogLine({ kind: "actor_unsupervised" }, 0)).toContain("ports=absent");
-    expect(actorLogLine({ kind: "actor_unbudgeted" }, 0)).toContain("budget=absent");
     expect(
       actorLogLine(
         {
@@ -2199,22 +2210,23 @@ describe("the actor accounts the console's spend, and says so when it cannot", (
    *
    * ONCE, not per pass: this is a fact about the build, not about the sweep.
    */
-  test("an actor with no budget port announces it once and still sweeps", async () => {
-    const h = harness({ live: [true, true, true], maxPasses: 3 });
-    await runTriageActor(
-      { ...h.deps, ports: pinnedPorts() },
-      { cadenceS: 300, runId: "r-tri", signal: h.signal },
-    );
-    expect(h.spy.events.filter((e) => e.kind === "actor_unbudgeted")).toHaveLength(1);
-    expect(h.counts().passes).toBe(3);
-    // And the mirror: an actor that HAS one never says it.
-    const g = harness({ live: [true], maxPasses: 1 });
-    await runTriageActor(
-      { ...g.deps, ports: pinnedPorts(budgetSpy({ order: [] })) },
-      { cadenceS: 300, runId: "r-tri", signal: g.signal },
-    );
-    expect(g.spy.events.map((e) => e.kind)).not.toContain("actor_unbudgeted");
-  });
+  /*
+   * RETIRED 2026-09-07, and the deletion is the criterion closing rather than a
+   * test being dropped.
+   *
+   * Two tests stood here: "an actor with no budget port announces it once and
+   * still sweeps" and its mirror. They asserted `actor_unbudgeted`, the loud tell
+   * that §6.10's producer was built and not yet wired — `actor_unsupervised`'s
+   * pattern, and meant to die the same way.
+   *
+   * `budget: productionConsoleBudgetPorts(e.env)` landed in the composition root
+   * and `TriageConsolePorts.budget` became REQUIRED, so an unbudgeted actor is no
+   * longer a shape TypeScript can construct and the event has no reachable
+   * emitter. They had to be DELETED rather than left passing: `bun test` strips
+   * types, so a `tsc` error does not redden a `-t` probe, and a probe pinned to a
+   * blocker's absence that survives the blocker's removal is the guard staying
+   * quietly green (ISC-965). The tell for a missing wire is the compiler now.
+   */
 
   /**
    * §6.10's halt is STICKY — `resumeBudget` carries a persisted `halted_at`

@@ -325,6 +325,23 @@ const inertPorts = (): TriageConsolePorts => ({
     throw new Error(`the inert ports must never recycle: up ${seat}`);
   },
   resume: async () => null,
+  /*
+   * §6.10's ports, inert like the rest: a unit fixture must never read a real
+   * `budget.json` or write one. `ceiling` answers a number nothing crosses and
+   * `publish` records nothing, so this object still decides NOTHING — which is
+   * what the docblock above promises of every member.
+   *
+   * Required rather than omitted as of 2026-09-07: `TriageConsolePorts.budget`
+   * stopped being optional when the composition root grew
+   * `budget: productionConsoleBudgetPorts(e.env)`, and this is the `tsc` error
+   * that change was supposed to produce.
+   */
+  budget: {
+    ceiling: async () => Number.MAX_SAFE_INTEGER,
+    persisted: async () => null,
+    seatTokens: async () => 0,
+    publish: async () => {},
+  },
 });
 
 describe("pifleet triage — the wiring layer (§13 task 6.2, §3.3)", () => {

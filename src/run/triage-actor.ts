@@ -620,7 +620,6 @@ export const TRIAGE_ACTOR_EVENT_KINDS = [
   "actor_started",
   "actor_refused",
   "actor_unsupervised",
-  "actor_unbudgeted",
   "budget_halted",
   "budget_unaccounted",
   "pass_completed",
@@ -652,19 +651,6 @@ export type TriageActorEvent =
   | { kind: "actor_refused"; reason: string }
   /** No {@link TriageConsolePorts}: no lock, no recycle, no gate. See its docblock. */
   | { kind: "actor_unsupervised" }
-  /**
-   * No {@link TriageConsolePorts.budget}: §6.10's ceiling has no producer in THIS
-   * actor, so `budget_exhausted` cannot fire however much the console spends.
-   *
-   * **The `actor_unsupervised` pattern, on purpose and with the same expiry.**
-   * That event was *"the loud tell that the wiring had not landed"* while
-   * `TriageActorDeps.ports` was optional, and it was retired the round the port
-   * became required. This one says the same thing about the one line §13 task 6.8
-   * could not write — the composition root's `budget:` member — and it is meant to
-   * DIE the same way: when that member is supplied, the port stops being optional
-   * and this kind goes with it. A tell nobody can see is worse than the gap.
-   */
-  | { kind: "actor_unbudgeted" }
   /**
    * §6.10's ceiling was crossed and the console said so. Logged on the
    * TRANSITION, not on every pass — the state is sticky, so a per-pass line would
@@ -729,8 +715,6 @@ export function actorLogLine(event: TriageActorEvent, at: number): string {
         return `pid=${event.pid} run=${event.run_id} cadence_s=${event.cadence_s}`;
       case "actor_unsupervised":
         return "ports=absent";
-      case "actor_unbudgeted":
-        return "budget=absent";
       /*
        * The seat list goes through `sanitizeToken` for `sweep_withheld`'s reason
        * one case below: the values are host-minted today and the log never
@@ -875,7 +859,7 @@ export interface TriageConsolePorts {
    * remains unreachable in production and [[ISC-891]] stays OPEN — which is said
    * here rather than left to be discovered from a criterion.
    */
-  readonly budget?: ConsoleBudgetPorts;
+  readonly budget: ConsoleBudgetPorts;
 }
 
 export interface TriageActorDeps {
@@ -1124,9 +1108,6 @@ async function triageActorLoop(
    * says the WIRING has not landed, which is a fact about the build and not about
    * this sweep. See {@link TriageConsolePorts.budget}.
    */
-  if (ports !== undefined && ports.budget === undefined) {
-    await deps.log({ kind: "actor_unbudgeted" });
-  }
   /*
    * §6.10's halt is sticky, so the LINE is edge-triggered: `resumeBudget` carries
    * a persisted `halted_at` forward on every subsequent pass, and a log that

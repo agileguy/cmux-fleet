@@ -239,7 +239,7 @@ harvest sweep's needle set without `secret_names` claiming it was ever granted, 
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
 **One `[ ]` criterion is open: ISC-824.** The `[ ]` count had been zero since ISC-572 closed on 2026-09-06, and ISC-824 opened later the same day rather than being closed on arrival. It is the residue of a design change ruled in *after* the task that would have carried it had already shipped: §6.8a's console-health `kind` set grew a seventh member, `inference_unreachable`, and nothing computes it — the enum, its observation and its anti-twin all landed and are green, and an `endpoint_down` sweep still composes nothing in production. It is filed `[ ]` rather than `[~]` on purpose: `[~]` means the behaviour is built and the evidence is thin, and here the behaviour is not built. Task 5.4e carries it.
-Twenty-five are graded `[~]`
+Twenty-six are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard — with one departure worth stating plainly, because it is the only
 criterion so far to have made the round trip:
@@ -295,7 +295,7 @@ replaced with the positive assertion rather than deleted. ISC-405's fired twice:
 `llm.providers` appeared in the schema, and again when `resolveWorker` started passing the tag-style
 predicate. That is the pattern paying for itself — nobody had to remember either criterion.
 
-Three are retired `[-]` — ISC-307 and ISC-360 — a marker introduced by ISC-368 on 2026-08-30 for a
+Four are retired `[-]` — ISC-307 and ISC-360 — a marker introduced by ISC-368 on 2026-08-30 for a
 criterion whose *premise* was superseded rather than left unproved. ISC-307 is about a secret's
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the

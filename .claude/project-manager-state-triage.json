@@ -570,8 +570,10 @@
           "test/unit/triage-actor.test.ts"
         ]
       },
-      "verified_commit": null,
-      "note": "6.5c and 6.9 both need src/cli/commands/triage.ts, so they are ONE slice \u2014 the acceptance-closure rule applied before dispatch this time rather than after. 6.7 owns scripts/triage and explicitly nothing in src/; 6.8's console-side budget accounting goes in triage-actor.ts to keep the halves disjoint. If 6.8 turns out to need triage.ts, eng-2 reports and it moves to round 19."
+      "verified_commit": "fa39e2a",
+      "note": "6.5c and 6.9 both need src/cli/commands/triage.ts, so they are ONE slice \u2014 the acceptance-closure rule applied before dispatch this time rather than after. 6.7 owns scripts/triage and explicitly nothing in src/; 6.8's console-side budget accounting goes in triage-actor.ts to keep the halves disjoint. If 6.8 turns out to need triage.ts, eng-2 reports and it moves to round 19.",
+      "graded": "2026-09-07 \u2014 eng-1 ISC-1010..1016 + ISC-809/850 re-stated (6.5c, 6.9); eng-2 ISC-1030..1037 (6.8). Orchestrator landed the budget wire that closed ISC-891, retired ISC-1034, and wrote all of Phase 7.",
+      "orchestrator_landed": "budget: productionConsoleBudgetPorts(e.env) in cli/commands/triage.ts; TriageConsolePorts.budget made REQUIRED; actor_unbudgeted + its two tests deleted. eng-2 could not do it \u2014 that file was eng-1's this round."
     }
   ],
   "status": "in_progress_round_9",
@@ -669,8 +671,12 @@
     "Phase 7 \u2014 7.1 to 7.4 close the branch"
   ],
   "round_19_candidates": [
-    "6.9 \u2014 cadence_s reaches --poll (if 6.8 displaced it)",
-    "Phase 7 \u2014 7.1 to 7.4 close the branch",
+    "6.7a and 6.9a \u2014 both need scripts/triage or the command; one slice each"
+  ],
+  "remaining": [
+    "6.7a \u2014 the argv re-point, ONE slice of four files (scripts/triage, fresh-dispatch, triage-console.test.ts, cli/commands/triage.ts)",
+    "6.9a \u2014 assertions inside --poll fixtures are swallowed by the loop's catch",
+    "ISC-1037 \u2014 \u00a76.10's budget paragraph vs \u00a76.1's four-run correction: an operator ruling",
     "Phase 8 is OUT of branch scope: the live run happens on main"
   ]
 }

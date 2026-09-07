@@ -162,6 +162,16 @@ export function retirementProblems(isa: string): string[] {
  */
 const NO_CLAIMS_BY_CONSTRUCTION = new Map<string, string>([
   [
+    "ISC-1034",
+    "Its subject was `actor_unbudgeted`, an EVENT whose whole purpose was to announce that §6.10's " +
+      "producer was built and not yet wired — and whose retirement is the wire landing. The event, " +
+      "its union arm, its log line and its two tests were deleted together, so there is no shipped " +
+      "code left for a claim to guard: the guarantee moved into the type system, where " +
+      "`TriageConsolePorts.budget` being REQUIRED is the mechanism and `bun run typecheck` runs it. " +
+      "A registry claim here would assert the absence of a deleted event, which is weaker than what " +
+      "the compiler already says.",
+  ],
+  [
     "ISC-698",
     "Its subject was `window_checked`, a FIELD that task 5.3d deleted, and its probe was a " +
       "test asserting that field's two values. There is no shipped code left for a claim to " +
@@ -191,7 +201,7 @@ describe("every retirement in ISA.md is a supersession (ISC-368)", () => {
    * without touching this file is not.
    */
   test("the retired set is exactly the criteria whose premises were superseded", () => {
-    expect(retiredIds(ISA)).toEqual(["ISC-307", "ISC-360", "ISC-698"]);
+    expect(retiredIds(ISA)).toEqual(["ISC-307", "ISC-360", "ISC-698", "ISC-1034"]);
   });
 
   /**

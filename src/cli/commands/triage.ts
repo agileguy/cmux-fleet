@@ -175,6 +175,7 @@ import {
   type TriageActorIdentity,
   type TriageActorRecordRead,
   type TriageConsolePorts,
+  productionConsoleBudgetPorts,
 } from "../../run/triage-actor.ts";
 
 // ---------------------------------------------------------------------------
@@ -1380,6 +1381,22 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
               : { recycled_at: record.record.recycled_at }),
           };
         },
+        /*
+         * §6.10's ceiling, wired 2026-09-07 — the one line ISC-891 was waiting
+         * for, and it is the last wire in a chain whose other four links shipped
+         * rounds apart.
+         *
+         * `refuseOnExhaustedBudget` has read `budget.json` since task 6.1b and
+         * ISC-885 pinned that mapping, correctly and — in its own words —
+         * "permanently inert", because nothing ever WROTE the file for a console
+         * run: `run.budgetJson` is written by the `--auto` scheduler's `onChange`
+         * and by nothing else. Task 6.8 built the writer; this hands it in.
+         *
+         * Until this landed the shipped actor announced `actor_unbudgeted` on
+         * every start, which is `actor_unsupervised`'s pattern: a loud tell whose
+         * whole purpose is to DIE when the wire lands. It dies here.
+         */
+        budget: productionConsoleBudgetPorts(e.env),
       };
       return await productionLoop({
         /**
