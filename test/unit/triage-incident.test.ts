@@ -40,12 +40,16 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   announcementFacts,
   consoleHealthObservations,
+  saveIncidentRecord,
   withUndelivered,
+  DEFAULT_INCIDENT_RECORD_DEPS,
   type ConsoleHealthFacts,
   type IncidentObservation,
   ADVANCE_READS_NO_ISSUE_REASON,
@@ -2014,6 +2018,154 @@ describe("loadIncidentRecord — a missing file is not a malformed one", () => {
     await loadIncidentRecord({ subject: BLOCKED, deps, env: ENV, path: "/elsewhere/x.json" });
     expect(seen[0]).toBe(incidentRecordPath(BLOCKED, ENV));
     expect(seen[1]).toBe("/elsewhere/x.json");
+  });
+});
+
+/**
+ * §13 task 6.1's widened *Touches* line — the writer, beside its reader.
+ *
+ * §13's argument for the placement, verbatim: §7.6's record *"is per-SUBJECT with
+ * its own schema and its own path helpers, all of which live in
+ * `triage-incident.ts`, so a writer that does not sit beside its reader becomes a
+ * second definition of where those files are"*.
+ *
+ * **The property that matters is the ROUND TRIP**, and it is only checkable at
+ * the byte boundary — which is why the port is typed `(path, text)` rather than
+ * `(path, record)`. Every test below writes through a spy and then feeds the
+ * captured bytes to `parseIncidentRecord`, which is the function that will
+ * actually read them back on the next sweep.
+ */
+describe("saveIncidentRecord — the writer §7.6 was missing", () => {
+  function spy(): {
+    readonly deps: { writeText: (p: string, t: string) => Promise<void> };
+    readonly writes: Array<{ path: string; text: string }>;
+  } {
+    const writes: Array<{ path: string; text: string }> = [];
+    return {
+      writes,
+      deps: {
+        writeText: async (path: string, text: string) => {
+          writes.push({ path, text });
+        },
+      },
+    };
+  }
+
+  /** A record with every field at a non-default value, so a dropped one shows. */
+  function populated(): IncidentRecord {
+    return {
+      subject: SERVICE,
+      state: "flapping",
+      reason: "degraded",
+      since: T0,
+      last_seen: T0 + 1_000,
+      sweep_count: 7,
+      consecutive_indeterminate: 2,
+      flap_transitions: [T0 - 3_000, T0 - 1_000],
+      last_notified_at: T0 + 2_000,
+      undelivered: ["triage: mia degraded (opened) [cni-prod]"],
+      last_artifact_ref: "T-sweep-9/observer-ops.json",
+    };
+  }
+
+  test("what it writes is what parseIncidentRecord reads back, field for field", async () => {
+    const wire = spy();
+    const record = populated();
+    const path = await saveIncidentRecord({ record, deps: wire.deps, env: ENV });
+    expect(wire.writes).toHaveLength(1);
+    const read = parseIncidentRecord(wire.writes[0]!.text, SERVICE, path);
+    if (read.kind !== "ok") throw new Error(read.reason);
+    expect(read.record).toEqual(record);
+  });
+
+  test("it writes the path the subject derives, follows PIFLEET_RUNS_DIR, and takes an override", async () => {
+    const wire = spy();
+    const written = await saveIncidentRecord({
+      record: { ...freshIncidentRecord(BLOCKED), subject: BLOCKED },
+      deps: wire.deps,
+      env: ENV,
+    });
+    expect(written).toBe(incidentRecordPath(BLOCKED, ENV));
+    expect(wire.writes[0]!.path).toBe(incidentRecordPath(BLOCKED, ENV));
+
+    const elsewhere = await saveIncidentRecord({
+      record: freshIncidentRecord(SERVICE),
+      deps: wire.deps,
+      env: ENV,
+      path: "/elsewhere/x.json",
+    });
+    expect(elsewhere).toBe("/elsewhere/x.json");
+  });
+
+  /**
+   * **Reading a bad file is history; writing one is a bug** —
+   * `writeTriageActorRecord`'s split, and it is load-bearing rather than tidy
+   * here: `parseIncidentRecord` has NO fallback from a refusal to a fresh record,
+   * so a file this function was allowed to write badly would be unreadable for
+   * the life of the console.
+   *
+   * The pair is asserted, not just the throw: **nothing was written**. A
+   * validator that ran after the write would satisfy a bare `expect(...).toThrow`
+   * and would still have left the bad bytes on disk.
+   */
+  test("a record the schema rejects THROWS and writes nothing", async () => {
+    const wire = spy();
+    const broken = { ...freshIncidentRecord(SERVICE), sweep_count: -1 } as IncidentRecord;
+    await expect(saveIncidentRecord({ record: broken, deps: wire.deps, env: ENV })).rejects.toThrow();
+    expect(wire.writes).toEqual([]);
+  });
+
+  test("an unrecognized key THROWS and writes nothing — §7.6 fixes the fields", async () => {
+    const wire = spy();
+    const extra = { ...freshIncidentRecord(SERVICE), notes: "hand-added" } as unknown as IncidentRecord;
+    await expect(saveIncidentRecord({ record: extra, deps: wire.deps, env: ENV })).rejects.toThrow();
+    expect(wire.writes).toEqual([]);
+  });
+
+  /**
+   * The two gates agree by construction — both are `SESSION_ID_RE` — and the
+   * ORDER decides which message the caller gets. Validation runs first, so a
+   * traversal is refused as a VALUE naming the field rather than as an
+   * `IncidentPathError` naming a path that was never built.
+   */
+  test("a traversal subject is refused by the schema BEFORE a path is derived", async () => {
+    const wire = spy();
+    const subject: IncidentSubject = { kind: "service", environment: "../..", service: "mia" };
+    const record = { ...freshIncidentRecord(SERVICE), subject };
+    await expect(saveIncidentRecord({ record, deps: wire.deps, env: ENV })).rejects.toThrow();
+    expect(wire.writes).toEqual([]);
+    // And the builder would have refused it too, so neither gate is the only one.
+    expect(() => incidentRecordPath(subject, ENV)).toThrow(IncidentPathError);
+  });
+
+  test("the default deps carry a writer as well as a reader", () => {
+    expect(typeof DEFAULT_INCIDENT_RECORD_DEPS.readText).toBe("function");
+    expect(typeof DEFAULT_INCIDENT_RECORD_DEPS.writeText).toBe("function");
+  });
+
+  /**
+   * The ONE test in this file that touches a disk, and it is isolated by
+   * `PIFLEET_RUNS_DIR` under a temporary directory rather than by hope.
+   *
+   * MEMORY, and task 6.3 found a leaked record from an earlier round by doing
+   * exactly this: `~/.pifleet` is keyed off `$HOME`, so a test that exercised the
+   * default writer without an override would write the operator's own console
+   * state. Both variables are set and the tree is removed afterwards.
+   */
+  test("the DEFAULT writer round-trips through a real file, under a temp runs root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-incident-"));
+    try {
+      const env = { HOME: root, PIFLEET_RUNS_DIR: join(root, ".pifleet", "runs") };
+      const record = populated();
+      const path = await saveIncidentRecord({ record, env });
+      expect(path).toBe(incidentRecordPath(SERVICE, env));
+      expect(path.startsWith(root)).toBe(true);
+      const back = await loadIncidentRecord({ subject: SERVICE, env });
+      if (back.kind !== "ok") throw new Error(back.reason);
+      expect(back.record).toEqual(record);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

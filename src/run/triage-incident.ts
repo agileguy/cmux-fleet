@@ -73,6 +73,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 
 import { SESSION_ID_RE } from "../contracts.ts";
+import { writeTextAtomic } from "../util/jsonl.ts";
 import { runsRoot } from "./paths.ts";
 import type { TriageConsoleConfig } from "./triage-config.ts";
 import type { AnnouncementFacts, NotifyBacklog } from "./triage-notify.ts";
@@ -1461,15 +1462,41 @@ function shapeOf(value: unknown): string {
 /** The read, and nothing but the read. `null` means the file does not exist. */
 export type IncidentRecordText = (path: string) => Promise<string | null>;
 
+/**
+ * The write, and nothing but the write — the twin of {@link IncidentRecordText}.
+ *
+ * It takes TEXT rather than a record, so the bytes that land on disk are the
+ * bytes a fixture sees: a port typed `(path, record)` would leave serialization
+ * inside the default implementation, where no test could assert that what was
+ * written parses back through {@link parseIncidentRecord}. That round trip is the
+ * whole property §7.6 needs from a writer, and it is only checkable at the byte
+ * boundary.
+ */
+export type IncidentRecordWrite = (path: string, text: string) => Promise<void>;
+
 export interface IncidentRecordDeps {
   readonly readText: IncidentRecordText;
+  readonly writeText: IncidentRecordWrite;
 }
 
-/** The real read, taken through a ports object exactly as `TriageConfigDeps` is. */
+/** The real read and write, taken through a ports object exactly as `TriageConfigDeps` is. */
 export const DEFAULT_INCIDENT_RECORD_DEPS: IncidentRecordDeps = {
   readText: async (path) => {
     const file = Bun.file(path);
     return (await file.exists()) ? await file.text() : null;
+  },
+  /*
+   * `writeTextAtomic`'s tmp + fsync + rename + directory fsync, rather than a
+   * plain write, and the reason is this file's own reader. `parseIncidentRecord`
+   * answers `not_json` for a truncated file and there is NO fallback from a
+   * refusal to a fresh record — deliberately, because falling back would turn a
+   * half-written file into a silent reset of a `firing` incident. A non-atomic
+   * writer would therefore convert a crash mid-write into a service whose
+   * incident state is permanently unreadable, which is the one failure the
+   * refusal was chosen to make loud rather than to cause.
+   */
+  writeText: async (path, text) => {
+    await writeTextAtomic(path, text);
   },
 };
 
@@ -1503,6 +1530,57 @@ export async function loadIncidentRecord(
   const text = await deps.readText(path);
   if (text === null) return { kind: "ok", record: freshIncidentRecord(opts.subject) };
   return parseIncidentRecord(text, opts.subject, path);
+}
+
+export interface SaveIncidentRecordOptions {
+  readonly record: IncidentRecord;
+  /** Defaults to {@link incidentRecordPath} for the record's own subject. */
+  readonly path?: string;
+  readonly deps?: Partial<IncidentRecordDeps>;
+  readonly env?: Record<string, string | undefined>;
+}
+
+/**
+ * Write one subject's record — §7.6's file, and the writer that belongs beside
+ * its reader.
+ *
+ * ## Why it lives HERE and not in the actor
+ *
+ * §13 widened task 6.1's *Touches* line to admit it, and the argument is that
+ * §7.6's record is per-SUBJECT with its own schema and its own path helpers, all
+ * of which are in this module: *"a writer that does not sit beside its reader
+ * becomes a second definition of where those files are"*. `incidentRecordPath`
+ * already refuses a subject it cannot spell, `IncidentRecordSchema` already
+ * fixes the fields, and `parseIncidentRecord` already decides what a reader will
+ * accept. A writer anywhere else would have to import all three and would still
+ * be free to disagree with them.
+ *
+ * ## It THROWS on a record the schema rejects, and that asymmetry is the point
+ *
+ * `writeTriageActorRecord` makes the same split for the same reason: **reading a
+ * bad file is history, writing one is a bug**. A record that would not parse back
+ * is a record this process constructed wrongly, in a process that holds the
+ * correct value in memory; returning a refusal would invite a caller to log it
+ * and carry on with an incident state that now exists only in RAM. And the
+ * asymmetry is load-bearing rather than tidy: {@link parseIncidentRecord}'s
+ * refusals have no fallback to a fresh record, so a file this function was
+ * allowed to write badly would be unreadable forever.
+ *
+ * The validation runs BEFORE the path is derived, so a subject that is not a
+ * legal path segment is refused as a VALUE by the schema's own `recordToken`
+ * rather than as an {@link IncidentPathError}. The two gates agree by
+ * construction — both are `SESSION_ID_RE` — and this ordering means the caller
+ * gets the message that names the field.
+ *
+ * Returns the path written, so an actor can log WHERE without re-deriving it and
+ * risking a second answer.
+ */
+export async function saveIncidentRecord(opts: SaveIncidentRecordOptions): Promise<string> {
+  const deps: IncidentRecordDeps = { ...DEFAULT_INCIDENT_RECORD_DEPS, ...opts.deps };
+  const validated = IncidentRecordSchema.parse(opts.record);
+  const path = opts.path ?? incidentRecordPath(validated.subject, opts.env);
+  await deps.writeText(path, `${JSON.stringify(validated, null, 2)}\n`);
+  return path;
 }
 
 // ── §6.8a task 5.4a — a sweep's console-level facts, as observations ─────────
