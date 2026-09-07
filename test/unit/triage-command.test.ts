@@ -28,19 +28,26 @@
  *     single 'OK' line is how 'quiet' and 'could not speak' become one row."*
  *     `Object.keys` is asserted by full sorted value, ISC-709's own instrument, so
  *     a field cannot be added or removed silently.
- *   - **The incident census**, which had no producer before task 6.2 and is the
- *     only thing that can answer *"incidents by state"* at all.
  *   - **The run-tree half of §6.4's driver** — including the zero-row case §6.4's
- *     own sentence gets wrong.
+ *     own sentence gets wrong, and §13 task 6.4a's `resumableSweep`, which is the
+ *     read that tells that zero-row apart from a sweep abandoned before its
+ *     collation. Both are asserted against BOTH functions on every fixture,
+ *     because they are indistinguishable through `inFlightSweep` by design.
+ *
+ * **The incident census moved out of this file with §13 task 6.2a** and is tested
+ * in `triage-incident.test.ts`, beside `incidentRecordPath` and
+ * `parseIncidentRecord` — the two things it reads with. What stays here is
+ * `--status`, which is a CONSUMER of the census: `triageStatus` still takes a
+ * `CensusDeps` and is still driven over a `Map`.
  *
  * ## No test here starts a clock, reaches a network, or touches `~/.pifleet`
  *
  * §12's closing anti-criterion: *"no criterion in this block requires a real
  * terminal, a real model, a real cluster, or the network."* Every transport is
- * injected. The census tests reach no filesystem at all — `CensusDeps` is backed
- * by a `Map` — and the run-tree tests use `mkdtemp` with `PIFLEET_RUNS_DIR` and
- * `HOME` both redirected, so `incidentRecordRoot`, which is keyed off the runs
- * root's parent, cannot resolve to the operator's own.
+ * injected. The `--status` tests reach no filesystem at all — `CensusDeps` is
+ * backed by a `Map` — and the run-tree tests use `mkdtemp` with
+ * `PIFLEET_RUNS_DIR` and `HOME` both redirected, so `incidentRecordRoot`, which
+ * is keyed off the runs root's parent, cannot resolve to the operator's own.
  *
  * The loop is driven ONCE, with an injected `sleep` that aborts the signal before
  * it resolves — `runTriageActor` checks `isStopped` immediately after `sleep`
@@ -59,13 +66,9 @@ import { dirname, join } from "node:path";
 import { buildProgram, CliError } from "../../src/cli/index.ts";
 import { EXIT } from "../../src/contracts.ts";
 import {
-  CONSOLE_HEALTH_KINDS,
-  CONSOLE_SCOPE,
-  INCIDENT_STATES,
   freshIncidentRecord,
   incidentRecordPath,
-  saveIncidentRecord,
-  type IncidentRecord,
+  type CensusDeps,
   type IncidentSubject,
 } from "../../src/run/triage-incident.ts";
 import { freshDeliveryState, reporterStatus } from "../../src/run/triage-notify.ts";
@@ -92,13 +95,12 @@ import type { NotifyRequest } from "../../src/run/triage-notify.ts";
 import { statusOutcome } from "../../src/run/triage-notify.ts";
 import type { TriageEnvironment, TriageService } from "../../src/run/triage-targets.ts";
 import {
-  DEFAULT_CENSUS_DEPS,
   NO_COLLATOR_RUN,
   buildSweepDriver,
   buildTriageSweepDriver,
   highestSweepNumber,
-  incidentCensus,
   inFlightSweep,
+  resumableSweep,
   previousSweepDocument,
   productionIncidentStore,
   productionTriageDeps,
@@ -109,7 +111,6 @@ import {
   resolveSeatRuns,
   soleEnvironment,
   triageStatus,
-  type CensusDeps,
   type TriageCommandDeps,
   type TriageProductionEffects,
   type TriageStatus,
@@ -187,34 +188,6 @@ function censusOver(files: ReadonlyMap<string, string>): CensusDeps {
     },
     read: async (path) => files.get(path) ?? null,
   };
-}
-
-/** A valid §7.6 record, produced by the PRODUCTION writer so it must parse back. */
-async function recordBytes(
-  subject: IncidentSubject,
-  patch: Partial<IncidentRecord> = {},
-): Promise<string> {
-  let written = "";
-  await saveIncidentRecord({
-    record: { ...freshIncidentRecord(subject), ...patch },
-    env: FAKE_ENV,
-    deps: {
-      writeText: async (_path, text) => {
-        written = text;
-      },
-    },
-  });
-  return written;
-}
-
-async function fixtureFiles(
-  entries: readonly (readonly [IncidentSubject, Partial<IncidentRecord>])[],
-): Promise<Map<string, string>> {
-  const files = new Map<string, string>();
-  for (const [subject, patch] of entries) {
-    files.set(incidentRecordPath(subject, FAKE_ENV), await recordBytes(subject, patch));
-  }
-  return files;
 }
 
 // ---------------------------------------------------------------------------
@@ -614,118 +587,6 @@ describe("§12 / §6.9 requirement 7: --status reports three distinct fields", (
 });
 
 // ---------------------------------------------------------------------------
-// The census — §12's second field, which had no producer
-// ---------------------------------------------------------------------------
-
-describe("the incident census (§12's 'incidents by state')", () => {
-  test("an absent record root is an empty table, not an error", async () => {
-    const census = await incidentCensus(FAKE_ENV, censusOver(new Map()));
-    expect(census.records).toBe(0);
-    expect(census.refused).toEqual([]);
-    // Every state named, so a caller doing `?? 0` cannot confuse "zero" with
-    // "the key was never emitted".
-    expect(Object.keys(census.by_state).sort()).toEqual([...INCIDENT_STATES].sort());
-  });
-
-  test("counts both record layouts by state and sums undelivered separately", async () => {
-    const files = await fixtureFiles([
-      [{ kind: "service", environment: "cni-dev", service: "alpha" }, { state: "firing" }],
-      [
-        { kind: "service", environment: "cni-dev", service: "beta" },
-        { state: "firing", undelivered: ["lost one", "lost two"] },
-      ],
-      [{ kind: "service", environment: "cni-dev", service: "gamma" }, { state: "clear" }],
-      [
-        { kind: "console_health", scope: CONSOLE_SCOPE, health: "sweeps_skipped" },
-        { state: "flapping", undelivered: ["lost three"] },
-      ],
-    ]);
-    const census = await incidentCensus(FAKE_ENV, censusOver(files));
-    expect(census.by_state).toEqual({ clear: 1, provisional: 0, firing: 2, flapping: 1 });
-    expect(census.records).toBe(4);
-    // The undelivered count is its OWN number and is not any state's count.
-    expect(census.undelivered).toBe(3);
-    expect(census.refused).toEqual([]);
-  });
-
-  /**
-   * **An unreadable record is not a clear one**, and the direction matters: a
-   * truncated write folded into `clear` presents as good news, which is the
-   * absence-as-evidence failure the whole console is against.
-   */
-  test("a record the schema refuses is counted in NO state", async () => {
-    const subject: IncidentSubject = {
-      kind: "service",
-      environment: "cni-dev",
-      service: "alpha",
-    };
-    const files = new Map<string, string>([
-      [incidentRecordPath(subject, FAKE_ENV), '{"subject":{"kind":"service"'],
-    ]);
-    const census = await incidentCensus(FAKE_ENV, censusOver(files));
-    expect(census.records).toBe(0);
-    expect(census.by_state).toEqual({ clear: 0, provisional: 0, firing: 0, flapping: 0 });
-    expect(census.refused).toHaveLength(1);
-    expect(census.refused[0]!.reason).toContain("is not JSON");
-  });
-
-  test("a file that is no record layout at all is refused, never descended into", async () => {
-    const root = "/nonexistent-pifleet-fixture/triage";
-    const files = new Map<string, string>([[join(root, "cni-dev", "notes.txt"), "hello"]]);
-    const census = await incidentCensus(FAKE_ENV, censusOver(files));
-    expect(census.records).toBe(0);
-    expect(census.refused).toHaveLength(1);
-    expect(census.refused[0]!.path).toContain("notes.txt");
-  });
-
-  /**
-   * The console-health names come from the EXPORTED tuple, so a member added
-   * after this line was written is read rather than rejected. The set grew from
-   * six to seven on 2026-09-06 (`inference_unreachable`, task 5.4d) and §6.8a's
-   * table is the kind of thing that grows again; a hand-written copy here would
-   * start reporting a live incident kind as an unrecognised file.
-   */
-  test("every CONSOLE_HEALTH_KINDS member is a countable record, whatever the set holds", async () => {
-    const files = await fixtureFiles(
-      CONSOLE_HEALTH_KINDS.map(
-        (health) =>
-          [{ kind: "console_health", scope: CONSOLE_SCOPE, health }, { state: "firing" }] as const,
-      ),
-    );
-    const census = await incidentCensus(FAKE_ENV, censusOver(files));
-    expect(census.records).toBe(CONSOLE_HEALTH_KINDS.length);
-    expect(census.by_state.firing).toBe(CONSOLE_HEALTH_KINDS.length);
-    expect(census.refused).toEqual([]);
-  });
-
-  test("a health name outside the enum is refused rather than counted", async () => {
-    const root = "/nonexistent-pifleet-fixture/triage";
-    const files = new Map<string, string>([
-      [join(root, CONSOLE_SCOPE, CONSOLE_SCOPE, "not_a_kind.json"), "{}"],
-    ]);
-    const census = await incidentCensus(FAKE_ENV, censusOver(files));
-    expect(census.records).toBe(0);
-    expect(census.refused).toHaveLength(1);
-  });
-
-  test("the default deps read a real directory and leave ~/.pifleet alone", async () => {
-    const subject: IncidentSubject = {
-      kind: "service",
-      environment: "cni-dev",
-      service: "alpha",
-    };
-    const path = incidentRecordPath(subject, process.env);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, await recordBytes(subject, { state: "provisional" }));
-    const census = await incidentCensus(process.env, DEFAULT_CENSUS_DEPS);
-    expect(census.by_state.provisional).toBe(1);
-    // The fixture root is the temp HOME `beforeEach` installed, so this cannot
-    // have been the operator's own tree.
-    expect(path.startsWith(process.env["HOME"]!)).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // The run-tree half of §6.4's driver
 // ---------------------------------------------------------------------------
 
@@ -736,8 +597,26 @@ async function seedRun(runId: string): Promise<ReturnType<typeof runPaths>> {
   return run;
 }
 
-async function inboxTask(run: ReturnType<typeof runPaths>, taskId: string): Promise<void> {
-  await writeFile(join(run.inboxDir, `${taskId}.json`), JSON.stringify({ task_id: taskId }));
+/**
+ * The host's own inbox envelope. `dispatched_at` is OPTIONAL here on purpose:
+ * `pifleet.task/v1` always carries it in production (`dispatch.ts` fills it
+ * rather than an author), but §13 task 6.4a has to answer for a file that has
+ * been truncated or hand-edited, and a fixture that could not spell the absence
+ * could not test the refusal.
+ */
+async function inboxTask(
+  run: ReturnType<typeof runPaths>,
+  taskId: string,
+  dispatchedAt?: string,
+): Promise<void> {
+  await writeFile(
+    join(run.inboxDir, `${taskId}.json`),
+    JSON.stringify(
+      dispatchedAt === undefined
+        ? { task_id: taskId }
+        : { task_id: taskId, dispatched_at: dispatchedAt },
+    ),
+  );
 }
 
 async function settle(
@@ -832,6 +711,115 @@ describe("§6.4's in-flight read, including the case its own sentence gets wrong
   });
 });
 
+/**
+ * §13 task 6.4a — the read ISC-868 was filed open for, over a real run tree.
+ *
+ * The two sweeps this narrows to are indistinguishable through `inFlightSweep`
+ * BY DESIGN — §6.4's corrected predicate collapses *"parent settled, no
+ * collation"* into `null` so a §6.5 zero-row cannot wedge the actor (ISC-805) —
+ * so every fixture below is asserted against BOTH functions. A `resumableSweep`
+ * that merely re-derived the in-flight answer would pass a file that only
+ * checked one of them.
+ */
+describe("§13 task 6.4a: the run tree's read for a sweep abandoned before collation", () => {
+  const DISPATCHED_AT = "2026-09-06T00:00:00.000Z";
+
+  test("a settled parent with no collate task is RESUMABLE, and carries its dispatch time", async () => {
+    const run = await seedRun("2026-09-06T00-01-00Z-a1a1");
+    await inboxTask(run, "T-sweep-4", DISPATCHED_AT);
+    await settle(run, "T-sweep-4");
+    expect(await resumableSweep(run)).toEqual({
+      sweepId: "T-sweep-4",
+      dispatchedAt: DISPATCHED_AT,
+    });
+    // The premise this whole task rests on: the in-flight port cannot see it.
+    expect(await inFlightSweep(run)).toBeNull();
+  });
+
+  /**
+   * A collation that was dispatched at ALL belongs to `inFlightSweep`, settled or
+   * not. Resuming here would race `tri-1` to write the same document.
+   */
+  test("a dispatched collation is NOT resumable — settled or unsettled", async () => {
+    const live = await seedRun("2026-09-06T00-01-01Z-b2b2");
+    await inboxTask(live, "T-sweep-4", DISPATCHED_AT);
+    await settle(live, "T-sweep-4");
+    await inboxTask(live, "T-sweep-4-collate", DISPATCHED_AT);
+    expect(await resumableSweep(live)).toBeNull();
+    expect(await inFlightSweep(live)).toEqual({
+      sweepId: "T-sweep-4",
+      waitingOn: "T-sweep-4-collate",
+    });
+
+    const done = await seedRun("2026-09-06T00-01-02Z-c3c3");
+    await inboxTask(done, "T-sweep-4", DISPATCHED_AT);
+    await settle(done, "T-sweep-4");
+    await inboxTask(done, "T-sweep-4-collate", DISPATCHED_AT);
+    await settle(done, "T-sweep-4-collate");
+    expect(await resumableSweep(done)).toBeNull();
+    expect(await inFlightSweep(done)).toBeNull();
+  });
+
+  /**
+   * The parent still working is the worker's turn, not the host's — and it is
+   * the case `inFlightSweep` already owns, so answering it twice would give the
+   * pass two contradictory instructions about one sweep.
+   */
+  test("a parent that has NOT settled is in flight, never resumable", async () => {
+    const run = await seedRun("2026-09-06T00-01-03Z-d4d4");
+    await inboxTask(run, "T-sweep-4", DISPATCHED_AT);
+    expect(await resumableSweep(run)).toBeNull();
+    expect(await inFlightSweep(run)).toEqual({ sweepId: "T-sweep-4", waitingOn: "T-sweep-4" });
+  });
+
+  /**
+   * **A sweep that cannot be DATED is not resumed.** §7.4's echo is computed
+   * against `dispatched_at`, so a resumed sweep dated from `now` would report
+   * every observer that answered correctly as `stale_window`. The cost of the
+   * refusal is the one wasted cadence this whole task is arguing about, which is
+   * the cheap side of the trade.
+   */
+  test("an envelope with no readable dispatched_at refuses rather than guessing", async () => {
+    const missing = await seedRun("2026-09-06T00-01-04Z-e5e5");
+    await inboxTask(missing, "T-sweep-4");
+    await settle(missing, "T-sweep-4");
+    expect(await resumableSweep(missing)).toBeNull();
+
+    const unparsable = await seedRun("2026-09-06T00-01-05Z-f6f6");
+    await inboxTask(unparsable, "T-sweep-4", "the day before yesterday");
+    await settle(unparsable, "T-sweep-4");
+    expect(await resumableSweep(unparsable)).toBeNull();
+
+    const truncated = await seedRun("2026-09-06T00-01-06Z-0707");
+    await writeFile(join(truncated.inboxDir, "T-sweep-4.json"), '{"task_id":"T-sweep');
+    await settle(truncated, "T-sweep-4");
+    expect(await resumableSweep(truncated)).toBeNull();
+  });
+
+  test("a run that has never swept has nothing to resume", async () => {
+    const run = await seedRun("2026-09-06T00-01-07Z-1818");
+    expect(await resumableSweep(run)).toBeNull();
+  });
+
+  /**
+   * The read is anchored on the HIGHEST parent, the same one `inFlightSweep`
+   * reads, so the two can never disagree about which sweep they are describing.
+   */
+  test("it answers for the highest sweep, not for an older settled one", async () => {
+    const run = await seedRun("2026-09-06T00-01-08Z-2929");
+    await inboxTask(run, "T-sweep-4", DISPATCHED_AT);
+    await settle(run, "T-sweep-4");
+    await inboxTask(run, "T-sweep-4-collate", DISPATCHED_AT);
+    await settle(run, "T-sweep-4-collate");
+    await inboxTask(run, "T-sweep-5", "2026-09-06T00:05:00.000Z");
+    await settle(run, "T-sweep-5");
+    expect(await resumableSweep(run)).toEqual({
+      sweepId: "T-sweep-5",
+      dispatchedAt: "2026-09-06T00:05:00.000Z",
+    });
+  });
+});
+
 describe("§6.6 layer 4: per-seat pins, resolved per seat rather than per run", () => {
   test("each seat gets the NEWEST run that materialised it, and an unresolved seat is absent", async () => {
     const older = await seedRun("2026-09-06T00-00-00Z-1111");
@@ -865,12 +853,43 @@ describe("buildSweepDriver", () => {
     const driver = buildSweepDriver(run, briefing, process.env);
     expect(await driver.highestSweepNumber()).toBe(7);
     expect(await driver.inFlight()).toEqual({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7" });
+    // §13 task 6.4a's member, wired to the SAME run — this parent has not
+    // settled, so it is in flight and there is nothing to resume.
+    expect(await driver.resumableSweep()).toBeNull();
     // Identity, not equality: a driver that rebuilt these would be a second
     // implementation of the four members that deliberately have none.
     expect(driver.openSweep).toBe(briefing.openSweep);
     expect(driver.dispatchObserver).toBe(briefing.dispatchObserver);
     expect(driver.join).toBe(briefing.join);
     expect(driver.collate).toBe(briefing.collate);
+  });
+
+  /**
+   * **The wiring is pinned on a run tree where the answer is NOT `null`**, and
+   * that is the whole point of a second test for one member. The case above
+   * asserts `null`, which a driver wired to `async () => null` would also
+   * satisfy — a fixture where the real read and a stub agree cannot tell them
+   * apart, and §13 task 6.4a's member is exactly the kind that could ship
+   * unwired while every pass-level test passed against a spy that supplied it.
+   */
+  test("resumableSweep is wired to the real run-tree read, not to a null stub", async () => {
+    const run = await seedRun("2026-09-06T00-00-12Z-5454");
+    await inboxTask(run, "T-sweep-7", "2026-09-06T00:00:00.000Z");
+    await settle(run, "T-sweep-7");
+    const driver = buildSweepDriver(
+      run,
+      {
+        openSweep: async () => ({ kind: "opened" as const }),
+        dispatchObserver: async () => {},
+        join: async () => ({ artifacts: [], blocked: [] }),
+        collate: async () => ({ document: null, evidenceRef: "ref" }),
+      },
+      process.env,
+    );
+    expect(await driver.resumableSweep()).toEqual({
+      sweepId: "T-sweep-7",
+      dispatchedAt: "2026-09-06T00:00:00.000Z",
+    });
   });
 
   test("a sweep with no dispatch request projects an EMPTY partition rather than throwing", async () => {
@@ -893,7 +912,7 @@ describe("buildSweepDriver", () => {
 // Task 6.1a — the composition point, and the ONE argument it is still missing
 // ---------------------------------------------------------------------------
 
-describe("buildTriageSweepDriver: nine members from one dep set", () => {
+describe("buildTriageSweepDriver: ten members from one dep set", () => {
   const SERVICES: readonly TriageService[] = [
     {
       name: "routing",
@@ -919,10 +938,13 @@ describe("buildTriageSweepDriver: nine members from one dep set", () => {
   }
 
   /**
-   * **ALL NINE, by name.** §13 task 6.1a's whole subject is that four of them
+   * **ALL TEN, by name.** §13 task 6.1a's whole subject is that four of them
    * were a refusing port; asserting the members by name rather than counting
-   * them is what makes a tenth — or a quietly dropped fourth — fail here, on
-   * `monitor-readonly.test.ts:363-369`'s rule.
+   * them is what makes an eleventh — or a quietly dropped fourth — fail here, on
+   * `monitor-readonly.test.ts:363-369`'s rule. The tenth, `resumableSweep`,
+   * arrived with §13 task 6.4a and is listed here rather than counted for the
+   * same reason: it is the member a driver could silently omit while every
+   * behavioural test over the pass still passed against a spy that supplied it.
    */
   test("every SweepDriver member is present and callable", async () => {
     const run = await seedRun("2026-09-06T00-00-20Z-5555");
@@ -936,10 +958,11 @@ describe("buildTriageSweepDriver: nine members from one dep set", () => {
       "join",
       "openSweep",
       "readPartition",
+      "resumableSweep",
       "runs",
     ]);
-    // Eight keys, nine members: `SweepDriver` counts `inFlight` and
-    // `highestSweepNumber` separately from the six below. Driven rather than
+    // Nine keys, ten members: `SweepDriver` counts `inFlight` and
+    // `highestSweepNumber` separately from the seven below. Driven rather than
     // merely present, because a member assigned `undefined` also has a key.
     expect(await driver.openSweep("T-sweep-3", "2026-09-06T12:00:00.000Z")).toEqual({
       kind: "opened",
@@ -949,6 +972,7 @@ describe("buildTriageSweepDriver: nine members from one dep set", () => {
     expect(await driver.readPartition("T-sweep-3")).toEqual([]);
     expect(await driver.highestSweepNumber()).toBe(0);
     expect(await driver.inFlight()).toBeNull();
+    expect(await driver.resumableSweep()).toBeNull();
     expect(sent).toEqual(["tri-1:T-sweep-3", "tri-1:T-sweep-3-collate"]);
   });
 

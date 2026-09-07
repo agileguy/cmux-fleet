@@ -68,6 +68,7 @@
  * test can reference rather than a literal `3` in a comparison.
  */
 
+import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { z } from "zod";
@@ -1596,6 +1597,185 @@ export async function saveIncidentRecord(opts: SaveIncidentRecordOptions): Promi
   const path = opts.path ?? incidentRecordPath(validated.subject, opts.env);
   await deps.writeText(path, `${JSON.stringify(validated, null, 2)}\n`);
   return path;
+}
+
+// ── §13 task 6.2a — the census, beside the two functions it reads with ──────
+//
+// It shipped in `cli/commands/triage.ts` because that is what task 6.2's
+// *Touches* line allowed, and it was in the wrong file from the first line.
+// Task 6.1's own recorded argument is the reason: *"a writer that does not sit
+// beside its reader becomes a second definition of where those files are"* —
+// and the census is a READER of exactly the two things defined above it,
+// `incidentRecordPath`'s two layouts and `parseIncidentRecord`'s refusal
+// posture. A third layout added to `incidentRecordPath` is now a change one
+// screen from the walk that has to enumerate it, rather than a change in
+// `src/run/` whose only other half is in `src/cli/`.
+//
+// ISC-804 travels unchanged: the console-health names still come from
+// {@link CONSOLE_HEALTH_KINDS}, which is now declared in this same file — so
+// the tuple and its only structural consumer can no longer be edited apart.
+
+/**
+ * A record on disk the census could not read, kept OUT of every state bucket.
+ *
+ * `parseIncidentRecord` returns a refusal rather than throwing *"because the bytes
+ * are a file, and a file can be hand-edited, truncated by a crash mid-write, or
+ * left behind by a build whose record shape differed"*. The census inherits that
+ * posture and adds the reporting half: a refusal is published as its own row, so
+ * an operator reading `--status` sees that the console has state it cannot
+ * account for rather than seeing a smaller, tidier, wrong table.
+ */
+export interface CensusRefusal {
+  readonly path: string;
+  readonly reason: string;
+}
+
+/**
+ * §12's *"incidents by state"*, plus the two things a bare histogram would hide.
+ *
+ * `by_state` names **every** member of {@link INCIDENT_STATES} whether or not any
+ * record is in it, on `monitor-readonly.test.ts`'s rule that naming the permitted
+ * set is what makes a missing member fail. A sparse object would let `firing: 0`
+ * and *"the key was never emitted"* look the same to a caller doing `?? 0`.
+ */
+export interface IncidentCensus {
+  readonly by_state: Readonly<Record<IncidentState, number>>;
+  /** Records read and understood. Equals the sum of `by_state`'s values. */
+  readonly records: number;
+  /** §7.6's `undelivered[]`, summed. §12's THIRD field. Never merged with a state. */
+  readonly undelivered: number;
+  /** Records on disk this census declined to count. Never folded into `clear`. */
+  readonly refused: readonly CensusRefusal[];
+}
+
+/** Every state at zero — the shape a census starts from and never departs from. */
+function emptyByState(): Record<IncidentState, number> {
+  const out = {} as Record<IncidentState, number>;
+  for (const state of INCIDENT_STATES) out[state] = 0;
+  return out;
+}
+
+const HEALTH_KINDS: ReadonlySet<string> = new Set<string>(CONSOLE_HEALTH_KINDS);
+
+/**
+ * Reconstruct the subject a file at this location claims to be about.
+ *
+ * `parseIncidentRecord` takes the `expected` subject as a REQUIRED parameter —
+ * *"the caller that forgets the argument is the caller that acts on another
+ * service's state, and it would compile"* — so a census that walks paths must be
+ * able to say what it expected before it reads. §7.6's `<env>/<service>.json` and
+ * §6.8a's `<scope>/_console/<kind>.json` are the only two layouts
+ * {@link incidentRecordPath} produces, and they cannot collide because
+ * `CONSOLE_SCOPE` is unspellable as an environment name.
+ *
+ * Returning `null` for a name that is not a live `ConsoleHealthKind` is what makes
+ * a stale record from a build whose enum differed show up as a refusal rather than
+ * as a subject that no longer exists. The kinds come from the exported tuple, so a
+ * file named for a member added after this line was written is read, not rejected.
+ */
+function subjectForPath(scope: string, rest: readonly string[]): IncidentSubject | null {
+  if (rest.length === 1) {
+    const name = rest[0]!;
+    if (!name.endsWith(".json")) return null;
+    return { kind: "service", environment: scope, service: name.slice(0, -".json".length) };
+  }
+  if (rest.length === 2 && rest[0] === CONSOLE_SCOPE) {
+    const name = rest[1]!;
+    if (!name.endsWith(".json")) return null;
+    const health = name.slice(0, -".json".length);
+    if (!HEALTH_KINDS.has(health)) return null;
+    return { kind: "console_health", scope, health: health as ConsoleHealthKind };
+  }
+  return null;
+}
+
+/** How the census reads bytes, injected so a fixture needs no temp directory. */
+export interface CensusDeps {
+  /** Directory entries, or `null` when the directory is absent. */
+  readonly list: (dir: string) => Promise<readonly string[] | null>;
+  /** File bytes, or `null` when the file is absent. */
+  readonly read: (path: string) => Promise<string | null>;
+}
+
+export const DEFAULT_CENSUS_DEPS: CensusDeps = {
+  list: async (dir) => {
+    try {
+      return await readdir(dir);
+    } catch {
+      // An absent root is the ordinary state before the first incident, and it
+      // is not a refusal: `--status` on a console that has never fired anything
+      // must report an empty table rather than an error.
+      return null;
+    }
+  },
+  read: async (path) => {
+    const file = Bun.file(path);
+    return (await file.exists()) ? await file.text() : null;
+  },
+};
+
+/**
+ * Walk §7.6's record root and count what is there.
+ *
+ * **Two levels deep and no deeper, by construction rather than by a depth
+ * counter.** `incidentRecordPath` produces exactly two shapes and this reads
+ * exactly those two; a directory that matches neither is reported as a refusal
+ * rather than descended into, so a stray tree under the records root cannot turn
+ * a status call into an unbounded walk of the operator's home directory.
+ */
+export async function incidentCensus(
+  env: Record<string, string | undefined> = process.env,
+  deps: CensusDeps = DEFAULT_CENSUS_DEPS,
+): Promise<IncidentCensus> {
+  const root = incidentRecordRoot(env);
+  const by_state = emptyByState();
+  const refused: CensusRefusal[] = [];
+  let undelivered = 0;
+  let records = 0;
+
+  const scopes = await deps.list(root);
+  if (scopes === null) return { by_state, records, undelivered, refused };
+
+  for (const scope of [...scopes].sort()) {
+    const scopeDir = join(root, scope);
+    const entries = await deps.list(scopeDir);
+    if (entries === null) continue;
+    for (const entry of [...entries].sort()) {
+      // `_console` is the one nested layout; everything else at this level is a
+      // service record, and anything that is neither is reported rather than
+      // walked.
+      const rests: readonly string[][] =
+        entry === CONSOLE_SCOPE
+          ? ((await deps.list(join(scopeDir, entry))) ?? []).slice().sort().map((n) => [entry, n])
+          : [[entry]];
+      for (const rest of rests) {
+        const path = join(scopeDir, ...rest);
+        const subject = subjectForPath(scope, rest);
+        if (subject === null) {
+          refused.push({
+            path,
+            reason:
+              `${path} is not a §7.6 \`<env>/<service>.json\` or a §6.8a ` +
+              `\`<scope>/_console/<kind>.json\` record, so no subject could be expected of ` +
+              `it and it is counted in no state.`,
+          });
+          continue;
+        }
+        const text = await deps.read(path);
+        if (text === null) continue;
+        const read = parseIncidentRecord(text, subject, path);
+        if (read.kind !== "ok") {
+          refused.push({ path, reason: read.reason });
+          continue;
+        }
+        records += 1;
+        by_state[read.record.state] += 1;
+        undelivered += read.record.undelivered.length;
+      }
+    }
+  }
+
+  return { by_state, records, undelivered, refused };
 }
 
 // ── §6.8a task 5.4a — a sweep's console-level facts, as observations ─────────

@@ -40,11 +40,14 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
+  DEFAULT_CENSUS_DEPS,
+  incidentCensus,
+  type CensusDeps,
   announcementFacts,
   consoleHealthObservations,
   saveIncidentRecord,
@@ -81,6 +84,7 @@ import {
   type ObservedIssueReason,
 } from "../../src/run/triage-incident.ts";
 import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
+import { stripComments } from "../support/source-structure.ts";
 import { TRIAGE_DOCUMENT_FAULTS } from "../../src/run/triage-document.ts";
 import {
   SATURATION_PAIR,
@@ -2173,6 +2177,260 @@ describe("saveIncidentRecord — the writer §7.6 was missing", () => {
     }
   });
 });
+// ---------------------------------------------------------------------------
+// §13 task 6.2a — the census, tested beside the function it now lives with
+// ---------------------------------------------------------------------------
+
+/**
+ * §13 task 6.2a's structural half — the census moved, and **nothing was left
+ * behind**, asserted on COMMENT-STRIPPED source so the docblock that explains
+ * the move cannot redden its own probe.
+ *
+ * Task 6.1's recorded argument is the criterion: *"a writer that does not sit
+ * beside its reader becomes a second definition of where those files are."* A
+ * re-export left in the command would be exactly that second definition — one
+ * more place a caller can learn the layout from, and one more place that stops
+ * agreeing the day `incidentRecordPath` grows a third shape. The command is a
+ * CONSUMER now, and the import edge is what says so.
+ */
+describe("§13 task 6.2a: the census lives beside its readers, and nowhere else", () => {
+  const commandSource = stripComments(
+    readFileSync(join(import.meta.dir, "../../src/cli/commands/triage.ts"), "utf8"),
+  );
+
+  test("cli/commands/triage.ts declares no census — it imports one", () => {
+    // The walk and its two record layouts are spelled in ONE file.
+    expect(commandSource).not.toContain("export async function incidentCensus");
+    expect(commandSource).not.toContain("export const DEFAULT_CENSUS_DEPS");
+    expect(commandSource).not.toContain("export interface CensusDeps");
+    expect(commandSource).not.toContain("export interface CensusRefusal");
+    expect(commandSource).not.toContain("export interface IncidentCensus");
+    // …and the command reaches it the way every other consumer does.
+    expect(commandSource).toContain('from "../../run/triage-incident.ts"');
+    expect(commandSource).toContain("incidentCensus");
+  });
+
+  test("the census and the two functions it reads with are one module", () => {
+    const home = stripComments(
+      readFileSync(join(import.meta.dir, "../../src/run/triage-incident.ts"), "utf8"),
+    );
+    for (const declaration of [
+      "export async function incidentCensus",
+      "export function incidentRecordPath",
+      "export function parseIncidentRecord",
+    ]) {
+      expect(home).toContain(declaration);
+    }
+  });
+});
+
+/**
+ * An env that resolves nowhere real, for the tests that reach no disk.
+ *
+ * `incidentRecordRoot` takes `dirname` of the runs root, so this puts the record
+ * root at `/nonexistent-pifleet-fixture/triage` — a path the census only ever
+ * hands to an injected `CensusDeps`, never to `readdir`. **`HOME` is set as well
+ * as `PIFLEET_RUNS_DIR`**, because `runsRoot` falls back to `$HOME/.pifleet/runs`
+ * and a fixture that set only one of the two would resolve to the operator's own.
+ */
+const CENSUS_ENV: Record<string, string | undefined> = {
+  PIFLEET_RUNS_DIR: "/nonexistent-pifleet-fixture/runs",
+  HOME: "/nonexistent-pifleet-fixture",
+};
+
+/** Bytes keyed by absolute path, listed the way `readdir` would list them. */
+function censusOver(files: ReadonlyMap<string, string>): CensusDeps {
+  return {
+    list: async (dir) => {
+      const prefix = `${dir}/`;
+      const names = new Set<string>();
+      for (const path of files.keys()) {
+        if (!path.startsWith(prefix)) continue;
+        const rest = path.slice(prefix.length);
+        const cut = rest.indexOf("/");
+        names.add(cut === -1 ? rest : rest.slice(0, cut));
+      }
+      return names.size === 0 ? null : [...names];
+    },
+    read: async (path) => files.get(path) ?? null,
+  };
+}
+
+/** A valid §7.6 record, produced by the PRODUCTION writer so it must parse back. */
+async function recordBytes(
+  subject: IncidentSubject,
+  patch: Partial<IncidentRecord> = {},
+  env: Record<string, string | undefined> = CENSUS_ENV,
+): Promise<string> {
+  let written = "";
+  await saveIncidentRecord({
+    record: { ...freshIncidentRecord(subject), ...patch },
+    env,
+    deps: {
+      writeText: async (_path, text) => {
+        written = text;
+      },
+    },
+  });
+  return written;
+}
+
+async function fixtureFiles(
+  entries: readonly (readonly [IncidentSubject, Partial<IncidentRecord>])[],
+): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  for (const [subject, patch] of entries) {
+    files.set(incidentRecordPath(subject, CENSUS_ENV), await recordBytes(subject, patch));
+  }
+  return files;
+}
+
+describe("the incident census (§12's 'incidents by state')", () => {
+  test("an absent record root is an empty table, not an error", async () => {
+    const census = await incidentCensus(CENSUS_ENV, censusOver(new Map()));
+    expect(census.records).toBe(0);
+    expect(census.refused).toEqual([]);
+    // Every state named, so a caller doing `?? 0` cannot confuse "zero" with
+    // "the key was never emitted".
+    expect(Object.keys(census.by_state).sort()).toEqual([...INCIDENT_STATES].sort());
+  });
+
+  test("counts both record layouts by state and sums undelivered separately", async () => {
+    const files = await fixtureFiles([
+      [{ kind: "service", environment: "cni-dev", service: "alpha" }, { state: "firing" }],
+      [
+        { kind: "service", environment: "cni-dev", service: "beta" },
+        { state: "firing", undelivered: ["lost one", "lost two"] },
+      ],
+      [{ kind: "service", environment: "cni-dev", service: "gamma" }, { state: "clear" }],
+      [
+        { kind: "console_health", scope: CONSOLE_SCOPE, health: "sweeps_skipped" },
+        { state: "flapping", undelivered: ["lost three"] },
+      ],
+    ]);
+    const census = await incidentCensus(CENSUS_ENV, censusOver(files));
+    expect(census.by_state).toEqual({ clear: 1, provisional: 0, firing: 2, flapping: 1 });
+    expect(census.records).toBe(4);
+    // The undelivered count is its OWN number and is not any state's count.
+    expect(census.undelivered).toBe(3);
+    expect(census.refused).toEqual([]);
+  });
+
+  /**
+   * **An unreadable record is not a clear one**, and the direction matters: a
+   * truncated write folded into `clear` presents as good news, which is the
+   * absence-as-evidence failure the whole console is against.
+   */
+  test("a record the schema refuses is counted in NO state", async () => {
+    const subject: IncidentSubject = {
+      kind: "service",
+      environment: "cni-dev",
+      service: "alpha",
+    };
+    const files = new Map<string, string>([
+      [incidentRecordPath(subject, CENSUS_ENV), '{"subject":{"kind":"service"'],
+    ]);
+    const census = await incidentCensus(CENSUS_ENV, censusOver(files));
+    expect(census.records).toBe(0);
+    expect(census.by_state).toEqual({ clear: 0, provisional: 0, firing: 0, flapping: 0 });
+    expect(census.refused).toHaveLength(1);
+    expect(census.refused[0]!.reason).toContain("is not JSON");
+  });
+
+  test("a file that is no record layout at all is refused, never descended into", async () => {
+    const root = "/nonexistent-pifleet-fixture/triage";
+    const files = new Map<string, string>([[join(root, "cni-dev", "notes.txt"), "hello"]]);
+    const census = await incidentCensus(CENSUS_ENV, censusOver(files));
+    expect(census.records).toBe(0);
+    expect(census.refused).toHaveLength(1);
+    expect(census.refused[0]!.path).toContain("notes.txt");
+    /*
+     * **Refused for its LAYOUT, before the bytes were read** — and the reason is
+     * asserted because the count is not enough. Found by mutation
+     * `census-descends-a-stray-tree-instead-of-refusing`, which deleted the
+     * layout gate and SURVIVED: the file was then read and refused by
+     * `parseIncidentRecord` instead, one refusal either way. The two are not the
+     * same thing. `parseIncidentRecord` takes the expected subject as a REQUIRED
+     * parameter — *"the caller that forgets the argument is the caller that acts
+     * on another service's state"* — so a census that reads first hands it a
+     * subject it has no expectation for, and a WELL-FORMED record under a stray
+     * path would then be graded against nothing.
+     */
+    expect(census.refused[0]!.reason).toContain("no subject could be expected of");
+  });
+
+  /**
+   * The console-health names come from the EXPORTED tuple, so a member added
+   * after this line was written is read rather than rejected. The set grew from
+   * six to seven on 2026-09-06 (`inference_unreachable`, task 5.4d) and §6.8a's
+   * table is the kind of thing that grows again; a hand-written copy here would
+   * start reporting a live incident kind as an unrecognised file.
+   */
+  test("every CONSOLE_HEALTH_KINDS member is a countable record, whatever the set holds", async () => {
+    const files = await fixtureFiles(
+      CONSOLE_HEALTH_KINDS.map(
+        (health) =>
+          [{ kind: "console_health", scope: CONSOLE_SCOPE, health }, { state: "firing" }] as const,
+      ),
+    );
+    const census = await incidentCensus(CENSUS_ENV, censusOver(files));
+    expect(census.records).toBe(CONSOLE_HEALTH_KINDS.length);
+    expect(census.by_state.firing).toBe(CONSOLE_HEALTH_KINDS.length);
+    expect(census.refused).toEqual([]);
+  });
+
+  test("a health name outside the enum is refused rather than counted", async () => {
+    const root = "/nonexistent-pifleet-fixture/triage";
+    const files = new Map<string, string>([
+      [join(root, CONSOLE_SCOPE, CONSOLE_SCOPE, "not_a_kind.json"), "{}"],
+    ]);
+    const census = await incidentCensus(CENSUS_ENV, censusOver(files));
+    expect(census.records).toBe(0);
+    expect(census.refused).toHaveLength(1);
+    // ISC-804's other side, and the reason matters here for the same argument as
+    // the layout case above: the NAME is what failed, before any byte was read.
+    expect(census.refused[0]!.reason).toContain("no subject could be expected of");
+  });
+
+  /**
+   * The ONE census test that touches a disk, and it carries its OWN temporary
+   * root rather than inheriting one.
+   *
+   * **This is the isolation task 6.2a had to re-establish rather than move.** In
+   * `triage-command.test.ts` this case read `process.env` and was safe only
+   * because a `beforeEach` in that file redirected `HOME` and `PIFLEET_RUNS_DIR`
+   * for every test in it. This file has no such hook — and the first run after
+   * the move wrote a record into the operator's real `~/.pifleet/triage/cni-dev`,
+   * which is ISC-614's hazard exactly: `incidentRecordRoot` is
+   * `dirname(runsRoot(env))/triage` and `runsRoot` falls back to
+   * `$HOME/.pifleet/runs`, so **isolating the checkout isolates nothing**. Both
+   * variables are set here, from one `mkdtemp`, and the tree is removed in a
+   * `finally`.
+   */
+  test("the default deps read a real directory and leave ~/.pifleet alone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-census-"));
+    try {
+      const env = { HOME: root, PIFLEET_RUNS_DIR: join(root, ".pifleet", "runs") };
+      const subject: IncidentSubject = {
+        kind: "service",
+        environment: "cni-dev",
+        service: "alpha",
+      };
+      const path = incidentRecordPath(subject, env);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, await recordBytes(subject, { state: "provisional" }, env));
+      const census = await incidentCensus(env, DEFAULT_CENSUS_DEPS);
+      expect(census.by_state.provisional).toBe(1);
+      // Under the temp root this test made, so it cannot have been the
+      // operator's own tree — asserted by VALUE, not by the absence of a crash.
+      expect(path.startsWith(root)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+
 
 describe("the two record kinds are one machine — §6.8a, and 5.5's half of it", () => {
   /**

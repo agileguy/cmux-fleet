@@ -143,21 +143,20 @@ import {
   triagePass,
   type InFlightSweep,
   type IncidentStore,
+  type ResumableSweep,
   type SaturationMemo,
   type SweepDriver,
   type TriagePassOutcome,
 } from "../../run/triage-pass.ts";
 import {
-  CONSOLE_HEALTH_KINDS,
-  CONSOLE_SCOPE,
+  DEFAULT_CENSUS_DEPS,
   INCIDENT_STATES,
-  incidentRecordRoot,
+  incidentCensus,
   loadIncidentRecord,
-  parseIncidentRecord,
   saveIncidentRecord,
-  type ConsoleHealthKind,
+  type CensusDeps,
+  type CensusRefusal,
   type IncidentState,
-  type IncidentSubject,
 } from "../../run/triage-incident.ts";
 import {
   TRIAGE_COLLATOR,
@@ -174,173 +173,6 @@ import {
   type TriageActorIdentity,
   type TriageActorRecordRead,
 } from "../../run/triage-actor.ts";
-
-// ---------------------------------------------------------------------------
-// The census — §12's second `--status` field, which had no producer
-// ---------------------------------------------------------------------------
-
-/**
- * A record on disk the census could not read, kept OUT of every state bucket.
- *
- * `parseIncidentRecord` returns a refusal rather than throwing *"because the bytes
- * are a file, and a file can be hand-edited, truncated by a crash mid-write, or
- * left behind by a build whose record shape differed"*. The census inherits that
- * posture and adds the reporting half: a refusal is published as its own row, so
- * an operator reading `--status` sees that the console has state it cannot
- * account for rather than seeing a smaller, tidier, wrong table.
- */
-export interface CensusRefusal {
-  readonly path: string;
-  readonly reason: string;
-}
-
-/**
- * §12's *"incidents by state"*, plus the two things a bare histogram would hide.
- *
- * `by_state` names **every** member of {@link INCIDENT_STATES} whether or not any
- * record is in it, on `monitor-readonly.test.ts`'s rule that naming the permitted
- * set is what makes a missing member fail. A sparse object would let `firing: 0`
- * and *"the key was never emitted"* look the same to a caller doing `?? 0`.
- */
-export interface IncidentCensus {
-  readonly by_state: Readonly<Record<IncidentState, number>>;
-  /** Records read and understood. Equals the sum of `by_state`'s values. */
-  readonly records: number;
-  /** §7.6's `undelivered[]`, summed. §12's THIRD field. Never merged with a state. */
-  readonly undelivered: number;
-  /** Records on disk this census declined to count. Never folded into `clear`. */
-  readonly refused: readonly CensusRefusal[];
-}
-
-/** Every state at zero — the shape a census starts from and never departs from. */
-function emptyByState(): Record<IncidentState, number> {
-  const out = {} as Record<IncidentState, number>;
-  for (const state of INCIDENT_STATES) out[state] = 0;
-  return out;
-}
-
-const HEALTH_KINDS: ReadonlySet<string> = new Set<string>(CONSOLE_HEALTH_KINDS);
-
-/**
- * Reconstruct the subject a file at this location claims to be about.
- *
- * `parseIncidentRecord` takes the `expected` subject as a REQUIRED parameter —
- * *"the caller that forgets the argument is the caller that acts on another
- * service's state, and it would compile"* — so a census that walks paths must be
- * able to say what it expected before it reads. §7.6's `<env>/<service>.json` and
- * §6.8a's `<scope>/_console/<kind>.json` are the only two layouts
- * {@link incidentRecordPath} produces, and they cannot collide because
- * `CONSOLE_SCOPE` is unspellable as an environment name.
- *
- * Returning `null` for a name that is not a live `ConsoleHealthKind` is what makes
- * a stale record from a build whose enum differed show up as a refusal rather than
- * as a subject that no longer exists. The kinds come from the exported tuple, so a
- * file named for a member added after this line was written is read, not rejected.
- */
-function subjectForPath(scope: string, rest: readonly string[]): IncidentSubject | null {
-  if (rest.length === 1) {
-    const name = rest[0]!;
-    if (!name.endsWith(".json")) return null;
-    return { kind: "service", environment: scope, service: name.slice(0, -".json".length) };
-  }
-  if (rest.length === 2 && rest[0] === CONSOLE_SCOPE) {
-    const name = rest[1]!;
-    if (!name.endsWith(".json")) return null;
-    const health = name.slice(0, -".json".length);
-    if (!HEALTH_KINDS.has(health)) return null;
-    return { kind: "console_health", scope, health: health as ConsoleHealthKind };
-  }
-  return null;
-}
-
-/** How the census reads bytes, injected so a fixture needs no temp directory. */
-export interface CensusDeps {
-  /** Directory entries, or `null` when the directory is absent. */
-  readonly list: (dir: string) => Promise<readonly string[] | null>;
-  /** File bytes, or `null` when the file is absent. */
-  readonly read: (path: string) => Promise<string | null>;
-}
-
-export const DEFAULT_CENSUS_DEPS: CensusDeps = {
-  list: async (dir) => {
-    try {
-      return await readdir(dir);
-    } catch {
-      // An absent root is the ordinary state before the first incident, and it
-      // is not a refusal: `--status` on a console that has never fired anything
-      // must report an empty table rather than an error.
-      return null;
-    }
-  },
-  read: async (path) => {
-    const file = Bun.file(path);
-    return (await file.exists()) ? await file.text() : null;
-  },
-};
-
-/**
- * Walk §7.6's record root and count what is there.
- *
- * **Two levels deep and no deeper, by construction rather than by a depth
- * counter.** `incidentRecordPath` produces exactly two shapes and this reads
- * exactly those two; a directory that matches neither is reported as a refusal
- * rather than descended into, so a stray tree under the records root cannot turn
- * a status call into an unbounded walk of the operator's home directory.
- */
-export async function incidentCensus(
-  env: Record<string, string | undefined> = process.env,
-  deps: CensusDeps = DEFAULT_CENSUS_DEPS,
-): Promise<IncidentCensus> {
-  const root = incidentRecordRoot(env);
-  const by_state = emptyByState();
-  const refused: CensusRefusal[] = [];
-  let undelivered = 0;
-  let records = 0;
-
-  const scopes = await deps.list(root);
-  if (scopes === null) return { by_state, records, undelivered, refused };
-
-  for (const scope of [...scopes].sort()) {
-    const scopeDir = join(root, scope);
-    const entries = await deps.list(scopeDir);
-    if (entries === null) continue;
-    for (const entry of [...entries].sort()) {
-      // `_console` is the one nested layout; everything else at this level is a
-      // service record, and anything that is neither is reported rather than
-      // walked.
-      const rests: readonly string[][] =
-        entry === CONSOLE_SCOPE
-          ? ((await deps.list(join(scopeDir, entry))) ?? []).slice().sort().map((n) => [entry, n])
-          : [[entry]];
-      for (const rest of rests) {
-        const path = join(scopeDir, ...rest);
-        const subject = subjectForPath(scope, rest);
-        if (subject === null) {
-          refused.push({
-            path,
-            reason:
-              `${path} is not a §7.6 \`<env>/<service>.json\` or a §6.8a ` +
-              `\`<scope>/_console/<kind>.json\` record, so no subject could be expected of ` +
-              `it and it is counted in no state.`,
-          });
-          continue;
-        }
-        const text = await deps.read(path);
-        if (text === null) continue;
-        const read = parseIncidentRecord(text, subject, path);
-        if (read.kind !== "ok") {
-          refused.push({ path, reason: read.reason });
-          continue;
-        }
-        records += 1;
-        by_state[read.record.state] += 1;
-        undelivered += read.record.undelivered.length;
-      }
-    }
-  }
-
-  return { by_state, records, undelivered, refused };
-}
 
 // ---------------------------------------------------------------------------
 // §12's three fields
@@ -599,6 +431,77 @@ export async function inFlightSweep(run: RunPaths): Promise<InFlightSweep | null
 }
 
 /**
+ * §13 task 6.4a's missing read — *does `T-sweep-<n>-collate` exist* — beside the
+ * one that could not answer it. ISC-868.
+ *
+ * ## The two sweeps that look identical to {@link inFlightSweep}, and this is one of them
+ *
+ * §6.4's corrected predicate collapses *"parent settled, no collation"* into
+ * `null` so a §6.5 zero-row cannot wedge the actor (ISC-805), and that same
+ * `null` is what an ABANDONED sweep reads — an actor that died between the join
+ * and the collation dispatch. Both have a settled parent and no `-collate` task,
+ * and no amount of looking at the in-flight port separates them, because
+ * separating them is not what that port is for.
+ *
+ * This function narrows the run tree to exactly those two and stops there. The
+ * fact that tells them apart — whether any observer produced an artifact — is
+ * `SweepDriver.join`'s, and the pass asks it, so this module does not grow a
+ * second artifact reader beside `triage-envelope.ts`'s.
+ *
+ * ## Three refusals, and each one is a hazard rather than tidiness
+ *
+ *  - **A `-collate` task that EXISTS.** Then the collation was dispatched and
+ *    {@link inFlightSweep} owns the sweep: either the collator still owes it, or
+ *    it settled and the sweep is over. Resuming here would race `tri-1` to write
+ *    the same document.
+ *  - **A parent that has NOT settled.** The worker owes the sweep, and neither
+ *    the join nor the collation is a step the host may take.
+ *  - **An envelope whose `dispatched_at` cannot be read.** §7.4's echo is
+ *    computed against that instant, so a resumed sweep dated from `now` would
+ *    report every observer that answered correctly as `stale_window`. A sweep
+ *    that cannot be dated is not resumed, and the cost of that refusal is the one
+ *    wasted cadence the whole task is arguing about — which is the cheap side.
+ */
+export async function resumableSweep(run: RunPaths): Promise<ResumableSweep | null> {
+  const n = await highestSweepNumber(run);
+  if (n === 0) return null;
+  const parent = sweepTaskId(n);
+  const envelope = inboxTaskPath(run, parent);
+  if (!existsSync(envelope)) return null;
+  if (existsSync(inboxTaskPath(run, collationTaskId(parent)))) return null;
+
+  const collator = workerPaths(run, TRIAGE_COLLATOR);
+  if ((await readTaskRecord(taskRecordPath(collator, parent))) === null) return null;
+
+  const dispatchedAt = await dispatchedAtOf(envelope);
+  return dispatchedAt === null ? null : { sweepId: parent, dispatchedAt };
+}
+
+/**
+ * The `dispatched_at` the HOST wrote into its own inbox envelope, or `null`.
+ *
+ * The envelope is `pifleet.task/v1` and the field is filled by the dispatcher
+ * rather than by an author, so it is the one durable record of when this sweep's
+ * observation window opened. It is read as an unvalidated shape on
+ * `relay.ts:421`'s pattern — the file is in the HOST's own directory but it is
+ * still a file, and a truncated or hand-edited one must answer *"cannot be
+ * dated"* rather than throw a pass that would otherwise have swept.
+ *
+ * `Date.parse` gates it because a non-timestamp string would reach `windowEcho`,
+ * which throws on a bound that is not a number — turning a resumable sweep into
+ * a thrown pass, which is the loudest possible version of the wrong answer.
+ */
+async function dispatchedAtOf(path: string): Promise<string | null> {
+  try {
+    const envelope = JSON.parse(await Bun.file(path).text()) as { dispatched_at?: unknown };
+    const at = envelope.dispatched_at;
+    return typeof at === "string" && Number.isFinite(Date.parse(at)) ? at : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * §6.6 layer 4's per-seat pins, re-derived every pass because recycling moves
  * them.
  *
@@ -667,6 +570,7 @@ export function buildSweepDriver(
 ): SweepDriver {
   return {
     inFlight: () => inFlightSweep(run),
+    resumableSweep: () => resumableSweep(run),
     highestSweepNumber: () => highestSweepNumber(run),
     runs: () => resolveSeatRuns(undefined, env),
     readPartition: (sweepId) => readSweepPartition(run, sweepId),

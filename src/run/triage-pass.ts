@@ -160,6 +160,55 @@ export interface InFlightSweep {
 }
 
 /**
+ * §13 task 6.4a — a sweep the run tree says NOBODY owes a step on, and which
+ * never reached §6.3 step 8.
+ *
+ * ## This is the read ISC-868 was filed open for, and it is a proof rather than a hint
+ *
+ * {@link InFlightSweep} reports a sweep exactly while a WORKER task is
+ * outstanding. The state worth resuming — the actor died between the join and the
+ * collation dispatch — reads `null` through that port, and is indistinguishable
+ * there from a sweep that finished, because §6.4's corrected predicate
+ * deliberately collapses *"parent settled, no collation"* into `null` so a §6.5
+ * zero-row cannot wedge the actor (ISC-805).
+ *
+ * `resumableSweep` answers the missing question — **does `T-sweep-<n>-collate`
+ * exist** — for a parent that has SETTLED. That narrows the run tree to two
+ * sweeps and they are told apart by one further fact, `join`'s artifact count:
+ *
+ *  - **artifacts present** — this pass dispatches a collation if and only if the
+ *    join found artifacts, so *artifacts AND no `-collate` task* proves the sweep
+ *    never reached step 8, and a sweep that never reached step 8 produced no
+ *    document for the incident machine to have consumed. It is carried.
+ *  - **no artifacts** — §6.5's zero-row, which was already assessed and
+ *    announced (`sweep_produced_nothing`) by the pass that ran it. It is left
+ *    alone and the next id is minted.
+ *
+ * **Resuming on *"the record is behind the run tree"* alone was refused**, and
+ * that refusal is the whole reason this member exists: it would re-drive the
+ * machine over a document already consumed, minting two `unhealthy` observations
+ * from ONE sweep and opening a firing incident on a single sweep's evidence,
+ * which ISC-712 forbids by name. That is worse than the failure it prevents,
+ * which is one wasted five-minute cadence.
+ */
+export interface ResumableSweep {
+  readonly sweepId: string;
+  /**
+   * The instant the sweep was ORIGINALLY dispatched, ISO-8601, read back from
+   * the host's own inbox envelope.
+   *
+   * Not `now`, and not optional. §7.4's echo refuses an artifact opened earlier
+   * than `dispatched_at − default_window − reserve_s`, so assessing a resumed
+   * sweep against the resuming pass's clock would report every observer that
+   * answered correctly as `stale_window` — three innocent workers named for an
+   * outage the console itself had, which is §6.7 rule 3's misdiagnosis family.
+   * A sweep whose dispatch instant cannot be recovered is therefore not
+   * resumable at all; the adapter answers `null` and the cadence is spent.
+   */
+  readonly dispatchedAt: string;
+}
+
+/**
  * §6.10's exit 5, as the only thing `openSweep` may say other than *"opened"*.
  *
  * A refused admission is not a thrown pass: the run's token ceiling is a
@@ -213,6 +262,11 @@ export interface SweepCollation {
 export interface SweepDriver {
   /** §6.4's D12 read: the RUN TREE decides, never `~/.pifleet/triage-relay.json`. */
   readonly inFlight: () => Promise<InFlightSweep | null>;
+  /**
+   * §13 task 6.4a's read — the parent settled and no `-collate` task was ever
+   * dispatched. See {@link ResumableSweep} for why this cannot be `inFlight`.
+   */
+  readonly resumableSweep: () => Promise<ResumableSweep | null>;
   /**
    * §6.6 layer 2's *"re-derived from the run tree on restart"* — the highest
    * `T-sweep-<n>` the run tree holds, or `0`.
@@ -465,26 +519,25 @@ export interface TriagePassOutcome {
  * fail to advance the cursor, never move it backwards onto an id that has been
  * dispatched.
  *
- * ## What this deliberately does NOT do, and the reason is a hazard rather than scope
+ * ## What this does NOT decide, and §13 task 6.4a is what decides it instead
  *
- * §13 task 6.4's other half — *joining an already-dispatched sweep and carrying it
- * to collation* — is **NOT built, and the pass could not tell when to do it
- * safely.** `SweepDriver.inFlight` reports a sweep exactly while a WORKER task is
- * outstanding (`inFlightSweep`: the parent's record is unsettled, or the
- * collation's is), and neither of those is a step the host may take: the actor
- * owes nothing, `tri-1` does. The genuinely abandoned states — the actor died
- * between the join and the collation dispatch — read `inFlight === null` and are
- * **indistinguishable through this port from a sweep that completed normally**,
- * because §6.4's corrected predicate deliberately collapses *"parent settled, no
- * collation"* into `null` so that §6.5's zero-row cannot wedge the actor
- * (ISC-805). Resuming on *"the record is behind the run tree"* alone would
- * therefore re-drive the incident machine over a sweep whose document it had
- * already consumed — two `unhealthy` observations minted from ONE sweep, which
- * opens a firing incident on a single sweep's evidence and is precisely what
- * §12's *"a first unhealthy notifies NOTHING"* exists to forbid. That is a worse
- * failure than the one it prevents, which is one wasted five-minute cadence. The
- * missing discrimination is a run-tree read nothing exports — *does
- * `T-sweep-<n>-collate` exist* — and it belongs beside `inFlightSweep`.
+ * The cursor is **not** the signal for resuming an abandoned sweep, and that is
+ * a ruling rather than an omission. Task 6.4 left the resume half unbuilt on this
+ * argument, ISC-868 was filed OPEN against it, and task 6.4a closed it with a
+ * different read rather than by relaxing this one.
+ *
+ * *"The record is behind the run tree"* is true of a sweep that was abandoned AND
+ * of one that completed perfectly while the actor's record write was lost, and
+ * resuming on it would re-drive the incident machine over a document already
+ * consumed — two `unhealthy` observations minted from ONE sweep, opening a
+ * firing incident on a single sweep's evidence, which is what §12's *"a first
+ * unhealthy notifies NOTHING"* exists to forbid (ISC-712). That is worse than
+ * the failure it prevents, which is one wasted five-minute cadence.
+ *
+ * The discrimination that IS safe is {@link ResumableSweep} — *does
+ * `T-sweep-<n>-collate` exist*, for a parent that has settled — plus the join's
+ * artifact count, which is a proof rather than a hint. See that interface. This
+ * function stays what it was: a monotone floor on the counter, and nothing else.
  */
 export function resumedCursor(recorded: number, runTree: number): number {
   return Math.max(recorded, runTree);
@@ -727,6 +780,43 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
     });
   }
 
+  /*
+   * §13 task 6.4a — ISC-868. A sweep whose parent settled with no collation ever
+   * dispatched is one of exactly two things, and the join tells them apart.
+   *
+   * The artifacts decide, and the reasoning is in {@link ResumableSweep}: this
+   * pass dispatches a collation if and only if the join found artifacts, so
+   * *artifacts present AND no `-collate` task* is a PROOF that the sweep never
+   * reached step 8 and the incident machine has never seen a document from it.
+   * The zero-row — the same run-tree shape with nothing to collate — falls
+   * through and the next id is minted, because it was assessed and announced by
+   * the pass that ran it and re-collating it would spend a worker turn every
+   * tick, forever, on a document with no rows.
+   *
+   * `openSweep` is NOT called and no observer is dispatched a second time: the
+   * envelope was rendered and the fan-out landed on the pass that opened this
+   * sweep, and §6.6 layer 2's *"No sweep ever reuses an id"* means the epoch
+   * fence would refuse the re-dispatch anyway.
+   */
+  const resumable = await deps.sweep.resumableSweep();
+  if (resumable !== null) {
+    const carried = await deps.sweep.join(resumable.sweepId);
+    if (carried.artifacts.length > 0) {
+      return await completeSweep(deps, {
+        at,
+        runs,
+        sweepId: resumable.sweepId,
+        /* The SWEEP's instant, never this pass's clock. {@link ResumableSweep}. */
+        dispatchedAt: resumable.dispatchedAt,
+        sweepCursor: resumedCursor(deps.cursor.sweep_cursor, highest),
+        assignments: await deps.sweep.readPartition(resumable.sweepId),
+        join: carried,
+        dispatched: [],
+        refusedPartition: null,
+      });
+    }
+  }
+
   // §6.6 layer 2: `max(record, run tree)`. D12 keeps the tree authoritative and
   // the record is the hint that makes finding the number cheap.
   const previous = resumedCursor(deps.cursor.sweep_cursor, highest);
@@ -777,13 +867,56 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
   });
 
   const refusedPartition = fanOut.kind === "refused" ? fanOut : null;
-  const effective = refusedPartition === null ? assignments : [];
 
   const join: SweepJoin =
     refusedPartition === null
       ? await deps.sweep.join(sweepId)
       : { artifacts: [], blocked: [] };
 
+  return await completeSweep(deps, {
+    at,
+    runs,
+    sweepId,
+    dispatchedAt,
+    sweepCursor: number,
+    assignments: refusedPartition === null ? assignments : [],
+    join,
+    dispatched,
+    refusedPartition,
+  });
+}
+
+/** §6.3 steps 8-11 for a sweep whose observers have already been joined. */
+interface CompletedSweep {
+  readonly at: number;
+  readonly runs: Readonly<Record<string, string>>;
+  readonly sweepId: string;
+  /** The instant the SWEEP was dispatched — task 6.4a carries an older one. */
+  readonly dispatchedAt: string;
+  readonly sweepCursor: number;
+  /** `[]` when the partition was refused, so coverage reports every service unassigned. */
+  readonly assignments: readonly PartitionAssignment[];
+  readonly join: SweepJoin;
+  /** The observers THIS pass dispatched to. Empty on a refusal and on a resume. */
+  readonly dispatched: readonly string[];
+  readonly refusedPartition: PartitionFault | null;
+}
+
+/**
+ * Steps 8-11, shared by the sweep this pass dispatched and the sweep it resumed.
+ *
+ * **One spelling rather than two, and §13 task 6.4b's argument is why**: the
+ * resume path differs from the mint path in the four values above it and in
+ * nothing below, and a second copy of the collate/assess/saturate/settle chain
+ * is the shape ISC-804 exists to catch — *"two spellings agreeing by
+ * coincidence, with no test pinning them equal"*. A resumed sweep that quietly
+ * stopped running the saturation memo, or stopped resetting §6.4's skip counter,
+ * would be invisible in a file where the two paths were written out separately.
+ */
+async function completeSweep(
+  deps: TriagePassDeps,
+  s: CompletedSweep,
+): Promise<TriagePassOutcome> {
   /*
    * §6.5's ZERO-ROW, and it is a call that does not happen rather than a result
    * that is discarded: *"with no child succeeding, no collation is dispatched"*.
@@ -792,27 +925,27 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
    * console's own answer to a question nobody answered.
    */
   const collation: SweepCollation =
-    join.artifacts.length > 0
-      ? await deps.sweep.collate(sweepId)
-      : { document: null, evidenceRef: sweepId };
+    s.join.artifacts.length > 0
+      ? await deps.sweep.collate(s.sweepId)
+      : { document: null, evidenceRef: s.sweepId };
 
   const coverage: SweepCoverage = {
     declared: deps.declared,
-    assignments: effective,
-    artifacts: join.artifacts,
+    assignments: s.assignments,
+    artifacts: s.join.artifacts,
     window: {
       default_window_s: deps.windowPolicy.default_window_s,
       reserve_s: deps.windowPolicy.reserve_s,
-      dispatched_at: dispatchedAt,
+      dispatched_at: s.dispatchedAt,
     },
   };
   const assessment = assessTriageSweep(
-    sweepId,
+    s.sweepId,
     coverage,
-    collation.document ?? silentDocument(sweepId),
+    collation.document ?? silentDocument(s.sweepId),
   );
 
-  const memo = memoized(deps.saturationMemo, sweepId, deps.probe);
+  const memo = memoized(deps.saturationMemo, s.sweepId, deps.probe);
   const saturation = await saturationVerdict(assessment, deps.endpoint, memo.probe);
   /*
    * The candidate lives exactly as long as the correlation does. See
@@ -825,23 +958,23 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
 
   const serviceObservations = sweepObservations(assessment, saturation, {
     environment: deps.environment,
-    at,
+    at: s.at,
     evidenceRef: collation.evidenceRef,
   });
 
   return await settle(deps, {
-    at,
-    runs,
-    kind: refusedPartition === null ? "swept" : "partition_refused",
-    sweepId,
+    at: s.at,
+    runs: s.runs,
+    kind: s.refusedPartition === null ? "swept" : "partition_refused",
+    sweepId: s.sweepId,
     waitingOn: null,
-    sweepCursor: number,
+    sweepCursor: s.sweepCursor,
     /** A sweep that RAN resets §6.4's counter. §6.8a's *"cleared by a sweep that ran"*. */
     consecutiveSkips: 0,
     environments: [
       {
         environment: deps.environment,
-        observerBlocked: join.blocked.length > 0,
+        observerBlocked: s.join.blocked.length > 0,
         /** §6.5's zero-row, as the fact §6.8a's table branches on. */
         collated: collation.document !== null,
       },
@@ -850,8 +983,8 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
     evidenceRef: collation.evidenceRef,
     assessment,
     saturation,
-    partition: refusedPartition,
-    dispatched,
+    partition: s.refusedPartition,
+    dispatched: s.dispatched,
     serviceObservations,
     memo: nextMemo,
   });

@@ -110,10 +110,22 @@ function partition(): PartitionAssignment[] {
 }
 
 function artifact(worker: string, sweepId: string): ObserverArtifact {
+  return artifactAt(worker, sweepId, clock.at);
+}
+
+/**
+ * An artifact whose window echo is pinned to a stated dispatch instant rather
+ * than to the fixture clock.
+ *
+ * §13 task 6.4a needs the two to DIFFER: a resumed sweep is assessed an outage
+ * later than it was dispatched, and an artifact echoing the resuming pass's own
+ * clock could not tell a carried `dispatched_at` from a re-minted one.
+ */
+function artifactAt(worker: string, sweepId: string, dispatchedAtMs: number): ObserverArtifact {
   return {
     worker,
     sweep_id: sweepId,
-    window_opened_at: new Date(clock.at - DEFAULT_WINDOW_S * 1_000).toISOString(),
+    window_opened_at: new Date(dispatchedAtMs - DEFAULT_WINDOW_S * 1_000).toISOString(),
   };
 }
 
@@ -194,6 +206,8 @@ function serviceSubject(service: string): IncidentSubject {
 
 interface DriverOptions {
   readonly inFlight?: SweepDriver["inFlight"];
+  /** §13 task 6.4a's run-tree read — a sweep abandoned before its collation. */
+  readonly resumable?: SweepDriver["resumableSweep"];
   readonly open?: SweepOpen;
   readonly assignments?: readonly PartitionAssignment[];
   readonly artifacts?: (sweepId: string) => readonly ObserverArtifact[];
@@ -208,33 +222,48 @@ interface Spy {
   readonly opened: string[];
   readonly dispatched: Array<{ sweepId: string; worker: string }>;
   readonly collated: string[];
+  /** Which sweep ids were JOINED, in order — task 6.4a asks the OLD one first. */
+  readonly joined: string[];
+  /** The `dispatched_at` each assessment was built against, in order. */
+  readonly partitioned: string[];
 }
 
 function driver(opts: DriverOptions = {}): Spy {
   const opened: string[] = [];
   const dispatched: Array<{ sweepId: string; worker: string }> = [];
   const collated: string[] = [];
+  const joined: string[] = [];
+  const partitioned: string[] = [];
   const assignments = opts.assignments ?? partition();
   return {
     opened,
     dispatched,
     collated,
+    joined,
+    partitioned,
     driver: {
       inFlight: opts.inFlight ?? (async () => null),
+      resumableSweep: opts.resumable ?? (async () => null),
       highestSweepNumber: async () => opts.highest ?? 0,
       runs: async () => ({ "tri-1": "RUN-A", "obs-t1": "RUN-A", "obs-t2": "RUN-A", "obs-t3": "RUN-A" }),
       openSweep: async (sweepId) => {
         opened.push(sweepId);
         return opts.open ?? { kind: "opened" };
       },
-      readPartition: async () => assignments,
+      readPartition: async (sweepId) => {
+        partitioned.push(sweepId);
+        return assignments;
+      },
       dispatchObserver: async (sweepId, assignment) => {
         dispatched.push({ sweepId, worker: assignment.worker });
       },
-      join: async (sweepId): Promise<SweepJoin> => ({
-        artifacts: opts.artifacts?.(sweepId) ?? SEATS.map((s) => artifact(s, sweepId)),
-        blocked: opts.blocked ?? [],
-      }),
+      join: async (sweepId): Promise<SweepJoin> => {
+        joined.push(sweepId);
+        return {
+          artifacts: opts.artifacts?.(sweepId) ?? SEATS.map((s) => artifact(s, sweepId)),
+          blocked: opts.blocked ?? [],
+        };
+      },
       collate: async (sweepId): Promise<SweepCollation> => {
         collated.push(sweepId);
         if (opts.collation !== undefined) return opts.collation(sweepId);
@@ -681,6 +710,216 @@ describe("tick or skip — §6.4, and a queue is never built", () => {
     const out = await triagePass(deps({ driver: spy.driver, records }));
     expect(out.notifications.map((n) => n.kind)).not.toContain("recovered");
     expect(records.held.get("console_health:cni-dev/observer_blocked")?.state).toBe("firing");
+  });
+});
+
+/**
+ * §13 task 6.4a — ISC-868, and the discrimination that makes it safe.
+ *
+ * ## Why "the record is behind the run tree" was refused as the signal
+ *
+ * ISC-868 was filed OPEN rather than built blind, and the reason is the anti-twin
+ * below. `inFlight` reports a sweep exactly while a WORKER task is outstanding,
+ * and the genuinely abandoned states read `null` through that port — §6.4's
+ * corrected predicate collapses *"parent settled, no collation"* into `null` so
+ * that §6.5's zero-row cannot wedge the actor (ISC-805). Resuming on the cursor
+ * lag alone would therefore re-drive the incident machine over a document it had
+ * already consumed: two `unhealthy` observations from ONE sweep, which opens a
+ * firing incident on a single sweep's evidence and is what ISC-712 forbids.
+ *
+ * The read that separates them is `resumableSweep`, and the fact that separates
+ * the two sweeps it returns is **whether any observer produced an artifact**.
+ * That is not a heuristic. The pass dispatches a collation if and only if the
+ * join found artifacts, so *artifacts present AND no `-collate` task* is a proof
+ * that this sweep never reached step 8 — and a sweep that never reached step 8
+ * produced no document for the machine to have consumed.
+ */
+describe("§13 task 6.4a: an abandoned sweep is carried to collation, and the zero-row is not", () => {
+  const DISPATCHED_AT = new Date(T0).toISOString();
+  /** An hour after the sweep was dispatched — the actor was down in between. */
+  const AN_OUTAGE_LATER = T0 + 3_600_000;
+
+  function abandoned(withArtifacts: boolean): Spy {
+    return driver({
+      highest: 7,
+      resumable: async () => ({ sweepId: "T-sweep-7", dispatchedAt: DISPATCHED_AT }),
+      artifacts: (sweepId) =>
+        withArtifacts && sweepId === "T-sweep-7"
+          ? SEATS.map((s) => artifactAt(s, sweepId, T0))
+          : [],
+    });
+  }
+
+  /**
+   * **THE PREMISE, asserted a step earlier**, because the fixture is worthless
+   * without it: if the sweep to be resumed and the sweep a fresh tick would mint
+   * had the same id, *"collated the old one"* and *"minted a new one"* would be
+   * the same observation and every assertion below would pass on either
+   * behaviour.
+   */
+  test("the resumed id and the id a fresh tick would mint are DIFFERENT ids", async () => {
+    const spy = abandoned(true);
+    const resumable = await spy.driver.resumableSweep();
+    expect(resumable?.sweepId).toBe("T-sweep-7");
+    expect(sweepTaskId((await spy.driver.highestSweepNumber()) + 1)).toBe("T-sweep-8");
+    expect(resumable?.sweepId).not.toBe("T-sweep-8");
+  });
+
+  test("a settled parent with artifacts and no collate task IS collated, not superseded", async () => {
+    const spy = abandoned(true);
+    const delivered = accepting(AN_OUTAGE_LATER);
+    const out = await triagePass(
+      deps({
+        driver: spy.driver,
+        now: AN_OUTAGE_LATER,
+        transport: delivered.transport,
+        /*
+         * A NON-ZERO skip count, because §6.8a's *"cleared by a sweep that
+         * ran"* is unobservable from a fresh cursor: `0` before and `0` after
+         * would pass an implementation that carried the count instead of
+         * resetting it. The outage that abandoned the sweep is also what ran
+         * the count up, so this is the realistic cursor as well as the
+         * discriminating one.
+         */
+        cursor: { runs: {}, sweep_cursor: 0, consecutive_skips: 3 },
+      }),
+    );
+
+    // The old sweep reached step 8. Nothing minted the eighth id, and no
+    // observer was dispatched a second time over work it had already done.
+    expect(spy.collated).toEqual(["T-sweep-7"]);
+    expect(spy.opened).toEqual([]);
+    expect(spy.dispatched).toEqual([]);
+    // The partition read is the OLD sweep's too: coverage for the resumed sweep
+    // must come from the request its own observers were dispatched from.
+    expect(spy.partitioned).toEqual(["T-sweep-7"]);
+    expect(spy.joined).toEqual(["T-sweep-7"]);
+    expect(out.kind).toBe("swept");
+    expect(out.sweepId).toBe("T-sweep-7");
+    expect(out.dispatched).toEqual([]);
+    // §6.6 layer 2: the cursor lands on the sweep that was carried, so the next
+    // tick mints the eighth rather than re-deriving the seventh.
+    expect(out.cursor.sweep_cursor).toBe(7);
+    // A sweep that RAN — resumed or minted — resets §6.4's counter.
+    expect(out.cursor.consecutive_skips).toBe(0);
+  });
+
+  /**
+   * The carried `dispatched_at` is the SWEEP's, never the resuming pass's clock,
+   * and this fixture is an hour apart so the two cannot be confused. §7.4's echo
+   * refuses an artifact opened earlier than
+   * `dispatched_at − default_window − reserve_s`; against `now` every observer
+   * here would be refused as `stale_window`, and three innocent observers would
+   * be named for an outage the console itself had.
+   */
+  test("the resumed sweep is assessed against its OWN dispatch time, not the resuming clock", async () => {
+    const spy = abandoned(true);
+    const delivered = accepting(AN_OUTAGE_LATER);
+    const out = await triagePass(
+      deps({ driver: spy.driver, now: AN_OUTAGE_LATER, transport: delivered.transport }),
+    );
+    expect(out.assessment?.stale_window).toEqual([]);
+    expect(out.assessment?.census.counted).toBe(3);
+    expect(out.assessment?.services.map((s) => s.assessment)).toEqual([
+      "healthy",
+      "healthy",
+      "healthy",
+    ]);
+  });
+
+  /**
+   * **THE ANTI-TWIN, and it outranks the criterion above.** §6.5's zero-row is
+   * the same run-tree shape — parent settled, no `-collate` task — with NO
+   * artifacts, because no child succeeded and so no collation was ever
+   * dispatched. It has already been through the incident machine. Collating it
+   * would spend a worker turn on a document with no rows; resuming it would do
+   * that on every tick, forever, and the console would never sweep again.
+   */
+  test("§6.5's zero-row — the same shape with NO artifacts — mints the next id instead", async () => {
+    const spy = abandoned(false);
+    const delivered = accepting();
+    const out = await triagePass(
+      // Both sweeps observe nothing, so §6.7 rule 3's correlation gate opens and
+      // the probe is reached. It answers `timeout` rather than being forbidden.
+      deps({ driver: spy.driver, transport: delivered.transport, probe: async () => timeoutProbe() }),
+    );
+    // Asked the abandoned sweep first, found nothing to carry, swept the next.
+    expect(spy.joined).toEqual(["T-sweep-7", "T-sweep-8"]);
+    expect(spy.opened).toEqual(["T-sweep-8"]);
+    // §6.5: with no child succeeding, no collation is dispatched — for EITHER.
+    expect(spy.collated).toEqual([]);
+    expect(out.sweepId).toBe("T-sweep-8");
+    expect(out.cursor.sweep_cursor).toBe(8);
+  });
+
+  /**
+   * *"…rather than collate forever."* One pass minting the next id is not enough
+   * to show the machine is unwedged: a zero-row that re-presents itself on the
+   * following tick must advance again. Two consecutive passes, each finding the
+   * previous sweep abandoned-and-empty, must mint two DIFFERENT ids.
+   */
+  test("a zero-row on the next tick advances again — the console is not wedged", async () => {
+    const first = abandoned(false);
+    const one = await triagePass(
+      deps({
+        driver: first.driver,
+        transport: accepting().transport,
+        probe: async () => timeoutProbe(),
+      }),
+    );
+
+    const second = driver({
+      highest: 8,
+      resumable: async () => ({ sweepId: "T-sweep-8", dispatchedAt: DISPATCHED_AT }),
+      artifacts: () => [],
+    });
+    const two = await triagePass(
+      deps({
+        driver: second.driver,
+        cursor: one.cursor,
+        now: T0 + CADENCE_MS,
+        transport: accepting(T0 + CADENCE_MS).transport,
+        probe: async () => timeoutProbe(),
+        memo: one.saturationMemo,
+      }),
+    );
+    expect(second.opened).toEqual(["T-sweep-9"]);
+    expect(one.sweepId).toBe("T-sweep-8");
+    expect(two.sweepId).toBe("T-sweep-9");
+  });
+
+  /**
+   * §6.4's SKIP still outranks the resume, and the port that would answer
+   * otherwise is never even asked. A live sweep is a worker's outstanding turn;
+   * carrying it to collation would be the host taking a step it does not own,
+   * and racing `tri-1` to write the same document.
+   */
+  test("a live in-flight sweep still skips, and the resumable read is never consulted", async () => {
+    const spy = driver({
+      highest: 7,
+      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+      resumable: async () => {
+        throw new Error("resumableSweep was consulted on a sweep a worker still owes");
+      },
+    });
+    const out = await triagePass(deps({ driver: spy.driver }));
+    expect(out.kind).toBe("skipped");
+    expect(out.waitingOn).toBe("T-sweep-7-collate");
+    expect(spy.collated).toEqual([]);
+    expect(spy.opened).toEqual([]);
+  });
+
+  /**
+   * The ordinary tick is unchanged: with nothing abandoned the pass mints,
+   * opens, dispatches and collates the new id, and asks the old one for nothing.
+   */
+  test("with no abandoned sweep the pass mints and dispatches as before", async () => {
+    const spy = driver({ highest: 7 });
+    const out = await triagePass(deps({ driver: spy.driver, transport: accepting().transport }));
+    expect(spy.opened).toEqual(["T-sweep-8"]);
+    expect(spy.joined).toEqual(["T-sweep-8"]);
+    expect(spy.collated).toEqual(["T-sweep-8"]);
+    expect(out.sweepId).toBe("T-sweep-8");
   });
 });
 
