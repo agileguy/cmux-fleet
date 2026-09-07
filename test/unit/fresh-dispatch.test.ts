@@ -27,6 +27,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { DEFAULT_TRIAGE_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
+import { relayLockPath } from "../../src/run/console-relay.ts";
+import { triageActorLockPath } from "../../src/run/triage-actor.ts";
 import {
   busyRefusal,
   recreateThenDispatch,
@@ -740,7 +742,35 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
     expect(body).toContain("relayRecordPath(CONSOLE)");
   });
 
-  test("the actor it starts is served --console triage, and never a bare literal", async () => {
+  /**
+   * **THE ACTOR IT STARTS IS THIS CONSOLE'S — and the claim is re-shaped so it
+   * does not redden on its own fix.**
+   *
+   * This arm used to read *"the actor it starts is served `--console triage`"* and
+   * asserted `consoleRelayArgv(` in the body by name. That is TRUE of the actor
+   * this script starts today and FALSE of the one §13 task 6.7 re-points it at:
+   * `pifleet triage` takes no `--console` and must not go anywhere near
+   * `consoleRelayArgv`. **MEASURED, not reasoned** — a fixture applying the whole
+   * correct re-point (argv, starter lock, record) to `scripts/triage` reddened
+   * exactly one test in this repository, and it was this one.
+   *
+   * That is ISC-572's recorded defect a fourth time, in the file that inherited
+   * the lesson: *"the current source-order test asserts the CURRENT order, so it
+   * would redden on the fix — the tripwire points the wrong way."* ISC-572's own
+   * remedy was to REPLACE such a probe rather than regrade it, so the claim is
+   * restated as the property that holds in both worlds:
+   *
+   *   - **relay**: `consoleRelayArgv` emits no `--console` and `DEFAULT_CONSOLE` is
+   *     `"review"`, so the argv must append `"--console", CONSOLE` — §9.13's row
+   *     reached through the one caller that did not exist when it was written.
+   *   - **clock**: `pifleet triage` IS this console's actor by subcommand; there is
+   *     no `--console` to get wrong, and `consoleRelayArgv` must be ABSENT, because
+   *     spawning it would start a review relay from the triage script.
+   *
+   * In both: the identity travels through {@link CONSOLE} and never a bare
+   * literal, and `startActor`'s OWN spawn is given this function's result.
+   */
+  test("the actor it starts is this console's, whichever actor that is", async () => {
     const src = await source("triage");
 
     // Declared once, as a constant. The known-limit arm of ISC-600: a comment
@@ -756,11 +786,27 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
         "unchanged would start a REVIEW actor, because DEFAULT_CONSOLE is \"review\"",
     );
     const body = src.slice(fn, at(src, "\n}", fn, "triageActorArgv is unterminated"));
-    expect(body).toContain("consoleRelayArgv(");
-    expect(body).toMatch(/"--console",\s*CONSOLE/);
-    // Never `"--console", "triage"`: the constant is what keeps this file's five
-    // console-shaped facts one fact.
-    expect(body).not.toMatch(/"--console",\s*"/);
+
+    if (body.includes("consoleRelayArgv(")) {
+      // The relay world. The flag is what stops §9.13 happening in the other
+      // direction, and it must carry the constant.
+      expect(body).toMatch(/"--console",\s*CONSOLE/);
+      // Never `"--console", "triage"`: the constant is what keeps this file's
+      // five console-shaped facts one fact.
+      expect(body).not.toMatch(/"--console",\s*"/);
+    } else {
+      /*
+       * The clock world. `pifleet triage` has no `--console` option at all, so a
+       * flag here would be a commander usage error handed to a DETACHED process —
+       * and `consoleRelayArgv` must not reappear, because its default IS the
+       * review console.
+       */
+      expect(
+        body,
+        "scripts/triage's actor argv names neither consoleRelayArgv nor the triage subcommand",
+      ).toContain('"triage"');
+      expect(body).not.toContain('"--console"');
+    }
 
     /*
      * And the ACTOR'S OWN spawn is given that argv. Anchored inside
@@ -893,5 +939,216 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
       );
 
     expect(cells).toEqual([...DEFAULT_TRIAGE_WORKERS]);
+  });
+});
+
+/**
+ * ── §13 TASK 6.7's UNLANDED HALF, MADE REDDENABLE ────────────────────────────
+ *
+ * **What 6.7 still owes, and why it is not the one line its own file claims.**
+ * §13's 6.7 entry reads *"wire the actor start/stop into `scripts/triage` as a
+ * `quiesce` dep"*, and that half is shipped — ISC-604, ISC-605, ISC-631 and
+ * ISC-697 pin it from four directions. What is left is the sentence
+ * `scripts/triage:54-57` writes about itself: *"the clock half is `pifleet
+ * triage` … task 6.7 re-points {@link triageActorArgv} at it AND NOTHING ELSE
+ * HERE CHANGES."* [[ISC-608]] is filed as that line's tripwire — *"this becomes
+ * `[x]` or is deleted at task 6.7"*.
+ *
+ * **Three things change with it, and none of them is visible to a compiler.**
+ * Measured against the shipped modules rather than reasoned:
+ *
+ *   1. **The starter would deadlock the actor it starts.** `triageActorLockPath`
+ *      IS `relayLockPath("triage")` — asserted below, live — and `runTriageActor`
+ *      takes it for the actor's whole life (§6.3b, ISC-932). `scripts/triage`'s
+ *      `startActor` holds that same file across its `Bun.spawn`. `pifleet relay`
+ *      takes no lock, so today the overlap is harmless; the moment the argv names
+ *      `triage`, the fresh actor's claim `EEXIST`s against a LIVE script pid, the
+ *      takeover correctly declines, `runTriageActor` returns `refused` and exits
+ *      nonzero — and the script writes a record naming a pid that has already
+ *      gone. That is §6.4's own failure shape, caused by the fix for it.
+ *   2. **The record the script writes would stop parsing.** It writes
+ *      `pifleet.consolerelay/v1` through `writeRelayRecord`, whose schema is a
+ *      non-strict `z.object` and therefore STRIPS unknown keys; §7.7's
+ *      `TriageActorRecordSchema` requires `cadence_s`, which has no default. So
+ *      `readTriageActorRecord` refuses it and `pifleet triage --status` reports
+ *      `actor: refused` for a healthy actor until its first `saveCursor` lands.
+ *   3. **`--cadence` stops having a reason to refuse.** Its refusal text names
+ *      *"the actor this script starts today is `pifleet relay --console triage` …
+ *      which takes no cadence"*. `pifleet triage` takes `--poll`.
+ *
+ * **THIS BLOCK IS NOT A "STILL RELAY" ASSERTION, and that distinction is the
+ * ISA's own.** ISC-572 records a tripwire that *"asserts the CURRENT order, so it
+ * would redden on the fix — the tripwire points the wrong way"*, and it was
+ * replaced rather than regraded. So what is asserted here is the property that
+ * must hold in BOTH worlds — *the starter never holds the lock the actor it
+ * starts will need, and never writes a record that actor's reader refuses* — with
+ * the script's own argv choosing which half applies. Green today, green after a
+ * correct re-point, red after a careless one.
+ */
+describe("scripts/triage's actor argv and the three things a re-point moves (§13 task 6.7)", () => {
+  const source = (script: string): Promise<string> =>
+    readFile(join(import.meta.dir, "..", "..", "scripts", script), "utf8");
+
+  const at = (src: string, needle: string, from: number, why: string): number => {
+    const i = src.indexOf(needle, from);
+    if (i === -1) throw new Error(`'${needle}' is not in this script after ${from} — ${why}`);
+    return i;
+  };
+
+  /** The script's code with prose removed, so a docblock cannot satisfy an arm. */
+  const codeOnly = (src: string): string => {
+    const usageStart = at(src, "const USAGE = `", 0, "scripts/triage prints no usage banner");
+    const usageEnd = at(src, "\n`;", usageStart, "the usage banner is unterminated");
+    return (src.slice(0, usageStart) + src.slice(usageEnd))
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+  };
+
+  /**
+   * Which actor the script starts, read from the argv builder's BODY.
+   *
+   * `relay` while it spawns `consoleRelayArgv`'s result; `clock` once it names the
+   * `triage` subcommand. Anything else throws rather than defaulting, because a
+   * builder this function cannot classify is one whose blast radius nobody has
+   * checked — and defaulting to `relay` would make every arm below vacuous.
+   */
+  const actorKind = (code: string): "relay" | "clock" => {
+    const fn = at(code, "function triageActorArgv(", 0, "scripts/triage builds no actor argv");
+    const body = code.slice(fn, at(code, "\n}", fn, "triageActorArgv is unterminated"));
+    const relay = body.includes("consoleRelayArgv(");
+    const clock = /"triage"/.test(body);
+    if (relay === clock) {
+      throw new Error(
+        `scripts/triage's triageActorArgv names ${relay ? "BOTH" : "NEITHER"} the relay and the ` +
+          `clock; §13 task 6.7 re-points it from one to the other and this file cannot say which ` +
+          `world it is in. Body was:\n${body}`,
+      );
+    }
+    return relay ? "relay" : "clock";
+  };
+
+  /**
+   * THE PREMISE, live rather than described: the two locks are ONE FILE.
+   *
+   * Without this the source arm below reads as fussiness. With it, "the starter
+   * holds the actor's lock" is a statement about the same inode.
+   */
+  test("the triage actor's lock IS the console lock scripts/triage takes", () => {
+    const env = { ...process.env, PIFLEET_RUNS_DIR: "/tmp/pf-6-7-premise/runs" };
+    expect(triageActorLockPath(env)).toBe(relayLockPath("triage", env));
+    // And it is not the review console's, or the overlap would be with somebody
+    // else's actor and this whole block would be about the wrong pair.
+    expect(triageActorLockPath(env)).not.toBe(relayLockPath("review", env));
+  });
+
+  /**
+   * ARM 1 — the starter and the started may not want the same lock.
+   *
+   * While the actor is `pifleet relay` the script MAY hold it (relay takes no
+   * lock), and it does — asserted, so this arm is a live claim about the current
+   * file rather than a conditional nobody has entered. The day the argv names the
+   * clock, holding it is a deadlock and the arm flips.
+   */
+  test("the starter's lock is compatible with the actor it starts", async () => {
+    const code = codeOnly(await source("triage"));
+    const start = at(code, "function startActor(", 0, "scripts/triage starts no actor");
+    const spawn = at(code, "Bun.spawn(", start, "startActor spawns nothing");
+    const beforeSpawn = code.slice(start, spawn);
+    const holdsLock = beforeSpawn.includes("acquireRelayLock(");
+
+    if (actorKind(code) === "relay") {
+      // `pifleet relay` takes no lock of its own, so the starter's is a real
+      // one-starter-at-a-time mutex and IS held. Asserted rather than permitted,
+      // so "compatible" cannot be satisfied by a script that locks nothing at all.
+      expect(
+        holdsLock,
+        "scripts/triage no longer takes the starter lock while still starting a relay",
+      ).toBe(true);
+      return;
+    }
+    expect(
+      holdsLock,
+      "scripts/triage starts `pifleet triage`, whose runTriageActor takes " +
+        "triageActorLockPath === relayLockPath('triage') for its whole life — so holding that " +
+        "same lock across the spawn makes the fresh actor refuse by name and exit, leaving a " +
+        "record naming a dead pid (§6.3b, §6.4)",
+    ).toBe(false);
+  });
+
+  /**
+   * ARM 2 — whatever record the script writes, the actor's own reader must accept
+   * it.
+   *
+   * `RelayRecordSchema` is a non-strict `z.object`, so adding `cadence_s` to the
+   * literal is NOT enough — `writeRelayRecord` parses and strips it. The two ways
+   * through are to write §7.7's record (`writeTriageActorRecord`) or to write none
+   * and let the actor be its own record's only writer.
+   */
+  test("the record the script writes is one the actor it starts can read", async () => {
+    const code = codeOnly(await source("triage"));
+    const writes = code.includes("writeRelayRecord(");
+
+    if (actorKind(code) === "relay") {
+      expect(writes, "scripts/triage stopped writing the relay record it still needs").toBe(true);
+      return;
+    }
+    expect(
+      writes,
+      "scripts/triage starts `pifleet triage`, whose record is read by " +
+        "readTriageActorRecord against TriageActorRecordSchema — which requires cadence_s and " +
+        "has no default, while writeRelayRecord's non-strict schema strips it. Write §7.7's " +
+        "record or write none",
+    ).toBe(false);
+  });
+
+  /**
+   * ARM 3 — `--cadence` must refuse only while there is nothing to refuse FOR.
+   *
+   * §7.8 calls it *"an override for a hand-run"*. `pifleet relay` has no cadence,
+   * so a refusal is the honest answer; `pifleet triage` has `--poll`, so the same
+   * refusal becomes a flag declining to do the thing it exists for. **It must
+   * reach `--poll` only when the operator gave it** — §13 task 6.9 makes
+   * `console.yaml`'s `cadence_s` the source when `--poll` is absent, and a script
+   * that always passed one would silently defeat that file.
+   */
+  test("--cadence refuses or reaches --poll, whichever the actor can honour", async () => {
+    const code = codeOnly(await source("triage"));
+    const flagAt = at(code, '"--cadence"', 0, "scripts/triage does not read --cadence");
+    // The parse happens either way: a malformed duration is answered as a
+    // duration and never as an unimplemented feature. `parseDuration` is
+    // IMPORTED rather than re-spelled, for §3.3's reason — a second duration
+    // grammar in an untypechecked file is a grammar nobody checks.
+    expect(code).toContain("parseDuration(");
+
+    if (actorKind(code) === "relay") {
+      expect(
+        code.slice(flagAt).includes("throw new Error("),
+        "scripts/triage accepts --cadence while still starting a relay, which has no cadence to " +
+          "set — the value would reach a DETACHED process as a commander usage error and leave " +
+          "a record naming a pid that had already exited",
+      ).toBe(true);
+      return;
+    }
+    /*
+     * The clock has `--poll`, so the flag must reach the ARGV BUILDER — not
+     * merely appear somewhere in the file, which a leftover refusal message
+     * would satisfy.
+     *
+     * What is deliberately NOT asserted here is that the flag is passed
+     * CONDITIONALLY. It must be — §13 task 6.9 makes `console.yaml`'s
+     * `cadence_s` the source when `--poll` is absent, so a script that always
+     * passed one would silently defeat that file — but "only when the operator
+     * gave it" is a property of a VALUE and this file reads TEXT. It belongs at
+     * 6.9's own seam, in `test/unit/triage-command.test.ts`, asserted by value.
+     */
+    const fn = at(code, "function triageActorArgv(", 0, "scripts/triage builds no actor argv");
+    const body = code.slice(fn, at(code, "\n}", fn, "triageActorArgv is unterminated"));
+    expect(
+      body.includes('"--poll"'),
+      "scripts/triage starts `pifleet triage`, so --cadence has somewhere to go and must reach " +
+        "the actor's argv as --poll rather than being refused (§7.8)",
+    ).toBe(true);
   });
 });

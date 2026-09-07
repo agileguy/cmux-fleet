@@ -40,6 +40,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -59,10 +60,12 @@ import {
   TRIAGE_COLLATOR,
   TRIAGE_CONSOLE,
   TriageActorRecordSchema,
+  accountConsoleSpend,
   acquireTriageActorLock,
   actorLogLine,
   appendActorLog,
   parseTriageActorRecord,
+  productionConsoleBudgetPorts,
   readTriageActorRecord,
   runTriageActor,
   seatsDueForRecycle,
@@ -73,11 +76,22 @@ import {
   writeTriageActorRecord,
 } from "../../src/run/triage-actor.ts";
 import type {
+  ConsoleBudgetPorts,
   TriageActorCursor,
   TriageActorDeps,
   TriageActorEvent,
   TriageConsolePorts,
 } from "../../src/run/triage-actor.ts";
+/**
+ * **THE SHIPPED GATE, imported rather than re-described.** §13 task 6.8's whole
+ * point is that the four links below `refuseOnExhaustedBudget` were already built
+ * and had no first link; a test that asserted the produced FILE and stopped there
+ * would be a second description of `halted_at`'s meaning rather than a join, and
+ * ISC-891 was filed OPEN precisely because ISC-885's tests *"go on passing forever
+ * whether or not this is ever closed"*.
+ */
+import { refuseOnExhaustedBudget } from "../../src/cli/commands/triage.ts";
+import { runPaths, runsRoot } from "../../src/run/paths.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures — every one of them hermetic, and asserted to be
@@ -627,8 +641,11 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       "actor_refused",
       "actor_started",
       "actor_stopped",
+      "actor_unbudgeted",
       "actor_unsupervised",
       "boundary_unreadable",
+      "budget_halted",
+      "budget_unaccounted",
       "console_gone",
       "console_unobservable",
       "pass_completed",
@@ -642,6 +659,16 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       { kind: "actor_started", pid: 1, run_id: "r-tri", cadence_s: 300 },
       { kind: "actor_refused", reason: "somebody holds the lock" },
       { kind: "actor_unsupervised" },
+      { kind: "actor_unbudgeted" },
+      /*
+       * §13 task 6.8's two arms, and the field names are the point.
+       * `BudgetState` spells these `tokens_spent`/`tokens_ceiling`; copying that
+       * spelling here fails the loop below, because `token` is on the banned list
+       * and this check cannot tell a token COUNT from an auth token. It is not
+       * meant to — see the arm's own docblock.
+       */
+      { kind: "budget_halted", run_id: "r-tri", spent: 6_000_001, ceiling: 6_000_000, degraded: [] },
+      { kind: "budget_unaccounted", reason: "run.json will not parse" },
       { kind: "pass_completed", sweep_cursor: 4, consecutive_skips: 1 },
       { kind: "pass_failed", reason: "boom" },
       { kind: "record_write_failed", reason: "ENOSPC" },
@@ -677,6 +704,27 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       "seats=obs-t2,obs-t3",
     );
     expect(actorLogLine({ kind: "actor_unsupervised" }, 0)).toContain("ports=absent");
+    expect(actorLogLine({ kind: "actor_unbudgeted" }, 0)).toContain("budget=absent");
+    expect(
+      actorLogLine(
+        {
+          kind: "budget_halted",
+          run_id: "r-tri",
+          spent: 6_000_001,
+          ceiling: 6_000_000,
+          degraded: ["obs-t2"],
+        },
+        0,
+      ),
+    ).toContain("run=r-tri spent=6000001 ceiling=6000000 degraded=obs-t2");
+    // An unbounded run says so rather than rendering `ceiling=null`, which reads
+    // as a missing value in a grep rather than as the fact that nobody budgeted.
+    expect(
+      actorLogLine(
+        { kind: "budget_halted", run_id: "r-tri", spent: 1, ceiling: null, degraded: [] },
+        0,
+      ),
+    ).toContain("ceiling=unbounded");
     expect(actorLogLine({ kind: "actor_refused", reason: "held by 42" }, 0)).toContain(
       'reason="held by 42"',
     );
@@ -1735,5 +1783,503 @@ describe("the record schema refuses what the actor could not have written", () =
       expect(TriageActorRecordSchema.safeParse({ ...base, ...bad }).success).toBe(false);
     }
     expect(TriageActorRecordSchema.safeParse(base).success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §6.10's ceiling — the PRODUCER (§13 task 6.8, ISC-891)
+// ---------------------------------------------------------------------------
+
+/**
+ * **THE CHAIN, JOINED — and the join is the whole criterion.**
+ *
+ * ISC-885 already pins the MAPPING: `halted_at` present ⇒ `budget_exhausted` ⇒ the
+ * dispatch is never reached. It is correct and, in its own words, *"permanently
+ * inert"* — because nothing in this repository ever wrote `budget.json` for a
+ * console run, so the gate's `budget !== null && budget.halted_at !== null` was
+ * false forever and every test over it passed anyway. ISC-891 was filed OPEN and
+ * SEPARATE for exactly that reason: *"a criterion whose probe cannot distinguish
+ * the two states asserts nothing."*
+ *
+ * So these fixtures start from SPEND — worker state files on a real run tree — and
+ * end at the SHIPPED gate, which is imported rather than re-implemented. The one
+ * thing they may not do is stub `halted_at`: a fixture that wrote the halted file
+ * by hand would be ISC-885 wearing a new name.
+ *
+ * **What they do NOT reach, stated rather than left to be discovered.** The link
+ * from `budget_exhausted` to the composed ANNOUNCEMENT is `triagePass`'s and is
+ * pinned in `test/unit/triage-pass.test.ts` (*"a refused admission dispatches
+ * nothing, consumes the id, and raises budget_exhausted"*), with §6.8a's machine
+ * owning the dedup. Re-driving those here would duplicate a large harness to
+ * re-assert somebody else's criterion. What was missing was the producer.
+ */
+describe("§6.10's ceiling has a producer, and the console halts on its own spend", () => {
+  /**
+   * A run tree with four seats and real spend, on disk.
+   *
+   * §D4 makes a console FOUR runs, so each seat gets its own run directory and its
+   * own `run.json` — a fixture that put all four workers in ONE run would agree
+   * with an accounting that read `workerPaths(collatorRun, seat)` and could not
+   * tell it from one that resolves each seat's own run.
+   */
+  async function spendingConsole(opts: {
+    readonly env: Record<string, string | undefined>;
+    readonly ceiling: number | null;
+    readonly tokens: Readonly<Record<string, number | null>>;
+  }): Promise<{ seatRuns: Record<string, string>; collator: ReturnType<typeof runPaths> }> {
+    const root = runsRoot(opts.env);
+    const seatRuns: Record<string, string> = {};
+    for (const seat of WORKERS) {
+      const runId = `r-${seat}`;
+      seatRuns[seat] = runId;
+      const run = runPaths(runId, root);
+      await mkdir(join(run.workersDir, seat), { recursive: true });
+      await writeFile(
+        run.runJson,
+        JSON.stringify({
+          schema: "pifleet.run/v1",
+          run_id: runId,
+          budget: { tokens_ceiling: opts.ceiling },
+        }),
+      );
+      const tokens = opts.tokens[seat] ?? null;
+      /*
+       * `null` writes NO state file: the seat is mid-recycle, or its supervisor
+       * has not flushed yet. The degraded observation is PRODUCED by the tree
+       * rather than stubbed at the port, so the production reader is what
+       * degrades.
+       */
+      if (tokens === null) continue;
+      await writeFile(join(run.workersDir, seat, "state.json"), seatState(seat, runId, tokens));
+      /*
+       * Every seat's state file lives in its OWN run's tree. A reader that took
+       * `workerPaths(collatorRun, seat)` — the shape a "console is one run"
+       * reading produces — finds nothing for the three observers, which lands as
+       * three degraded seats rather than as a wrong total.
+       */
+    }
+    return { seatRuns, collator: runPaths(seatRuns[TRIAGE_COLLATOR]!, root) };
+  }
+
+  /**
+   * One seat's state file, with its spend SPLIT ACROSS BOTH USAGE AXES.
+   *
+   * `input_tokens` and `output_tokens` are two fields and A6 spend is their sum,
+   * so a fixture that put everything in one of them is green for a reader that
+   * silently drops the other — a degenerate shape this branch has recorded
+   * catching twice. The split is uneven so the two halves cannot be swapped
+   * either.
+   */
+  function seatState(seat: string, runId: string, tokens: number): string {
+    const input = Math.floor(tokens / 4);
+    return JSON.stringify({
+      schema: "pifleet.state/v1",
+      worker: seat,
+      run_id: runId,
+      pid: 4242,
+      pgid: 4242,
+      started_at: "2026-09-07T00:00:00.000Z",
+      phase: "idle",
+      epoch: 1,
+      usage: { input_tokens: input, output_tokens: tokens - input, usd: 0, priced: false },
+    });
+  }
+
+  /** The gate, driven. Returns the outcome AND whether the effect behind it ran. */
+  async function throughGate(
+    collator: ReturnType<typeof runPaths>,
+  ): Promise<{ kind: string; reason?: string; dispatched: number }> {
+    let dispatched = 0;
+    const gated = refuseOnExhaustedBudget(collator, async () => {
+      dispatched += 1;
+      return { kind: "accepted" };
+    });
+    const out = await gated({
+      taskId: "T-sweep-1-obs-t1",
+      worker: "obs-t1",
+      title: "t",
+      brief: "b",
+    });
+    return {
+      kind: out.kind,
+      ...(out.kind === "accepted" ? {} : { reason: out.reason }),
+      dispatched,
+    };
+  }
+
+  test("spend across the ceiling halts the run, and the SHIPPED gate then refuses", async () => {
+    const env = await tempRunsDir();
+    assertHermetic(env);
+    const { seatRuns, collator } = await spendingConsole({
+      env,
+      ceiling: 6_000_000,
+      // 6,000,001 — one token past, which is `resumeBudget`'s STRICT `>` and the
+      // same off-by-one ISC-885's own fixture spells as "6000001 of 6000000".
+      tokens: { "tri-1": 1, "obs-t1": 2_000_000, "obs-t2": 2_000_000, "obs-t3": 2_000_000 },
+    });
+
+    /*
+     * BEFORE: no file, and the gate is the permanently-false one ISC-891
+     * describes. This is the PREMISE — without it the assertion below passes
+     * against a repository whose gate refuses everything.
+     */
+    const before = await throughGate(collator);
+    expect(before.kind).toBe("accepted");
+    expect(before.dispatched).toBe(1);
+
+    const account = await accountConsoleSpend(
+      { seatRuns, seats: [...WORKERS] },
+      productionConsoleBudgetPorts(env),
+    );
+    expect(account).not.toBeNull();
+    expect(account!.degraded).toEqual([]);
+    expect(account!.state.tokens_spent).toBe(6_000_001);
+    expect(account!.state.halted_at).not.toBeNull();
+
+    // The file is real, and it is the one the gate reads.
+    const published = JSON.parse(await readFile(collator.budgetJson, "utf8")) as {
+      run_id: string;
+      halted_at: string | null;
+    };
+    expect(published.run_id).toBe("r-tri-1");
+    expect(published.halted_at).not.toBeNull();
+
+    const after = await throughGate(collator);
+    expect(after.kind).toBe("budget_exhausted");
+    expect(after.reason).toContain("6000001 of 6000000");
+    /*
+     * The value of a gate is that the thing behind it did not run — an
+     * outcome-only assertion passes for an implementation that dispatches and
+     * then relabels. ISC-885's reasoning, re-taken from the producer's side.
+     */
+    expect(after.dispatched).toBe(0);
+  });
+
+  /**
+   * **THE ANTI-TWIN, and §13 task 6.8 names it as outranking the first:** *"a
+   * producer that always halts satisfies the first alone."*
+   *
+   * Same tree, same four seats, same ceiling — one token UNDER it. Everything else
+   * about the fixture is identical, so a producer that halted on the mere presence
+   * of spend, or on a comparison with the wrong direction, dies here and nowhere
+   * else.
+   */
+  test("spend UNDER the ceiling publishes an unhalted budget and refuses nothing", async () => {
+    const env = await tempRunsDir();
+    const { seatRuns, collator } = await spendingConsole({
+      env,
+      ceiling: 6_000_000,
+      tokens: { "tri-1": 0, "obs-t1": 2_000_000, "obs-t2": 2_000_000, "obs-t3": 1_999_999 },
+    });
+
+    const account = await accountConsoleSpend(
+      { seatRuns, seats: [...WORKERS] },
+      productionConsoleBudgetPorts(env),
+    );
+    expect(account!.state.tokens_spent).toBe(5_999_999);
+    expect(account!.state.halted_at).toBeNull();
+    /*
+     * The file IS written — "under the ceiling" is a published fact, not a
+     * silence. A producer that only wrote on the halt would leave `--status` and
+     * every future resume with no evidence the console had spent anything.
+     */
+    expect(existsSync(collator.budgetJson)).toBe(true);
+
+    const out = await throughGate(collator);
+    expect(out.kind).toBe("accepted");
+    expect(out.dispatched).toBe(1);
+  });
+
+  /**
+   * A run nobody budgeted never halts, however much it spends.
+   *
+   * `tokens_ceiling: null` is `readRunBudgetPolicy`'s honest answer for a
+   * `run.json` with no budget block, and it is the third arm the pair above cannot
+   * reach: both of those hold a ceiling, so a producer that ignored the ceiling
+   * and halted on a hard-coded number would pass one of them.
+   */
+  test("an unbudgeted run is unbounded, not halted at zero", async () => {
+    const env = await tempRunsDir();
+    const { seatRuns, collator } = await spendingConsole({
+      env,
+      ceiling: null,
+      tokens: { "tri-1": 1, "obs-t1": 9_000_000, "obs-t2": 0, "obs-t3": 0 },
+    });
+    const account = await accountConsoleSpend(
+      { seatRuns, seats: [...WORKERS] },
+      productionConsoleBudgetPorts(env),
+    );
+    expect(account!.state.tokens_ceiling).toBeNull();
+    expect(account!.state.tokens_spent).toBe(9_000_001);
+    expect(account!.state.halted_at).toBeNull();
+    expect((await throughGate(collator)).kind).toBe("accepted");
+  });
+
+  /**
+   * **A DEGRADED SEAT FLOORS THE TOTAL, and this console MANUFACTURES the
+   * degradation.**
+   *
+   * `safety/budget.ts` records the hazard for a crashed run — *"a run at 95% of
+   * its ceiling that crashes and cannot re-read its transcripts resumes at 0 with
+   * a fresh full ceiling — n restarts, n × `tokens_ceiling`"*. Here it needs no
+   * crash: §6.6 layer 4 tears a seat down and brings it back up every
+   * `recycle_after_sweeps`, and a seat mid-recycle has no state file. Without the
+   * floor a halted console un-halts itself four hours into its life, forever.
+   */
+  test("a seat with no readable state floors the total rather than lowering it", async () => {
+    const env = await tempRunsDir();
+    const { seatRuns, collator } = await spendingConsole({
+      env,
+      ceiling: 6_000_000,
+      tokens: { "tri-1": 1, "obs-t1": 2_000_000, "obs-t2": 2_000_000, "obs-t3": 2_000_000 },
+    });
+    const ports = productionConsoleBudgetPorts(env);
+    const first = await accountConsoleSpend({ seatRuns, seats: [...WORKERS] }, ports);
+    expect(first!.state.tokens_spent).toBe(6_000_001);
+
+    // obs-t3 goes mid-recycle: its state file is gone.
+    await rm(join(runPaths("r-obs-t3", runsRoot(env)).workersDir, "obs-t3", "state.json"), {
+      force: true,
+    });
+    const second = await accountConsoleSpend({ seatRuns, seats: [...WORKERS] }, ports);
+    expect(second!.degraded).toEqual(["obs-t3"]);
+    // NOT 4,000,001 — the observation failed, so the total falls back on the last
+    // thing the run published about itself.
+    expect(second!.state.tokens_spent).toBe(6_000_001);
+    expect((await throughGate(collator)).kind).toBe("budget_exhausted");
+  });
+
+  /**
+   * And the discriminating half of that rule: a CLEAN observation may legitimately
+   * fall, because re-observing is the point.
+   *
+   * Without this, "floor at the persisted snapshot" is indistinguishable from
+   * "never publish a lower number", which is a monotonic accumulator — the thing
+   * `resumeBudget`'s docblock refuses by name (*"carrying it forward AND booking
+   * deltas against a fresh observation would double-count every resumed worker"*).
+   */
+  test("a clean observation that fell is published as it is", async () => {
+    const env = await tempRunsDir();
+    const { seatRuns, collator } = await spendingConsole({
+      env,
+      ceiling: 6_000_000,
+      tokens: { "tri-1": 0, "obs-t1": 500_000, "obs-t2": 0, "obs-t3": 0 },
+    });
+    const ports = productionConsoleBudgetPorts(env);
+    const first = await accountConsoleSpend({ seatRuns, seats: [...WORKERS] }, ports);
+    expect(first!.state.tokens_spent).toBe(500_000);
+
+    // The seat rotated its session and now reports less. Nothing degraded.
+    await writeFile(
+      join(runPaths("r-obs-t1", runsRoot(env)).workersDir, "obs-t1", "state.json"),
+      seatState("obs-t1", "r-obs-t1", 10),
+    );
+    const second = await accountConsoleSpend({ seatRuns, seats: [...WORKERS] }, ports);
+    expect(second!.degraded).toEqual([]);
+    expect(second!.state.tokens_spent).toBe(10);
+    expect((await throughGate(collator)).kind).toBe("accepted");
+  });
+
+  /**
+   * **THE HALT IS CARRIED, which is `resumeBudget` rule 2 and is why the halt
+   * decision was not written here.** A console that crossed its ceiling and then
+   * observed less — a rotation, a recycle, a truncated transcript — stays halted.
+   */
+  test("a run that already halted stays halted when its observed spend falls", async () => {
+    const env = await tempRunsDir();
+    const { seatRuns, collator } = await spendingConsole({
+      env,
+      ceiling: 6_000_000,
+      tokens: { "tri-1": 1, "obs-t1": 2_000_000, "obs-t2": 2_000_000, "obs-t3": 2_000_000 },
+    });
+    const ports = productionConsoleBudgetPorts(env);
+    const halted = await accountConsoleSpend({ seatRuns, seats: [...WORKERS] }, ports);
+    expect(halted!.state.halted_at).not.toBeNull();
+
+    for (const seat of ["obs-t1", "obs-t2", "obs-t3"]) {
+      await writeFile(
+        join(runPaths(`r-${seat}`, runsRoot(env)).workersDir, seat, "state.json"),
+        seatState(seat, `r-${seat}`, 1),
+      );
+    }
+    const after = await accountConsoleSpend({ seatRuns, seats: [...WORKERS] }, ports);
+    expect(after!.degraded).toEqual([]);
+    expect(after!.state.tokens_spent).toBe(4);
+    expect(after!.state.halted_at).toBe(halted!.state.halted_at);
+    expect((await throughGate(collator)).kind).toBe("budget_exhausted");
+  });
+
+  /**
+   * No collator run is `null` and not a throw — there is no file to publish into
+   * and no gate that could read one. The console is mid-repair, which §6.6's
+   * *"absent ⇒ due"* clause already handles.
+   */
+  test("a console with no collator run publishes nothing", async () => {
+    const published: string[] = [];
+    const ports: ConsoleBudgetPorts = {
+      ceiling: async () => 10,
+      persisted: async () => null,
+      seatTokens: async () => 1,
+      publish: async (runId) => void published.push(runId),
+    };
+    const out = await accountConsoleSpend(
+      { seatRuns: { "obs-t1": "r-o1" }, seats: [...WORKERS] },
+      ports,
+    );
+    expect(out).toBeNull();
+    expect(published).toEqual([]);
+  });
+});
+
+/**
+ * The loop's half of §13 task 6.8 — WHEN the accounting runs, and what the actor
+ * says when it has none.
+ *
+ * These drive `runTriageActor` with fake ports and never touch the filesystem, so
+ * the ORDER and the LOG are what they assert; the block above owns the arithmetic
+ * and the join to the gate.
+ */
+describe("the actor accounts the console's spend, and says so when it cannot", () => {
+  /** A budget port that records every call in a shared ordering log. */
+  function budgetSpy(opts: {
+    readonly order: string[];
+    readonly halted?: boolean;
+    readonly throws?: boolean;
+  }): ConsoleBudgetPorts {
+    return {
+      ceiling: async () => 6_000_000,
+      persisted: async () => null,
+      seatTokens: async () => {
+        if (opts.throws === true) throw new Error("run.json will not parse");
+        return opts.halted === true ? 2_000_000 : 1;
+      },
+      publish: async (runId) => void opts.order.push(`publish:${runId}`),
+    };
+  }
+
+  /** Four seats, all pinned, and no recycle — so only the accounting moves. */
+  function pinnedPorts(budget?: ConsoleBudgetPorts): TriageConsolePorts {
+    const base = recyclePorts({
+      seats: [...WORKERS],
+      runs: [fourRuns()],
+      recycleAfterSweeps: 0,
+    }).ports;
+    return budget === undefined ? base : { ...base, budget };
+  }
+
+  /**
+   * **THE ORDER IS THE PROPERTY.** `refuseOnExhaustedBudget` reads `budget.json`
+   * INSIDE the pass's own dispatch, so an actor that accounted afterwards would
+   * publish a crossing the pass that caused it never sees — the console spends a
+   * whole cadence past its ceiling before refusing, every single time. A fixture
+   * that only asserted "the accounting happened" is green either way.
+   */
+  test("the accounting is published BEFORE the pass that will read it", async () => {
+    const order: string[] = [];
+    const h = harness({
+      live: [true, true],
+      maxPasses: 2,
+      pass: async (n) => {
+        order.push(`pass:${n}`);
+        return cursor();
+      },
+    });
+    await runTriageActor(
+      { ...h.deps, ports: pinnedPorts(budgetSpy({ order })) },
+      { cadenceS: 300, runId: "r-tri", signal: h.signal },
+    );
+    expect(order).toEqual(["publish:r-tri", "pass:1", "publish:r-tri", "pass:2"]);
+  });
+
+  /**
+   * **THE WIRING TELL, and it is meant to die.** `TriageConsolePorts.budget` is
+   * optional for exactly the reason `TriageActorDeps.ports` was optional for one
+   * round — the composition root belonged to another task — so an actor that has
+   * no producer announces it on §7.7's log rather than spending in silence.
+   *
+   * ONCE, not per pass: this is a fact about the build, not about the sweep.
+   */
+  test("an actor with no budget port announces it once and still sweeps", async () => {
+    const h = harness({ live: [true, true, true], maxPasses: 3 });
+    await runTriageActor(
+      { ...h.deps, ports: pinnedPorts() },
+      { cadenceS: 300, runId: "r-tri", signal: h.signal },
+    );
+    expect(h.spy.events.filter((e) => e.kind === "actor_unbudgeted")).toHaveLength(1);
+    expect(h.counts().passes).toBe(3);
+    // And the mirror: an actor that HAS one never says it.
+    const g = harness({ live: [true], maxPasses: 1 });
+    await runTriageActor(
+      { ...g.deps, ports: pinnedPorts(budgetSpy({ order: [] })) },
+      { cadenceS: 300, runId: "r-tri", signal: g.signal },
+    );
+    expect(g.spy.events.map((e) => e.kind)).not.toContain("actor_unbudgeted");
+  });
+
+  /**
+   * §6.10's halt is STICKY — `resumeBudget` carries a persisted `halted_at`
+   * forward — so a line written per pass is 288 identical records a day in a file
+   * that never shrinks. Edge-triggered, and the fixture halts on every pass so a
+   * level-triggered implementation writes three.
+   */
+  test("the halt is logged on the transition, not on every pass after it", async () => {
+    const order: string[] = [];
+    const h = harness({ live: [true, true, true], maxPasses: 3 });
+    await runTriageActor(
+      { ...h.deps, ports: pinnedPorts(budgetSpy({ order, halted: true })) },
+      { cadenceS: 300, runId: "r-tri", signal: h.signal },
+    );
+    const halts = h.spy.events.filter((e) => e.kind === "budget_halted");
+    expect(halts).toHaveLength(1);
+    expect(halts[0]).toMatchObject({ run_id: "r-tri", spent: 8_000_000, ceiling: 6_000_000 });
+    // The accounting itself still ran every pass — the LINE is deduplicated, not
+    // the publish, or the gate would read a snapshot that stopped moving.
+    expect(order.filter((o) => o.startsWith("publish:"))).toHaveLength(3);
+  });
+
+  /**
+   * An accounting fault must not become an outage of the thing that diagnoses
+   * outages. The gate then reads whatever the last pass published, which is
+   * `record_write_failed`'s posture one block down.
+   */
+  test("a throwing accounting is reported and the sweep still happens", async () => {
+    const h = harness({ live: [true], maxPasses: 1 });
+    await runTriageActor(
+      { ...h.deps, ports: pinnedPorts(budgetSpy({ order: [], throws: true })) },
+      { cadenceS: 300, runId: "r-tri", signal: h.signal },
+    );
+    const failed = h.spy.events.find((e) => e.kind === "budget_unaccounted");
+    expect(failed).toBeDefined();
+    expect(failed).toMatchObject({ reason: "run.json will not parse" });
+    expect(h.counts().passes).toBe(1);
+  });
+
+  /**
+   * A WITHHELD sweep accounts nothing, and that is a boundary rather than an
+   * omission: nothing was dispatched, so nothing moved, and re-publishing an
+   * unchanged snapshot every cadence is a write per five minutes for no reader.
+   *
+   * The fixture is §6.6's own gate — one seat with no pin — so this also pins the
+   * accounting INSIDE the sweep branch rather than above it.
+   */
+  test("a sweep withheld on an unresolved pin publishes nothing", async () => {
+    const order: string[] = [];
+    const h = harness({ live: [true], maxPasses: 1 });
+    const base = recyclePorts({
+      seats: [...WORKERS],
+      // obs-t3 has no pin, so §6.6's gate withholds. `recycleAfterSweeps: 0`
+      // keeps clause 1 from repairing it inside this single pass.
+      runs: [{ "tri-1": "r-tri", "obs-t1": "r-o1", "obs-t2": "r-o2" }],
+      recycleAfterSweeps: 0,
+      downSeat: async () => {},
+      upSeat: async () => {},
+    }).ports;
+    await runTriageActor(
+      { ...h.deps, ports: { ...base, budget: budgetSpy({ order }) } },
+      { cadenceS: 300, runId: "r-tri", signal: h.signal },
+    );
+    expect(h.spy.events.map((e) => e.kind)).toContain("sweep_withheld");
+    expect(order).toEqual([]);
+    expect(h.counts().passes).toBe(0);
   });
 });

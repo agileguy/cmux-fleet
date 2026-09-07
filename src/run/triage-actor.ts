@@ -112,6 +112,8 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
 
+import type { BudgetState } from "../contracts.ts";
+import { resumeBudget } from "../safety/budget.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import {
   ConsoleWatch,
@@ -122,6 +124,8 @@ import {
   relayLogPath,
   relayRecordPath,
 } from "./console-relay.ts";
+import { runPaths, runsRoot, workerPaths } from "./paths.ts";
+import { readBudgetState, readRunBudgetPolicy, readWorkerState } from "./state.ts";
 import { sanitizeToken } from "./triage-notify.ts";
 
 /** The console this module keeps books for, bound once so no caller can pass the other. */
@@ -420,6 +424,195 @@ export async function writeTriageActorRecord(
 }
 
 // ---------------------------------------------------------------------------
+// §6.10's ceiling — THE PRODUCER (§13 task 6.8, ISC-891)
+// ---------------------------------------------------------------------------
+
+/**
+ * §6.10's ceiling, given the one thing it never had: **something that writes
+ * `budget.json` for a console run.**
+ *
+ * ## What was already there, and why every test over it passed anyway
+ *
+ * `refuseOnExhaustedBudget` (`cli/commands/triage.ts`) reads `halted_at` before
+ * every dispatch and maps it to `SweepDispatchOutcome`'s `budget_exhausted` arm;
+ * `triagePass` turns that into §6.8a's console-health issue; `triage-incident.ts`
+ * dedups it and `triage-notify.ts` announces it. **Four links of a five-link
+ * chain, with no first link.** `run.budgetJson` is written by exactly one thing in
+ * this repository — the `--auto` scheduler's `onChange` in
+ * `cli/commands/dispatch.ts` — and this console does not use that scheduler, so on
+ * a run `scripts/triage` started the file is absent, the gate is permanently
+ * false, and §6.10's *"nothing announces that today, so this design makes it a
+ * notification"* stayed a promise. ISC-891 was filed OPEN against exactly that,
+ * and filed SEPARATELY from ISC-885 *"because ISC-885's tests go on passing
+ * forever whether or not this is ever closed"*.
+ *
+ * ## THE HALT DECISION IS `resumeBudget`'S, NOT THIS FUNCTION'S
+ *
+ * That is the single most load-bearing line here and it is deliberate.
+ * `refuseOnExhaustedBudget`'s own docblock asks for it in advance — *"the mapping
+ * is written now so that closing it is a WRITER and not a second decision about
+ * what `halted_at` means"*. `safety/budget.ts` already owns *"spend past the
+ * ceiling halts, a persisted halt is carried rather than re-litigated, and the
+ * reason names both numbers"*; a second copy of that rule living in the console
+ * would be the fourth instance on this branch of one table in two files.
+ *
+ * ## FOUR PORTS, BECAUSE A SPEND READ IS NOT A FIXTURE
+ *
+ * Every member is a READ of the run tree except {@link publish}, and §12's
+ * read-only block permits exactly that: *"this console writes its own records by
+ * design … widening it to 'no write' would fail against the design the SRD asks
+ * for"*. `writeJsonAtomic` is named in that block as permitted; nothing here
+ * reaches a mutating verb, a control socket or the fleet ledger, so
+ * {@link productionConsoleBudgetPorts} can and does live in this module rather
+ * than arriving from the composition root the way `downSeat`/`upSeat` must.
+ */
+export interface ConsoleBudgetPorts {
+  /**
+   * §6.10's `run.budget.tokens_ceiling`, read from the run's OWN `run.json`.
+   *
+   * `null` is unbounded and is the honest answer for a run nobody budgeted —
+   * `readRunBudgetPolicy` fails CLOSED on a `run.json` it can read but cannot
+   * parse, which reaches {@link accountConsoleSpend}'s caller as a throw rather
+   * than as a silent "unbounded".
+   */
+  readonly ceiling: (runId: string) => Promise<number | null>;
+  /** The last published snapshot, or `null` for a run with no budget yet. */
+  readonly persisted: (runId: string) => Promise<BudgetState | null>;
+  /**
+   * One seat's observed cumulative tokens.
+   *
+   * **`null` means the observation DEGRADED and is not the same as `0`** — the
+   * distinction `safety/budget.ts` spends four paragraphs on, because *"a run at
+   * 95% of its ceiling that crashes and cannot re-read its transcripts resumes at
+   * 0 with a fresh full ceiling — n restarts, n × `tokens_ceiling`"*. Here the
+   * same hole is reached without a crash: this console recycles its seats on
+   * purpose (§6.6 layer 4), and a seat mid-recycle has no readable state.
+   */
+  readonly seatTokens: (runId: string, seat: string) => Promise<number | null>;
+  /** Publish the snapshot the gate will read. `writeJsonAtomic` in production. */
+  readonly publish: (runId: string, state: BudgetState) => Promise<void>;
+}
+
+export interface ConsoleSpendAccount {
+  readonly state: BudgetState;
+  /** The seats whose spend could not be observed. Non-empty ⇒ the floor applied. */
+  readonly degraded: readonly string[];
+}
+
+/**
+ * Observe the console's spend, publish it, and let `resumeBudget` decide the halt.
+ *
+ * ## THE SUM IS OVER FOUR SEATS AND THE CEILING IS THE COLLATOR RUN'S, AND THAT
+ * ## PAIRING IS FORCED RATHER THAN CHOSEN
+ *
+ * §6.10 reasons about *"a triage console is one run"* and D4 says *"a console is
+ * four runs"*; both are in the document and they disagree (reported against
+ * §6.10). What settles it is not the prose but the gate: `refuseOnExhaustedBudget`
+ * is handed **one** `RunPaths` — the collator's, from `resolveCollatorRun` — so
+ * the collator's `budget.json` is the only file a dispatch refusal can read. An
+ * accounting that halted each seat's own run would publish three files nothing
+ * reads and leave the fourth carrying only `tri-1`'s spend, which is the
+ * *smallest* of the four: the reconciler collates, the three observers query live
+ * environments. The console would then run to a ceiling it can never reach.
+ *
+ * So the whole console's spend is measured against one ceiling. That is
+ * CONSERVATIVE — it halts at 6,000,000 console tokens rather than at 6,000,000
+ * per seat — and conservative is the direction §6.10 argues for: *"it is the first
+ * thing in this fleet that can starve the fleet's own inference server around the
+ * clock, and the console has to be able to say so about itself."*
+ *
+ * ## A DEGRADED SEAT FLOORS THE TOTAL RATHER THAN LOWERING IT
+ *
+ * `openingBalance`'s rule, applied to a console that manufactures the degradation
+ * itself. A seat that is mid-recycle, or whose state file has not been written
+ * yet, observes as `null`; summing it as `0` would publish a total BELOW the last
+ * one and hand a console that had already crossed its ceiling a fresh one every
+ * four hours. A clean observation may legitimately fall (that is rotation, and
+ * re-observing is the point); only a failed one falls back on the last thing the
+ * run published about itself.
+ *
+ * @returns `null` when no run holds the collator — there is no file to publish
+ *   into and no gate that could read one, which is not an error.
+ */
+export async function accountConsoleSpend(
+  input: {
+    readonly seatRuns: Readonly<Record<string, string>>;
+    readonly seats: readonly string[];
+  },
+  ports: ConsoleBudgetPorts,
+): Promise<ConsoleSpendAccount | null> {
+  const runId = input.seatRuns[TRIAGE_COLLATOR];
+  if (runId === undefined) return null;
+
+  let observed = 0;
+  const degraded: string[] = [];
+  for (const seat of input.seats) {
+    const seatRun = input.seatRuns[seat];
+    if (seatRun === undefined) {
+      degraded.push(seat);
+      continue;
+    }
+    const tokens = await ports.seatTokens(seatRun, seat);
+    if (tokens === null) {
+      degraded.push(seat);
+      continue;
+    }
+    observed += tokens;
+  }
+
+  const persisted = await ports.persisted(runId);
+  /*
+   * The floor applies ONLY when something failed to observe. A clean sum that
+   * is lower than the snapshot is a real fall and is published as one.
+   */
+  const floor = degraded.length > 0 ? (persisted?.tokens_spent ?? 0) : 0;
+  const state = resumeBudget({
+    runId,
+    tokensCeiling: await ports.ceiling(runId),
+    openingTokens: Math.max(observed, floor),
+    persisted,
+  });
+  await ports.publish(runId, state);
+  return { state, degraded };
+}
+
+/**
+ * The production binding — four reads of the run tree and one atomic write.
+ *
+ * `readWorkerState`'s throw is mapped to `null` rather than propagated, on
+ * `cumulativeTokens`' own posture: *"degrading still SCHEDULES — refusing to run
+ * because a session file is malformed converts a reporting problem into an
+ * outage"*. Here the degradation is not silent: it reaches
+ * {@link ConsoleSpendAccount.degraded}, floors the total, and is logged.
+ *
+ * **`state.usage` and not the transcript.** `cumulativeTokens` reconstructs the
+ * session transcript and combines it with `state.usage`; doing that here would
+ * pull `harvest/` into this console's import closure, which
+ * `test/unit/triage-readonly.test.ts` bans by name. `state.usage` is the same A6
+ * accounting flushed by the supervisor's 250 ms heartbeat, so it lags the live
+ * turn and never the settled one — an under-read of at most one turn per seat
+ * against a six-million-token ceiling, which is the trade the layering forces and
+ * it is stated rather than hidden.
+ */
+export function productionConsoleBudgetPorts(
+  env: Record<string, string | undefined> = process.env,
+): ConsoleBudgetPorts {
+  const paths = (runId: string): ReturnType<typeof runPaths> => runPaths(runId, runsRoot(env));
+  return {
+    ceiling: async (runId) => (await readRunBudgetPolicy(paths(runId))).tokensCeiling,
+    persisted: async (runId) => await readBudgetState(paths(runId)),
+    seatTokens: async (runId, seat) => {
+      const state = await readWorkerState(workerPaths(paths(runId), seat)).catch(() => null);
+      if (state === null) return null;
+      return state.usage.input_tokens + state.usage.output_tokens;
+    },
+    publish: async (runId, state) => {
+      await writeJsonAtomic(paths(runId).budgetJson, state);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // §7.7's log — appended, never truncated
 // ---------------------------------------------------------------------------
 
@@ -427,6 +620,9 @@ export const TRIAGE_ACTOR_EVENT_KINDS = [
   "actor_started",
   "actor_refused",
   "actor_unsupervised",
+  "actor_unbudgeted",
+  "budget_halted",
+  "budget_unaccounted",
   "pass_completed",
   "pass_failed",
   "record_write_failed",
@@ -456,6 +652,44 @@ export type TriageActorEvent =
   | { kind: "actor_refused"; reason: string }
   /** No {@link TriageConsolePorts}: no lock, no recycle, no gate. See its docblock. */
   | { kind: "actor_unsupervised" }
+  /**
+   * No {@link TriageConsolePorts.budget}: §6.10's ceiling has no producer in THIS
+   * actor, so `budget_exhausted` cannot fire however much the console spends.
+   *
+   * **The `actor_unsupervised` pattern, on purpose and with the same expiry.**
+   * That event was *"the loud tell that the wiring had not landed"* while
+   * `TriageActorDeps.ports` was optional, and it was retired the round the port
+   * became required. This one says the same thing about the one line §13 task 6.8
+   * could not write — the composition root's `budget:` member — and it is meant to
+   * DIE the same way: when that member is supplied, the port stops being optional
+   * and this kind goes with it. A tell nobody can see is worse than the gap.
+   */
+  | { kind: "actor_unbudgeted" }
+  /**
+   * §6.10's ceiling was crossed and the console said so. Logged on the
+   * TRANSITION, not on every pass — the state is sticky, so a per-pass line would
+   * write 288 identical records a day into a file that never shrinks.
+   */
+  | {
+      kind: "budget_halted";
+      run_id: string;
+      /**
+       * **`spent`/`ceiling` and NOT `tokens_spent`/`tokens_ceiling`, which is what
+       * `BudgetState` calls them.** ISC-710's guard in
+       * `test/unit/triage-actor.test.ts` refuses any field name containing
+       * `token`, and it is right to: it cannot tell a token COUNT from an auth
+       * token, and a guard that could be argued with case by case is one that gets
+       * argued with. The one-word names lose nothing — the line reads
+       * `kind=budget_halted run=… spent=… ceiling=…` — and the alternative is
+       * carving an exception into the check that stops a credential reaching a
+       * file that never shrinks.
+       */
+      spent: number;
+      ceiling: number | null;
+      degraded: readonly string[];
+    }
+  /** The accounting itself failed. The gate keeps whatever the last pass published. */
+  | { kind: "budget_unaccounted"; reason: string }
   | { kind: "pass_completed"; sweep_cursor: number; consecutive_skips: number }
   | { kind: "pass_failed"; reason: string }
   | { kind: "record_write_failed"; reason: string }
@@ -495,12 +729,26 @@ export function actorLogLine(event: TriageActorEvent, at: number): string {
         return `pid=${event.pid} run=${event.run_id} cadence_s=${event.cadence_s}`;
       case "actor_unsupervised":
         return "ports=absent";
+      case "actor_unbudgeted":
+        return "budget=absent";
+      /*
+       * The seat list goes through `sanitizeToken` for `sweep_withheld`'s reason
+       * one case below: the values are host-minted today and the log never
+       * shrinks, so the question is whether a newline has anywhere to sit.
+       */
+      case "budget_halted":
+        return (
+          `run=${event.run_id} spent=${event.spent} ` +
+          `ceiling=${event.ceiling ?? "unbounded"} ` +
+          `degraded=${sanitizeToken(event.degraded.join(","), ACTOR_LOG_REASON_MAX_BYTES)}`
+        );
       case "pass_completed":
         return `sweep=${event.sweep_cursor} skips=${event.consecutive_skips}`;
       case "actor_refused":
       case "pass_failed":
       case "record_write_failed":
       case "boundary_unreadable":
+      case "budget_unaccounted":
         return reason(event.reason);
       case "console_unobservable":
       case "recycle_failed":
@@ -608,6 +856,26 @@ export interface TriageConsolePorts {
    * names as wrong.
    */
   readonly resume: () => Promise<TriageActorCursor | null>;
+  /**
+   * §6.10's ceiling, as the one port §13 task 6.8 could ship and could not wire.
+   *
+   * **OPTIONAL, and the optionality is a REPORTED residue rather than a design.**
+   * Every other member here is supplied by `productionTriageDeps().loop` in
+   * `cli/commands/triage.ts`, which is the composition root for this console — and
+   * that file belonged to another task in the round this port landed. Making the
+   * member required would have been a `tsc` error in a file this task did not own,
+   * which is exactly the situation `TriageActorDeps.ports` was in for one round
+   * before task 6.5b closed it: *"it was optional for exactly one round, as a
+   * reported residue."*
+   *
+   * So the shape is the same and so is the tell: an actor with no budget port
+   * announces `actor_unbudgeted` once at start, and the ONE line that retires both
+   * the optionality and the event is `budget: productionConsoleBudgetPorts(e.env)`
+   * beside `resume:` in that file. Until it is written, §6.10's `budget_exhausted`
+   * remains unreachable in production and [[ISC-891]] stays OPEN — which is said
+   * here rather than left to be discovered from a criterion.
+   */
+  readonly budget?: ConsoleBudgetPorts;
 }
 
 export interface TriageActorDeps {
@@ -851,6 +1119,21 @@ async function triageActorLoop(
     cadence_s: opts.cadenceS,
   });
   if (ports === undefined) await deps.log({ kind: "actor_unsupervised" });
+  /*
+   * Once at start and never per pass, for `actor_unsupervised`'s reason: this
+   * says the WIRING has not landed, which is a fact about the build and not about
+   * this sweep. See {@link TriageConsolePorts.budget}.
+   */
+  if (ports !== undefined && ports.budget === undefined) {
+    await deps.log({ kind: "actor_unbudgeted" });
+  }
+  /*
+   * §6.10's halt is sticky, so the LINE is edge-triggered: `resumeBudget` carries
+   * a persisted `halted_at` forward on every subsequent pass, and a log that
+   * recorded it each time would write 288 identical records a day into a file
+   * that never shrinks.
+   */
+  let announcedHalt = false;
 
   /*
    * §7.7's record at start. The per-seat clock has to be here before the first
@@ -972,6 +1255,45 @@ async function triageActorLoop(
     if (unresolved.length > 0) {
       await deps.log({ kind: "sweep_withheld", seats: [...unresolved] });
     } else {
+      /*
+       * §6.10's PRODUCER, and it runs BEFORE the pass rather than after it.
+       *
+       * The gate that consumes it (`refuseOnExhaustedBudget`) reads
+       * `budget.json` inside the pass's own dispatch, so accounting afterwards
+       * would publish a crossing the pass that caused it never sees — the
+       * console would spend one whole cadence past its ceiling before refusing,
+       * every time. Here the same pass that crosses is the pass that refuses.
+       *
+       * Inside this branch and not above it, because the numbers only move when
+       * a sweep is actually attempted: a withheld sweep dispatches nothing, and
+       * re-publishing an unchanged snapshot 288 times a day is a write per
+       * cadence for no reader.
+       *
+       * A failure here does NOT skip the sweep. The gate then reads whatever the
+       * last pass published, which is the same posture `record_write_failed`
+       * takes one block down — an accounting fault must not become an outage of
+       * the thing that diagnoses outages.
+       */
+      if (ports?.budget !== undefined && pins !== null) {
+        try {
+          const account = await accountConsoleSpend(
+            { seatRuns: pins, seats: ports.seats },
+            ports.budget,
+          );
+          if (account !== null && account.state.halted_at !== null && !announcedHalt) {
+            announcedHalt = true;
+            await deps.log({
+              kind: "budget_halted",
+              run_id: account.state.run_id,
+              spent: account.state.tokens_spent,
+              ceiling: account.state.tokens_ceiling,
+              degraded: [...account.degraded],
+            });
+          }
+        } catch (err) {
+          await deps.log({ kind: "budget_unaccounted", reason: why(err) });
+        }
+      }
       try {
         const passed = await deps.pass();
         /*
