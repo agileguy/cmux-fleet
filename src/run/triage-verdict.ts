@@ -1231,8 +1231,11 @@ export async function saturationVerdict(
  * the second fence rather than a repetition of the first: with no default on this
  * parameter and no default on {@link saturationVerdict}'s probe, there is no path
  * from this module to the network that does not pass through a value a caller
- * handed it. The suite asserts the absence of a bare `fetch(` in this file's own
- * source, so the fence is graded rather than promised.
+ * handed it. The suite reads this file's own source, strips its comments and
+ * asserts that no unqualified call to the global `fetch` survives, so the fence is
+ * graded rather than promised. (Comments are stripped rather than matched around
+ * because a docblock that QUOTES the pattern reddens the probe — which this one
+ * did, on its first run.)
  *
  * `hostReachableBaseUrl` is right and `llm.base_url` would be wrong: this probe
  * runs on the HOST, in the actor's process, and `base_url` is documented as what a
