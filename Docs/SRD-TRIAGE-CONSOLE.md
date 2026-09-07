@@ -3440,7 +3440,7 @@ and SRD-FLEET-PM-001 D7's.
   *Acceptance: a console run whose spend crosses `run.budget.tokens_ceiling` produces ONE
   `budget_exhausted` console-health announcement; and the anti-twin, that a run under the ceiling
   produces none — because a producer that always halts satisfies the first alone.*
-- **6.9** **Let §7.8's `cadence_s` reach `--poll`. Added 2026-09-07 by task 6.1b.** §7.8 calls
+- **6.9** **DONE 2026-09-07 — ISC-1013..1016.** Let §7.8's `cadence_s` reach `--poll`. Added 2026-09-07 by task 6.1b.** §7.8 calls
   `--poll` *"an override for a hand-run"*, which presupposes the file is the source. It is not:
   `DEFAULT_POLL_S = 300` is the fallback when `--poll` is absent, and the action computes the poll
   interval before the loop is reached, so an operator setting `cadence_s: 600` still gets 300.
@@ -3451,6 +3451,16 @@ and SRD-FLEET-PM-001 D7's.
   at the default cannot tell the file from the fallback.*
   *This needs `TriageCommandDeps.loop`'s `cadenceS` to become nullable so "not overridden" is
   spellable — a contract change task 6.1b deliberately left alone in a round about the dispatch effect.*
+  **Two corrections found while building it.** (a) §7.8 names the override flag **`--cadence`** in two
+  places; the shipped flag on `pifleet triage` is **`--poll`**. `scripts/triage` separately has a real
+  `--cadence`, so the two spellings are NOT interchangeable and §7.8 read as if they were. (b) This
+  task's acceptance asked that a console *"polls at 600, asserted by value at the seam"*, and **that is
+  unreachable end to end as written**: `cadence_s` is floored at 60 s and the production loop uses the
+  shipped `setTimeout`, so no fixture can bound a loop *after* its sleep. `console_gone` is the only
+  pre-sleep exit, which is why the cadence is asserted by value in §7.7's RECORD — a faithful proxy,
+  because `runTriageActor` drives its sleep from the same `identity` — with the dispatch deadline as an
+  independent second route (ISC-1014).
+
 - **6.5** **PART DONE 2026-09-07 — the decision landed; the privileged `down`/`up` effect is task 6.5b.** Recycling (§6.6 layer 4): **four** `down`s and four `up`s between sweeps at
   `recycle_after_sweeps`, per-seat boundary condition, sweep counter carried across. Touches:
   `src/run/triage-actor.ts`, `test/unit/triage-actor.test.ts`, `ISA.md`.
@@ -3480,7 +3490,7 @@ and SRD-FLEET-PM-001 D7's.
   goes RED because the production actor stops emitting it, and `TriageActorDeps.ports` becomes
   REQUIRED, which turns the un-ported fixture into a `tsc` error. **Both are the point** — the guard
   was pinned to the blocker's absence on purpose, so landing the unblocker must break it.*
-- **6.5c** **Decide whether an actor may start into a console with no collator. Added 2026-09-07 by
+- **6.5c** **DONE 2026-09-07 — the loop STARTS; the refusal narrows from the command to the pass (ISC-1010).** Decide whether an actor may start into a console with no collator. Added 2026-09-07 by
   task 6.5b.** `productionTriageDeps.loop` calls `resolveCollatorRun` before it builds anything, and
   that throws `NO_COLLATOR_RUN` — so §6.6's *"absent ⇒ due"* clause repairs `obs-t1..3` from cold and
   repairs `tri-1` **only mid-life**, once the loop is already running. A console whose collator is
@@ -3490,6 +3500,17 @@ and SRD-FLEET-PM-001 D7's.
   `src/cli/commands/triage.ts`, `test/unit/triage-command.test.ts`.
   *Acceptance: whichever way it goes, BOTH ISC-809 and ISC-850 are re-stated to match — a refusal
   that becomes a repair leaves two criteria asserting a message nobody emits.*
+- **6.9a** **An assertion inside a `--poll` fixture's dispatch stub is SILENTLY SWALLOWED. Added
+  2026-09-07 by task 6.9, pre-existing and not caused by it.** `triageActorLoop` catches everything
+  `deps.pass()` throws — correctly, by §6.4, because an actor that dies on one bad sweep stops
+  watching — so an `expect(...)` inside a fixture's `dispatchFor` is a **real assertion under `--once`
+  and a discarded one under every `--poll` test in the file.** A test can therefore assert a settle
+  deadline, be wrong about it, and pass. Task 6.9 recorded the deadlines into an array and asserted
+  outside the swallow for its own two tests; the older loop tests still rely on the swallowed form.
+  Touches: `test/unit/triage-command.test.ts`.
+  *Acceptance: every assertion a `--poll` fixture makes about a dispatch is made OUTSIDE the loop, on
+  recorded values; and the anti-criterion — a deliberately wrong expectation inside a stub must FAIL
+  the test, which is the measurement that proves the swallow is gone rather than moved.*
 - **6.7** Wire the actor start/stop into `scripts/triage` as a `quiesce` dep. Touches:
   `scripts/triage`, and **nothing in `src/` that Phase 4.3's test does not already pin**.
 
