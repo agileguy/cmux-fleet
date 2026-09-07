@@ -58,6 +58,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type { PartitionAssignment } from "../../src/run/triage-partition.ts";
 import {
@@ -66,18 +68,45 @@ import {
   COVERAGE_RESULTS,
   EVIDENCE_GAPS,
   evidenceGaps,
+  inferenceSaturationProbe,
+  inferenceSubject,
   OBSERVER_ASSESSMENTS,
+  SATURATION_MIN_MISSING,
+  SATURATION_VERDICTS,
+  saturationVerdict,
   sweepIdEcho,
+  sweepObservations,
   windowEcho,
   type CoverageEntry,
   type CoverageResult,
+  type InferenceEndpoint,
   type ObserverArtifact,
   type ObserverAssessment,
+  type SaturationOutcome,
+  type SaturationProbe,
+  type SaturationVerdict,
+  type SweepAssessment,
   type SweepCoverage,
   type SweepWindow,
   type TriageDocument,
   type TriageRow,
 } from "../../src/run/triage-verdict.ts";
+import {
+  advanceIncident,
+  COVERAGE_THRESHOLD,
+  freshIncidentRecord,
+  type IncidentNotification,
+  type IncidentObservation,
+  type IncidentPolicy,
+  type IncidentRecord,
+} from "../../src/run/triage-incident.ts";
+import { defaultTriageConsoleConfig } from "../../src/run/triage-config.ts";
+import type {
+  FetchLike,
+  HostDialConfigView,
+  ProbeFailure,
+  ToolCallProbeResult,
+} from "../../src/security/model-probe.ts";
 
 /**
  * The environment as `triage/targets.yaml` declares it — the SRD's own example
@@ -1703,3 +1732,900 @@ const _assessmentsAreExhaustive: readonly ObserverAssessment[] = [
   "indeterminate",
 ];
 void _assessmentsAreExhaustive;
+
+// ───────────────────────────────────────────────────────────────────────────
+// §6.7 rule 3, D15, §9.16 — the saturation verdict (§13 task 5.3a)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * ## The one criterion the rest of this block is graded on
+ *
+ * §13 task 5.3a: *"§12's Saturation block passes, **including the two-of-three
+ * fixture that must not saturate**. That anti-fixture is the criterion the rest of
+ * the task is graded on — a rule that saturates whenever anything is indeterminate
+ * passes every positive fixture and fails only that one."*
+ *
+ * So every fixture below is built to break the coincidence that would make the
+ * rule indistinguishable from `some(s => s.assessment === "indeterminate")`. Four
+ * fixtures do it, and each names its premise one step earlier so it cannot go
+ * degenerate in silence:
+ *
+ * | fixture | indeterminate services | observers with no artifact | verdict |
+ * |---|---|---|---|
+ * | one artifact of three | 2 | **2** | `saturated` |
+ * | two artifacts of three | 1 | **1** | `uncorrelated` |
+ * | one observer holding all three, silent | **3** | 1 | `uncorrelated` |
+ * | two observers silent, third reports `healthy` | 2 of 3 | **2** | `saturated` |
+ *
+ * Rows three and four are the asymmetric pair: a rule counting indeterminate
+ * SERVICES saturates on row three and is uncorrelated on row four, and both
+ * answers are wrong. §6.7 rule 3's own sentence is why — *"two or more observers
+ * producing no artifact in one sweep is a statement about what they have in
+ * common"* — and what an observer's three services have in common is the observer,
+ * not the provider.
+ *
+ * A fifth pair separates `observers_missing` from `observers_stale`, because
+ * *"produced no artifact **at all**"* is not *"produced nothing usable"*: a stale
+ * artifact is a file, which means that seat got an answer out of the model, which
+ * is evidence against saturation rather than for it.
+ *
+ * ## No fixture here reaches the network, and the fence is structural
+ *
+ * The probe is a required parameter with no default (`saturationVerdict.length` is
+ * asserted), the factory that builds the real one takes a required `FetchLike`
+ * (its arity is asserted too), and the module's own source is read below and
+ * asserted to contain no bare `fetch(`. Fixtures that are NOT saturation
+ * candidates are handed `NEVER`, which throws if it is called at all — a stronger
+ * statement than a call count, because it fails at the call site.
+ */
+
+/** The environment, deliberately sharing no substring with the provider or model. */
+const ENV = "cni-dev";
+
+/**
+ * §6.10's endpoint: *"every seat resolves to `gpt-oss-20b-MXFP4-Q8` on `omlx`"*.
+ *
+ * Provider, model and environment are pairwise distinct and non-substring, and a
+ * premise test below asserts it. ISC-681's lesson: a fixture where the tokens
+ * coincide makes a swap invisible.
+ */
+const ENDPOINT: InferenceEndpoint = { provider: "omlx", model: "gpt-oss-20b-MXFP4-Q8" };
+
+const AT = Date.UTC(2026, 8, 6, 12, 0, 0);
+const EVIDENCE = "outbox/T-sweep-42/files/triage.json";
+const CTX = { environment: ENV, at: AT, evidenceRef: EVIDENCE };
+
+/** The shipped defaults, read from the schema rather than re-typed (§7.8). */
+const POLICY: IncidentPolicy = defaultTriageConsoleConfig();
+
+function probeResult(failure: ProbeFailure | null): ToolCallProbeResult {
+  return {
+    model: ENDPOINT.model,
+    ok: failure === null,
+    failure,
+    detail: `fixture probe: ${failure ?? "answered"}`,
+  };
+}
+
+/** A probe double that counts its calls. It cannot reach anything. */
+function stubProbe(failure: ProbeFailure | null): { probe: SaturationProbe; calls: () => number } {
+  let n = 0;
+  return {
+    probe: () => {
+      n += 1;
+      return Promise.resolve(probeResult(failure));
+    },
+    calls: () => n,
+  };
+}
+
+/**
+ * The probe for every sweep that is NOT a saturation candidate.
+ *
+ * §6.7 rule 3: the probe runs *"once per saturation candidate and never per
+ * sweep"*, and §6.10 is why it matters — the resource being probed is the one this
+ * console is accused of starving, so a completion request on all 288 sweeps a day
+ * would manufacture the condition the verdict exists to report. Throwing is a
+ * harder assertion than a call count: it fails at the offending line.
+ */
+const NEVER: SaturationProbe = () => {
+  throw new Error("the confirming probe ran on a sweep that is not a saturation candidate");
+};
+
+/** `assessTriageSweep` over a coverage and a document, at the dispatched id. */
+function assess(coverage: SweepCoverage, document: TriageDocument): SweepAssessment {
+  return assessTriageSweep(SWEEP, coverage, document);
+}
+
+/** One evidenced `healthy` row per named service. */
+function healthyRows(...services: string[]): TriageRow[] {
+  return services.map((s) => row(s, { assessment: "healthy" }));
+}
+
+/**
+ * Advance one record per service through one sweep's observations.
+ *
+ * Returns the next records and every notification, so a criterion phrased about
+ * *"no coverage issue was composed"* is asserted on the notifications rather than
+ * inferred from a state.
+ */
+function advanceAll(
+  records: ReadonlyMap<string, IncidentRecord>,
+  observations: readonly IncidentObservation[],
+): { records: Map<string, IncidentRecord>; notifications: IncidentNotification[] } {
+  const next = new Map(records);
+  const notifications: IncidentNotification[] = [];
+  for (const observation of observations) {
+    if (observation.subject.kind !== "service") throw new Error("service observations only");
+    const service = observation.subject.service;
+    const held = next.get(service) ?? freshIncidentRecord(observation.subject);
+    const step = advanceIncident(held, observation, POLICY);
+    next.set(service, step.record);
+    notifications.push(...step.notifications);
+  }
+  return { records: next, notifications };
+}
+
+/**
+ * Two ordinary blind sweeps that are NOT saturation candidates, leaving the named
+ * service at `consecutive_indeterminate: 2`.
+ *
+ * Every artifact is present and fresh; the blindness comes from `unreported` —
+ * the observer answered this sweep and its document carries no row. So
+ * `observers_missing` is empty, the verdict is `clear`, nothing is suppressed, and
+ * the counter advances for real. **Building the runway out of missing artifacts
+ * instead would make the runway itself a saturation candidate**, and the fixture
+ * would be testing the suppression against a sweep that was already suppressed.
+ */
+function runway(blind: string): {
+  records: Map<string, IncidentRecord>;
+  notifications: IncidentNotification[];
+} {
+  const reported = DECLARED.filter((s) => s !== blind);
+  let records = new Map<string, IncidentRecord>();
+  const notifications: IncidentNotification[] = [];
+  for (let n = 0; n < 2; n += 1) {
+    const assessment = assess(fullCoverage(), doc(healthyRows(...reported)));
+    const outcome: SaturationOutcome = {
+      verdict: "clear",
+      saturated: false,
+      suppressed: false,
+      subject: inferenceSubject(ENDPOINT),
+      correlated: [],
+      probe: null,
+    };
+    const step = advanceAll(records, sweepObservations(assessment, outcome, { ...CTX, at: AT + n }));
+    records = step.records;
+    notifications.push(...step.notifications);
+  }
+  return { records, notifications };
+}
+
+describe("§6.7 rule 3 — the correlation, and what it is a statement about", () => {
+  /**
+   * §12: *"**Anti: two observers producing no artifact in one sweep is
+   * `saturated`, not a coverage gap.** Probe: a fixture sweep with one artifact of
+   * three."*
+   *
+   * The premise is asserted first: two observers missing, and the probe is called
+   * exactly once. A verdict reached without consulting the probe would satisfy the
+   * verdict assertion alone.
+   */
+  test("one artifact of three is SATURATED, on a probe that timed out", async () => {
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0])] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    expect(assessment.census.observers_missing).toEqual([OBS[1], OBS[2]]);
+
+    const probe = stubProbe("timeout");
+    const outcome = await saturationVerdict(assessment, ENDPOINT, probe.probe);
+
+    expect(outcome.verdict).toBe("saturated");
+    expect(outcome.saturated).toBe(true);
+    expect(outcome.suppressed).toBe(true);
+    expect(outcome.correlated).toEqual([OBS[1], OBS[2]]);
+    expect(probe.calls()).toBe(1);
+  });
+
+  /**
+   * **THE ANTI-FIXTURE §13 names, and the one this task is graded on.**
+   *
+   * *"One observer missing is **not** saturation. Probe: a fixture sweep with two
+   * artifacts of three; assert the normal `indeterminate` path and that
+   * `consecutive_indeterminate` **did** advance."*
+   *
+   * The probe is `NEVER`, so a rule that consulted it here — and any rule that
+   * saturates on one missing observer must — throws rather than merely returning a
+   * wrong verdict.
+   */
+  test("two artifacts of three is NOT saturation, and the probe is never asked", async () => {
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0]), artifact(OBS[1])] }),
+      doc(healthyRows(DECLARED[0], DECLARED[1])),
+    );
+    // The premise, one step earlier: exactly one observer silent, and exactly one
+    // service blind. A fixture that drifted to two of either would stop testing
+    // the boundary and start testing the positive case again.
+    expect(assessment.census.observers_missing).toEqual([OBS[2]]);
+    expect(assessment.services.filter((s) => s.assessment === "indeterminate")).toHaveLength(1);
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.verdict).toBe("uncorrelated");
+    expect(outcome.saturated).toBeNull();
+    expect(outcome.suppressed).toBe(false);
+    expect(outcome.probe).toBeNull();
+  });
+
+  /**
+   * **The asymmetric fixture that separates observers from services.**
+   *
+   * One observer holds all three services and produces nothing: THREE services are
+   * `indeterminate` and ONE observer is silent. A rule written over the service
+   * verdicts saturates here, and it is wrong — three services behind one stalled
+   * seat is a worker to restart, not a provider to wait for.
+   *
+   * Both halves of the asymmetry are asserted as premises. Without them a later
+   * edit that gave the fixture a second observer would silently turn it into the
+   * positive case and this test would keep passing.
+   */
+  test("one silent observer holding THREE services is a coverage gap, not saturation", async () => {
+    const assessment = assess(
+      fullCoverage({ assignments: [assign(OBS[0], ...DECLARED)], artifacts: [] }),
+      doc([]),
+    );
+    expect(assessment.services.map((s) => s.assessment)).toEqual([
+      "indeterminate",
+      "indeterminate",
+      "indeterminate",
+    ]);
+    expect(assessment.census.observers_missing).toEqual([OBS[0]]);
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.verdict).toBe("uncorrelated");
+    expect(outcome.suppressed).toBe(false);
+  });
+
+  /**
+   * **Its mirror**, and the reason both are needed: a rule requiring EVERY service
+   * to be blind passes the fixture above and fails this one.
+   *
+   * Two observers silent, and the third reports an evidenced `healthy`. Two of
+   * three services are `indeterminate` — not all — and the sweep is saturated.
+   */
+  test("two silent observers saturate even though one service came back healthy", async () => {
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0])] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    // The premise: the healthy service is genuinely healthy, so the set of
+    // indeterminate services is a STRICT subset of the declared set.
+    expect(of(assessment, DECLARED[0]).assessment).toBe("healthy");
+    expect(assessment.services.filter((s) => s.assessment === "indeterminate")).toHaveLength(2);
+
+    const probe = stubProbe("timeout");
+    const outcome = await saturationVerdict(assessment, ENDPOINT, probe.probe);
+    expect(outcome.verdict).toBe("saturated");
+    expect(probe.calls()).toBe(1);
+  });
+
+  /**
+   * **`observers_missing` is not `observers_stale`, and the fixture makes the two
+   * counts fall on opposite sides of the threshold.**
+   *
+   * Four seats: one produced nothing, two echoed the previous sweep's id, one
+   * answered cleanly. A rule reading the stale list, or reading
+   * `observers_total − observers_reported`, counts two or three and saturates. The
+   * right answer is one, because a stale artifact IS an artifact — that seat got
+   * an answer out of the model, which is evidence against saturation.
+   */
+  test("two STALE artifacts and one missing is not saturation — a stale file is a file", async () => {
+    const fourth = "obs-t4";
+    const assessment = assess(
+      fullCoverage({
+        declared: [...DECLARED, "ingest"],
+        assignments: [
+          assign(OBS[0], DECLARED[0]),
+          assign(OBS[1], DECLARED[1]),
+          assign(OBS[2], DECLARED[2]),
+          assign(fourth, "ingest"),
+        ],
+        artifacts: [artifact(OBS[0]), artifact(OBS[1], PREVIOUS), artifact(OBS[2], PREVIOUS)],
+      }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    // Asymmetric and named: the two lists are non-empty, disjoint, and of
+    // DIFFERENT lengths that fall on opposite sides of the threshold.
+    expect(assessment.census.observers_missing).toEqual([fourth]);
+    expect(assessment.census.observers_stale).toEqual([OBS[1], OBS[2]]);
+    expect(assessment.census.observers_total - assessment.census.observers_reported).toBe(3);
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.verdict).toBe("uncorrelated");
+    expect(outcome.correlated).toEqual([fourth]);
+  });
+
+  /**
+   * The mirror of the same pair: two missing and one stale DOES saturate, so the
+   * test above cannot be satisfied by a rule that never saturates.
+   */
+  test("two MISSING and one stale does saturate", async () => {
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0], PREVIOUS)] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    expect(assessment.census.observers_missing).toEqual([OBS[1], OBS[2]]);
+    expect(assessment.census.observers_stale).toEqual([OBS[0]]);
+
+    const probe = stubProbe("timeout");
+    expect((await saturationVerdict(assessment, ENDPOINT, probe.probe)).verdict).toBe("saturated");
+  });
+
+  /**
+   * `clear` is the ONLY verdict that reports `saturated: false`, and §6.8a fixes
+   * what earns it: *"a sweep in which every observer produced an artifact"*.
+   */
+  test("every observer producing an artifact clears, and the probe is not asked", async () => {
+    const assessment = assess(fullCoverage(), doc(healthyRows(...DECLARED)));
+    expect(assessment.census.observers_missing).toEqual([]);
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.verdict).toBe("clear");
+    expect(outcome.saturated).toBe(false);
+    expect(outcome.suppressed).toBe(false);
+  });
+
+  /**
+   * The twin that matters: every artifact present but every one of them STALE
+   * still clears, because §6.8a's clause is about producing a file and not about
+   * the file being usable. `observers_reported` is zero on that sweep, so a rule
+   * reading the report count instead would refuse to clear a saturation incident
+   * on a sweep where the provider demonstrably answered three times.
+   */
+  test("artifacts that are all STALE still clear — the clause is about producing a file", async () => {
+    const assessment = assess(
+      fullCoverage({
+        artifacts: [
+          artifact(OBS[0], PREVIOUS),
+          artifact(OBS[1], PREVIOUS),
+          artifact(OBS[2], PREVIOUS),
+        ],
+      }),
+      doc(healthyRows(...DECLARED)),
+    );
+    expect(assessment.census.observers_missing).toEqual([]);
+    expect(assessment.census.observers_reported).toBe(0);
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.verdict).toBe("clear");
+    expect(outcome.saturated).toBe(false);
+  });
+
+  /**
+   * A sweep that dispatched nobody is `unconfirmed`, never `clear`.
+   *
+   * `observers_missing` is empty in both cases and only one of them is *"every
+   * observer produced an artifact"*. ISC-675's rule applied at the one place an
+   * empty set means two different things: clearing a saturation incident out of an
+   * absence is the mistake, and it would arrive here through arithmetic rather
+   * than through a boolean.
+   */
+  test("a sweep that dispatched nobody says NOTHING — not `clear`", async () => {
+    const assessment = assess(fullCoverage({ assignments: [], artifacts: [] }), doc([]));
+    expect(assessment.census.observers_missing).toEqual([]);
+    expect(assessment.census.observers_total).toBe(0);
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.verdict).toBe("unconfirmed");
+    expect(outcome.saturated).toBeNull();
+    expect(outcome.probe).toBeNull();
+  });
+
+  /** The threshold is `SATURATION_MIN_MISSING`, and §6.7 rule 3's number is two. */
+  test("the threshold is two, and it is the module's own constant", () => {
+    expect(SATURATION_MIN_MISSING).toBe(2);
+  });
+
+  /** §6.2 rule 4's closed-set discipline: members by NAME, never by count. */
+  test("the verdict vocabulary is closed, asserted by name", () => {
+    expect([...SATURATION_VERDICTS]).toEqual([
+      "clear",
+      "uncorrelated",
+      "saturated",
+      "endpoint_down",
+      "unconfirmed",
+    ]);
+  });
+});
+
+describe("§6.7 rule 3's confirming probe — and its two failure classes stay apart", () => {
+  /**
+   * *"A `timeout` verdict is saturation. An `unreachable` verdict is the server
+   * being down, which is a different sentence on the operator's screen and a
+   * different thing for them to go and do."* `probeNativeToolCalls` carries the
+   * incident report for conflating them (S1).
+   *
+   * The `Record` is exhaustive over `ProbeFailure` BY CONSTRUCTION: a seventh
+   * member added to that union is a `tsc --noEmit` error on this literal, so a new
+   * probe class cannot silently default into saturation.
+   */
+  const EXPECTED: Record<ProbeFailure, SaturationVerdict> = {
+    timeout: "saturated",
+    unreachable: "endpoint_down",
+    prose: "unconfirmed",
+    "model-not-found": "unconfirmed",
+    malformed: "unconfirmed",
+    inconclusive: "unconfirmed",
+  };
+
+  const candidate = (): SweepAssessment =>
+    assess(fullCoverage({ artifacts: [artifact(OBS[0])] }), doc(healthyRows(DECLARED[0])));
+
+  test("every probe class maps to its own verdict, and only two of six suppress", async () => {
+    const seen: Record<string, [SaturationVerdict, boolean | null, boolean]> = {};
+    for (const failure of Object.keys(EXPECTED) as ProbeFailure[]) {
+      const probe = stubProbe(failure);
+      const outcome = await saturationVerdict(candidate(), ENDPOINT, probe.probe);
+      expect(probe.calls()).toBe(1);
+      expect(outcome.verdict).toBe(EXPECTED[failure]);
+      seen[failure] = [outcome.verdict, outcome.saturated, outcome.suppressed];
+    }
+
+    // By full value, so the three fields cannot drift apart. `endpoint_down`
+    // suppresses WITHOUT setting `saturated`: the coverage escalation must not
+    // point the operator at their cluster over a process on their own machine,
+    // and `inference_saturated` must not announce a saturation that is not
+    // happening. One boolean could not hold both answers.
+    expect(seen).toEqual({
+      timeout: ["saturated", true, true],
+      unreachable: ["endpoint_down", null, true],
+      prose: ["unconfirmed", null, false],
+      "model-not-found": ["unconfirmed", null, false],
+      malformed: ["unconfirmed", null, false],
+      inconclusive: ["unconfirmed", null, false],
+    });
+  });
+
+  /**
+   * A probe that ANSWERS is `unconfirmed`, never `clear`.
+   *
+   * One small completion answering promptly, seconds after the sweep ended, is not
+   * evidence the endpoint was answering during it — and `clear` is the value that
+   * CLEARS an `inference_saturated` incident. The result is still carried, so a
+   * reader can tell this from the sweep that never asked.
+   */
+  test("a probe that succeeds settles nothing, and does not clear", async () => {
+    const probe = stubProbe(null);
+    const outcome = await saturationVerdict(candidate(), ENDPOINT, probe.probe);
+    expect(outcome.verdict).toBe("unconfirmed");
+    expect(outcome.saturated).toBeNull();
+    expect(outcome.suppressed).toBe(false);
+    expect(outcome.probe?.ok).toBe(true);
+    expect(probe.calls()).toBe(1);
+  });
+
+  /**
+   * **The probe has NO DEFAULT, and the arity is how that is graded.**
+   *
+   * A defaulted parameter does not count toward `Function.length`, so a default
+   * added here — the one omitted argument between this suite and a real POST to
+   * the operator's own inference server — reddens. It is ISC-260's rule applied to
+   * the mirror hazard: *"Removing the default is the load-bearing half of that
+   * change."*
+   */
+  test("neither the verdict nor the factory carries a defaulted dependency", () => {
+    expect(saturationVerdict.length).toBe(3);
+    // Five, because `Function.length` counts every parameter up to the first
+    // one carrying an initialiser, and `timeoutMs?: number` has none. That is
+    // what makes the number load-bearing rather than incidental: a default on
+    // `fetchImpl` — the parameter this criterion is about — drops it to 3.
+    expect(inferenceSaturationProbe.length).toBe(5);
+  });
+
+  /**
+   * And the fence the arities cannot see: the module names no `fetch` of its own.
+   *
+   * Read from the source, because the property is *"there is no path from this
+   * module to the network that a caller did not supply"* and no runtime call can
+   * observe a path that is never taken.
+   */
+  test("the module reaches the network only through a value a caller handed it", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "..", "..", "src", "run", "triage-verdict.ts"),
+      "utf8",
+    );
+    // Comments are stripped rather than matched around. A probe over the raw
+    // text fails the moment a docblock QUOTES the pattern it is looking for —
+    // which this one did on its first run — and the repair a hurried reader
+    // would reach for is to reword the prose, leaving a probe that any future
+    // comment can redden. `test/unit/fresh-dispatch.test.ts` reached the same
+    // conclusion for the seat-list probe (ISC-696).
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    // The premise, because `not.toMatch` against an empty string passes: a
+    // stripper that ate the module would make every assertion below vacuous.
+    expect(code).toContain("export async function saturationVerdict");
+    expect(code).toContain("export function inferenceSaturationProbe");
+
+    expect(code).not.toMatch(/(?<![A-Za-z])fetch\s*\(/);
+    expect(code).not.toContain("globalThis.fetch");
+    expect(code).not.toContain("XMLHttpRequest");
+    // §13 names both functions by file and line; this is the assertion that the
+    // sentence is true of the code rather than only of the brief.
+    expect(code).toContain("probeNativeToolCalls");
+    expect(code).toContain("hostReachableBaseUrl");
+  });
+
+  /**
+   * The factory dials `hostReachableBaseUrl`, not `llm.base_url`.
+   *
+   * This probe runs in the ACTOR's process, on the host, and `base_url` is what a
+   * WORKER dials — on the shipped default it names the relay's bridge alias, which
+   * the host cannot resolve at all (ISC-291). A factory that dialled it would
+   * report the endpoint unreachable on a healthy machine and turn every saturation
+   * candidate into an `endpoint_down`, which is rule 3's own misdiagnosis arriving
+   * through the confirming probe.
+   *
+   * The injected `fetchImpl` records and answers; nothing leaves the process.
+   */
+  test("the real probe dials the HOST-reachable target, never the worker-facing one", async () => {
+    const seen: string[] = [];
+    const fetchImpl: FetchLike = (input) => {
+      seen.push(String(input));
+      return Promise.resolve(
+        new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: {} }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    };
+    const config: HostDialConfigView = {
+      llm: {
+        base_url: "http://omlx.pifleet.internal:10240/v1",
+        relay_upstream: "192.168.7.9:10240",
+      },
+    };
+
+    const probe = inferenceSaturationProbe(config, "", ENDPOINT.model, fetchImpl, 1_000);
+    const result = await probe();
+
+    expect(seen).toEqual(["http://192.168.7.9:10240/v1/chat/completions"]);
+    expect(seen[0]).not.toContain("omlx.pifleet.internal");
+    // The result is a real `ToolCallProbeResult` rather than a shape this file
+    // invented, so the mapping above is graded against the function the console
+    // will actually be handed.
+    expect(result.failure).toBe("prose");
+    expect(result.model).toBe(ENDPOINT.model);
+  });
+});
+
+describe("§6.7 rule 3's ORDERING — the suppression, driven through the machine", () => {
+  /**
+   * §12's saturation criterion, end to end and in full: *"a fixture sweep with one
+   * artifact of three; assert the outcome is `saturated`, that each service's
+   * `consecutive_indeterminate` did **not** advance, and that no coverage issue
+   * was composed."*
+   *
+   * The runway is what makes it bite. Two ordinary blind sweeps leave the blind
+   * service at `consecutive_indeterminate: 2`, one short of `COVERAGE_THRESHOLD`,
+   * so the saturated third sweep is the one that WOULD escalate under a verdict
+   * that reported saturation and let the counter advance anyway. §13: *"a
+   * saturation verdict that does not stop `consecutive_indeterminate` advancing is
+   * a console that reports both findings and lets the operator pick the wrong
+   * one."*
+   *
+   * Asserted by OBJECT IDENTITY, the incident suite's own discipline: a
+   * field-by-field comparison silently stops covering any field added later.
+   */
+  test("a saturated sweep advances no counter and composes no coverage issue", async () => {
+    const before = runway(DECLARED[2]);
+    expect(before.notifications).toEqual([]);
+    expect(before.records.get(DECLARED[2])!.consecutive_indeterminate).toBe(COVERAGE_THRESHOLD - 1);
+
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0])] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    const outcome = await saturationVerdict(assessment, ENDPOINT, stubProbe("timeout").probe);
+    expect(outcome.verdict).toBe("saturated");
+
+    const step = advanceAll(before.records, sweepObservations(assessment, outcome, CTX));
+    expect(step.notifications).toEqual([]);
+    for (const service of DECLARED) {
+      expect(step.records.get(service)).toBe(before.records.get(service));
+    }
+  });
+
+  /**
+   * **The anti-fixture's other half**, and the reason the test above is not
+   * satisfied by a machine that never escalates: the same runway plus a
+   * TWO-artifact sweep does reach the threshold, on the third gap, as a coverage
+   * issue.
+   *
+   * Only the blind service escalates. The two whose observers reported an
+   * evidenced `healthy` clear instead, which is what makes this a fixture about
+   * the correlation rather than about the machine being alive.
+   */
+  test("the two-of-three sweep DOES escalate, and only for the blind service", async () => {
+    const before = runway(DECLARED[2]);
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0]), artifact(OBS[1])] }),
+      doc(healthyRows(DECLARED[0], DECLARED[1])),
+    );
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.suppressed).toBe(false);
+
+    const step = advanceAll(before.records, sweepObservations(assessment, outcome, CTX));
+    expect(step.notifications).toHaveLength(1);
+    expect(step.notifications[0]!.kind).toBe("opened");
+    expect(step.notifications[0]!.reason).toBe("coverage");
+    expect(step.notifications[0]!.subject).toEqual({
+      kind: "service",
+      environment: ENV,
+      service: DECLARED[2],
+    });
+    expect(step.records.get(DECLARED[2])!.consecutive_indeterminate).toBe(COVERAGE_THRESHOLD);
+  });
+
+  /**
+   * And the sweep AFTER a suppressed one escalates on the third real gap rather
+   * than the second — the ordering's whole point, which a suppression that merely
+   * skipped the notification would fail.
+   */
+  test("a suppressed sweep costs the escalation one cadence, and no more", async () => {
+    const before = runway(DECLARED[2]);
+    const saturated = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0])] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    const suppressedOutcome = await saturationVerdict(
+      saturated,
+      ENDPOINT,
+      stubProbe("timeout").probe,
+    );
+    const held = advanceAll(before.records, sweepObservations(saturated, suppressedOutcome, CTX));
+
+    const real = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0]), artifact(OBS[1])] }),
+      doc(healthyRows(DECLARED[0], DECLARED[1])),
+    );
+    const realOutcome = await saturationVerdict(real, ENDPOINT, NEVER);
+    const step = advanceAll(held.records, sweepObservations(real, realOutcome, CTX));
+
+    expect(step.notifications.map((n) => n.kind)).toEqual(["opened"]);
+    expect(step.notifications[0]!.reason).toBe("coverage");
+  });
+
+  /**
+   * **The suppression is uniform, and this is the fixture that says why.**
+   *
+   * A firing service whose observer WAS the one that got through, reporting a
+   * fully evidenced `healthy` on a sweep the console has just declared it could
+   * not see. Suppressing only the blind rows would let that recovery through — *"a
+   * recovery notification for a service nobody could see"*, which §6.8 calls the
+   * single most damaging message this console could send, composed here on one
+   * third of the evidence.
+   */
+  test("a healthy row on a saturated sweep does NOT recover a firing service", async () => {
+    // Drive DECLARED[0] to `firing` on two observed `unhealthy` sweeps.
+    let records = new Map<string, IncidentRecord>();
+    for (let n = 0; n < 2; n += 1) {
+      const sick = assess(
+        fullCoverage(),
+        doc([
+          row(DECLARED[0], { assessment: "unhealthy" }),
+          ...healthyRows(DECLARED[1], DECLARED[2]),
+        ]),
+      );
+      const outcome = await saturationVerdict(sick, ENDPOINT, NEVER);
+      records = advanceAll(records, sweepObservations(sick, outcome, { ...CTX, at: AT + n })).records;
+    }
+    expect(records.get(DECLARED[0])!.state).toBe("firing");
+
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0])] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    // The premise: the row really is an accepted, evidenced `healthy`, so the
+    // recovery is available to any implementation that reads the service row.
+    expect(of(assessment, DECLARED[0]).assessment).toBe("healthy");
+    expect(of(assessment, DECLARED[0]).gaps).toEqual([]);
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, stubProbe("timeout").probe);
+    const observations = sweepObservations(assessment, outcome, CTX);
+    expect(observations.map((o) => o.signal.kind)).toEqual([
+      "suppressed",
+      "suppressed",
+      "suppressed",
+    ]);
+
+    const step = advanceAll(records, observations);
+    expect(step.notifications).toEqual([]);
+    expect(step.records.get(DECLARED[0])).toBe(records.get(DECLARED[0]));
+  });
+
+  /**
+   * An `endpoint_down` sweep suppresses too, and that is a decision rather than a
+   * consequence.
+   *
+   * §6.7 rule 3's argument for the ordering — *"the operator reads the one that
+   * names their cluster"* — is about the inference path being the fault, and the
+   * probe has just said it is. What `endpoint_down` does NOT do is set
+   * `saturated`: the sweep announces no saturation, because the endpoint is not
+   * saturated, it is down.
+   */
+  test("an endpoint that is DOWN suppresses without claiming saturation", async () => {
+    const before = runway(DECLARED[2]);
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0])] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    const outcome = await saturationVerdict(assessment, ENDPOINT, stubProbe("unreachable").probe);
+    expect(outcome.verdict).toBe("endpoint_down");
+    expect(outcome.saturated).toBeNull();
+
+    const step = advanceAll(before.records, sweepObservations(assessment, outcome, CTX));
+    expect(step.notifications).toEqual([]);
+    expect(step.records.get(DECLARED[2])).toBe(before.records.get(DECLARED[2]));
+  });
+
+  /**
+   * **The suppression cannot be skipped, because the verdict is a required
+   * parameter.**
+   *
+   * `triage-partition.ts`'s move — *"ordering stopped being caller discipline"* —
+   * and the arity is the assertion. A defaulted `saturation` would let task 6.1
+   * build observations without ever computing a verdict, which is §13's *"reports
+   * both findings and lets the operator pick the wrong one"* arriving through an
+   * omitted argument.
+   */
+  test("there is no path to a service signal that skips the verdict", () => {
+    expect(sweepObservations.length).toBe(3);
+  });
+});
+
+describe("the unsuppressed mapping, and what §6.7 rule 2 has already done to it", () => {
+  /**
+   * All four assessments in ONE sweep and ONE value comparison, so a mapping that
+   * returned the same signal twice reddens. Four services, four different
+   * observers, four different answers.
+   */
+  test("healthy clears, degraded and unhealthy raise, indeterminate is blindness", async () => {
+    const fourth = "obs-t4";
+    const assessment = assess(
+      fullCoverage({
+        declared: [...DECLARED, "ingest"],
+        assignments: [
+          assign(OBS[0], DECLARED[0]),
+          assign(OBS[1], DECLARED[1]),
+          assign(OBS[2], DECLARED[2]),
+          assign(fourth, "ingest"),
+        ],
+        artifacts: [artifact(OBS[0]), artifact(OBS[1]), artifact(OBS[2]), artifact(fourth)],
+      }),
+      doc([
+        row(DECLARED[0], { assessment: "healthy" }),
+        row(DECLARED[1], { assessment: "degraded" }),
+        row(DECLARED[2], { assessment: "unhealthy" }),
+        // No row for `ingest`: `unreported`, hence `indeterminate`.
+      ]),
+    );
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    expect(outcome.suppressed).toBe(false);
+
+    expect(sweepObservations(assessment, outcome, CTX)).toEqual([
+      {
+        subject: { kind: "service", environment: ENV, service: DECLARED[0] },
+        sweepId: SWEEP,
+        at: AT,
+        signal: { kind: "observed_clear", evidenceRef: EVIDENCE },
+      },
+      {
+        subject: { kind: "service", environment: ENV, service: DECLARED[1] },
+        sweepId: SWEEP,
+        at: AT,
+        signal: { kind: "issue", reason: "degraded", evidenceRef: EVIDENCE },
+      },
+      {
+        subject: { kind: "service", environment: ENV, service: DECLARED[2] },
+        sweepId: SWEEP,
+        at: AT,
+        signal: { kind: "issue", reason: "unhealthy", evidenceRef: EVIDENCE },
+      },
+      {
+        subject: { kind: "service", environment: ENV, service: "ingest" },
+        sweepId: SWEEP,
+        at: AT,
+        signal: { kind: "unobserved" },
+      },
+    ]);
+  });
+
+  /**
+   * §6.7 rule 2 composes with this and needs no code here: an unevidenced
+   * `healthy` has already been downgraded to `indeterminate` by the time a signal
+   * is built, so it arrives as `unobserved` and cannot clear anything.
+   *
+   * The premise names the gate that did it, so a fixture that stopped tripping the
+   * gate would redden rather than quietly assert the trivial case.
+   */
+  test("an unevidenced `healthy` reaches the machine as blindness, never as a clear", async () => {
+    const assessment = assess(
+      fullCoverage(),
+      doc([
+        row(DECLARED[0], { assessment: "healthy", evidence_ref: [] }),
+        ...healthyRows(DECLARED[1], DECLARED[2]),
+      ]),
+    );
+    expect(of(assessment, DECLARED[0]).reason).toBe("unevidenced_healthy");
+    expect(of(assessment, DECLARED[0]).claimed).toBe("healthy");
+
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    const observations = sweepObservations(assessment, outcome, CTX);
+    expect(observations[0]!.signal).toEqual({ kind: "unobserved" });
+    expect(observations[1]!.signal).toEqual({ kind: "observed_clear", evidenceRef: EVIDENCE });
+  });
+
+  /** The sweep id on every observation is the HOST's, carried from the assessment. */
+  test("every observation carries the dispatched sweep id", async () => {
+    const assessment = assess(fullCoverage(), doc(healthyRows(...DECLARED)));
+    const outcome = await saturationVerdict(assessment, ENDPOINT, NEVER);
+    const ids = new Set(sweepObservations(assessment, outcome, CTX).map((o) => o.sweepId));
+    expect([...ids]).toEqual([SWEEP]);
+  });
+});
+
+describe("ISC-681's naming, from the verdict's side", () => {
+  /**
+   * The premise, one step earlier and in its own test: the tokens this criterion
+   * is about are pairwise distinct and non-substring, so a swap cannot pass by
+   * coincidence. ISC-681 records the same guard on the composed title.
+   */
+  test("provider, model and environment share no substring", () => {
+    const tokens = [ENDPOINT.provider, ENDPOINT.model, ENV];
+    for (const a of tokens) {
+      for (const b of tokens) {
+        if (a === b) continue;
+        expect(a).not.toContain(b);
+      }
+    }
+  });
+
+  /**
+   * *"§6.7 rule 3's announcement names the PROVIDER as its subject and the
+   * environment only as scope."* The verdict is upstream of the composer, so what
+   * it owes that sentence is a `subject` that already IS the provider/model pair —
+   * asserted by full value, because a subject that merely CONTAINED the provider
+   * would be satisfied by a string that also contained the environment.
+   */
+  test("the outcome's subject is the provider and model, and never the environment", async () => {
+    const assessment = assess(
+      fullCoverage({ artifacts: [artifact(OBS[0])] }),
+      doc(healthyRows(DECLARED[0])),
+    );
+    const outcome = await saturationVerdict(assessment, ENDPOINT, stubProbe("timeout").probe);
+
+    expect(outcome.subject).toBe("omlx/gpt-oss-20b-MXFP4-Q8");
+    expect(outcome.subject).toBe(inferenceSubject(ENDPOINT));
+    expect(outcome.subject).not.toContain(ENV);
+  });
+
+  /** The join has one home, and the halves cannot be swapped in one place only. */
+  test("the subject joins provider then model, in that order", () => {
+    expect(inferenceSubject({ provider: "left", model: "right" })).toBe("left/right");
+  });
+
+  /**
+   * The subject is on EVERY outcome, not only the saturated one — a `--status`
+   * line or a log entry about an `endpoint_down` names the same endpoint, and a
+   * field populated only on the announcing path is a field the other paths would
+   * have to re-derive.
+   */
+  test("every verdict carries the subject", async () => {
+    const outcome = await saturationVerdict(
+      assess(fullCoverage(), doc(healthyRows(...DECLARED))),
+      ENDPOINT,
+      NEVER,
+    );
+    expect(outcome.subject).toBe(inferenceSubject(ENDPOINT));
+  });
+});

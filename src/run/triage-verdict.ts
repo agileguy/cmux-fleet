@@ -121,13 +121,21 @@
  * module's** either, for the same reason: `consecutive_indeterminate` lives in the
  * incident record (§7.6).
  *
- * **Saturation (§6.7 rule 3, D15) is task 5.3a's**, and this module must not
- * pre-empt it. Its input is available here — {@link SweepCensus.observers_missing}
- * is the correlation signal, *"two or more observers producing no artifact in one
- * sweep"* — but the verdict, the confirming `probeNativeToolCalls`, and above all
- * the **suppression** of the coverage escalation are 5.3a's, and §13 is explicit
- * that the suppression is written before the verdict. What this module owes that
- * task is the count, by name, and it publishes it.
+ * **Saturation (§6.7 rule 3, D15) LANDED HERE as task 5.3a**, and it is the one
+ * thing in this file that spans more than the sweep's own arithmetic: see
+ * {@link saturationVerdict} and {@link sweepObservations} at the foot of the
+ * module. The correlation signal was already published here —
+ * {@link SweepCensus.observers_missing}, *"two or more observers producing no
+ * artifact in one sweep"* — and what 5.3a added is the confirming probe (injected,
+ * never defaulted) and the **suppression** of the coverage escalation, which §13
+ * requires be written before the verdict.
+ *
+ * **The escalation itself is still not this module's.** `consecutive_indeterminate`
+ * lives in the incident record and only `advanceIncident` moves it. What
+ * {@link sweepObservations} does is decide which SIGNAL each service's record is
+ * advanced with, and a suppressed sweep hands every one of them
+ * `{kind: "suppressed"}` — the member `advanceIncident` answers by returning the
+ * caller's own record, identity included.
  *
  * **`status: blocked` is not read here.** §6.7 makes it a *console-health* issue
  * rather than a service issue, and §6.8a's `(scope, kind)` identity is task 5.4a's.
@@ -145,6 +153,17 @@
  * threshold in it, and a host that answered it would be judging.
  */
 
+import { hostReachableBaseUrl, probeNativeToolCalls } from "../security/model-probe.ts";
+import type {
+  FetchLike,
+  HostDialConfigView,
+  ToolCallProbeResult,
+} from "../security/model-probe.ts";
+import type {
+  IncidentObservation,
+  IncidentSignal,
+  ObservedIssueReason,
+} from "./triage-incident.ts";
 import type { PartitionAssignment } from "./triage-partition.ts";
 
 /**
@@ -943,4 +962,387 @@ function blank(
   reason: Exclude<AssessmentReason, "observed" | "unevidenced_healthy">,
 ): ServiceAssessment {
   return { service, assessment: "indeterminate", reason, observer, claimed: null, gaps: [] };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// §6.7 rule 3, D15, §9.16 — the saturation verdict (§13 task 5.3a)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The inference endpoint a saturation announcement is ABOUT.
+ *
+ * Two fields rather than one string, because ISC-681 grades the announcement on
+ * naming *"the PROVIDER as its subject and the environment only as scope"*, and a
+ * pre-joined string is a thing a caller can assemble the wrong way round once and
+ * then never notice. {@link inferenceSubject} is the one join site.
+ */
+export interface InferenceEndpoint {
+  /** `llm.providers.<name>` — `omlx` on this fleet (`fleet.yaml:113-140`). */
+  readonly provider: string;
+  /** The model every seat resolves to — `gpt-oss-20b-MXFP4-Q8`. */
+  readonly model: string;
+}
+
+/**
+ * §6.7 rule 3's *"the provider and model"*, as one token.
+ *
+ * `provider/model`, which is the shape ISC-681 already asserts by full value on
+ * the composed title (`ollama-cloud/qwen3-coder:480b`). It is a function rather
+ * than an inline template so that the two halves cannot be swapped in one place
+ * and not the other.
+ */
+export function inferenceSubject(endpoint: InferenceEndpoint): string {
+  return `${endpoint.provider}/${endpoint.model}`;
+}
+
+/**
+ * §6.7 rule 3's confirming probe, as a dep.
+ *
+ * **It has no default anywhere, and that is the load-bearing half of the design
+ * rather than a testing convenience.** `probeNativeToolCalls` removed its own
+ * `fetchImpl` default for exactly this reason (ISC-260): *"Leaving it would leave
+ * the host-side probe one omitted argument away, in a gate whose entire value is
+ * that it tests the path the workers actually use."* Here the stake is the mirror
+ * one — a default would leave every fixture in the suite one omitted argument
+ * away from a real POST to the operator's own inference server, 288 times a day
+ * in CI. So {@link saturationVerdict} takes it as a required parameter, and
+ * `saturationVerdict.length` is asserted in the suite: a default would drop the
+ * arity and redden.
+ *
+ * Zero-argument, so the base URL, the key, the model and the timeout are all
+ * closed over by whoever built it — see {@link inferenceSaturationProbe}. A probe
+ * that took the endpoint as an argument would be a second place the dial target
+ * is decided, which is the drift `hostReachableBaseUrl` exists to end.
+ */
+export type SaturationProbe = () => Promise<ToolCallProbeResult>;
+
+/**
+ * §6.7 rule 3's correlation threshold — *"**Two or more** observers producing no
+ * artifact in one sweep"*.
+ *
+ * Exported so a fixture can name it, and so the sentence has one home. The
+ * argument for the number is in the section: *"A cluster fault does not arrive at
+ * three independent observers in the same sweep; a shared dependency does, and the
+ * only dependency all three share is the inference server."* One observer silent
+ * is a worker; two is what they have in common.
+ */
+export const SATURATION_MIN_MISSING = 2;
+
+/**
+ * What one sweep concluded about the inference endpoint. Closed, and asserted by
+ * name — `test/unit/monitor-readonly.test.ts:363-369`'s rule.
+ *
+ * Five members for three behaviours, and the extra two are named rather than
+ * hidden for {@link sweepIdEcho}'s reason: they arrive from different faults and
+ * a log line should be able to say which.
+ *
+ * | verdict | reached when | `saturated` | suppresses |
+ * |---|---|---|---|
+ * | `clear` | every dispatched observer produced an artifact, and at least one was dispatched | `false` | no |
+ * | `uncorrelated` | some observer produced nothing, but fewer than {@link SATURATION_MIN_MISSING} | `null` | no |
+ * | `saturated` | correlated, and the probe answered `timeout` | `true` | **yes** |
+ * | `endpoint_down` | correlated, and the probe answered `unreachable` | `null` | **yes** |
+ * | `unconfirmed` | correlated and the probe settled neither way — or nothing was dispatched at all | `null` | no |
+ */
+export const SATURATION_VERDICTS = [
+  "clear",
+  "uncorrelated",
+  "saturated",
+  "endpoint_down",
+  "unconfirmed",
+] as const;
+export type SaturationVerdict = (typeof SATURATION_VERDICTS)[number];
+
+/**
+ * One sweep's saturation finding.
+ *
+ * ## `saturated` is `boolean | null` and the `null` is the point
+ *
+ * It is the field §6.8a's `ConsoleHealthFacts` takes, and §6.8a states the rule
+ * this shape exists to keep: *"**`saturated: null` is not `saturated: false`.** A
+ * sweep that could not tell says nothing about `inference_saturated`; only a sweep
+ * that positively observed every observer producing an artifact clears it"*
+ * (ISC-675). So `false` is reachable from `clear` and from nothing else — an
+ * `endpoint_down` is emphatically not a clean sweep, and reporting it as one would
+ * compose a RECOVERY for a saturation incident out of an outage.
+ *
+ * ## `saturated: true` is NOT `suppressed`, and they are separate fields on purpose
+ *
+ * `endpoint_down` suppresses and does not set `saturated`. The two questions are
+ * different: *"is the provider saturated"* decides what the operator is TOLD, and
+ * *"did this sweep learn anything about the cluster"* decides what the coverage
+ * escalation is allowed to conclude. When the probe says the endpoint is
+ * unreachable, the answer to the first is *"no — it is down"* and the answer to
+ * the second is *"nothing"*, and collapsing them into one boolean forces a choice
+ * between announcing a saturation that is not happening and pointing the operator
+ * at their cluster over a process on their own machine. §6.7 rule 3's own words
+ * for why the two probe classes are kept apart: *"a different sentence on the
+ * operator's screen and a different thing for them to go and do."*
+ *
+ * **The residue, stated rather than discovered.** §6.8a's `kind` is a closed
+ * six-member enum with no `inference_unreachable` in it, so an `endpoint_down`
+ * sweep composes no announcement of its own from Phase 5. In the case that
+ * actually occurs — an endpoint that is down produces no artifact from ANY
+ * observer — §6.5's zero-row raises `sweep_produced_nothing` for the environment
+ * and the console does speak. The uncovered case is the partial one, and it is one
+ * cadence long: the next sweep has nothing at all. Recorded for task 6.1.
+ */
+export interface SaturationOutcome {
+  readonly verdict: SaturationVerdict;
+  /** §6.8a's `ConsoleHealthFacts.saturated`, and `null` is not `false`. */
+  readonly saturated: boolean | null;
+  /** Whether the coverage escalation is stopped for this sweep. §6.7 rule 3's ordering. */
+  readonly suppressed: boolean;
+  /** §6.7 rule 3's announcement subject — the provider and model, never the environment. */
+  readonly subject: string;
+  /**
+   * The observers that produced no artifact at all, by name — the correlation
+   * itself, published so a log line can name what was correlated.
+   *
+   * `SweepCensus.observers_missing` verbatim. **Not** `observers_stale` and not
+   * `observers_total − observers_reported`: a stale or out-of-window artifact is
+   * an artifact, which means that observer got an answer out of the model, which
+   * is evidence AGAINST saturation rather than for it.
+   */
+  readonly correlated: readonly string[];
+  /**
+   * The confirming probe's own result, or `null` when it was not run.
+   *
+   * `null` is how a reader tells the two `unconfirmed` roads apart — a sweep that
+   * dispatched nobody never asked, while a correlated sweep asked and got an
+   * answer that settled neither way.
+   */
+  readonly probe: ToolCallProbeResult | null;
+}
+
+/**
+ * §6.7 rule 3 and D15 — is the inference endpoint saturated, or is this a
+ * coverage gap?
+ *
+ * ## The correlation, and why it is a statement about what observers SHARE
+ *
+ * §6.7: *"A cluster fault does not arrive at three independent observers in the
+ * same sweep; a shared dependency does, and the only dependency all three share is
+ * the inference server. **Two or more observers producing no artifact in one sweep
+ * is a statement about what they have in common**, and what they have in common is
+ * not the environment."*
+ *
+ * So the input is a count of OBSERVERS, never of services and never of
+ * indeterminate assessments — and the difference is the whole task. One observer
+ * holding three services and stalling makes three services `indeterminate` and is
+ * not saturation; two observers holding one service each and stalling makes two
+ * services `indeterminate` and is. A rule written over the service verdicts cannot
+ * tell those apart, would saturate on every sweep with two blind services, and
+ * would pass every positive fixture in §12 while failing the one that matters.
+ *
+ * ## The probe runs ONCE PER CANDIDATE and never per sweep
+ *
+ * §6.7's own words. This is not an optimisation: the resource being probed is the
+ * one the console is accused of starving (§6.10 — *"the first thing in this fleet
+ * that can starve the fleet's own inference server around the clock"*), and a
+ * console that added a completion request to all 288 sweeps a day would be
+ * manufacturing the condition it exists to report. So the correlation gate is
+ * evaluated first and the probe is not called at all unless it fires; the suite
+ * asserts the call count on the negative fixtures rather than only on the positive
+ * one.
+ *
+ * ## The two failure classes are kept apart, because the operator's next move differs
+ *
+ * `probeNativeToolCalls`'s own docblock: *"A timeout is NOT 'unreachable', and
+ * conflating them is a misdiagnosis this project has the incident report for
+ * (S1)."* §6.7 spends that distinction directly — *"A `timeout` verdict is
+ * saturation. An `unreachable` verdict is the server being down, which is a
+ * different sentence on the operator's screen and a different thing for them to go
+ * and do."* Every other probe class (`prose`, `model-not-found`, `malformed`,
+ * `inconclusive`, and success) is `unconfirmed`: the correlation is real and the
+ * probe did not settle it, which is a third thing and not a licence to guess.
+ *
+ * **A successful probe is `unconfirmed` rather than `clear`.** The endpoint
+ * answering one small completion promptly, seconds after the sweep ended, is not
+ * evidence that it was answering during the sweep — and `clear` is the value that
+ * CLEARS an `inference_saturated` incident. §6.8a reserves that for *"a sweep in
+ * which every observer produced an artifact"*, which is a fact about the sweep and
+ * not about the probe.
+ *
+ * ## Throwing
+ *
+ * The probe is documented to never throw (`model-probe.ts:206-210`), so a
+ * rejection is a broken injected dep — a host argument that is wrong for the life
+ * of the run — and this module's rule for that class is a throw. It propagates to
+ * task 6.1's pass, which catches and continues (`relay.ts:700-723`). Swallowing it
+ * here would make a permanently broken probe indistinguishable from an endpoint
+ * that is merely healthy.
+ */
+export async function saturationVerdict(
+  assessment: SweepAssessment,
+  endpoint: InferenceEndpoint,
+  probe: SaturationProbe,
+): Promise<SaturationOutcome> {
+  const subject = inferenceSubject(endpoint);
+  const correlated = assessment.census.observers_missing;
+  const dispatched = assessment.census.observers_total;
+
+  const settle = (
+    verdict: SaturationVerdict,
+    saturated: boolean | null,
+    suppressed: boolean,
+    result: ToolCallProbeResult | null,
+  ): SaturationOutcome => ({
+    verdict,
+    saturated,
+    suppressed,
+    subject,
+    correlated,
+    probe: result,
+  });
+
+  /*
+   * A sweep that dispatched nobody learned nothing, and `clear` below would
+   * otherwise be reachable from an empty set — `observers_missing` is empty when
+   * three observers all replied AND when there were never any observers, and
+   * only the first of those is §6.8a's *"a sweep in which every observer produced
+   * an artifact"*. `checkTriagePartition` refuses an empty partition before
+   * dispatch, so this is unreachable through the console's own path; it is
+   * answered rather than assumed away because clearing a saturation incident out
+   * of an absence is the exact shape ISC-675 is filed against.
+   */
+  if (dispatched === 0) return settle("unconfirmed", null, false, null);
+
+  if (correlated.length === 0) return settle("clear", false, false, null);
+  if (correlated.length < SATURATION_MIN_MISSING) {
+    return settle("uncorrelated", null, false, null);
+  }
+
+  const result = await probe();
+  if (result.failure === "timeout") return settle("saturated", true, true, result);
+  if (result.failure === "unreachable") return settle("endpoint_down", null, true, result);
+  return settle("unconfirmed", null, false, result);
+}
+
+/**
+ * §6.7 rule 3's confirming probe, wired to the two functions §13 names.
+ *
+ * *"`probeNativeToolCalls` (`src/security/model-probe.ts:230`), run host-side
+ * against `hostReachableBaseUrl` (`:603`)"* — and this is the only place in the
+ * console where those two meet, so a reader checking that §13's sentence is true
+ * of the code has one function to read.
+ *
+ * **`fetchImpl` is required here for the reason it is required there**, and it is
+ * the second fence rather than a repetition of the first: with no default on this
+ * parameter and no default on {@link saturationVerdict}'s probe, there is no path
+ * from this module to the network that does not pass through a value a caller
+ * handed it. The suite asserts the absence of a bare `fetch(` in this file's own
+ * source, so the fence is graded rather than promised.
+ *
+ * `hostReachableBaseUrl` is right and `llm.base_url` would be wrong: this probe
+ * runs on the HOST, in the actor's process, and `base_url` is documented as what a
+ * WORKER dials — on the shipped default it names the relay's bridge alias, which
+ * the host cannot resolve at all (ISC-291). A probe that dialled it would report
+ * the endpoint unreachable on a healthy machine and turn every saturation
+ * candidate into an `endpoint_down`.
+ */
+export function inferenceSaturationProbe(
+  config: HostDialConfigView,
+  apiKey: string,
+  model: string,
+  fetchImpl: FetchLike,
+  timeoutMs?: number,
+): SaturationProbe {
+  const baseUrl = hostReachableBaseUrl(config);
+  return () => probeNativeToolCalls(baseUrl, apiKey, model, fetchImpl, timeoutMs);
+}
+
+/** What one sweep's service observations need that the assessment does not carry. */
+export interface SweepObservationContext {
+  /** The environment these services belong to — §6.8's `(environment, service)` key. */
+  readonly environment: string;
+  /** Epoch milliseconds. A PARAMETER — Phase 5 has no clock. */
+  readonly at: number;
+  /**
+   * What a signal CITES. One value for the sweep, as
+   * `ConsoleHealthFacts.evidenceRef` is, and non-nullable for the reason
+   * `IncidentSignal["observed_clear"]` makes it non-nullable: a recovery that
+   * names nothing is a recovery derived from an absence.
+   */
+  readonly evidenceRef: string;
+}
+
+/**
+ * One sweep's per-service readings, as {@link IncidentObservation}s — the service
+ * twin of `consoleHealthObservations`, and **the suppression's only home**.
+ *
+ * ## The ordering is structural, which is what §13 asks for
+ *
+ * §13 task 5.3a: *"**Write the suppression before the verdict** — a saturation
+ * verdict that does not stop `consecutive_indeterminate` advancing is a console
+ * that reports both findings and lets the operator pick the wrong one."*
+ *
+ * A caller cannot obey that by discipline here, because there is nothing to be
+ * disciplined about: {@link SaturationOutcome} is a **required parameter**, so the
+ * verdict has already been computed by the time a service signal exists, and the
+ * suppression is the first branch in the body. This is `triage-partition.ts`'s
+ * move — it *"made 'nothing was dispatched' a property of the code by taking the
+ * dispatch effect as a parameter, so ordering stopped being caller discipline"* —
+ * and `assessTriageSweep`'s: *"there is no exported path that hands a caller the
+ * worker's raw `healthy`"*. There is likewise no exported path that hands a caller
+ * an unsuppressed signal.
+ *
+ * ## What `suppressed` does downstream, and why it is EVERY service
+ *
+ * `advanceIncident` answers `{kind: "suppressed"}` by returning the caller's own
+ * record — *"no counter, no timestamp, and not the `renotify_after` floor
+ * either"*. §6.7 rule 3's requirement is narrower than that (*"a service's
+ * `consecutive_indeterminate` counter does not advance"*) and the machine's own
+ * docblock argues the stricter reading; this function supplies it uniformly rather
+ * than per service, because *"a sweep in which the inference server was the fault
+ * carries no information about the cluster"* is a statement about the sweep. A
+ * version that suppressed only the blind rows would let a `healthy` observed by
+ * the one seat that did get through CLEAR a firing incident on a sweep the console
+ * has just declared it could not see — a recovery composed on one third of the
+ * evidence, which is §6.8's *"single most damaging message this console could
+ * send"*.
+ *
+ * ## The mapping, for the unsuppressed case
+ *
+ * | assessment | signal |
+ * |---|---|
+ * | `healthy` | `observed_clear` — post-gate, so §6.7 rule 2 has already run |
+ * | `degraded`, `unhealthy` | `issue`, carrying that word as the reason |
+ * | `indeterminate` | `unobserved` |
+ *
+ * The `healthy` row is the gated one by construction: {@link ServiceAssessment}
+ * has no field carrying the worker's raw verdict into `assessment`, and an
+ * unevidenced `healthy` arrives here already downgraded to `indeterminate` with
+ * `reason: "unevidenced_healthy"`. That is what makes §12's *"assert it does
+ * **not** clear a firing incident"* true without this function knowing the rule.
+ *
+ * `coverage` is deliberately unreachable from here: it is minted by
+ * `advanceIncident` alone, because the threshold is a property of a record that
+ * spans sweeps. A verdict module that could pass it in would be a second place the
+ * escalation is decided.
+ */
+export function sweepObservations(
+  assessment: SweepAssessment,
+  saturation: SaturationOutcome,
+  context: SweepObservationContext,
+): readonly IncidentObservation[] {
+  return assessment.services.map((service) => ({
+    subject: {
+      kind: "service" as const,
+      environment: context.environment,
+      service: service.service,
+    },
+    sweepId: assessment.sweep_id,
+    at: context.at,
+    signal: saturation.suppressed
+      ? ({ kind: "suppressed" } as const)
+      : serviceSignal(service.assessment, context.evidenceRef),
+  }));
+}
+
+/** The unsuppressed half of {@link sweepObservations}'s table. */
+function serviceSignal(assessment: ObserverAssessment, evidenceRef: string): IncidentSignal {
+  if (assessment === "healthy") return { kind: "observed_clear", evidenceRef };
+  if (assessment === "indeterminate") return { kind: "unobserved" };
+  return { kind: "issue", reason: assessment satisfies ObservedIssueReason, evidenceRef };
 }
