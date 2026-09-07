@@ -1025,10 +1025,9 @@ and one comparison host-side, and it is the only thing in this design that would
 03:00 with nobody watching. **A worker cannot forge it into correctness by accident**: the value is
 minted host-side, per sweep, and echoing last sweep's id is exactly the failure being caught.
 
-**Layer 4 — recycling, because accumulation is certain.** After `recycle_after_sweeps` (default **1**
-since 2026-09-07 — one sweep per session; it was 48, four hours at the default cadence) the actor
-takes the console down and brings it back up: a new run id, a new `<run>/sessions/` directory, empty
-transcripts. It does this **between** sweeps,
+**Layer 4 — recycling, because accumulation is certain.** After `recycle_after_sweeps` (default 48,
+i.e. four hours at the default cadence) the actor takes the console down and brings it back up: a new
+run id, a new `<run>/sessions/` directory, empty transcripts. It does this **between** sweeps,
 never during one, and it re-derives its own pins afterwards because it minted the new run itself.
 
 Three things make this implementable here and nowhere else in this fleet:
@@ -2259,7 +2258,7 @@ export const TriageConsoleConfigSchema = z
     cadence_s: z.number().int().min(60).max(3_600).default(300),
     reserve_s: z.number().int().min(15).max(600).default(60),
     max_consecutive_skips: z.number().int().min(1).max(24).default(3),
-    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(1),
+    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(48),
     flap_threshold: z.number().int().min(2).max(20).default(3),
     flap_window_s: z.number().int().min(300).max(86_400).default(3_600),
     renotify_after_s: z.number().int().min(0).max(604_800).default(21_600),
@@ -2318,7 +2317,7 @@ one is a thing that would otherwise become a secret in a tracked file, an append
 | `cadence_s` | `300` | §6.4's tick. `--cadence` overrides it for a hand-run and does not persist |
 | `reserve_s` | `60` | the margin `sweep_deadline_s` is derived against. §6.5 |
 | `max_consecutive_skips` | `3` | fifteen minutes of not sweeping. Raises `sweeps_skipped` (§6.8a) |
-| `recycle_after_sweeps` | `1` | ONE SWEEP PER SESSION — the boundary runs before the pass, so every sweep is dispatched into freshly recreated seats. `0` disables. **Was `48` (four hours) until 2026-09-07**; the operator changed it because a `tui` seat keeps its session and a collator holding four previous sweeps answers from what it already has (`fresh-dispatch.ts`'s measured case). The cost is a recreate per tick |
+| `recycle_after_sweeps` | `48` | four hours. `0` disables — the setting for measuring Q5, and §6.6 records that leaving it there is a decision rather than a default. **A value of `1` is structurally broken and was measured as such on 2026-09-07**: a sweep spans more than one pass, the later pass collects artifacts through `resumableSweep` against the CURRENT run's tree, and a recycle mints a new run — so every sweep's outbox is stranded and the observer is torn down mid-turn. The floor is more passes than a sweep takes to settle |
 | `flap_threshold` | `3` | §6.8 |
 | `flap_window_s` | `3600` | §6.8 |
 | `renotify_after_s` | `21600` | six hours. `0` disables. **The knob that undoes the design if it is set small** — §6.8 and §8 both say so, and the schema's `min(0)`/`max(604800)` bound it but cannot protect it |

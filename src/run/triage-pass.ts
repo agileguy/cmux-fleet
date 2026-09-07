@@ -230,6 +230,28 @@ export interface SweepJoin {
   readonly artifacts: readonly ObserverArtifact[];
   /** Observers whose reply carried SRD-OBSERVER-001 §9.3's `status: blocked`. */
   readonly blocked: readonly string[];
+  /**
+   * Observers whose TASK settled `success` and which wrote no artifact at all.
+   *
+   * **A silent false success, and it is worse than a failure.** Measured on the
+   * first live console: the observer started, ran one `ls`, narrated what it was
+   * about to do, and its turn ended eleven seconds later with an empty outbox —
+   * whereupon the supervisor read the quiet transcript as `quiesced` and settled
+   * the task `success`. Forty-five passes ran that way and produced not one
+   * artifact.
+   *
+   * The console was never fooled — §6.5 counts what the HOST harvested, so the
+   * services came back unobserved and escalated to coverage correctly. What was
+   * missing is the DIAGNOSIS: "coverage" reads as "the environment did not
+   * answer", and the truth was "the worker said it was done and wrote nothing".
+   * Those send an operator to different places, and only one of them is a
+   * cluster.
+   *
+   * Separate from {@link blocked} on purpose. A `blocked` observer reported — it
+   * said it could not see, which is an answer. These seats did not report and
+   * claimed they had.
+   */
+  readonly claimedSuccess: readonly string[];
 }
 
 /** §6.3 steps 8-9: the collation, and what a signal derived from it may cite. */
@@ -881,7 +903,7 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
   const join: SweepJoin =
     refusedPartition === null
       ? await deps.sweep.join(sweepId)
-      : { artifacts: [], blocked: [] };
+      : { artifacts: [], blocked: [], claimedSuccess: [] };
 
   return await completeSweep(deps, {
     at,

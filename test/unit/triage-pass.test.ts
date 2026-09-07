@@ -212,6 +212,7 @@ interface DriverOptions {
   readonly assignments?: readonly PartitionAssignment[];
   readonly artifacts?: (sweepId: string) => readonly ObserverArtifact[];
   readonly blocked?: readonly string[];
+  readonly claimedSuccess?: readonly string[];
   readonly rows?: (sweepId: string) => readonly TriageRow[];
   readonly collation?: (sweepId: string) => SweepCollation;
   readonly highest?: number;
@@ -262,6 +263,7 @@ function driver(opts: DriverOptions = {}): Spy {
         return {
           artifacts: opts.artifacts?.(sweepId) ?? SEATS.map((s) => artifact(s, sweepId)),
           blocked: opts.blocked ?? [],
+          claimedSuccess: opts.claimedSuccess ?? [],
         };
       },
       collate: async (sweepId): Promise<SweepCollation> => {

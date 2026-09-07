@@ -84,7 +84,13 @@ import {
   TRIAGE_COLLATOR,
   type TriageConsolePorts,
 } from "../../src/run/triage-actor.ts";
-import { inboxTaskPath, runPaths, type RunPaths, runIdsAscending } from "../../src/run/paths.ts";
+import {
+  inboxTaskPath,
+  runIdsAscending,
+  runPaths,
+  runsRoot,
+  type RunPaths,
+} from "../../src/run/paths.ts";
 import {
   DISPATCH_REQUEST_SCHEMA,
   dispatchRequestPath,
@@ -920,7 +926,7 @@ describe("buildSweepDriver", () => {
     const briefing = {
       openSweep: async () => ({ kind: "opened" as const, marker }),
       dispatchObserver: async () => {},
-      join: async () => ({ artifacts: [], blocked: [] }),
+      join: async () => ({ artifacts: [], blocked: [], claimedSuccess: [] }),
       collate: async () => ({ document: null, evidenceRef: "ref" }),
     };
     const driver = buildSweepDriver(run, briefing, process.env);
@@ -954,7 +960,7 @@ describe("buildSweepDriver", () => {
       {
         openSweep: async () => ({ kind: "opened" as const }),
         dispatchObserver: async () => {},
-        join: async () => ({ artifacts: [], blocked: [] }),
+        join: async () => ({ artifacts: [], blocked: [], claimedSuccess: [] }),
         collate: async () => ({ document: null, evidenceRef: "ref" }),
       },
       process.env,
@@ -972,7 +978,7 @@ describe("buildSweepDriver", () => {
       {
         openSweep: async () => ({ kind: "opened" as const }),
         dispatchObserver: async () => {},
-        join: async () => ({ artifacts: [], blocked: [] }),
+        join: async () => ({ artifacts: [], blocked: [], claimedSuccess: [] }),
         collate: async () => ({ document: null, evidenceRef: "ref" }),
       },
       process.env,
@@ -1040,7 +1046,7 @@ describe("buildTriageSweepDriver: ten members from one dep set", () => {
     expect(await driver.openSweep("T-sweep-3", "2026-09-06T12:00:00.000Z")).toEqual({
       kind: "opened",
     });
-    expect(await driver.join("T-sweep-3")).toEqual({ artifacts: [], blocked: [] });
+    expect(await driver.join("T-sweep-3")).toEqual({ artifacts: [], blocked: [], claimedSuccess: [] });
     expect((await driver.collate("T-sweep-3")).document).toBeNull();
     expect(await driver.readPartition("T-sweep-3")).toEqual([]);
     expect(await driver.highestSweepNumber()).toBe(0);
@@ -1212,8 +1218,22 @@ function fixtureFleetDispatch(
         })),
       });
     } else if (worker !== TRIAGE_COLLATOR) {
-      // An observer's turn — §7.4's artifact, echoing both host-minted values.
-      await writeJson(observerArtifactPath(run, worker, taskId), {
+      /*
+       * An observer's turn — §7.4's artifact, echoing both host-minted values.
+       *
+       * Written into the SEAT's own run, not the collator's, because that is
+       * where a real observer writes and where the join now reads (D4: a console
+       * is four runs). This fixture wrote to `run` until 2026-09-07 and passed,
+       * which is exactly how the production join came to read a path that could
+       * not exist: with both halves using the collator's tree the mistake is
+       * invisible, and only a seat that has MOVED — the recycle test below —
+       * tells them apart.
+       */
+      const seatRuns = await resolveSeatRuns(undefined, process.env);
+      const seatId = seatRuns[worker];
+      const seatTree =
+        seatId === undefined ? run : runPaths(seatId, runsRoot(process.env));
+      await writeJson(observerArtifactPath(seatTree, worker, taskId), {
         sweep_id: sweepId,
         window_opened_at: windows[windows.length - 1],
         status: "success",

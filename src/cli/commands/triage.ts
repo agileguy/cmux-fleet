@@ -618,7 +618,31 @@ export function buildTriageSweepDriver(
   producers: SweepProducerDeps,
   env: Record<string, string | undefined> = process.env,
 ): SweepDriver {
-  return buildSweepDriver(producers.run, sweepProducers(producers), env);
+  /*
+   * **The seat resolver is supplied HERE, and it is not optional in production.**
+   *
+   * `producers.run` is the collator's run and `SweepProducerDeps.seatRun`
+   * defaults to it, which is right for a caller that builds one run by hand and
+   * wrong for this console: D4 makes a console FOUR runs, and an observer's
+   * outbox lives under its own. Without this the join reads
+   * `<collator-run>/outbox/obs-t1/…`, a path that cannot exist, and reports every
+   * service unobserved however well the observers did — silently, because an
+   * absent file is exactly what a worker that wrote nothing produces.
+   *
+   * Same `resolveSeatRuns` the dispatch path uses, so the two halves of a sweep
+   * cannot disagree about which run a seat is in.
+   */
+  const withSeatRun: SweepProducerDeps = {
+    ...producers,
+    seatRun:
+      producers.seatRun ??
+      (async (worker) => {
+        const runs = await resolveSeatRuns(undefined, env);
+        const id = runs[worker];
+        return id === undefined ? producers.run : runPaths(id, runsRoot(env));
+      }),
+  };
+  return buildSweepDriver(producers.run, sweepProducers(withSeatRun), env);
 }
 
 // ---------------------------------------------------------------------------

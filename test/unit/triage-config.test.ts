@@ -79,7 +79,7 @@ const DOCUMENTED_DEFAULTS: TriageConsoleConfig = {
   cadence_s: 300,
   reserve_s: 60,
   max_consecutive_skips: 3,
-  recycle_after_sweeps: 1,
+  recycle_after_sweeps: 48,
   flap_threshold: 3,
   flap_window_s: 3_600,
   renotify_after_s: 21_600,

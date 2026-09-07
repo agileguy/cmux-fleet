@@ -75,7 +75,7 @@
  */
 
 import { readDispatchRequest, TRIAGE_CONSOLE_ROSTER } from "./dispatch-request.ts";
-import { workerOutboxDir, type RunPaths } from "./paths.ts";
+import { taskRecordPath, workerOutboxDir, workerPaths, type RunPaths } from "./paths.ts";
 import { replyMountPath } from "./replies.ts";
 import { childTaskId, collationTaskId, TRIAGE_CONSOLE_ASPECTS } from "./task-ids.ts";
 import { TRIAGE_COLLATOR } from "./triage-actor.ts";
@@ -895,6 +895,23 @@ export interface SweepProducerDeps {
   /** The previous sweep's document, fetched lazily. Projected, never rendered. */
   readonly previousDocument: () => Promise<TriageDocument | null>;
   readonly dispatch: SweepDispatch;
+  /**
+   * Where a given SEAT's run tree lives. Defaults to {@link run}.
+   *
+   * **`run` is the COLLATOR's, and only the collator's.** D4: a console is four
+   * runs, not one — so `<run>/outbox/obs-t1/` does not exist and never did. The
+   * join read observer artifacts out of the collator's tree, which is a directory
+   * that cannot contain them, so the harvest found nothing no matter what the
+   * observers wrote. Every service came back unobserved and escalated to
+   * coverage, and the console pointed at a cluster that had answered.
+   *
+   * This is the SECOND place that mistake was made — `dispatchObserver` posted to
+   * the collator's run too, and failed loudly with `SocketRequestError`. The join
+   * had no such luck: reading a path that does not exist is indistinguishable
+   * from a worker that wrote nothing, so it failed silently for as long as it
+   * existed.
+   */
+  readonly seatRun?: (worker: string) => Promise<RunPaths>;
   readonly read?: SweepFileRead;
 }
 
@@ -916,6 +933,8 @@ export interface SweepProducers {
  */
 export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
   const read = deps.read ?? DEFAULT_READ;
+  /** The collator's run, for callers that have no per-seat map. */
+  const seatRun = deps.seatRun ?? (async (): Promise<RunPaths> => deps.run);
 
   const openSweep = async (sweepId: string, dispatchedAt: string): Promise<SweepOpen> => {
     const envelope = renderSweepEnvelope({
@@ -1011,13 +1030,45 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
    */
   const joinSweep = async (sweepId: string): Promise<SweepJoin> => {
     const replies: ObserverReply[] = [];
+    const claimedSuccess: string[] = [];
     for (const seat of TRIAGE_CONSOLE_ASPECTS) {
       const taskId = childTaskId(sweepId, seat.aspect);
-      const path = observerArtifactPath(deps.run, seat.worker, taskId);
+      const seatTree = await seatRun(seat.worker);
+      const path = observerArtifactPath(seatTree, seat.worker, taskId);
       const found = await readObserverArtifactAt(path, { worker: seat.worker, path }, read);
-      if (found.kind === "ok") replies.push(found.reply);
+      if (found.kind === "ok") {
+        replies.push(found.reply);
+        continue;
+      }
+      /*
+       * NOTHING CAME BACK. Ask what the worker CLAIMED, because the two answers
+       * point an operator at different places — see {@link SweepJoin.claimedSuccess}.
+       * Read through the same injected `read` the artifacts use, so this stays a
+       * pure file read and the module keeps its one I/O seam.
+       */
+      const record = await read(taskRecordPath(workerPaths(seatTree, seat.worker), taskId));
+      if (record === null) continue;
+      let verdict: unknown;
+      try {
+        verdict = (JSON.parse(record) as { verdict?: unknown }).verdict;
+      } catch {
+        // A task record that will not parse is its own fault and not this one's.
+        continue;
+      }
+      if (verdict !== "success") continue;
+      claimedSuccess.push(seat.worker);
+      console.error(
+        `triage: ${seat.worker} settled ${taskId} SUCCESS and wrote no artifact. The sweep will ` +
+          `report this service unobserved, which is correct but reads as "the environment did ` +
+          `not answer" — the truth is that the worker said it was done and produced nothing. ` +
+          `Look at the worker's transcript, not the cluster.`,
+      );
     }
-    return { artifacts: replies.map((r) => r.artifact), blocked: blockedObservers(replies) };
+    return {
+      artifacts: replies.map((r) => r.artifact),
+      blocked: blockedObservers(replies),
+      claimedSuccess,
+    };
   };
 
   /**

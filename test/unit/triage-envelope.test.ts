@@ -41,10 +41,16 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { OUTBOX_FILES_DIR } from "../../src/harvest/outbox.ts";
-import { runPaths, workerOutboxDir, type RunPaths } from "../../src/run/paths.ts";
+import {
+  runPaths,
+  taskRecordPath,
+  workerOutboxDir,
+  workerPaths,
+  type RunPaths,
+} from "../../src/run/paths.ts";
 import {
   TRIAGE_CONSOLE_ASPECTS,
   childTaskId,
@@ -810,10 +816,74 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     expect(joined.blocked).toEqual(["obs-t1"]);
   });
 
+  /**
+   * **THE SILENT FALSE SUCCESS, and it is the failure this console met first.**
+   *
+   * Measured 2026-09-07 on the live console: the observer started, ran one `ls`,
+   * narrated what it was about to do, and its turn ended eleven seconds later
+   * with an empty outbox — whereupon the supervisor read the quiet transcript as
+   * `quiesced` and settled the task `success`. Forty-five passes ran that way and
+   * produced not one artifact.
+   *
+   * The COUNT was never wrong: §6.5 harvests what the host can read, so those
+   * services came back unobserved and escalated to coverage exactly as designed.
+   * What was missing is the diagnosis. "Coverage" reads as *the environment did
+   * not answer*; the truth was *the worker said it was done and wrote nothing*,
+   * and only one of those is a reason to go and look at a cluster.
+   *
+   * The negative half is the load-bearing one: a seat that wrote nothing and
+   * whose task did NOT settle `success` must stay out of this list, because a
+   * worker that failed, was blocked, or never ran has not claimed anything. The
+   * list is for the contradiction alone.
+   */
+  test("a seat that settled success and wrote nothing is named, and only that seat", async () => {
+    const run = await seedRun("2026-09-06T00-00-14Z-0014");
+    const sweepId = sweepTaskId(41);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    const child = childTaskId(sweepId, seat.aspect);
+    const recordPath = taskRecordPath(workerPaths(run, seat.worker), child);
+    await mkdir(dirname(recordPath), { recursive: true });
+
+    const settleAs = async (verdict: string): Promise<void> => {
+      await writeFile(
+        recordPath,
+        JSON.stringify({
+          schema: "pifleet.taskrecord/v1",
+          task_id: child,
+          attempt_id: "file:deadbeefdeadbeef",
+          worker: seat.worker,
+          run_id: run.runId,
+          epoch: 1,
+          verdict,
+          reason: "transcript_quiesced",
+          settled_at: "2026-09-06T12:00:00.000Z",
+          tree_hash: null,
+        }),
+        "utf8",
+      );
+    };
+
+    const { producers } = producerFixture(run);
+
+    // POSITIVE: settled success, no artifact anywhere -> named.
+    await settleAs("success");
+    const claimed = await producers.join(sweepId);
+    expect(claimed.artifacts).toEqual([]);
+    expect(claimed.claimedSuccess).toEqual([seat.worker]);
+    // It is NOT `blocked` — that arm is for a seat that reported it could not see.
+    expect(claimed.blocked).toEqual([]);
+
+    // NEGATIVE: same missing artifact, a verdict that claims nothing -> silent.
+    await settleAs("failed");
+    const failed = await producers.join(sweepId);
+    expect(failed.artifacts).toEqual([]);
+    expect(failed.claimedSuccess).toEqual([]);
+  });
+
   test("join of a sweep nobody answered is empty on both members, not a throw", async () => {
     const run = await seedRun("2026-09-06T00-00-07Z-0007");
     const { producers } = producerFixture(run);
-    expect(await producers.join(sweepTaskId(41))).toEqual({ artifacts: [], blocked: [] });
+    expect(await producers.join(sweepTaskId(41))).toEqual({ artifacts: [], blocked: [], claimedSuccess: [] });
   });
 
   test("collate dispatches the collation task and reads the document back", async () => {

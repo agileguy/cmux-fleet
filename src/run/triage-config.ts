@@ -400,8 +400,18 @@ export const TriageConsoleConfigSchema = z
      * ONE SWEEP PER SESSION, by default. `0` disables — the setting for
      * measuring §11 Q5. §6.6.
      *
-     * **Changed from 48 (four hours) on 2026-09-07, by operator decision, and the
-     * reason is a measured failure rather than tidiness.** A `pane_mode: tui`
+     * **A DEFAULT OF 1 IS STRUCTURALLY BROKEN — measured 2026-09-07, and this note
+     * exists so nobody tries it again.** A sweep spans more than one pass by
+     * design: the pass dispatches the observers and does NOT wait for them, and
+     * their artifacts are collected by a LATER pass through `resumableSweep`.
+     * That read is against the CURRENT run's tree. A recycle mints a new run, so
+     * at `1` every sweep's outbox is left in a run the next pass cannot see, and
+     * the observer is torn down mid-turn on the way. Observed: sweeps 1-3 each
+     * dispatched, completed in ~90s having collected nothing, and recycled the
+     * still-working observer 5 minutes later. The floor is therefore "more passes
+     * than a sweep takes to settle", never 1.
+     *
+     * **Why 48 and not tidiness.** A `pane_mode: tui`
      * worker keeps its session across dispatches, so at 48 the collator
      * accumulates a day of sweeps into one transcript — and a model holding four
      * previous sweeps answers the cheapest way it can, from what it already has.
@@ -418,7 +428,7 @@ export const TriageConsoleConfigSchema = z
      * agent boot out of every tick. That is the trade — a slower console that
      * cannot answer from memory, over a faster one that sometimes does.
      */
-    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(1),
+    recycle_after_sweeps: z.number().int().min(0).max(1_000).default(48),
     flap_threshold: z.number().int().min(2).max(20).default(3),
     flap_window_s: z.number().int().min(300).max(86_400).default(3_600),
     /**
