@@ -948,6 +948,28 @@ export interface SweepProducerDeps {
    * existed.
    */
   readonly seatRun?: (worker: string) => Promise<RunPaths>;
+  /**
+   * Put a child's artifact where the COLLATOR can read it — §6.3 step 7, and it
+   * was missing entirely.
+   *
+   * `renderCollationEnvelope` names `/replies/<child>.json` for every seat, and
+   * nothing wrote those files. Each worker has its OWN `/outbox`: the observer
+   * writes into its run, the collator reads its own, and the two never meet. So
+   * the collator was handed a brief listing paths that had never existed, and
+   * said so — *"there is no directory for T-sweep-1-slice1 … the /replies
+   * directory is empty"* — after the observer had done the work correctly and
+   * written both artifacts.
+   *
+   * The review console has always done this (`relay.ts` publishes each child's
+   * reply before dispatching its collation); this console named the mechanism and
+   * skipped it. A PORT rather than a direct write, because publishing into
+   * another worker's `:ro` mount is a privileged effect and §12 keeps those at the
+   * composition root — the same reason `dispatch` is injected.
+   *
+   * Optional so a caller that builds its own fixture need not supply one; the
+   * production wiring is not optional and lives in `buildTriageSweepDriver`.
+   */
+  readonly publishReply?: (childTaskId: string, reply: unknown) => Promise<void>;
   readonly read?: SweepFileRead;
 }
 
@@ -1074,6 +1096,11 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
       const found = await readObserverArtifactAt(path, { worker: seat.worker, path }, read);
       if (found.kind === "ok") {
         replies.push(found.reply);
+        /*
+         * §6.3 step 7: hand it to the collator. The collation brief will name
+         * `/replies/<taskId>.json`, so this is what makes that path exist.
+         */
+        await deps.publishReply?.(taskId, found.reply.artifact);
         continue;
       }
       /*

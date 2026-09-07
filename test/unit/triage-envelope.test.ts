@@ -754,9 +754,14 @@ interface Sent {
 
 function producerFixture(
   run: RunPaths,
-  outcome: SweepDispatchOutcome = { kind: "accepted" },
+  outcome: SweepDispatchOutcome | { publishReply: (c: string, r: unknown) => Promise<void> } = {
+    kind: "accepted",
+  },
 ): { sent: Sent[]; producers: ReturnType<typeof sweepProducers> } {
   const sent: Sent[] = [];
+  const publishReply = "publishReply" in outcome ? outcome.publishReply : undefined;
+  const dispatchOutcome: SweepDispatchOutcome =
+    "publishReply" in outcome ? { kind: "accepted" } : outcome;
   const producers = sweepProducers({
     run,
     environment: "cni-dev",
@@ -765,8 +770,9 @@ function producerFixture(
     previousDocument: async () => null,
     dispatch: async (args) => {
       sent.push(args);
-      return outcome;
+      return dispatchOutcome;
     },
+    ...(publishReply === undefined ? {} : { publishReply }),
   });
   return { sent, producers };
 }
@@ -938,6 +944,68 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     const failed = await producers.join(sweepId);
     expect(failed.artifacts).toEqual([]);
     expect(failed.claimedSuccess).toEqual([]);
+  });
+
+  /**
+   * **THE COLLATOR MUST BE HANDED THE REPLIES, and it never was.**
+   *
+   * `renderCollationEnvelope` names `/replies/<child>.json` for every seat, and
+   * for as long as this console existed nothing wrote those files. Each worker
+   * has its OWN `/outbox`: the observer writes into its run and the collator
+   * reads its own, so the two never meet.
+   *
+   * Measured 2026-09-07 on the live console, and the collator said it in as many
+   * words — *"I found the task-level directories for T-sweep-1 and
+   * T-sweep-1-collate, but there is no directory for T-sweep-1-slice1 … the
+   * /replies directory is empty"* — after the observer had done the work
+   * correctly and written both artifacts. A perfect sweep collated to nothing.
+   *
+   * The review console has always published each child's reply before dispatching
+   * its collation; this console named the mechanism in the brief and skipped the
+   * act. The negative half matters as much: a seat whose artifact was NOT read
+   * must not be published, or the collator is handed an empty file and told it is
+   * a report.
+   */
+  test("every artifact the join reads is published to the collator, and only those", async () => {
+    const run = await seedRun("2026-09-06T00-00-15Z-0015");
+    const sweepId = sweepTaskId(41);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    const child = childTaskId(sweepId, seat.aspect);
+    const dir = join(workerOutboxDir(run.root, seat.worker), child, SWEEP_FILES_DIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, OBSERVER_ARTIFACT_FILE),
+      JSON.stringify({ sweep_id: sweepId, window_opened_at: "2026-09-06T12:00:00.000Z", status: "success" }),
+      "utf8",
+    );
+
+    const published: Array<{ child: string; reply: unknown }> = [];
+    const { producers } = producerFixture(run, {
+      publishReply: async (c, reply) => {
+        published.push({ child: c, reply });
+      },
+    });
+
+    const joined = await producers.join(sweepId);
+    expect(joined.artifacts.map((a) => a.worker)).toEqual([seat.worker]);
+    // BY NAME: the child task id the collation brief will name, not just "one call".
+    expect(published.map((p) => p.child)).toEqual([child]);
+    expect((published[0]!.reply as { worker?: string }).worker).toBe(seat.worker);
+  });
+
+  test("a seat with no artifact publishes NOTHING", async () => {
+    const run = await seedRun("2026-09-06T00-00-16Z-0016");
+    const published: string[] = [];
+    const { producers } = producerFixture(run, {
+      publishReply: async (c) => {
+        published.push(c);
+      },
+    });
+    const joined = await producers.join(sweepTaskId(41));
+    expect(joined.artifacts).toEqual([]);
+    // An empty file in /replies is worse than a missing one: the collator would
+    // read it as a report rather than as an absence.
+    expect(published).toEqual([]);
   });
 
   test("join of a sweep nobody answered is empty on both members, not a throw", async () => {

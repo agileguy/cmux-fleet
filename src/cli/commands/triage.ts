@@ -760,6 +760,15 @@ export interface TriageProductionEffects {
     opts: { readonly settleDeadlineMs: number },
   ) => SweepDispatch;
   /**
+   * §6.3 step 7 — put a child's artifact in the COLLATOR's `/replies` mount.
+   *
+   * Injected for exactly the reason the dispatch is: writing into another
+   * worker's `:ro` mount is a privileged effect and the module that needs it is
+   * inside §12's read-only block. Without it the collation brief names
+   * `/replies/<child>.json` for every seat and nothing creates those files.
+   */
+  readonly publishReplyFor: (run: RunPaths) => (child: string, reply: unknown) => Promise<void>;
+  /**
    * §12's exit-when-the-console-is-gone predicate, for `--poll`.
    *
    * Injected for the same structural reason as the dispatch: the production
@@ -1205,6 +1214,13 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
             run,
             e.dispatchFor(run, { settleDeadlineMs: sweepDeadlineS(pair.console) * 1_000 }),
           ),
+          /*
+           * §6.3 step 7. `run` is the COLLATOR's, and that is correct here and
+           * only here: the reply is published INTO the collator's `/replies`
+           * mount, so the destination is its run by definition — unlike the
+           * dispatch and the join, which address the seat that owns the work.
+           */
+          publishReply: e.publishReplyFor(run),
         },
         e.env,
       ),

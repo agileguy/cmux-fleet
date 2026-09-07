@@ -349,6 +349,15 @@ export async function productionTriageEffects(): Promise<TriageProductionEffects
 
   return {
     dispatchFor: productionSweepDispatchFor,
+    publishReplyFor: (run) => async (child, reply) => {
+      const mods = await loadTriageEffectModules();
+      const transport = mods.relay.consoleTransport(
+        mods.actor.TRIAGE_COLLATOR,
+        mods.relay.productionRelayEffects,
+        { deadlineMs: 0 },
+      );
+      await transport.publishReply(run, child, reply);
+    },
     isCollatorLive: async (run) =>
       await m.relay.productionRunSources.isLiveWorker(run, m.actor.TRIAGE_COLLATOR),
     downRun: productionDownRun,

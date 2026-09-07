@@ -1418,6 +1418,7 @@ async function fixtureFleet(
   const settled: string[] = [];
   const recycled: string[] = [];
   const deadlines: number[] = [];
+  const published: Array<{ child: string; reply: unknown }> = [];
   const probes = { count: 0 };
 
   const effects: TriageProductionEffects = {
@@ -1435,6 +1436,15 @@ async function fixtureFleet(
        */
       deadlines.push(opts.settleDeadlineMs);
       return fixtureFleetDispatch(r, dispatched, windows, titles, settled);
+    },
+    /*
+     * §6.3 step 7's publish, recorded so a test can assert the collator was
+     * actually handed each child's reply. The real one writes into the
+     * collator's `:ro` /replies mount; here it is a list, because what the
+     * console owns is WHETHER it publishes and for which children.
+     */
+    publishReplyFor: () => async (child, reply) => {
+      published.push({ child, reply });
     },
     isCollatorLive: async () => true,
     /*
