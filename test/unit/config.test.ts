@@ -46,6 +46,8 @@ import {
   unknownThemeWarning,
   unknownThemeWorkers,
   parseDuration,
+  submitReportWriteWarning,
+  submitReportWriteWorkers,
   workersMissingKubeconfig,
 } from "../../src/config/schema.ts";
 import { omlxRelayTarget } from "../../src/security/relay.ts";
@@ -2172,6 +2174,184 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(observerTuiWorkers(loaded.config)).toEqual(["obs-1"]);
     expect(resolveWorker(loaded, "obs-2").paneMode).toBe("rpc");
+  });
+});
+
+/**
+ * §6.6 interaction 2: `submit_report` beside `write`.
+ *
+ * The combination is not an error and must never become one. §13's phase 6
+ * adds `submit_report` to every role and removes nothing, and phase 7 removes
+ * `write` one role at a time behind a full console cycle each — so a fleet is
+ * REQUIRED to hold both for as long as phase 7 takes. What must not happen is
+ * that it holds both silently: for `triage`, `collator` and `reviewer` the
+ * second grant is the whole of what §6.3's layer 1 removes, and layer 1 is the
+ * only one of the four layers that is a mechanism rather than a nudge.
+ */
+describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-EXTENSION §6.6)", () => {
+  /** The shipped observer's tools (`fleet.yaml:542`) with phase 6 applied. */
+  const OBSERVER_TOOLS = ["read", "write", "bash", "grep", "find", "ls", "submit_report"];
+  /** The shipped reviewer/collator/triage tools (`:695`, `:726`, `:839`), phase 6 applied. */
+  const BASH_LESS_TOOLS = ["read", "write", "grep", "find", "ls", "submit_report"];
+
+  /**
+   * §12's acceptance hook, verbatim: *"the `observer` fixture; assert one
+   * warning and zero errors, because the observer is the intended case."*
+   *
+   * Zero errors is asserted by `writeAndLoad` RESOLVING — every schema issue
+   * in this file arrives as a thrown `ConfigValidationError`, so a document
+   * that loads is a document with no issues at any path.
+   */
+  test("the observer's pairing warns, names the bash asymmetry, and still loads", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: { tools: OBSERVER_TOOLS } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const loaded = await writeAndLoad(doc); // zero errors, or this throws
+    const found = submitReportWriteWorkers(loaded.config);
+    expect(found).toEqual([{ id: "obs-1", bash: true }]);
+    const warning = submitReportWriteWarning(found);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("obs-1");
+    // The observer belongs in the bash bucket, and the bucket's whole content
+    // is the finding: there is nothing here to take away.
+    expect(warning).toMatch(/bash can cat > a file/);
+    expect(warning).toMatch(/a tool and not a capability/);
+    // And it must not read as a refusal, because phase 6 IS this state.
+    expect(warning).toMatch(/Not a refusal/);
+  });
+
+  /**
+   * The seat the warning exists for. `reviewer` is the `rev-lang-1` seat — the
+   * one whose recorded defect (§6.9, ISC-517) is a valid report that was never
+   * delivered — and it holds no `bash`, so `write` is the entire difference
+   * between layer 1 and no mechanism at all.
+   */
+  test("a bash-less seat is named as the forfeiting case, with the mechanism stated", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: BASH_LESS_TOOLS } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    const found = submitReportWriteWorkers(loaded.config);
+    expect(found).toEqual([{ id: "rev-1", bash: false }]);
+    const warning = submitReportWriteWarning(found);
+    expect(warning).toMatch(/Forfeited here, and removing write is the fix \(rev-1\)/);
+    // The mechanism, not just the fact — this is the part a reader acts on.
+    expect(warning).toMatch(/layer 1/);
+    expect(warning).toMatch(/only way to create a file/);
+    // The bash bucket must be ABSENT, not merely empty of ids: a reader told
+    // "removing write takes away a tool and not a capability" about a seat
+    // that holds no shell has been told the opposite of the truth.
+    expect(warning).not.toMatch(/bash can cat > a file/);
+  });
+
+  /**
+   * The asymmetric fixture, and the reason it is written out rather than
+   * folded into the two above: with one worker per test, a `bash` flag that
+   * was hardcoded, inverted, or read off the wrong tool would satisfy every
+   * single-seat assertion in this block. Only a document holding one of each
+   * can tell the two buckets apart.
+   */
+  test("a bash holder and a bash-less seat land in different buckets, in one document", async () => {
+    const doc = baseDoc();
+    doc["roles"] = {
+      observer: { tools: OBSERVER_TOOLS },
+      reviewer: { tools: BASH_LESS_TOOLS },
+    };
+    doc["workers"] = [
+      { id: "obs-1", role: "observer" },
+      { id: "rev-1", role: "reviewer" },
+    ];
+    const loaded = await writeAndLoad(doc);
+    const found = submitReportWriteWorkers(loaded.config);
+    expect(found).toEqual([
+      { id: "obs-1", bash: true },
+      { id: "rev-1", bash: false },
+    ]);
+    const warning = submitReportWriteWarning(found)!;
+    expect(warning).toContain("2 worker(s)");
+    const forfeitLine = warning.split("\n").find((l) => l.includes("Forfeited here"))!;
+    const shellLine = warning.split("\n").find((l) => l.includes("bash can cat"))!;
+    expect(forfeitLine).toContain("rev-1");
+    expect(forfeitLine).not.toContain("obs-1");
+    expect(shellLine).toContain("obs-1");
+    expect(shellLine).not.toContain("rev-1");
+  });
+
+  /** §6.8's proposed rows — the state phase 7 is trying to reach. */
+  test("submit_report with no write raises nothing", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: ["read", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
+    expect(submitReportWriteWarning([])).toBeNull();
+  });
+
+  /**
+   * Every role in `fleet.yaml` today, before phase 6. A warning that fired on
+   * `write` alone would print on the shipped fleet from the moment it landed
+   * and would name nothing anyone could act on.
+   */
+  test("write with no submit_report raises nothing — this is the pre-phase-6 fleet", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: ["read", "write", "grep", "find", "ls"] } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * `--exclude-tools` is a real subtraction Pi applies (`render.ts:261`), so a
+   * declared-then-excluded `write` is not a grant. Warning about it would be a
+   * false positive, and this warning's only currency is that it is read.
+   */
+  test("exclude_tools removes write for this check, not just from the argv", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: BASH_LESS_TOOLS, exclude_tools: ["write"] } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * Resolved three-level, for `paneModeIssues`' reason: either level can
+   * complete the pair on its own, and a check that read only `roles:` would
+   * miss a fleet that put its tool list in `defaults:` — which is exactly
+   * where a phase 6 rollout is most tempted to put `submit_report`.
+   */
+  test("the pair inherited from defaults is found", async () => {
+    const doc = baseDoc();
+    doc["defaults"] = { tools: BASH_LESS_TOOLS };
+    doc["roles"] = { rev: {} };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([{ id: "w1", bash: false }]);
+  });
+
+  test("a worker override that completes the pair against a narrowed role is found", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { rev: { tools: ["read", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "w1", role: "rev", tools: BASH_LESS_TOOLS }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([{ id: "w1", bash: false }]);
+  });
+
+  /**
+   * §6.6 interaction 1, observed from the other end. An omitted `tools:`
+   * resolves to Pi's own builtins — which carry `write` and cannot carry
+   * `submit_report`, because an extension tool reaches a worker only when a
+   * role names it. So the most common shape of a role block cannot reach this
+   * warning at all, and it is `effectiveToolGrant`'s default that makes that
+   * true rather than a filter written here.
+   */
+  test("an omitted tools: cannot pair, because no built-in is named submit_report", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { rev: {} };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(doc);
+    expect(effectiveToolGrant(undefined)).toContain("write");
+    expect(effectiveToolGrant(undefined)).not.toContain("submit_report");
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
   });
 });
 

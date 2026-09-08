@@ -1936,6 +1936,103 @@ export function observerTuiEpochWarning(workerIds: readonly string[]): string | 
 }
 
 /**
+ * Workers whose resolved grant holds BOTH `submit_report` and `write`, each
+ * tagged with whether it also holds `bash`
+ * (SRD-WORKER-DISPATCH-EXTENSION §6.6 interaction 2).
+ *
+ * `bash` is CARRIED rather than filtered on, because it is what decides what
+ * the operator should DO about the line, and the two answers are opposite.
+ * `fleet.yaml:542` gives the observer `read, write, bash, grep, find, ls`:
+ * dropping `write` there removes a tool and not a capability, because
+ * `cat > /outbox/...` is two seconds of shell (§6.8). `triage`, `collator` and
+ * `reviewer` hold `[read, write, grep, find, ls]` with no `bash` anywhere
+ * (`fleet.yaml:695`, `:726`, `:839`), and there `write` IS the capability —
+ * it is the whole of what §6.3's layer 1 takes away. One sentence sent to both
+ * seats is a sentence that asks a bash holder to act on something it cannot
+ * change, which is how `observerTuiEpochWarning`'s own narrowing describes a
+ * warning turning into noise and taking the rest of them with it.
+ *
+ * Resolved at the WORKER and then MINUS `exclude_tools`, because what forfeits
+ * layer 1 is the grant Pi is actually launched with. Any of the three levels
+ * can complete the pair on its own — the argument `paneModeIssues` makes — and
+ * `--exclude-tools` is a real subtraction that Pi applies (`render.ts:261`),
+ * so a role that declares `write` and excludes it holds none. Naming that
+ * worker would be a false positive in the one warning whose whole value is
+ * that operators still read it.
+ *
+ * An omitted `tools:` can never appear here, and that falls OUT of
+ * `effectiveToolGrant` rather than being arranged: the omission resolves to
+ * Pi's own builtins, and no built-in is named `submit_report` — an extension
+ * tool reaches a worker only when a role names it. §6.6 interaction 1 pays for
+ * itself a second time.
+ */
+export function submitReportWriteWorkers(cfg: FleetConfig): { id: string; bash: boolean }[] {
+  const out: { id: string; bash: boolean }[] = [];
+  for (const w of cfg.workers) {
+    const role = cfg.roles[w.role];
+    if (!role) continue; // an unknown role is already a superRefine issue
+    const granted = effectiveToolGrant(pickRoleField(w, role, cfg.defaults, "tools"));
+    const excluded = pickRoleField(w, role, cfg.defaults, "exclude_tools") ?? [];
+    const holds = (t: ToolName): boolean => granted.includes(t) && !excluded.includes(t);
+    if (holds("submit_report") && holds("write")) out.push({ id: w.id, bash: holds("bash") });
+  }
+  return out;
+}
+
+/**
+ * The warning `submitReportWriteWorkers` renders, or `null`.
+ *
+ * NOT a refusal, and §13's phase table is the argument rather than taste.
+ * Phase 6 adds `submit_report` to every role and removes nothing; phase 7 then
+ * removes `write`, one role at a time, each narrowing gated on a full console
+ * cycle by the preceding one. The pairing named here is therefore a state the
+ * fleet is REQUIRED to run in for as long as phase 7 takes, and a schema that
+ * refused it would collapse two phases into one commit — the rollout shape
+ * those phases exist to avoid. The observer is a second and permanent case:
+ * §6.8's proposed row keeps `bash`, so its `write` is a tool and not a
+ * capability whichever way the row lands.
+ *
+ * Names what is GIVEN UP rather than restating the config, on
+ * `kubeconfigScopeWarning`'s precedent, and what is given up is specific.
+ * Layer 1 is the only one of §6.3's four layers that is a MECHANISM — layers
+ * 2, 3 and 4 are an incentive, one bounded nag and a session record — and it
+ * holds only while `submit_report` is the only way to create a file at all.
+ * Beside `write`, the three recorded defects layer 1 makes UNREPRESENTABLE go
+ * back to being merely discouraged, which is the state that produced them.
+ */
+export function submitReportWriteWarning(
+  workers: readonly { id: string; bash: boolean }[],
+): string | null {
+  if (workers.length === 0) return null;
+  const forfeits = workers.filter((w) => !w.bash).map((w) => w.id);
+  const shellWriters = workers.filter((w) => w.bash).map((w) => w.id);
+  let out =
+    `warning: ${workers.length} worker(s) resolve both submit_report and write\n` +
+    `  submit_report is a MECHANISM only while it is the only way to create a file at all ` +
+    `(SRD-WORKER-DISPATCH-EXTENSION §6.3 layer 1). Beside write a model can still hand-write ` +
+    `an envelope, so a file called "notes", an envelope carrying a fifth status, and a .md ` +
+    `with no .json all stay representable and merely discouraged; layers 2-4 are an incentive, ` +
+    `one nag and a record, and none of the three is a fence.\n`;
+  if (forfeits.length > 0) {
+    out +=
+      `  Forfeited here, and removing write is the fix (${forfeits.join(", ")}): these hold no ` +
+      `bash, so submit_report would otherwise be their only writing verb of any kind.\n`;
+  }
+  if (shellWriters.length > 0) {
+    out +=
+      `  Never available here, because bash can cat > a file (${shellWriters.join(", ")}): ` +
+      `removing write takes away a tool and not a capability (§6.8). Worth doing anyway for the ` +
+      `smaller reason §6.8 gives — the failure at roles/observer.md:19-22 is a model reasoning ` +
+      `about which tools it holds and concluding wrongly, and a seat whose only writing verb is ` +
+      `named submit_report leaves that reasoning less room.\n`;
+  }
+  out +=
+    `  Not a refusal: §13 phase 6 adds submit_report to every role and removes nothing, and ` +
+    `phase 7 narrows one role at a time behind a full console cycle each.\n`;
+  return out;
+}
+
+/**
  * Worker ids whose resolved `theme` is a name this image cannot resolve.
  *
  * Returned as `{id, theme}` pairs rather than bare ids because the operator's
