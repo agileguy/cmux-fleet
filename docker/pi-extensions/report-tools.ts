@@ -313,8 +313,15 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  *
  * The declaration is a SUBSET, so it cannot drift into claiming Pi has a method
  * it does not — only into failing to mention one this file never calls.
- * `test/integration/report-tools-image.test.ts` (SRD task 2.5) reads the real
- * `.d.ts` out of the image and fails if it has.
+ *
+ * **`test/integration/extension-declarations-image.test.ts` is what checks that,
+ * and until ISC-1073 it did not exist.** This docblock previously named
+ * `report-tools-image.test.ts`, which reads the baked file's digest and its
+ * registered tool names and never opens a `.d.ts` at all — the same false
+ * citation the SRD carried in three places about a different file that was also
+ * never written. The check now reads the real `types.d.ts` out of the image and
+ * compares this interface's members, and the events every `pi.on` call
+ * subscribes to, against it — for all three extensions, not just this one.
  */
 export interface ExtensionAPI {
   registerTool<Params>(tool: ToolDefinitionLike<Params>): void;

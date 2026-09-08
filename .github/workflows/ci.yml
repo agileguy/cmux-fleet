@@ -909,6 +909,26 @@ jobs:
           # inside the expensive job. The comment's reasoning holds; the
           # derivation was what was wrong.
           #
+          # 2026-09-08, 151 -> 160: extension-declarations-image.test.ts,
+          # closing ISC-1073. It belongs in THIS job because every one of its
+          # nine probes needs the real image: it reads
+          # @earendil-works/pi-coding-agent's own types.d.ts out of the tag and
+          # checks the three structural `interface ExtensionAPI` declarations in
+          # docker/pi-extensions/ against it. Nothing else can — the package is
+          # installed in the image and is not a dependency of this repository,
+          # so `tsc` has never seen those declarations and a 0.79.x rename of
+          # registerTool would leave the whole suite green.
+          #
+          # DERIVED BY THE HAND METHOD: the seventeen paths with every gate
+          # UNSET report `Ran 151 tests`, the eighteen report `Ran 160`. That
+          # the difference happens to equal this file's nine is a check on the
+          # derivation, not the derivation itself.
+          #
+          # The previous last entry gained a trailing backslash in the same
+          # edit. Without it the new path is a separate shell word after the
+          # command ends — yaml.safe_load parses the block scalar happily either
+          # way, and only reading the argv shows the file was never passed.
+          #
           # 2026-09-08, 146 -> 148: report-tools-image.test.ts, added by
           # SRD-WORKER-DISPATCH-EXTENSION task 2.5. It belongs in THIS job by
           # the same rule that admits probe-in-network.test.ts and excludes
@@ -957,7 +977,7 @@ jobs:
           # RUNS with it open, so the collection total moves and the pass total
           # does not. A new row that ran here with the gate closed would be a
           # row that does not need the daemon and does not belong in this job.
-          TOTAL_EXPECTED: "151"
+          TOTAL_EXPECTED: "160"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -1139,7 +1159,8 @@ jobs:
               test/integration/hostile-pi.test.ts \
               test/integration/mount-preflight-remote.test.ts \
               test/integration/relay-provider-containment.test.ts \
-              test/integration/report-tools-image.test.ts
+              test/integration/report-tools-image.test.ts \
+              test/integration/extension-declarations-image.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every

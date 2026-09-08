@@ -429,9 +429,13 @@ const MUTATIONS: M[] = [
   },
   {
     id: "W5",
+    // RE-ANCHORED for ISC-1057. `servesConsole`'s worker arm was an equality
+    // over a U+0001 join and is now containment over a Set: the record must
+    // serve every seat the caller needs. The mutation is unchanged in intent —
+    // stop comparing the worker set at all — and the anchor follows the code.
     what: "IDENTITY: the worker set is not compared",
     file: CONSOLE,
-    find: "  return a === b;",
+    find: "  return console_.workers.every((w) => served.has(w));",
     replace: "  return true;",
     expect: "red",
   },
