@@ -286,13 +286,23 @@ describe("the declared reply set", () => {
      * squashes bind-mount ownership to the container user, so a 0644 here reads
      * as owner-writable INSIDE the container with only `:ro` left in the way.
      *
-     * NOT because the verbgate would catch it. `docker/verbgate:234` iterates
-     * three FILE surfaces — `/policy/cloud-allow`, `/policy/task`,
-     * `/policy/dispatch` — and this is a fourth that is not in that list, which
-     * its own comment at `:154` invites ("a fourth policy file is one word").
-     * Stating the reason accurately matters here: a note claiming the gate
-     * covers this file would let a later editor relax the mode on the strength
-     * of a guarantee nothing provides.
+     * AND the verbgate now catches it too — CORRECTED 2026-09-08, and the
+     * correction reverses this note's conclusion rather than its count. When
+     * this was written the gate's FILE loop iterated three surfaces
+     * (`/policy/cloud-allow`, `/policy/task`, `/policy/dispatch`) and this was
+     * a fourth outside it, which the loop's own comment at `:154` invited
+     * ("a fourth policy file is one word"). ISC-1092 took that up: the loop now
+     * carries `/policy/replies`, so a writable declared reply set refuses EVERY
+     * gated verb with exit 78 rather than yielding one forged file.
+     *
+     * **The 0444 assertion below stays, and it is not now redundant.** The gate
+     * is the container's answer and this is the HOST's: `materialize` is what
+     * makes the file exist at all, and a mode set wrong here would be caught by
+     * the gate only at the cost of the whole worker. Two controls, in the order
+     * an operator meets them. What is no longer true is the old warning that
+     * relaxing the mode would rest on "a guarantee nothing provides" — the
+     * guarantee now exists, and the reason to keep the mode is that failing
+     * closed at the gate is a worse way to learn about it.
      */
     expect(await mode(file)).toBe(0o444);
     /*

@@ -96,8 +96,10 @@ export const DISPATCH_POLICY_MOUNT = "/policy/dispatch";
  *    integrity loop precisely because a missing `:ro` is one character; an
  *    image layer has no such character.
  *
- * It is therefore NOT under `/policy/`, and the verbgate's loop is deliberately
- * left at three files. That loop exists for host-mounted policy, where writability
+ * It is therefore NOT under `/policy/`, and this file is deliberately kept out of
+ * the verbgate's loop. (That loop grew to FOUR files on 2026-09-08 when ISC-1092
+ * added `/policy/replies`; the argument below is about THIS path's membership,
+ * not about the loop's size, and it is unchanged by that.) That loop exists for host-mounted policy, where writability
  * is a live risk; adding an image path to it would assert a guarantee the loop
  * does not actually provide and dilute the three checks that matter.
  *
@@ -339,7 +341,8 @@ export function splitDispatchPolicy(body: string): {
  * brief is the one that just failed.
  *
  * That state costs a whole worker rather than one dispatch. The drop is one of
- * the three paths `docker/verbgate`'s integrity loop iterates, and it answers a
+ * the four paths `docker/verbgate`'s integrity loop iterates — `/policy/replies`
+ * joined it on 2026-09-08 (ISC-1092) — and it answers a
  * policy surface writable by the uid consulting it by refusing EVERY gated verb
  * with exit 78 — so the worker does not merely lose the brief, it loses `git`,
  * `gh` and every other gated verb for the life of the container. And the brief

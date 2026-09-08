@@ -58,9 +58,20 @@
  *
  * ## What being a sibling of `/policy/*` obliges
  *
- * `docker/verbgate`'s integrity loop refuses EVERY verb (exit 78) when any
- * policy surface is writable by the uid consulting it, and `/replies` is now in
- * that loop. That is not defence in depth against a hostile worker — the gate's
+ * `docker/verbgate` refuses EVERY verb (exit 78) when any policy surface is
+ * writable by the uid consulting it, and `/replies` is one of the surfaces it
+ * checks.
+ *
+ * **BESIDE the loop, not IN it — CORRECTED 2026-09-08.** This said "`/replies` is
+ * now in that loop", and the loop is the FILE loop (`docker/verbgate:277`), whose
+ * four members are `/policy/cloud-allow`, `/policy/task`, `/policy/dispatch` and,
+ * since ISC-1092, `/policy/replies`. `/replies` is a DIRECTORY and gets its own
+ * check at `:284-286`, with **no parent arm** — the file loop tests each path's
+ * parent too, which is safe for a file under `/policy` and meaningless for one
+ * whose dirname is `/`. The obligation this paragraph states is unchanged; what
+ * was wrong is the mechanism, and it matters because `/policy/replies` — a FILE
+ * naming which replies count — now sits one word away in that script and IS a
+ * loop member. That is not defence in depth against a hostile worker — the gate's
  * own header is honest that a determined worker reaches past it — it is the
  * tripwire for a DROPPED `:ro`, which is one character and has no other symptom.
  * The macOS Docker VM squashes bind-mount ownership to the container user, so a

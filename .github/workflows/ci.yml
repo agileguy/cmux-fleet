@@ -938,7 +938,26 @@ jobs:
           # with it OPEN in this job they run. Neither is pinned in a skip list
           # below, deliberately — a skip here would mean the image build or the
           # daemon is gone, and that must fail rather than be permitted.
-          TOTAL_EXPECTED: "148"
+          #
+          # 2026-09-08, 148 -> 151: three rows added to verbgate.test.ts by
+          # ISC-1092, which puts /policy/replies into the gate's FILE integrity
+          # loop. All three are skipIf(!PIFLEET_DOCKER) — an anti-vacuity mount
+          # check, a :ro control, and the row the loop entry exists for, which
+          # measures the worker's write capability INSIDE the container rather
+          # than hard-coding a per-platform answer.
+          #
+          # DERIVED BY THE HAND METHOD, the seventeen listed paths with every
+          # gate variable UNSET, and not by adding 3 to 148:
+          #
+          #   -> 8 pass, 143 skip, 0 fail. Ran 151 tests across 17 files.
+          #
+          # The pass count is unchanged at 8, which is the check this block
+          # keeps insisting is the one worth making: three new rows that all
+          # need a daemon contribute three SKIPS with the gate shut and three
+          # RUNS with it open, so the collection total moves and the pass total
+          # does not. A new row that ran here with the gate closed would be a
+          # row that does not need the daemon and does not belong in this job.
+          TOTAL_EXPECTED: "151"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
