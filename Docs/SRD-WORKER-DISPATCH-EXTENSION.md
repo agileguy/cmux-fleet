@@ -1627,11 +1627,37 @@ CLI and is the only one that reddens on that mutation.
   *Acceptance: no assertion changes. **A comment task, filed as a task because §4.3 verified the
   scope and the next reader will not.***
 
-### Phase 2 — The extension
+### Phase 2 — The extension ✅ COMPLETE 2026-09-08
 
 **Intent.** `submit_report` exists, in the real image, callable.
 
 **Does not.** Remove any tool from any role. Phase 2 is purely additive.
+
+**"Callable" is the word this phase did NOT earn, and it should not have been in the intent.**
+The extension loads for every worker and `submit_report` is granted to none of them, because
+`--tools` is applied at registry construction and filters extension tools through the same
+allowlist, and every role in `fleet.yaml` declares `tools:`. That is Phase 6's job and it was
+known before 2.4 was dispatched; what is wrong is the exit line, not the sequence. **Everything
+else the phase claims is measured in the real image:** `ISC-1072`'s probe reads Pi's registry out
+of `0.79.6-base-72c16f4efb2f` and finds `submit_report` there, as a difference across two runs
+rather than by filtering against a copy of Pi's built-in list.
+
+**Two SRD rows were corrected by the engineers who could not build them as written** (§6.2's
+`typebox`/`StringEnum` imports, neither package resolvable from `test/`; §6.2.1's artifacts row,
+stricter than the host it was quoting). Both are recorded in place rather than silently amended.
+
+**A third correction was mine and is larger than either**, because it is a claim about this
+repository rather than about the design: three passages said an existing integration test reads
+Pi's `.d.ts` out of the image to catch drift in the structural declarations, and *"that is the
+pattern this design copies wholesale, including the integration test"*. **No such test exists**,
+for this extension or for the two already running in workers. Filed OPEN as `ISC-1073`.
+
+**Task 2.5 shipped without a CI reader and was graded on that basis first.** Both of its probes
+are `skipIf(!PIFLEET_DOCKER)`, and the only job opening that gate runs an explicit file list — so
+the file was collected solely by the fast `test` job, where it skipped silently. It is now in the
+gated list with `TOTAL_EXPECTED` re-derived by the hand method (146 -> 148). **The engineer
+reported this against its own work rather than rounding up**, which is the reason it was fixed in
+the same session instead of being discovered by a green board three phases later.
 
 - **2.1** Write `report-tools.ts`: the structural type declaration, `submit_report`, `/policy/task`
   reading, path derivation, atomic envelope write, every §6.2.1 refusal. Touches:

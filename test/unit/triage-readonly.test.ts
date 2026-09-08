@@ -85,10 +85,14 @@
  * `docker/` build context, which this file has never opened.
  *
  * **The blind spot is already occupied, which is why this is a note and not a
- * footnote.** `docker/pi-extensions/` holds two extensions running inside the
- * worker container today — `dispatch-trigger.ts` and `truncation-recovery.ts` —
- * and `tsconfig.json:32` includes only `src/**` and `test/**`, so that directory
- * is outside the typechecker as well as outside this walk.
+ * footnote.** `docker/pi-extensions/` holds three extensions running inside the
+ * worker container today — `dispatch-trigger.ts`, `truncation-recovery.ts` and,
+ * since 2026-09-08, `report-tools.ts` — and `tsconfig.json:32` includes only
+ * `src/**` and `test/**`, so that directory is outside the typechecker as well
+ * as outside this walk. **The third one sharpens the point rather than merely
+ * incrementing it:** `report-tools.ts` WRITES the record the host grades a
+ * worker by, so the directory this walk cannot see now holds the fleet's only
+ * writing verb.
  *
  * **The advantage, and then the hazard.** A worker-side extension may hold write
  * capability without widening this console's read-only closure by one edge,

@@ -214,11 +214,16 @@ export interface ImageInputs {
    * without being added to `BUILD_CONTEXT_ASSETS`.)
    *
    * Hashing the Dockerfile alone closed only part of that. The Dockerfile
-   * `COPY`s two files it does not contain: `docker/verbgate`, which IS the
+   * `COPY`s files it does not contain, and the two that motivated this were
+   * `docker/verbgate`, which IS the
    * cloud-mutation gate enforcing ISC-104/105/106/107, and
    * `docker/entrypoint.sh`, which renders `models.json`. Editing either left
    * the tag fixed, so a stale image with an OLD verb gate — the highest-
    * consequence staleness there is — was silently reusable.
+   * (COUNT DELIBERATELY NOT RESTATED, 2026-09-08: it was "two" when this was
+   * written and is seven now, and a number in prose beside the array that
+   * defines it is a second definition of the same fact. `BUILD_CONTEXT_ASSETS`
+   * below IS the count; that is what a reader should count from.)
    */
   assets: Record<BuildContextAsset, string>;
 }
