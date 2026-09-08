@@ -278,11 +278,21 @@ describe("the declared reply set", () => {
     // the assertion and mere existence is not.
     expect((await stat(file)).isFile()).toBe(true);
     /*
-     * 0444 like every other file on the `/policy` surface: `docker/verbgate`'s
-     * integrity loop answers a policy file writable by the uid consulting it by
-     * refusing EVERY gated verb with exit 78, and the macOS Docker VM squashes
-     * bind-mount ownership to the container user — so a 0644 established here
-     * costs the worker `git`, `gh` and the rest for the life of the container.
+     * 0444 like every other file on the `/policy` surface, and asserted at the
+     * ESTABLISHING end because that is the end this test can see. The worker
+     * must never hold write permission on the record of which evidence it is
+     * allowed to read — a collator that can widen its own declared set can
+     * award itself a previous sweep's replies — and on macOS the Docker VM
+     * squashes bind-mount ownership to the container user, so a 0644 here reads
+     * as owner-writable INSIDE the container with only `:ro` left in the way.
+     *
+     * NOT because the verbgate would catch it. `docker/verbgate:234` iterates
+     * three FILE surfaces — `/policy/cloud-allow`, `/policy/task`,
+     * `/policy/dispatch` — and this is a fourth that is not in that list, which
+     * its own comment at `:154` invites ("a fourth policy file is one word").
+     * Stating the reason accurately matters here: a note claiming the gate
+     * covers this file would let a later editor relax the mode on the strength
+     * of a guarantee nothing provides.
      */
     expect(await mode(file)).toBe(0o444);
     /*
