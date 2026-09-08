@@ -2369,6 +2369,72 @@ describe("publishReplies refuses a missing replies mount, by type", () => {
 });
 
 /**
+ * The production publish, over a real directory — WHOSE plane, and whose
+ * declaration.
+ *
+ * The probes in section 5 above inject the effect, so they pin the transport's
+ * ARGUMENTS and not the directory the production effect derives from them. That
+ * gap was measured rather than suspected: `test/mutation/collator-relay.battery.ts`'s
+ * M13 was re-anchored onto `publishReplies` after task 5.3 made the port
+ * set-shaped, and BOTH a subtle wrong plane (the first child's task id) and a
+ * plainly wrong one (`collator + "-elsewhere"`) SURVIVED the whole file. Nothing
+ * here read a byte back off disk at a path it computed independently.
+ *
+ * It is the same argument the `listTaskOutbox` block below makes in as many
+ * words — *"nothing there would notice if the effect derived the wrong host
+ * path, and the path is exactly what it exists to supply"* — and `publishReplies`
+ * had no equivalent. What a wrong plane costs is specific: replies filed under a
+ * child's own directory are invisible to the collator that asked for them,
+ * because `/replies` is mounted per worker, and the collator then reports every
+ * lens missing while every lens sits on disk.
+ *
+ * Both halves of §7.4's one act are checked, at paths this test builds itself
+ * from `join` rather than from the module under test.
+ */
+describe("the production publishReplies files under the COLLATOR's own plane", () => {
+  test("the reply and the declaration both land under the collator, not the child", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-plane-"));
+    try {
+      const collator = "col-1";
+      const child = "T1-arch";
+      // `up` normally makes both; this test is about WHERE, so it makes the
+      // same two by hand and then asserts the effect chose them.
+      await mkdir(join(root, "replies", collator), { recursive: true });
+      await mkdir(join(root, "workers", collator), { recursive: true });
+
+      // `workersDir` as well as `root`: the declaration half reaches
+      // `workerPaths`, which the error-path probe above never gets far enough to
+      // touch. A cast that satisfied only the reply half would have made this
+      // test fail for a reason that is not the one it is about.
+      const run = { root, workersDir: join(root, "workers") } as RunPaths;
+      await productionRelayEffects.publishReplies(run, collator, "T1-collate", [
+        { task_id: child, worker: "rev-arch-1", aspect: "arch", reply: { verdict: "success" } },
+      ]);
+
+      // The reply is in the collator's plane...
+      const landed = await readdir(join(root, "replies", collator));
+      expect(landed).toEqual([`${child}.json`]);
+
+      // ...and NOT in a plane of the child's own, which is what M13's mutation
+      // produces and what nothing in this file could previously see.
+      await expect(readdir(join(root, "replies", child))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      // And the declaration is the collator's, naming that child.
+      const declared = JSON.parse(
+        readFileSync(join(root, "workers", collator, "replies-policy"), "utf8"),
+      ) as { schema: string; task_id: string; replies: Array<{ task_id: string }> };
+      expect(declared.schema).toBe("pifleet.replies/v1");
+      expect(declared.task_id).toBe("T1-collate");
+      expect(declared.replies.map((r) => r.task_id)).toEqual([child]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
  * The production listing, over a real directory.
  *
  * The unit probes above inject it, so nothing there would notice if the effect

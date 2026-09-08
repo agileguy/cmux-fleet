@@ -139,7 +139,21 @@ const MUTATIONS: M[] = [
     file: CORE,
     find: "    if (!m.paths.isPathUnder(hostPath, root)) {",
     replace: "    if (false) {",
-    expect: "green",
+    /*
+     * RE-GRADED green -> red 2026-09-08. This was filed `green` because the
+     * containment check had no probe in `TESTFILE` — the case existed to record
+     * a gap, not a guarantee. The gap has since closed: the mutation now reddens
+     * `readArtifact resolves the path once > a path outside the worker's outbox
+     * is refused before anything is opened`, which is exactly the property this
+     * row names. Measured, not assumed: the mutation was applied to the live
+     * checkout, that one test failed and nothing else did, and the file was
+     * restored by hash.
+     *
+     * A `green` expectation left standing over a guard that IS covered is worse
+     * than no case at all — it reports "as expected" for a battery whose whole
+     * job is telling you which guards are load-bearing.
+     */
+    expect: "red",
   },
   // ── T1: brief-to-lens binding. The mutation the reviewer demonstrated. ───
   {
@@ -375,10 +389,25 @@ const MUTATIONS: M[] = [
   },
   {
     id: "M13",
-    what: "publishReply: filed under the CHILD instead of the collator",
+    what: "publishReplies: the plane is the CHILD's rather than the collator's",
     file: CORE,
-    find: "await effects.writeReply(collatorRun, collator, child, reply);",
-    replace: "await effects.writeReply(collatorRun, child, child, reply);",
+    /*
+     * RE-ANCHORED 2026-09-08. Task 5.3 made the port SET-shaped —
+     * `publishReplies(run, collator, taskId, replies)` — so the old anchor
+     * `await effects.writeReply(collatorRun, collator, child, reply);` no longer
+     * exists and this case had been refusing loudly (`PRIMARY ANCHOR MATCHED
+     * 0x — NOT APPLIED`) rather than silently skipping, which is why it was
+     * visible at all.
+     *
+     * The INTENT is unchanged and is the one thing worth preserving: a reply
+     * filed under the child's own plane instead of the collator's is invisible
+     * to the collator that asked for it, and the mount is per-worker. The
+     * mutation is now on the directory derivation rather than on an argument
+     * list, because after the reshape the child id no longer appears at the
+     * call site at all.
+     */
+    find: "const dir = m.paths.workerRepliesDir(run.root, collator);",
+    replace: "const dir = m.paths.workerRepliesDir(run.root, replies[0]?.task_id ?? collator);",
     expect: "red",
   },
   {
