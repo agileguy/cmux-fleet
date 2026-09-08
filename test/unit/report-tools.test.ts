@@ -55,15 +55,23 @@ import register, {
   composeNoSubmitEntry,
   composeSubmitEntry,
   createEpochTracker,
+  declaredReplyFile,
   DEFAULT_MOUNTS,
   emptyTally,
   filenameProblem,
+  GET_REPLIES_PARAMETERS,
+  getReplies,
   MAX_ENTRIES,
   NAG_TEXT,
+  NO_REPLIES_DECLARED,
   NO_SUBMIT_ENTRY_SCHEMA,
   OUTBOX_ROOT,
+  parseRepliesPolicy,
   parseTaskPolicy,
   readTaskPolicy,
+  REPLIES_POLICY_PATH,
+  REPLIES_POLICY_SCHEMA,
+  REPLIES_ROOT,
   RESULT_SCHEMA,
   shouldNag,
   submitReport,
@@ -76,29 +84,71 @@ import register, {
   type EpochTally,
   type ExtensionAPI,
   type ExtensionContextLike,
+  type MountRoots,
   type Roots,
   type SubmitReportParams,
   type ToolDefinitionLike,
 } from "../../docker/pi-extensions/report-tools.ts";
+/**
+ * The HOST half of the `/policy/replies` contract, imported on purpose.
+ *
+ * Nothing else in this file reaches into `src/`, and the exception is the point
+ * rather than a convenience. `get_replies` reads a document
+ * `src/run/replies-policy.ts` writes, across a mount, between a host on one
+ * clock and an image pinned by tag on another — and the one property no
+ * hand-written fixture can establish is that the two ends agree. A fixture I
+ * typed myself proves this file parses what I believe the host emits; these
+ * three functions prove it parses what the host actually emits, including the
+ * task-id spelling that failure mode 9.6's equality turns on.
+ *
+ * Hand-written bytes are still used, and only, for documents the host renderer
+ * CANNOT produce: a wrong schema tag, a malformed entry, a stale declaration.
+ */
+import {
+  renderRepliesPolicy,
+  REPLIES_POLICY_MOUNT,
+  REPLIES_POLICY_SCHEMA as HOST_REPLIES_POLICY_SCHEMA,
+  type DeclaredReply,
+} from "../../src/run/replies-policy.ts";
+import { replyHostPath, replyMountPath, REPLIES_MOUNT } from "../../src/run/replies.ts";
+import { renderTaskPolicy } from "../../src/run/task-policy.ts";
 
 /** The fixture identities, deliberately sharing no substring with each other. */
 const TASK_ID = "T-sweep-7-slice1";
 const EPOCH = 12;
 const WORKER = "obs-t1";
 
+/** The declared replies the `get_replies` fixtures publish, sharing no substring. */
+const CHILD_A: DeclaredReply = { task_id: "T-obs-alpha", worker: "obs-t1", aspect: "kafka" };
+const CHILD_B: DeclaredReply = { task_id: "T-obs-beta", worker: "obs-t2", aspect: "postgres" };
+/** Never declared. Its file is published anyway — that is Finding E in a fixture. */
+const CHILD_UNDECLARED: DeclaredReply = { task_id: "T-obs-gamma", worker: "obs-t3", aspect: "redis" };
+
 interface Fixture {
   dir: string;
   roots: Roots;
   outbox: string;
   taskDir: string;
+  /** The reply PLANE, standing in for `/replies`. */
+  repliesRoot: string;
+  /** The DECLARATION, standing in for `/policy/replies`. Not written by default. */
+  repliesPolicyPath: string;
+  /** Exactly what `register` is handed — the four mounts, without the workdir. */
+  mounts: MountRoots;
 }
 
 /**
- * A tmpdir carrying a `/policy/task` and an `/outbox`.
+ * A tmpdir carrying a `/policy/task`, an `/outbox` and an empty `/replies`.
  *
  * `policy` defaults to a live task; passing a string writes those exact bytes,
  * which is how the `<none>` and malformed cases are reached without a second
  * helper. Passing `null` writes no file at all — the unmounted case.
+ *
+ * **`/policy/replies` is deliberately NOT written here.** An absent declaration
+ * is a real state — it is what every `submit_report` fixture in this file should
+ * present, and it is one of `get_replies`'s three refusals — so a fixture that
+ * created one by default would make the absent case unreachable without a second
+ * helper and would quietly seed every unrelated test with a document.
  */
 function fixture(policy: string | null = `${TASK_ID}\n${EPOCH}\n`): Fixture {
   const dir = mkdtempSync(join(tmpdir(), "pifleet-report-tools-"));
@@ -108,13 +158,81 @@ function fixture(policy: string | null = `${TASK_ID}\n${EPOCH}\n`): Fixture {
   mkdirSync(outbox, { recursive: true });
   const workdir = join(dir, "workspace");
   mkdirSync(workdir, { recursive: true });
+  const repliesRoot = join(dir, "replies");
+  mkdirSync(repliesRoot, { recursive: true });
+  const repliesPolicyPath = join(dir, "policy-replies");
+  const mounts: MountRoots = {
+    policyPath,
+    outboxRoot: outbox,
+    repliesPolicyPath,
+    repliesRoot,
+  };
   return {
     dir,
-    roots: { policyPath, outboxRoot: outbox, workdir },
+    roots: { ...mounts, workdir },
     outbox,
     taskDir: join(outbox, TASK_ID),
+    repliesRoot,
+    repliesPolicyPath,
+    mounts,
   };
 }
+
+/**
+ * Write `/policy/replies` with the HOST's own renderer — the honest path.
+ *
+ * `taskId` is passed through `renderRepliesPolicy` untouched, so the `task_id`
+ * that lands is whatever `renderTaskPolicy` would put on line 1 of
+ * `/policy/task` — which is the equality failure mode 9.6 turns on, established
+ * here by construction instead of by my retyping it.
+ *
+ * **Named `declareSet` and not `declare`, and the reason is measured rather than
+ * stylistic.** Bun's TypeScript transpiler (1.3.11) treats a bare
+ * `declare(...);` CALL STATEMENT as an ambient declaration and ERASES it. The
+ * function itself survives — `typeof declare` is `"function"` — so the symptom
+ * is ten tests failing as though the fixture had never been written, with no
+ * error and nothing in the stack to point at. `tsc --noEmit` is green
+ * throughout, and `void declare(...)` or `const x = declare(...)` both run
+ * normally; only the statement form disappears. Any helper in this repository
+ * whose name is a TypeScript contextual keyword is one rename away from the same
+ * silence.
+ */
+function declareSet(f: Fixture, taskId: string | null, replies: readonly DeclaredReply[]): void {
+  writeFileSync(f.repliesPolicyPath, renderRepliesPolicy(taskId, replies));
+}
+
+/** Write `/policy/replies` verbatim — for documents the host renderer cannot produce. */
+function declareRaw(f: Fixture, body: string): void {
+  writeFileSync(f.repliesPolicyPath, body);
+}
+
+/**
+ * Put a reply on the plane, at the path `replies.ts` names.
+ *
+ * `replyHostPath` rather than `join(root, id + ".json")`, for the reason that
+ * module gives for exporting it at all: a second spelling of the reply filename
+ * agrees with the first until the suffix moves, and then this file would be
+ * publishing where nothing reads.
+ */
+function publish(f: Fixture, child: DeclaredReply, body: string): void {
+  writeFileSync(replyHostPath(f.repliesRoot, child.task_id), body);
+}
+
+/**
+ * A `RegExp` matching one literal string.
+ *
+ * `toThrow(string)` is a SUBSTRING match in bun, which is what is wanted — but
+ * the messages asserted below carry backticks, brackets and a `/` in
+ * `pifleet.replies/v1`, and writing those into a hand-built pattern is how a
+ * test ends up matching less than it reads as matching. Escaping the constant
+ * cannot drift from the constant.
+ */
+function reOf(literal: string): RegExp {
+  return new RegExp(literal.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"));
+}
+
+/** The refusal every malformed `/policy/replies` produces — asserted in four places. */
+const NOT_A_DECLARATION = /is not a `pifleet\.replies\/v1` document/;
 
 /** Every path under `root`, relative and sorted. Empty means nothing was written. */
 function listAll(root: string): string[] {
@@ -243,6 +361,8 @@ function registered(
   sendUserMessage?: ExtensionAPI["sendUserMessage"],
 ): {
   tool: ToolDefinitionLike;
+  /** `get_replies`, found by name for the reason `byName` gives. */
+  replies: ToolDefinitionLike;
   entries: RecordedEntry[];
   messages: RecordedMessage[];
   ctx: ExtensionContextLike;
@@ -254,13 +374,29 @@ function registered(
   fire(event: "agent_end" | "tool_call", payload?: unknown): unknown;
 } {
   const { pi, tools, entries, handlers, messages } = stubPi(appendEntry, sendUserMessage);
-  register(pi, { policyPath: f.roots.policyPath, outboxRoot: f.outbox });
+  register(pi, f.mounts);
   const ctx: ExtensionContextLike = {
     cwd: f.roots.workdir ?? "",
     sessionManager: { getSessionId: () => WORKER },
   };
+  /**
+   * By NAME and not by index, now that two tools are registered.
+   *
+   * `tools[0]` was unambiguous while there was one; with two it is a claim about
+   * registration ORDER that no test here means to make, and reordering the two
+   * `registerTool` calls would silently point every `submit_report` assertion in
+   * this file at `get_replies`. The `toBeDefined` is the anti-vacuity guard —
+   * without it, dropping a `registerTool` would surface as a cryptic throw on
+   * the next line rather than as a named failure here.
+   */
+  const byName = (name: string): ToolDefinitionLike => {
+    const found = tools.find((t) => t.name === name);
+    expect(found).toBeDefined();
+    return found!;
+  };
   return {
-    tool: tools[0]!,
+    tool: byName("submit_report"),
+    replies: byName("get_replies"),
     entries,
     messages,
     ctx,
@@ -734,20 +870,62 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
 
 describe("registration", () => {
   /**
-   * §12, from phase 2: *"the registered set is a SUBSET of `PI_EXTENSION_TOOLS`
-   * and contains `submit_report`"*. `get_replies` is phase 5 and registering it
-   * early would make the phase-2 criterion assert something phase 2 does not
-   * ship.
+   * §12, as of phase 5: the registered set EQUALS `PI_EXTENSION_TOOLS`.
+   *
+   * The enum itself is not imported here — `docker/pi-extensions/` may not
+   * depend on `src/`, and a unit test asserting against a recording `pi` cannot
+   * see the image anyway. `test/integration/report-tools-image.test.ts` is where
+   * the two sets are compared, and it was tightened from a subset assertion to
+   * `toEqual(new Set(PI_EXTENSION_TOOLS))` in this same commit. What this test
+   * pins is the half that lives in this repository: BOTH tools are registered,
+   * with their own parameter schemas, and no third.
+   *
+   * The names are asserted as a sorted set rather than in registration order,
+   * for `byName`'s reason: the order is not a property this file means to fix.
    */
-  test("exactly one tool is registered, and it is submit_report", () => {
+  test("exactly submit_report and get_replies are registered", () => {
     const { pi, tools } = stubPi();
     register(pi);
-    expect(tools.map((t) => t.name)).toEqual(["submit_report"]);
-    expect(tools[0]?.parameters).toBe(SUBMIT_REPORT_PARAMETERS);
+    expect(tools.map((t) => t.name).sort()).toEqual(["get_replies", "submit_report"]);
+    expect(tools.find((t) => t.name === "submit_report")?.parameters).toBe(
+      SUBMIT_REPORT_PARAMETERS,
+    );
+    expect(tools.find((t) => t.name === "get_replies")?.parameters).toBe(GET_REPLIES_PARAMETERS);
   });
 
   test("the default mounts are the real ones, so the image needs no caller to pass them", () => {
-    expect(DEFAULT_MOUNTS).toEqual({ policyPath: TASK_POLICY_PATH, outboxRoot: OUTBOX_ROOT });
+    expect(DEFAULT_MOUNTS).toEqual({
+      policyPath: TASK_POLICY_PATH,
+      outboxRoot: OUTBOX_ROOT,
+      repliesPolicyPath: REPLIES_POLICY_PATH,
+      repliesRoot: REPLIES_ROOT,
+    });
+  });
+
+  /**
+   * The mirrored mount constants are the paths `src/` actually mounts.
+   *
+   * `docker/pi-extensions/` may not import from `src/`, so these are copies —
+   * and a copy with no comparison is a spelling that drifts the first time a
+   * mount moves. This test is the comparison. `REPLIES_POLICY_PATH` and
+   * `REPLIES_ROOT` are the two `get_replies` reads and the two that are new;
+   * `TASK_POLICY_PATH` is already pinned through `renderTaskPolicy` elsewhere in
+   * this file, and `/outbox` has no exported constant on the host side to
+   * compare against (`render.ts` spells it inline).
+   *
+   * **The test above cannot make this claim, and that was measured rather than
+   * assumed.** `DEFAULT_MOUNTS` is BUILT from these constants, so an assertion
+   * comparing it to them compares each one to itself: mutating
+   * `REPLIES_POLICY_PATH` to `/policy/reply` leaves that test green and reddens
+   * only this one. What the `DEFAULT_MOUNTS` test does catch is a wrong WIRING —
+   * a field pointed at the wrong constant — and mutating `repliesPolicyPath` to
+   * `TASK_POLICY_PATH` reddens it alone. Two tests, two failures, and neither
+   * substitutes for the other.
+   */
+  test("the mirrored mount constants are the paths src/ mounts", () => {
+    expect(REPLIES_POLICY_PATH).toBe(REPLIES_POLICY_MOUNT);
+    expect(REPLIES_ROOT).toBe(REPLIES_MOUNT);
+    expect(REPLIES_POLICY_SCHEMA).toBe(HOST_REPLIES_POLICY_SCHEMA);
   });
 
   /**
@@ -777,8 +955,8 @@ describe("registration", () => {
   test("execute takes worker from the session id and workdir from ctx.cwd", async () => {
     const f = fixture();
     const { pi, tools } = stubPi();
-    register(pi, { policyPath: f.roots.policyPath, outboxRoot: f.outbox });
-    const tool = tools[0];
+    register(pi, f.mounts);
+    const tool = tools.find((t) => t.name === "submit_report");
     expect(tool).toBeDefined();
 
     const ctx: ExtensionContextLike = {
@@ -1065,8 +1243,8 @@ describe("layer 4 — the pifleet.submit/v1 session entry", () => {
         throw new Error("session store is gone");
       },
     };
-    register(pi, { policyPath: f.roots.policyPath, outboxRoot: f.outbox });
-    const result = await tools[0]!.execute(
+    register(pi, f.mounts);
+    const result = await tools.find((t) => t.name === "submit_report")!.execute(
       "call-1",
       { status: "partial", summary: "SESSION-STORE-GONE" },
       undefined,
@@ -2188,5 +2366,581 @@ describe("the tool-call counter never blocks a tool", () => {
     });
     expect(() => fire("agent_end")).not.toThrow();
     rmSync(f.dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * `get_replies` — the DECLARED set (SRD §6.2.2, §7.4, D6, task 5.4).
+ *
+ * ## The one criterion this block exists for
+ *
+ * §13's task 5.4 names it: *"three files in `/replies`, one declared, one
+ * returned"*. Every other test here is a way that criterion could be satisfied
+ * by an implementation that was nonetheless wrong, so each is written against a
+ * fixture where the wrong implementation and the right one give different
+ * answers.
+ *
+ * **The plane is deliberately over-populated in the criterion's own fixture.**
+ * Three replies are published and one is declared, because a `readdir` returns
+ * three and the declaration returns one and there is no other way to tell those
+ * two implementations apart. Finding E is not a hypothesis about a future
+ * console — the triage console is one long-lived RUN publishing into one
+ * directory every sweep, so sweep 5's `/replies` really does hold sweeps 1
+ * through 5, and every one of those files really does read like a good answer to
+ * the question the collator was just asked.
+ *
+ * ## Why the honest path is built with the host's own renderer
+ *
+ * See the import block. `renderRepliesPolicy` writes these fixtures wherever the
+ * host could write them, so what is asserted is that the two ends of
+ * `pifleet.replies/v1` agree — not that this file parses bytes I typed while
+ * looking at the writer. `declareRaw` exists only for documents the writer
+ * cannot produce: a wrong schema tag, a malformed entry, a declaration whose
+ * task id disagrees with `/policy/task`.
+ *
+ * ## The refusals are refusals, and that matters
+ *
+ * `docs/extensions.md`: *"To mark a tool execution as failed … throw an error
+ * from `execute`. Returning a value never sets the error flag."* A `get_replies`
+ * that RETURNED "nothing was declared" as a text block would be a tool the model
+ * reads as having succeeded, and §11 Q4 measured what a thrown error actually
+ * costs — every model in `fleet.yaml` retried once and none looped. So the empty
+ * set throws, and the assertions below are `toThrow` rather than comparisons
+ * against a returned message.
+ */
+describe("get_replies — the declared set, never a listing", () => {
+  /** A reply payload naming its own child, so a mix-up is visible rather than plausible. */
+  const payload = (child: DeclaredReply): string =>
+    JSON.stringify({
+      schema: RESULT_SCHEMA,
+      task_id: child.task_id,
+      worker: child.worker,
+      summary: `${child.aspect.toUpperCase()}-PAYLOAD`,
+    });
+
+  /**
+   * **The acceptance criterion for task 5.4.**
+   *
+   * Three files on the plane, one of them declared, exactly that one returned.
+   * The two undeclared payloads are asserted absent from the WHOLE outcome and
+   * not merely from the text, because `details.replies[]` is a second channel to
+   * the model and a `readdir` feeding only that half would pass a content-only
+   * assertion.
+   */
+  test("three files on the plane, one declared, one returned", () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    publish(f, CHILD_B, payload(CHILD_B));
+    publish(f, CHILD_UNDECLARED, payload(CHILD_UNDECLARED));
+    declareSet(f, TASK_ID, [CHILD_A]);
+
+    const out = getReplies(f.mounts);
+
+    expect(out.blocks).toHaveLength(1);
+    expect(out.readouts).toEqual([
+      {
+        task_id: CHILD_A.task_id,
+        worker: CHILD_A.worker,
+        aspect: CHILD_A.aspect,
+        bytes: Buffer.byteLength(payload(CHILD_A), "utf8"),
+        ok: true,
+      },
+    ]);
+    expect(out.missing).toEqual([]);
+    expect(out.blocks[0]).toContain("KAFKA-PAYLOAD");
+
+    // Neither undeclared reply reaches the model through either channel.
+    const everything = JSON.stringify(out);
+    expect(everything).not.toContain("POSTGRES-PAYLOAD");
+    expect(everything).not.toContain("REDIS-PAYLOAD");
+    expect(everything).not.toContain(CHILD_B.task_id);
+    expect(everything).not.toContain(CHILD_UNDECLARED.task_id);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The other half of the same criterion: a declaration naming two replies gets
+   * both, in the declaration's order.
+   *
+   * Without this, "one declared, one returned" is satisfied by an implementation
+   * that returns the FIRST declared reply and stops — which reads identically in
+   * a one-entry fixture and loses a slice in production.
+   */
+  test("every declared reply is returned, in the declaration's order", () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    publish(f, CHILD_B, payload(CHILD_B));
+    declareSet(f, TASK_ID, [CHILD_B, CHILD_A]);
+
+    const out = getReplies(f.mounts);
+    expect(out.readouts.map((r) => r.task_id)).toEqual([CHILD_B.task_id, CHILD_A.task_id]);
+    expect(out.blocks[0]).toContain("POSTGRES-PAYLOAD");
+    expect(out.blocks[1]).toContain("KAFKA-PAYLOAD");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * An EMPTY declared array is a value, and refusing on it reports that value
+   * rather than losing it (§7.4).
+   *
+   * The fixture publishes a reply anyway, and that is the whole discrimination:
+   * a turn-one collator whose `/replies` already holds the PREVIOUS sweep's
+   * files must be told nothing was declared, and an implementation that fell
+   * back to the directory when the array was empty would return that stale file
+   * and read as helpful.
+   */
+  test("an empty declaration refuses, even with files on the plane", () => {
+    const f = fixture();
+    publish(f, CHILD_UNDECLARED, payload(CHILD_UNDECLARED));
+    declareSet(f, TASK_ID, []);
+
+    expect(() => getReplies(f.mounts)).toThrow(SubmitRefusal);
+    expect(() => getReplies(f.mounts)).toThrow(reOf(NO_REPLIES_DECLARED));
+    // And the message tells the model not to go looking, which is what
+    // `roles/triage.md` spends six lines on today.
+    expect(() => getReplies(f.mounts)).toThrow(/do not go looking/);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * An ABSENT `/policy/replies` and an EMPTY one share a sentence and differ in
+   * their clause.
+   *
+   * They are one fact to the model — nothing was declared — and two different
+   * problems to an operator: an empty set is a turn-one dispatch and nobody's
+   * fault, while an unreadable mount is a host that did not write the file. The
+   * shared prefix is asserted so the model's half cannot drift; the differing
+   * clause is asserted so the operator's half cannot be collapsed into it.
+   */
+  test("an absent declaration refuses with the same sentence and a different clause", () => {
+    const f = fixture();
+    expect(existsSync(f.repliesPolicyPath)).toBe(false);
+    expect(() => getReplies(f.mounts)).toThrow(reOf(NO_REPLIES_DECLARED));
+    expect(() => getReplies(f.mounts)).toThrow(/could not be read/);
+    expect(() => getReplies(f.mounts)).not.toThrow(/do not go looking/);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The schema tag is checked before a byte of the document is believed.
+   *
+   * The reader is baked into an image pinned by tag and the writer is on the
+   * host: the two are updated on different clocks, so a `pifleet.replies/v2`
+   * whose entries happen to still parse has to be a refusal rather than a
+   * misparse. The fixture is otherwise a perfectly good declaration, so nothing
+   * but the tag can be what refuses it.
+   */
+  test("a document that is not pifleet.replies/v1 is refused, not parsed", () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareRaw(
+      f,
+      JSON.stringify({
+        schema: "pifleet.replies/v2",
+        task_id: TASK_ID,
+        replies: [{ ...CHILD_A, path: replyMountPath(CHILD_A.task_id) }],
+      }),
+    );
+    expect(() => getReplies(f.mounts)).toThrow(NOT_A_DECLARATION);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Failure mode 9.6 — *"Finding E arriving through the front door"*.
+   *
+   * A dispatch that rewrote `/policy/task` and not `/policy/replies` leaves a
+   * declaration for the PREVIOUS sweep, and every path in it names a file that
+   * really is on the plane and really does parse. Nothing downstream can notice:
+   * the collator gets five well-formed answers to a question it was not asked.
+   * The equality against `/policy/task` is the only thing standing between that
+   * and a silent wrong answer, so it is asserted against a fixture where the
+   * stale reply is present and readable.
+   */
+  test("a declaration for another task is refused, however readable its replies", () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareSet(f, "T-sweep-6-collate", [CHILD_A]);
+
+    expect(() => getReplies(f.mounts)).toThrow(SubmitRefusal);
+    expect(() => getReplies(f.mounts)).toThrow(/The declared reply set is stale\./);
+    expect(() => getReplies(f.mounts)).toThrow(/T-sweep-6-collate/);
+    expect(() => getReplies(f.mounts)).toThrow(reOf(TASK_ID));
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **The trap in the freshness check, and why both files here are written by
+   * the host's own renderers.**
+   *
+   * `renderTaskPolicy` strips control characters and slices to 200, so a long
+   * task id is spelled one way in `/policy/task` and another way in the dispatch
+   * that produced it. `renderRepliesPolicy` handles that by CALLING
+   * `renderTaskPolicy` and reading line 1 back, so the declaration stores the
+   * spelling `/policy/task` uses — and this end must compare the two verbatim.
+   *
+   * A reader that re-derived the spelling with a second `slice`, `trim` or
+   * character class would report a STALE declaration for a set that is perfectly
+   * fresh: silent, on the honest path, and indistinguishable from the tool
+   * working. This fixture is the discriminator — a short id survives every such
+   * mutation and a 200-character one survives none of them.
+   */
+  test("a task id long enough to be sliced still matches — the honest path", () => {
+    const longId = `T-collate-${"x".repeat(300)}`;
+    const f = fixture(renderTaskPolicy(longId, EPOCH));
+    // The premise: the file really does disagree with the id it came from.
+    const lineOne = renderTaskPolicy(longId, EPOCH).split("\n")[0]!;
+    expect(lineOne).toHaveLength(200);
+    expect(lineOne).not.toBe(longId);
+
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareSet(f, longId, [CHILD_A]);
+
+    const out = getReplies(f.mounts);
+    expect(out.readouts.map((r) => r.task_id)).toEqual([CHILD_A.task_id]);
+    expect(out.missing).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * No live task refuses before the declaration is opened at all.
+   *
+   * `/policy/task` is reset at settle (`supervisor/index.ts:1075`), so this is
+   * an idle worker, and the declaration left over from its last dispatch is the
+   * staleness of 9.6 in its most reachable form. Refusing on the task rather
+   * than on the id makes that case unreachable rather than merely caught.
+   */
+  test("an idle worker is refused before its stale declaration is read", () => {
+    const f = fixture(`${TASK_POLICY_NONE}\n0\n`);
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareSet(f, TASK_ID, [CHILD_A]);
+    expect(() => getReplies(f.mounts)).toThrow(/No task is live\./);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A declared reply that did not arrive is REPORTED, in `roles/triage.md`'s own
+   * words, and the other declared replies still come back.
+   *
+   * §6.2.2: the block *"says so explicitly rather than being omitted"*. Omitting
+   * it would make a fan-out of two that produced one look like a fan-out of one,
+   * and `roles/triage.md` is explicit that *"what did not reach you is named for
+   * you, so you are never left to notice it"*.
+   */
+  test("a declared reply that did not arrive is named, not omitted", () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareSet(f, TASK_ID, [CHILD_A, CHILD_B]);
+
+    const out = getReplies(f.mounts);
+    expect(out.blocks).toHaveLength(2);
+    expect(out.missing).toEqual([CHILD_B.task_id]);
+    expect(out.readouts[1]).toEqual({
+      task_id: CHILD_B.task_id,
+      worker: CHILD_B.worker,
+      aspect: CHILD_B.aspect,
+      bytes: 0,
+      ok: false,
+    });
+    expect(out.blocks[1]).toContain("No report was produced.");
+    expect(out.blocks[1]).toContain(CHILD_B.worker);
+    // The one that did arrive is unaffected.
+    expect(out.blocks[0]).toContain("KAFKA-PAYLOAD");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A reply that is THERE and does not parse is unreadable, never missing.
+   *
+   * `roles/triage.md` spends six lines establishing that these are different
+   * things for a person to do next — one re-runs a seat, the other goes and
+   * looks at a file sitting on disk — and calls conflating them *"a specific
+   * falsehood worth avoiding"*. `e5d5751` is this fleet's recorded case of the
+   * general shape: a right answer to the wrong document.
+   *
+   * So it carries its byte count, it is `ok: false`, and it is NOT in `missing`.
+   * The byte count is the assertion that separates this from the arm above,
+   * because `bytes: 0` is what a reader would otherwise infer "missing" from.
+   */
+  test("a reply that does not parse is unreadable, and is not missing", () => {
+    const f = fixture();
+    const garbage = "{ this was a report and it is not JSON";
+    publish(f, CHILD_A, garbage);
+    declareSet(f, TASK_ID, [CHILD_A]);
+
+    const out = getReplies(f.mounts);
+    expect(out.missing).toEqual([]);
+    expect(out.readouts[0]?.ok).toBe(false);
+    expect(out.readouts[0]?.bytes).toBe(Buffer.byteLength(garbage, "utf8"));
+    expect(out.blocks[0]).toContain("A report was produced and could not be read.");
+    expect(out.blocks[0]).not.toContain("No report was produced.");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The reply's OWN bytes come back — the parse is a validation, not a
+   * transformation.
+   *
+   * Re-serializing a parse hands the collator a document the host never wrote:
+   * key order, whitespace and number formatting all move, and a collator quoting
+   * it in a write-up would be quoting something that exists nowhere. The fixture
+   * is formatted so that a round trip through `JSON.parse`/`JSON.stringify`
+   * cannot reproduce it.
+   */
+  test("the reply's own bytes come back, not a re-serialization", () => {
+    const f = fixture();
+    const odd = '{\n   "z" :  1,\n   "a" :  2\n}';
+    expect(JSON.stringify(JSON.parse(odd))).not.toBe(odd);
+    publish(f, CHILD_A, odd);
+    declareSet(f, TASK_ID, [CHILD_A]);
+
+    const out = getReplies(f.mounts);
+    expect(out.readouts[0]?.ok).toBe(true);
+    expect(out.blocks[0]).toContain(odd);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * ONE malformed entry refuses the WHOLE document.
+   *
+   * A declaration is a set. Silently returning the entries that parsed would
+   * hand the collator a smaller set than the host published while looking
+   * exactly like a smaller fan-out — Finding E's cost arriving through a third
+   * door, and one nothing downstream can notice. The fixture puts the GOOD entry
+   * first, so an implementation that collected as it went would have something
+   * to return.
+   */
+  test("one malformed entry refuses the whole declaration", () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareRaw(
+      f,
+      JSON.stringify({
+        schema: REPLIES_POLICY_SCHEMA,
+        task_id: TASK_ID,
+        replies: [
+          { ...CHILD_A, path: replyMountPath(CHILD_A.task_id) },
+          {
+            task_id: CHILD_B.task_id,
+            aspect: CHILD_B.aspect,
+            path: replyMountPath(CHILD_B.task_id),
+          },
+        ],
+      }),
+    );
+    expect(() => getReplies(f.mounts)).toThrow(NOT_A_DECLARATION);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A declared path outside `/replies` is not followed, and the document is
+   * refused rather than the entry skipped.
+   *
+   * `renderRepliesPolicy` derives every path from `replyMountPath`, so a path of
+   * another shape means the document was not written by that renderer whatever
+   * its schema tag claims. **The check is on the PREFIX and the remainder, never
+   * on the basename**: taking the basename of `/etc/passwd` would read
+   * `<repliesRoot>/passwd` and call the result a reply, which is a host bug
+   * turned into a file read. The fixture puts a readable `passwd` exactly where
+   * that mistake would land it.
+   */
+  test("a declared path outside /replies refuses the document", () => {
+    const f = fixture();
+    writeFileSync(join(f.repliesRoot, "passwd"), "root:x:0:0");
+    for (const bad of ["/etc/passwd", `${REPLIES_ROOT}/../passwd`, `${REPLIES_ROOT}/sub/a.json`]) {
+      declareRaw(
+        f,
+        JSON.stringify({
+          schema: REPLIES_POLICY_SCHEMA,
+          task_id: TASK_ID,
+          replies: [{ ...CHILD_A, path: bad }],
+        }),
+      );
+      expect(() => getReplies(f.mounts)).toThrow(NOT_A_DECLARATION);
+    }
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * `details` is §6.2.2's two fields and the result carries no `terminate`.
+   *
+   * The absence of `terminate` is asserted rather than assumed. Layer 2 makes
+   * delivering the cheapest way to end a turn; a turn that has just fetched its
+   * inputs is the one turn that must not be made cheap to end, and adding
+   * `terminate: true` here is a one-word edit nothing else in this file would
+   * notice.
+   */
+  test("the result is content and details, with no terminate", async () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareSet(f, TASK_ID, [CHILD_A, CHILD_B]);
+    const { replies, ctx } = registered(f);
+
+    const result = await replies.execute("call-1", {}, undefined, undefined, ctx);
+
+    expect(Object.keys(result).sort()).toEqual(["content", "details"]);
+    expect(result.terminate).toBeUndefined();
+    expect(result.content).toHaveLength(2);
+    expect(result.content.every((c) => c.type === "text")).toBe(true);
+    expect(result.details).toEqual({
+      replies: [
+        {
+          task_id: CHILD_A.task_id,
+          worker: CHILD_A.worker,
+          aspect: CHILD_A.aspect,
+          bytes: Buffer.byteLength(payload(CHILD_A), "utf8"),
+          ok: true,
+        },
+        {
+          task_id: CHILD_B.task_id,
+          worker: CHILD_B.worker,
+          aspect: CHILD_B.aspect,
+          bytes: 0,
+          ok: false,
+        },
+      ],
+      missing: [CHILD_B.task_id],
+    });
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A `get_replies` call is a TOOL CALL and is not a delivery.
+   *
+   * §6.2.2's whole claim for the tool's value is that *"the host now knows
+   * whether the collator looked"* — defect 6 was a collator that made zero tool
+   * calls. But looking is not reporting: a collator that read its replies and
+   * wrote nothing is exactly the turn layers 3 and 4 exist to record, so this
+   * call must leave the epoch undelivered and the `pifleet.no_submit/v1` entry
+   * must still be written. A `tracker.noteDelivery` in `get_replies`'s `execute`
+   * is a one-line edit that would silence layer 4 for every collation turn in
+   * the fleet, and this is the only assertion that would notice.
+   */
+  test("reading replies is not delivering a report", async () => {
+    const f = fixture();
+    publish(f, CHILD_A, payload(CHILD_A));
+    declareSet(f, TASK_ID, [CHILD_A]);
+    const { replies, entries, ctx, fire } = registered(f);
+
+    fire("tool_call");
+    await replies.execute("call-1", {}, undefined, undefined, ctx);
+    fire("agent_end");
+
+    expect(entries.map((e) => e.customType)).toEqual([NO_SUBMIT_ENTRY_SCHEMA]);
+    expect((entries[0]?.data as Record<string, unknown>)["tool_calls"]).toBe(1);
+    // And it wrote nothing: the only thing in this file that creates a file is
+    // `submit_report`.
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The parameter schema: an object with no properties, closed, and no
+   * `required` key at all.
+   *
+   * Measured in the image rather than reasoned about
+   * (`pifleet/pi-worker:0.79.6-base-7b18f4213430`, 2026-09-08):
+   * `Type.Object({})` renders `{"type":"object","properties":{}}` — no
+   * `required` key at all — while `Type.Object({a: Type.String()})` does emit
+   * one. §6.2's whole `StringEnum` argument is that the SPELLING reaching the
+   * provider is the thing that matters, so `properties: {}` is present because
+   * typebox emits it and `required` is absent because typebox does not.
+   * `additionalProperties: false` is this file's own addition on top.
+   */
+  test("get_replies takes no arguments, in typebox's spelling", () => {
+    expect(GET_REPLIES_PARAMETERS).toEqual({
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    });
+    expect(Object.keys(GET_REPLIES_PARAMETERS)).not.toContain("required");
+  });
+});
+
+/**
+ * The two pure readers `get_replies` is built out of, exercised on their own.
+ *
+ * Both are total and exported for the reason `shouldNag` is: a clause reachable
+ * only through a filesystem fixture is a clause whose mutation is expensive to
+ * redden, and these two carry the checks that defend against a HOST bug rather
+ * than a worker one.
+ */
+describe("parseRepliesPolicy and declaredReplyFile", () => {
+  test("the host's own renderer round-trips, including the empty set", () => {
+    expect(parseRepliesPolicy(renderRepliesPolicy(TASK_ID, [CHILD_A, CHILD_B]))).toEqual({
+      schema: REPLIES_POLICY_SCHEMA,
+      task_id: TASK_ID,
+      replies: [
+        { ...CHILD_A, path: replyMountPath(CHILD_A.task_id) },
+        { ...CHILD_B, path: replyMountPath(CHILD_B.task_id) },
+      ],
+    });
+    expect(parseRepliesPolicy(renderRepliesPolicy(TASK_ID, []))).toEqual({
+      schema: REPLIES_POLICY_SCHEMA,
+      task_id: TASK_ID,
+      replies: [],
+    });
+  });
+
+  /**
+   * `<none>` parses like any other id here, and is refused upstream.
+   *
+   * `readTaskPolicy` refuses an idle worker before the declaration is opened, so
+   * a special case in the parser would be a second place the idle rule lives —
+   * and the two would eventually disagree about which one refuses.
+   */
+  test("the idle spelling is a task id like any other", () => {
+    expect(parseRepliesPolicy(renderRepliesPolicy(null, []))?.task_id).toBe(TASK_POLICY_NONE);
+  });
+
+  test("every structural problem is one answer, because the caller has one response", () => {
+    const good = { ...CHILD_A, path: replyMountPath(CHILD_A.task_id) };
+    const doc = (over: Record<string, unknown>): string =>
+      JSON.stringify({ schema: REPLIES_POLICY_SCHEMA, task_id: TASK_ID, replies: [good], ...over });
+    expect(parseRepliesPolicy("not json at all")).toBeNull();
+    expect(parseRepliesPolicy("[]")).toBeNull();
+    expect(parseRepliesPolicy('"a string"')).toBeNull();
+    expect(parseRepliesPolicy("null")).toBeNull();
+    expect(parseRepliesPolicy(doc({ schema: "pifleet.replies/v2" }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ task_id: "" }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ task_id: 7 }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ replies: "not an array" }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ replies: [null] }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ replies: [[]] }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ replies: [{ ...good, task_id: "" }] }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ replies: [{ ...good, worker: "" }] }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ replies: [{ ...good, aspect: 3 }] }))).toBeNull();
+    expect(parseRepliesPolicy(doc({ replies: [{ ...good, path: 3 }] }))).toBeNull();
+    // And the good document itself still parses, so none of the above is green
+    // because the fixture was broken to begin with.
+    expect(parseRepliesPolicy(doc({}))).not.toBeNull();
+  });
+
+  /**
+   * An empty `aspect` is legal. `DeclaredReply.aspect` is an unconstrained
+   * string on the host side and a console with one slice has nothing to call it,
+   * so refusing it here would be this end inventing a rule the writer does not
+   * enforce — and the refusal would take the whole declaration with it.
+   */
+  test("an empty aspect is a value, not a malformed entry", () => {
+    const parsed = parseRepliesPolicy(renderRepliesPolicy(TASK_ID, [{ ...CHILD_A, aspect: "" }]));
+    expect(parsed?.replies[0]?.aspect).toBe("");
+  });
+
+  test("a declared path is the mount prefix plus one bare name, or nothing", () => {
+    expect(declaredReplyFile(replyMountPath(CHILD_A.task_id))).toBe(`${CHILD_A.task_id}.json`);
+    expect(declaredReplyFile("/etc/passwd")).toBeNull();
+    expect(declaredReplyFile("/repliesX/a.json")).toBeNull();
+    expect(declaredReplyFile("replies/a.json")).toBeNull();
+    expect(declaredReplyFile(`${REPLIES_ROOT}/`)).toBeNull();
+    expect(declaredReplyFile(`${REPLIES_ROOT}/sub/a.json`)).toBeNull();
+    expect(declaredReplyFile(`${REPLIES_ROOT}/../passwd`)).toBeNull();
+    expect(declaredReplyFile(`${REPLIES_ROOT}/..`)).toBeNull();
+    expect(declaredReplyFile(`${REPLIES_ROOT}/a\u0000.json`)).toBeNull();
+    expect(declaredReplyFile(`${REPLIES_ROOT}/.`)).toBeNull();
+    // A SPACE is NOT rejected, and saying so is the point of the line: this
+    // check refuses paths, not unusual names. The charset rule for a child
+    // task id lives upstream in `replyFileName`, and a second copy here would
+    // agree with it until the day one of the two was relaxed.
+    expect(declaredReplyFile(`${REPLIES_ROOT}/a b.json`)).toBe("a b.json");
   });
 });

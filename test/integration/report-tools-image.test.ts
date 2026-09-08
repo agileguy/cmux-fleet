@@ -23,23 +23,29 @@
  * A stub cannot reach any of those, because in a stub the loader, the registry
  * and the image are all this file's imagination.
  *
- * ## The assertion is deliberately a SUBSET, not an equality
+ * ## The assertion is a SET EQUALITY, as of Phase 5
  *
- * §12 SPLIT this criterion on 2026-09-07 and the split is the whole point.
- * `PI_EXTENSION_TOOLS` names both `submit_report` and `get_replies` — it is the
- * vocabulary config may request — while Phase 2 ships `report-tools.ts`
- * registering `submit_report` alone; `get_replies` arrives in Phase 5. A
- * set-equality assertion filed now would be red for three phases by
- * construction, which is a test that trains its reader to ignore it.
+ * §12 SPLIT this criterion on 2026-09-07 and held it at a subset for three
+ * phases. `PI_EXTENSION_TOOLS` names both `submit_report` and `get_replies` — it
+ * is the vocabulary config may request — while Phase 2 shipped `report-tools.ts`
+ * registering `submit_report` alone. A set-equality assertion filed then would
+ * have been red for three phases by construction, which is a test that trains
+ * its reader to ignore it, so the claim was: the registered set is a SUBSET of
+ * the enum and CONTAINS `submit_report`.
  *
- * So from Phase 2 the claim is: the registered set is a SUBSET of
- * `PI_EXTENSION_TOOLS` and CONTAINS `submit_report`. That is what catches a name
- * the image does not serve.
+ * **Phase 5 registers `get_replies` and this file was tightened in the same
+ * commit** (SRD task 5.4). The claim is now
+ * `expect(registered).toEqual(new Set(PI_EXTENSION_TOOLS))`, and it is strictly
+ * stronger in the direction the subset could not reach: **no name in the enum is
+ * unserved by the image.** That is failure mode 9.3 — *"Name in `--tools`,
+ * extension not in the image"*, which `--tools` answers by dropping the name
+ * without an error (§0.2 row 7, measured) — and it is unreachable from a subset
+ * assertion, which is green for an image that serves nothing at all beyond
+ * `submit_report`.
  *
- * **PHASE 5 TIGHTENS THIS TO SET EQUALITY.** When `get_replies` is registered,
- * `expect(registered).toEqual(new Set(PI_EXTENSION_TOOLS))` replaces the two
- * assertions below, and that is where the stronger claim — no name in the enum
- * is unserved — is finally made.
+ * **The tightening adds no test.** It replaces two assertions inside the
+ * existing `it` with one, so this file still collects two, and CI's
+ * `TOTAL_EXPECTED` does not move.
  *
  * ## How the registered set is observed, and why it costs no model call
  *
@@ -314,33 +320,42 @@ describe("report-tools.ts in the real worker image (§12 D1)", () => {
   }, containerBudget(1));
 
   /**
-   * §12 D1, the Phase 2 half: the registered set is a SUBSET of
-   * `PI_EXTENSION_TOOLS` and CONTAINS `submit_report`.
+   * §12 D1, the Phase 5 form: the registered set EQUALS `PI_EXTENSION_TOOLS`.
    *
-   * PHASE 5 TIGHTENS THIS TO SET EQUALITY — see this file's header for why it
-   * cannot be equality today.
+   * Read as two claims that fail in opposite directions and that only an
+   * equality makes together:
+   *
+   * - **No name reaches Pi's registry that config has no vocabulary to
+   *   request.** Failure mode 9.2 — a tool the image serves under a name no
+   *   `tools:` list can name is a tool no worker will ever be granted, and
+   *   `--tools` reports nothing about it.
+   * - **No name in the vocabulary is unserved by the image.** Failure mode 9.3 —
+   *   `--tools` drops an unknown name silently (§0.2 row 7, measured), so a
+   *   config that requests `get_replies` from an image that does not carry it
+   *   produces a worker that is simply missing a tool, with no non-zero exit
+   *   anywhere. This is the half the subset assertion could not reach and the
+   *   reason this file was tightened.
+   *
+   * Neither is reachable from a unit test against a recording `pi`, which sees
+   * this repository's source rather than the image.
    */
-  it("registers a subset of PI_EXTENSION_TOOLS, containing submit_report", async () => {
+  it("registers exactly PI_EXTENSION_TOOLS", async () => {
     const baseline = await registryNames({ withExtension: false });
     const withExtension = await registryNames({ withExtension: true });
 
     // Anti-vacuity, and the reason the difference below means anything. A
-    // baseline that already carried `submit_report` — a future built-in, a
-    // third baked extension — would make the difference empty while every
-    // other assertion here still read as satisfiable.
+    // baseline that already carried one of these names — a future built-in, a
+    // third baked extension — would make the difference short by that name
+    // while every other assertion here still read as satisfiable. Under an
+    // equality that shows up as a failure rather than as a weakened test, but
+    // it would name the wrong culprit, so it is checked directly.
     expect(baseline.length).toBeGreaterThan(0);
-    expect(baseline).not.toContain("submit_report");
+    for (const name of PI_EXTENSION_TOOLS) expect(baseline).not.toContain(name);
     // The extension ADDS; it must not displace a built-in on the way in.
     for (const name of baseline) expect(withExtension).toContain(name);
 
     const registered = new Set(withExtension.filter((n) => !baseline.includes(n)));
 
-    // CONTAINS.
-    expect([...registered]).toContain("submit_report");
-    // SUBSET. Read as: no name reaches Pi's registry that config has no
-    // vocabulary to request — which is failure mode 9.2/9.3, and the half a
-    // unit test against a recording `pi` cannot reach.
-    const vocabulary = new Set<string>(PI_EXTENSION_TOOLS);
-    for (const name of registered) expect(vocabulary).toContain(name);
+    expect(registered).toEqual(new Set<string>(PI_EXTENSION_TOOLS));
   }, containerBudget(2));
 });

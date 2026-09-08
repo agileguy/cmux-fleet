@@ -1,5 +1,12 @@
 /**
- * `submit_report` — the result envelope, written by the host's own hand.
+ * `submit_report` and `get_replies` — the envelope written by the host's own
+ * hand, and the reply set declared by the host's own hand.
+ *
+ * Two tools, one file, and they are here together because they are the same
+ * argument pointed in opposite directions: the host owns the identity of what a
+ * worker writes, and the host owns the identity of what a worker reads. Neither
+ * is a convenience wrapper over `write` or `read`; each removes a value the
+ * model would otherwise have to copy correctly out of prose.
  *
  * ## What this replaces, and why the replacement is not a convenience
  *
@@ -204,6 +211,67 @@
  * before `execute` ever runs, so no number written here could detect either.
  * The bound that exists is a role's brief and Phase 7's per-role gate, not a
  * constant in this file.
+ *
+ * ## `get_replies` — DECLARED, never listed, and the empty set is an answer
+ *
+ * §6.2.2 and D6. The tool takes no arguments and it never calls `readdir`.
+ * `/replies` is one directory per worker per RUN and the triage console is one
+ * long-lived run publishing into it every sweep, so **sweep 5's collator listing
+ * that directory would be handed sweeps 1 through 5, each of which reads like a
+ * perfectly good answer to the question actually asked** — Finding E, and the
+ * reason `src/run/replies.ts` refuses a listing from the publishing end. The set
+ * cannot be discovered, so it is DECLARED: `/policy/replies`, host-written,
+ * `:ro`, rewritten in the same act that publishes the replies
+ * (`src/run/replies-policy.ts`).
+ *
+ * **Three refusals, and the first of them is the point of the file existing.**
+ * A declaration carrying `replies: []` is a turn-one dispatch, and the refusal
+ * it produces says *"No replies were declared for this task"* — which is a
+ * different sentence from *"the directory is empty"* and is the distinction
+ * `roles/triage.md` and `roles/collator.md` each spend six lines of prose
+ * establishing. A `readdir` cannot make that distinction at all: an empty
+ * `/replies` on turn one and an empty `/replies` after a fan-out that silently
+ * failed are the same bytes. The empty ARRAY is a value the host wrote on
+ * purpose, and refusing on it is reporting that value rather than losing it.
+ *
+ * **The freshness check is an equality against `/policy/task`, and it compares
+ * two strings that are the same string by construction** (failure mode 9.6 —
+ * *"Finding E arriving through the front door"*: a dispatch that rewrote
+ * `/policy/task` and not `/policy/replies` hands the collator a previous sweep's
+ * set). `renderTaskPolicy` strips control characters and slices to 200, so
+ * `renderRepliesPolicy` stores the task id **as `/policy/task` spells it** — by
+ * calling that renderer and reading line 1 back, not by copying its rules. This
+ * end honours the other half of that: it compares `declared.task_id` against the
+ * task id `parseTaskPolicy` returns, which IS line 1 verbatim, and it normalizes
+ * neither side. A check that re-derived the spelling — a second `slice`, a
+ * second character class, a trim — would report a stale declaration for a set
+ * that is perfectly fresh, which is the most expensive way a freshness check can
+ * be wrong: it is silent, it is on the honest path, and it looks like the tool
+ * working.
+ *
+ * **A declared reply that did not arrive is REPORTED, not omitted**, and in the
+ * vocabulary `roles/triage.md` already uses: *"No report was produced"* for a
+ * file that is not there, and *"A report was produced and could not be read"*
+ * for one that is there and does not parse. Those are different things for a
+ * person to do next — one re-runs a seat, the other goes and looks at a file
+ * sitting on disk — and `e5d5751` is this fleet's recorded case of the cost of
+ * blurring them: a right answer to the wrong document. So the JSON parse here is
+ * a VALIDATION and not a transformation; what comes back is the file's own bytes,
+ * because re-serializing a parse would hand the collator a document the host
+ * never wrote.
+ *
+ * **`get_replies` writes nothing, terminates nothing, and records nothing.** It
+ * does not mark the epoch delivered — a collator that looked and reported
+ * nothing is exactly the turn layers 3 and 4 exist to catch, and a read tool that
+ * quieted them would be spending `submit_report`'s evidence on a `read`. It sets
+ * no `terminate`, because a turn that has just fetched its inputs is the one turn
+ * that must not be encouraged to end. **What the host gains is that a
+ * `get_replies` call is a tool call**: defect 6 was a collator that made zero
+ * tool calls, and under this design that is now a fact in the session rather than
+ * an inference from a transcript.
+ *
+ * **It needs no sixth member of §7.6's surface** — only `registerTool`, which was
+ * already declared and already called.
  */
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -245,7 +313,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  * `.d.ts` out of the image and fails if it has.
  */
 export interface ExtensionAPI {
-  registerTool(tool: ToolDefinitionLike): void;
+  registerTool<Params>(tool: ToolDefinitionLike<Params>): void;
   /**
    * Both events take Pi's `ExtensionHandler<E, R>` shape — `(event, ctx) =>`
    * (`types.d.ts:804`) — and both handlers here ignore the event entirely, so
@@ -301,15 +369,43 @@ export interface ToolResultLike {
   terminate?: boolean;
 }
 
-/** The slice of `ToolDefinition` this file fills in (`types.d.ts:335-366`). */
-export interface ToolDefinitionLike {
+/**
+ * The slice of `ToolDefinition` this file fills in (`types.d.ts:335-366`).
+ *
+ * Generic as of task 5.4, because this file now registers TWO tools whose
+ * parameter shapes have nothing in common — `submit_report` takes eight fields
+ * and `get_replies` takes none. Pinned to `SubmitReportParams`, which is what it
+ * was while there was one tool, the second tool's `execute` would have been a
+ * lie about what it receives.
+ *
+ * **Pi's own type is generic here too, and that was read out of the image rather
+ * than assumed** (`pifleet/pi-worker:0.79.6-base-7b18f4213430`, 2026-09-08,
+ * `dist/core/extensions/types.d.ts`):
+ *
+ *     :335  export interface ToolDefinition<TParams extends TSchema = TSchema, …>
+ *     :361      execute(toolCallId: string, params: Static<TParams>, …)
+ *     :840      registerTool<TParams extends TSchema = TSchema, …>(tool: …): void;
+ *
+ * **The one deliberate difference: Pi's parameter is the SCHEMA and derives the
+ * arguments with `Static<TParams>`; this one IS the arguments.** `Static<>` and
+ * `TSchema` both come from typebox, which does not resolve in this repository
+ * (see the header), so a faithful copy of the constraint would make this file
+ * unimportable from `test/` — the exact cost the structural declaration exists to
+ * avoid. The subset stays assignable to the real type at every call site this
+ * file makes, which is all a structural declaration has to be.
+ *
+ * `unknown` is the default rather than an `any`, so a caller holding a
+ * `ToolDefinitionLike` off the registry can pass whatever it likes and the
+ * implementation still has to say what it expects.
+ */
+export interface ToolDefinitionLike<Params = unknown> {
   name: string;
   label: string;
   description: string;
   parameters: unknown;
   execute(
     toolCallId: string,
-    params: SubmitReportParams,
+    params: Params,
     signal: AbortSignal | undefined,
     onUpdate: unknown,
     ctx: ExtensionContextLike,
@@ -328,6 +424,21 @@ export const OUTBOX_FILES_DIR = "files";
 export const RESULT_ENVELOPE_NAME = "result.json";
 /** Mirrors `ResultEnvelopeSchema`'s `schema` literal (`src/contracts.ts:220`). */
 export const RESULT_SCHEMA = "pifleet.result/v1";
+/** Mirrors `REPLIES_POLICY_MOUNT` (`src/run/replies-policy.ts`) — the DECLARATION. */
+export const REPLIES_POLICY_PATH = "/policy/replies";
+/**
+ * Mirrors `REPLIES_MOUNT` (`src/run/replies.ts`) — the reply PLANE, which is a
+ * different object from the declaration above and is deliberately never listed.
+ *
+ * It is here for one purpose: a declared `path` is `<REPLIES_ROOT>/<name>` and
+ * this end must be able to say so. Every path this tool reads is the host's own
+ * spelling with this prefix re-rooted onto the injected mount, so a declaration
+ * naming anything else is a document `renderRepliesPolicy` did not write and is
+ * refused as malformed rather than followed.
+ */
+export const REPLIES_ROOT = "/replies";
+/** Mirrors `REPLIES_POLICY_SCHEMA` (`src/run/replies-policy.ts`). */
+export const REPLIES_POLICY_SCHEMA = "pifleet.replies/v1";
 
 /**
  * §7.1's session entry, used as BOTH `appendEntry`'s `customType` and the
@@ -463,21 +574,34 @@ export interface LiveTask {
 }
 
 /**
- * The two mounts this tool reads and writes, injectable for the same reason
+ * The four mounts these tools read and write, injectable for the same reason
  * `truncation-recovery.ts` injects `readFull`: without it every assertion in
  * `test/unit/report-tools.test.ts` would have to be made against the real
  * `/policy/task` and the real `/outbox`, which exist on no developer's machine
- * and on no CI runner. The default is the real pair, so nothing in the image
+ * and on no CI runner. The default is the real set, so nothing in the image
  * depends on a caller remembering to pass them.
+ *
+ * All four are REQUIRED rather than optional-with-a-default-per-field, and that
+ * is the property `DEFAULT_MOUNTS`'s own test pins. An optional field would let
+ * a future caller pass three and silently inherit the fourth from a constant
+ * that is correct only inside the image — which in a test is a read against a
+ * path that does not exist, and is exactly the shape of failure the injection
+ * exists to remove.
  */
 export interface MountRoots {
   policyPath: string;
   outboxRoot: string;
+  /** `/policy/replies` — the declared reply set (§7.4), read by `get_replies`. */
+  repliesPolicyPath: string;
+  /** `/replies` — the plane the declared paths point into. Never listed. */
+  repliesRoot: string;
 }
 
 export const DEFAULT_MOUNTS: MountRoots = {
   policyPath: TASK_POLICY_PATH,
   outboxRoot: OUTBOX_ROOT,
+  repliesPolicyPath: REPLIES_POLICY_PATH,
+  repliesRoot: REPLIES_ROOT,
 };
 
 /** The mounts plus the workdir, which comes from `ctx` rather than from a constant. */
@@ -534,7 +658,18 @@ function isBareName(name: string): boolean {
   return true;
 }
 
-/** The refusal thrown by every check in this file, so a caller can tell them apart from an ENOENT. */
+/**
+ * The refusal thrown by every check in this file, so a caller can tell them
+ * apart from an ENOENT.
+ *
+ * ONE class for both tools, and the name it was given while there was one tool
+ * is kept rather than widened. It is the vocabulary a caller matches on, and
+ * renaming it would rewrite every assertion in `test/unit/report-tools.test.ts`
+ * to buy a word — while a second class would let a caller catch one refusal and
+ * miss the other, which is the only outcome that costs anything. What the class
+ * means is *"this file refused, and nothing was written"*; that is true of
+ * `get_replies`'s three refusals exactly as it is of `submit_report`'s five.
+ */
 export class SubmitRefusal extends Error {
   override readonly name = "SubmitRefusal";
 }
@@ -1190,6 +1325,348 @@ export function shouldNag(tally: EpochTally): boolean {
   return tally.toolCalls > 0;
 }
 
+// ---------------------------------------------------------------------------
+// `get_replies` — the declared set (§6.2.2, §7.4, D6). See the header.
+// ---------------------------------------------------------------------------
+
+/**
+ * One entry of `/policy/replies`, mirroring `DeclaredReplyEntry`
+ * (`src/run/replies-policy.ts`) field for field.
+ *
+ * `path` is the host's spelling and is carried through verbatim into every
+ * message this tool composes, because it is the string the collator's brief also
+ * cites. This end derives a READ location from it and never a second spelling of
+ * the path itself.
+ */
+export interface DeclaredReplyEntry {
+  task_id: string;
+  worker: string;
+  aspect: string;
+  path: string;
+}
+
+/** The `/policy/replies` document, mirroring `RepliesPolicy` on the host side. */
+export interface RepliesPolicy {
+  schema: string;
+  /** Spelled as `/policy/task` line 1 spells it — see the header's §9.6 note. */
+  task_id: string;
+  replies: DeclaredReplyEntry[];
+}
+
+/**
+ * What one declared reply turned out to be, as `details.replies[]` carries it.
+ *
+ * `bytes` is measured from the file that was read and is 0 for one that was not
+ * there — never absent, so a reader never has to tell a missing field from a
+ * zero-length reply. `ok` is *"this is a document I could parse"* and nothing
+ * more; it makes no claim about whether the reply says anything useful, which is
+ * the collator's judgement and not this tool's.
+ */
+export interface ReplyReadout {
+  task_id: string;
+  worker: string;
+  aspect: string;
+  bytes: number;
+  ok: boolean;
+}
+
+/** Everything one `get_replies` call produces, before it is shaped into a tool result. */
+export interface RepliesOutcome {
+  /** One text block per DECLARED reply, in the declaration's order. */
+  blocks: string[];
+  readouts: ReplyReadout[];
+  /**
+   * The child task ids whose file was not there at all.
+   *
+   * A separate list rather than a flag on the readout, because §6.2.2 asks for
+   * `missing` by name and because the two failures it separates are not degrees
+   * of one thing: `ok: false` with bytes is *"a report was produced and could
+   * not be read"*, and membership here is *"no report was produced"*. A reader
+   * that had only `ok` would have to infer the difference from `bytes === 0`,
+   * which is an inference and would be wrong for a zero-byte file.
+   */
+  missing: string[];
+}
+
+/**
+ * The basename inside `/replies` a declared path names, or null when the path
+ * is not one this tool will read.
+ *
+ * The prefix is checked rather than the basename taken, and the remainder is
+ * held to `isBareName`. Both halves are a defence against a HOST bug, not a
+ * worker one — the worker cannot write `/policy/replies` — and they are here for
+ * `parseTaskPolicy`'s reason, restated: `renderRepliesPolicy` derives every path
+ * from `replyMountPath`, so a path of any other shape means the document was not
+ * written by that renderer whatever its schema tag says. Taking the basename of
+ * an unexpected path instead would read `<repliesRoot>/passwd` for a declared
+ * `/etc/passwd` and call the result a reply.
+ */
+export function declaredReplyFile(path: string): string | null {
+  const prefix = `${REPLIES_ROOT}/`;
+  if (!path.startsWith(prefix)) return null;
+  const name = path.slice(prefix.length);
+  return isBareName(name) ? name : null;
+}
+
+/** One declared entry, or null when the value is not one. */
+function declaredEntry(value: unknown): DeclaredReplyEntry | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const r = value as Record<string, unknown>;
+  const taskId = r["task_id"];
+  const worker = r["worker"];
+  const aspect = r["aspect"];
+  const path = r["path"];
+  if (typeof taskId !== "string" || taskId === "") return null;
+  if (typeof worker !== "string" || worker === "") return null;
+  // `aspect` may legitimately be empty — `DeclaredReply.aspect` is an
+  // unconstrained string on the host side and a console with one slice has
+  // nothing to call it. It must still be a string, because it is interpolated.
+  if (typeof aspect !== "string") return null;
+  if (typeof path !== "string" || declaredReplyFile(path) === null) return null;
+  return { task_id: taskId, worker, aspect, path };
+}
+
+/**
+ * `/policy/replies`'s document, or null when the bytes are not one.
+ *
+ * Null for every structural problem, as `parseTaskPolicy` is, and for the same
+ * reason: the caller's response to all of them is the same refusal, so four
+ * messages would be four ways of saying one thing to a model that can act on
+ * none of them. **One malformed entry refuses the WHOLE document** rather than
+ * being skipped — a declaration is a set, and silently returning the subset that
+ * parsed would hand a collator a smaller set than the host published while
+ * looking exactly like a smaller fan-out. That is Finding E's cost arriving
+ * through a third door.
+ *
+ * The schema tag is checked before anything else is believed, because the reader
+ * is baked into an image pinned by tag: the host and this file are updated on
+ * different clocks and a `pifleet.replies/v2` has to be a refusal rather than a
+ * misparse.
+ */
+export function parseRepliesPolicy(body: string): RepliesPolicy | null {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return null;
+  const d = doc as Record<string, unknown>;
+  const taskId = d["task_id"];
+  const raw = d["replies"];
+  if (d["schema"] !== REPLIES_POLICY_SCHEMA) return null;
+  if (typeof taskId !== "string" || taskId === "") return null;
+  if (!Array.isArray(raw)) return null;
+  const replies: DeclaredReplyEntry[] = [];
+  for (const value of raw) {
+    const entry = declaredEntry(value);
+    if (entry === null) return null;
+    replies.push(entry);
+  }
+  return { schema: REPLIES_POLICY_SCHEMA, task_id: taskId, replies };
+}
+
+/**
+ * The sentence §6.2.2 specifies, and the prefix all three "no set" refusals
+ * share.
+ *
+ * One sentence for three causes — the mount is not readable, the bytes are not a
+ * `pifleet.replies/v1` document, the declared array is empty — because they are
+ * one fact to the model: **nothing was declared, so there is nothing to look
+ * for.** Each refusal appends its own clause for the operator, who is the only
+ * reader who can act on the difference.
+ */
+export const NO_REPLIES_DECLARED = "No replies were declared for this task.";
+
+/**
+ * Read the declaration, or refuse — including the 9.6 staleness check.
+ *
+ * **The equality is against `parseTaskPolicy`'s `taskId`, which is
+ * `/policy/task` line 1 VERBATIM, and neither side is normalized here.** That is
+ * the whole of the check and the header explains why adding anything to it is a
+ * bug: `renderRepliesPolicy` already stored the id as `renderTaskPolicy` spells
+ * it, so the two strings are equal by construction on the honest path, and any
+ * second `slice`, `trim` or character class applied at this end would break that
+ * equality for exactly the ids the host took care to normalize. The `slice(120)`
+ * below is in the MESSAGE only, and it is deliberately not shared with the
+ * comparison.
+ */
+export function readRepliesPolicy(roots: MountRoots, live: LiveTask): RepliesPolicy {
+  let body: string;
+  try {
+    body = readFileSync(roots.repliesPolicyPath, "utf8");
+  } catch {
+    // One arm for absent, unreadable and not-a-file alike: the tool's answer to
+    // all three is the same, and a branch per errno would be three messages
+    // about a mount only an operator can fix.
+    refuse(`${NO_REPLIES_DECLARED} \`${roots.repliesPolicyPath}\` could not be read.`);
+  }
+  const declared = parseRepliesPolicy(body);
+  if (declared === null) {
+    refuse(
+      `${NO_REPLIES_DECLARED} \`${roots.repliesPolicyPath}\` is not a ` +
+        `\`${REPLIES_POLICY_SCHEMA}\` document.`,
+    );
+  }
+  if (declared.task_id !== live.taskId) {
+    refuse(
+      `The declared reply set is stale. \`${roots.repliesPolicyPath}\` declares replies for ` +
+        `task \`${declared.task_id.slice(0, 120)}\`, and \`${roots.policyPath}\` says the live ` +
+        `task is \`${live.taskId.slice(0, 120)}\`. Nothing in \`${REPLIES_ROOT}\` belongs to ` +
+        `this task; report that you could not read your inputs.`,
+    );
+  }
+  return declared;
+}
+
+/**
+ * Read one declared reply and describe it — the three states §6.2.2 names.
+ *
+ * The JSON parse is a VALIDATION and the raw bytes are what comes back. Parsing
+ * and re-serializing would hand the collator a document the host never wrote —
+ * key order, whitespace and number formatting all move — and `e5d5751` is this
+ * fleet's recorded case of what a right answer to the wrong document costs.
+ *
+ * The two failing arms use `roles/triage.md`'s own sentences verbatim, because
+ * that file spends six lines establishing that they are different things for a
+ * person to do next and the collator is being asked to carry the distinction
+ * into its write-up. A tool that said "unavailable" for both would take the
+ * vocabulary away and then ask for it back.
+ */
+export function readDeclaredReply(
+  entry: DeclaredReplyEntry,
+  repliesRoot: string,
+): { readout: ReplyReadout; block: string; missing: boolean } {
+  const who =
+    `\`${entry.worker}\`, aspect \`${entry.aspect}\`, task \`${entry.task_id}\` ` +
+    `(\`${entry.path}\`)`;
+  const name = declaredReplyFile(entry.path);
+  let raw: string | null = null;
+  if (name !== null) {
+    try {
+      raw = readFileSync(join(repliesRoot, name), "utf8");
+    } catch {
+      raw = null;
+    }
+  }
+
+  if (raw === null) {
+    // `name === null` cannot reach here through `getReplies` — `parseRepliesPolicy`
+    // refuses any entry whose path is not `<REPLIES_ROOT>/<bare name>` — so this
+    // arm is the file that is not there. It is written to be total anyway, so
+    // this function can be called on an entry from anywhere without inventing a
+    // read against a path it just rejected.
+    return {
+      readout: { task_id: entry.task_id, worker: entry.worker, aspect: entry.aspect, bytes: 0, ok: false },
+      block: `No report was produced. Nothing was written for ${who}.`,
+      missing: true,
+    };
+  }
+
+  const bytes = Buffer.byteLength(raw, "utf8");
+  let ok = true;
+  try {
+    JSON.parse(raw);
+  } catch {
+    ok = false;
+  }
+  const readout = { task_id: entry.task_id, worker: entry.worker, aspect: entry.aspect, bytes, ok };
+  if (!ok) {
+    return {
+      readout,
+      block:
+        `A report was produced and could not be read. ${who} holds ${bytes} bytes ` +
+        `that are not valid JSON.`,
+      missing: false,
+    };
+  }
+  return { readout, block: `Reply from ${who}:\n${raw}`, missing: false };
+}
+
+/**
+ * The whole of `get_replies`, with its roots injected so a test can reach it.
+ *
+ * Three refusals before a single byte is read out of `/replies`, in the order
+ * that makes each of them the most specific true statement available: no live
+ * task, then no declaration, then an empty one. The empty case is last because
+ * it is the only one that is not a fault — it is a turn-one dispatch, and §6.2.2
+ * calls the sentence it produces *"the correct and complete answer"* for that
+ * turn.
+ *
+ * Every declared reply produces a block whether it arrived or not, so the count
+ * of blocks is the count of the DECLARED set. A collator can therefore tell what
+ * it was promised from what it received without being told the number
+ * separately, and an omission cannot look like a shorter fan-out.
+ */
+export function getReplies(roots: MountRoots): RepliesOutcome {
+  const live = readTaskPolicy(roots.policyPath);
+  const declared = readRepliesPolicy(roots, live);
+  if (declared.replies.length === 0) {
+    refuse(
+      `${NO_REPLIES_DECLARED} \`${roots.repliesPolicyPath}\` declares an empty set, which is ` +
+        `the whole answer for a first-turn dispatch: nothing has been published for you yet. ` +
+        `\`${REPLIES_ROOT}\` holds no reply belonging to this task, so do not go looking in it.`,
+    );
+  }
+
+  const blocks: string[] = [];
+  const readouts: ReplyReadout[] = [];
+  const missing: string[] = [];
+  for (const entry of declared.replies) {
+    const read = readDeclaredReply(entry, roots.repliesRoot);
+    blocks.push(read.block);
+    readouts.push(read.readout);
+    if (read.missing) missing.push(read.readout.task_id);
+  }
+  return { blocks, readouts, missing };
+}
+
+/**
+ * The parameter schema: an object with no properties, closed.
+ *
+ * §6.2.2's `Type.Object({})`, spelled as the JSON Schema literal the header
+ * argues for. **`required` is OMITTED rather than written as `[]`, and that is
+ * measured rather than reasoned** — run against the typebox in the real image
+ * (`pifleet/pi-worker:0.79.6-base-7b18f4213430`, 2026-09-08):
+ *
+ *     Type.Object({})              -> {"type":"object","properties":{}}
+ *     Type.Object({a: Type.String()}) -> {"type":"object","required":["a"],…}
+ *
+ * So the reference implementation emits no `required` key at all for an empty
+ * object, and `properties: {}` is present rather than absent. §6.2's whole
+ * `StringEnum` argument is that the SPELLING reaching the provider is what
+ * matters, and an empty `required: []` is a spelling nothing in this stack
+ * produces. `additionalProperties: false` is this file's own addition, for
+ * `SUBMIT_REPORT_PARAMETERS`'s reason rather than typebox's.
+ *
+ * `additionalProperties: false` is kept for `SUBMIT_REPORT_PARAMETERS`'s reason
+ * rather than by symmetry. A model that has read a role document about reading
+ * `/replies/<child-task-id>.json` will try to pass a `task_id` or a `path`, and
+ * the difference between a validation error naming the field and a silently
+ * ignored argument is the difference between one retry and a collator convinced
+ * it asked for something specific.
+ */
+export const GET_REPLIES_PARAMETERS = {
+  type: "object",
+  additionalProperties: false,
+  properties: {},
+} as const;
+
+/**
+ * What the model is told about `get_replies`.
+ *
+ * Three sentences, and the second is the one that earns its tokens: it tells the
+ * model not to list `/replies`, which is the behaviour `roles/collator.md`
+ * records a collator spending *"its last twelve tool calls"* on. Saying "there
+ * are no arguments" without saying why invites a model to work around the
+ * limitation it thinks it has found.
+ */
+export const GET_REPLIES_DESCRIPTION =
+  "Return the replies the host declared for this task. It takes no arguments and you must not " +
+  "list or search `/replies` yourself — that directory also holds replies published for other " +
+  "tasks, and reading one of those would answer a question nobody asked. A reply that was " +
+  "declared and did not arrive is reported to you as missing rather than left out.";
+
 /**
  * What the model is told about the tool.
  *
@@ -1208,13 +1685,15 @@ export const SUBMIT_REPORT_DESCRIPTION =
   "write-up); it is written into your outbox and declared in `artifacts` for you.";
 
 /**
- * Register `submit_report`, and only `submit_report`.
+ * Register `submit_report` and `get_replies` — the whole of `PI_EXTENSION_TOOLS`.
  *
- * `get_replies` is named alongside it in `PI_EXTENSION_TOOLS` and is SRD phase
- * 5; §12 is explicit that between phase 2 and phase 5 the registered set is a
- * SUBSET of that enum rather than equal to it, *"because a set-equality
- * criterion filed against Phase 2 would be red for three phases by
- * construction, which is a criterion that trains its reader to ignore it."*
+ * **As of SRD phase 5 the registered set EQUALS that enum**, and
+ * `test/integration/report-tools-image.test.ts` was tightened from a subset
+ * assertion to a set equality in the same commit. §12 held that criterion at a
+ * subset from phase 2 *"because a set-equality criterion filed against Phase 2
+ * would be red for three phases by construction, which is a criterion that
+ * trains its reader to ignore it"* — phase 5 is where the stronger claim, that
+ * no name config may request is unserved by the image, is finally made.
  *
  * `worker` and `workdir` come off `ctx` on every call rather than being
  * captured here. A worker id captured at registration would be read before the
@@ -1252,7 +1731,10 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
     label: "Submit report",
     description: SUBMIT_REPORT_DESCRIPTION,
     parameters: SUBMIT_REPORT_PARAMETERS,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    // Annotated rather than inferred: `ToolDefinitionLike` is generic now that
+    // two tools share it, and the annotation is what makes `params` this tool's
+    // arguments instead of `unknown`.
+    async execute(_toolCallId, params: SubmitReportParams, _signal, _onUpdate, ctx) {
       const worker = ctx.sessionManager.getSessionId();
       // Layer 4's entry is appended only AFTER this call returns — never
       // before it, and never from a `finally`. The entry says a report was
@@ -1313,6 +1795,43 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
         // Layer 2. A hint, batch-conditional, and the cheapest way to end a
         // turn — see the header for §11 Q3's measurement of it.
         terminate: true,
+      };
+    },
+  });
+
+  /*
+   * `get_replies` (§6.2.2, D6, task 5.4).
+   *
+   * **Four things this `execute` deliberately does not do**, each of which is a
+   * property rather than an omission:
+   *
+   * - **No `terminate`.** Layer 2 makes delivering the cheapest way to end a
+   *   turn; a turn that has just fetched its inputs is the one turn that must
+   *   not be made cheap to end. The absence is asserted, not assumed.
+   * - **No `tracker.noteDelivery`.** A collator that read its replies and wrote
+   *   nothing is precisely the turn layers 3 and 4 exist to record, and marking
+   *   this epoch delivered would spend `submit_report`'s evidence on a read.
+   * - **No `appendEntry`.** The `tool_call` handler already counts this call,
+   *   which is the whole of what §6.2.2 claims the tool buys the host — *"the
+   *   host now knows whether the collator looked"* — and a second record of one
+   *   call would be a diagnostic about a diagnostic.
+   * - **Nothing off `ctx`.** Unlike `submit_report` this tool composes no
+   *   document, so there is no field a worker id or a workdir would fill; a
+   *   `getSessionId()` here would be a read with no reader.
+   */
+  pi.registerTool({
+    name: "get_replies",
+    label: "Get replies",
+    description: GET_REPLIES_DESCRIPTION,
+    parameters: GET_REPLIES_PARAMETERS,
+    // The arguments are `unknown` and ignored: the schema above admits an empty
+    // object and nothing else, so whatever survives Pi's validator carries no
+    // information. Naming a parameter type would be inventing a shape to discard.
+    async execute(_toolCallId, _params: unknown, _signal, _onUpdate, _ctx) {
+      const outcome = getReplies(mounts);
+      return {
+        content: outcome.blocks.map((text) => ({ type: "text" as const, text })),
+        details: { replies: outcome.readouts, missing: outcome.missing },
       };
     },
   });
