@@ -1530,11 +1530,25 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
   assert `tool_calls: 3`. **The field that separates defect 5's two measured shapes** (§7.2).*
 
 **Authority (D3) — the anti-criteria that matter most**
-- **Anti: no host module reads `pifleet.submit/v1` in a verdict path.** *Probe: a closure/grep guard
-  over `src/run/triage-*.ts`, `src/harvest/`, `src/supervisor/` asserting the string appears in no
-  module that produces a verdict, a coverage count, an incident transition or a notification.
-  **Reddened by** wiring it into `completeSweep`'s artifact count — which is failure mode 9.8, the one
-  failure with no runtime symptom.*
+- **Anti: no host module READS OR BRANCHES ON `pifleet.submit/v1` in a verdict path.** *Probe: a
+  closure/grep guard over `src/run/triage-*.ts`, `src/harvest/`, `src/supervisor/` asserting no module
+  that produces a verdict, a coverage count, an incident transition or a notification **consumes** the
+  entry. **Reddened by** wiring it into `completeSweep`'s artifact count — which is failure mode 9.8,
+  the one failure with no runtime symptom.*
+
+  **AMENDED 2026-09-08, before anyone wrote it, by the engineer landing task 3.4.** This bullet said
+  *"asserting the STRING APPEARS in no module"*, and a guard built to that letter would have been
+  **red by construction on the commit that closed 3.4**: §6.5 property 3 sanctions both entry names
+  *"in `claimedSuccess`'s message"*, and that message lives in `src/run/triage-envelope.ts` — squarely
+  inside the stated scope. **A string-presence guard cannot express this criterion**, because the
+  permitted use and the forbidden one are the same characters in the same file; only *"is it read
+  back"* separates them. So the guard must either test consumption, or carry a named exemption for
+  that one message the way `test/unit/triage-readonly.test.ts` exempts `DISPATCH_PATH` — and the
+  exemption must be by MODULE AND REASON, not a count. **The behavioural half already exists and is
+  green**: `triage-envelope.test.ts`'s by-value probe pins `joinSweep`'s whole return object, and
+  `completeSweep` reads only `artifacts.length` and `blocked.length`, so smuggling the entry name into
+  a returned value reddens it (measured: 3 fails). What a source guard adds is failure 9.8's
+  no-runtime-symptom case, and that is the only reason to write one.
 - **Anti: coverage is still counted from the run tree.** *Probe: `Docs/SRD-TRIAGE-CONSOLE.md` §12's
   existing criterion, re-run. It must not change, and this document's job is to leave it alone.*
 
