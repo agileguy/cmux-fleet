@@ -1301,6 +1301,16 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
        *  - **`seatTree`, not `deps.run`.** A seat can live in another run
        *    (`seatRun`), and the collator's sessions directory would send an
        *    operator to a tree the worker never wrote in.
+       *  - **`no_submit` is stated as NOTHING-DELIVERED, not as never-called.**
+       *    CORRECTED 2026-09-08 by the engineer building task 3.3, against this
+       *    message: the extension writes that entry whenever the epoch was not
+       *    DELIVERED, which also covers a `submit_report` that was called and
+       *    REFUSED — a bad filename, an artifact path escaping the outbox. The
+       *    original wording sent an operator looking for a model that ignored
+       *    its instructions, when the transcript may show one that tried twice
+       *    and was turned down. The distinction is the whole reason the entry
+       *    exists, so overstating it here would have cost more than saying
+       *    nothing.
        *  - **The directory is named and the FILENAME is not.** Pi's
        *    `_<worker>.jsonl` convention is `sessionFileSuffix` over in
        *    `supervisor/tui.ts`, a subtree this module may not import
@@ -1315,8 +1325,8 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
           `not answer" — the truth is that the worker said it was done and produced nothing. ` +
           `Look at the worker's transcript, not the cluster: its session JSONL is in ` +
           `${seatTree.sessionsDir}. A pifleet.submit/v1 entry there means the worker DID call ` +
-          `submit_report and the write did not land; pifleet.no_submit/v1 means it never called ` +
-          `the tool at all. Neither entry is read by this sweep — the coverage number is still ` +
+          `submit_report and the write did not land; pifleet.no_submit/v1 means nothing was ` +
+          `delivered for that epoch — the tool was never called, or it was called and REFUSED. Neither entry is read by this sweep — the coverage number is still ` +
           `this host's own count of the files it could open.`,
       );
     }

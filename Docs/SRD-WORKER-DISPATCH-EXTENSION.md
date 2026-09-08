@@ -876,8 +876,10 @@ Four constraints on this layer, each of which is a way it could go wrong:
 
 **Layer 4 — EVIDENCE. A host-readable record of the omission.** Whether or not the nag works, the
 extension writes `pi.appendEntry("pifleet.submit/v1", …)` on delivery and
-`pi.appendEntry("pifleet.no_submit/v1", { task_id, epoch, tool_calls, at })` at `agent_end` when
-nothing was delivered. Session entries land in the JSONL under `/sessions`, which is bind-mounted
+`pi.appendEntry("pifleet.no_submit/v1", …)` — **§7.2's seven fields**, not the four this line used
+to list — at `agent_end` when nothing was delivered. (CORRECTED 2026-09-08 during task 3.3, the
+second time this document has spelled an entry short beside an authoritative example; §7.1 and §7.2
+are the shapes, and these prose mentions point at them.) Session entries land in the JSONL under `/sessions`, which is bind-mounted
 **read-write from the run tree** (`render.ts:513`), so the host can read both without a new mount and
 the model never sees either (`types.d.ts:871`: *"not sent to LLM"*).
 
@@ -1153,8 +1155,24 @@ new fixture possible and which is the closest this design comes to touching defe
 
 `docker/pi-extensions/report-tools.ts` declares its Pi surface structurally, not by import
 (`dispatch-trigger.ts:81-102`, `truncation-recovery.ts:119-124`), because the package is in the image
-and not in this repository. The declared surface is `registerTool`, `on("agent_end")`,
+and not in this repository. The declared surface is `registerTool`, `on("agent_end")`, `on("tool_call")`,
 `sendUserMessage`, `appendEntry`.
+
+**`on("tool_call")` was ADDED 2026-09-08 by task 3.3, and the deviation is recorded because it was
+forced rather than chosen.** §7.2 requires `tool_calls` and the four-member surface cannot produce it.
+The only candidate within those four is `AgentEndEvent.messages`, and it is WRONG rather than merely
+awkward: that array is the session's retained transcript, spanning every epoch a long-lived worker has
+served and shortened by compaction — counting it would silently answer *"how many tool calls are still
+in context"*, which is not the question §7.2 asks and would read plausibly forever.
+
+**That handler is the one place in this extension where a diagnostic can break the thing it
+diagnoses, and it was measured in the image rather than assumed** (verified independently
+2026-09-08 in `0.79.6-base-51b82d0e7cad`): `dist/core/extensions/runner.js:639-657` calls
+`await handler(event, ctx)` with **no `try`/`catch`**, unlike `emit` at `:522-534` which wraps it —
+and `dist/core/agent-session.js:184-197` catches and RE-THROWS, an `Error` as-is and anything else
+wrapped as *"Extension failed, blocking execution"*. So a throwing counter stops the worker running
+tools at all. A truthy handler result carrying `block` is the same failure through another door,
+since `:649-652` returns early on it. Hence a total `catch` and a bare return, both asserted.
 
 **A drift check against the image's `.d.ts` is NOT what `report-tools-image.test.ts` shipped in task
 2.5**, and this paragraph claimed it was. That file diffs Pi's tool registry across two runs and
@@ -1721,9 +1739,33 @@ the same session instead of being discovered by a green board three phases later
   shape. Touches: possibly `docker/pi-extensions/truncation-recovery.ts`.
   *Acceptance: either a test showing it passes the result through unchanged, or a fix.*
 
-### Phase 3 — Layers 2 and 4
+### Phase 3 — Layers 2 and 4 ✅ COMPLETE 2026-09-08
 
 **Intent.** Delivery becomes cheap, and non-delivery becomes a fact.
+
+**Both halves hold, and the second one cost a design decision this document did not anticipate.**
+Non-delivery is decided by an in-memory per-epoch FLAG, never by the absence of a
+`pifleet.submit/v1` entry — because task 3.2's swallow (§6.5 property 4's inverse: a diagnostic write
+may not un-deliver a report that landed) means **a failed session write produces a delivered report
+with no entry**. An implementation reading absence backwards would file a false accusation against a
+worker that did its job. `ISC-1080`.
+
+**The declared surface grew a fifth member and §7.6 now says so.** `on("tool_call")` was forced, not
+chosen: §7.2 requires `tool_calls` and the four-member surface cannot produce it, while the only
+candidate among those four — `AgentEndEvent.messages` — is wrong rather than awkward. The hazard it
+introduces was measured in the image and independently re-verified: a throwing `tool_call` handler
+**stops the worker running tools at all**. `ISC-1081`.
+
+**A comment that had become a lie was rewritten rather than left.** `report-tools.ts`'s swallow said
+the missing entry was *"indistinguishable from a worker that never called the tool… the accepted
+cost"*. Task 3.3 made three cases distinct — submit entry, `no_submit` entry, and NEITHER — so the
+sentence was false the moment 3.3 landed.
+
+**And one correction runs backwards into 3.4.** That task's message said `no_submit` *"means it never
+called the tool at all"*; the extension writes it whenever the epoch was not DELIVERED, which also
+covers a `submit_report` called and REFUSED. `ISC-1083`. **Two engineers, two rounds apart, each
+found the defect the other's task had left** — which is the argument for small briefs, not for
+better reviewers.
 
 - **3.1** Return `terminate: true` from `submit_report`. Touches: `docker/pi-extensions/report-tools.ts`.
 - **3.2** `pifleet.submit/v1` on delivery. Touches: same, `src/run/` schema if the host-side reader
