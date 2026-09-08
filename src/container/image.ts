@@ -131,6 +131,18 @@ export const BUILD_CONTEXT_ASSETS = [
   // exactly as it did on the day a worker re-ran the same command twice and
   // answered nothing. Nothing fails; the banner is just absent.
   "pi-extensions/truncation-recovery.ts",
+  // The result-envelope extension (SRD-WORKER-DISPATCH-EXTENSION D1). The third
+  // in-process asset, and the one whose staleness is hardest to see from
+  // outside, because it is the only one that does not fail by ABSENCE.
+  // `submit_report` validates and only then writes, and it composes
+  // `schema`/`task_id`/`epoch`/`worker` by READING `/policy/task` rather than
+  // by trusting the model — so an image carrying an older copy goes on emitting
+  // well-formed `pifleet.result/v1` envelopes on the ordinary path. What has
+  // moved is the rule set they were checked against and the recipe those four
+  // fields came from, and the harvester cannot tell an envelope written by a
+  // stale validator from one written by the current one. The two extensions
+  // above at least fall silent; this one keeps answering.
+  "pi-extensions/report-tools.ts",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 

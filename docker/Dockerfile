@@ -445,6 +445,23 @@ COPY --chmod=0444 docker/pi-extensions/dispatch-trigger.ts /opt/pifleet/dispatch
 # `BUILD_CONTEXT_ASSETS` in src/container/image.ts.
 COPY --chmod=0444 docker/pi-extensions/truncation-recovery.ts /opt/pifleet/truncation-recovery.ts
 
+# The report-tools extension (SRD-WORKER-DISPATCH-EXTENSION D1). It registers
+# `submit_report`, which composes the `pifleet.result/v1` envelope from
+# /policy/task — a file the worker cannot write — instead of asking a model to
+# copy `schema`, `task_id`, `epoch` and `worker` correctly out of its prompt.
+# Same reasoning as the two files above on every count: in-process, root-owned,
+# 0444, denied to the worker. This COPY only PLACES it — nothing loads it yet.
+# The `--extension /opt/pifleet/report-tools.ts` argv is task 2.4 and lands in
+# src/config/render.ts; until it does, the file is present and inert.
+#
+# ADDING THIS COPY MEANT ADDING "pi-extensions/report-tools.ts" TO
+# `BUILD_CONTEXT_ASSETS` in src/container/image.ts. Stale here is quiet in a
+# different way from the two above, and worth naming: this file's job is to
+# VALIDATE and only then write, so an image carrying an older copy does not
+# stop producing envelopes and does not produce malformed ones. It produces
+# well-formed envelopes checked against a rule set that has since moved.
+COPY --chmod=0444 docker/pi-extensions/report-tools.ts /opt/pifleet/report-tools.ts
+
 USER 10001:10001
 WORKDIR /workspace
 ENV PI_OFFLINE=0 \
