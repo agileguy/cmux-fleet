@@ -690,9 +690,17 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
    */
   const quiesceProps = (src: string, call: string, script: string): string[] => {
     const start = at(src, call, 0, `scripts/${script} does not call ${call}`);
+    /*
+     * The options argument closes the dep object, and it is matched by SHAPE
+     * rather than by the variable inside it. It was `{ worker: restartFlag },`
+     * verbatim until ISC-1106 gave `scripts/operations` a `targetWorker` — the
+     * pane titles there are roles, not worker ids, so passing the flag matched
+     * no run and orphaned the container. A helper pinned to one spelling turns
+     * that correction into an unrelated red test in a file about `quiesce`.
+     */
     const end = at(
       src,
-      "{ worker: restartFlag },",
+      "{ worker: ",
       start,
       `scripts/${script}'s ${call} dep object is not closed by the options argument`,
     );

@@ -343,11 +343,25 @@ export function plannedPane(
   title: string,
 ): OperationsPane {
   const plan = planPanes(spec, opts);
-  const planned = plan.find((p) => p.title === title);
+  /*
+   * TITLE FIRST, THEN WORKER ID, and accepting both is half of ISC-1106's fix.
+   *
+   * On the agent-square consoles the two are the same string, so this is one
+   * lookup written twice. On `operations` they differ — panes are titled by
+   * ROLE (`observer`) and run `obs-1` — and naming the worker used to be
+   * REFUSED while naming the title silently orphaned the container. An operator
+   * who reaches for the id every other console takes should not be the one who
+   * finds that out.
+   *
+   * Title wins a tie because it is what this function's own error message
+   * offers, and no console has a pane whose title is another pane's worker.
+   */
+  const planned =
+    plan.find((p) => p.title === title) ?? plan.find((p) => p.worker === title);
   if (planned === undefined) {
     throw new Error(
       `${spec.name}: '${title}' is not a pane this console plans — it holds ` +
-        `${plan.map((p) => p.title).join(", ")}`,
+        `${plan.map((p) => (p.worker === undefined || p.worker === p.title ? p.title : `${p.title} (${p.worker})`)).join(", ")}`,
     );
   }
   return planned;

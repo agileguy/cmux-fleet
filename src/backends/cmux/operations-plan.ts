@@ -126,6 +126,31 @@ export const DEFAULT_GIT_POLL_SECONDS = 5;
 export interface OperationsPane {
   /** `rename-tab --title`; also how a human names the pane when asking for it. */
   readonly title: string;
+  /**
+   * The pifleet worker this pane runs, or absent for a pane that runs none.
+   *
+   * **This field exists because the title is NOT the worker id on every console,
+   * and one caller assumed it was.** The agent-square consoles title a pane by
+   * its worker id — see the note on `title` below — so there the two are the
+   * same string and the assumption is invisible. `operations` holds one worker
+   * per ROLE and titles its panes `observer` and `ticketing` while running
+   * `obs-1` and `tick-1`, and `monitor` runs no worker at all.
+   *
+   * ISC-1106 measured the cost. `scripts/operations --restart observer` passed
+   * the TITLE to `resolveThenRestart`, whose only use of it is
+   * `runsHoldingAny(status, {worker})` — no run holds a worker called
+   * `observer`, so nothing matched, `down` was never called, and the pane was
+   * respawned beside its own still-running container. Two live runs for one
+   * worker id, reproduced twice an hour apart, and the console had no safe
+   * restart path at all: `--restart obs-1` was refused as "not a pane this
+   * console plans" and `--restart observer` orphaned.
+   *
+   * Carried on the PLAN rather than re-derived by each caller, because the plan
+   * is the one place that already knows both halves — it puts `workers[0]` in
+   * the observer pane — and a second mapping written beside it is a second
+   * thing to get wrong.
+   */
+  readonly worker?: string;
   /** Shell text for `respawn-pane --command`. */
   readonly command: string;
   /**
@@ -442,6 +467,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
   return [
     {
       title: "observer",
+      worker: agent,
       /*
        * THREE STAGES, each a deliberate step down, and the pane never lands on
        * a host prompt while anything above it is still available.
@@ -569,6 +595,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       : [
           {
             title: "ticketing",
+            worker: second,
             /*
              * The same three-stage ladder the observer pane uses, for this
              * pane's own worker and its own run. See `second` above for why it
@@ -746,6 +773,7 @@ export function agentSquarePanes(
     // belongs to. The id is also what `dispatch --worker` takes, so the title
     // is the argument.
     title: worker,
+    worker,
     command: `${envPreamble()} ${agentPaneCommand({
       repoRoot,
       worker,

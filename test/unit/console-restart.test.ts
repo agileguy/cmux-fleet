@@ -299,11 +299,46 @@ describe("a restart resolves its title before it stops anything", () => {
     expect(plannedPane(OPERATIONS_SPEC, OPTS, "observer").command).toContain("up");
   });
 
+  /**
+   * The PROPERTY is unchanged — an unplannable name refuses before anything is
+   * destroyed — but `obs-1` is no longer an example of one. ISC-1106 made the
+   * operations console accept its workers' ids as well as its pane titles,
+   * because refusing the id while the title silently orphaned the container was
+   * the trap that left two live runs for one worker, twice. So the refusal is
+   * re-pinned on a name no console builds.
+   */
   test("the measured case refuses, naming what operations does hold", () => {
-    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-1")).toThrow(
+    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-9")).toThrow(
       /not a pane this console plans/,
     );
-    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-1")).toThrow(/observer/);
+    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-9")).toThrow(/observer/);
+  });
+
+  /**
+   * ISC-1106. `--restart obs-1` used to be refused as "not a pane this console
+   * plans" while `--restart observer` respawned the pane and stopped nothing —
+   * so the console had no safe restart path at all. Both spellings now resolve
+   * to the same pane, and the pane knows which worker it runs.
+   */
+  test("operations resolves a pane by worker id as well as by title", () => {
+    const byTitle = plannedPane(OPERATIONS_SPEC, OPTS, "observer");
+    const byWorker = plannedPane(OPERATIONS_SPEC, OPTS, "obs-1");
+    expect(byWorker.title).toBe("observer");
+    expect(byWorker.command).toBe(byTitle.command);
+    expect(byTitle.worker).toBe("obs-1");
+    expect(plannedPane(OPERATIONS_SPEC, OPTS, "ticketing").worker).toBe("tick-1");
+  });
+
+  /** A pane that runs no worker says so, rather than being given its own title. */
+  test("the monitor pane carries no worker", () => {
+    expect(plannedPane(OPERATIONS_SPEC, OPTS, "monitor").worker).toBeUndefined();
+  });
+
+  /** On the agent-square consoles the two spellings coincide, and must stay equal. */
+  test("an agent-square pane's worker is its title", () => {
+    const p = plannedPane(DEVELOPMENT_SPEC, OPTS, "tst-2");
+    expect(p.worker).toBe("tst-2");
+    expect(p.worker).toBe(p.title);
   });
 
   test("a console asked for another console's live worker refuses too", () => {
@@ -417,6 +452,31 @@ describe("every console script hands its --restart ordering to the module", () =
       expect(resolved).toBeLessThan(dispatch);
     });
   }
+
+  /**
+   * ISC-1106 — OPERATIONS ONLY, and the scoping is the point.
+   *
+   * On `review`, `development` and `triage` a pane's title IS its worker id, so
+   * `{ worker: restartFlag }` is accidentally correct there and pinning this
+   * across all four would fail on three consoles that have no defect. Only
+   * `operations` titles its panes by ROLE while running ids, and only it
+   * orphaned containers as a result.
+   *
+   * A SOURCE probe because nothing else can be: `scripts/` is outside
+   * `tsconfig`'s `include` and the scripts are not importable, so
+   * `tsc --listFiles` never names this file and no unit test can call into it.
+   * The defect was invisible for exactly that reason — `{ worker: restartFlag }`
+   * type-checks nowhere and reads fine.
+   */
+  test("scripts/operations hands the modules a WORKER ID, not a pane title", async () => {
+    const src = await source("operations");
+    const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
+    const after = src.slice(branch);
+    expect(after).not.toContain("{ worker: restartFlag }");
+    expect(after).toContain("{ worker: targetWorker }");
+    expect(after).not.toContain('"--worker", restartFlag');
+    expect(after).toContain('"--worker", targetWorker');
+  });
 
   /**
    * ── THE ISC-572 ORDERING, ON EVERY CONSOLE THAT HAS AN ACTOR ───────────────
