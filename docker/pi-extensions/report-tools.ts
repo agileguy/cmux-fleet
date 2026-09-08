@@ -122,23 +122,44 @@
  * an anomaly. It did NOT suppress a queued `followUp`, so it is compatible with
  * the bounded nag of layer 3 (SRD task 4.1, not in this file yet).
  *
- * **Layer 4 is a `pifleet.submit/v1` session entry** (§7.1), written through
- * `pi.appendEntry`, which *"does NOT participate in LLM context"*
- * (`types.d.ts:871`). Entries land in the session JSONL under `/sessions`,
- * bind-mounted read-write from the run tree (`render.ts:513`), so the host can
- * read it with no new mount and the model never sees it. It exists to split one
- * thing `SweepJoin.claimedSuccess` currently cannot: *the worker never called
- * the tool* and *the worker called it and the write failed* look identical from
- * the absence of a file, and they send an operator to different places.
+ * **Layer 4 is two session entries**, both written through `pi.appendEntry`,
+ * which *"does NOT participate in LLM context"* (`types.d.ts:871`). They land
+ * in the session JSONL under `/sessions`, bind-mounted read-write from the run
+ * tree (`render.ts:513`), so the host can read them with no new mount and the
+ * model never sees either. Together they split one thing
+ * `SweepJoin.claimedSuccess` currently cannot: *the worker never called the
+ * tool* and *the worker called it and the write failed* look identical from the
+ * absence of a file, and they send an operator to different places.
  *
- * **The entry is diagnosis and may not become authority** — §6.5 property 3
- * lists where it may appear (an actor log, `pifleet monitor`,
- * `claimedSuccess`'s message) and where it may not (a verdict, a coverage
+ * - **`pifleet.submit/v1` on delivery** (§7.1, task 3.2).
+ * - **`pifleet.no_submit/v1` at `agent_end` when nothing was delivered** (§7.2,
+ *   task 3.3), carrying the epoch's `tool_calls`. That field is the one that
+ *   separates defect 5's two measured shapes — a `gpt-oss-20b` that ran one
+ *   `ls` and quit from a `gemma-4-26b` that made 150 `kubectl` calls — and an
+ *   operator should not have to open a transcript to tell them apart. It also
+ *   carries `nagged`, which belongs to layer 3 and is therefore `false` on
+ *   every entry this tree can produce; see `EpochTally`.
+ *
+ * **Read those two together and a third case appears, which is the whole
+ * reason the delivered flag is held in memory rather than inferred:** a submit
+ * entry means delivered and recorded, a no_submit entry means nothing was
+ * delivered, and NEITHER entry means delivered with the session write lost.
+ * That third case exists because the append below is wrapped in a `catch` that
+ * swallows — a diagnostic write may not un-deliver a report that landed — so
+ * the absence of a submit entry is NOT proof the tool was never called, and a
+ * `no_submit` inferred from that absence would be a false accusation against a
+ * worker that did its job.
+ *
+ * **Both entries are diagnosis and may not become authority** — §6.5 property 3
+ * lists where they may appear (an actor log, `pifleet monitor`,
+ * `claimedSuccess`'s message) and where they may not (a verdict, a coverage
  * count, an incident transition, a notification). This file holds up its half
- * of that fence by putting nothing in the entry worth branching on: host state,
- * a byte count measured from the file that landed, and the paths the envelope
- * already claims. No `summary`, no `notes`, nothing the model wrote. §12's
- * authority anti-criterion is a host-side guard and is not asserted here.
+ * of that fence by putting nothing in either entry worth branching on: host
+ * state, a byte count measured from the file that landed, the paths the
+ * envelope already claims, and a count of calls this file made itself. No
+ * `summary`, no `notes`, nothing the model wrote, and nothing read back out of
+ * `AgentEndEvent.messages`. §12's authority anti-criterion is a host-side guard
+ * and is not asserted here.
  *
  * ## The size of `report.content` is NOT capped here, deliberately
  *
@@ -162,16 +183,27 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  * import would make this file uncheckable here and untestable anywhere.
  *
  * SRD §7.6 names the declared surface as `registerTool`, `on("agent_end")`,
- * `sendUserMessage` and `appendEntry`. `registerTool` and `appendEntry` have
- * callers — the second as of SRD task 3.2, which is the `pifleet.submit/v1`
- * entry the header describes. `on("agent_end")` and `sendUserMessage` still do
- * not: `pifleet.no_submit/v1` is task 3.3 and the bounded nag is 4.1. They are
- * declared now rather than twice more later because §7.6 specifies the surface
- * as one thing and because all four were read out of the real `.d.ts` on
- * 2026-09-08 rather than copied from the document:
+ * `sendUserMessage` and `appendEntry`. As of SRD task 3.3 three of the four
+ * have callers: `registerTool`, `appendEntry` (the `pifleet.submit/v1` entry of
+ * task 3.2 and the `pifleet.no_submit/v1` entry of 3.3) and `on`.
+ * **`sendUserMessage` still has none** — it is the bounded nag, SRD task 4.1,
+ * and it is declared here rather than added later because §7.6 specifies the
+ * surface as one thing.
+ *
+ * **`"tool_call"` is a FIFTH member and §7.6 does not name it.** Task 3.3
+ * requires `pifleet.no_submit/v1` to carry the epoch's tool-call count and
+ * §7.6's four give no way to observe a tool call. The alternative inside the
+ * declared surface is `AgentEndEvent.messages` (`types.d.ts:507-510`), and it
+ * is wrong rather than merely awkward: that array is the whole SESSION's
+ * retained transcript, spanning every epoch a long-lived worker has served and
+ * shortened by compaction, so counting it answers *"how many tool calls are
+ * still in context"* — silently, and with nothing to notice. The deviation is
+ * flagged rather than hidden; the SRD is the orchestrator's to amend.
+ *
+ * All five were read out of the real `.d.ts` on 2026-09-08 rather than copied
+ * from the document, in `pifleet/pi-worker:0.79.6-base-b722edcf4699`:
  * `dist/core/extensions/types.d.ts:840` (`registerTool`), `:824` (`agent_end`),
- * `:867` (`sendUserMessage`), `:871` (`appendEntry`), in
- * `pifleet/pi-worker:0.79.6-base-b722edcf4699`.
+ * `:835` (`tool_call`), `:867` (`sendUserMessage`), `:871` (`appendEntry`).
  *
  * The declaration is a SUBSET, so it cannot drift into claiming Pi has a method
  * it does not — only into failing to mention one this file never calls.
@@ -180,7 +212,20 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  */
 export interface ExtensionAPI {
   registerTool(tool: ToolDefinitionLike): void;
-  on(event: "agent_end", handler: (...args: unknown[]) => unknown): void;
+  /**
+   * Both events take Pi's `ExtensionHandler<E, R>` shape — `(event, ctx) =>`
+   * (`types.d.ts:804`) — and both handlers here ignore the event entirely, so
+   * it is declared `unknown` rather than narrowed per event. `ctx` is not
+   * ignored: `agent_end` reads the worker id off it, exactly as `execute` does.
+   *
+   * The return is `void` because on `tool_call` it must be: `emitToolCall`
+   * blocks the tool on any truthy result carrying `block`
+   * (`runner.js:648-653`, `types.d.ts:739-743`).
+   */
+  on(
+    event: "agent_end" | "tool_call",
+    handler: (event: unknown, ctx: ExtensionContextLike) => void,
+  ): void;
   sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
   appendEntry(customType: string, data?: unknown): void;
 }
@@ -844,6 +889,175 @@ export function composeSubmitEntry(
 }
 
 /**
+ * §7.2's session entry, used as BOTH `appendEntry`'s `customType` and the
+ * entry's own `schema` field, for the reason `SUBMIT_ENTRY_SCHEMA` gives.
+ */
+export const NO_SUBMIT_ENTRY_SCHEMA = "pifleet.no_submit/v1";
+
+/**
+ * What this extension knows about one epoch, held in memory for its duration.
+ *
+ * **`delivered` is the whole design of task 3.3 and it is worth saying why it
+ * is a FLAG rather than an inference.** The obvious implementation of "nothing
+ * was delivered" is to look for a `pifleet.submit/v1` entry and, finding none,
+ * conclude the tool was never called. It is wrong, and the counter-example is
+ * one screen down in this same file: the `appendEntry` on the delivery path is
+ * wrapped in a `try/catch` that SWALLOWS, deliberately, because *"a diagnostic
+ * write may not un-deliver a report that landed"*. **So a failed session write
+ * produces a delivered report with no entry**, and absence is therefore not
+ * proof the tool was never called. An implementation that inferred backwards
+ * would file `pifleet.no_submit/v1` against a worker whose `result.json` is on
+ * disk, complete and correct — a false accusation, which is the one way a
+ * diagnostic record is worse than no record.
+ *
+ * The flag is set by `submit_report` itself, before the entry is attempted. It
+ * cannot be wrong about a delivery it performed.
+ *
+ * **`nagged` is layer 3's field and layer 3 is SRD phase 4.** It lives here,
+ * beside the count, because it is per-epoch state of exactly the same kind:
+ * nothing in this tree sets it, so every entry written today reads
+ * `nagged: false`, which is a MEASUREMENT of an epoch that was not nagged and
+ * not a placeholder for one. Phase 4 adds a `noteNag` to the tracker and
+ * changes no signature, no entry shape and no call site here.
+ */
+export interface EpochTally {
+  taskId: string;
+  epoch: number;
+  /** Calls the model MADE this epoch, counted before execution. */
+  toolCalls: number;
+  /** Whether `submit_report` reached the end of a write for this epoch. */
+  delivered: boolean;
+  /** Whether layer 3 re-prompted this epoch. Always false until SRD task 4.1. */
+  nagged: boolean;
+}
+
+/** §7.2's session entry — seven fields, and the reason there is no eighth is in `composeNoSubmitEntry`. */
+export interface NoSubmitEntry {
+  schema: string;
+  task_id: string;
+  epoch: number;
+  worker: string;
+  tool_calls: number;
+  nagged: boolean;
+  at: string;
+}
+
+/**
+ * The live epoch's tally, and the two things that update it.
+ *
+ * ONE slot, not a map. A worker serves one task at a time — `/policy/task`
+ * names exactly one — so epochs are sequential and a map would be an unbounded
+ * structure in a process designed to run for weeks, holding rows nothing will
+ * read again. The slot is replaced whenever a different epoch is seen, which is
+ * also what makes the count and the delivery reset together: they describe the
+ * same epoch or they describe nothing.
+ *
+ * The consequence a caller must handle is that the slot goes STALE. It holds
+ * the last epoch this extension saw, which after a settle and a new dispatch is
+ * no longer the live one — so `agent_end` reads `/policy/task` for which epoch
+ * it is talking about and consults the tally only when the two agree.
+ */
+export interface EpochTracker {
+  noteToolCall(live: LiveTask): void;
+  noteDelivery(live: LiveTask): void;
+  /** A snapshot of the current tally, or null if no epoch has been seen. */
+  current(): EpochTally | null;
+}
+
+/**
+ * The zero state of an epoch, defined once.
+ *
+ * Used by the tracker for a newly seen epoch AND by `agent_end` for an epoch it
+ * observed nothing about — the worker that was dispatched and made no tool call
+ * at all. Those two must be the same shape: if they drifted, a worker that did
+ * nothing and a worker whose first call had just been counted would produce
+ * differently shaped records of the same silence.
+ */
+export function emptyTally(live: LiveTask): EpochTally {
+  return { taskId: live.taskId, epoch: live.epoch, toolCalls: 0, delivered: false, nagged: false };
+}
+
+/**
+ * Is this tally about that task?
+ *
+ * Task id AND epoch, because neither alone identifies an allocation:
+ * `dispatch-trigger.ts` records that *"`epoch` alone is not unique across
+ * workers"*, and a task id alone re-fires when the same task is re-staged.
+ */
+function sameEpoch(tally: EpochTally, live: LiveTask): boolean {
+  return tally.taskId === live.taskId && tally.epoch === live.epoch;
+}
+
+export function createEpochTracker(): EpochTracker {
+  let tally: EpochTally | null = null;
+  const slotFor = (live: LiveTask): EpochTally => {
+    if (tally === null || !sameEpoch(tally, live)) tally = emptyTally(live);
+    return tally;
+  };
+  return {
+    noteToolCall: (live) => void (slotFor(live).toolCalls += 1),
+    noteDelivery: (live) => void (slotFor(live).delivered = true),
+    // A COPY. The tally decides whether a worker is accused of delivering
+    // nothing; a caller able to reach in and set `delivered` would be editing
+    // the evidence, and the edit would leave no trace.
+    current: () => (tally === null ? null : { ...tally }),
+  };
+}
+
+/**
+ * `/policy/task`'s live task, or null — and never a throw.
+ *
+ * Both callers are diagnostics running inside Pi's event handlers, where a
+ * throw is not a report of a problem but a NEW problem: on the `tool_call` path
+ * it blocks the tool outright (see `register`), and on `agent_end` it becomes an
+ * `emitError` banner about a record nobody asked for. An unreadable, absent or
+ * malformed policy all mean the same thing here — there is no epoch to attribute
+ * anything to — so they collapse to null rather than to four messages no model
+ * and no operator will ever see.
+ */
+export function readLiveTaskQuietly(policyPath: string): LiveTask | null {
+  try {
+    return parseTaskPolicy(readFileSync(policyPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compose the `pifleet.no_submit/v1` entry from a tally that already happened.
+ *
+ * Takes an `EpochTally` rather than the event, and that is the same design
+ * `composeSubmitEntry` has: every field is host state or a count this file kept
+ * itself. There is no path from `AgentEndEvent.messages` — or from any model
+ * output — to here, so no later edit can put a worker's prose in a session entry
+ * without first changing this signature. §6.5 property 3 and `Docs/SRD.md`
+ * §12.6 are the same rule stated twice.
+ *
+ * **`delivered` is a gate, not a field.** The entry is written only when it is
+ * false, so carrying it would put a constant on every record ever produced — a
+ * column that says nothing and invites a later reader to branch on it as though
+ * it varied.
+ *
+ * **`at` is a parameter**, as `composeSubmitEntry`'s is, so the mapping can be
+ * asserted against exact values rather than a regex.
+ */
+export function composeNoSubmitEntry(
+  tally: EpochTally,
+  worker: string,
+  at: string,
+): NoSubmitEntry {
+  return {
+    schema: NO_SUBMIT_ENTRY_SCHEMA,
+    task_id: tally.taskId,
+    epoch: tally.epoch,
+    worker,
+    tool_calls: tally.toolCalls,
+    nagged: tally.nagged,
+    at,
+  };
+}
+
+/**
  * What the model is told about the tool.
  *
  * The description names the four fields it must NOT try to supply, because the
@@ -875,6 +1089,13 @@ export const SUBMIT_REPORT_DESCRIPTION =
  * of the context Pi hands to the call.
  */
 export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS): void {
+  /*
+   * Per-`register` rather than module-scope, as `dispatch-trigger.ts` holds its
+   * timer: a module-level slot would be shared by every `register` in a test
+   * file, so one test's delivered epoch would silence the next test's.
+   */
+  const tracker = createEpochTracker();
+
   pi.registerTool({
     name: "submit_report",
     label: "Submit report",
@@ -888,6 +1109,18 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
       // on a refused call would point an operator at the filesystem for a
       // problem that was in the call.
       const outcome = submitReport(params, worker, { ...mounts, workdir: ctx.cwd });
+      /*
+       * **This line is BEFORE the try, and that is the point of task 3.3.**
+       *
+       * The report has landed. Layer 4's other half decides "nothing was
+       * delivered" from this flag and never from the absence of the entry
+       * below, because the `catch` on that entry swallows: a failed session
+       * write leaves a delivered report with no `pifleet.submit/v1` record, and
+       * a `no_submit` inferred from that absence would be a false accusation
+       * against a worker that did its job. Moved inside the `try` — or after
+       * it — this line stops running in exactly the case it exists for.
+       */
+      tracker.noteDelivery({ taskId: outcome.taskId, epoch: outcome.epoch });
       try {
         pi.appendEntry(
           SUBMIT_ENTRY_SCHEMA,
@@ -901,10 +1134,18 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
         // measured what follows: every model retries once, re-delivers the
         // same envelope, throws again, and ends the turn believing it could
         // not report. There is no second channel to report this on — the
-        // channel is what failed — so it is swallowed, and the missing entry
-        // is itself the evidence, indistinguishable from a worker that never
-        // called the tool. That conflation is the accepted cost, and it is the
-        // narrower one: the file on disk is the thing the host decides on.
+        // channel is what failed — so it is swallowed.
+        //
+        // **Until task 3.3 the cost of that swallow was a conflation**: the
+        // missing entry was the only evidence, and it looked exactly like a
+        // worker that never called the tool. It no longer does. `noteDelivery`
+        // above ran BEFORE this `try`, so `agent_end` knows this epoch was
+        // delivered and writes no `pifleet.no_submit/v1`. The three cases are
+        // now distinct in the session: a submit entry means delivered and
+        // recorded; a no_submit entry means nothing was delivered; NEITHER
+        // entry means delivered with the session write lost — which is this
+        // branch, and which is the case a host reader must not mistake for
+        // silence. The file on disk remains the thing the host decides on.
       }
       return {
         content: [
@@ -920,5 +1161,107 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
         terminate: true,
       };
     },
+  });
+
+  /*
+   * The count `pifleet.no_submit/v1` carries, and the one hard constraint on
+   * gathering it: **THIS HANDLER MUST NEVER THROW AND MUST NEVER RETURN A
+   * VALUE.** Measured in `pifleet/pi-worker:0.79.6-base-b722edcf4699` on
+   * 2026-09-08, because the two ways to get it wrong are silent:
+   *
+   * - `dist/core/extensions/runner.js:639-657` — `emitToolCall` has NO
+   *   `try/catch`, unlike the general `emit` at `:522-551`; and
+   *   `dist/core/agent-session.js:184-197` catches and RE-THROWS with the
+   *   message *"Extension failed, blocking execution"*. A throwing counter
+   *   stops the worker running tools at all.
+   * - `emitToolCall` returns early on any truthy result whose `block` is set
+   *   (`types.d.ts:739-743`), so a handler that returned something shaped like
+   *   a veto would be one.
+   *
+   * A diagnostic that can stop a worker calling `read` is a worse bug than
+   * every failure it exists to describe. Hence the total `catch` and the bare
+   * return.
+   *
+   * `/policy/task` is read PER CALL rather than cached, because it is rewritten
+   * in place at every dispatch with nothing coordinating that against work in
+   * flight (`task-policy.ts:33-41`) — the same hazard `SubmitOutcome` carries
+   * its own identity out to avoid. The cost is one `readFileSync` of a
+   * two-line file, in page cache, at model speed; `dispatch-trigger.ts` polls a
+   * file of the same class twice a second for the life of the container.
+   */
+  pi.on("tool_call", () => {
+    try {
+      const live = readLiveTaskQuietly(mounts.policyPath);
+      if (live !== null) tracker.noteToolCall(live);
+    } catch {
+      // **This catch is the OUTER of two and no test can redden it alone.**
+      // Measured with the mutation battery: removing `readLiveTaskQuietly`'s
+      // own swallow leaves the suite green, because this one holds; removing
+      // both reddens two tests. Nothing else in the body can throw today —
+      // `noteToolCall` is arithmetic on an object — so this is a guard against
+      // the NEXT statement someone adds here, and it is kept for the reason the
+      // block comment above gives: "in principle unreachable" is not a standard
+      // worth applying when the measured penalty is a worker that cannot call
+      // `read`.
+    }
+  });
+
+  /*
+   * Layer 4's other half (§6.3, task 3.3): non-delivery becomes a fact.
+   *
+   * **The live task decides WHICH epoch this is about; the tally supplies only
+   * the count and the delivery.** The tracker holds one slot, so after a settle
+   * and a new dispatch it still describes the PREVIOUS epoch — and one that may
+   * have been delivered. Trusting it unchecked would return early and let the
+   * new epoch's silence go unrecorded, which is the exact failure this handler
+   * exists to remove, reintroduced by the mechanism meant to prevent it.
+   *
+   * Four outcomes, in order:
+   *
+   * - **No live task** — `<none>`, or an unreadable mount. `/policy/task` is
+   *   reset at settle (`supervisor/index.ts:1075`, whose own comment says work
+   *   between settle and the next dispatch *"belongs to NO task"*), so this is
+   *   the idle worker §6.3 says must be left alone. There is no task id and no
+   *   epoch, so §7.2's shape cannot be composed and none is.
+   * - **The tally is about this epoch and says delivered** — nothing. §11 Q3
+   *   measured `agent_end` firing 2-4ms after a terminating tool result, so
+   *   this is the happy path of every delivery in the fleet and its silence is
+   *   a property, not the absence of one.
+   * - **The tally is about this epoch and says otherwise** — the entry, with the
+   *   epoch's cumulative count.
+   * - **The tally is about some other epoch, or there is none** — an
+   *   `emptyTally`, and the entry reads `tool_calls: 0`. That is the worker
+   *   that was dispatched and made no move at all: the most severe shape defect
+   *   5 has, and the one least likely to be guessed at, so it gets a record
+   *   rather than silence.
+   *
+   * ONE ENTRY PER `agent_end`, not one per epoch, and the count is cumulative
+   * across the epoch. Q1 measured a phase-4 `sendUserMessage(followUp)` from
+   * here landing as a `queue_update` that EXTENDS the turn, so a nagged epoch
+   * ends more than once; an entry written only at the first `agent_end` could
+   * never carry 150, and `tool_calls` would lose exactly the discrimination
+   * §7.2 built it for. The last entry for an epoch is that epoch's final word.
+   *
+   * The `catch` is narrower in purpose than the one above. `emit`
+   * (`runner.js:530-548`) already catches a throwing handler, so this is not
+   * what keeps the agent loop alive — Pi does that. What it stops is
+   * `emitError` raising a banner about a purely diagnostic write. A record that
+   * nothing was delivered is not worth an error dialog; its absence is its own
+   * evidence.
+   */
+  pi.on("agent_end", (_event, ctx) => {
+    try {
+      const live = readLiveTaskQuietly(mounts.policyPath);
+      if (live === null) return;
+      const tracked = tracker.current();
+      const tally = tracked !== null && sameEpoch(tracked, live) ? tracked : emptyTally(live);
+      if (tally.delivered) return;
+      pi.appendEntry(
+        NO_SUBMIT_ENTRY_SCHEMA,
+        composeNoSubmitEntry(tally, ctx.sessionManager.getSessionId(), new Date().toISOString()),
+      );
+    } catch {
+      // See above: a failed diagnostic write is not worth an error banner.
+    }
   });
 }

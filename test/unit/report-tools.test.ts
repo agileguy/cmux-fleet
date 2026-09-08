@@ -52,10 +52,14 @@ import register, {
   artifactPathProblem,
   capProblem,
   composeEnvelope,
+  composeNoSubmitEntry,
   composeSubmitEntry,
+  createEpochTracker,
   DEFAULT_MOUNTS,
+  emptyTally,
   filenameProblem,
   MAX_ENTRIES,
+  NO_SUBMIT_ENTRY_SCHEMA,
   OUTBOX_ROOT,
   parseTaskPolicy,
   readTaskPolicy,
@@ -67,6 +71,7 @@ import register, {
   TASK_POLICY_NONE,
   TASK_POLICY_PATH,
   taskPaths,
+  type EpochTally,
   type ExtensionAPI,
   type ExtensionContextLike,
   type Roots,
@@ -154,41 +159,93 @@ interface RecordedEntry {
   data: unknown;
 }
 
+/** One `pi.on` subscription, as a recording `pi` saw it. */
+interface RecordedHandler {
+  event: string;
+  handler: (event: unknown, ctx: ExtensionContextLike) => unknown;
+}
+
+/**
+ * The event objects Pi really passes, cut down to what this file's handlers
+ * touch — which is nothing.
+ *
+ * Both handlers ignore their payload entirely: the count comes from
+ * `/policy/task` and the tracker, never from `event.toolName`, and the entry
+ * comes from the tracker, never from `AgentEndEvent.messages`. The payloads are
+ * here so `fire` passes something of the right SHAPE, and their being ignored is
+ * the point — a handler that read `messages` would be counting the retained
+ * transcript rather than this epoch (see the header of the no-submit block).
+ */
+const EVENT_PAYLOADS: Record<"agent_end" | "tool_call", unknown> = {
+  agent_end: { type: "agent_end", messages: [] },
+  tool_call: { type: "tool_call", toolName: "ls", toolCallId: "call-ls-1", input: {} },
+};
+
 /**
  * A `pi` that records instead of running one.
  *
- * Module-scope rather than local to `describe("registration")` because layer 2
- * and layer 4 both drive `execute` and both need it, and because `entries` is
- * the only window either has: `pi.appendEntry` writes into the session JSONL,
- * which is Pi's to own, so the recording stub IS the assertion surface.
+ * Module-scope rather than local to `describe("registration")` because layers 2
+ * and 4 both drive `execute` and both need it, and because `entries` is the only
+ * window either has: `pi.appendEntry` writes into the session JSONL, which is
+ * Pi's to own, so the recording stub IS the assertion surface. `handlers` is the
+ * same window onto `pi.on`, which is how the `agent_end` and `tool_call`
+ * subscriptions are reached at all.
  *
  * `appendEntry` may be swapped for one that throws — see the delivery-survives
- * test at the bottom of this file for why that case is not hypothetical.
+ * tests for why that case is not hypothetical, and note that the swap is
+ * per-`customType` in one of them, because a stub that threw on everything could
+ * not tell "the entry was never composed" from "the entry could not be written".
  */
-function stubPi(): { pi: ExtensionAPI; tools: ToolDefinitionLike[]; entries: RecordedEntry[] } {
+function stubPi(appendEntry?: ExtensionAPI["appendEntry"]): {
+  pi: ExtensionAPI;
+  tools: ToolDefinitionLike[];
+  entries: RecordedEntry[];
+  handlers: RecordedHandler[];
+} {
   const tools: ToolDefinitionLike[] = [];
   const entries: RecordedEntry[] = [];
+  const handlers: RecordedHandler[] = [];
   const pi: ExtensionAPI = {
     registerTool: (tool) => void tools.push(tool),
-    on: () => undefined,
+    on: (event, handler) => void handlers.push({ event, handler }),
     sendUserMessage: () => undefined,
-    appendEntry: (customType, data) => void entries.push({ customType, data }),
+    appendEntry: appendEntry ?? ((customType, data) => void entries.push({ customType, data })),
   };
-  return { pi, tools, entries };
+  return { pi, tools, entries, handlers };
 }
 
-/** `register` against a fixture, plus the `ctx` `execute` is really handed. */
-function registered(f: Fixture): {
+/** `register` against a fixture, plus the `ctx` `execute` and the handlers are really handed. */
+function registered(
+  f: Fixture,
+  appendEntry?: ExtensionAPI["appendEntry"],
+): {
   tool: ToolDefinitionLike;
   entries: RecordedEntry[];
   ctx: ExtensionContextLike;
+  fire(event: "agent_end" | "tool_call"): unknown;
 } {
-  const { pi, tools, entries } = stubPi();
+  const { pi, tools, entries, handlers } = stubPi(appendEntry);
   register(pi, { policyPath: f.roots.policyPath, outboxRoot: f.outbox });
+  const ctx: ExtensionContextLike = {
+    cwd: f.roots.workdir ?? "",
+    sessionManager: { getSessionId: () => WORKER },
+  };
   return {
     tool: tools[0]!,
     entries,
-    ctx: { cwd: f.roots.workdir ?? "", sessionManager: { getSessionId: () => WORKER } },
+    ctx,
+    fire: (event) => {
+      const matching = handlers.filter((r) => r.event === event);
+      // Without this line every assertion driven through `fire` would be green
+      // by VACUITY the moment a subscription was dropped: no handler runs, no
+      // entry appears, and "no entry appears" is what several of the tests below
+      // are asserting. Unsubscribing `agent_end` is a one-word deletion and it
+      // must not be able to make this file greener.
+      expect(matching.length).toBeGreaterThan(0);
+      let last: unknown;
+      for (const r of matching) last = r.handler(EVENT_PAYLOADS[event], ctx);
+      return last;
+    },
   };
 }
 
@@ -663,6 +720,20 @@ describe("registration", () => {
   });
 
   /**
+   * The two subscriptions layer 4 needs, and no third.
+   *
+   * `agent_end` is where non-delivery becomes a record and `tool_call` is the
+   * only source of the count that record carries. A third subscription would be
+   * a hook with no reader — and `session_start`/`session_shutdown` in particular
+   * belong to `dispatch-trigger.ts`, which owns the poll they arm.
+   */
+  test("exactly agent_end and tool_call are subscribed", () => {
+    const { pi, handlers } = stubPi();
+    register(pi);
+    expect(handlers.map((h) => h.event).sort()).toEqual(["agent_end", "tool_call"]);
+  });
+
+  /**
    * The `ctx` seam, which nothing else here reaches.
    *
    * `render.ts:203` launches every worker with `--session-id <w.id>`, so
@@ -1042,5 +1113,599 @@ describe("composeSubmitEntry", () => {
       "2026-09-07T23:41:02Z",
     );
     expect(JSON.stringify(entry)).not.toContain("/outbox/");
+  });
+});
+
+/**
+ * The per-epoch tally, which is where "nothing was delivered" is decided.
+ *
+ * **Why a flag and not an inference.** The obvious implementation of layer 4's
+ * other half is to look for a `pifleet.submit/v1` entry and, finding none,
+ * conclude the tool was never called. It is wrong, and the reason is three
+ * screens up in `report-tools.ts`: the `appendEntry` on the delivery path is
+ * wrapped in a `try/catch` that SWALLOWS, deliberately, because *"a diagnostic
+ * write may not un-deliver a report that landed"*. So a failed session write
+ * produces a DELIVERED REPORT WITH NO ENTRY, and an implementation that
+ * inferred backwards would file `pifleet.no_submit/v1` against a worker that
+ * did its job — the one way a diagnostic record can be worse than no record.
+ *
+ * The flag is set by `submit_report` itself, in memory, before the entry is
+ * attempted. It cannot be wrong about a delivery it performed.
+ *
+ * **Keyed on task id AND epoch.** `dispatch-trigger.ts` makes this exact
+ * argument for its own trigger key — *"`epoch` alone is not unique across
+ * workers"* — and the tests below use two task ids at the SAME epoch number so
+ * an implementation keyed on the number alone cannot pass.
+ */
+describe("createEpochTracker — the per-epoch tally", () => {
+  const twelve = { taskId: TASK_ID, epoch: EPOCH };
+  const thirteen = { taskId: TASK_ID, epoch: EPOCH + 1 };
+  /** Same epoch NUMBER, different task. The asymmetry the key must survive. */
+  const otherTaskSameEpoch = { taskId: "T-sweep-9-collate", epoch: EPOCH };
+
+  test("a fresh tracker has seen no epoch at all", () => {
+    expect(createEpochTracker().current()).toBeNull();
+  });
+
+  test("tool calls accumulate across the epoch", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    t.noteToolCall(twelve);
+    t.noteToolCall(twelve);
+    expect(t.current()).toEqual({ ...emptyTally(twelve), toolCalls: 3 });
+  });
+
+  /**
+   * The zero state has ONE definition, and this is what proves it.
+   *
+   * `emptyTally` is used by the tracker for a newly seen epoch and by the
+   * `agent_end` handler for an epoch it observed nothing about — the
+   * dispatched-and-did-nothing case. If those two drifted apart, a worker that
+   * made no tool calls and a worker whose first tool call had just been counted
+   * would be described by differently shaped records.
+   */
+  test("a newly tracked epoch is exactly the empty tally", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    expect(t.current()).toEqual({ ...emptyTally(twelve), toolCalls: 1 });
+    expect(emptyTally(twelve)).toEqual({
+      taskId: TASK_ID,
+      epoch: EPOCH,
+      toolCalls: 0,
+      delivered: false,
+      nagged: false,
+    });
+  });
+
+  test("a delivery marks the epoch, and a later tool call does not unmark it", () => {
+    const t = createEpochTracker();
+    t.noteDelivery(twelve);
+    expect(t.current()?.delivered).toBe(true);
+    t.noteToolCall(twelve);
+    expect(t.current()).toEqual({ ...emptyTally(twelve), toolCalls: 1, delivered: true });
+  });
+
+  test("a delivery for an unseen epoch starts the tally rather than being dropped", () => {
+    const t = createEpochTracker();
+    t.noteDelivery(twelve);
+    expect(t.current()).toEqual({ ...emptyTally(twelve), delivered: true });
+  });
+
+  /**
+   * A new epoch inherits NOTHING — not the count, and above all not the
+   * delivery. Carrying `delivered` forward would silence the very next epoch
+   * that reported nothing, which is the failure this whole task exists to make
+   * visible.
+   */
+  test("a new epoch starts fresh and inherits neither the count nor the delivery", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    t.noteToolCall(twelve);
+    t.noteDelivery(twelve);
+    t.noteToolCall(thirteen);
+    expect(t.current()).toEqual({ ...emptyTally(thirteen), toolCalls: 1 });
+  });
+
+  test("a different task at the same epoch number is a different epoch", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    t.noteDelivery(twelve);
+    t.noteToolCall(otherTaskSameEpoch);
+    expect(t.current()).toEqual({ ...emptyTally(otherTaskSameEpoch), toolCalls: 1 });
+  });
+
+  /**
+   * `current()` hands out a copy.
+   *
+   * The tally is the thing that decides whether a worker is accused of
+   * delivering nothing. A caller that could reach in and set `delivered` — or
+   * `toolCalls` — would be editing the evidence, and the edit would be
+   * invisible.
+   */
+  test("current() is a snapshot, so a reader cannot edit the tally", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    const snapshot = t.current();
+    expect(snapshot).not.toBeNull();
+    (snapshot as EpochTally).delivered = true;
+    (snapshot as EpochTally).toolCalls = 99;
+    expect(t.current()).toEqual({ ...emptyTally(twelve), toolCalls: 1 });
+  });
+});
+
+/**
+ * `composeNoSubmitEntry` — §7.2's shape, on its own.
+ *
+ * `at` is a parameter for the reason `composeSubmitEntry`'s is: a value a test
+ * cannot fix is a value a test can only match with a regex. Everything else
+ * comes off the tally, and that is the design — there is no path from a
+ * `SubmitReportParams` to this function, so no later edit can put a model's
+ * prose in a session entry without first changing this signature. §6.5's fence
+ * and `Docs/SRD.md` §12.6 are the same rule said twice.
+ */
+describe("composeNoSubmitEntry", () => {
+  test("§7.2's seven fields, and no eighth", () => {
+    const entry = composeNoSubmitEntry(
+      { taskId: TASK_ID, epoch: EPOCH, toolCalls: 150, delivered: false, nagged: true },
+      WORKER,
+      "2026-09-07T23:44:19Z",
+    );
+    expect(entry).toEqual({
+      schema: "pifleet.no_submit/v1",
+      task_id: TASK_ID,
+      epoch: EPOCH,
+      worker: WORKER,
+      tool_calls: 150,
+      nagged: true,
+      at: "2026-09-07T23:44:19Z",
+    });
+    expect(NO_SUBMIT_ENTRY_SCHEMA).toBe("pifleet.no_submit/v1");
+  });
+
+  /**
+   * `nagged` is CARRIED, not written.
+   *
+   * Layer 3 is SRD phase 4 and nothing in this tree sends a nag, so every entry
+   * the wiring below produces reads `nagged: false`. That is a measurement of
+   * the current state and not a placeholder, and this pair of assertions is what
+   * makes the difference checkable: a `nagged: false` hard-coded into the
+   * composer would satisfy every wiring test in this file and would silently
+   * survive phase 4 wiring a real nag onto the tally beside it.
+   */
+  test("nagged comes off the tally, so phase 4 changes no signature here", () => {
+    const tally: EpochTally = {
+      taskId: TASK_ID,
+      epoch: EPOCH,
+      toolCalls: 1,
+      delivered: false,
+      nagged: false,
+    };
+    expect(composeNoSubmitEntry(tally, WORKER, "2026-09-07T23:44:19Z").nagged).toBe(false);
+    expect(composeNoSubmitEntry({ ...tally, nagged: true }, WORKER, "2026-09-07T23:44:19Z").nagged)
+      .toBe(true);
+  });
+
+  /**
+   * `delivered` is not a field, and it must not become one.
+   *
+   * The entry is only ever written when `delivered` is false, so a `delivered`
+   * key would be a constant `false` on every record ever produced — a column
+   * that says nothing, and an invitation for a later reader to branch on it as
+   * if it varied.
+   */
+  test("the tally's delivered flag is a gate, not a field", () => {
+    const entry = composeNoSubmitEntry(
+      { taskId: TASK_ID, epoch: EPOCH, toolCalls: 0, delivered: false, nagged: false },
+      WORKER,
+      "2026-09-07T23:44:19Z",
+    );
+    expect(Object.keys(entry)).not.toContain("delivered");
+  });
+});
+
+/**
+ * Layer 4's other half (SRD §6.3, task 3.3) — `pifleet.no_submit/v1`.
+ *
+ * **What this entry is for, in one sentence:** an operator should be able to
+ * tell the `gpt-oss-20b` that ran one `ls` and quit from the `gemma-4-26b` that
+ * made 150 `kubectl` calls, without opening a transcript (§7.2). Those are
+ * different failures with different fixes, and `tool_calls` is the only field
+ * that separates them.
+ *
+ * **Where the count comes from, and where it deliberately does not.** It is
+ * accumulated from `pi.on("tool_call")`, which fires once per call the model
+ * MADE — before execution, so a refused or blocked call still counts, which is
+ * right: 150 failing `kubectl` calls are 150 calls. The tempting alternative is
+ * `AgentEndEvent.messages`, which is inside §7.6's already-declared surface and
+ * is WRONG: that array is the whole session's retained transcript, spanning
+ * every epoch this long-lived worker has served and shortened by compaction. It
+ * would answer "how many tool calls are still in context", silently, and
+ * nothing would ever notice.
+ *
+ * **Why it fires on a delivered turn too, and writes nothing.** SRD §11 Q3
+ * measured `agent_end` firing 2-4ms after a terminating tool result, so the
+ * handler runs on the happy path of every single delivery. Its silence there is
+ * a property, not an absence of one, and it is asserted.
+ *
+ * **The count is cumulative across the epoch, and one entry is written per
+ * `agent_end` that ends undelivered.** Not once per epoch: Q1 measured that a
+ * phase-4 `sendUserMessage(followUp)` from `agent_end` EXTENDS the turn, so an
+ * epoch that gets nagged ends more than once. An entry written only at the first
+ * `agent_end` could never carry 150 — it would carry whatever the count was
+ * before the nag, and the field would lose exactly the discrimination it exists
+ * for. The last entry for an epoch is that epoch's final word.
+ */
+describe("layer 4 — the pifleet.no_submit/v1 session entry", () => {
+  /** The entries one `agent_end` wrote under §7.2's customType. */
+  function noSubmits(entries: RecordedEntry[]): Record<string, unknown>[] {
+    return entries
+      .filter((e) => e.customType === NO_SUBMIT_ENTRY_SCHEMA)
+      .map((e) => e.data as Record<string, unknown>);
+  }
+
+  /**
+   * **The acceptance criterion, quoted:** *"a fixture with three tool calls
+   * asserting `tool_calls: 3`"* (§12, "The layers (D4)"; task 3.3).
+   */
+  test("three tool calls and no report produce one entry reading tool_calls: 3", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f);
+    fire("tool_call");
+    fire("tool_call");
+    fire("tool_call");
+    fire("agent_end");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.customType).toBe("pifleet.no_submit/v1");
+    expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(3);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("§7.2's seven fields, from host state and a count", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    const data = noSubmits(entries)[0] ?? {};
+    expect(Object.keys(data).sort()).toEqual([
+      "at",
+      "epoch",
+      "nagged",
+      "schema",
+      "task_id",
+      "tool_calls",
+      "worker",
+    ]);
+    expect(data["schema"]).toBe("pifleet.no_submit/v1");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The identity is `/policy/task`'s and the session's, exactly as the
+   * envelope's is. `TASK_ID`, `EPOCH` and `WORKER` share no substring, so an
+   * implementation that read the worker off the task id cannot pass by
+   * coincidence.
+   */
+  test("task_id and epoch come from /policy/task and worker from the session", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    const data = noSubmits(entries)[0] ?? {};
+    expect(data["task_id"]).toBe(TASK_ID);
+    expect(data["epoch"]).toBe(EPOCH);
+    expect(data["worker"]).toBe(WORKER);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **`nagged: false`, and it is a fact rather than a stub.**
+   *
+   * Layer 3 — the bounded `agent_end` re-prompt — is SRD task 4.1 and is NOT in
+   * this tree. Nothing calls `sendUserMessage`, so no nag has been sent, so
+   * `false` is what actually happened to this epoch. Phase 4 flips it by marking
+   * the tally when it sends the nag; the composer, the entry shape and this
+   * wiring do not change.
+   *
+   * Note what phase 4 will make of the pair: task 4.2 suppresses the nag for a
+   * zero-tool-call turn, so the `gpt-oss-20b` shape will read
+   * `tool_calls: 1, nagged: false` and the `gemma` shape
+   * `tool_calls: 150, nagged: true`. Two fields, two failures, no transcript.
+   */
+  test("nagged is false, because layer 3 does not exist in this tree", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    expect(noSubmits(entries)[0]?.["nagged"]).toBe(false);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("at is an ISO8601 Z stamp", () => {
+    const f = fixture();
+    const before = Date.now();
+    const { entries, fire } = registered(f);
+    fire("agent_end");
+    const at = noSubmits(entries)[0]?.["at"];
+    expect(typeof at).toBe("string");
+    expect(at as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/);
+    expect(Date.parse(at as string)).toBeGreaterThanOrEqual(before - 1000);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A worker that was dispatched and did LITERALLY NOTHING.
+   *
+   * This is the most severe shape defect 5 has and the one an operator is least
+   * likely to guess at, so it gets a record rather than silence: `tool_calls: 0`
+   * says the model was handed a live task and made no move at all. It is also
+   * the case with no tracker entry — nothing was ever counted — which is why the
+   * handler reads `/policy/task` for the epoch rather than relying on having
+   * seen one.
+   */
+  test("a dispatched worker that made no tool calls is reported with tool_calls: 0", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f);
+    fire("agent_end");
+    expect(noSubmits(entries)).toHaveLength(1);
+    expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(0);
+    expect(noSubmits(entries)[0]?.["task_id"]).toBe(TASK_ID);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **An idle worker is nobody's problem** — §6.3's third constraint.
+   *
+   * `supervisor/index.ts:1075` resets `/policy/task` to `<none>` at settle,
+   * with its own comment saying anything the worker runs between settle and the
+   * next dispatch *"belongs to NO task"*. There is no task id and no epoch to
+   * put in an entry, so §7.2's shape cannot be composed and none is — the shape
+   * forces the answer here rather than a policy choosing it.
+   */
+  test("an idle worker between dispatches is left alone", () => {
+    const idle = fixture(`${TASK_POLICY_NONE}\n0\n`);
+    const { entries, fire } = registered(idle);
+    fire("tool_call");
+    fire("agent_end");
+    expect(entries).toEqual([]);
+    rmSync(idle.dir, { recursive: true, force: true });
+  });
+
+  test("an unmounted policy file produces no entry and no throw", () => {
+    const unmounted = fixture(null);
+    const { entries, fire } = registered(unmounted);
+    expect(() => fire("tool_call")).not.toThrow();
+    expect(() => fire("agent_end")).not.toThrow();
+    expect(entries).toEqual([]);
+    rmSync(unmounted.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The delivered path, which §11 Q3 measured runs on every successful call.
+   *
+   * `agent_end` fires 2-4ms after `submit_report`'s terminating result, so this
+   * handler executes on the happy path of every delivery in the fleet. Writing
+   * a `no_submit` there would accuse every worker that did its job.
+   */
+  test("a delivered epoch writes no no_submit entry", async () => {
+    const f = fixture();
+    const { tool, entries, ctx, fire } = registered(f);
+    await tool.execute("call-1", minimal, undefined, undefined, ctx);
+    fire("agent_end");
+    expect(entries.map((e) => e.customType)).toEqual([SUBMIT_ENTRY_SCHEMA]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **THE ONE THAT MATTERS: a delivery whose session write failed is still a
+   * delivery.**
+   *
+   * `execute` swallows a throwing `appendEntry` on purpose — *"a diagnostic
+   * write may not un-deliver a report that landed"* — so **a failed session
+   * write produces a delivered report with NO `pifleet.submit/v1` entry**. Any
+   * implementation that decided "nothing was delivered" from the absence of that
+   * entry would, in exactly this situation, file `pifleet.no_submit/v1` against
+   * a worker whose `result.json` is sitting on disk, complete and correct. That
+   * is a false accusation, and it is worse than no record at all.
+   *
+   * So the flag is set in memory by `submit_report` itself, BEFORE the entry is
+   * attempted, and this test is the only thing that reddens if it is moved
+   * after — or inside — the `try`. The stub throws only for the submit entry, so
+   * a `no_submit` composed in error would still be recorded and visible; a stub
+   * that threw on everything could not tell a wrong entry from an unwritable
+   * one.
+   */
+  test("a delivery whose session write failed is still a delivery", async () => {
+    const f = fixture();
+    const entries: RecordedEntry[] = [];
+    const { tool, ctx, fire } = registered(f, (customType, data) => {
+      if (customType === SUBMIT_ENTRY_SCHEMA) throw new Error("session store is gone");
+      entries.push({ customType, data });
+    });
+    const result = await tool.execute(
+      "call-1",
+      { status: "partial", summary: "SESSION-STORE-GONE" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect(result.terminate).toBe(true);
+    // The report really did land, which is what makes an accusation false.
+    const env = JSON.parse(readFileSync(join(f.taskDir, "result.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(env["summary"]).toBe("SESSION-STORE-GONE");
+    fire("agent_end");
+    expect(entries).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A REFUSED `submit_report` is not a delivery, and its call still counts.
+   *
+   * The model tried and got a validation error back; nothing reached the
+   * outbox. `tool_call` fires before `execute`, so the attempt is counted —
+   * which is the honest number, and which is what stops a worker that spent its
+   * turn arguing with the schema from looking like a worker that sat still.
+   */
+  test("a refused submit_report leaves the epoch undelivered and counts the attempt", async () => {
+    const f = fixture();
+    const { tool, entries, ctx, fire } = registered(f);
+    fire("tool_call");
+    await expect(
+      tool.execute(
+        "call-1",
+        { ...minimal, artifacts: [{ kind: "file", path: "/etc/passwd" }] },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    ).rejects.toThrow(/outside/);
+    fire("agent_end");
+    expect(noSubmits(entries)).toHaveLength(1);
+    expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(1);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The count is the EPOCH's, not the agent loop's, and the second entry is the
+   * one that proves it.
+   *
+   * This is the shape phase 4 creates: `agent_end` fires, a nag extends the
+   * turn (Q1 — a `followUp` lands as a `queue_update`), the model does more
+   * work, and `agent_end` fires again. If the count reset between loops the
+   * second entry would read 2 instead of 5, and `tool_calls` would be a
+   * per-loop number wearing an epoch's name — which is the field's whole job
+   * lost quietly.
+   */
+  test("a second agent_end in one epoch carries the epoch's cumulative count", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f);
+    fire("tool_call");
+    fire("tool_call");
+    fire("tool_call");
+    fire("agent_end");
+    fire("tool_call");
+    fire("tool_call");
+    fire("agent_end");
+    expect(noSubmits(entries).map((d) => d["tool_calls"])).toEqual([3, 5]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A stale tally must not silence the epoch that is actually live.
+   *
+   * The tracker holds ONE slot. After a delivered epoch settles and a new task
+   * is dispatched, that slot still says "delivered" about the OLD epoch. An
+   * `agent_end` that trusted the slot without checking it names the live task
+   * would return early and the new epoch's silence would go unrecorded — which
+   * is precisely the failure this task exists to make visible, reintroduced by
+   * the mechanism meant to prevent it.
+   *
+   * So the live task decides WHICH epoch the entry names, and the tally is used
+   * only when it is about that same epoch.
+   */
+  test("a delivered previous epoch does not silence the epoch now live", async () => {
+    const f = fixture();
+    const { tool, entries, ctx, fire } = registered(f);
+    await tool.execute("call-1", minimal, undefined, undefined, ctx);
+    // The supervisor's next dispatch: `/policy/task` is rewritten in place.
+    writeFileSync(f.roots.policyPath, `${TASK_ID}\n${EPOCH + 1}\n`);
+    fire("agent_end");
+    expect(noSubmits(entries)).toHaveLength(1);
+    expect(noSubmits(entries)[0]?.["epoch"]).toBe(EPOCH + 1);
+    expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(0);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A tool call belongs to the epoch that was live WHEN IT WAS MADE.
+   *
+   * `/policy/task` is rewritten in place at every dispatch and nothing
+   * coordinates that with a call in flight (`task-policy.ts:33-41`), which is
+   * the same hazard `SubmitOutcome` carries its own `taskId`/`epoch` out to
+   * avoid. Counting against a freshly read policy on each call is what keeps
+   * epoch 13's entry from inheriting epoch 12's work.
+   */
+  test("tool calls made under the previous epoch are not counted against the new one", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f);
+    fire("tool_call");
+    fire("tool_call");
+    writeFileSync(f.roots.policyPath, `${TASK_ID}\n${EPOCH + 1}\n`);
+    fire("tool_call");
+    fire("agent_end");
+    expect(noSubmits(entries)[0]?.["epoch"]).toBe(EPOCH + 1);
+    expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(1);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * The counter must never be the reason a tool did not run.
+ *
+ * **Measured in `pifleet/pi-worker:0.79.6-base-b722edcf4699`, 2026-09-08**, and
+ * this is not the same as the `agent_end` case:
+ *
+ * - `dist/core/extensions/runner.js:639-657` — `emitToolCall` has **no
+ *   `try/catch`**, unlike the general `emit` at `:522-551` which catches per
+ *   handler and routes to `emitError`.
+ * - `dist/core/agent-session.js:184-197` — the caller catches and **RE-THROWS**,
+ *   with the message *"Extension failed, blocking execution"*.
+ *
+ * So a `tool_call` handler that throws BLOCKS THE TOOL. A diagnostic counter
+ * that could stop a worker from running `read` is a worse bug than every failure
+ * it exists to describe, and the two assertions below are the whole of the
+ * defence: it returns nothing, and it does not throw when the mount it reads is
+ * not there. `ToolCallEventResult.block` (`types.d.ts:739-743`) is the other
+ * door into the same failure — `emitToolCall` returns early on any truthy
+ * result carrying `block` — which is why "returns undefined" is asserted rather
+ * than assumed.
+ */
+describe("the tool-call counter never blocks a tool", () => {
+  test("the handler returns undefined, so no result can carry block", () => {
+    const f = fixture();
+    const { fire } = registered(f);
+    expect(fire("tool_call")).toBeUndefined();
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("an unreadable policy mount does not throw out of the handler", () => {
+    const unmounted = fixture(null);
+    const { fire } = registered(unmounted);
+    expect(() => fire("tool_call")).not.toThrow();
+    rmSync(unmounted.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A malformed policy is not an error either — `parseTaskPolicy` returns null
+   * for all four of its cases, and null means "no epoch to count this against",
+   * not "fail".
+   */
+  test("a malformed policy file is counted against nothing, quietly", () => {
+    const malformed = fixture("../other-worker\nlater\n");
+    const { entries, fire } = registered(malformed);
+    expect(() => fire("tool_call")).not.toThrow();
+    fire("agent_end");
+    expect(entries).toEqual([]);
+    rmSync(malformed.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * And the same courtesy at `agent_end`, for a different reason.
+   *
+   * `emit` (`runner.js:530-548`) already catches a throwing handler, so this
+   * wrapper is not what keeps the agent loop alive — Pi does that. What it stops
+   * is `emitError`, which would surface an extension error to the operator about
+   * a purely diagnostic write. A record that nothing was delivered is not worth
+   * an error banner; the missing record is its own evidence.
+   */
+  test("an agent_end whose appendEntry throws does not escape the handler", () => {
+    const f = fixture();
+    const { fire } = registered(f, () => {
+      throw new Error("session store is gone");
+    });
+    expect(() => fire("agent_end")).not.toThrow();
+    rmSync(f.dir, { recursive: true, force: true });
   });
 });
