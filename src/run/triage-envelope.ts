@@ -1311,6 +1311,16 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
        *    and was turned down. The distinction is the whole reason the entry
        *    exists, so overstating it here would have cost more than saying
        *    nothing.
+       *  - **BOTH entries can appear for one epoch, and that is the good case.**
+       *    AMENDED 2026-09-08 by the engineer building Phase 4, against this
+       *    message a second time. Layer 3's nag makes a worker that produced
+       *    nothing produce something: the epoch leaves a `no_submit`
+       *    (`nagged: true`) and then a `submit`. Presented as mutually
+       *    exclusive, that pair reads as a contradiction and an operator has no
+       *    reading for it — so the order is stated instead. **Twice now the
+       *    correction has been that this sentence claimed more than the
+       *    extension does**, which is what naming another module's artifact
+       *    costs: the wording is not checkable from here.
        *  - **The directory is named and the FILENAME is not.** Pi's
        *    `_<worker>.jsonl` convention is `sessionFileSuffix` over in
        *    `supervisor/tui.ts`, a subtree this module may not import
@@ -1326,7 +1336,10 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
           `Look at the worker's transcript, not the cluster: its session JSONL is in ` +
           `${seatTree.sessionsDir}. A pifleet.submit/v1 entry there means the worker DID call ` +
           `submit_report and the write did not land; pifleet.no_submit/v1 means nothing was ` +
-          `delivered for that epoch — the tool was never called, or it was called and REFUSED. Neither entry is read by this sweep — the coverage number is still ` +
+          `delivered for that epoch — the tool was never called, or it was called and REFUSED. ` +
+          `Read an epoch's entries IN ORDER: a submit after a no_submit means the nag worked and ` +
+          `the report landed late, so both appearing is a success, not a contradiction. ` +
+          `Neither entry is read by this sweep — the coverage number is still ` +
           `this host's own count of the files it could open.`,
       );
     }

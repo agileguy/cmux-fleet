@@ -853,8 +853,18 @@ action the lazy action. It does nothing about a model that stops for other reaso
 
 **Layer 3 — PRESSURE. A bounded `agent_end` re-prompt.** On `agent_end`, if `submit_report` was not
 called for the current `(task_id, epoch)`, the extension calls `pi.sendUserMessage` once with a fixed
-host-authored string naming the omission and the tool. **Bounded to `MAX_NAGS = 1` per epoch**, with
-the count held in memory and mirrored through `pi.appendEntry` so a `/reload` cannot reset it.
+host-authored string naming the omission and the tool. **Bounded to one nag per epoch**, with the
+bound held in memory and MIRRORED through `pi.appendEntry` — for the HOST's benefit, not the
+extension's.
+
+**CORRECTED 2026-09-08 during Phase 4: the mirror does NOT survive a `/reload`, and this line said
+it did.** `appendEntry` returns `void` and §7.6's surface has no read-back — verified against the
+image's own `types.d.ts:871` rather than argued — so a reloaded extension starts with an empty
+tally and may nag a second time for the same epoch. What the mirror actually buys is that the host
+can see the nag happened; it is not state this file can rehydrate. **`MAX_NAGS = 1` is also not a
+constant in the built code, deliberately**: the bound is the boolean `nagged` that §7.2's entry
+already declares, and a counter whose only legal values are 0 and 1 sitting beside a boolean that
+says the same thing is two spellings of one rule.
 
 Four constraints on this layer, each of which is a way it could go wrong:
 
@@ -1237,7 +1247,7 @@ tools and whose instructions disagreed, and it produced a review that graded as 
 | **9.2** | **Tool present, name not in `--tools`** | Silent (§0.2 row 2). Identical symptom to 9.1 | Closed enum (§6.6) makes the config side loud; the integration test makes the image side loud |
 | **9.3** | **Name in `--tools`, extension not in the image** | Also silent — row 7: an unknown name is dropped without error | The `BUILD_CONTEXT_ASSETS` criterion (§12), because this is what a forgotten array entry looks like |
 | **9.4** | **A worker needs to write and cannot** — layer 1 removed `write` and the model has a legitimate file to produce that `submit_report`'s `report` parameter does not cover | The model narrates the problem and settles. Indistinguishable from defect 5 in the transcript | Phase A→B→C ordering (§8.1); `report` accepts an arbitrary filename; **rollback is one config line** |
-| **9.5** | **The nag loops** | Token ceiling reached, run ends on exit 5 | `MAX_NAGS = 1`, mirrored through `appendEntry` so `/reload` cannot reset it. §12 pins the bound |
+| **9.5** | **The nag loops** | Token ceiling reached, run ends on exit 5 | One nag per epoch, held as `nagged` on the epoch tally. §12 pins the bound. **A `/reload` DOES reset it** (`appendEntry` is write-only — §6.3's correction), so the true bound is one nag per epoch *per extension load*; the loop this row fears needs a reload per nag and is not reachable from the handler |
 | **9.6** | **`/policy/replies` is stale** — a dispatch that did not rewrite it | `get_replies` returns a previous sweep's set. **This is Finding E arriving through the front door** | Declaring and publishing are one act (§7.4); the file carries its own `task_id` and the tool refuses a mismatch against `/policy/task` |
 | **9.7** | **The tool writes a valid envelope the host still refuses** — `task_id`/`epoch` disagree with the location (`src/harvest/outbox.ts:721-724`) | Unchanged from today | Reading both from `/policy/task` makes it near-impossible; the host check stays as the fence (§6.5 property 2) |
 | **9.8** | **Authority drift** — someone reads `pifleet.submit/v1` in a verdict path | Silent and total: the fleet starts trusting worker claims | §12's mutation. This is the one failure with no runtime symptom |
@@ -1777,10 +1787,33 @@ better reviewers.
   *Acceptance: the message text changes; **no verdict, count or transition changes** — §12's
   authority anti-criterion must stay green through this task.*
 
-### Phase 4 — Layer 3
+### Phase 4 — Layer 3 ✅ COMPLETE 2026-09-08
 
 **Depends on Q1.** If Q1's third outcome obtains — the message arrives after the settle — **this
 phase is skipped and the reason is recorded in §11**, not silently dropped.
+
+**NOT SKIPPED. Q1 returned the best of its three outcomes:** the turn EXTENDS, all four fleet models
+acted on the follow-up, and the margin between a model acting and the supervisor settling was 0.18s
+(glm) to 1.05s (qwen). That is about a second of runway rather than a whole turn, which is the
+constraint the nag was built against — a message asking the model to re-derive anything loses that
+race, so `NAG_TEXT` is a fixed string naming the omission and the tool.
+
+**Two orderings carry the phase, and both are set against the case that is rarer and worse.** The nag
+is sent BEFORE the entry is appended, because the only mirror this file has is `nagged` on that entry
+— send after, and the mirror lags by one entry, harmless while the turn extends and total when it
+does not (`ISC-1085`). And the send has its own `try`/`catch`, separate from the handler's, so a
+throwing `sendUserMessage` cannot skip the append: the layer with no authority may not silence the
+layer whose job is to be read.
+
+**Layer 3's courtesy and layer 4's evidence separate here, deliberately.** A zero-tool-call turn gets
+no nag and STILL gets its entry; an idle worker gets neither (`ISC-1086`).
+
+**Two claims this document made about the bound were wrong and are corrected in §6.3 and row 9.5.**
+`appendEntry` returns `void` and §7.6's surface has no read-back, so a `/reload` DOES reset the
+in-memory bound — the mirror is for the host's eyes, not the extension's memory.
+
+**And the phase filed an open criterion against itself.** `ISC-1087`: layer 3 has never run against a
+live model. Q1 measured a scratch extension, not this code path.
 
 - **4.1** The bounded nag: one per `(task_id, epoch)`, constant text, mirrored through `appendEntry`.
   Touches: `docker/pi-extensions/report-tools.ts`.
