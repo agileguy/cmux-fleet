@@ -1314,9 +1314,25 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
   `z.string()`.*
 - `render.ts` emits extension tool names in `--tools` without change. *Probe: `buildPiArgv` on a
   worker whose `tools` includes `submit_report`; assert the flag value contains it.*
-- **Anti: ISC-59's default stays the built-in set.** *Probe: a role with `read_only: true` and no
-  `tools:`; assert the `bash` violation still fires. **Reddened by** changing `effective()`'s default
-  to `PI_ALL_TOOLS` — which would make the guard reason about a grant nobody made. §6.6 interaction 1.*
+- **Anti: ISC-59's default stays the built-in set.** *Probe: assert `effectiveToolGrant(undefined)`
+  resolves to `PI_BUILTIN_TOOLS` BY VALUE. **Reddened by** changing that default to `PI_ALL_TOOLS`.*
+
+  **CORRECTED 2026-09-07, during Phase 1, because the probe first written here could not redden.**
+  It said: *"a role with `read_only: true` and no `tools:`; assert the `bash` violation still fires"*.
+  `PI_ALL_TOOLS` is a SUPERSET of `PI_BUILTIN_TOOLS`, so under that exact mutation `tools.includes("bash")`
+  is still true, the violation still fires, and the message is byte-identical — it branches on
+  `declared === undefined`, not on the resolved set. Measured both ways rather than argued: with the
+  default swapped, the stated probe reported **0 fail** and the by-value probe **1 fail**.
+  §6.6 interaction 1.
+
+  Holding this invariant needed the default to have a NAME, which is why Phase 1 exported
+  `effectiveToolGrant()` — a deviation from task 1.2's `Touches:` line that the engineer flagged
+  rather than hid, and the right call: there is no assertion available from the test file alone,
+  because no config loads differently and `loadConfig` therefore cannot see the change.
+
+  The behavioural probe is KEPT alongside it, filed as coverage of the WIRING rather than as the
+  anti-criterion: it is the only test that reaches the ISC-59 shape with no `tools:` declared
+  anywhere, and it reddens if the guard is unwired from `effectiveToolGrant`.
 - A role granting both `submit_report` and `write` warns. *Probe: the `observer` fixture; assert one
   warning and zero errors, because the observer is the intended case.*
 
@@ -1325,10 +1341,21 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
   before and after a byte change to `docker/pi-extensions/report-tools.ts`; assert the twelve hex
   characters differ. **Reddened by** removing the array entry — which is ISC-270's fail-open aimed at
   the one file that would suffer most from it.*
-- The image registers exactly `PI_EXTENSION_TOOLS`. *Probe: an integration test running `pi` in the
-  real image with a command handler printing `getAllTools()`; assert the extension-sourced names equal
-  the enum. **This is the only check that spans the `tsconfig` boundary of §3.2** and it is the
-  answer to failure modes 9.1, 9.2 and 9.3 at once.*
+- The image registers the tools the extension declares. *Probe: an integration test running `pi` in
+  the real image with a command handler printing `getAllTools()`. **This is the only check that spans
+  the `tsconfig` boundary of §3.2** and it is the answer to failure modes 9.1, 9.2 and 9.3 at once.*
+
+  **SPLIT IN TWO 2026-09-07, because "equals `PI_EXTENSION_TOOLS`" cannot hold between Phase 2 and
+  Phase 5.** The enum names both `submit_report` and `get_replies` (§6.6, §7.5) — it is the vocabulary
+  config may REQUEST — while Phase 2 ships `report-tools.ts` registering `submit_report` alone and
+  `get_replies` arrives in Phase 5. A set-equality criterion filed against Phase 2 would be red for
+  three phases by construction, which is a criterion that trains its reader to ignore it.
+
+  So: **from Phase 2**, the registered set is a SUBSET of `PI_EXTENSION_TOOLS` and contains
+  `submit_report` — that is what catches a name the image does not serve. **From Phase 5**, it is
+  SET-EQUAL to the enum, and that is where the "no name in the enum is unserved" claim is finally
+  made. Raised by the engineer implementing 1.1 rather than found by a reader, which is the shape
+  these contradictions usually take.
 - The structural type declaration matches the image's `.d.ts`. *Probe: `test/integration/auto-trigger-image.test.ts`'s
   method, applied to the new file.*
 
