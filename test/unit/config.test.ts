@@ -2806,6 +2806,47 @@ describe("config validate CLI (ISC-58)", () => {
     expect(parsed.valid).toBe(false);
     expect(parsed.errors.some((e) => e.path === "workers.0.role")).toBe(true);
   });
+
+  /**
+   * The WIRING, and it is a separate test because the schema-level block above
+   * passes with `config validate` never calling either function.
+   *
+   * That is not hypothetical here: `submitReportWriteWarning` shipped in commit
+   * 8310846 with five green tests and zero callers outside them, and stayed
+   * that way until it was grepped for. Its sibling `observerTuiEpochWarning` is
+   * reached at `config.ts:124`; this one was not reached at all, so an operator
+   * running the only command that exists to tell them what their document gives
+   * up was told nothing. The deprecated-alias test twelve lines up records the
+   * same lesson from the other direction — a probe that cannot observe the
+   * thing it is named after is worth nothing — and this is its inverse: a
+   * function that no observable surface reaches is worth nothing either.
+   *
+   * Driven through the CLI rather than by calling the pair directly, because
+   * calling them directly is precisely what the block above already does and
+   * what stayed green. The only assertion that reddens when line 127 is deleted
+   * is one that reads the process's own output.
+   */
+  test("`config validate --json` carries the submit_report/write warning to the operator", async () => {
+    const dir = await tempDir();
+    await mkdir(join(dir, "repo"), { recursive: true });
+    const doc = baseDoc();
+    doc["run"] = { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } };
+    doc["roles"] = { observer: { tools: ["read", "write", "bash", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const path = join(dir, "fleet.yaml");
+    await writeFile(path, stringify(doc));
+    const r = await runCli(["config", "validate", "--json", "--config", path]);
+    // Still valid — the pairing is the state phases 6 and 7 REQUIRE the fleet
+    // to run in, so a nonzero exit here would be the refusal §6.6 refuses.
+    expect(r.code).toBe(0);
+    const parsed = JSON.parse(r.stdout) as { valid: boolean; warnings: string[] };
+    expect(parsed.valid).toBe(true);
+    const hit = parsed.warnings.find((w) => w.includes("resolve both submit_report and write"));
+    expect(hit, `warnings did not carry it — got ${parsed.warnings.length}`).toBeDefined();
+    // The seat, not just the category: a warning that names no worker leaves an
+    // operator with a document to re-read rather than a line to change.
+    expect(hit!).toContain("obs-1");
+  });
 });
 
 /**

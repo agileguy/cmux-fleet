@@ -13,6 +13,8 @@ import {
   operatorIdentityWarning,
   observerTuiEpochWarning,
   observerTuiWorkers,
+  submitReportWriteWarning,
+  submitReportWriteWorkers,
   unknownThemeWarning,
   unknownThemeWorkers,
   workersMissingKubeconfig,
@@ -122,6 +124,7 @@ export function register(program: Command): void {
         const warnings = [
           kubeconfigScopeWarning(workersMissingKubeconfig(loaded.config)),
           observerTuiEpochWarning(observerTuiWorkers(loaded.config)),
+          submitReportWriteWarning(submitReportWriteWorkers(loaded.config)),
           unknownThemeWarning(unknownThemeWorkers(loaded.config)),
           operatorIdentityWarning(loaded.config.run.git_identity.email, await hostGitEmail()),
           triageUnfencedWarning(triage),
