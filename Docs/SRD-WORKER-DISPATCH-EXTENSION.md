@@ -1846,7 +1846,37 @@ live model. Q1 measured a scratch extension, not this code path.
 - **4.2** Suppress it for an idle worker and for a zero-tool-call turn. Touches: same.
   *Acceptance: `/policy/task` reading `<none>` produces no nag.*
 
-### Phase 5 — `/policy/replies` and `get_replies`
+### Phase 5 — `/policy/replies` and `get_replies` ✅ COMPLETE 2026-09-08
+
+**All four tasks landed, plus two criteria neither of them named.** The phase's own tasks are the
+schema and renderer, the `:ro` mount, the publish/declare composition root and `get_replies`. What
+those four did not cover, and what engineers found against files outside every Touches list, is what
+made the phase actually work:
+
+- **`ISC-1091`** — nothing established `/policy/replies` on the host before `docker run`, and Docker
+  creates a missing bind-mount source as a DIRECTORY (confirmed by running it). Every worker would
+  have come up unable to read or write its declared set, silently and permanently.
+- **`ISC-1092`** — the file was not in `docker/verbgate`'s integrity loop, which is what makes a
+  dropped `:ro` cost the whole worker rather than one forged declaration.
+
+Both were filed and closed the same day, by the rounds they would otherwise have blocked.
+
+**The port had to change shape, and that was forced.** A declaration is one document about one task's
+WHOLE set, so a per-child `publishReply` could only be paired with a second declaring port — and a
+turn calling one and not the other is failure mode 9.6, invisible from the host side. §12's criterion
+is now asserted by reading BOTH ARTEFACTS back off disk and comparing them as sets, never by counting
+calls.
+
+**Re-anchoring a mutation found the thing it protected was no longer protected** (`ISC-1099`): after
+the reshape, filing every reply under the wrong worker's plane survived the entire adapter suite,
+because those probes inject the effect and pin the transport's arguments rather than the directory
+the production effect derives. `/replies` is mounted per worker, so that defect would have made the
+collator report every lens missing while every lens sat on disk.
+
+**One thing this phase did NOT prove:** nothing end-to-end has run a real worker against a real
+declaration. The images cannot currently be rebuilt on this host (`ISC-1101`), so Phase 6's rollout is
+where `get_replies` first meets a model.
+
 
 - **5.1** The schema and renderer, in `task-policy.ts`'s shape and with its write recipe. Touches:
   `src/run/replies-policy.ts` (new), `test/unit/replies-policy.test.ts`.
