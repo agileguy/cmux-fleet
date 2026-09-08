@@ -24,7 +24,10 @@ import {
   renderAllWorkers,
   renderWorker,
   BRIEFING_MOUNT,
+  REPORT_TOOLS_PATH,
+  TRUNCATION_RECOVERY_PATH,
 } from "../../src/config/render.ts";
+import { DISPATCH_TRIGGER_PATH } from "../../src/run/dispatch-policy.ts";
 import {
   assetDigestAt,
   BUILD_CONTEXT_ASSETS,
@@ -1633,19 +1636,55 @@ describe("image tag", () => {
   /**
    * ISC-160, the other half — the Dockerfile is not the whole recipe.
    *
-   * The Dockerfile `COPY`s two files it does not contain, and hashing only its
-   * own text left both outside the tag:
+   * The Dockerfile `COPY`s six files it does not contain, and hashing only its
+   * own text left every one of them outside the tag:
    *
    *  - `docker/verbgate` IS the cloud-mutation gate (ISC-104/105/106/107). An
    *    image built before a gate fix carries the OLD gate, and reusing it
    *    silently is the single highest-consequence staleness this system has.
    *  - `docker/entrypoint.sh` renders `models.json`, so a stale one points the
    *    worker at the wrong model set.
+   *  - `docker/honeypot.cjs` is the escape-attempt DETECTOR (ISC-125). A stale
+   *    listener reports "no escape attempt" for a run nothing was watching,
+   *    which is an absence of evidence read as evidence of absence.
+   *  - `docker/ticket-cli` turns four delivered `_FILE` paths into the CLI's
+   *    environment, so a stale copy reads a credential from the wrong variable
+   *    or queries an unscoped workspace — and the second returns ROWS rather
+   *    than an error.
+   *  - `docker/pi-extensions/dispatch-trigger.ts` and
+   *    `docker/pi-extensions/truncation-recovery.ts` are the two extensions Pi
+   *    executes IN-PROCESS, and both go stale by falling SILENT: the first
+   *    stops firing and the worker sits idle against a staged task, the second
+   *    stops matching Pi's `BashToolDetails` field names and finds no
+   *    truncation to report. Neither raises anything anywhere.
+   *
+   * THE LAST FOUR WERE ENROLLED WITH NOTHING BUT MEMBERSHIP BEHIND THEM. Each
+   * of `ticket-cli.test.ts`, `auto-trigger.test.ts` and
+   * `truncation-recovery.test.ts` carries one `expect(BUILD_CONTEXT_ASSETS)
+   * .toContain(…)`, and `honeypot.cjs` had only the generic Dockerfile sweeps.
+   * Membership is a claim about an ARRAY; ISC-160's claim is that the TAG
+   * moves when the bytes move, and an array entry that `configHash` never
+   * reads satisfies the first and not the second. These cases make the second
+   * claim for all six.
+   *
+   * `pi-extensions/report-tools.ts` is deliberately NOT in this list.
+   * `test/unit/dockerfile-build-assets.test.ts` pins it end to end — real
+   * bytes written to the real file, the real `imageTag` called on both sides —
+   * which is strictly stronger than moving a digest string inside an
+   * `ImageInputs` record. A weaker duplicate here would only be a second thing
+   * to keep in step.
    *
    * Each assertion pins the recorded digest to the bytes on disk first, so
    * "the tag moves" cannot be satisfied by a field nobody reads.
    */
-  test.each(["verbgate", "entrypoint.sh"] as const)(
+  test.each([
+    "verbgate",
+    "entrypoint.sh",
+    "honeypot.cjs",
+    "ticket-cli",
+    "pi-extensions/dispatch-trigger.ts",
+    "pi-extensions/truncation-recovery.ts",
+  ] as const)(
     "editing docker/%s busts the tag even though the Dockerfile is untouched (ISC-160)",
     async (asset) => {
       const { loaded } = await fixture();
@@ -1981,6 +2020,11 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // an rpc worker's operator is a program that will not read a footer.
       "--extension",
       "/opt/pifleet/truncation-recovery.ts",
+      // Report tools, also in both modes and for a reason of its own: the
+      // envelope every worker owes the host is harvested out of `/outbox` by
+      // one reader that has never asked which pane mode wrote it.
+      "--extension",
+      "/opt/pifleet/report-tools.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2020,6 +2064,11 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // an rpc worker's operator is a program that will not read a footer.
       "--extension",
       "/opt/pifleet/truncation-recovery.ts",
+      // Report tools, also in both modes and for a reason of its own: the
+      // envelope every worker owes the host is harvested out of `/outbox` by
+      // one reader that has never asked which pane mode wrote it.
+      "--extension",
+      "/opt/pifleet/report-tools.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2069,12 +2118,15 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // extension — pifleet's, root-owned 0444 in the image — loads.
       "--extension",
       "/opt/pifleet/dispatch-trigger.ts",
-      // And truncation recovery after it, on every worker in both modes. Two
-      // `--extension` flags is the expected shape here, not a duplication:
-      // `--no-extensions` still denies DISCOVERY, so these two paths are the
-      // complete set of what executes in-process.
+      // And truncation recovery after it, then report tools, both on every
+      // worker in both modes. THREE `--extension` flags is the expected shape
+      // here, not a duplication: `--no-extensions` still denies DISCOVERY, so
+      // these three paths are the complete set of what executes in-process,
+      // and this is the only argv in the file that carries all three.
       "--extension",
       "/opt/pifleet/truncation-recovery.ts",
+      "--extension",
+      "/opt/pifleet/report-tools.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2221,5 +2273,153 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
     const explicit = await renderWorker(loaded, "eng-2");
     expect(explicit.docker).toEqual(implicit.docker.map((a) => a.replaceAll("eng-1", "eng-2")));
     expect(explicit.pi).toEqual(implicit.pi.map((a) => a.replaceAll("eng-1", "eng-2")));
+  });
+});
+
+/**
+ * The result-envelope extension is on every worker's argv, unconditionally
+ * (SRD-WORKER-DISPATCH-EXTENSION task 2.4, D1).
+ *
+ * `report-tools.ts` registers `submit_report`, which composes
+ * `pifleet.result/v1` by READING `/policy/task` — a file the worker cannot
+ * write — instead of asking a model to copy `schema`, `task_id`, `epoch` and
+ * `worker` correctly out of its prompt. Three assertions here and none of them
+ * is "the tool works": what 2.4 delivers is the FLAG, and the flag is the only
+ * part of it this file can see without a daemon.
+ *
+ * ## Why the argv lists above are not enough on their own
+ *
+ * They pin it, element for element, in all three of `rpc.docker`, `rpc.pi` and
+ * `tui.pi` — which is the strongest form of "it is there". What they cannot
+ * say is WHY it is there in both, because a literal list is equally satisfied
+ * by a renderer that emits the flag from two separate gated branches that
+ * happen to cover the fixture's two workers. The cases below name the
+ * predicates it must NOT be gated on: `pane_mode`, and `auto_trigger`.
+ *
+ * ## What this block deliberately does not assert, and must not be "fixed" to
+ *
+ * `submit_report` is emitted for every worker and is still UNAVAILABLE to any
+ * role that declares `tools:`, because `--tools` is applied at registry
+ * construction and filters extension tools through the same allowlist
+ * (`PI_EXTENSION_TOOLS`' header, `config/schema.ts:68-92`, measured
+ * 2026-09-07 against a real image). Every role in `fleet.yaml`
+ * declares `tools:`. Granting the name per role is a later phase and a
+ * deliberate one; landing the flag into that state is the expected outcome
+ * here, so nothing below asserts availability and nothing below should be
+ * amended to work around the allowlist.
+ */
+describe("report tools load on every worker (SRD-WORKER-DISPATCH-EXTENSION 2.4)", () => {
+  /**
+   * Three workers of one role off ONE fixture, differing only in the two keys
+   * under test.
+   *
+   * One fixture rather than three, for the reason the `pane_mode` block states:
+   * a second `fixture()` call mkdtemps a second runs root and rewrites
+   * `PIFLEET_RUNS_DIR`, so every path in the second argv would differ for a
+   * reason that has nothing to do with the key being varied.
+   *
+   * `eng-manual` is `tui` AND `auto_trigger: false` on purpose. `resolveWorker`
+   * defaults `auto_trigger` TRUE (`config/load.ts:772`), so a `tui` worker
+   * carries the dispatch-trigger flag by default and "both extensions present"
+   * would hold under a renderer that had wrongly coupled the two. Turning the
+   * auto-trigger off is what separates them.
+   */
+  async function workers() {
+    const f = await fixture((doc) => {
+      (doc["workers"] as unknown[]).push(
+        { id: "eng-tui", role: "eng", pane_mode: "tui" },
+        { id: "eng-manual", role: "eng", pane_mode: "tui", auto_trigger: false },
+      );
+    });
+    return {
+      ...f,
+      rpc: await renderWorker(f.loaded, "eng-1"),
+      tui: await renderWorker(f.loaded, "eng-tui"),
+      manual: await renderWorker(f.loaded, "eng-manual"),
+    };
+  }
+
+  /**
+   * The acceptance sentence for 2.4, stated as the WHOLE extension set rather
+   * than as a `toContain`.
+   *
+   * `toContain` would pass against a renderer that also loaded something else,
+   * and `--no-extensions` denies discovery precisely so that this list is the
+   * complete inventory of what Pi executes in-process. Written as an equality,
+   * a fourth extension arriving unannounced is a failure here rather than a
+   * discovery made inside a running container.
+   */
+  test("both pane modes carry it, and the extension set is exactly right in each", async () => {
+    const { rpc, tui } = await workers();
+
+    expect(valuesOf(rpc.pi, "--extension")).toEqual([TRUNCATION_RECOVERY_PATH, REPORT_TOOLS_PATH]);
+    expect(valuesOf(tui.pi, "--extension")).toEqual([
+      DISPATCH_TRIGGER_PATH,
+      TRUNCATION_RECOVERY_PATH,
+      REPORT_TOOLS_PATH,
+    ]);
+    // Once, not twice: `--extension` is repeatable, so a second push would be
+    // accepted by Pi and by every `toContain` ever written about this flag.
+    expect(countOf(rpc.pi, REPORT_TOOLS_PATH)).toBe(1);
+    expect(countOf(tui.pi, REPORT_TOOLS_PATH)).toBe(1);
+  });
+
+  /**
+   * Not gated on `auto_trigger` either — the other predicate already in this
+   * function, and the one a future edit is most likely to reach for.
+   *
+   * A staged brief is a `tui` concept and the auto-trigger is correctly gated
+   * on it. A result envelope is not: an `auto_trigger: false` worker is a seat
+   * a human drives by hand, and it owes the host the same envelope through the
+   * same harvester.
+   */
+  test("an auto_trigger: false worker keeps it, so the two flags are independent", async () => {
+    const { manual } = await workers();
+
+    // The premise: this worker really has lost the auto-trigger…
+    expect(manual.pi).not.toContain(DISPATCH_TRIGGER_PATH);
+    // …and kept the other two, which is the claim.
+    expect(valuesOf(manual.pi, "--extension")).toEqual([
+      TRUNCATION_RECOVERY_PATH,
+      REPORT_TOOLS_PATH,
+    ]);
+  });
+
+  /**
+   * Baked, not mounted — the same control the other two extensions have.
+   *
+   * Pi executes an extension IN-PROCESS with the full extension API, so a
+   * worker able to write this file would be a worker able to rewrite its own
+   * tool results and, through `submit_report`, its own result envelope. The
+   * image ships it root-owned 0444; a bind mount would carry that guarantee in
+   * a `:ro` flag one character from being dropped.
+   */
+  test("nothing mounts it: the docker argv names the path once and no -v carries it", async () => {
+    const { rpc } = await workers();
+
+    expect(countOf(rpc.docker, REPORT_TOOLS_PATH)).toBe(1);
+    // Substring, not equality: a `-v` for it would read
+    // `<host>:/opt/pifleet/report-tools.ts:ro` and would satisfy neither the
+    // count above nor a `toContain`, but would show up here.
+    expect(rpc.docker.filter((a) => a.includes("report-tools"))).toEqual([REPORT_TOOLS_PATH]);
+  });
+
+  /**
+   * The constant and the image agree about the path.
+   *
+   * This is the assertion that makes the rest of the block worth anything.
+   * Everything above is satisfied by a renderer that emits a well-formed flag
+   * pointing at a path no image has — and that failure does not degrade, it
+   * stops Pi from starting, so it would take out every worker in the fleet at
+   * once. `--theme` is measured to ignore a missing directory silently; no such
+   * measurement exists for `--extension`, which is exactly why this is pinned
+   * to the Dockerfile's own COPY destination rather than assumed harmless.
+   */
+  test("the emitted path is the path docker/Dockerfile COPYs the extension to", async () => {
+    const dockerfile = await readFile(join(REPO_ROOT, "docker", "Dockerfile"), "utf8");
+
+    expect(dockerfile).toContain(`docker/pi-extensions/report-tools.ts ${REPORT_TOOLS_PATH}`);
+    // …and it is the root-owned read-only layer the paragraph above relies on.
+    expect(dockerfile).toContain("--chmod=0444 docker/pi-extensions/report-tools.ts");
   });
 });

@@ -526,12 +526,22 @@ describe("the argv that loads it", () => {
     expect(argv).toContain(TRUNCATION_RECOVERY_PATH);
   });
 
-  /** Both extensions coexist on an auto-triggered tui worker. */
+  /**
+   * All three extensions coexist on an auto-triggered tui worker.
+   *
+   * The count was 2 until SRD-WORKER-DISPATCH-EXTENSION task 2.4 put
+   * `report-tools.ts` on the same argv unconditionally, and it is still spelled
+   * as a count rather than relaxed to two `toContain`s: the claim this test
+   * makes is that nothing DISPLACED anything, and only a total can say that.
+   * Moving the number is the correct maintenance when an extension is added on
+   * purpose — the failure it exists to catch is the number moving on its own.
+   */
   test("it does not displace the auto-trigger extension", () => {
     const argv = buildPiArgv(worker(), false);
-    expect(argv.filter((a) => a === "--extension")).toHaveLength(2);
+    expect(argv.filter((a) => a === "--extension")).toHaveLength(3);
     expect(argv).toContain("/opt/pifleet/dispatch-trigger.ts");
     expect(argv).toContain(TRUNCATION_RECOVERY_PATH);
+    expect(argv).toContain("/opt/pifleet/report-tools.ts");
   });
 });
 
