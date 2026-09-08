@@ -39,6 +39,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1135,6 +1136,210 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     }
     expect(thrown).toBeInstanceOf(SweepEnvelopeError);
     expect(sent).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SRD-WORKER-DISPATCH-EXTENSION §13 task 3.4 — the diagnosis names where to look
+// ---------------------------------------------------------------------------
+
+/**
+ * **THE MESSAGE MAY NAME THE SESSION ENTRY; NOTHING MAY BRANCH ON IT.**
+ *
+ * §6.3's layer 4 gives the host two typed session entries — §7.1's on delivery,
+ * §7.2's at `agent_end` with nothing delivered — and task 3.4's whole content is
+ * putting their names in front of the operator who is already reading this line.
+ * §6.5 property 3 states the fence in one sentence: they *"may appear in an actor
+ * log, in `pifleet monitor`, and in `claimedSuccess`'s message. They may not
+ * appear in a verdict, a coverage count, an incident transition or a
+ * notification."*
+ *
+ * **So the acceptance has two halves and only the second is hard.** A test that
+ * asserts the new words are in the string passes trivially and proves nothing —
+ * it is green for an implementation that also started counting the entry. The
+ * three tests below are ordered weakest-first for that reason, and the value is
+ * in the last two:
+ *
+ *  1. the words are there (the deliverable);
+ *  2. **the join's answer is BY VALUE what the run tree says** — the
+ *     count/verdict/transition half, and, because `toEqual` compares the object
+ *     whole, also the assertion that catches an entry name smuggled into a member;
+ *  3. **a source tripwire**, because 2 is behavioural and §6.5's drift is
+ *     *"reading it is cheaper than re-reading the outbox"* — a read wired into a
+ *     branch this fixture does not reach would leave 2 green. Failure mode 9.8
+ *     is named in the SRD as *"the one failure with no runtime symptom"*, which
+ *     is precisely the thing a behavioural probe cannot see.
+ *
+ * The negative arm of 2 is not decoration either: the whole list exists for the
+ * CONTRADICTION — settled `success`, wrote nothing — so a seat that settled
+ * `failed` must produce no line at all. A message that fired on every silent seat
+ * would be a message an operator learns to skip.
+ */
+describe("§13 task 3.4: claimedSuccess names §7.1/§7.2's entries and decides nothing", () => {
+  /** The two entry names, spelled here as the SRD spells them rather than imported: nothing exports them, deliberately. */
+  const SUBMIT_ENTRY = "pifleet.submit/v1";
+  const NO_SUBMIT_ENTRY = "pifleet.no_submit/v1";
+
+  /** Settles the one seat's child task with `verdict`, writing no artifact. */
+  async function settleWithNoArtifact(run: RunPaths, sweepId: string, verdict: string): Promise<void> {
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    const recordPath = taskRecordPath(workerPaths(run, seat.worker), childTaskId(sweepId, seat.aspect));
+    await mkdir(dirname(recordPath), { recursive: true });
+    await writeFile(
+      recordPath,
+      JSON.stringify({
+        schema: "pifleet.taskrecord/v1",
+        task_id: childTaskId(sweepId, seat.aspect),
+        attempt_id: "file:deadbeefdeadbeef",
+        worker: seat.worker,
+        run_id: run.runId,
+        epoch: 1,
+        verdict,
+        reason: "transcript_quiesced",
+        settled_at: "2026-09-06T12:00:00.000Z",
+        tree_hash: null,
+      }),
+      "utf8",
+    );
+  }
+
+  /**
+   * **TWO RUN TREES, and the asymmetry is what makes the fixture worth writing.**
+   *
+   * `producerFixture` injects no `seatRun`, so the collator's tree and the seat's
+   * tree are the same object there — and under that fixture `seatTree.sessionsDir`
+   * and `deps.run.sessionsDir` are the same string, so a message that named the
+   * WRONG one would be green. That is [[feedback_degenerate_fixtures_hide_narrowing]]
+   * exactly, and this console has already paid for it once: `SweepProducerDeps.seatRun`
+   * exists because the join read observer artifacts out of the collator's tree,
+   * a directory that cannot contain them, and failed silently for as long as it
+   * existed.
+   *
+   * Captures stderr on `triage-command.test.ts`'s pattern, so the NEGATIVE case
+   * (no line at all) is assertable rather than merely unseen.
+   */
+  async function joinWithLog(
+    collatorRun: RunPaths,
+    seatTree: RunPaths,
+    sweepId: string,
+  ): Promise<{
+    joined: Awaited<ReturnType<ReturnType<typeof sweepProducers>["join"]>>;
+    logged: string[];
+    published: string[];
+  }> {
+    const logged: string[] = [];
+    const published: string[] = [];
+    const before = console.error;
+    console.error = (...args: unknown[]): void => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      const producers = sweepProducers({
+        run: collatorRun,
+        environment: "cni-dev",
+        services: SERVICES,
+        defaultWindowS: 300,
+        previousDocument: async () => null,
+        dispatch: async () => ({ kind: "accepted" }),
+        seatRun: async () => seatTree,
+        publishReply: async (child) => {
+          published.push(child);
+        },
+      });
+      return { joined: await producers.join(sweepId), logged, published };
+    } finally {
+      console.error = before;
+    }
+  }
+
+  test("the line names both entries and the SEAT's sessions directory, not the collator's", async () => {
+    const collatorRun = await seedRun("2026-09-06T00-00-17Z-0017");
+    const seatTree = await seedRun("2026-09-06T00-00-17Z-0117");
+    const sweepId = sweepTaskId(41);
+    await settleWithNoArtifact(seatTree, sweepId, "success");
+
+    const { logged } = await joinWithLog(collatorRun, seatTree, sweepId);
+    expect(logged).toHaveLength(1);
+    const line = logged[0]!;
+    expect(line).toContain(SUBMIT_ENTRY);
+    expect(line).toContain(NO_SUBMIT_ENTRY);
+    /*
+     * BY VALUE against `RunPaths`, and BOTH directions. A console is four runs,
+     * not one: a message naming the collator's tree would send an operator to a
+     * directory the worker never wrote in, and a wrong pointer is worse than no
+     * pointer because it looks like an answer.
+     */
+    expect(line).toContain(seatTree.sessionsDir);
+    expect(line).not.toContain(collatorRun.sessionsDir);
+    // The half it replaces is still there: the transcript, not the cluster.
+    expect(line).toContain("not the cluster");
+  });
+
+  /**
+   * **THE CONSTRAINT, AND IT IS THE TASK.** Task 3.4's acceptance: *"the message
+   * text changes; no verdict, count or transition changes."*
+   *
+   * Asserted by pinning the WHOLE return value rather than one member, because
+   * the drift §6.5 predicts does not announce itself as a new field — it arrives
+   * as a claimed-success seat quietly counted among `artifacts[]`, which is the
+   * mutation §12 names (*"wiring it into `completeSweep`'s artifact count"*).
+   * `completeSweep` reads `artifacts.length` and `blocked.length`, so this object
+   * IS the count for everything downstream of the join.
+   */
+  test("naming the entries moved no count: the join is the run tree's own answer, by value", async () => {
+    const collatorRun = await seedRun("2026-09-06T00-00-18Z-0018");
+    const seatTree = await seedRun("2026-09-06T00-00-18Z-0118");
+    const sweepId = sweepTaskId(41);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    await settleWithNoArtifact(seatTree, sweepId, "success");
+
+    const { joined, published } = await joinWithLog(collatorRun, seatTree, sweepId);
+    expect(joined).toEqual({ artifacts: [], blocked: [], claimedSuccess: [seat.worker] });
+    // A claim is not a reply: nothing reached the collator's /replies either.
+    expect(published).toEqual([]);
+    /*
+     * NO `JSON.stringify(joined)` SEARCH FOR THE ENTRY NAMES, and the omission is
+     * deliberate. `toEqual` compares the object whole and fails on an extra key,
+     * so a name smuggled into any member — a reason appended to `claimedSuccess`,
+     * a synthetic artifact, a new field — already reddens the line above.
+     * MEASURED: the mutation that appends `(see pifleet.submit/v1)` to the pushed
+     * worker id fails this test at that assertion. A substring search underneath
+     * it would be `ISC-1075`'s *"second, weaker assertion about the same"* object.
+     */
+
+    // NEGATIVE: a verdict that claims nothing is silent, and still counts zero.
+    await settleWithNoArtifact(seatTree, sweepId, "failed");
+    const failed = await joinWithLog(collatorRun, seatTree, sweepId);
+    expect(failed.joined).toEqual({ artifacts: [], blocked: [], claimedSuccess: [] });
+    expect(failed.logged).toEqual([]);
+  });
+
+  /**
+   * **THE TRIPWIRE FOR THE FAILURE WITH NO RUNTIME SYMPTOM.**
+   *
+   * `test/unit/config.test.ts`'s ISC-1063 idiom — a reference COUNT, deliberately
+   * brittle. §6.5: *"once `pifleet.submit/v1` exists in the session, somebody will
+   * notice that reading it is cheaper than re-reading the outbox"*, and that read
+   * lands in this module first, because this module is where the absence is
+   * already noticed.
+   *
+   * Each name may be spelled ONCE in `triage-envelope.ts`, in the sentence the
+   * operator reads. A second spelling — a constant to compare against, an
+   * `includes()`, a filter — is an edit somebody makes on purpose, and this test
+   * is the line they have to change to make it. Comments in that module cite the
+   * entries as *"§7.1's"* and *"§7.2's"* for the same reason: the count means
+   * something only while a mention costs one.
+   *
+   * `sessionsDir` is counted for the same reason and is the stronger half: a
+   * module that starts BRANCHING on an entry must first reach the directory, and
+   * there is exactly one expression here that names it.
+   */
+  test("neither entry name is spelled twice in the module, and the sessions directory is reached once", () => {
+    const source = readFileSync(new URL("../../src/run/triage-envelope.ts", import.meta.url).pathname, "utf8");
+    const occurrences = (needle: string): number => source.split(needle).length - 1;
+    expect(occurrences(SUBMIT_ENTRY)).toBe(1);
+    expect(occurrences(NO_SUBMIT_ENTRY)).toBe(1);
+    expect(occurrences("sessionsDir")).toBe(1);
   });
 });
 

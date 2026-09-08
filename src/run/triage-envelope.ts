@@ -1276,11 +1276,48 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
       }
       if (verdict !== "success") continue;
       claimedSuccess.push(seat.worker);
+      /*
+       * SRD-WORKER-DISPATCH-EXTENSION §13 task 3.4. The sentence used to stop at
+       * *"look at the transcript"*, which is a whole transcript and an
+       * operator's afternoon. §6.3's layer 4 puts two typed entries in the
+       * session JSONL that answer the next question directly — §7.1's entry
+       * means the tool RAN and its bytes did not land, §7.2's means it was never
+       * called — and those are different faults with different fixes, which is
+       * the distinction `triage-pass.ts` already draws between `coverage` and
+       * `claimedSuccess`.
+       *
+       * **NAMED, NEVER READ.** §6.5 property 3 permits both entries in an actor
+       * log, in `pifleet monitor` and in exactly this message, and forbids them
+       * in a verdict, a coverage count, an incident transition or a
+       * notification. Nothing on this line is read back: `claimedSuccess` still
+       * holds worker ids and `artifacts[]` is still the files this host could
+       * open. **The closing clause tells the OPERATOR that too**, because the
+       * drift §6.5 is built against — reading the entry instead of re-reading
+       * the outbox, which is cheaper and therefore attractive — would make that
+       * sentence false in the one place somebody would notice it.
+       *
+       * Two smaller choices, each of which could be made the other way:
+       *
+       *  - **`seatTree`, not `deps.run`.** A seat can live in another run
+       *    (`seatRun`), and the collator's sessions directory would send an
+       *    operator to a tree the worker never wrote in.
+       *  - **The directory is named and the FILENAME is not.** Pi's
+       *    `_<worker>.jsonl` convention is `sessionFileSuffix` over in
+       *    `supervisor/tui.ts`, a subtree this module may not import
+       *    (`test/unit/triage-readonly.test.ts`). A second spelling of a
+       *    convention is how a recogniser and its minter drift apart, so the
+       *    message points at the directory it already holds and lets the
+       *    operator glob.
+       */
       console.error(
         `triage: ${seat.worker} settled ${taskId} SUCCESS and wrote no artifact. The sweep will ` +
           `report this service unobserved, which is correct but reads as "the environment did ` +
           `not answer" — the truth is that the worker said it was done and produced nothing. ` +
-          `Look at the worker's transcript, not the cluster.`,
+          `Look at the worker's transcript, not the cluster: its session JSONL is in ` +
+          `${seatTree.sessionsDir}. A pifleet.submit/v1 entry there means the worker DID call ` +
+          `submit_report and the write did not land; pifleet.no_submit/v1 means it never called ` +
+          `the tool at all. Neither entry is read by this sweep — the coverage number is still ` +
+          `this host's own count of the files it could open.`,
       );
     }
     return {
