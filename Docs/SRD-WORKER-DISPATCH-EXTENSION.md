@@ -1479,6 +1479,46 @@ models passed byte-exact, with margin. **Phase 7 for `triage` and `observer` is 
 their model truncates silently above 4 KB — those roles need either a chunked `report` or a size the
 role brief actually bounds.
 
+**Q8 follow-up — a census of what these roles ACTUALLY report, 2026-09-08.** The block above measures
+what the WIRE carries. It does not say what any role needs it to carry, and "NOT cleared" above rests
+on a limit with no demand next to it. So every envelope this fleet has ever harvested was measured:
+all 283 `result.json` files under `~/.pifleet/runs/*/outbox/<worker>/<task>/`, summing every string
+byte in each envelope — the payload a `submit_report` call would have had to carry to deliver that
+same report.
+
+| Role | Worker(s) | n | p50 | **max** | 4 KB floor | 16 KB ceiling |
+|---|---|---|---|---|---|---|
+| `triage` (collating seat) | `tri-1` | 95 | 142 | **519** | 7.9× under | — |
+| `triage` (observer seats) | `obs-t1`, `obs-t3` | 24 | 296 | **1 472** | 2.8× under | — |
+| `collator` | `col-1` | 41 | 480 | **964** | 4.2× under | — |
+| `reviewer` | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | 56 | 1 539 | **13 965** | — | 1.17× under |
+| `observer` | `obs-1` | **1** | 2 255 | **2 255** | 1.8× under | — |
+
+**This census is plane-independent, and that is why it is quoted here.** It reads envelopes the
+harvester already wrote; it says nothing about `rpc` versus `tui` because the size of a report does
+not depend on how the report was delivered. The Q8 probe above IS plane-bound — it was run through
+`report` on the `rpc` path — and the two are only usable together: the probe gives the ceiling, this
+gives the demand.
+
+**What it changes.**
+
+- **7.3 (`triage`) is CLEARED**, on 119 real envelopes across the three seats that have produced any. The largest report this
+  console has ever produced is 1 472 bytes, a factor of 2.8 inside the size at which its model was
+  measured to truncate silently. This is the *"a size the role brief actually bounds"* arm above —
+  with the correction that the brief does not currently bound anything, the OBSERVED size does, and
+  an observed maximum is not a bound. 7.3 therefore carries a probe asserting the bound rather than
+  resting on this table.
+- **7.5 (`observer`) stays BLOCKED, and for a different reason than the one above.** Not because
+  2 255 bytes is close to 4 096, but because **n = 1**. One envelope is an anecdote. `observer`'s work
+  is ad-hoc cloud inquiry whose output is bounded by the size of whatever log excerpt the question
+  drags in, which is the one shape in this fleet with no natural ceiling — so it is exactly the role
+  whose maximum cannot be inferred from its median. It needs its own sample before its `write` comes
+  out.
+- **`reviewer`'s margin is thinner than §11 states.** The paragraph above cites
+  `roles/reviewer.md:120-126`'s 8 709 bytes as the size that matters. The real maximum across 56
+  reviewer envelopes is **13 965** — still inside 16 384, but by 15% rather than by half. The
+  decision does not change; the margin quoted for it should.
+
 **Failure mode 9.4 is confirmed and its detection column is wrong.** 9.4 is *"a worker needs to write
 and cannot"*, detected as *"the model narrates the problem and settles"* — and a size-capped tool is
 one way to reach it, which is why Q8 pointed at it. But nothing narrated anything. At 64 KB the model
@@ -1913,11 +1953,24 @@ where `get_replies` first meets a model.
 - **7.1** `reviewer`: remove `write`. **Gated on Q8** (failure mode 9.4). Touches: `fleet.yaml`
   (operator), `fleet.example.yaml`.
   *Acceptance: one full review console run producing three lens reports through `report`.*
-- **7.2** `collator`: remove `write`. Touches: same. *Acceptance: one collation.*
-- **7.3** `triage`: remove `write`. Touches: same. *Acceptance: **three consecutive sweeps**, because
-  this console runs unattended and one is not evidence.*
+- **7.2** `collator`: remove `write`. **Touches: `fleet.yaml` (operator) ONLY — there is no
+  `collator` in `fleet.example.yaml`.** The example's `roles:` block is
+  `sre observer verifier engineer reviewer tester ticketing triage`; the role exists solely in the
+  operator's gitignored file, so this task produces NO TRACKED DIFF and is not dispatchable, on
+  ISC-93's reasoning and for the same mechanical reason as 6.1. It is an operator edit whose only
+  evidence is the live cycle. *Acceptance: one collation.*
+- **7.3** `triage`: remove `write`. **Gated on Q8, and the gate is now CLEARED** — §11's census
+  measured 119 harvested envelopes from this console at a maximum of 1 472 bytes, 2.8× inside the
+  4 KB at which its model truncates silently. Touches: `fleet.yaml` (operator), `fleet.example.yaml`.
+  *Acceptance: **three consecutive sweeps**, because this console runs unattended and one is not
+  evidence — plus a probe asserting the size bound, because what the census establishes is an
+  OBSERVED maximum and the clearance above is only sound if something keeps it true.*
 - **7.4** The resolved-tools criterion for all three. Touches: `test/unit/config.test.ts`, `ISA.md`.
-- **7.5** `observer`: remove `write`, keep `bash`. Touches: same.
+- **7.5** `observer`: remove `write`, keep `bash`. **BLOCKED, and not on the size limit** —
+  §11's census found exactly ONE harvested `observer` envelope, which is an anecdote rather than a
+  distribution, and this is the one role whose output is bounded by whatever log excerpt the question
+  drags in. It needs its own sample before its `write` comes out. Touches: `fleet.yaml` (operator),
+  `fleet.example.yaml`.
   *Acceptance: three sweeps. **§6.8 is explicit that this is not layer 1** — it is proposed for the
   smaller reason and must be judged against `roles/observer.md:19-22`'s recorded misreading, not
   against a claim of prevention.*
