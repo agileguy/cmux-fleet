@@ -288,11 +288,59 @@ describe("servesConsole — the console name is part of the identity", () => {
     );
   });
 
-  test("the same console and run with a different worker set is not this console", () => {
+  /**
+   * ISC-1057 re-pinned this on a set the record does NOT serve.
+   *
+   * The arm's PURPOSE is unchanged and is what the block comment above states:
+   * varied alone, with the console held equal, so the console comparison cannot
+   * be what answers it. What changed is the rule — containment, not equality —
+   * so the discriminating fixture has to name a seat the actor does not cover.
+   * `["tri-1", "obs-t1"]` against a four-seat record is now an ADOPT, and the
+   * test below is that case.
+   */
+  test("the same console and run with an UNSERVED worker is not this console", () => {
+    const other = record({ console: "triage", run_id: "r-tri", workers: TRIAGE_WORKERS });
+    expect(
+      servesConsole(other, { name: "triage", runId: "r-tri", workers: ["tri-1", "obs-t9"] }),
+    ).toBe(false);
+  });
+
+  /**
+   * ISC-1057. `pifleet triage` has no `--workers`: its record is written from
+   * the constant `TRIAGE_CONSOLE_ROSTER`, so an operator's `--workers` subset
+   * could never equal it and `./scripts/triage --workers …` stopped a healthy
+   * actor and started an identical one on every invocation. A restart cannot
+   * change a constant, so refusing to adopt bought no convergence.
+   */
+  test("an actor serving a SUPERSET of the caller's seats is adopted", () => {
     const other = record({ console: "triage", run_id: "r-tri", workers: TRIAGE_WORKERS });
     expect(
       servesConsole(other, { name: "triage", runId: "r-tri", workers: ["tri-1", "obs-t1"] }),
-    ).toBe(false);
+    ).toBe(true);
+    // The whole roster still adopts — containment is reflexive, so the default
+    // path this console actually runs is unchanged.
+    expect(
+      servesConsole(other, { name: "triage", runId: "r-tri", workers: [...TRIAGE_WORKERS] }),
+    ).toBe(true);
+  });
+
+  /** Order-insensitivity survives the rewrite: a Set compares elements, not a join. */
+  test("the caller's order does not matter", () => {
+    const other = record({ console: "triage", run_id: "r-tri", workers: TRIAGE_WORKERS });
+    expect(
+      servesConsole(other, { name: "triage", runId: "r-tri", workers: ["obs-t1", "tri-1"] }),
+    ).toBe(true);
+  });
+
+  /**
+   * The collision the U+0001 join was escaping is now unrepresentable rather
+   * than escaped around: elements are compared as elements.
+   */
+  test("adjacent ids cannot collide by concatenation", () => {
+    const other = record({ console: "triage", run_id: "r-tri", workers: ["ab", "c"] });
+    expect(servesConsole(other, { name: "triage", runId: "r-tri", workers: ["a", "bc"] })).toBe(
+      false,
+    );
   });
 
   /**

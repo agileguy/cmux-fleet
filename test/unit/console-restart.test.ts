@@ -468,6 +468,42 @@ describe("every console script hands its --restart ordering to the module", () =
    * The defect was invisible for exactly that reason — `{ worker: restartFlag }`
    * type-checks nowhere and reads fine.
    */
+  /**
+   * ISC-1057 — the third arm of the mismatch message.
+   *
+   * `servesConsole` compares console, run and worker coverage. The message the
+   * script prints when it replaces an actor only distinguished the first two, so
+   * a WORKERS mismatch fell through to the run arm and printed
+   * `serves run r-1, not this console's r-1` — the same id twice. That is the
+   * reading the surrounding comment calls "a bug in the script": an operator
+   * watching a healthy actor be replaced was told the runs differed when they
+   * did not. Source-level because `scripts/` is outside `tsconfig`'s `include`
+   * and unimportable.
+   */
+  test("scripts/triage names a worker mismatch instead of blaming the run", async () => {
+    const src = await source("triage");
+    const start = at(src, "const mismatch =", 0, "scripts/triage builds no mismatch message");
+    const end = at(src, "stopActor(", start, "the mismatch message reaches no stop");
+    const expr = src.slice(start, end);
+    expect(expr).toContain("does not serve");
+    expect(expr).toContain("existing.record.workers");
+    // The run arm must still be CONDITIONAL, or the workers arm is unreachable.
+    expect(expr).toContain("existing.record.run_id !== runId");
+  });
+
+  /**
+   * The same block referenced `triageWorkers`, which is `main`'s local and not
+   * in `startActor`'s scope — a ReferenceError at the moment an operator is
+   * being told why their actor is being replaced. Nothing else would catch it:
+   * this file is not typechecked and not importable.
+   */
+  test("scripts/triage's startActor uses its own workers parameter", async () => {
+    const src = await source("triage");
+    const fn = at(src, "async function startActor(", 0, "scripts/triage defines no startActor");
+    const end = at(src, "\nasync function ", fn + 10, "startActor is never closed by another function");
+    expect(src.slice(fn, end)).not.toContain("triageWorkers");
+  });
+
   test("scripts/operations hands the modules a WORKER ID, not a pane title", async () => {
     const src = await source("operations");
     const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");

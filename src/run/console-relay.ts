@@ -532,27 +532,46 @@ export function servesConsole(
   if (record.console !== console_.name) return false;
   if (record.run_id !== console_.runId) return false;
   /**
-   * Order-insensitive: `--workers` is a list the operator types and the pane
-   * plan is what fixes the order, not this record.
+   * CONTAINMENT, NOT EQUALITY — the record must SERVE every worker the caller
+   * needs, and may serve more. This is ISC-1057's decision about §6.4's
+   * adoption rule, and the equality it replaces is why that criterion was filed.
    *
-   * **THE SEPARATOR IS LOAD-BEARING, and it is spelled as an ESCAPE because it
-   * was previously a raw byte.** Joining a sorted set on `""` is not an
-   * encoding of it — `["ab", "c"]` and `["a", "bc"]` both render `"abc"`, and
-   * every character there is legal in a worker id — so two DIFFERENT consoles
-   * would compare equal and a live relay serving one would be adopted as
-   * serving the other. U+0001 is the right separator precisely because
-   * `SESSION_ID_RE` cannot produce it.
+   * Equality asks *"were you configured exactly as I would configure you"*, and
+   * on the triage console that question has no reachable yes. `pifleet triage`
+   * takes `--once`, `--poll`, `--status` and `--json` and **no `--workers`**; its
+   * record is written from the constant `TRIAGE_CONSOLE_ROSTER`
+   * (`cli/commands/triage.ts:1375-1378`). `scripts/triage` compares that against
+   * `opts.workers ?? DEFAULT_TRIAGE_WORKERS`. Those spell the same pair today —
+   * `["tri-1", "obs-t1"]` — so the DEFAULT adopts, and every `--workers`
+   * override is permanently unequal. `./scripts/triage --workers …` therefore
+   * stopped a healthy actor and started an identical one on EVERY invocation,
+   * quietly, on a console nobody watches.
    *
-   * It used to sit in the file as a literal 0x01. That is invisible in an
-   * editor, a diff and a terminal, so the line READ as `join("")` — and a
-   * reviewer filed this function as a collision bug on exactly that misreading,
-   * correctly describing a defect the code did not have. The escape costs
-   * nothing at runtime and is the difference between code that is right and
-   * code that can be SEEN to be right.
+   * **The argument for containment rather than a narrower equality is that a
+   * restart cannot change the thing being compared.** The replacement actor
+   * reads the same constant and writes the same roster, so refusing to adopt
+   * buys no convergence at all — it only pays the restart again next time. An
+   * actor whose roster CONTAINS the caller's seats does serve those seats, which
+   * is the question this function is named for.
+   *
+   * It does not weaken the review console. There the set IS an input —
+   * `startRelay` passes the same list it built the panes from — so
+   * `record.workers` equals the caller's and equality implies containment. What
+   * the arm stops being is a way to fail permanently on a console where the
+   * caller's set was never an input to the thing it is compared against.
+   *
+   * A caller naming a seat the record does NOT serve is still refused: that is
+   * an operator asking for a console this actor cannot cover.
+   *
+   * **The U+0001 join this replaces is gone, and with it the hazard its comment
+   * documented at length.** Joining a sorted set on `""` made `["ab", "c"]` and
+   * `["a", "bc"]` compare equal, and the escape was the fix. A `Set` and
+   * `every` compare elements as elements, so there is no separator to choose
+   * and no encoding to get wrong — the collision is unrepresentable rather than
+   * escaped around.
    */
-  const a = [...record.workers].sort().join("\u0001");
-  const b = [...console_.workers].sort().join("\u0001");
-  return a === b;
+  const served = new Set(record.workers);
+  return console_.workers.every((w) => served.has(w));
 }
 
 /**

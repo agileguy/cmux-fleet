@@ -463,10 +463,29 @@ describe("identity — whether a running relay is THIS console's", () => {
     expect(servesConsole(REC, { name: "review", runId: "r-5", workers: WORKERS })).toBe(false);
   });
 
-  test("a different worker set is not this console either", () => {
+  /**
+   * ISC-1057 made the workers arm CONTAINMENT rather than equality, so the
+   * discriminating fixture names a seat the relay does not serve. A SUBSET was
+   * the old fixture and is now an adopt — correctly: a relay covering four
+   * reviewers does serve two of them.
+   *
+   * On this console the distinction is theoretical, and that is worth saying
+   * rather than leaving implied: `startRelay` passes the same list the panes
+   * were built from, so `record.workers` equals the caller's set and equality
+   * and containment agree. The rule was changed for `triage`, where the record
+   * is written from a constant the caller's flag can never match.
+   */
+  test("a worker the relay does not serve is not this console either", () => {
+    expect(
+      servesConsole(REC, { name: "review", runId: "r-1", workers: ["col-1", "rev-ghost-1"] }),
+    ).toBe(false);
+  });
+
+  test("the review console's own set still adopts, exactly as before", () => {
+    expect(servesConsole(REC, { name: "review", runId: "r-1", workers: WORKERS })).toBe(true);
     expect(
       servesConsole(REC, { name: "review", runId: "r-1", workers: ["col-1", "rev-arch-1"] }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 

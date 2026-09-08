@@ -721,11 +721,24 @@ async function startActor(
      * "serves run r-1, not this console's r-1" would read as a bug in the script
      * rather than as the one-time replacement it is.
      */
+    /*
+     * THE THIRD ARM IS ISC-1057's, and its absence is what made that criterion's
+     * restart loop silent. With the console and the run both equal, the only
+     * remaining reason `servesConsole` said no is the worker set — and this
+     * expression fell through to the run arm and printed
+     * `serves run r-1, not this console's r-1`, the same id twice. That is
+     * precisely the reading the comment above calls "a bug in the script": an
+     * operator watching a healthy actor be replaced was told the runs differed
+     * when they did not.
+     */
+    const unserved = workers.filter((w) => !existing.record.workers.includes(w));
     const mismatch =
       existing.record.console !== CONSOLE
         ? `serves console ${JSON.stringify(existing.record.console)}, not ${JSON.stringify(CONSOLE)}` +
           `${existing.record.console === "" ? " (a record written before the actor named its console)" : ""}`
-        : `serves run ${existing.record.run_id}, not this console's ${runId}`;
+        : existing.record.run_id !== runId
+          ? `serves run ${existing.record.run_id}, not this console's ${runId}`
+          : `does not serve ${unserved.join(", ")} — it covers ${existing.record.workers.join(", ")}`;
     process.stderr.write(
       `triage: the running actor (pid ${existing.record.pid}) ${mismatch} — stopping it\n`,
     );
