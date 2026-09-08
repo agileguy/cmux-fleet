@@ -261,9 +261,18 @@ function productionSweepDispatchFor(
       presentation === null
         ? { reset: false, reason: `no presentation record for ${worker}` }
         : await m.dispatch_cmd.resetPaneSession(worker, presentation, m.backends.loadBackend);
-    if (!reset.reset && reset.reason !== null) {
-      console.error(`triage: session reset skipped for ${worker}: ${reset.reason}`);
-    }
+    /*
+     * LOGGED ON BOTH ARMS, deliberately. The first version logged only the
+     * failure, which made "the reset fired" and "the reset never ran" produce
+     * byte-identical output — an absence of evidence read as evidence, which is
+     * the exact shape of the defects this console keeps producing. §7.7's log is
+     * the only place anything about an unattended actor can be read afterwards.
+     */
+    console.error(
+      reset.reset
+        ? `triage: session reset SENT to ${worker} — its next task starts on an empty session`
+        : `triage: session reset skipped for ${worker}: ${reset.reason ?? "no reason given"}`,
+    );
     return { kind: "accepted" };
   };
 }
