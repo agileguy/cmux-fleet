@@ -44,6 +44,14 @@ import { MAX_TEXT, RESULT_ENVELOPE_NAME, ResultEnvelopeSchema } from "../../src/
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
+/**
+ * The tool VOCABULARY, so the reverse direction of the opening-sentence probe is
+ * derived rather than a denylist of {write, bash, edit}. A name added to the
+ * schema's enum is covered here the day it lands, without anyone remembering to
+ * widen a literal list — the argument `role-docs.ts` makes for paths, applied to
+ * tools.
+ */
+import { PI_ALL_TOOLS } from "../../src/config/schema.ts";
 import {
   MAX_REPLY_ARTIFACT_BYTES,
   MAX_REPLY_INLINE_BYTES,
@@ -436,47 +444,146 @@ describe("the reviewer's grant is what the document says it is", () => {
   });
 
   /**
-   * The document's own sentence against the grant, both ways: a tool it claims
-   * and does not have costs an epoch to discover, and a tool it has and does not
-   * mention is a capability the model will not use.
+   * The document's own sentence against the grant, BOTH WAYS — and the second
+   * direction was unenforced until a live cycle priced it.
    *
-   * **ONE DIRECTION IS ASSERTED AND THE OTHER IS DELIBERATELY UNENFORCED FOR THE
-   * LENGTH OF PHASE B — read this before "fixing" it.** The loop runs over the
-   * GRANT, so it catches a granted tool the opening line omits and says nothing
-   * about a tool the line names and the grant no longer holds. Since task 7.1
-   * withdrew `write`, that second direction is exactly the state this file is
-   * in: `roles/reviewer.md:1` still says *"You have read, write, …"*.
+   * A tool the grant holds and the line omits is a capability the model will not
+   * use. A tool the line NAMES and the grant does not hold is worse: the model
+   * has no way to discover the lie except by spending a turn on it.
    *
-   * That is the migration's own instruction rather than an oversight. SRD §8.1:
-   * *"the rollback boundary is phase B and it is one config line … the prose is
-   * still there because phase C has not run for that role. This is why the order
-   * is prose-last."* Tightening this probe now would buy a correct assertion at
-   * the price of the property the phase order exists for — restoring `write` to
-   * one `tools:` line would no longer restore a coherent worker. The reverse
-   * direction becomes enforceable when task 8.1 rewrites the opening line, and
-   * belongs in that commit, with the prose it grades.
+   * ## What the prose-last order was protecting, stated before it is overturned
+   *
+   * SRD §8.1: *"the rollback boundary is phase B and it is one config line …
+   * the prose is still there because phase C has not run for that role. This is
+   * why the order is prose-last."* The property is real. While the briefing
+   * still described `write`, restoring `write` to one `tools:` entry restored a
+   * coherent worker — config and prose agreeing again in a single edit, with no
+   * document to re-write under time pressure. That is why the version of this
+   * probe above the rewrite looped over the GRANT only, and said so.
+   *
+   * ## What the first cycle measured (T-rv-152, 2026-09-08)
+   *
+   * Three reviewers, narrowed grant, prose untouched. `rev-arch-1` and
+   * `rev-lang-1` read the config, found no `write`, and delivered 2 091 and
+   * 5 691 bytes through `submit_report`. **`rev-ctx-1` believed line 1.** It
+   * composed its entire review into a 13 933-byte `write` call, received `Tool
+   * write not found`, and reported nothing: layer 3 nagged, layer 4 recorded
+   * `pifleet.no_submit/v1` with `tool_calls: 11, nagged: true`, and the console
+   * collated **two lens reports out of three** against task 7.1's acceptance
+   * criterion of three.
+   *
+   * The causal claim is kept narrow on purpose. Every turn after the refusal
+   * ended `stopReason: error` and every turn before it succeeded, but that
+   * correlation does not establish that the refusal caused the stream to fail,
+   * and nothing here rests on it. The first-order defect stands either way: the
+   * model spent a whole review on a tool it does not hold **because the briefing
+   * told it it did**, and that cost is paid whether or not it could have
+   * recovered afterwards.
+   *
+   * ## Why the SENTENCE came forward and §8.1's mechanics did not
+   *
+   * Only the sentences stating WHAT THE GRANT IS move with the grant, because
+   * those are the ones a model acts on. `roles/reviewer.md:39-138` — the four
+   * envelope sections `submit_report` makes redundant — is task 8.1's and stays
+   * deferred; deleting it is a size decision that costs nothing when it is late.
+   * A false statement of the grant is not that kind of debt.
+   *
+   * The rollback property survives, kept honestly rather than by leaving a
+   * falsehood in place: the document now instructs a reader restoring `write` to
+   * the `tools:` line to restore its description in the same commit. That is a
+   * one-line coupling written down where the person doing the rollback will read
+   * it, instead of a briefing that is wrong in the meantime.
+   *
+   * ## The splitter is load-bearing
+   *
+   * The line makes two different claims — what it HOLDS before the em dash, what
+   * it DENIES after it — and only the first is checked against the grant. A
+   * whole-line check would redden on the document's own *"no write"*, which is
+   * the one wording that must stay. So the boundary is asserted first: a line
+   * that stops carrying exactly one `—` fails loudly here rather than quietly
+   * grading the wrong half.
    */
   test("the document's opening tool sentence matches the grant", () => {
     const first = REVIEWER.split("\n")[0]!;
-    for (const t of grantedTools(EXAMPLE, "reviewer")) {
+    const halves = first.split("—");
+    expect(
+      halves.length,
+      "the opening line no longer separates what it HOLDS from what it DENIES with one em dash",
+    ).toBe(2);
+    const held = halves[0]!;
+
+    const grant = grantedTools(EXAMPLE, "reviewer");
+    // Forward: a granted tool the line never mentions is one the model will not
+    // reach for.
+    for (const t of grant) {
       expect(first, `the opening line does not mention the granted tool "${t}"`).toContain(t);
     }
+    // Reverse: a tool the line claims and the grant does not hold. Derived from
+    // `PI_ALL_TOOLS` rather than a denylist of {write, bash, edit}, so a name
+    // added to the vocabulary is covered without anyone remembering to add it.
+    for (const t of PI_ALL_TOOLS) {
+      if (grant.includes(t)) continue;
+      expect(
+        new RegExp(`\\b${t}\\b`).test(held),
+        `the opening line claims "${t}", which this role does not hold — the rev-ctx-1 state`,
+      ).toBe(false);
+    }
+
+    expect(first).toContain("no write");
     expect(first).toContain("no bash");
     expect(first).toContain("no edit");
   });
 
   /**
-   * KEPT GREEN THROUGH PHASE B ON PURPOSE, for the reason in the block above.
+   * THE SAME BOUND, RE-POINTED AT THE TOOL THAT NOW CARRIES IT.
    *
-   * This sentence bounds a tool the role no longer holds, so it reads as stale —
-   * and it is, in the way §8.1 requires it to be. Deleting it is task 8.1's, and
-   * only after this role has completed a full review-console cycle without
-   * `write`. Until then the sentence is the other half of the one-config-line
-   * rollback: put `write` back and the briefing that describes it is still
-   * correct and still in place.
+   * This probe used to pin *"The write is for `/outbox` alone"*, and it was kept
+   * green through Phase B deliberately — the other half of the one-config-line
+   * rollback the block above describes. The live cycle retired that argument
+   * along with the opening line's, and for the same reason: the sentence bounded
+   * a tool the role had already lost, so it was teaching `rev-ctx-1`'s mistake a
+   * second time, three lines below the first.
+   *
+   * Deleting it outright would have been wrong. The BOUND is not stale — a
+   * reviewer still needs to know that the one verb it holds writes to its own
+   * outbox and not to the code under review, and that nothing about holding it
+   * makes the checkout writable. Only the tool's NAME changed. So the sentence
+   * is re-pointed at `submit_report`, and the probe follows it.
+   *
+   * The fragments are matched inside single lines. This document is wrapped
+   * prose, and a probe pinning a phrase that happens to straddle a line break
+   * reddens on a re-wrap that changed nothing — a probe nobody trusts is one
+   * that gets deleted.
    */
-  test("the document bounds the write to the outbox", () => {
-    expect(REVIEWER).toContain("The write is for `/outbox` alone");
+  test("the document bounds submit_report's writing to the outbox", () => {
+    expect(REVIEWER, "the document does not bound where the writing verb writes").toContain(
+      "`submit_report` writes under `/outbox/<task-id>` and nowhere else",
+    );
+    expect(REVIEWER, "the document no longer refuses the licence reading").toContain(
+      "not a licence to change the code you are",
+    );
+    expect(REVIEWER, "the document drops the reason the licence could not be exercised").toContain(
+      "read-only checkout you could not anyway",
+    );
+  });
+
+  /**
+   * AND THE COUPLING IS WRITTEN DOWN, which is what replaces §8.1's protection.
+   *
+   * The prose-last order guaranteed the rollback stayed one edit. Bringing the
+   * grant sentence forward gives that up unless the document says so itself, so
+   * this asserts the instruction a person performing the rollback has to see:
+   * the `tools:` line and this description move together. Without it the next
+   * restore re-creates exactly the state that cost a lens, and the only warning
+   * would be in a test file nobody opens while editing yaml.
+   */
+  test("the document couples a restored write to a restored description", () => {
+    expect(REVIEWER, "nothing tells a reader the two edits are one").toContain(
+      "are ONE edit",
+    );
+    expect(REVIEWER, "the document does not say restoring the grant obliges the prose").toContain(
+      "restore its description here in the SAME commit",
+    );
   });
 
   /**
