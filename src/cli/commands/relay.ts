@@ -230,9 +230,13 @@ export type RelayFanOutResult =
  *   That map is a property of the CONSOLE, identical on every tick, so it
  *   belongs to whatever composes the relay rather than to a per-request poll.
  * - **`transport: RelayTransport<R>`** — the four host effects (`dispatch`,
- *   `awaitSettled`, `harvest`, `publishReply`). `relay.ts` injects them
+ *   `awaitSettled`, `harvest`, `publishReplies`). `relay.ts` injects them
  *   deliberately; the production implementation over `controlCall`,
  *   `harvestTask` and `writeReply` is neither in that module nor in this one.
+ *   (RENAMED 2026-09-08 by SRD-WORKER-DISPATCH-EXTENSION task 5.3: the effect is
+ *   SET-shaped now, because a declaration is one document about one task's whole
+ *   set — a per-child port could only be paired with a second declaring port, and
+ *   a turn calling one and not the other is failure mode 9.6.)
  *
  * **Both are named here rather than assumed, because they are the whole of what
  * is left before this command can run.**

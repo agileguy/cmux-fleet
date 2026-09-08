@@ -18,8 +18,9 @@
  * ## Declaring and publishing are ONE act, and that is the whole design
  *
  * §7.4 is explicit that the declaration is written by the same composition root
- * that publishes the replies (`relay.ts` for the review console, the injected
- * `publishReply` for triage). Not "at the same time" — by the same code, in the
+ * that publishes the replies — `productionRelayEffects.publishReplies`, reached by
+ * the review console through `fanOut` and by the triage console through
+ * `publishRepliesFor`, so ONE FUNCTION rather than two call sites obeying a rule. Not "at the same time" — by the same code, in the
  * same act. That is what makes the set a worker can read BY CONSTRUCTION the set
  * the host published, rather than two lists that agree until the day one of them
  * is edited. Failure mode 9.6 is what a split buys: a dispatch that rewrote

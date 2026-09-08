@@ -1158,8 +1158,14 @@ declared"* instead of *"the directory is empty"* — the distinction
 `roles/triage.md:266-271` and `roles/collator.md:153-158` each spend six lines of prose establishing.
 
 **Where the host writes it.** The same composition roots that already publish the replies:
-`relay.ts:2654` for the review console and the injected `publishReply` for triage
-(`triage-envelope.ts:1118`). **Declaring and publishing must be one act**, so that the set a worker
+**one function**, `productionRelayEffects.publishReplies` in `src/run/relay.ts` — reached by the
+review console through `fanOut` -> `RelayTransport.publishReplies` and by the triage console through
+`cli/index.ts`'s `publishRepliesFor`, which builds the same `consoleTransport`. (CORRECTED
+2026-09-08 as task 5.3 was built: this named `relay.ts:2654` and *"the injected `publishReply` for
+triage"* — two roots. **The port had to become SET-shaped for the criterion to be expressible at
+all**, because a declaration is one document about one task's WHOLE set, so a per-child
+`publishReply` could only ever be paired with a second declaring port and a turn calling one and not
+the other is 9.6, invisible from the host side.) **Declaring and publishing must be one act**, so that the set a worker
 can read is by construction the set the host published — which is the property that makes §12's
 new fixture possible and which is the closest this design comes to touching defect 3's class.
 
@@ -1568,8 +1574,9 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
 - `get_replies` reports a declared-but-absent reply as missing rather than omitting it. *Probe: a
   declared path that does not exist; assert it appears in `missing`.*
 - **Anti: what the host published and what the tool returns are the same set.** *Probe: drive
-  `publishReply` and the declaration through one composition root over a fixture sweep; assert set
-  equality. **This is the only new assertion in this document that touches defect 3's class**, and
+  `publishReplies` and the declaration through one composition root over a fixture sweep; assert set
+  equality **by reading both ARTEFACTS back off disk** — the replies directory and the replies-policy
+  file — never by counting calls. **This is the only new assertion in this document that touches defect 3's class**, and
   §1.3 is explicit that it is a test surface rather than a prevention.*
 
 **The layers (D4)**
@@ -1926,7 +1933,7 @@ live model. Q1 measured a scratch extension, not this code path.
 - `src/run/replies.ts:24-37`, `:41-50`, `:101`, `:171-173`, `:272-324` — the no-enumeration rule, the
   invisible-late-reply cost, the inode recipe, `writeReply`.
 - `src/run/triage-envelope.ts:116-137`, `:708-745`, `:951-971`, `:1089-1156` — the constants, the
-  collation brief, `publishReply`'s docblock, `joinSweep` and `claimedSuccess`'s only effect.
+  collation brief, `publishReplies`'s docblock, `joinSweep` and `claimedSuccess`'s only effect.
 - `src/run/triage-pass.ts:225-255`, `:942-1022` — `SweepJoin`, and `completeSweep` not reading
   `claimedSuccess`.
 - `src/contracts.ts:52-53`, `:203-217`, `:219-235` — `StatusSchema`, `RESULT_ENVELOPE_NAME`'s docblock
