@@ -2567,5 +2567,8 @@ describe("publishReplies refuses a duplicate child id and publishes NOTHING", ()
     expect(await readdir(repliesDir)).toEqual([]);
     // And the previous turn's declaration still stands, byte for byte.
     expect(readFileSync(paths.repliesPolicy, "utf8")).toBe(before);
+
+    // Swept on the SUCCESS path only, so a failure leaves the tree to read.
+    await rm(root, { recursive: true, force: true });
   });
 });
