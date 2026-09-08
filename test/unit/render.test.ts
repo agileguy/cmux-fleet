@@ -28,6 +28,7 @@ import {
   TRUNCATION_RECOVERY_PATH,
 } from "../../src/config/render.ts";
 import { DISPATCH_TRIGGER_PATH } from "../../src/run/dispatch-policy.ts";
+import { REPLIES_POLICY_MOUNT, repliesPolicyHostPath } from "../../src/run/replies-policy.ts";
 import {
   assetDigestAt,
   BUILD_CONTEXT_ASSETS,
@@ -1356,6 +1357,55 @@ describe("docker argv (SRD §5.6)", () => {
     }
   });
 
+  /**
+   * The declared reply SET, which is a different object from the reply PLANE
+   * checked above (SRD-WORKER-DISPATCH-EXTENSION §7.4, Finding E).
+   *
+   * `/replies` is one directory per worker per RUN, so a standing console's
+   * sweep 5 lists sweeps 1 through 5. `/policy/replies` is what says which of
+   * them belongs to THIS turn, and the two mounts being adjacent in the argv is
+   * not what relates them — this test is.
+   *
+   * WHAT WOULD BREAK IF THIS WERE REMOVED: the golden argv above pins the whole
+   * list for `eng-1` only, and pins it against a literal `/policy/replies`. This
+   * runs against a SECOND worker and asserts against the imported constants, so
+   * a mount that was rendered for one worker and not another, or one whose
+   * container path drifted from the constant `get_replies` will compile against,
+   * fails here rather than nowhere.
+   */
+  test("the declared reply set is mounted read-only beside the other two policy files", async () => {
+    const { runsDir, loaded } = await fixture();
+    for (const id of ["eng-1", "rev-1"]) {
+      const r = await renderWorker(loaded, id);
+      const worker = workerPaths(runPaths("dry", runsDir), id);
+      const expected = `${repliesPolicyHostPath(worker.dir)}:${REPLIES_POLICY_MOUNT}:ro`;
+      expect(r.docker, `worker ${id} has no read-only declared-reply-set mount`).toContain(expected);
+
+      // `:ro` named as its own claim, not left implicit in the string above. It
+      // is the entire control: the macOS Docker VM squashes bind-mount
+      // ownership to the container user, so the host's 0444 says nothing inside
+      // the container and the flag is all that stands between a worker and the
+      // record of which evidence it may read.
+      expect(r.docker.filter((a) => a.startsWith(`${repliesPolicyHostPath(worker.dir)}:`))).toEqual([
+        expected,
+      ]);
+
+      // A SIBLING of the two policy files and not a fourth surface: same
+      // directory on the host, contiguous in the argv. The adjacency is what
+      // makes "the policy surface" a phrase with a referent.
+      const at = r.docker.indexOf(expected);
+      expect(r.docker[at - 2]).toBe(`${worker.dispatchPolicy}:/policy/dispatch:ro`);
+      expect(dirname(repliesPolicyHostPath(worker.dir))).toBe(dirname(worker.taskPolicy));
+
+      // And it is a NAMED CHILD of the run dir, held to ISC-127 exactly as the
+      // reply plane is — the guard returns `null` for a source strictly under
+      // the run dir, so being a named child is the whole guarantee.
+      const run = runPaths("dry", runsDir);
+      expect(() => assertNoRunDirMount(r.docker, run.root)).not.toThrow();
+      expect(classifyRunDirExposure(repliesPolicyHostPath(worker.dir), run.root)).toBeNull();
+    }
+  });
+
   test("pi argv equals the docker argv tail after the image", async () => {
     const { loaded } = await fixture();
     const r = await renderWorker(loaded, "eng-1");
@@ -1478,7 +1528,7 @@ describe("the run directory is computed once (ISC-188)", () => {
       [after, moved],
     ] as const) {
       const hostPaths = runStateHostPaths(rendered.docker);
-      // Or the loop below is vacuous: ten mounts plus the env file. The
+      // Or the loop below is vacuous: eleven mounts plus the env file. The
       // seventh is /policy/task, added with ISC-362. The eighth is
       // /policy/dispatch, the task drop (SRD-TUI-DISPATCH D4), unconditional
       // for the same reason its sibling is. The ninth is /secrets, which D8
@@ -1488,8 +1538,11 @@ describe("the run directory is computed once (ISC-188)", () => {
       // (SRD-REVIEW-CONSOLE D6), unconditional on the same argument again: only
       // a collator is ever replied to, but the mount is not what decides that,
       // and a `-v` behind a predicate `materialize.ts` would have to spell a
-      // second time is the ISC-188 shape.
-      expect(hostPaths.length).toBe(11);
+      // second time is the ISC-188 shape. The eleventh is /policy/replies, the
+      // declared reply SET (SRD-WORKER-DISPATCH-EXTENSION §7.4) — the third file
+      // of the policy surface, and the count is MOVED rather than relaxed to a
+      // `toContain` because the number is the claim that nothing was displaced.
+      expect(hostPaths.length).toBe(12);
       for (const p of hostPaths) expect(p.startsWith(join(root, "dry"))).toBe(true);
     }
 
@@ -1557,14 +1610,16 @@ describe("the run directory is computed once (ISC-188)", () => {
         const r = await renderWorker(loaded, "eng-1");
         expect(isAbsolute(r.runDir)).toBe(true);
         const hostPaths = runStateHostPaths(r.docker);
-        // Ten mounts plus the env file (the seventh is /policy/task, ISC-362;
-        // the eighth is /policy/dispatch, the task drop, SRD-TUI-DISPATCH D4;
-        // the ninth is /secrets, which D8 made unconditional; the tenth is
-        // /replies, the reply plane, SRD-REVIEW-CONSOLE D6).
+        // Eleven mounts plus the env file (the seventh is /policy/task,
+        // ISC-362; the eighth is /policy/dispatch, the task drop,
+        // SRD-TUI-DISPATCH D4; the ninth is /secrets, which D8 made
+        // unconditional; the tenth is /replies, the reply plane,
+        // SRD-REVIEW-CONSOLE D6; the eleventh is /policy/replies, the declared
+        // reply set, SRD-WORKER-DISPATCH-EXTENSION §7.4).
         // Unresolved, they are not absolute and `runStateHostPaths` drops them
         // as named volumes — so this count is the assertion, and it read 0
         // before the root was canonicalized.
-        expect(hostPaths.length).toBe(11);
+        expect(hostPaths.length).toBe(12);
         for (const p of hostPaths) expect(isAbsolute(p)).toBe(true);
       } finally {
         if (saved === undefined) delete process.env["PIFLEET_RUNS_DIR"];
@@ -1989,6 +2044,17 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // in the argv is the first sign the two stopped being one surface.
       "-v",
       `${worker.dispatchPolicy}:/policy/dispatch:ro`,
+      // The declared reply set, pinned as the THIRD file of the policy surface
+      // and immediately after the other two (SRD-WORKER-DISPATCH-EXTENSION
+      // §7.4). Its position carries the same claim theirs does: the three are
+      // read together by anyone debugging what a worker was told, and a
+      // declaration that drifted away from `/policy/task` in the argv is the
+      // first sign the surface stopped being one surface. The host path is
+      // `repliesPolicyHostPath`'s and not a `worker.` field — the one way this
+      // mount differs from its siblings, and asserted here in the spelling the
+      // renderer must use so that a second derivation of the basename fails.
+      "-v",
+      `${repliesPolicyHostPath(worker.dir)}:/policy/replies:ro`,
       // D8 made this UNCONDITIONAL. `eng-1` requests no `secrets:` and still
       // carries the store, because the Class 1 provider key is delivered as a
       // 0444 file in it and no worker requests that. Its POSITION is pinned

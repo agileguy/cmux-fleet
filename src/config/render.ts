@@ -50,6 +50,7 @@ import {
 } from "../run/paths.ts";
 import { DISPATCH_POLICY_MOUNT, DISPATCH_TRIGGER_PATH } from "../run/dispatch-policy.ts";
 import { REPLIES_MOUNT } from "../run/replies.ts";
+import { REPLIES_POLICY_MOUNT, repliesPolicyHostPath } from "../run/replies-policy.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
@@ -590,6 +591,39 @@ export function buildDockerArgv(
    * drop saying nothing is staged.
    */
   argv.push("-v", `${opts.worker.dispatchPolicy}:${DISPATCH_POLICY_MOUNT}:ro`);
+  /*
+   * The declared reply set — the THIRD file on the policy surface, pinned
+   * immediately after the other two for their reason
+   * (SRD-WORKER-DISPATCH-EXTENSION §7.4, D6).
+   *
+   * It names which replies belong to THIS turn, because `get_replies` cannot
+   * list `/replies` to find out: that directory is one per worker per RUN, and a
+   * standing console publishes into it every sweep — so a listing on sweep 5
+   * returns sweeps 1 through 5, each of which reads like a good answer
+   * (Finding E). The set is therefore declared rather than discovered, and the
+   * declaration is written by whatever publishes the replies, in the same act.
+   *
+   * `:ro` is the whole control and it is doing the same work it does one line
+   * above. The macOS Docker VM squashes bind-mount ownership to the container
+   * user, so the host's 0444 reads as OWNED by uid 10001 inside the container
+   * and the mount flag is all that is left between a worker and the record of
+   * which evidence it is permitted to read.
+   *
+   * UNCONDITIONAL, like both of its siblings and on the argument they carry:
+   * only a collating worker is ever handed a reply set, but the mount is not
+   * what decides that — the publisher is — and a `-v` behind a predicate
+   * `materialize.ts` would have to spell a second time is the ISC-188 shape this
+   * file keeps closing. A worker nothing declares for reads an empty set, which
+   * is a TRUE answer and the one a `readdir` cannot give: "nothing was declared"
+   * rather than "the directory is empty".
+   *
+   * The host path comes from `repliesPolicyHostPath` rather than a `WorkerPaths`
+   * field, which is the one way this mount differs from its two siblings: the
+   * basename lives in the module that also owns the mount constant, the mode and
+   * the rewrite recipe, exactly as `replies.ts` owns `replyHostPath`. Nothing
+   * under the run directory is joined HERE, which is this file's standing rule.
+   */
+  argv.push("-v", `${repliesPolicyHostPath(opts.worker.dir)}:${REPLIES_POLICY_MOUNT}:ro`);
   /*
    * The secret store, `:ro` like every other input the worker only reads.
    *
