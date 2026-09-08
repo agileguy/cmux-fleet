@@ -29,6 +29,9 @@ import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed, tuiWorkerIds } from "../../src/cli/commands/up.ts";
+import { buildProgram, exitCodeForError } from "../../src/cli/index.ts";
+import { register as registerConfigCommand } from "../../src/cli/commands/config.ts";
+import { cliBudget } from "../support/budget.ts";
 import { DEFAULT_DEVELOPMENT_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import { REVIEW_CONSOLE_ROSTER } from "../../src/run/dispatch-request.ts";
 import {
@@ -1554,6 +1557,49 @@ describe("models_allowlist is enforced (ISC-190)", () => {
       return err as Error;
     }
   }
+
+  /**
+   * `config validate` MAKES THIS REFUSAL TOO, and until 2026-09-08 it did not.
+   *
+   * The command's own docblock promises that "what passes here is exactly what
+   * `up` will accept", on the reasoning that a `validate` printing `ok:` for a
+   * config `up` then refuses "is worse than not having the command, because the
+   * operator has been told the file is fine". `resolveAllWorkers` was the merge
+   * half of that promise; the allowlist was the half nobody wired.
+   *
+   * MEASURED, and the symptom is why this is a test and not a note. `gemma4:31b`
+   * was given to a reviewer seat with its `context_windows` entry and without
+   * its `models_allowlist` line. `config validate` printed `ok:` and listed the
+   * worker. The console script reported the pane respawned. `up` refused INSIDE
+   * that pane, where nothing was reading, and the only visible symptom was
+   * `status --all` showing eleven workers where there had been twelve — a seat
+   * simply absent, with the reason on a surface already scrolled past.
+   *
+   * Run through `buildProgram` rather than by calling `assertModelAllowed`
+   * again: the function was already correct and already covered, and what broke
+   * was that nothing in this command CALLED it. A test that calls it directly
+   * would have stayed green through the entire defect.
+   */
+  test("config validate refuses it too, not just up", async () => {
+    const doc = baseDoc();
+    doc["llm"] = { model: "DefaultModel", models_allowlist: ["Allowed-A"] };
+    doc["roles"] = { eng: { model: "Sneaky-C" } };
+    const dir = await tempDir();
+    const path = join(dir, "fleet.yaml");
+    await writeFile(path, stringify(doc));
+
+    const program = buildProgram();
+    registerConfigCommand(program);
+    let thrown: unknown = null;
+    try {
+      await program.parseAsync(["config", "validate", "--config", path], { from: "user" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown, "config validate accepted a model up would refuse").not.toBeNull();
+    expect(String((thrown as Error).message)).toContain("models_allowlist");
+    expect(exitCodeForError(thrown)).toBe(EXIT.USAGE);
+  }, cliBudget(1));
 
   test("a model absent from a non-empty allowlist is refused", async () => {
     const err = await check(["Allowed-A", "Allowed-B"], "Sneaky-C");
