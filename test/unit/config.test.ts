@@ -7,7 +7,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stringify } from "yaml";
@@ -33,8 +33,11 @@ import { DEFAULT_DEVELOPMENT_WORKERS } from "../../src/backends/cmux/operations-
 import { REVIEW_CONSOLE_ROSTER } from "../../src/run/dispatch-request.ts";
 import {
   BackendSchema,
+  PI_BUILTIN_TOOLS,
+  PI_EXTENSION_TOOLS,
   RESERVED_ENV_NAMES,
   RESERVED_ENV_PREFIXES,
+  effectiveToolGrant,
   kubeconfigScopeWarning,
   observerTuiEpochWarning,
   observerTuiWorkers,
@@ -1681,6 +1684,144 @@ describe("merge: relative paths (§6.1 exception 3)", () => {
     expect(w.briefing[0]!.value.startsWith("/")).toBe(true);
     expect(w.briefing[0]!.value.includes("~")).toBe(false);
     expect(loaded.config.run.root).toBe("~/.pifleet/runs");
+  });
+});
+
+/**
+ * Extension tool names in `tools:` (SRD-WORKER-DISPATCH-EXTENSION §6.6, §12).
+ *
+ * The hazard these guard is the one `PI_BUILTIN_TOOLS`' docblock was written
+ * against, measured a second time on 2026-09-07 and found to hold for a second
+ * class of name: `--tools read,bash,submit_report,does_not_exist` built a
+ * registry of `read, bash, submit_report` and said nothing about the fourth
+ * name. Widening `ToolNameSchema` to the union is what lets a role ASK for an
+ * extension tool; keeping the union CLOSED is what makes asking wrongly loud.
+ * A widening that dropped the enum would satisfy the first and lose the second,
+ * which is why the misspelling below is asserted next to the acceptance.
+ */
+describe("extension tool declaration (§6.6)", () => {
+  test("a role may request submit_report and it survives to the resolved worker", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { rev: { tools: ["read", "grep", "submit_report"] } };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(doc);
+    // Resolved, not merely parsed: `render.ts:260` joins THIS array into
+    // `--tools`, so a name that validates but is dropped by the merge would be
+    // the same silence with extra steps.
+    expect(resolveWorker(loaded, "w1").tools).toEqual(["read", "grep", "submit_report"]);
+  });
+
+  /**
+   * Driven off the constant rather than a hand-written list, so the name Phase
+   * 5 adds (`get_replies`) is covered the day it becomes requestable instead of
+   * the day someone remembers to extend this test.
+   */
+  test("every name in PI_EXTENSION_TOOLS is accepted in a tools list", async () => {
+    expect(PI_EXTENSION_TOOLS.length).toBeGreaterThan(0);
+    for (const name of PI_EXTENSION_TOOLS) {
+      const doc = baseDoc();
+      doc["roles"] = { rev: { tools: ["read", name] } };
+      doc["workers"] = [{ id: "w1", role: "rev" }];
+      const loaded = await writeAndLoad(doc);
+      expect(resolveWorker(loaded, "w1").tools).toContain(name);
+    }
+  });
+
+  test("a misspelled extension tool name is refused, naming the element", async () => {
+    // `submit_reprot` is what the silence looks like from the operator's side:
+    // Pi drops it from the registry and grants the worker nothing by that name.
+    const doc = baseDoc();
+    doc["roles"] = { rev: { tools: ["read", "submit_reprot"] } };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    await expectIssue(doc, "roles.rev.tools.1");
+  });
+
+  test("exclude_tools ranges over the same vocabulary, and refuses a misspelling", async () => {
+    const ok = baseDoc();
+    ok["roles"] = { rev: { exclude_tools: ["submit_report"] } };
+    ok["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(ok);
+    expect(resolveWorker(loaded, "w1").excludeTools).toEqual(["submit_report"]);
+
+    const bad = baseDoc();
+    bad["roles"] = { rev: { exclude_tools: ["submit_reprot"] } };
+    bad["workers"] = [{ id: "w1", role: "rev" }];
+    await expectIssue(bad, "roles.rev.exclude_tools.0");
+  });
+
+  /**
+   * ANTI-CRITERION (§12, §6.6 interaction 1): ISC-59's default stays the
+   * BUILT-IN set.
+   *
+   * This is asserted against the resolution itself and not through a fixture,
+   * because there is no fixture that can see it. `PI_ALL_TOOLS` is a superset
+   * of `PI_BUILTIN_TOOLS`, so a default swapped to the union leaves
+   * `includes("bash")` true, every ISC-59 message byte-identical and every
+   * existing rejection in place. §12's stated probe — "a role with
+   * `read_only: true` and no `tools:`; assert the `bash` violation still
+   * fires" — stays GREEN under the mutation it names, and was verified to do so
+   * before this test was written. The behavioural test below is kept anyway,
+   * because it is what proves the guard is still WIRED to this function; it is
+   * simply not what makes the mutation red.
+   */
+  test("an omitted tools list resolves to the built-in set, never the union", () => {
+    expect([...effectiveToolGrant(undefined)]).toEqual([...PI_BUILTIN_TOOLS]);
+    for (const name of PI_EXTENSION_TOOLS) {
+      // The whole of the mutation: a grant nobody made. An omitted `tools:`
+      // means "Pi's own defaults", and Pi's own defaults cannot contain a tool
+      // this repository invented — the extension's tools reach a worker only
+      // when a role names one.
+      expect(effectiveToolGrant(undefined)).not.toContain(name);
+    }
+    // A DECLARED list is still returned untouched, extension names included —
+    // the default is the only thing narrowed.
+    expect([...effectiveToolGrant(["read", "submit_report"])]).toEqual(["read", "submit_report"]);
+  });
+
+  test("a read_only role with no tools at all is still rejected for bash", async () => {
+    // The case `effectiveToolGrant` exists for, and the one shape of the ISC-59
+    // violation that had no test: the other three fixtures above all declare a
+    // tools list somewhere, so none of them ever reaches the default.
+    const doc = baseDoc();
+    doc["roles"] = { rev: { read_only: true } };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    await expectIssue(doc, "roles.rev.tools", "no explicit tools");
+  });
+
+  /**
+   * The re-inlining hole, closed by reading the file.
+   *
+   * The value assertion above cannot see a default that is re-inlined at the
+   * call site — someone writing `declared ?? PI_ALL_TOOLS` back into the
+   * refinement leaves `effectiveToolGrant` correct and unused, and every other
+   * test in this file green. What is actually true of this codebase is
+   * narrower and checkable: `PI_ALL_TOOLS` is the vocabulary the SCHEMA ranges
+   * over, and it has exactly two code references — the declaration and the
+   * `z.enum` it feeds. Any third one is either that mistake or a decision worth
+   * a human reading this comment.
+   *
+   * Comment lines are excluded rather than counted: the docblocks in
+   * `schema.ts` argue about `PI_ALL_TOOLS` at length, and a guard that goes red
+   * when someone explains the invariant better is a guard that gets deleted.
+   */
+  test("PI_ALL_TOOLS widens the schema and nothing else", async () => {
+    const text = await readFile(join(REPO_ROOT, "src", "config", "schema.ts"), "utf8");
+    const refs = text
+      .split("\n")
+      .map((line, i) => ({ at: i + 1, text: line.trim() }))
+      .filter((l) => /\bPI_ALL_TOOLS\b/.test(l.text))
+      .filter((l) => !l.text.startsWith("*") && !l.text.startsWith("/*") && !l.text.startsWith("//"));
+    const shown = refs.map((l) => `schema.ts:${l.at}  ${l.text}`).join("\n");
+    const why =
+      "PI_ALL_TOOLS is the vocabulary `tools:`/`exclude_tools:` range over, and nothing else.\n" +
+      "In particular it is NOT what an omitted `tools:` resolves to: it is a superset of\n" +
+      "PI_BUILTIN_TOOLS, so using it as ISC-59's default leaves every message and every\n" +
+      "rejection identical while making the guard reason about a grant nobody made\n" +
+      "(SRD-WORKER-DISPATCH-EXTENSION §6.6 interaction 1). References found:\n" +
+      shown;
+    expect(refs.length, why).toBe(2);
+    expect(refs.filter((l) => /^export const PI_ALL_TOOLS\b/.test(l.text)), why).toHaveLength(1);
+    expect(refs.filter((l) => /z\.enum\(PI_ALL_TOOLS\)/.test(l.text)), why).toHaveLength(1);
   });
 });
 

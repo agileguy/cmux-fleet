@@ -64,8 +64,77 @@ export const durationSeconds = z.union([
  * loud schema error.
  */
 export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
-export const ToolNameSchema = z.enum(PI_BUILTIN_TOOLS);
+
+/**
+ * Tools registered by `docker/pi-extensions/report-tools.ts`, exactly. Closed
+ * for `PI_BUILTIN_TOOLS`' reason and for one more that was MEASURED rather than
+ * inherited: `--tools` filters the EXTENSION registry too, so a name that does
+ * not exist is silently granted nothing AND a name that is omitted silently
+ * deletes a tool that does exist (SRD-WORKER-DISPATCH-EXTENSION §0.2, measured
+ * 2026-09-07 against `pifleet/pi-worker:0.79.6-base-b722edcf4699`).
+ *
+ * Both halves came off one probe table, read out of the image the live triage
+ * console runs. `--tools read,bash,submit_report,does_not_exist` built a
+ * registry of `read, bash, submit_report`: `does_not_exist` vanished with no
+ * error, no warning and no log line, which is the first time the claim above
+ * has been demonstrated rather than asserted — and it is now true of a second
+ * class of name. `--tools read,bash` built a registry with no `submit_report`
+ * in it at all, because Pi applies the allowlist at registry CONSTRUCTION
+ * (`dist/core/agent-session.js:1830,1838`) rather than at activation; an
+ * omitted extension name does not leave the tool inactive, it deletes it.
+ * Every role in `fleet.yaml` declares `tools:`, so an extension shipped
+ * without a config edit is granted to nobody, silently.
+ *
+ * A free-string list here would be the enum's own counter-argument. This stays
+ * closed so that `submit_reprot` fails `config validate` naming the field,
+ * instead of buying a worker nothing at all.
+ */
+export const PI_EXTENSION_TOOLS = ["submit_report", "get_replies"] as const;
+
+/**
+ * The vocabulary `tools:` and `exclude_tools:` range over — and the whole of
+ * what declaring an extension tool costs.
+ *
+ * `render.ts:260` already joins whatever `tools` holds, so widening the
+ * vocabulary is what makes an extension tool requestable; nothing in rendering
+ * learns a new case. That is the property that keeps this a schema change.
+ *
+ * It is deliberately NOT what an omitted `tools:` resolves to — see
+ * `effectiveToolGrant`, which is the interaction this union has to survive.
+ */
+export const PI_ALL_TOOLS = [...PI_BUILTIN_TOOLS, ...PI_EXTENSION_TOOLS] as const;
+
+export const ToolNameSchema = z.enum(PI_ALL_TOOLS);
 export type ToolName = z.infer<typeof ToolNameSchema>;
+
+/**
+ * What an OMITTED `tools:` resolves to for ISC-59's `read_only`/`bash`
+ * cross-check: the BUILT-IN set, never `PI_ALL_TOOLS`.
+ *
+ * Omitting `tools` is not "no tools". pifleet then passes no `--tools` flag at
+ * all and Pi grants every builtin, `bash` among them, which is why the guard
+ * resolves the omission before testing it — `tools?.includes` let the most
+ * common shape of the violation through silently. What the omission resolves
+ * to must therefore be what Pi would actually grant, and Pi's own defaults do
+ * not include a tool this repository invented: an extension tool reaches a
+ * worker only when a role names it. Resolving to the union would make the
+ * guard reason about a grant nobody made
+ * (SRD-WORKER-DISPATCH-EXTENSION §6.6 interaction 1).
+ *
+ * Exported, and a named function rather than a closure inside the refinement,
+ * because that particular mistake is INVISIBLE from the outside.
+ * `PI_ALL_TOOLS` is a superset of `PI_BUILTIN_TOOLS`, so swapping the default
+ * leaves `includes("bash")` true, every ISC-59 message unchanged and every
+ * existing rejection intact. No config loads differently; no probe through
+ * `loadConfig` can go red. The only assertion that can hold this invariant is
+ * one made against the default itself, and it can only be made against the
+ * default if the default has a name.
+ */
+export function effectiveToolGrant(
+  declared: readonly ToolName[] | undefined,
+): readonly ToolName[] {
+  return declared ?? PI_BUILTIN_TOOLS;
+}
 
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
@@ -1584,15 +1653,16 @@ export const FleetConfigSchema = z
     // at the document position a human would edit.
     // Omitting `tools` is NOT "no tools" — pifleet then passes no `--tools`
     // flag and Pi grants every builtin, `bash` among them. Resolving the
-    // omission to the builtin set before the check is what makes the guard
-    // catch the default case; testing `tools?.includes` let the most common
-    // shape of the violation through silently.
+    // omission before the check is what makes the guard catch the default
+    // case; testing `tools?.includes` let the most common shape of the
+    // violation through silently. `effectiveToolGrant` IS that resolution, and
+    // its docblock argues why it resolves to the built-in set rather than to
+    // `ToolNameSchema`'s wider vocabulary — the two are not interchangeable
+    // here even though every ISC-59 message would look identical.
     const defaultTools = cfg.defaults.tools;
-    const effective = (declared: readonly ToolName[] | undefined): readonly ToolName[] =>
-      declared ?? PI_BUILTIN_TOOLS;
     for (const [name, role] of Object.entries(cfg.roles)) {
       const readOnly = role.read_only ?? cfg.defaults.read_only ?? false;
-      const tools = effective(role.tools ?? defaultTools);
+      const tools = effectiveToolGrant(role.tools ?? defaultTools);
       if (readOnly && tools.includes("bash")) {
         ctx.addIssue({
           code: "custom",
@@ -1609,7 +1679,7 @@ export const FleetConfigSchema = z
       if (!role) return; // already reported above
       const readOnly = w.read_only ?? role.read_only ?? cfg.defaults.read_only ?? false;
       const declared = w.tools ?? role.tools ?? defaultTools;
-      const tools = effective(declared);
+      const tools = effectiveToolGrant(declared);
       if (readOnly && tools.includes("bash")) {
         ctx.addIssue({
           code: "custom",
