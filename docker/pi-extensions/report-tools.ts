@@ -127,7 +127,11 @@
  * measured it in the real image against all four models in `fleet.yaml`:
  * `agent_end` fired 2-4ms after the terminating result and every task settled
  * `verdict: success, reason: quiesced`, with the supervisor reading nothing as
- * an anomaly. It did NOT suppress a queued `followUp`, so it is compatible with
+ * an anomaly — **on the `rpc` plane, which is not the one console seats run on.**
+ * Every seat is `pane_mode: tui`, where completion is read off the transcript and
+ * this hint leaves the last assistant message on `stopReason: "toolUse"` for ever.
+ * That settled three live seats `timed_out` on complete reports before ISC-1105
+ * taught `supervisor/tui.ts` to recognise a delivered report as a turn that ended. It did NOT suppress a queued `followUp`, so it is compatible with
  * the bounded nag of layer 3, which is `NAG_TEXT` and `shouldNag` below.
  *
  * **Layer 3 is one `sendUserMessage` per `(task_id, epoch)`** (§6.3, task 4.1).

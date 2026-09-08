@@ -1424,9 +1424,15 @@ than these four would have its delivery land after the epoch had already settled
 outcome arriving intermittently rather than never. Layer 3 should therefore be built to make
 non-delivery a FACT (layer 4's session entry) rather than to rely on the nag winning.
 
-**Q3 — ANSWERED: `terminate: true` is a clean end, and it skips the follow-up call.**
+**Q3 — ANSWERED FOR `rpc` ONLY, and that limit was not stated until ISC-1105 found it.**
 `agent_end` fired 2-4ms after the terminating tool result returned on every model, and every task
-settled `success` / `quiesced`. The supervisor read nothing as an anomaly. It did NOT suppress the
+settled `success` / `quiesced`. The supervisor read nothing as an anomaly. **This was measured on the
+`rpc` completion plane, which is not the one any console seat runs on.** Every seat in `fleet.yaml` is
+`pane_mode: tui`, where §3.5 gives up `agent_end` and completion is read off the transcript instead —
+and there `terminate: true` leaves the last assistant message on `stopReason: "toolUse"` for ever, which
+`classifyTuiTurn` read as still-working until ISC-1105. Measured live 2026-09-08: 3 of 3 seats that
+delivered through the tool settled `timed_out` with a complete report on disk. A measurement on the
+plane the code does not run on is not coverage. It did NOT suppress the
 nag's cycle, which is consistent with the doc rather than a contradiction of it: the hint governs the
 *automatic follow-up LLM call after a tool batch*, and a queued `followUp` user message starts a new
 agent run. Layer 2 works, and it is compatible with layer 3.
