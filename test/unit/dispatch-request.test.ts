@@ -1688,7 +1688,7 @@ describe("the two `collate` collisions task 2.1 names are pinned, not remembered
     harvest: () => {
       throw new Error("no child was dispatched, so none can be harvested");
     },
-    publishReply: () => {
+    publishReplies: () => {
       throw new Error("no reply exists to publish");
     },
   };

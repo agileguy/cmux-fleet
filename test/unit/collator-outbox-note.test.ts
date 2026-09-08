@@ -162,7 +162,7 @@ class Fake implements RelayTransport<Run> {
     };
   }
 
-  async publishReply(): Promise<void> {}
+  async publishReplies(): Promise<void> {}
 }
 
 function collated(o: RelayOutcome): Extract<RelayOutcome, { kind: "collated" }> {
@@ -501,7 +501,7 @@ describe("consoleTransport carries the harvester's outbox listing", () => {
       async readArtifact() {
         return { text: "", unreadable: null };
       },
-      async writeReply() {},
+      async publishReplies() {},
       now: () => 0,
       async sleep() {},
     };

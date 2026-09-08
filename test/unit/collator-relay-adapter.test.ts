@@ -177,7 +177,20 @@ interface Recorder {
      */
     via: string;
   }>;
-  readonly replies: Array<{ run: string; collator: string; child: string; reply: unknown }>;
+  /**
+   * ONE ROW PER PUBLISHED REPLY, plus the `taskId` the whole set was DECLARED
+   * under — because §7.4 makes those one act and a recorder that kept only the
+   * children could not tell a declared set from an undeclared one.
+   */
+  readonly replies: Array<{
+    run: string;
+    collator: string;
+    taskId: string;
+    child: string;
+    reply: unknown;
+  }>;
+  /** One row per `publishReplies` CALL — the act, not the entries. */
+  readonly declared: Array<{ run: string; collator: string; taskId: string; children: string[] }>;
   readonly harvested: string[];
   readonly slept: number[];
 }
@@ -207,6 +220,7 @@ function effects(
   const rec: Recorder = {
     sent: [],
     replies: [],
+    declared: [],
     harvested: [],
     slept: [],
   };
@@ -267,8 +281,16 @@ function effects(
     async listTaskOutbox() {
       return { kind: "unlistable" as const };
     },
-    async writeReply(run, collator, child, reply) {
-      rec.replies.push({ run: run.runId, collator, child, reply });
+    async publishReplies(run, collator, taskId, replies) {
+      rec.declared.push({
+        run: run.runId,
+        collator,
+        taskId,
+        children: replies.map((r) => r.task_id),
+      });
+      for (const r of replies) {
+        rec.replies.push({ run: run.runId, collator, taskId, child: r.task_id, reply: r.reply });
+      }
     },
     now: () => clock,
     async sleep(ms) {
@@ -991,24 +1013,51 @@ describe("harvest", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. `publishReply` — into the COLLATOR's replies dir, via writeReply.
+// 5. `publishReplies` — into the COLLATOR's replies dir AND its declaration.
 // ---------------------------------------------------------------------------
 
-describe("publishReply", () => {
+describe("publishReplies", () => {
   /**
-   * `writeReply` already performs the chmod-0644 → truncate-in-place →
-   * chmod-0444 recipe, and it must not be reimplemented: a bind mount pins the
-   * inode, so an implementation that wrote a temp file and renamed would
-   * deliver a reply the collator's mount can never see. This asserts the
-   * routing — the right directory owner and the right child id — and leaves the
-   * recipe to `replies.ts`, which owns it.
+   * `writeReply` and `writeRepliesPolicy` already perform the chmod-0644 →
+   * truncate-in-place → chmod-0444 recipe, and it must not be reimplemented: a
+   * bind mount pins the inode, so an implementation that wrote a temp file and
+   * renamed would deliver a reply the collator's mount can never see. This
+   * asserts the routing — the right directory owner, the right child ids, the
+   * right declaring task — and leaves the recipe to the modules that own it.
    */
   test("routes to the collator's own replies dir under the collator's run", async () => {
     const { fx, rec } = effects();
-    await consoleTransport("col-1", fx).publishReply(COL_RUN, "T1-arch", { v: 1 });
-    expect(rec.replies).toEqual([
-      { run: "run-col", collator: "col-1", child: "T1-arch", reply: { v: 1 } },
+    await consoleTransport("col-1", fx).publishReplies(COL_RUN, "T1-collate", [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { v: 1 } },
     ]);
+    expect(rec.replies).toEqual([
+      { run: "run-col", collator: "col-1", taskId: "T1-collate", child: "T1-arch", reply: { v: 1 } },
+    ]);
+  });
+
+  /**
+   * **THE TRANSPORT ADDS NOTHING AND DROPS NOTHING.**
+   *
+   * §7.4's property is that the published set and the declared set cannot
+   * differ, and the mechanism is that ONE array reaches ONE effect. A transport
+   * that filtered, reordered or de-duplicated on the way through would be a
+   * second opinion about the set, and the two halves would then agree only as
+   * long as that opinion did. Asserted by identity rather than by value, which
+   * is the strongest form available here: `toBe` on the array itself.
+   */
+  test("forwards the set by identity — no copy, no filter, no reorder", async () => {
+    let seen: unknown = null;
+    const { fx } = effects({
+      async publishReplies(_run, _collator, _taskId, replies) {
+        seen = replies;
+      },
+    });
+    const set = [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { v: 1 } },
+      { task_id: "T1-ctx", worker: "rev-ctx-1", aspect: "ctx", reply: { v: 2 } },
+    ];
+    await consoleTransport("col-1", fx).publishReplies(COL_RUN, "T1-collate", set);
+    expect(seen).toBe(set);
   });
 });
 
@@ -2296,13 +2345,13 @@ describe("a failed harvest carries a pointer to what it could not read", () => {
   });
 });
 
-describe("writeReply refuses a missing replies mount, by type", () => {
+describe("publishReplies refuses a missing replies mount, by type", () => {
   test("a missing replies directory throws RelayReplyError carrying the facts", async () => {
     const root = await mkdtemp(join(tmpdir(), "pifleet-replies-"));
     // No `up`, so nothing created the collator's replies directory.
-    const p = productionRelayEffects.writeReply({ root } as RunPaths, "col-1", "T1-arch", {
-      verdict: "success",
-    });
+    const p = productionRelayEffects.publishReplies({ root } as RunPaths, "col-1", "T1-collate", [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { verdict: "success" } },
+    ]);
 
     await expect(p).rejects.toBeInstanceOf(RelayReplyError);
     const err = (await p.catch((e: unknown) => e)) as RelayReplyError;

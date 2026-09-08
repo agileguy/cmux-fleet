@@ -88,6 +88,7 @@ import {
   type RelayOutcome,
   type RelayTaskRef,
   type RelayTransport,
+  type PublishedReply,
 } from "../../src/run/relay.ts";
 
 const PARENT = "T";
@@ -300,9 +301,15 @@ class FakeTransport implements RelayTransport<Run> {
     };
   }
 
-  async publishReply(_run: Run, child: string, reply: unknown): Promise<void> {
-    this.log.push(`reply:${child}`);
-    this.replies.set(child, reply);
+  async publishReplies(
+    _run: Run,
+    _taskId: string,
+    replies: readonly PublishedReply[],
+  ): Promise<void> {
+    for (const r of replies) {
+      this.log.push(`reply:${r.task_id}`);
+      this.replies.set(r.task_id, r.reply);
+    }
   }
 
   /** Every brief that has ever left the host: the children's and the collation's. */

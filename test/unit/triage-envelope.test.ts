@@ -40,7 +40,7 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -50,8 +50,11 @@ import {
   taskRecordPath,
   workerOutboxDir,
   workerPaths,
+  workerRepliesDir,
   type RunPaths,
 } from "../../src/run/paths.ts";
+import { createRepliesDir } from "../../src/run/replies.ts";
+import { writeRepliesPolicy } from "../../src/run/replies-policy.ts";
 import {
   TRIAGE_CONSOLE_ASPECTS,
   childTaskId,
@@ -83,9 +86,26 @@ import {
   type ForbiddenEnvelopeClass,
   type SweepDispatchOutcome,
   type SweepEnvelopeInput,
+  type SweepProducerDeps,
   normalizeSliceReportingPath,
   ensureFreshnessEcho,
 } from "../../src/run/triage-envelope.ts";
+import {
+  consoleTransport,
+  productionRelayEffects,
+  type PublishedReply,
+} from "../../src/run/relay.ts";
+
+/**
+ * The publish-and-declare port, named once so the fixtures below cannot each
+ * spell it slightly differently.
+ *
+ * Read off `SweepProducerDeps` rather than restated, because a hand-written
+ * copy is a second answer to a question the module already answers — and a
+ * fixture whose port shape drifted from the real one would keep passing while
+ * production stopped compiling.
+ */
+type PublishRepliesPort = NonNullable<SweepProducerDeps["publishReplies"]>;
 
 // ---------------------------------------------------------------------------
 // Isolation — both variables, every time
@@ -757,14 +777,16 @@ interface Sent {
 
 function producerFixture(
   run: RunPaths,
-  outcome: SweepDispatchOutcome | { publishReply: (c: string, r: unknown) => Promise<void> } = {
+  outcome:
+    | SweepDispatchOutcome
+    | { publishReplies: PublishRepliesPort } = {
     kind: "accepted",
   },
 ): { sent: Sent[]; producers: ReturnType<typeof sweepProducers> } {
   const sent: Sent[] = [];
-  const publishReply = "publishReply" in outcome ? outcome.publishReply : undefined;
+  const publishReplies = "publishReplies" in outcome ? outcome.publishReplies : undefined;
   const dispatchOutcome: SweepDispatchOutcome =
-    "publishReply" in outcome ? { kind: "accepted" } : outcome;
+    "publishReplies" in outcome ? { kind: "accepted" } : outcome;
   const producers = sweepProducers({
     run,
     environment: "cni-dev",
@@ -775,7 +797,7 @@ function producerFixture(
       sent.push(args);
       return dispatchOutcome;
     },
-    ...(publishReply === undefined ? {} : { publishReply }),
+    ...(publishReplies === undefined ? {} : { publishReplies }),
   });
   return { sent, producers };
 }
@@ -995,9 +1017,11 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     );
 
     const published: Array<{ child: string; reply: unknown }> = [];
+    const declaredUnder: string[] = [];
     const { producers } = producerFixture(run, {
-      publishReply: async (c, reply) => {
-        published.push({ child: c, reply });
+      publishReplies: async (taskId, replies) => {
+        declaredUnder.push(taskId);
+        for (const r of replies) published.push({ child: r.task_id, reply: r.reply });
       },
     });
 
@@ -1005,6 +1029,14 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     expect(joined.artifacts.map((a) => a.worker)).toEqual([seat.worker]);
     // BY NAME: the child task id the collation brief will name, not just "one call".
     expect(published.map((p) => p.child)).toEqual([child]);
+    /*
+     * AND THE DECLARING TASK IS THE COLLATION'S, by value. §7.4: `get_replies`
+     * refuses a declaration whose `task_id` does not match the collator's own
+     * `/policy/task`, and the task that reads this set is the collation — so a
+     * publisher that declared under the SWEEP id would produce a set that is
+     * fresh, correct, and refused as stale on every honest path.
+     */
+    expect(declaredUnder).toEqual([collationTaskId(sweepId)]);
     /*
      * THE REPORT SURVIVES, asserted by value. `worker` alone is satisfied by the
      * narrow freshness echo, which is exactly the bug this replaces: the collator
@@ -1016,19 +1048,27 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     expect(reply.status).toBe("success");
   });
 
-  test("a seat with no artifact publishes NOTHING", async () => {
+  test("a seat with no artifact publishes NOTHING — and declares the EMPTY SET", async () => {
     const run = await seedRun("2026-09-06T00-00-16Z-0016");
-    const published: string[] = [];
+    const calls: Array<{ taskId: string; children: string[] }> = [];
     const { producers } = producerFixture(run, {
-      publishReply: async (c) => {
-        published.push(c);
+      publishReplies: async (taskId, replies) => {
+        calls.push({ taskId, children: replies.map((r) => r.task_id) });
       },
     });
     const joined = await producers.join(sweepTaskId(41));
     expect(joined.artifacts).toEqual([]);
-    // An empty file in /replies is worse than a missing one: the collator would
-    // read it as a report rather than as an absence.
-    expect(published).toEqual([]);
+    /*
+     * An empty file in /replies is worse than a missing one: the collator would
+     * read it as a report rather than as an absence. So NO child is published.
+     *
+     * **But the declaration IS written, holding `[]`** — §7.4: *"an EMPTY array
+     * is a value, not an absence"*. Skipping the call would leave the previous
+     * sweep's declaration in place, and `get_replies` would answer a question
+     * about sweep 41 with sweep 40's set until the staleness check happened to
+     * catch it. One call, zero children, is the honest answer.
+     */
+    expect(calls).toEqual([{ taskId: collationTaskId(sweepTaskId(41)), children: [] }]);
   });
 
   test("join of a sweep nobody answered is empty on both members, not a throw", async () => {
@@ -1242,8 +1282,8 @@ describe("§13 task 3.4: claimedSuccess names §7.1/§7.2's entries and decides 
         previousDocument: async () => null,
         dispatch: async () => ({ kind: "accepted" }),
         seatRun: async () => seatTree,
-        publishReply: async (child) => {
-          published.push(child);
+        publishReplies: async (_taskId, replies) => {
+          for (const r of replies) published.push(r.task_id);
         },
       });
       return { joined: await producers.join(sweepId), logged, published };
@@ -1443,5 +1483,225 @@ describe("ensureFreshnessEcho", () => {
     const r = ensureFreshnessEcho(norm.brief, "T-sweep-1");
     expect(r.brief).toContain("/outbox/T-sweep-1-slice1/files/");
     expect(r.brief).toContain('`sweep_id` exactly "T-sweep-1"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §12's publish/declare SET-EQUALITY criterion — SRD-WORKER-DISPATCH-EXTENSION
+// task 5.3.
+// ---------------------------------------------------------------------------
+
+/**
+ * **WHAT THE HOST PUBLISHED AND WHAT THE TOOL WILL RETURN ARE THE SAME SET.**
+ *
+ * §12: *"Anti: what the host published and what the tool returns are the same
+ * set. Probe: drive `publishReply` and the declaration through one composition
+ * root over a fixture sweep; assert set equality."*
+ *
+ * ## Why this drives the REAL effect and not a fixture
+ *
+ * A test that asserted *"`writeReply` was called and `writeRepliesPolicy` was
+ * called"* would be a test that the composition root calls two functions, which
+ * is the thing §7.4 says is not enough: two calls can be kept in step by a
+ * reader right up until the day one of them is edited. The criterion is about
+ * two ARTEFACTS, so both are read back off disk — `<run>/replies/<collator>/`
+ * and `<worker-dir>/replies-policy` — and compared as sets. Nothing here
+ * inspects a call count.
+ *
+ * The path under test is the whole production wiring minus the CLI's `import`:
+ * `sweepProducers` → `SweepProducerDeps.publishReplies` →
+ * `consoleTransport.publishReplies` → `productionRelayEffects.publishReplies`.
+ * That is the same chain `cli/index.ts`'s `publishRepliesFor` builds, and it is
+ * the chain the review console's `fanOut` also lands on — which is what makes
+ * "one composition root" a fact about the code rather than a claim about two.
+ *
+ * ## And why a SECOND sweep is part of the criterion rather than a bonus
+ *
+ * `/replies` is one directory per worker per RUN and the triage console is one
+ * long-lived run, so it ACCUMULATES (Finding E). After two sweeps the directory
+ * and the declaration MUST have stopped agreeing — that divergence is the whole
+ * reason `get_replies` cannot be a `readdir` — while the declaration must equal
+ * exactly what the second sweep published. A one-sweep test cannot tell a
+ * correct declaration from a `readdir` in disguise, because on sweep one they
+ * are the same answer.
+ */
+describe("§7.4: the published set and the declared set are one set", () => {
+  /** `materialize.ts`'s two establishing steps, which run before `docker run`. */
+  async function establishCollator(
+    run: RunPaths,
+  ): Promise<{ repliesDir: string; policyFile: string }> {
+    const paths = workerPaths(run, TRIAGE_COLLATOR);
+    await mkdir(paths.dir, { recursive: true });
+    const repliesDir = workerRepliesDir(run.root, TRIAGE_COLLATOR);
+    await createRepliesDir(repliesDir);
+    // ISC-1091: a regular FILE holding the empty declaration, never an absence.
+    await writeRepliesPolicy(paths.repliesPolicy, null, []);
+    return { repliesDir, policyFile: paths.repliesPolicy };
+  }
+
+  /** One observer artifact, as a seat would have left it. */
+  async function seedArtifact(
+    run: RunPaths,
+    sweepId: string,
+    seat: { worker: string; aspect: string },
+  ): Promise<string> {
+    const child = childTaskId(sweepId, seat.aspect);
+    const dir = join(workerOutboxDir(run.root, seat.worker), child, SWEEP_FILES_DIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, OBSERVER_ARTIFACT_FILE),
+      JSON.stringify({
+        sweep_id: sweepId,
+        window_opened_at: "2026-09-06T12:00:00.000Z",
+        status: "success",
+        services: [{ service: "alert-notifier", assessment: "healthy" }],
+      }),
+      "utf8",
+    );
+    return child;
+  }
+
+  /** The set on disk, as child task ids — `replies.ts`'s `.json` suffix removed. */
+  async function publishedSet(repliesDir: string): Promise<string[]> {
+    return (await readdir(repliesDir)).map((f) => f.replace(/\.json$/, "")).sort();
+  }
+
+  /** The set the tool will read, as child task ids. */
+  async function declaredSet(policyFile: string): Promise<string[]> {
+    const doc = JSON.parse(await readFile(policyFile, "utf8")) as {
+      replies: { task_id: string }[];
+    };
+    return doc.replies.map((r) => r.task_id).sort();
+  }
+
+  /** The producers, wired to the PRODUCTION publish-and-declare act. */
+  function realProducers(run: RunPaths): ReturnType<typeof sweepProducers> {
+    return sweepProducers({
+      run,
+      environment: "cni-dev",
+      services: SERVICES,
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async () => ({ kind: "accepted" }),
+      publishReplies: async (taskId, replies) => {
+        await consoleTransport(TRIAGE_COLLATOR, productionRelayEffects, {
+          deadlineMs: 0,
+        }).publishReplies(run, taskId, replies);
+      },
+    });
+  }
+
+  test("one sweep: the directory and the declaration hold the same set", async () => {
+    const run = await seedRun("2026-09-06T00-00-31Z-0031");
+    const { repliesDir, policyFile } = await establishCollator(run);
+    const sweepId = sweepTaskId(41);
+    const child = await seedArtifact(run, sweepId, TRIAGE_CONSOLE_ASPECTS[0]!);
+
+    await realProducers(run).join(sweepId);
+
+    const published = await publishedSet(repliesDir);
+    const declared = await declaredSet(policyFile);
+    // THE CRITERION: two artefacts, read back, one set.
+    expect(declared).toEqual(published);
+    // PREMISE — a vacuous pair of empty sets would satisfy the line above.
+    expect(published).toEqual([child]);
+  });
+
+  /**
+   * THE DECLARATION IS ABOUT THE COLLATION, and asserted by value.
+   *
+   * Failure mode 9.6's mitigation has two halves: publish and declare in one
+   * act, AND *"the file carries its own `task_id` and the tool refuses a
+   * mismatch against `/policy/task`"*. A declaration under the SWEEP id would be
+   * a perfectly fresh set that `get_replies` refuses on every honest path, which
+   * is the most expensive way a freshness check can be wrong.
+   */
+  test("the declaration names the COLLATION task", async () => {
+    const run = await seedRun("2026-09-06T00-00-32Z-0032");
+    const { policyFile } = await establishCollator(run);
+    const sweepId = sweepTaskId(41);
+    await seedArtifact(run, sweepId, TRIAGE_CONSOLE_ASPECTS[0]!);
+
+    await realProducers(run).join(sweepId);
+
+    const doc = JSON.parse(await readFile(policyFile, "utf8")) as { task_id: string };
+    expect(doc.task_id).toBe(collationTaskId(sweepId));
+  });
+
+  test("two sweeps: the directory accumulates and the declaration does NOT", async () => {
+    const run = await seedRun("2026-09-06T00-00-33Z-0033");
+    const { repliesDir, policyFile } = await establishCollator(run);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+
+    const first = sweepTaskId(41);
+    const firstChild = await seedArtifact(run, first, seat);
+    await realProducers(run).join(first);
+
+    const second = sweepTaskId(42);
+    const secondChild = await seedArtifact(run, second, seat);
+    await realProducers(run).join(second);
+
+    /*
+     * FINDING E, made executable. The directory now holds BOTH sweeps, so a
+     * `get_replies` that listed it would hand sweep 42's collator sweep 41's
+     * question as well — and sweep 41's answer reads like a perfectly good one.
+     */
+    expect(await publishedSet(repliesDir)).toEqual([firstChild, secondChild].sort());
+    // The declaration is THIS sweep's set and only this sweep's.
+    expect(await declaredSet(policyFile)).toEqual([secondChild]);
+  });
+
+  /**
+   * THE EMPTY SET IS DECLARED, not skipped — §7.4's *"an EMPTY array is a value,
+   * not an absence"*, asserted on the artefact rather than on a call.
+   *
+   * Sequenced after a sweep that published something, because that is the state
+   * where skipping the call is invisible: the previous declaration is left
+   * standing and every observable on the host says the join worked.
+   */
+  test("a sweep that observed nothing declares the empty set over the previous one", async () => {
+    const run = await seedRun("2026-09-06T00-00-34Z-0034");
+    const { repliesDir, policyFile } = await establishCollator(run);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+
+    const first = sweepTaskId(41);
+    const firstChild = await seedArtifact(run, first, seat);
+    await realProducers(run).join(first);
+    expect(await declaredSet(policyFile)).toEqual([firstChild]);
+
+    // Sweep 42: nobody wrote an artifact.
+    await realProducers(run).join(sweepTaskId(42));
+
+    expect(await declaredSet(policyFile)).toEqual([]);
+    // And the previous sweep's FILE is still there — declaring is not deleting.
+    expect(await publishedSet(repliesDir)).toEqual([firstChild]);
+  });
+
+  /**
+   * THE TWO PORT SHAPES CANNOT DRIFT.
+   *
+   * `SweepProducerDeps.publishReplies` spells its element type inline because
+   * §12's read-only block bans this console's modules from importing
+   * `run/relay.ts`, where {@link PublishedReply} lives. The bridge between them
+   * is structural and is made at `cli/index.ts`, a file no unit test drives —
+   * so the compatibility is pinned HERE, in a file that may import both, which
+   * is the treatment {@link SWEEP_FILES_DIR} already gets for the same reason.
+   *
+   * Assignability in BOTH directions, because one direction only proves the
+   * relay's type is a subtype: a `PublishedReply` that grew a required field
+   * would still satisfy the triage port and would silently make the bridge
+   * impossible to write.
+   */
+  test("the triage port and relay's PublishedReply are the same shape, both ways", () => {
+    const fromRelay: PublishedReply = {
+      task_id: "T-sweep-41-slice1",
+      worker: "obs-t1",
+      aspect: "slice1",
+      reply: { status: "success" },
+    };
+    type PortEntry = Parameters<PublishRepliesPort>[1][number];
+    const asPort: PortEntry = fromRelay;
+    const backAgain: PublishedReply = asPort;
+    expect(backAgain).toEqual(fromRelay);
   });
 });

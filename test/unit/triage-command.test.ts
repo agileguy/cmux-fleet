@@ -1421,7 +1421,7 @@ async function fixtureFleet(
   const settled: string[] = [];
   const recycled: string[] = [];
   const deadlines: number[] = [];
-  const published: Array<{ child: string; reply: unknown }> = [];
+  const published: Array<{ taskId: string; children: string[] }> = [];
   const probes = { count: 0 };
 
   const effects: TriageProductionEffects = {
@@ -1441,13 +1441,15 @@ async function fixtureFleet(
       return fixtureFleetDispatch(r, dispatched, windows, titles, settled);
     },
     /*
-     * §6.3 step 7's publish, recorded so a test can assert the collator was
-     * actually handed each child's reply. The real one writes into the
-     * collator's `:ro` /replies mount; here it is a list, because what the
-     * console owns is WHETHER it publishes and for which children.
+     * §6.3 step 7's publish-and-declare, recorded so a test can assert the
+     * collator was actually handed each child's reply. The real one writes into
+     * the collator's `:ro` /replies mount AND rewrites its `/policy/replies`
+     * declaration in one act (SRD-WORKER-DISPATCH-EXTENSION §7.4); here it is a
+     * list, because what the console owns is WHETHER it publishes, under which
+     * task, and for which children.
      */
-    publishReplyFor: () => async (child, reply) => {
-      published.push({ child, reply });
+    publishRepliesFor: () => async (taskId, replies) => {
+      published.push({ taskId, children: replies.map((r) => r.task_id) });
     },
     isCollatorLive: async () => true,
     /*

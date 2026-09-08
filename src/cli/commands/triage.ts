@@ -762,14 +762,28 @@ export interface TriageProductionEffects {
     opts: { readonly settleDeadlineMs: number },
   ) => SweepDispatch;
   /**
-   * §6.3 step 7 — put a child's artifact in the COLLATOR's `/replies` mount.
+   * §6.3 step 7 — put the sweep's artifacts in the COLLATOR's `/replies` mount
+   * AND declare them at `/policy/replies`, in ONE act
+   * (SRD-WORKER-DISPATCH-EXTENSION §7.4).
    *
    * Injected for exactly the reason the dispatch is: writing into another
    * worker's `:ro` mount is a privileged effect and the module that needs it is
    * inside §12's read-only block. Without it the collation brief names
    * `/replies/<child>.json` for every seat and nothing creates those files.
+   *
+   * **The whole set and the collation's id, not one child.** `get_replies`
+   * cannot enumerate `/replies` — it accumulates across sweeps — so the set is
+   * DECLARED, and a declaration is one document about one task's whole set. A
+   * per-child port would have to be paired with a second declaring port, and a
+   * turn that called one and not the other is failure mode 9.6: the collator
+   * reads a previous sweep's set and it looks like a good answer.
    */
-  readonly publishReplyFor: (run: RunPaths) => (child: string, reply: unknown) => Promise<void>;
+  readonly publishRepliesFor: (
+    run: RunPaths,
+  ) => (
+    taskId: string,
+    replies: readonly { task_id: string; worker: string; aspect: string; reply: unknown }[],
+  ) => Promise<void>;
   /**
    * §12's exit-when-the-console-is-gone predicate, for `--poll`.
    *
@@ -1229,11 +1243,12 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
           ),
           /*
            * §6.3 step 7. `run` is the COLLATOR's, and that is correct here and
-           * only here: the reply is published INTO the collator's `/replies`
-           * mount, so the destination is its run by definition — unlike the
-           * dispatch and the join, which address the seat that owns the work.
+           * only here: the replies are published INTO the collator's `/replies`
+           * mount and declared in the collator's own worker directory, so the
+           * destination is its run by definition — unlike the dispatch and the
+           * join, which address the seat that owns the work.
            */
-          publishReply: e.publishReplyFor(run),
+          publishReplies: e.publishRepliesFor(run),
         },
         e.env,
       ),

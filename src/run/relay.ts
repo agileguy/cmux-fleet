@@ -28,7 +28,9 @@
  *   picked the answer to Q4 by accident.
  * - `harvest` is `harvestTask`, which clones a repository and may run acceptance
  *   commands in a container.
- * - `publishReply` writes a `0444` file into the `:ro` `/replies` mount (D6).
+ * - `publishReplies` writes `0444` files into the `:ro` `/replies` mount (D6)
+ *   AND rewrites the `:ro` `/policy/replies` declaration in one act
+ *   (SRD-WORKER-DISPATCH-EXTENSION §7.4).
  *
  * So §6.5 changes where this is CALLED and changes nothing about what it
  * decides — the same property `dispatch-request.ts` was built for, and the
@@ -87,6 +89,7 @@ import { runsRoot as runsRootEager, runPaths as runPathsEager } from "./paths.ts
 
 import { SESSION_ID_RE, type Verdict } from "../contracts.ts";
 import { replyMountPath } from "./replies.ts";
+import type { DeclaredReply } from "./replies-policy.ts";
 import type { DispatchRequest } from "./dispatch-request.ts";
 import type { RunPaths } from "./paths.ts";
 import type { RelayFanOutInput, RelayFanOutResult } from "../cli/commands/relay.ts";
@@ -647,9 +650,9 @@ export interface RelayHarvest {
  * `R` is the run handle and relay never inspects it — see the module docblock.
  * The transport closes over whatever `controlCall` and `harvestTask` need.
  *
- * **`publishReply` is on this interface rather than left to the caller, and the
- * ordering is why.** D6's cost is that the collation brief carries three PATHS,
- * so a brief naming a file that is not on disk yet is a collator reading
+ * **`publishReplies` is on this interface rather than left to the caller, and
+ * the ordering is why.** D6's cost is that the collation brief carries three
+ * PATHS, so a brief naming a file that is not on disk yet is a collator reading
  * `ENOENT` and reporting a lens as missing that was never missing. That ordering
  * is a correctness property of the JOIN, so it lives where the join lives.
  * Returning the payloads and trusting a caller to write them before dispatching
@@ -678,8 +681,50 @@ export interface RelayTransport<R> {
   awaitSettled(run: R, task: RelayTaskRef): Promise<void>;
   /** Harvest a settled task. */
   harvest(run: R, task: RelayTaskRef): Promise<RelayHarvest>;
-  /** Write `<child>.json` into the collator's `/replies` mount. */
-  publishReply(collatorRun: R, childTaskId: string, reply: unknown): Promise<void>;
+  /**
+   * Publish the whole set into the collator's `/replies` mount AND declare it
+   * at `/policy/replies` — ONE call, because they are ONE act.
+   *
+   * **The set shape is the criterion, not a convenience.**
+   * SRD-WORKER-DISPATCH-EXTENSION §7.4: *"Declaring and publishing must be one
+   * act, so that the set a worker can read is by construction the set the host
+   * published"*. A per-child `publishReply(run, id, reply)` plus a separate
+   * `declareReplies(run, taskId, entries)` would be two members a reader has to
+   * keep in step, and failure mode 9.6 is what a split buys: a turn that wrote
+   * the files and not the declaration hands `get_replies` a PREVIOUS sweep's
+   * set, which reads like a perfectly good answer. One parameter drives both
+   * halves, so there is no second list to disagree with the first.
+   *
+   * `taskId` is the task that will READ this set — the collation — and not any
+   * child's. 9.6's staleness check is `get_replies` comparing this against
+   * `/policy/task` line 1 inside the collator, so it must be the id the
+   * collation is about to be dispatched under.
+   *
+   * REJECTS rather than partially applying: see `productionRelayEffects` for
+   * what a duplicate child id does and why nothing is published when one
+   * appears.
+   */
+  publishReplies(collatorRun: R, taskId: string, replies: readonly PublishedReply[]): Promise<void>;
+}
+
+/**
+ * One reply as the host holds it at the moment of publishing: the declaration's
+ * three attribution fields, plus the payload that becomes the file.
+ *
+ * **`extends DeclaredReply` and never a fourth spelling of those three fields.**
+ * `replies-policy.ts` owns what a declaration entry says about a reply, and the
+ * whole point of the set-shaped call above is that the bytes written to
+ * `/replies/<id>.json` and the entry written to `/policy/replies` come out of
+ * ONE value. Re-declaring `task_id`/`worker`/`aspect` here would give the two
+ * halves separate sources and let them drift apart field by field.
+ *
+ * `path` is deliberately absent — it is `renderRepliesPolicy`'s to derive from
+ * `replyMountPath`, and a publisher that named it would be the second thing
+ * naming it (`replies-policy.ts`'s `DeclaredReply` records that ruling).
+ */
+export interface PublishedReply extends DeclaredReply {
+  /** The payload `writeReply` serialises — the harvest bundle, for this console. */
+  readonly reply: unknown;
 }
 
 /** One lens after the join. Every seat appears, whether or not it was asked. */
@@ -1199,18 +1244,35 @@ async function fanOut<R>(
     };
   }
 
-  // ── Publish, THEN collate (D6) ────────────────────────────────────────────
+  // ── Publish AND declare, THEN collate (D6, §7.4) ──────────────────────────
   //
   // Ordering, not convention: the brief carries paths, so every path in it names
   // a file already on disk. Only surviving lenses get a reply — a file at a
   // reply path IS a lens as far as the collator can tell, so publishing an empty
   // one for a reviewer that timed out would hand it a fourth thing to read and a
   // reason to believe three lenses reported.
-  for (const child of survived) {
-    const harvested = result.get(child.aspect);
-    if (harvested === undefined || child.taskId === null) continue;
-    await transport.publishReply(collatorRun, child.taskId, harvested.reply);
-  }
+  //
+  // **ONE call carrying the whole set, and that is §7.4's requirement rather
+  // than tidiness.** The declaration at `/policy/replies` is what `get_replies`
+  // reads instead of a `readdir` (Finding E: `/replies` accumulates across
+  // fan-outs, so a listing collates a mixture of turns). Publishing in a loop
+  // here and declaring somewhere else would be two lists that agree until the
+  // day one of them is edited — failure mode 9.6.
+  //
+  // `collationId` and not any child's id: the declaration names the task that
+  // will READ the set, because the tool's staleness check is an equality against
+  // the collator's own `/policy/task`.
+  await transport.publishReplies(
+    collatorRun,
+    collationId,
+    survived.flatMap((child) => {
+      const harvested = result.get(child.aspect);
+      if (harvested === undefined || child.taskId === null) return [];
+      return [
+        { task_id: child.taskId, worker: child.worker, aspect: child.aspect, reply: harvested.reply },
+      ];
+    }),
+  );
 
   const missingSeats = missing.map((c) => ({ worker: c.worker, aspect: c.aspect }));
   const coverage = { reported: survived.length, dispatched: children.length };
@@ -2052,8 +2114,22 @@ export interface RelayEffects {
     hostPath: string,
     maxBytes: number,
   ): Promise<{ text: string; unreadable: string | null }>;
-  /** `writeReply(workerRepliesDir(run.root, collator), childTaskId, reply)`. */
-  writeReply(run: RunPaths, collator: string, childTaskId: string, reply: unknown): Promise<void>;
+  /**
+   * `writeReply` per entry into `workerRepliesDir(run.root, collator)`, then
+   * `writeRepliesPolicy(workerPaths(run, collator).repliesPolicy, taskId, …)`.
+   *
+   * **The two writes are one member because they are one act** (§7.4). Two
+   * members would be two things a `fanOut` — or a triage join, or the next
+   * console — has to remember to call, and forgetting the second one is
+   * invisible: the replies land, the collation dispatches, and `get_replies`
+   * answers with the previous turn's set (failure mode 9.6).
+   */
+  publishReplies(
+    run: RunPaths,
+    collator: string,
+    taskId: string,
+    replies: readonly PublishedReply[],
+  ): Promise<void>;
   /** Milliseconds. Injected so the deadline below needs no wall clock to test. */
   now(): number;
   sleep(ms: number): Promise<void>;
@@ -2298,11 +2374,12 @@ function relayAttemptId(worker: string, dispatch: RelayDispatch): string {
  * The four host effects, satisfied.
  *
  * `collator` is closed over rather than passed, and that is what makes
- * `publishReply(collatorRun, childTaskId, reply)` implementable at all: the
- * reply belongs in the collator's own replies directory, the signature carries
- * the run but not the worker, and the collator is a property of the REQUEST —
- * one per fan-out — rather than of the console. Inverting the worker→run map to
- * recover it would give the wrong answer the moment two workers share a run.
+ * `publishReplies(collatorRun, taskId, replies)` implementable at all: the
+ * replies belong in the collator's own replies directory and the declaration in
+ * the collator's own worker directory, the signature carries the run but not the
+ * worker, and the collator is a property of the REQUEST — one per fan-out —
+ * rather than of the console. Inverting the worker→run map to recover it would
+ * give the wrong answer the moment two workers share a run.
  */
 export function consoleTransport(
   collator: string,
@@ -2646,12 +2723,22 @@ export function consoleTransport(
       };
     },
 
-    async publishReply(collatorRun: RunPaths, child: string, reply: unknown): Promise<void> {
-      // `writeReply` and never a reimplementation of it: it owns the
-      // chmod-0644 → truncate-in-place → chmod-0444 recipe, and the recipe is
-      // truncate-in-place because a bind mount pins the INODE. A write-and-
-      // rename would leave the collator's mount showing the old file forever.
-      await effects.writeReply(collatorRun, collator, child, reply);
+    async publishReplies(
+      collatorRun: RunPaths,
+      taskId: string,
+      replies: readonly PublishedReply[],
+    ): Promise<void> {
+      // `writeReply`/`writeRepliesPolicy` and never a reimplementation of
+      // either: they own the chmod-0644 → truncate-in-place → chmod-0444
+      // recipe, and the recipe is truncate-in-place because a bind mount pins
+      // the INODE. A write-and-rename would leave the collator's mount showing
+      // the old file forever.
+      //
+      // A PASS-THROUGH, so the set this transport was handed is the set the
+      // effect receives — there is no place here to filter, reorder or drop an
+      // entry, which is what makes the published half and the declared half the
+      // same set by construction rather than by review.
+      await effects.publishReplies(collatorRun, collator, taskId, replies);
     },
   };
 }
@@ -3058,6 +3145,7 @@ let effectModules: Promise<{
   state: typeof import("./state.ts");
   paths: typeof import("./paths.ts");
   replies: typeof import("./replies.ts");
+  repliesPolicy: typeof import("./replies-policy.ts");
   ledger: typeof import("./ledger.ts");
   registry: typeof import("./registry.ts");
   interrupt: typeof import("../container/interrupt.ts");
@@ -3071,6 +3159,7 @@ function loadEffectModules(): NonNullable<typeof effectModules> {
     state: await import("./state.ts"),
     paths: await import("./paths.ts"),
     replies: await import("./replies.ts"),
+    repliesPolicy: await import("./replies-policy.ts"),
     ledger: await import("./ledger.ts"),
     registry: await import("./registry.ts"),
     interrupt: await import("../container/interrupt.ts"),
@@ -3335,11 +3424,78 @@ export const productionRelayEffects: RelayEffects = {
       await handle?.close().catch(() => undefined);
     }
   },
-  async writeReply(run, collator, childTaskId, reply) {
+  /**
+   * PUBLISH AND DECLARE — SRD-WORKER-DISPATCH-EXTENSION §7.4's one act, and the
+   * only place in the fleet where either half happens.
+   *
+   * Both consoles arrive here. The review console reaches it through
+   * `consoleTransport` (`fanOut` → `RelayTransport.publishReplies`); the triage
+   * console reaches it through `cli/index.ts`'s `publishRepliesFor`, which
+   * constructs the same transport. So "declaring and publishing are one act" is
+   * a property of ONE function rather than a rule two call sites obey.
+   *
+   * ## The order is refuse → publish → declare, and each step earns its place
+   *
+   * **1. `renderRepliesPolicy` FIRST, for its refusals, with the result thrown
+   * away.** It is the only thing that can see a duplicate child id or an id that
+   * cannot name a file, and both must be found before a single byte lands.
+   * `DuplicateReplyError` is REFUSED rather than deduplicated because the reply
+   * path is derived from the child id: two entries with one id name one file
+   * with two attributions, and only the SECOND publish survives — so a
+   * deduplicating publisher would deliver one lens's bytes under another lens's
+   * name and the collator has no way to notice. **What this publisher does with
+   * it: nothing is published and nothing is declared.** The previous turn's
+   * files and declaration are left exactly as they were, the throw reaches
+   * `relayPass`, which journals nothing and retries — and `EXIT.USAGE` is
+   * already the right grade, because the ids came out of a request the COLLATOR
+   * wrote and the remedy is the operator's.
+   *
+   * The double render (here and inside `writeRepliesPolicy`) is deliberate and
+   * cheap. Rendering once and writing the bytes would mean spelling the write
+   * recipe here — a fifth copy of the chmod dance, in the one module whose
+   * docblock says it must not re-implement it.
+   *
+   * **2. Publish, in order.** Every path the declaration is about to name exists
+   * before it is named, which is D6's own ordering argument applied to the
+   * declaration rather than to the brief.
+   *
+   * **3. Declare, last.** A failure between 2 and 3 leaves published files that
+   * nothing declares — and that is the SAFE direction: `get_replies` refuses a
+   * declaration whose `task_id` does not match `/policy/task`, so a stale
+   * declaration for a collation that is about to be dispatched is caught, while
+   * an undeclared file is simply invisible. The reverse order would declare
+   * paths that no publish had created yet, which the tool reports as `missing`
+   * — a lens that ran, reported, and reads as absent.
+   */
+  async publishReplies(run, collator, taskId, replies) {
     const m = await loadEffectModules();
     const dir = m.paths.workerRepliesDir(run.root, collator);
+    // Step 1. The value is discarded; the REFUSALS are the point.
+    m.repliesPolicy.renderRepliesPolicy(taskId, replies);
+    /**
+     * WHICH child the ENOENT arm is about, or `taskId` once the loop is done.
+     *
+     * `RelayReplyError` carries a `childTaskId` and it must stay a real one: the
+     * message an operator reads names the report that did not land, and a fixed
+     * placeholder would tell them a lens is missing that is sitting on disk. The
+     * declaration is attributed to the COLLATION id, which is the honest answer
+     * for a file whose subject is the whole set.
+     */
+    let subject = taskId;
     try {
-      await m.replies.writeReply(dir, childTaskId, reply);
+      // Step 2.
+      for (const r of replies) {
+        subject = r.task_id;
+        await m.replies.writeReply(dir, r.task_id, r.reply);
+      }
+      // Step 3. Same `replies`, so the declared set cannot differ from the
+      // published one — there is one array and both halves read it.
+      subject = taskId;
+      await m.repliesPolicy.writeRepliesPolicy(
+        m.paths.workerPaths(run, collator).repliesPolicy,
+        taskId,
+        replies,
+      );
     } catch (err) {
       /**
        * A MISSING REPLIES DIRECTORY IS DIAGNOSED, NOT CREATED — and the
@@ -3358,20 +3514,27 @@ export const productionRelayEffects: RelayEffects = {
        * is the silent-empty-mount failure arriving through the repair rather
        * than through the fault.
        *
-       * So it propagates. `fanOut` does not catch `publishReply`, `relayPass`
+       * So it propagates. `fanOut` does not catch `publishReplies`, `relayPass`
        * lets a throw through without journalling, and the next pass retries —
        * which is the correct handling for a console that is not built yet. All
        * that is added here is a sentence saying which directory and whose job
        * it is, because a bare ENOENT on a path an operator never typed sends
        * them looking in the wrong place.
+       *
+       * **The declaration's own ENOENT is a DIFFERENT fault with the same code
+       * and it is deliberately not re-worded here.** `/policy/replies` is
+       * established by `materialize.ts` before `docker run` (ISC-1091), so its
+       * absence means the same thing this arm already says: the collator's
+       * container was never started against this run tree. One sentence for one
+       * cause is better than two that an operator has to tell apart.
        */
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         throw new RelayReplyError(
           collator,
-          childTaskId,
+          subject,
           dir,
           `the collator "${collator}" has no replies directory at ${dir}, so the report for ` +
-            `"${childTaskId}" could not be delivered (SRD-REVIEW-CONSOLE D6). That directory is ` +
+            `"${subject}" could not be delivered (SRD-REVIEW-CONSOLE D6). That directory is ` +
             `created by \`pifleet up\` before the container starts, and it is NOT created here on ` +
             `purpose: Docker makes a missing bind-mount source rather than refusing, so a run ` +
             `that reached this point has a collator mounted on a different directory — writing ` +

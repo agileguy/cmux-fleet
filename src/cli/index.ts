@@ -394,14 +394,25 @@ export async function productionTriageEffects(): Promise<TriageProductionEffects
 
   return {
     dispatchFor: productionSweepDispatchFor,
-    publishReplyFor: (run) => async (child, reply) => {
+    /**
+     * THE BRIDGE, and the reason it is a pass-through and nothing else.
+     *
+     * SRD-WORKER-DISPATCH-EXTENSION §7.4: publishing a reply and declaring it at
+     * `/policy/replies` are ONE act. That act lives in
+     * `productionRelayEffects.publishReplies`, which both consoles reach — the
+     * review console through `fanOut`, the triage console through this lambda.
+     * Anything done to `replies` on the way through would give the triage
+     * console its own version of a set-equality property the review console gets
+     * for free, so the array is forwarded untouched.
+     */
+    publishRepliesFor: (run) => async (taskId, replies) => {
       const mods = await loadTriageEffectModules();
       const transport = mods.relay.consoleTransport(
         mods.actor.TRIAGE_COLLATOR,
         mods.relay.productionRelayEffects,
         { deadlineMs: 0 },
       );
-      await transport.publishReply(run, child, reply);
+      await transport.publishReplies(run, taskId, replies);
     },
     isCollatorLive: async (run) =>
       await m.relay.productionRunSources.isLiveWorker(run, m.actor.TRIAGE_COLLATOR),

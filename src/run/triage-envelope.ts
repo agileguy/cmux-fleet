@@ -77,6 +77,18 @@
 import { readDispatchRequest, TRIAGE_CONSOLE_ROSTER } from "./dispatch-request.ts";
 import { taskRecordPath, workerOutboxDir, workerPaths, type RunPaths } from "./paths.ts";
 import { replyMountPath } from "./replies.ts";
+/**
+ * TYPE ONLY, and the distinction is what keeps §12's read-only block intact.
+ *
+ * `test/unit/triage-readonly.test.ts` bans control-plane MODULES by import and
+ * mutating VERBS by name; a type erased at compile time is neither, and this
+ * module already imports `replies.ts` — which exports `writeReply` — on exactly
+ * that reading. What the import buys is one spelling of the three attribution
+ * fields a declaration entry carries, shared with `replies-policy.ts`, which
+ * owns them. Re-typing `{task_id, worker, aspect}` here would be the second
+ * answer this console keeps having to refuse.
+ */
+import type { DeclaredReply } from "./replies-policy.ts";
 import { childTaskId, collationTaskId, TRIAGE_CONSOLE_ASPECTS } from "./task-ids.ts";
 import { TRIAGE_COLLATOR } from "./triage-actor.ts";
 import {
@@ -1077,10 +1089,42 @@ export interface SweepProducerDeps {
    * another worker's `:ro` mount is a privileged effect and §12 keeps those at the
    * composition root — the same reason `dispatch` is injected.
    *
+   * ## Why it takes the WHOLE SET and the collation's id
+   *
+   * SRD-WORKER-DISPATCH-EXTENSION §7.4: publishing a reply and DECLARING it at
+   * `/policy/replies` are ONE act, because `get_replies` cannot `readdir` —
+   * `<run>/replies/<worker>/` accumulates across sweeps, so sweep 5's collator
+   * listing it would see sweeps 1 through 5 and collate a mixture of five
+   * questions, each of which reads like a good answer (Finding E).
+   *
+   * A per-child port could not express that. The declaration is one document
+   * naming one task's whole set, so a port called once per seat would have to
+   * either rewrite the file five times with a growing set — a set that is wrong
+   * at every intermediate step — or leave the declaration to a second port the
+   * join has to remember, which is failure mode 9.6 with a seam through it. So
+   * the port is called ONCE per join, carrying the set and the id of the task
+   * that will read it, and the composition root behind it (`cli/index.ts`'s
+   * `publishRepliesFor` → `relay.ts`'s `productionRelayEffects.publishReplies`)
+   * does both halves from that one value.
+   *
+   * `taskId` is the COLLATION's — `collationTaskId(sweepId)` — because the
+   * tool's staleness check compares the declaration against the collator's own
+   * `/policy/task`, and the task that reads this set is the collation.
+   *
+   * The element type is `DeclaredReply` plus the payload rather than a name
+   * imported from `relay.ts`, which §12 bans this subtree from importing. The
+   * bridge is structural, at the composition root, and
+   * `test/unit/triage-envelope.test.ts` pins the two shapes against each other
+   * so they cannot drift — the same treatment {@link SWEEP_FILES_DIR} gets for
+   * the same reason.
+   *
    * Optional so a caller that builds its own fixture need not supply one; the
    * production wiring is not optional and lives in `buildTriageSweepDriver`.
    */
-  readonly publishReply?: (childTaskId: string, reply: unknown) => Promise<void>;
+  readonly publishReplies?: (
+    taskId: string,
+    replies: readonly (DeclaredReply & { readonly reply: unknown })[],
+  ) => Promise<void>;
   readonly read?: SweepFileRead;
 }
 
@@ -1224,6 +1268,16 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
   const joinSweep = async (sweepId: string): Promise<SweepJoin> => {
     const replies: ObserverReply[] = [];
     const claimedSuccess: string[] = [];
+    /**
+     * What the collator will be handed — accumulated across the seat loop and
+     * published in ONE act after it (§7.4).
+     *
+     * Held rather than published per seat because the DECLARATION is one
+     * document about one task's whole set: a port called inside the loop would
+     * declare a set that is wrong at every step but the last, and a collator
+     * that read `/policy/replies` mid-join would see a truthful-looking subset.
+     */
+    const publishable: (DeclaredReply & { reply: unknown })[] = [];
     for (const seat of TRIAGE_CONSOLE_ASPECTS) {
       const taskId = childTaskId(sweepId, seat.aspect);
       const seatTree = await seatRun(seat.worker);
@@ -1249,13 +1303,33 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
          */
         const rawArtifact = await read(path);
         if (rawArtifact !== null) {
+          /*
+           * The PARSE is what this guard is about, and it is now only that.
+           * Unparseable here is impossible in practice — `readObserverArtifactAt`
+           * just parsed it — but a throw inside the loop would cost the whole
+           * sweep, and the artifact is already counted.
+           *
+           * **The publish itself used to be inside this `try` and is now
+           * outside it, deliberately.** A swallowed publish is a collation brief
+           * naming `/replies/<child>.json` files that do not exist AND a stale
+           * `/policy/replies` — failure mode 9.6 exactly, with no symptom on
+           * this side. That is the one failure worth losing a sweep over, and
+           * the review console already answers it the same way: `fanOut` does
+           * not catch `publishReplies`, the pass journals nothing, and the next
+           * sweep re-reads the same artifacts and publishes them again.
+           */
+          let parsed: unknown;
           try {
-            await deps.publishReply?.(taskId, JSON.parse(rawArtifact));
+            parsed = JSON.parse(rawArtifact);
           } catch {
-            // Unparseable here is impossible in practice — `readObserverArtifactAt`
-            // just parsed it — but a throw inside the join would cost the whole
-            // sweep, and the artifact is already counted.
+            continue;
           }
+          publishable.push({
+            task_id: taskId,
+            worker: seat.worker,
+            aspect: seat.aspect,
+            reply: parsed,
+          });
         }
         continue;
       }
@@ -1343,6 +1417,25 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
           `this host's own count of the files it could open.`,
       );
     }
+    /*
+     * §6.3 step 7, and SRD-WORKER-DISPATCH-EXTENSION §7.4's one act.
+     *
+     * **UNCONDITIONAL, including when `publishable` is empty**, and that is the
+     * whole reason the declaration exists as a file rather than as a directory
+     * listing. An empty array says *"nothing was declared for this collation"*;
+     * a `/replies` directory that happens to hold nothing NEW says nothing at
+     * all, because it still holds every previous sweep's files. Skipping the
+     * call on an empty join would leave the previous sweep's declaration
+     * standing — which `get_replies` refuses as stale only because it carries
+     * the previous collation's `task_id`, and "refused as stale" is a worse
+     * answer than "declared empty" for a sweep that honestly observed nothing.
+     *
+     * BEFORE the return and AFTER the loop: every seat has been read, so the set
+     * is final, and `collate` has not run yet, so every path the collation brief
+     * is about to name exists before it is named (D6).
+     */
+    await deps.publishReplies?.(collationTaskId(sweepId), publishable);
+
     return {
       artifacts: replies.map((r) => r.artifact),
       blocked: blockedObservers(replies),
