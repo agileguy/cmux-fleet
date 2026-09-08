@@ -83,17 +83,33 @@
  * file, and a shared `writePolicyFile` helper would let a fifth caller inherit
  * the recipe without inheriting the argument for it.
  *
- * ## Where the host path is spelled, and why it is spelled HERE
+ * ## Where the host path is spelled, and why it is spelled in BOTH places
  *
- * `cloudAllow`, `taskPolicy` and `dispatchPolicy` are fields on `WorkerPaths`
- * (`run/paths.ts`); this file's host path is a function of the worker directory
- * instead, exported from the module that owns the file. That is the shape
- * `replies.ts` already uses for `replyHostPath`, and it keeps the BASENAME in
- * the one module that also owns the mount, the mode and the recipe — so the four
- * cannot drift apart. `render.ts`'s standing rule is that it joins no path under
- * the run directory itself (ISC-188), and this satisfies it the same way
- * `workerRepliesDir` does: render is handed a directory it did not compute and
- * asks a single function for the name inside it.
+ * The basename lives HERE, in `repliesPolicyHostPath`, beside the mount
+ * constant, the mode and the rewrite recipe — the shape `replies.ts` already
+ * uses for `replyHostPath`, and the one that keeps those four from drifting
+ * apart. `render.ts` calls it directly, which satisfies that file's standing
+ * rule that it joins no path under the run directory itself (ISC-188) the same
+ * way `workerRepliesDir` does: render is handed a directory it did not compute
+ * and asks a single function for the name inside it.
+ *
+ * `WorkerPaths.repliesPolicy` (`run/paths.ts`) is ALSO that path, and it is not
+ * a second spelling — the field is assigned `repliesPolicyHostPath(dir)`. It
+ * exists because the FIRST version of this module shipped without it, and
+ * ISC-1091 is the bill: `cloudAllow`, `taskPolicy` and `dispatchPolicy` are
+ * fields, so `materialize.ts` establishes each as `paths.<name>` before
+ * `docker run` — and a mount whose source had no field was a mount nothing
+ * established, which Docker answers by creating a DIRECTORY at the host path.
+ * Every later `writeRepliesPolicy` then fails `EISDIR` and every `get_replies`
+ * reads nothing, permanently and silently. Being a function rather than a field
+ * did not cause that, but it is what let the omission look deliberate: three
+ * siblings in one list and a fourth somewhere else reads as complete.
+ *
+ * So the ruling is BOTH, with one direction of derivation: this module names
+ * the file, `paths.ts` caches that answer under the name its siblings use, and
+ * nothing else joins it. A `join(dir, "replies-policy")` in `paths.ts` would be
+ * the drift this section exists to refuse, and `replies-policy.test.ts` asserts
+ * the field against the function so that it cannot be written.
  */
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";

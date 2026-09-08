@@ -37,8 +37,9 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
+import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import {
   DuplicateReplyError,
   REPLIES_POLICY_MOUNT,
@@ -301,5 +302,57 @@ describe("the renderer mounts the declaration read-only at the constant this mod
   test("the host path is a named child of the worker directory, beside task-policy", () => {
     const workerDir = "/runs/r-1/workers/obs-t1";
     expect(repliesPolicyHostPath(workerDir)).toBe(`${workerDir}/replies-policy`);
+  });
+
+  /**
+   * The two ends of the mount are now reached by two different routes —
+   * `render.ts` calls the function, `materialize.ts` reads
+   * `WorkerPaths.repliesPolicy` — and they are the same file only because the
+   * FIELD is assigned from the FUNCTION (ISC-1091's ruling, argued in
+   * `replies-policy.ts`).
+   *
+   * A `join(dir, "replies-policy")` in `paths.ts` would satisfy every other test
+   * in this repository and would be wrong in the way this surface keeps being
+   * wrong: it agrees until the basename moves, and then the establisher creates
+   * one inode while the `-v` mounts another. Docker does not refuse that — it
+   * creates the second as a DIRECTORY, which is exactly the state ISC-1091 was
+   * filed for. Asserting the VALUE rather than the source text is what makes the
+   * check survive a reflow and still fail on a second spelling.
+   */
+  test("the WorkerPaths field materialize reads is this module's path, not a second join", () => {
+    const paths = workerPaths(runPaths("r-1", "/runs"), "obs-t1");
+    expect(paths.repliesPolicy).toBe(repliesPolicyHostPath(paths.dir));
+    // And it lands in the worker's own directory beside the sibling whose
+    // establishing block this one was modelled on, rather than anywhere else
+    // under the run tree that `assertNoRunDirMount` would have to re-examine.
+    expect(dirname(paths.repliesPolicy)).toBe(dirname(paths.taskPolicy));
+  });
+});
+
+/**
+ * ISC-1091: the drop exists on the HOST before `docker run`, not after it.
+ *
+ * The structural analogue of `dispatch-policy.test.ts`'s
+ * *"materialize establishes the drop before the container starts"*, and it is
+ * structural for that test's reason: what must be true is an ORDER — the file
+ * exists before the container starts — and no unit test can schedule a container
+ * against a materialize. What IS observable is that the call sits in
+ * `materializeWorkerInputs` alongside the two siblings whose ordering is already
+ * established, and that the symlink refusal precedes the write.
+ *
+ * `materialize.test.ts` carries the other half, which this one cannot reach: that
+ * running `materializeWorkerInputs` actually leaves a regular file at
+ * `paths.repliesPolicy` holding the empty declaration at 0444. A source-text
+ * probe alone would keep passing for a block that had been moved behind a
+ * predicate no worker satisfies.
+ */
+describe("materialize establishes the declaration before the container starts", () => {
+  test("the inode is created beside the task drop, from the same establishing block", async () => {
+    const src = await readFile("src/run/materialize.ts", "utf8");
+    const refuse = src.indexOf("await refuseSymlinkDestination(paths.repliesPolicy);");
+    const write = src.indexOf("await writeRepliesPolicy(paths.repliesPolicy, null, []);");
+    expect(refuse, "no symlink refusal for the declaration").toBeGreaterThan(-1);
+    expect(write, "no establishing write for the declaration").toBeGreaterThan(-1);
+    expect(refuse).toBeLessThan(write);
   });
 });
