@@ -47,13 +47,20 @@
  * move, and those are different claims: the first is satisfied by an array
  * entry, the second by `configHash` reading that entry off disk and the tag
  * carrying the result. `test/unit/render.test.ts`'s ISC-160 block is the
- * closest existing mechanism, but it covers `Dockerfile`, `verbgate` and
- * `entrypoint.sh` only, and it moves a digest STRING inside an `ImageInputs`
- * record rather than moving bytes on disk. For every other name in the array
- * the strongest assertion anywhere is MEMBERSHIP: `ticket-cli.test.ts`,
- * `auto-trigger.test.ts` and `truncation-recovery.test.ts` each carry one
- * `expect(BUILD_CONTEXT_ASSETS).toContain(...)`, `honeypot.cjs` has only the
- * generic sweeps here and in `render.test.ts`, and `report-tools.ts` had
+ * closest existing mechanism, and it moves a digest STRING inside an
+ * `ImageInputs` record rather than moving bytes on disk.
+ *
+ * UPDATED 2026-09-08 (GAP-160, ISC-1075). When this docblock was written that
+ * block covered `Dockerfile`, `verbgate` and `entrypoint.sh` ONLY, and for
+ * every other enrolled name the strongest assertion anywhere was MEMBERSHIP —
+ * one `expect(BUILD_CONTEXT_ASSETS).toContain(...)` apiece in
+ * `ticket-cli.test.ts`, `auto-trigger.test.ts` and
+ * `truncation-recovery.test.ts`, and for `honeypot.cjs` not even that. It now
+ * ranges over `honeypot.cjs`, `ticket-cli` and both older `pi-extensions/`
+ * files as well. **That does not make this file redundant, and the distinction
+ * is why both exist**: the widened block still moves a digest string, so it
+ * proves the hash READS each entry; this file moves real bytes, so it proves
+ * the tag MOVES. `report-tools.ts` had
  * nothing at all before this file. The final block below
  * closes that for `pi-extensions/report-tools.ts` end to end: it calls the real
  * `imageTag` twice across a real edit to the real file and compares the twelve
