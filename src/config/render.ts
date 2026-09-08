@@ -617,11 +617,19 @@ export function buildDockerArgv(
    * is a TRUE answer and the one a `readdir` cannot give: "nothing was declared"
    * rather than "the directory is empty".
    *
-   * The host path comes from `repliesPolicyHostPath` rather than a `WorkerPaths`
-   * field, which is the one way this mount differs from its two siblings: the
-   * basename lives in the module that also owns the mount constant, the mode and
-   * the rewrite recipe, exactly as `replies.ts` owns `replyHostPath`. Nothing
-   * under the run directory is joined HERE, which is this file's standing rule.
+   * The host path comes from `repliesPolicyHostPath`, the module that also owns
+   * the mount constant, the mode and the rewrite recipe — exactly as `replies.ts`
+   * owns `replyHostPath`. Nothing under the run directory is joined HERE, which
+   * is this file's standing rule.
+   *
+   * CORRECTED 2026-09-08 (ISC-1091): this used to add *"rather than a
+   * `WorkerPaths` field, which is the one way this mount differs from its two
+   * siblings"*. `WorkerPaths.repliesPolicy` now exists — `materialize.ts` needs it
+   * to establish the inode before `docker run`, beside `taskPolicy` and
+   * `dispatchPolicy`. The field is a CACHE of this module's answer, assigned from
+   * `repliesPolicyHostPath(dir)` rather than joining the basename itself, so
+   * there is still exactly one spelling of it; what is false above is only the
+   * claim that no field exists and that this mount is unlike its siblings.
    */
   argv.push("-v", `${repliesPolicyHostPath(opts.worker.dir)}:${REPLIES_POLICY_MOUNT}:ro`);
   /*
