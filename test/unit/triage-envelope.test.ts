@@ -1691,6 +1691,15 @@ describe("§7.4: the published set and the declared set are one set", () => {
    * relay's type is a subtype: a `PublishedReply` that grew a required field
    * would still satisfy the triage port and would silently make the bridge
    * impossible to write.
+   *
+   * **ITS PROBE IS `bun run typecheck`, NOT `bun test`, and the difference was
+   * measured rather than assumed.** Adding a required `lens: string` to
+   * `PublishedReply` leaves this file reporting **62 pass / 0 fail** — Bun
+   * strips types before it runs anything — while `tsc --noEmit` reddens in eight
+   * places, `src/cli/index.ts:415` (the real bridge) and this file's own
+   * `realProducers` wiring among them. The `expect` below is there so the case
+   * appears in a run at all; the assertion is the two annotated assignments
+   * above it.
    */
   test("the triage port and relay's PublishedReply are the same shape, both ways", () => {
     const fromRelay: PublishedReply = {

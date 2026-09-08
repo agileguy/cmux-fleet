@@ -61,14 +61,16 @@
 import { describe, expect, test } from "bun:test";
 
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { stripComments } from "../support/source-structure.ts";
 
 import type { Verdict } from "../../src/contracts.ts";
-import type { RunPaths } from "../../src/run/paths.ts";
+import { runPaths, workerPaths, workerRepliesDir, type RunPaths } from "../../src/run/paths.ts";
+import { createRepliesDir } from "../../src/run/replies.ts";
+import { DuplicateReplyError, writeRepliesPolicy } from "../../src/run/replies-policy.ts";
 import {
   RELAY_SETTLE_DEADLINE_MS,
   RELAY_SETTLE_POLL_MS,
@@ -2522,5 +2524,48 @@ describe("a failed harvest carries its reason", () => {
     const note = harvestFailureNote(undefined);
     expect(note).toBe("it was dispatched but could not be harvested");
     expect(note).not.toContain("FAILED");
+  });
+});
+
+/**
+ * THE DUPLICATE IS REFUSED BEFORE A BYTE LANDS — §7.4, `DuplicateReplyError`.
+ *
+ * Two declared entries naming one child task name ONE file with two
+ * attributions, because the reply path is derived from the child id and only the
+ * second `writeReply` survives. `replies-policy.ts` refuses rather than
+ * deduplicates for that reason; what THIS publisher adds is the ordering that
+ * makes the refusal total, and it is the ordering rather than the throw that has
+ * to be asserted. A publisher that discovered the duplicate after its loop would
+ * leave one lens's bytes on disk under another lens's name, with no declaration
+ * naming them and nothing anywhere saying so.
+ *
+ * So both artefacts are read back after the rejection: the directory is empty
+ * and the previous turn's declaration is byte-for-byte unchanged.
+ */
+describe("publishReplies refuses a duplicate child id and publishes NOTHING", () => {
+  test("nothing is written and the previous declaration is untouched", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-dup-"));
+    const run = runPaths("2026-09-06T00-00-40Z-0040", join(root, ".pifleet"));
+    const paths = workerPaths(run, "col-1");
+    await mkdir(paths.dir, { recursive: true });
+    const repliesDir = workerRepliesDir(run.root, "col-1");
+    await createRepliesDir(repliesDir);
+    // The state a real console is in: a previous turn, correctly declared.
+    await writeRepliesPolicy(paths.repliesPolicy, "T0-collate", [
+      { task_id: "T0-arch", worker: "rev-arch-1", aspect: "arch" },
+    ]);
+    const before = readFileSync(paths.repliesPolicy, "utf8");
+
+    const p = productionRelayEffects.publishReplies(run, "col-1", "T1-collate", [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { v: 1 } },
+      // Same child, different attribution — the state that cannot be repaired.
+      { task_id: "T1-arch", worker: "rev-ctx-1", aspect: "ctx", reply: { v: 2 } },
+    ]);
+    await expect(p).rejects.toBeInstanceOf(DuplicateReplyError);
+
+    // NOTHING was published: not even the first entry, which is legal on its own.
+    expect(await readdir(repliesDir)).toEqual([]);
+    // And the previous turn's declaration still stands, byte for byte.
+    expect(readFileSync(paths.repliesPolicy, "utf8")).toBe(before);
   });
 });

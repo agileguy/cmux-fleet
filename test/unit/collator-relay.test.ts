@@ -232,7 +232,8 @@ interface FakeOptions {
  * each poll the task record inline, and neither is reusable), so `awaitSettled`
  * is a seam whose production implementation has to be written by the process
  * that owns the poll interval; `harvestTask` runs acceptance commands in a
- * container; and `publishReply` writes a `0444` file into a `:ro` mount. Every
+ * container; and `publishReplies` writes `0444` files into two `:ro` mounts —
+ * the replies themselves and the declaration that names them. Every
  * one of those is a socket, a container or a filesystem, and none of them can
  * appear in a unit test.
  *
