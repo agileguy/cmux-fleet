@@ -1949,7 +1949,7 @@ describe("layer 4 — the pifleet.no_submit/v1 session entry", () => {
  * which is what makes a deleted clause show up as a named failure rather than as
  * a count that moved.
  */
-describe("shouldNag — layer 3's three suppressions", () => {
+describe("shouldNag — layer 3's four suppressions", () => {
   const worked: EpochTally = {
     taskId: TASK_ID,
     epoch: EPOCH,
@@ -1965,6 +1965,24 @@ describe("shouldNag — layer 3's three suppressions", () => {
   /** §11 Q3: `agent_end` fires 2-4ms after a terminating result, so this is every delivery. */
   test("a delivered epoch is not nagged", () => {
     expect(shouldNag({ ...worked, delivered: true })).toBe(false);
+  });
+
+  /**
+   * ISC-1107. `delivered` is set by `submit_report` itself, so it cannot see a
+   * report filed the OTHER way — and during Phase A both routes are open and
+   * legitimate. Measured live 2026-09-08: `col-1` wrote its fan-out and
+   * `result.json` with `write`, ended cleanly, and was nagged for a report it
+   * had already filed. This is the false accusation the `EpochTally` docblock
+   * already warned about — *"a worker whose `result.json` is on disk, complete
+   * and correct"* — reached through the nag rather than through the entry.
+   */
+  test("an epoch whose envelope is already on disk is not nagged", () => {
+    expect(shouldNag(worked, true)).toBe(false);
+  });
+
+  /** The default must stay false, or every caller silently suppresses the nag. */
+  test("the envelope clause defaults to absent", () => {
+    expect(shouldNag(worked)).toBe(true);
   });
 
   /** §6.3: *"One nag, not a loop."* The `followUp` extends the turn, so a second is a third. */
@@ -2063,6 +2081,40 @@ describe("layer 3 — the bounded nag", () => {
    * `options` does the same, so dropping the argument as noise would be dropping
    * the half of the call that was run in the real image.
    */
+  /**
+   * ISC-1107 — THE WIRING, and it is the probe that matters here.
+   *
+   * `shouldNag`'s new clause is pure and its unit test passes whether or not
+   * anything calls it with a real answer. This drives the actual `agent_end`
+   * handler against a real directory: a `result.json` on disk, put there by the
+   * `write` route rather than by this extension, and the nag must not be sent.
+   * Delete the argument at the call site and this reddens while every clause
+   * test above stays green.
+   */
+  test("no nag is sent when the write route already filed result.json", () => {
+    const f = fixture();
+    mkdirSync(f.taskDir, { recursive: true });
+    writeFileSync(
+      join(f.taskDir, "result.json"),
+      JSON.stringify({ schema: "pifleet.result/v1", task_id: TASK_ID, status: "success" }),
+    );
+    const { messages, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages).toHaveLength(0);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /** The same fixture WITHOUT the envelope still nags — or the probe above proves nothing. */
+  test("the same turn with no envelope on disk is still nagged", () => {
+    const f = fixture();
+    const { messages, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages).toHaveLength(1);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
   test("the message is the constant, delivered as a followUp", () => {
     const f = fixture();
     const { messages, fire } = registered(f);

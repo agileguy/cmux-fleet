@@ -278,7 +278,7 @@
  * already declared and already called.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
@@ -1290,10 +1290,10 @@ export function composeNoSubmitEntry(
  * cannot afford.
  */
 export const NAG_TEXT =
-  "You have not called `submit_report` for this task, and nothing you wrote in " +
-  "this transcript reaches the host — that tool is the only channel. Call it now. " +
-  "`status` and `summary` are its only required arguments; `task_id`, `epoch` and " +
-  "`worker` are read from host state and must not be passed.";
+  "You have not reported for this task, and prose in this transcript does not " +
+  "reach the host. Call `submit_report` now. `status` and `summary` are its only " +
+  "required arguments; `task_id`, `epoch` and `worker` are read from host state " +
+  "and must not be passed.";
 
 /**
  * Should this epoch be nagged? Three clauses, each of which is a separate way
@@ -1303,6 +1303,18 @@ export const NAG_TEXT =
  *   after a terminating tool result, so this handler runs on the happy path of
  *   every delivery in the fleet, and a nag there would tell a worker that just
  *   did its job to do it again.
+ * - **`envelopeOnDisk`** — the report is in, by the OTHER route. This clause is
+ *   the one the file's own `EpochTally` docblock already argued for and did not
+ *   have: an implementation that infers non-delivery *"would file
+ *   `pifleet.no_submit/v1` against a worker whose `result.json` is on disk,
+ *   complete and correct — a false accusation"*. `delivered` cannot see a
+ *   `write`-route envelope, because it is set by `submit_report` itself, and
+ *   during Phase A BOTH routes are open and legitimate. Measured live
+ *   2026-09-08 (ISC-1107): `col-1` wrote its fan-out and `result.json` with
+ *   `write`, ended cleanly, and was nagged for a report it had already filed —
+ *   then obeyed, was refused `No task is live`, and spent a turn working out
+ *   why. **A worker that reported is never told it did not**, whichever channel
+ *   it used.
  * - **`nagged`** — §6.3's *"One nag, not a loop."* Q1 measured the `followUp`
  *   EXTENDING the turn, which is exactly what makes an unbounded version a loop
  *   rather than a no-op: nag, extend, `agent_end`, nag, until the token ceiling
@@ -1323,8 +1335,9 @@ export const NAG_TEXT =
  * Pure, exported and total, so each clause can be reddened on its own without a
  * filesystem or an event in the way.
  */
-export function shouldNag(tally: EpochTally): boolean {
+export function shouldNag(tally: EpochTally, envelopeOnDisk = false): boolean {
   if (tally.delivered) return false;
+  if (envelopeOnDisk) return false;
   if (tally.nagged) return false;
   return tally.toolCalls > 0;
 }
@@ -1961,7 +1974,17 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
        * no message and therefore spends no tokens, so what is bounded — model
        * turns bought with a nag — stays bounded at one.
        */
-      if (shouldNag(tallyFor(live))) {
+      /*
+       * The envelope is read from DISK here rather than tracked, because the
+       * whole point of the clause is the route this extension did not perform:
+       * a `write` to `/outbox/<task>/result.json` leaves no trace in memory.
+       * Read at `agent_end` and not cached, so a worker that wrote its envelope
+       * mid-turn is seen to have reported by the time the turn ends.
+       */
+      const envelopeOnDisk = existsSync(
+        taskPaths(mounts.outboxRoot, live.taskId).envelopePath,
+      );
+      if (shouldNag(tallyFor(live), envelopeOnDisk)) {
         try {
           pi.sendUserMessage(NAG_TEXT, { deliverAs: "followUp" });
           tracker.noteNag(live);

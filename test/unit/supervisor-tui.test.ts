@@ -357,6 +357,42 @@ describe("classifyTuiTurn", () => {
     ).toEqual({ phase: "in_flight", stopReason: "toolUse" });
   });
 
+  /**
+   * ISC-1107 — a queued user message is a turn that has not happened yet.
+   *
+   * Layer 3's nag is delivered as a `followUp`, so it lands in the transcript as
+   * a user message after the assistant stopped. Reading only the last ASSISTANT
+   * message misses it, and the epoch settled 1.99s later — before any model
+   * could answer. Measured: nag at 19:10:40, settle at 19:10:41.996, model
+   * replied at 19:10:44 and was refused `No task is live`.
+   */
+  test("a user message AFTER the last assistant message is in_flight", () => {
+    expect(classifyTuiTurn([assistant("e1", "stop"), user("e2")])).toEqual({
+      phase: "in_flight",
+      stopReason: null,
+    });
+  });
+
+  /**
+   * The ordinary case must not move: the auto-trigger IS a user message, and it
+   * always precedes the assistant messages of the turn it started. Reading "any
+   * user message" rather than "one after the last assistant" would make every
+   * dispatched epoch permanently in_flight.
+   */
+  test("a user message BEFORE the last assistant message still ends the turn", () => {
+    expect(classifyTuiTurn([user("e1"), assistant("e2", "stop")])).toEqual({
+      phase: "ended",
+      stopReason: "stop",
+    });
+  });
+
+  /** A tool result is not a user message — it is the turn continuing normally. */
+  test("a toolResult after the last assistant message does not make it in_flight", () => {
+    expect(
+      classifyTuiTurn([assistant("e1", "stop"), toolResult("e2", "call_a")]),
+    ).toEqual({ phase: "ended", stopReason: "stop" });
+  });
+
   /** The entry must belong to THIS batch, not to an earlier delivered epoch. */
   test("a submit entry BEFORE the last assistant message does not end the turn", () => {
     expect(

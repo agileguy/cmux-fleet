@@ -407,6 +407,34 @@ export function classifyTuiTurn(sinceDispatch: readonly TreeEntry[]): TuiTurnRea
     if (isAssistantEntry(e)) last = e;
   }
   if (last === null) return { phase: "awaiting_start", stopReason: null };
+  /*
+   * A USER message after the last assistant message means another agent cycle
+   * is queued — Pi has been given something to answer and has not answered it.
+   * Reading only the last ASSISTANT message misses that entirely, and layer 3's
+   * nag is exactly such a message: it is delivered as a `followUp`, so it lands
+   * here and starts a new turn.
+   *
+   * ISC-1107 measured what that cost. `col-1` stopped at 19:10:40, the nag
+   * landed in the same second, and the epoch settled at 19:10:41.996 — a
+   * 1.99-second runway, because growth restarts the quiet clock and the window
+   * IS `TUI_QUIET_MS`. The model answered at 19:10:44 and `submit_report`
+   * refused with `No task is live`: the nag could not be obeyed by any model
+   * slower than the quiet window, which is all of them. Layer 3 was measured on
+   * the `rpc` plane, where settle waits for `agent_end` and the runway was
+   * 0.18-1.05s — the same wrong-plane gap as ISC-1105.
+   *
+   * A queued message nobody ever answers now runs to the DEADLINE rather than
+   * settling `success`. That is the correct trade and not a new hazard: an
+   * epoch with an unanswered prompt in it has not finished, and `timed_out` on
+   * a stuck agent is what the deadline is for. It is also bounded, where the
+   * `toolUse` reading this function used to give was not.
+   */
+  for (let i = sinceDispatch.length - 1; i >= 0; i--) {
+    const e = sinceDispatch[i];
+    if (e === last) break;
+    const role = (e as { message?: { role?: unknown } }).message?.role;
+    if (role === "user") return { phase: "in_flight", stopReason: null };
+  }
   const message = (last as { message?: { stopReason?: unknown } }).message;
   const stopReason = typeof message?.stopReason === "string" ? message.stopReason : null;
   if (stopReason !== null && CONTINUING_STOP_REASONS.has(stopReason)) {
