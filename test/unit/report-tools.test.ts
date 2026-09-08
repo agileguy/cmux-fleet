@@ -52,6 +52,7 @@ import register, {
   artifactPathProblem,
   capProblem,
   composeEnvelope,
+  composeSubmitEntry,
   DEFAULT_MOUNTS,
   filenameProblem,
   MAX_ENTRIES,
@@ -60,6 +61,7 @@ import register, {
   readTaskPolicy,
   RESULT_SCHEMA,
   submitReport,
+  SUBMIT_ENTRY_SCHEMA,
   SUBMIT_REPORT_PARAMETERS,
   SubmitRefusal,
   TASK_POLICY_NONE,
@@ -144,6 +146,50 @@ function expectRefusal(params: SubmitReportParams, matcher: RegExp): void {
   expect(readFileSync(join(seeded.taskDir, "result.json"), "utf8")).toBe(before);
   expect(listAll(seeded.outbox)).toEqual(treeBefore);
   rmSync(seeded.dir, { recursive: true, force: true });
+}
+
+/** One `pi.appendEntry` call, as a recording `pi` saw it. */
+interface RecordedEntry {
+  customType: string;
+  data: unknown;
+}
+
+/**
+ * A `pi` that records instead of running one.
+ *
+ * Module-scope rather than local to `describe("registration")` because layer 2
+ * and layer 4 both drive `execute` and both need it, and because `entries` is
+ * the only window either has: `pi.appendEntry` writes into the session JSONL,
+ * which is Pi's to own, so the recording stub IS the assertion surface.
+ *
+ * `appendEntry` may be swapped for one that throws — see the delivery-survives
+ * test at the bottom of this file for why that case is not hypothetical.
+ */
+function stubPi(): { pi: ExtensionAPI; tools: ToolDefinitionLike[]; entries: RecordedEntry[] } {
+  const tools: ToolDefinitionLike[] = [];
+  const entries: RecordedEntry[] = [];
+  const pi: ExtensionAPI = {
+    registerTool: (tool) => void tools.push(tool),
+    on: () => undefined,
+    sendUserMessage: () => undefined,
+    appendEntry: (customType, data) => void entries.push({ customType, data }),
+  };
+  return { pi, tools, entries };
+}
+
+/** `register` against a fixture, plus the `ctx` `execute` is really handed. */
+function registered(f: Fixture): {
+  tool: ToolDefinitionLike;
+  entries: RecordedEntry[];
+  ctx: ExtensionContextLike;
+} {
+  const { pi, tools, entries } = stubPi();
+  register(pi, { policyPath: f.roots.policyPath, outboxRoot: f.outbox });
+  return {
+    tool: tools[0]!,
+    entries,
+    ctx: { cwd: f.roots.workdir ?? "", sessionManager: { getSessionId: () => WORKER } },
+  };
 }
 
 describe("parseTaskPolicy", () => {
@@ -599,18 +645,6 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
 });
 
 describe("registration", () => {
-  /** A `pi` that records instead of running one. */
-  function stubPi(): { pi: ExtensionAPI; tools: ToolDefinitionLike[] } {
-    const tools: ToolDefinitionLike[] = [];
-    const pi: ExtensionAPI = {
-      registerTool: (tool) => void tools.push(tool),
-      on: () => undefined,
-      sendUserMessage: () => undefined,
-      appendEntry: () => undefined,
-    };
-    return { pi, tools };
-  }
-
   /**
    * §12, from phase 2: *"the registered set is a SUBSET of `PI_EXTENSION_TOOLS`
    * and contains `submit_report`"*. `get_replies` is phase 5 and registering it
@@ -668,31 +702,345 @@ describe("registration", () => {
     rmSync(f.dir, { recursive: true, force: true });
   });
 
-  /**
-   * SRD task 3.1 and 3.2 are NOT in this phase, and this asserts their absence
-   * rather than leaving it to a reader to notice. `terminate: true` and
-   * `pi.appendEntry("pifleet.submit/v1", …)` are real parts of the design; a
-   * later commit adds them, and this test is the thing that has to change when
-   * it does — which is better than a phase-2 result that quietly already
-   * carried a phase-3 field nobody tested.
-   */
-  test("terminate and the session entry are phase 3, and are absent", async () => {
+});
+
+/**
+ * Layer 2 (SRD §6.3, task 3.1) — `terminate: true`.
+ *
+ * **What this layer is and is not.** `docs/extensions.md` calls it a HINT that
+ * *"the automatic follow-up LLM call should be skipped after the current tool
+ * batch"*, effective *"only when every finalized tool result in that batch is
+ * terminating"*. It cannot make not-delivering fail; it makes delivering the
+ * cheapest possible way to end a turn, which is §6.3's own framing — *"it makes
+ * the right action the lazy action"*.
+ *
+ * **It is asserted here and it is measured elsewhere, and neither substitutes
+ * for the other.** SRD §11 Q3 ran it in the real image against all four fleet
+ * models: `agent_end` fired 2-4ms after the terminating result and every task
+ * settled `success` / `quiesced`. What a unit test can pin is that the flag is
+ * on the object at all — which is the half that a refactor deletes.
+ */
+describe("layer 2 — terminate: true", () => {
+  test("a delivered report ends the turn", async () => {
     const f = fixture();
-    const entries: string[] = [];
+    const { tool, ctx } = registered(f);
+    const result = await tool.execute("call-1", minimal, undefined, undefined, ctx);
+    expect(result.terminate).toBe(true);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Three keys and no fourth.
+   *
+   * `details` is what §6.5 property 1 permits to reach the model and the
+   * transcript and NOTHING else — no host code reads a tool result — so a
+   * field added here is a field with no reader and an invitation to grow one.
+   * Pinning the key set is how that stays deliberate: adding a fourth requires
+   * changing this line, which is the moment to ask who reads it.
+   */
+  test("the result is content, details and terminate, and no fourth key", async () => {
+    const f = fixture();
+    const { tool, ctx } = registered(f);
+    const result = await tool.execute("call-1", minimal, undefined, undefined, ctx);
+    expect(Object.keys(result).sort()).toEqual(["content", "details", "terminate"]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * Layer 4 (SRD §6.3, task 3.2) — `pifleet.submit/v1`, and the fence around it.
+ *
+ * **Why this entry exists.** `SweepJoin.claimedSuccess` currently INFERS *"the
+ * worker said it was done and wrote nothing"* from the absence of a file plus a
+ * `success` verdict. It cannot tell *the worker never called the tool* from
+ * *the worker called it and the write failed*, and those two send an operator
+ * to different places. The entry is the producer that turns the first into a
+ * fact. `pi.appendEntry` *"does NOT participate in LLM context"*
+ * (`types.d.ts:871`) and lands in the session JSONL, which is bind-mounted
+ * read-write from the run tree (`render.ts:513`) — so the host can read it with
+ * no new mount and the model never sees it.
+ *
+ * **And the fence.** §6.5 property 3: the entry *"may appear in an actor log, in
+ * `pifleet monitor`, and in `claimedSuccess`'s message. It may not appear in a
+ * verdict, a coverage count, an incident transition or a notification."* The
+ * assertions below are about the entry's SHAPE; the authority anti-criterion is
+ * a host-side guard and is not this file's to make. What this file can do — and
+ * does, in the eight-fields test — is refuse to put anything in the entry that
+ * would be worth branching on: no `summary`, no `notes`, nothing the model
+ * wrote. An entry carrying only host state and byte counts is one that cannot
+ * become a claim.
+ */
+describe("layer 4 — the pifleet.submit/v1 session entry", () => {
+  /** The entry one `execute` wrote, with the customType asserted on the way past. */
+  async function deliverAndRead(
+    f: Fixture,
+    params: SubmitReportParams,
+  ): Promise<Record<string, unknown>> {
+    const { tool, entries, ctx } = registered(f);
+    await tool.execute("call-1", params, undefined, undefined, ctx);
+    expect(entries.map((e) => e.customType)).toEqual([SUBMIT_ENTRY_SCHEMA]);
+    return entries[0]!.data as Record<string, unknown>;
+  }
+
+  test("delivery writes exactly one entry, under §7.1's customType", async () => {
+    const f = fixture();
+    const { tool, entries, ctx } = registered(f);
+    await tool.execute("call-1", minimal, undefined, undefined, ctx);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.customType).toBe("pifleet.submit/v1");
+    expect(SUBMIT_ENTRY_SCHEMA).toBe("pifleet.submit/v1");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * §7.1's eight fields, and no ninth — the anti-criterion of this block.
+   *
+   * The ninth field somebody will want to add is `summary`, because it is right
+   * there and it would make `pifleet monitor` read better. `Docs/SRD.md` §12.6
+   * is why it must not be: worker prose is data, and an entry the host reads
+   * out of a channel the model cannot see is exactly the place where a claim
+   * would ride in wearing a fact's clothes. Every field below is host state, a
+   * byte count, or a path the envelope on disk also carries.
+   */
+  test("§7.1's eight fields, and no ninth", async () => {
+    const f = fixture();
+    const data = await deliverAndRead(f, { ...minimal, notes: "the long form" });
+    expect(Object.keys(data).sort()).toEqual([
+      "artifact_files",
+      "at",
+      "bytes",
+      "epoch",
+      "schema",
+      "status",
+      "task_id",
+      "worker",
+    ]);
+    expect(data["schema"]).toBe("pifleet.submit/v1");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The identity is host state, exactly as the envelope's is.
+   *
+   * `TASK_ID`, `EPOCH` and `WORKER` share no substring with each other or with
+   * anything in the call, so an implementation that read the worker off the
+   * task id, or the epoch out of the parameters, cannot pass by coincidence.
+   */
+  test("task_id, epoch and worker come from /policy/task and the session, not the call", async () => {
+    const f = fixture();
+    const data = await deliverAndRead(f, minimal);
+    expect(data["task_id"]).toBe(TASK_ID);
+    expect(data["epoch"]).toBe(EPOCH);
+    expect(data["worker"]).toBe(WORKER);
+    expect(data["status"]).toBe("success");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * `bytes` is the envelope ON DISK.
+   *
+   * This is the field the entry exists for: it is what an operator compares
+   * against a missing `result.json` to tell *"never called the tool"* from
+   * *"called it and the write failed"*. A number composed for the model rather
+   * than measured from the bytes that landed would answer neither question, so
+   * it is asserted against the file and not against a constant.
+   */
+  test("bytes is the envelope that landed, measured from the file", async () => {
+    const f = fixture();
+    const data = await deliverAndRead(f, { ...minimal, notes: "a much longer second field" });
+    const onDisk = Buffer.byteLength(
+      readFileSync(join(f.taskDir, "result.json"), "utf8"),
+      "utf8",
+    );
+    expect(data["bytes"]).toBe(onDisk);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * `artifact_files` is the ENVELOPE's claim list, verbatim — which is a
+   * superset of the call's, because the tool appends the `report` it wrote.
+   *
+   * Two mutations this fixture is built to catch, and it is asymmetric for
+   * exactly that reason. Reading `params.artifacts` instead of the composed
+   * envelope's drops `files/review.md` — the file the tool itself wrote, which
+   * is the one an operator is most likely to be hunting. Reducing each entry to
+   * a basename yields `["patch.diff", "review.md"]`, which reads fine in a log
+   * and cannot be resolved back to a location: `files/x` and `/workspace/x` are
+   * the same string once the directory is gone.
+   */
+  test("artifact_files carries the declared claims and the report the tool appended", async () => {
+    const f = fixture();
+    const data = await deliverAndRead(f, {
+      ...minimal,
+      artifacts: [{ kind: "diff", path: "files/patch.diff" }],
+      report: { filename: "review.md", content: "# a review\n" },
+    });
+    expect(data["artifact_files"]).toEqual(["files/patch.diff", "files/review.md"]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * An EMPTY ARRAY, not an absent key.
+   *
+   * `composeEnvelope` omits `artifacts` when there are none, deliberately —
+   * *"the difference between 'reported none' and 'did not report' is one an
+   * operator reading the raw JSON should keep"*. The session entry is the
+   * opposite case and the opposite rule applies: it is read by a machine
+   * looking for one shape, and a key that is sometimes missing is a key every
+   * reader has to guard. `[]` says the same thing without the branch.
+   */
+  test("artifact_files is an empty array when nothing was claimed, never absent", async () => {
+    const f = fixture();
+    const data = await deliverAndRead(f, minimal);
+    expect(data["artifact_files"]).toEqual([]);
+    expect(Object.keys(data)).toContain("artifact_files");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /** `at` is an ISO8601 Z stamp — `new Date().toISOString()`, as every other timestamp here is. */
+  test("at is an ISO8601 Z stamp", async () => {
+    const f = fixture();
+    const before = Date.now();
+    const data = await deliverAndRead(f, minimal);
+    const at = data["at"];
+    expect(typeof at).toBe("string");
+    expect(at as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/);
+    expect(Date.parse(at as string)).toBeGreaterThanOrEqual(before - 1000);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A REFUSED call appends nothing, and this is the ordering assertion of
+   * layer 4.
+   *
+   * The entry says *"a report was delivered"*. Written before the bytes land —
+   * or written from a `finally` — it would say that of a call that threw, and
+   * the host would be told the write failed when the tool never got as far as
+   * writing. That is a worse diagnosis than none: it points an operator at the
+   * filesystem for a problem in the call.
+   */
+  test("a refused call appends no entry", async () => {
+    const f = fixture();
+    const { tool, entries, ctx } = registered(f);
+    await expect(
+      tool.execute(
+        "call-1",
+        { ...minimal, artifacts: [{ kind: "file", path: "/etc/passwd" }] },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    ).rejects.toThrow(/outside/);
+    expect(entries).toEqual([]);
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **A diagnostic write may not un-deliver a report that landed.**
+   *
+   * Not hypothetical, and not defensive coding for its own sake: §6.5 property
+   * 4 is *"a worker that calls `submit_report` and whose file does not land is
+   * counted as having produced nothing"*, and the inverse is the property this
+   * pins — a worker whose file DID land must not be told it failed. `execute`
+   * throwing after `writeAtomic` succeeded would make the model see `isError`
+   * on a delivered report, and §11 Q4 measured what happens next: every model
+   * retries once. That retry re-delivers the same envelope (legal, §6.2.1) and
+   * throws again, so the transcript ends with a worker convinced it could not
+   * report, on top of a correct `result.json`.
+   *
+   * So the append is wrapped, and this test is the only thing that reddens if
+   * the wrapper is removed as noise.
+   */
+  test("an appendEntry that throws does not un-deliver a report that landed", async () => {
+    const f = fixture();
     const tools: ToolDefinitionLike[] = [];
     const pi: ExtensionAPI = {
       registerTool: (tool) => void tools.push(tool),
       on: () => undefined,
       sendUserMessage: () => undefined,
-      appendEntry: (customType) => void entries.push(customType),
+      appendEntry: () => {
+        throw new Error("session store is gone");
+      },
     };
     register(pi, { policyPath: f.roots.policyPath, outboxRoot: f.outbox });
-    const result = await tools[0]!.execute("call-1", minimal, undefined, undefined, {
-      cwd: f.roots.workdir ?? "",
-      sessionManager: { getSessionId: () => WORKER },
-    });
-    expect(Object.keys(result)).toEqual(["content", "details"]);
-    expect(entries).toEqual([]);
+    const result = await tools[0]!.execute(
+      "call-1",
+      { status: "partial", summary: "SESSION-STORE-GONE" },
+      undefined,
+      undefined,
+      { cwd: f.roots.workdir ?? "", sessionManager: { getSessionId: () => WORKER } },
+    );
+    expect(result.terminate).toBe(true);
+    const env = JSON.parse(readFileSync(join(f.taskDir, "result.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(env["summary"]).toBe("SESSION-STORE-GONE");
     rmSync(f.dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * `composeSubmitEntry` on its own, where the mapping is visible without a
+ * filesystem in the way.
+ *
+ * `at` is a PARAMETER rather than a `Date.now()` read inside, for the reason
+ * `truncation-recovery.ts` injects `readFull`: a value a test cannot fix is a
+ * value a test can only match with a regex. `execute` supplies
+ * `new Date().toISOString()` and the ISO-shape assertion above covers that
+ * seam; everything else about the entry is asserted here against exact values.
+ */
+describe("composeSubmitEntry", () => {
+  test("every field is the outcome's, and `at` is the caller's", () => {
+    const entry = composeSubmitEntry(
+      {
+        path: "/outbox/T-x/result.json",
+        bytes: 2841,
+        status: "partial",
+        reportPath: null,
+        taskId: TASK_ID,
+        epoch: EPOCH,
+        artifactFiles: ["files/observer-ops.json", "files/observer-ops.md"],
+      },
+      WORKER,
+      "2026-09-07T23:41:02Z",
+    );
+    expect(entry).toEqual({
+      schema: "pifleet.submit/v1",
+      task_id: TASK_ID,
+      epoch: EPOCH,
+      worker: WORKER,
+      status: "partial",
+      bytes: 2841,
+      artifact_files: ["files/observer-ops.json", "files/observer-ops.md"],
+      at: "2026-09-07T23:41:02Z",
+    });
+  });
+
+  /**
+   * The envelope's path is NOT in the entry, and that is not an oversight.
+   *
+   * `path` is derivable from `task_id` and the mount (§6.4: five of seven
+   * fields need no new host contract), and `Docs/SRD-TRIAGE-CONSOLE.md` §7.8's
+   * rule applies — *"a value that must always equal a function of two others is
+   * one that will one day disagree with them."* It is also a CONTAINER path,
+   * and the host reading this entry is on the other side of the mount.
+   */
+  test("the container path the model was told is not in the entry", () => {
+    const entry = composeSubmitEntry(
+      {
+        path: "/outbox/T-x/result.json",
+        bytes: 1,
+        status: "success",
+        reportPath: null,
+        taskId: TASK_ID,
+        epoch: EPOCH,
+        artifactFiles: [],
+      },
+      WORKER,
+      "2026-09-07T23:41:02Z",
+    );
+    expect(JSON.stringify(entry)).not.toContain("/outbox/");
   });
 });

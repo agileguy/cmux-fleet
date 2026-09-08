@@ -104,6 +104,42 @@
  *   doesn't work with Google's API"*), and the literal IS that spelling. The
  *   instruction is honoured, not evaded.
  *
+ * ## Layers 2 and 4 — delivery is cheap, and non-delivery is a fact
+ *
+ * §6.3 orders four responses to a turn that ends without a report, and this
+ * file carries the second and the fourth. Neither is a veto; §2.3 measured that
+ * no veto exists.
+ *
+ * **Layer 2 is `terminate: true` on the result.** `docs/extensions.md` calls it
+ * a hint that *"the automatic follow-up LLM call should be skipped after the
+ * current tool batch"*, effective *"only when every finalized tool result in
+ * that batch is terminating"*. It cannot make not-delivering fail. What it does
+ * is make delivering the cheapest available way to end a turn — no follow-up
+ * call, no further tokens — so the right action is also the lazy one. §11 Q3
+ * measured it in the real image against all four models in `fleet.yaml`:
+ * `agent_end` fired 2-4ms after the terminating result and every task settled
+ * `verdict: success, reason: quiesced`, with the supervisor reading nothing as
+ * an anomaly. It did NOT suppress a queued `followUp`, so it is compatible with
+ * the bounded nag of layer 3 (SRD task 4.1, not in this file yet).
+ *
+ * **Layer 4 is a `pifleet.submit/v1` session entry** (§7.1), written through
+ * `pi.appendEntry`, which *"does NOT participate in LLM context"*
+ * (`types.d.ts:871`). Entries land in the session JSONL under `/sessions`,
+ * bind-mounted read-write from the run tree (`render.ts:513`), so the host can
+ * read it with no new mount and the model never sees it. It exists to split one
+ * thing `SweepJoin.claimedSuccess` currently cannot: *the worker never called
+ * the tool* and *the worker called it and the write failed* look identical from
+ * the absence of a file, and they send an operator to different places.
+ *
+ * **The entry is diagnosis and may not become authority** — §6.5 property 3
+ * lists where it may appear (an actor log, `pifleet monitor`,
+ * `claimedSuccess`'s message) and where it may not (a verdict, a coverage
+ * count, an incident transition, a notification). This file holds up its half
+ * of that fence by putting nothing in the entry worth branching on: host state,
+ * a byte count measured from the file that landed, and the paths the envelope
+ * already claims. No `summary`, no `notes`, nothing the model wrote. §12's
+ * authority anti-criterion is a host-side guard and is not asserted here.
+ *
  * ## The size of `report.content` is NOT capped here, deliberately
  *
  * §6.2's schema gives `content` no `maxLength`, and SRD §11 Q8 measured why a
@@ -126,11 +162,13 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  * import would make this file uncheckable here and untestable anywhere.
  *
  * SRD §7.6 names the declared surface as `registerTool`, `on("agent_end")`,
- * `sendUserMessage` and `appendEntry`. Only `registerTool` has a caller in this
- * phase — the session entries are SRD task 3.2/3.3 and the bounded nag is 4.1 —
- * and the other three are declared now rather than three times later because
- * §7.6 specifies the surface as one thing and because all four were read out of
- * the real `.d.ts` on 2026-09-08 rather than copied from the document:
+ * `sendUserMessage` and `appendEntry`. `registerTool` and `appendEntry` have
+ * callers — the second as of SRD task 3.2, which is the `pifleet.submit/v1`
+ * entry the header describes. `on("agent_end")` and `sendUserMessage` still do
+ * not: `pifleet.no_submit/v1` is task 3.3 and the bounded nag is 4.1. They are
+ * declared now rather than twice more later because §7.6 specifies the surface
+ * as one thing and because all four were read out of the real `.d.ts` on
+ * 2026-09-08 rather than copied from the document:
  * `dist/core/extensions/types.d.ts:840` (`registerTool`), `:824` (`agent_end`),
  * `:867` (`sendUserMessage`), `:871` (`appendEntry`), in
  * `pifleet/pi-worker:0.79.6-base-b722edcf4699`.
@@ -168,6 +206,12 @@ export interface ExtensionContextLike {
 export interface ToolResultLike {
   content: { type: "text"; text: string }[];
   details: unknown;
+  /**
+   * Layer 2 (§6.3). Optional in the type because it is optional in Pi's, and
+   * because a required field here would be a claim about every tool this file
+   * might one day register rather than about the one it does.
+   */
+  terminate?: boolean;
 }
 
 /** The slice of `ToolDefinition` this file fills in (`types.d.ts:335-366`). */
@@ -197,6 +241,22 @@ export const OUTBOX_FILES_DIR = "files";
 export const RESULT_ENVELOPE_NAME = "result.json";
 /** Mirrors `ResultEnvelopeSchema`'s `schema` literal (`src/contracts.ts:220`). */
 export const RESULT_SCHEMA = "pifleet.result/v1";
+
+/**
+ * §7.1's session entry, used as BOTH `appendEntry`'s `customType` and the
+ * entry's own `schema` field.
+ *
+ * The duplication is the document's — §6.3 writes
+ * `pi.appendEntry("pifleet.submit/v1", …)` and §7.1's payload carries
+ * `"schema": "pifleet.submit/v1"` — and it is worth keeping rather than
+ * tidying. The `customType` is Pi's envelope and belongs to the session
+ * format; the `schema` field is this fleet's, and is what makes the payload
+ * self-describing once a host has lifted it out of the JSONL. The envelope
+ * `submit_report` writes carries its own `schema` for the same reason —
+ * `ResultEnvelopeSchema` declares it as a `z.literal` (`src/contracts.ts:220`),
+ * so a document whose `schema` says something else is refused rather than read.
+ */
+export const SUBMIT_ENTRY_SCHEMA = "pifleet.submit/v1";
 
 /**
  * The per-array entry cap, and why it is enforced twice.
@@ -633,6 +693,33 @@ export interface SubmitOutcome {
   status: string;
   /** The report file's container path, when one was written. */
   reportPath: string | null;
+  /**
+   * The live task it was delivered under, carried out rather than re-read.
+   *
+   * `submit_report` reads `/policy/task` once, at the top of `submitReport`,
+   * and everything downstream — the paths, the envelope, the session entry —
+   * is derived from that single read. A second read for the entry could see a
+   * DIFFERENT task: `/policy/task` is rewritten in place at every dispatch
+   * (`task-policy.ts:33-41`) and nothing coordinates that with a call in
+   * flight. The entry would then name a task the envelope does not, which is
+   * the one way a diagnostic record could be actively misleading.
+   */
+  taskId: string;
+  epoch: number;
+  /**
+   * Every path the ENVELOPE's `artifacts[]` claims, verbatim and in its order.
+   *
+   * The envelope's and not the call's, because the two differ by exactly the
+   * file this tool wrote itself: `composeEnvelope` appends the `report` claim.
+   * That file is the one an operator hunting a half-delivered report is most
+   * likely to be looking for, so dropping it here would empty the field of its
+   * best case.
+   *
+   * Verbatim and not by basename. A basename reads well in a log and cannot be
+   * resolved back to anything — `files/notes.md` and `/workspace/notes.md` are
+   * both `notes.md` once the directory is gone, and §6.2.1 admits both.
+   */
+  artifactFiles: string[];
 }
 
 /**
@@ -698,6 +785,61 @@ export function submitReport(
     bytes: Buffer.byteLength(bytes, "utf8"),
     status: params.status,
     reportPath,
+    taskId: live.taskId,
+    epoch: live.epoch,
+    artifactFiles: (envelope.artifacts ?? []).map((a) => a.path),
+  };
+}
+
+/** §7.1's session entry — eight fields, and the reason there is no ninth is in the header. */
+export interface SubmitEntry {
+  schema: string;
+  task_id: string;
+  epoch: number;
+  worker: string;
+  status: string;
+  bytes: number;
+  artifact_files: string[];
+  at: string;
+}
+
+/**
+ * Compose the `pifleet.submit/v1` entry from a delivery that already happened.
+ *
+ * Takes a `SubmitOutcome` rather than the parameters, and that is the whole
+ * design of this function: every field it can reach is either host state or a
+ * measurement of the bytes that landed. There is no path from `params` to here,
+ * so no amount of later editing can put a model's prose in a session entry
+ * without first changing this signature.
+ *
+ * **`at` is a parameter.** `execute` passes `new Date().toISOString()` —
+ * `2026-09-08T05:56:25.442Z`, which is what every other timestamp in this fleet
+ * is (`src/util/clock.ts:28`) and is ISO8601 with a `Z`. §7.1's example elides
+ * the milliseconds; nothing reads them either way, and matching the fleet's own
+ * spelling is worth more than matching an illustration. Injected rather than
+ * read inside so the mapping below can be asserted against exact values instead
+ * of a regex.
+ *
+ * **The envelope's `path` is deliberately not a field.** It is a CONTAINER
+ * path, and the host reading this entry is on the other side of the mount; it
+ * is also derivable from `task_id` and the outbox root, and
+ * `Docs/SRD-TRIAGE-CONSOLE.md` §7.8's rule applies — *"a value that must always
+ * equal a function of two others is one that will one day disagree with them."*
+ */
+export function composeSubmitEntry(
+  outcome: SubmitOutcome,
+  worker: string,
+  at: string,
+): SubmitEntry {
+  return {
+    schema: SUBMIT_ENTRY_SCHEMA,
+    task_id: outcome.taskId,
+    epoch: outcome.epoch,
+    worker,
+    status: outcome.status,
+    bytes: outcome.bytes,
+    artifact_files: outcome.artifactFiles,
+    at,
   };
 }
 
@@ -739,10 +881,31 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
     description: SUBMIT_REPORT_DESCRIPTION,
     parameters: SUBMIT_REPORT_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const outcome = submitReport(params, ctx.sessionManager.getSessionId(), {
-        ...mounts,
-        workdir: ctx.cwd,
-      });
+      const worker = ctx.sessionManager.getSessionId();
+      // Layer 4's entry is appended only AFTER this call returns — never
+      // before it, and never from a `finally`. The entry says a report was
+      // delivered, and a refusal leaves here having written nothing; an entry
+      // on a refused call would point an operator at the filesystem for a
+      // problem that was in the call.
+      const outcome = submitReport(params, worker, { ...mounts, workdir: ctx.cwd });
+      try {
+        pi.appendEntry(
+          SUBMIT_ENTRY_SCHEMA,
+          composeSubmitEntry(outcome, worker, new Date().toISOString()),
+        );
+      } catch {
+        // A diagnostic write may not un-deliver a report that landed. §6.5
+        // property 4 counts a worker whose file does not land as having
+        // produced nothing; the inverse has to hold too, and throwing here
+        // would show the model `isError` on a correct `result.json`. §11 Q4
+        // measured what follows: every model retries once, re-delivers the
+        // same envelope, throws again, and ends the turn believing it could
+        // not report. There is no second channel to report this on — the
+        // channel is what failed — so it is swallowed, and the missing entry
+        // is itself the evidence, indistinguishable from a worker that never
+        // called the tool. That conflation is the accepted cost, and it is the
+        // narrower one: the file on disk is the thing the host decides on.
+      }
       return {
         content: [
           { type: "text", text: `Report delivered: ${outcome.bytes} bytes at ${outcome.path}.` },
@@ -752,6 +915,9 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
           bytes: outcome.bytes,
           status: outcome.status,
         },
+        // Layer 2. A hint, batch-conditional, and the cheapest way to end a
+        // turn — see the header for §11 Q3's measurement of it.
+        terminate: true,
       };
     },
   });
