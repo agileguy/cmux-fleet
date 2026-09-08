@@ -59,11 +59,13 @@ import register, {
   emptyTally,
   filenameProblem,
   MAX_ENTRIES,
+  NAG_TEXT,
   NO_SUBMIT_ENTRY_SCHEMA,
   OUTBOX_ROOT,
   parseTaskPolicy,
   readTaskPolicy,
   RESULT_SCHEMA,
+  shouldNag,
   submitReport,
   SUBMIT_ENTRY_SCHEMA,
   SUBMIT_REPORT_PARAMETERS,
@@ -166,6 +168,20 @@ interface RecordedHandler {
 }
 
 /**
+ * One `pi.sendUserMessage` call — layer 3's only observable.
+ *
+ * `options` is recorded and not discarded because §11 Q1 measured
+ * `{deliverAs: "followUp"}` specifically: that spelling lands as a
+ * `queue_update` and Pi runs another agent cycle. Nothing measured says a
+ * `steer` — or an omitted `options` — extends the turn, so dropping the argument
+ * would be dropping the half of the call that was tested in the real image.
+ */
+interface RecordedMessage {
+  content: string;
+  options: { deliverAs?: "steer" | "followUp" } | undefined;
+}
+
+/**
  * The event objects Pi really passes, cut down to what this file's handlers
  * touch — which is nothing.
  *
@@ -196,35 +212,48 @@ const EVENT_PAYLOADS: Record<"agent_end" | "tool_call", unknown> = {
  * per-`customType` in one of them, because a stub that threw on everything could
  * not tell "the entry was never composed" from "the entry could not be written".
  */
-function stubPi(appendEntry?: ExtensionAPI["appendEntry"]): {
+function stubPi(
+  appendEntry?: ExtensionAPI["appendEntry"],
+  sendUserMessage?: ExtensionAPI["sendUserMessage"],
+): {
   pi: ExtensionAPI;
   tools: ToolDefinitionLike[];
   entries: RecordedEntry[];
   handlers: RecordedHandler[];
+  messages: RecordedMessage[];
 } {
   const tools: ToolDefinitionLike[] = [];
   const entries: RecordedEntry[] = [];
   const handlers: RecordedHandler[] = [];
+  const messages: RecordedMessage[] = [];
   const pi: ExtensionAPI = {
     registerTool: (tool) => void tools.push(tool),
     on: (event, handler) => void handlers.push({ event, handler }),
-    sendUserMessage: () => undefined,
+    sendUserMessage:
+      sendUserMessage ?? ((content, options) => void messages.push({ content, options })),
     appendEntry: appendEntry ?? ((customType, data) => void entries.push({ customType, data })),
   };
-  return { pi, tools, entries, handlers };
+  return { pi, tools, entries, handlers, messages };
 }
 
 /** `register` against a fixture, plus the `ctx` `execute` and the handlers are really handed. */
 function registered(
   f: Fixture,
   appendEntry?: ExtensionAPI["appendEntry"],
+  sendUserMessage?: ExtensionAPI["sendUserMessage"],
 ): {
   tool: ToolDefinitionLike;
   entries: RecordedEntry[];
+  messages: RecordedMessage[];
   ctx: ExtensionContextLike;
-  fire(event: "agent_end" | "tool_call"): unknown;
+  /**
+   * `payload` overrides the canned event object. It exists for one assertion —
+   * that the nag is identical across DIFFERING transcripts — which cannot be
+   * made while every `agent_end` this file fires carries the same bytes.
+   */
+  fire(event: "agent_end" | "tool_call", payload?: unknown): unknown;
 } {
-  const { pi, tools, entries, handlers } = stubPi(appendEntry);
+  const { pi, tools, entries, handlers, messages } = stubPi(appendEntry, sendUserMessage);
   register(pi, { policyPath: f.roots.policyPath, outboxRoot: f.outbox });
   const ctx: ExtensionContextLike = {
     cwd: f.roots.workdir ?? "",
@@ -233,8 +262,9 @@ function registered(
   return {
     tool: tools[0]!,
     entries,
+    messages,
     ctx,
-    fire: (event) => {
+    fire: (event, payload) => {
       const matching = handlers.filter((r) => r.event === event);
       // Without this line every assertion driven through `fire` would be green
       // by VACUITY the moment a subscription was dropped: no handler runs, no
@@ -243,7 +273,8 @@ function registered(
       // must not be able to make this file greener.
       expect(matching.length).toBeGreaterThan(0);
       let last: unknown;
-      for (const r of matching) last = r.handler(EVENT_PAYLOADS[event], ctx);
+      const body = payload === undefined ? EVENT_PAYLOADS[event] : payload;
+      for (const r of matching) last = r.handler(body, ctx);
       return last;
     },
   };
@@ -1206,6 +1237,44 @@ describe("createEpochTracker — the per-epoch tally", () => {
     expect(t.current()).toEqual({ ...emptyTally(thirteen), toolCalls: 1 });
   });
 
+  /** `noteNag` marks the epoch, and marks only `nagged`. */
+  test("a nag marks the epoch without touching the count or the delivery", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    t.noteNag(twelve);
+    expect(t.current()).toEqual({ ...emptyTally(twelve), toolCalls: 1, nagged: true });
+  });
+
+  /**
+   * **The nag budget is per epoch, not per worker lifetime**, and this is the
+   * assertion that says so.
+   *
+   * The bound §6.3 sets — one nag — exists to stop a re-prompt LOOP inside one
+   * allocation, where the `followUp` extends the turn and the next `agent_end`
+   * would nag again. It is not a ration for the container's whole life: a worker
+   * runs for weeks and serves many tasks, and a `nagged` that survived into the
+   * next dispatch would spend an epoch's one chance on a task that had already
+   * ended. The slot is replaced whenever `(task_id, epoch)` changes, so this
+   * falls out of the same mechanism that resets the count.
+   */
+  test("a new epoch may be nagged again — the bound is per epoch, not per session", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    t.noteNag(twelve);
+    t.noteToolCall(thirteen);
+    expect(t.current()?.nagged).toBe(false);
+    expect(shouldNag(t.current()!)).toBe(true);
+  });
+
+  /** Same epoch NUMBER, different task: a nag on one is not a nag on the other. */
+  test("a nag does not carry across to a different task at the same epoch number", () => {
+    const t = createEpochTracker();
+    t.noteToolCall(twelve);
+    t.noteNag(twelve);
+    t.noteToolCall(otherTaskSameEpoch);
+    expect(t.current()).toEqual({ ...emptyTally(otherTaskSameEpoch), toolCalls: 1 });
+  });
+
   test("a different task at the same epoch number is a different epoch", () => {
     const t = createEpochTracker();
     t.noteToolCall(twelve);
@@ -1263,16 +1332,18 @@ describe("composeNoSubmitEntry", () => {
   });
 
   /**
-   * `nagged` is CARRIED, not written.
+   * `nagged` is CARRIED, not written — and phase 4 is the proof it was worth
+   * writing that way.
    *
-   * Layer 3 is SRD phase 4 and nothing in this tree sends a nag, so every entry
-   * the wiring below produces reads `nagged: false`. That is a measurement of
-   * the current state and not a placeholder, and this pair of assertions is what
-   * makes the difference checkable: a `nagged: false` hard-coded into the
-   * composer would satisfy every wiring test in this file and would silently
-   * survive phase 4 wiring a real nag onto the tally beside it.
+   * Task 3.3 shipped this pair while nothing in the tree sent a nag, so both
+   * arms were reachable only by hand. The point was that a `nagged: false`
+   * hard-coded into the composer would have satisfied every wiring test that
+   * existed and would have SURVIVED phase 4 wiring a real nag onto the tally
+   * beside it — a green suite over an entry that could never say `true`. Task
+   * 4.1 then added `noteNag` and one call site and changed this signature, this
+   * entry shape and this test not at all, which is the prediction coming out.
    */
-  test("nagged comes off the tally, so phase 4 changes no signature here", () => {
+  test("nagged comes off the tally, so phase 4 changed no signature here", () => {
     const tally: EpochTally = {
       taskId: TASK_ID,
       epoch: EPOCH,
@@ -1398,26 +1469,77 @@ describe("layer 4 — the pifleet.no_submit/v1 session entry", () => {
   });
 
   /**
-   * **`nagged: false`, and it is a fact rather than a stub.**
+   * **`nagged` MIRRORS the nag, and it mirrors the one this same `agent_end`
+   * just sent — which is what pins the order of the two layers.**
    *
-   * Layer 3 — the bounded `agent_end` re-prompt — is SRD task 4.1 and is NOT in
-   * this tree. Nothing calls `sendUserMessage`, so no nag has been sent, so
-   * `false` is what actually happened to this epoch. Phase 4 flips it by marking
-   * the tally when it sends the nag; the composer, the entry shape and this
-   * wiring do not change.
+   * §6.3 asks for layer 3's bound to be *"mirrored through `pi.appendEntry`"*,
+   * and the only mirror this file has is this field. Append first and mark
+   * second and the mirror lags by one entry: harmless when the turn extends,
+   * total when it does not, because there is then no second `agent_end` to carry
+   * the truth and the nag leaves no trace anywhere. §11 Q1 says that case
+   * arrives intermittently rather than never — a model slower than the four
+   * measured has its delivery land after the settle.
    *
-   * Note what phase 4 will make of the pair: task 4.2 suppresses the nag for a
-   * zero-tool-call turn, so the `gpt-oss-20b` shape will read
-   * `tool_calls: 1, nagged: false` and the `gemma` shape
-   * `tool_calls: 150, nagged: true`. Two fields, two failures, no transcript.
+   * This test is the one that reddens if the `sendUserMessage` block is moved
+   * below the `appendEntry`.
    */
-  test("nagged is false, because layer 3 does not exist in this tree", () => {
+  test("the entry mirrors the nag the same agent_end sent", () => {
     const f = fixture();
-    const { entries, fire } = registered(f);
+    const { entries, messages, fire } = registered(f);
     fire("tool_call");
     fire("agent_end");
-    expect(noSubmits(entries)[0]?.["nagged"]).toBe(false);
+    expect(messages).toHaveLength(1);
+    expect(noSubmits(entries)[0]?.["nagged"]).toBe(true);
     rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **Defect 5's shapes, as the two fields actually read them — and the pair
+   * this docblock used to name was wrong.**
+   *
+   * Task 3.3 left a note here predicting that task 4.2 would make the
+   * `gpt-oss-20b` shape read `tool_calls: 1, nagged: false`. It does not, and
+   * it should not. 4.2 suppresses the nag for a turn with NO tool call; one `ls`
+   * is one tool call, so that worker is nagged and its entry reads
+   * `tool_calls: 1, nagged: true`. The prediction confused "did almost nothing"
+   * with "did nothing", and §6.3's rule is the second: *"this epoch has seen at
+   * least one tool call"*. A worker that held a live task and ran one `ls` is
+   * defect 5's exact shape — the case layer 3 exists for — not a worker with
+   * nothing to report.
+   *
+   * So the discrimination §7.2 built `tool_calls` for is unchanged and `nagged`
+   * adds a second axis to it. Three shapes, all asserted below:
+   *
+   * | shape | `tool_calls` | `nagged` |
+   * |---|---|---|
+   * | dispatched, made no move at all | 0 | false — 4.2 suppressed it |
+   * | ran one `ls` and quit (`gpt-oss-20b`) | 1 | true |
+   * | 150 `kubectl` calls, no report (`gemma-4-26b`) | 150 | true |
+   *
+   * The first row is the one that carries 4.2: an entry still exists, because
+   * layer 4 is unconditional, and only the courtesy was withheld.
+   */
+  test("defect 5's shapes read as tool_calls 0/false, 1/true and many/true", () => {
+    const silent = fixture();
+    const a = registered(silent);
+    a.fire("agent_end");
+    expect(noSubmits(a.entries)[0]).toMatchObject({ tool_calls: 0, nagged: false });
+    expect(a.messages).toEqual([]);
+    rmSync(silent.dir, { recursive: true, force: true });
+
+    const oneCall = fixture();
+    const b = registered(oneCall);
+    b.fire("tool_call");
+    b.fire("agent_end");
+    expect(noSubmits(b.entries)[0]).toMatchObject({ tool_calls: 1, nagged: true });
+    rmSync(oneCall.dir, { recursive: true, force: true });
+
+    const busy = fixture();
+    const c = registered(busy);
+    for (let i = 0; i < 150; i += 1) c.fire("tool_call");
+    c.fire("agent_end");
+    expect(noSubmits(c.entries)[0]).toMatchObject({ tool_calls: 150, nagged: true });
+    rmSync(busy.dir, { recursive: true, force: true });
   });
 
   test("at is an ISO8601 Z stamp", () => {
@@ -1637,6 +1759,365 @@ describe("layer 4 — the pifleet.no_submit/v1 session entry", () => {
     fire("agent_end");
     expect(noSubmits(entries)[0]?.["epoch"]).toBe(EPOCH + 1);
     expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(1);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * `shouldNag` on its own — three clauses, three ways layer 3 becomes a nuisance.
+ *
+ * Pure and total, so each clause reddens without a filesystem or an event in the
+ * way. The fixtures below differ from the base tally in exactly ONE field each,
+ * which is what makes a deleted clause show up as a named failure rather than as
+ * a count that moved.
+ */
+describe("shouldNag — layer 3's three suppressions", () => {
+  const worked: EpochTally = {
+    taskId: TASK_ID,
+    epoch: EPOCH,
+    toolCalls: 4,
+    delivered: false,
+    nagged: false,
+  };
+
+  test("an epoch with work done and no report is nagged", () => {
+    expect(shouldNag(worked)).toBe(true);
+  });
+
+  /** §11 Q3: `agent_end` fires 2-4ms after a terminating result, so this is every delivery. */
+  test("a delivered epoch is not nagged", () => {
+    expect(shouldNag({ ...worked, delivered: true })).toBe(false);
+  });
+
+  /** §6.3: *"One nag, not a loop."* The `followUp` extends the turn, so a second is a third. */
+  test("an already-nagged epoch is not nagged again", () => {
+    expect(shouldNag({ ...worked, nagged: true })).toBe(false);
+  });
+
+  /**
+   * SRD task 4.2. *"An idle worker between dispatches must be left alone, and so
+   * must a worker whose brief was a question."* Zero is the bar and it is the
+   * only value below it.
+   */
+  test("a zero-tool-call turn is not nagged", () => {
+    expect(shouldNag({ ...worked, toolCalls: 0 })).toBe(false);
+  });
+
+  /**
+   * ONE call is over the bar, and this is the boundary the suppression is most
+   * likely to be widened past by someone reading `gpt-oss-20b ran one ls and
+   * quit` as "nothing to report". It is the opposite: a worker holding a live
+   * task that ran one `ls` and produced no envelope is defect 5, which is what
+   * layer 3 exists for. A `> 1` here would silence the case.
+   */
+  test("one tool call is enough — the bar is a call, not a productive one", () => {
+    expect(shouldNag({ ...worked, toolCalls: 1 })).toBe(true);
+  });
+});
+
+/**
+ * Layer 3 (SRD §6.3, tasks 4.1 and 4.2) — the bounded nag.
+ *
+ * **What it is.** On `agent_end`, an epoch with a live task, no delivery and at
+ * least one tool call gets ONE `pi.sendUserMessage` carrying a constant string
+ * that names the omission and the tool. Not a veto — §2.3 measured that none
+ * exists — and not authority: §6.5 puts layer 3 among the courtesies, and *"the
+ * number the loop branches on is the one the host counted"* is untouched by it.
+ *
+ * **What §11 Q1 measured, because it is why the layer shipped and why the string
+ * looks like it does.** `sendUserMessage(text, {deliverAs: "followUp"})` from
+ * `agent_end` lands as a `queue_update` and Pi runs a further agent cycle; all
+ * four models in `fleet.yaml` called the tool the nag asked for. But the
+ * supervisor settled 0.18s (glm), 0.40s (deepseek), 0.84s (gemma) and 1.05s
+ * (qwen) after the model acted. **The runway is about a second**, so `NAG_TEXT`
+ * tells the model which tool and which two arguments and asks it to work nothing
+ * out. A model slower than those four loses the race — which is why the layer is
+ * built so that losing it costs nothing: the `pifleet.no_submit/v1` entry is
+ * written either way, and §6.3 says so in as many words (*"Layer 3 should
+ * therefore be built to make non-delivery a FACT rather than to rely on the nag
+ * winning"*).
+ *
+ * **The bound is per `(task_id, epoch)` and it is held in memory.** §6.3 asks
+ * for it to be *"mirrored through `pi.appendEntry`"*, and the mirror is
+ * `nagged` on the entry — durable, host-readable, and written by the same
+ * handler run that sent the nag. It is NOT a way to restore the bound after a
+ * `/reload`: the declared surface (§7.6) cannot read a session entry back. See
+ * the extension's header.
+ */
+describe("layer 3 — the bounded nag", () => {
+  /** The `pifleet.no_submit/v1` entries, as the layer-4 block reads them. */
+  function noSubmits(entries: RecordedEntry[]): Record<string, unknown>[] {
+    return entries
+      .filter((e) => e.customType === NO_SUBMIT_ENTRY_SCHEMA)
+      .map((e) => e.data as Record<string, unknown>);
+  }
+
+  /**
+   * **The acceptance criterion of task 4.1, quoted:** *"two `agent_end` events,
+   * one message"*.
+   *
+   * The second `agent_end` is not hypothetical — it is what Q1 measured the
+   * first nag CAUSING, since the `followUp` extends the turn. So the unbounded
+   * version of this layer is not a no-op that fires twice, it is a loop that
+   * runs until the token ceiling ends the run on exit 5
+   * (`Docs/SRD-TRIAGE-CONSOLE.md` Finding C). The tool calls between the two
+   * ends are there so `shouldNag`'s count clause cannot be the thing suppressing
+   * the second message.
+   */
+  test("two agent_end events in one epoch send exactly one message", () => {
+    const f = fixture();
+    const { messages, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    fire("tool_call");
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages).toHaveLength(1);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The message is `NAG_TEXT` and the options are Q1's measured spelling.
+   *
+   * `deliverAs: "followUp"` is asserted rather than left to a default because
+   * the measurement is of that spelling: a `followUp` from `agent_end` became a
+   * `queue_update` and a further agent cycle. Nothing in §11 says an omitted
+   * `options` does the same, so dropping the argument as noise would be dropping
+   * the half of the call that was run in the real image.
+   */
+  test("the message is the constant, delivered as a followUp", () => {
+    const f = fixture();
+    const { messages, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages[0]?.content).toBe(NAG_TEXT);
+    expect(messages[0]?.options).toEqual({ deliverAs: "followUp" });
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **The other half of task 4.1's acceptance:** *"the string is identical
+   * across differing transcripts"*.
+   *
+   * The two runs differ in everything a template could reach: a different task
+   * id, a different epoch, a different number of tool calls, different
+   * `tool_call` payloads and a different `agent_end` transcript. If the nag
+   * interpolated ANY of them the two strings would differ, and the comparison —
+   * not the `toBe(NAG_TEXT)` beside it — is what reddens. `Docs/SRD.md` §12.6 is
+   * the rule: worker prose is data, and feeding a model its own words back
+   * through a host channel is what `5dbdafe` was fixing.
+   *
+   * `task_id` and `epoch` would be LEGAL under §12.6 — they are host state — and
+   * are still absent, because the tool the nag asks for reads both out of
+   * `/policy/task` itself (§6.4). Putting them in the prompt would hand back the
+   * exact two numbers the whole design exists to stop a model copying.
+   */
+  test("the string is identical across differing transcripts", () => {
+    const first = fixture();
+    const a = registered(first);
+    a.fire("tool_call", { type: "tool_call", toolName: "read", toolCallId: "c1", input: {} });
+    a.fire("agent_end", {
+      type: "agent_end",
+      messages: [{ role: "assistant", content: "I reviewed the auth module and found three issues." }],
+    });
+
+    const second = fixture("T-review-99-lang\n7\n");
+    const b = registered(second);
+    for (let i = 0; i < 6; i += 1) {
+      b.fire("tool_call", { type: "tool_call", toolName: "grep", toolCallId: `c${i}`, input: {} });
+    }
+    b.fire("agent_end", {
+      type: "agent_end",
+      messages: [{ role: "assistant", content: "kubectl returned 47 pods; nothing further." }],
+    });
+
+    expect(a.messages).toHaveLength(1);
+    expect(b.messages).toHaveLength(1);
+    expect(a.messages[0]?.content).toBe(b.messages[0]?.content);
+    expect(a.messages[0]?.content).toBe(NAG_TEXT);
+    rmSync(first.dir, { recursive: true, force: true });
+    rmSync(second.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The text names the omission and the tool — §6.3's requirement of it — and
+   * nothing else it could name.
+   *
+   * The negative half is the fence: no task id, no epoch, and no worker id, so
+   * this string cannot become a template later without failing here first.
+   */
+  test("the text names the tool and carries no dispatch state", () => {
+    expect(NAG_TEXT).toContain("submit_report");
+    expect(NAG_TEXT).not.toContain(TASK_ID);
+    expect(NAG_TEXT).not.toContain(WORKER);
+    expect(NAG_TEXT).not.toContain(String(EPOCH));
+  });
+
+  /**
+   * **Task 4.2's acceptance, quoted:** *"`/policy/task` reading `<none>`
+   * produces no nag."*
+   *
+   * `supervisor/index.ts:1075` resets the policy at settle, with its own comment
+   * saying work between settle and the next dispatch *"belongs to NO task"*.
+   * There is nothing to report and nobody to report it to, so §6.3's *"an idle
+   * worker between dispatches must be left alone"* is met by the handler
+   * returning before layer 3 is reached — which is also why no entry appears.
+   */
+  test("an idle worker reading <none> is not nagged", () => {
+    const idle = fixture(`${TASK_POLICY_NONE}\n0\n`);
+    const { entries, messages, fire } = registered(idle);
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages).toEqual([]);
+    expect(entries).toEqual([]);
+    rmSync(idle.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **Task 4.2's other half: a zero-tool-call turn is not nagged — but it is
+   * still RECORDED.**
+   *
+   * The two layers part company here and the pair of assertions is the point.
+   * Layer 3 is a courtesy and is withheld: a worker that made no move may have
+   * been asked a question, and §6.3 says such a worker must be left alone. Layer
+   * 4 is evidence and is unconditional: a dispatched worker that did literally
+   * nothing is defect 5's most severe shape, and `tool_calls: 0` is exactly the
+   * fact an operator needs. Suppressing the entry alongside the nag would delete
+   * the record of the worst case in the name of politeness.
+   */
+  test("a zero-tool-call turn is not nagged, and is still recorded", () => {
+    const f = fixture();
+    const { entries, messages, fire } = registered(f);
+    fire("agent_end");
+    expect(messages).toEqual([]);
+    expect(noSubmits(entries)).toHaveLength(1);
+    expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(0);
+    expect(noSubmits(entries)[0]?.["nagged"]).toBe(false);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("an unmounted policy file produces no nag and no throw", () => {
+    const unmounted = fixture(null);
+    const { messages, fire } = registered(unmounted);
+    fire("tool_call");
+    expect(() => fire("agent_end")).not.toThrow();
+    expect(messages).toEqual([]);
+    rmSync(unmounted.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * A delivered epoch is not nagged, and this runs on the happy path of every
+   * delivery in the fleet — §11 Q3 measured `agent_end` firing 2-4ms after
+   * `submit_report`'s terminating result. A nag here would tell a worker that
+   * had just done its job to do it again, one second before the settle.
+   */
+  test("a delivered epoch is not nagged", async () => {
+    const f = fixture();
+    const { tool, ctx, messages, fire } = registered(f);
+    fire("tool_call");
+    await tool.execute("call-1", minimal, undefined, undefined, ctx);
+    fire("agent_end");
+    expect(messages).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The bound is per epoch, driven end-to-end rather than through the tracker.
+   *
+   * The tracker test beside `noteNag` pins the same rule at the unit; this one
+   * pins the wiring, because the handler reads `/policy/task` for the epoch and
+   * a handler that consulted a session-lifetime flag instead would pass the unit
+   * test and fail here.
+   */
+  test("the next epoch gets its own nag", () => {
+    const f = fixture();
+    const { messages, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    writeFileSync(f.roots.policyPath, `${TASK_ID}\n${EPOCH + 1}\n`);
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.content).toBe(messages[1]?.content);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **A courtesy that fails may not take the evidence with it** — §6.5's fence,
+   * as one test.
+   *
+   * Layer 3 is a courtesy and layer 4 is evidence. If `sendUserMessage` shared
+   * the handler's outer `catch`, a throw would skip the `appendEntry` below it
+   * and the record of an epoch that reported nothing would be lost — the layer
+   * with no authority silencing the layer whose whole job is to be read. So the
+   * send has its own `try`, and this test is the only thing that reddens if it
+   * is removed as noise.
+   *
+   * `nagged` reads FALSE, and that is the second half. `noteNag` sits after the
+   * call inside that `try`, so a send that threw delivered no message and claims
+   * none. An implementation that marked the epoch first would put `nagged: true`
+   * in the session for a nag the model never received — a lie in the one record
+   * an operator has.
+   */
+  test("a nag that throws loses neither the entry nor the truth about itself", () => {
+    const f = fixture();
+    const { entries, fire } = registered(f, undefined, () => {
+      throw new Error("no session to steer");
+    });
+    fire("tool_call");
+    expect(() => fire("agent_end")).not.toThrow();
+    expect(noSubmits(entries)).toHaveLength(1);
+    expect(noSubmits(entries)[0]?.["tool_calls"]).toBe(1);
+    expect(noSubmits(entries)[0]?.["nagged"]).toBe(false);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * **What a WORKING nag leaves in the session, and the reason the extension's
+   * header had to change tense.**
+   *
+   * Q1's best outcome in full: the nag extends the turn, the model delivers, and
+   * the epoch ends a second time. The session then holds a
+   * `pifleet.no_submit/v1` carrying `nagged: true` FOLLOWED BY a
+   * `pifleet.submit/v1` for the same `(task_id, epoch)`. A host that read
+   * no_submit entries alone would call that epoch undelivered — and it is the
+   * opposite, it is layer 3 working.
+   *
+   * So *"a no_submit entry means nothing was delivered"* became *"nothing HAD
+   * been delivered when that `agent_end` fired"*, and the entries for one epoch
+   * are read in order with a submit settling it. Nothing here is a host-side
+   * guard; §6.5 property 3 keeps both entries diagnostic, and this test asserts
+   * the SEQUENCE so that whoever writes the reader can see what they must read.
+   */
+  test("a nag answered by a delivery leaves a no_submit and then a submit", async () => {
+    const f = fixture();
+    const { tool, entries, ctx, messages, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages).toHaveLength(1);
+    await tool.execute("call-1", minimal, undefined, undefined, ctx);
+    fire("agent_end");
+    expect(entries.map((e) => e.customType)).toEqual([
+      NO_SUBMIT_ENTRY_SCHEMA,
+      SUBMIT_ENTRY_SCHEMA,
+    ]);
+    expect((entries[0]?.data as Record<string, unknown>)["nagged"]).toBe(true);
+    expect((entries[1]?.data as Record<string, unknown>)["epoch"]).toBe(EPOCH);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Layer 3 writes nothing to the outbox, which is §6.5 property 1 restated
+   * where it can fail: the nag is a message to the model, and the only thing
+   * that ever creates a file is `submit_report`.
+   */
+  test("a nag writes nothing to the outbox", () => {
+    const f = fixture();
+    const { messages, fire } = registered(f);
+    fire("tool_call");
+    fire("agent_end");
+    expect(messages).toHaveLength(1);
+    expect(listAll(f.outbox)).toEqual([]);
     rmSync(f.dir, { recursive: true, force: true });
   });
 });

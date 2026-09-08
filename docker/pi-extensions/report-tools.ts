@@ -104,11 +104,12 @@
  *   doesn't work with Google's API"*), and the literal IS that spelling. The
  *   instruction is honoured, not evaded.
  *
- * ## Layers 2 and 4 — delivery is cheap, and non-delivery is a fact
+ * ## Layers 2, 3 and 4 — delivery is cheap, non-delivery is asked about once,
+ * and it is a fact either way
  *
  * §6.3 orders four responses to a turn that ends without a report, and this
- * file carries the second and the fourth. Neither is a veto; §2.3 measured that
- * no veto exists.
+ * file carries the second, the third and the fourth. None is a veto; §2.3
+ * measured that no veto exists.
  *
  * **Layer 2 is `terminate: true` on the result.** `docs/extensions.md` calls it
  * a hint that *"the automatic follow-up LLM call should be skipped after the
@@ -120,7 +121,22 @@
  * `agent_end` fired 2-4ms after the terminating result and every task settled
  * `verdict: success, reason: quiesced`, with the supervisor reading nothing as
  * an anomaly. It did NOT suppress a queued `followUp`, so it is compatible with
- * the bounded nag of layer 3 (SRD task 4.1, not in this file yet).
+ * the bounded nag of layer 3, which is `NAG_TEXT` and `shouldNag` below.
+ *
+ * **Layer 3 is one `sendUserMessage` per `(task_id, epoch)`** (§6.3, task 4.1).
+ * When `agent_end` finds a live task, no delivery, and at least one tool call
+ * this epoch, the handler sends a CONSTANT string naming the omission and the
+ * tool, marks the epoch, and never sends a second one for it. §11 Q1 measured
+ * the whole of what this buys and the whole of what it costs: a
+ * `sendUserMessage(text, {deliverAs: "followUp"})` from `agent_end` lands as a
+ * `queue_update` and Pi runs a further agent cycle, and all four models in
+ * `fleet.yaml` called the tool the nag asked for — but the supervisor settled
+ * between 0.18s and 1.05s after they acted. **Layer 3's runway is about a second
+ * of slack, not a turn**, which is why `NAG_TEXT` tells the model what to call
+ * and what the two required arguments are rather than asking it to work
+ * anything out. A model slower than those four loses the race, and layer 3 is
+ * built so that losing it costs nothing: the record below is written whether the
+ * nag lands or not.
  *
  * **Layer 4 is two session entries**, both written through `pi.appendEntry`,
  * which *"does NOT participate in LLM context"* (`types.d.ts:871`). They land
@@ -137,14 +153,32 @@
  *   separates defect 5's two measured shapes — a `gpt-oss-20b` that ran one
  *   `ls` and quit from a `gemma-4-26b` that made 150 `kubectl` calls — and an
  *   operator should not have to open a transcript to tell them apart. It also
- *   carries `nagged`, which belongs to layer 3 and is therefore `false` on
- *   every entry this tree can produce; see `EpochTally`.
+ *   carries `nagged`, and that field is layer 3 MIRRORED THROUGH `appendEntry`
+ *   as §6.3 asks: the nag is sent before the entry is composed, so the record
+ *   of an epoch that got one is durable in the session even if the extension's
+ *   memory is not. **What the mirror does not do is restore the bound** — the
+ *   declared surface (§7.6) has no way to read a session entry back, so a
+ *   `/reload` really does reset `nagged` to false in memory and a reloaded
+ *   extension may nag a second time for the same epoch. §6.3's *"so a `/reload`
+ *   cannot reset it"* overstates what one-way `appendEntry` can buy; the entry
+ *   is evidence for the host, not state for this file.
  *
  * **Read those two together and a third case appears, which is the whole
  * reason the delivered flag is held in memory rather than inferred:** a submit
- * entry means delivered and recorded, a no_submit entry means nothing was
- * delivered, and NEITHER entry means delivered with the session write lost.
- * That third case exists because the append below is wrapped in a `catch` that
+ * entry means delivered and recorded, a no_submit entry means nothing HAD been
+ * delivered when that `agent_end` fired, and NEITHER entry means delivered with
+ * the session write lost.
+ *
+ * **"had been", and the tense is layer 3's doing.** A nagged epoch ends more
+ * than once (Q1: the `followUp` extends the turn), so the sequence a delivery
+ * after a nag leaves in the session is a `pifleet.no_submit/v1` carrying
+ * `nagged: true` FOLLOWED BY a `pifleet.submit/v1` for the same
+ * `(task_id, epoch)`. A host reading no_submit entries alone would call that
+ * epoch undelivered, and it is not — it is the case layer 3 exists to produce.
+ * **Entries must therefore be read per epoch and in order: a submit entry
+ * settles the epoch it names, whatever precedes it.**
+ *
+ * The third case exists because the append below is wrapped in a `catch` that
  * swallows — a diagnostic write may not un-deliver a report that landed — so
  * the absence of a submit entry is NOT proof the tool was never called, and a
  * `no_submit` inferred from that absence would be a false accusation against a
@@ -183,12 +217,12 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  * import would make this file uncheckable here and untestable anywhere.
  *
  * SRD §7.6 names the declared surface as `registerTool`, `on("agent_end")`,
- * `sendUserMessage` and `appendEntry`. As of SRD task 3.3 three of the four
- * have callers: `registerTool`, `appendEntry` (the `pifleet.submit/v1` entry of
- * task 3.2 and the `pifleet.no_submit/v1` entry of 3.3) and `on`.
- * **`sendUserMessage` still has none** — it is the bounded nag, SRD task 4.1,
- * and it is declared here rather than added later because §7.6 specifies the
- * surface as one thing.
+ * `sendUserMessage` and `appendEntry`. **As of SRD task 4.1 all four have
+ * callers**, which they did not before: `registerTool`, `on`, `appendEntry`
+ * (the `pifleet.submit/v1` entry of task 3.2 and the `pifleet.no_submit/v1`
+ * entry of 3.3) and now `sendUserMessage`, which is layer 3's bounded nag in
+ * the `agent_end` handler below. It was declared here two tasks before it was
+ * called because §7.6 specifies the surface as one thing.
  *
  * **`"tool_call"` is a FIFTH member and §7.6 does not name it.** Task 3.3
  * requires `pifleet.no_submit/v1` to carry the epoch's tool-call count and
@@ -226,6 +260,14 @@ export interface ExtensionAPI {
     event: "agent_end" | "tool_call",
     handler: (event: unknown, ctx: ExtensionContextLike) => void,
   ): void;
+  /**
+   * Layer 3's only call. `options` is optional in Pi's signature and is passed
+   * anyway: `deliverAs: "followUp"` is the SPELLING §11 Q1 measured, and the
+   * measurement is of that spelling and not of the default. A `followUp` from
+   * `agent_end` lands as a `queue_update` carrying the text and Pi runs another
+   * agent cycle; nothing in Q1 says a `steer`, or an omitted `options`, does the
+   * same thing, so the argument is not dropped as noise.
+   */
   sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
   appendEntry(customType: string, data?: unknown): void;
 }
@@ -913,12 +955,25 @@ export const NO_SUBMIT_ENTRY_SCHEMA = "pifleet.no_submit/v1";
  * The flag is set by `submit_report` itself, before the entry is attempted. It
  * cannot be wrong about a delivery it performed.
  *
- * **`nagged` is layer 3's field and layer 3 is SRD phase 4.** It lives here,
- * beside the count, because it is per-epoch state of exactly the same kind:
- * nothing in this tree sets it, so every entry written today reads
- * `nagged: false`, which is a MEASUREMENT of an epoch that was not nagged and
- * not a placeholder for one. Phase 4 adds a `noteNag` to the tracker and
- * changes no signature, no entry shape and no call site here.
+ * **`nagged` is layer 3's field and SRD task 4.1 gave it its writer.** It lives
+ * here, beside the count, because it is per-epoch state of exactly the same
+ * kind — and the shape task 3.3 left it in was the right one: phase 4 added
+ * `noteNag` and changed no signature, no entry shape and no call site. A
+ * `nagged: false` hard-coded into `composeNoSubmitEntry` would have satisfied
+ * every test that existed then and would have survived this task silently.
+ *
+ * **It is a boolean and not a count, and that is §6.3's `MAX_NAGS = 1` spelled
+ * once instead of twice.** A counter whose only legal values are 0 and 1, sat
+ * beside a bound that says so, is two spellings of one rule and they can
+ * disagree; §7.2's entry declares `nagged` a boolean, so the boolean is the
+ * spelling that reaches a reader. The bound is not configurable on purpose —
+ * §6.3: *"An unbounded re-prompt against a model that will never call the tool
+ * is an infinite spend against a token ceiling that ends the run on exit 5."*
+ *
+ * **It is per EPOCH, not per session.** The slot is replaced whenever a
+ * different `(task_id, epoch)` is seen, so a worker nagged on one task is
+ * nagged again on the next. That is the intent: the bound exists to stop a loop
+ * within one allocation, not to spend a worker's one nag for its lifetime.
  */
 export interface EpochTally {
   taskId: string;
@@ -927,7 +982,7 @@ export interface EpochTally {
   toolCalls: number;
   /** Whether `submit_report` reached the end of a write for this epoch. */
   delivered: boolean;
-  /** Whether layer 3 re-prompted this epoch. Always false until SRD task 4.1. */
+  /** Whether layer 3 re-prompted this epoch. At most once — see the docblock. */
   nagged: boolean;
 }
 
@@ -960,6 +1015,13 @@ export interface NoSubmitEntry {
 export interface EpochTracker {
   noteToolCall(live: LiveTask): void;
   noteDelivery(live: LiveTask): void;
+  /**
+   * Layer 3's bound, set by the `agent_end` handler after a nag has actually
+   * been sent — never before, and never on a send that threw. A flag set
+   * speculatively would suppress the one nag this epoch is allowed on the
+   * strength of a message the model never received.
+   */
+  noteNag(live: LiveTask): void;
   /** A snapshot of the current tally, or null if no epoch has been seen. */
   current(): EpochTally | null;
 }
@@ -997,6 +1059,7 @@ export function createEpochTracker(): EpochTracker {
   return {
     noteToolCall: (live) => void (slotFor(live).toolCalls += 1),
     noteDelivery: (live) => void (slotFor(live).delivered = true),
+    noteNag: (live) => void (slotFor(live).nagged = true),
     // A COPY. The tally decides whether a worker is accused of delivering
     // nothing; a caller able to reach in and set `delivered` would be editing
     // the evidence, and the edit would leave no trace.
@@ -1058,6 +1121,76 @@ export function composeNoSubmitEntry(
 }
 
 /**
+ * Layer 3's message, entire (§6.3, task 4.1).
+ *
+ * **It is a `const` and not a template, and §6.3 makes that the first of four
+ * constraints on this layer:** *"The message is a constant in the extension, not
+ * composed from anything the model produced."* `Docs/SRD.md` §12.6 is the rule —
+ * worker prose is data — and commit `5dbdafe` is the fix this would undo:
+ * re-feeding a model its own text back through a host-shaped channel makes the
+ * host look like it agrees. Nothing here interpolates. **Not even `task_id` or
+ * `epoch`**, which are host state and would therefore be legal under §12.6: the
+ * model is being asked to call a tool that reads both out of `/policy/task`
+ * itself, so putting them in the prompt would be handing back the exact two
+ * numbers §6.4 exists to stop a model copying. It would also cost the acceptance
+ * criterion its teeth — *"the string is identical across differing
+ * transcripts"* is checkable by comparison only while there is one string.
+ *
+ * **Every word is paid for out of about a second.** §11 Q1 measured the
+ * supervisor settling 0.18s (glm) to 1.05s (qwen) after the model acted on a
+ * nag, so this text has to produce a tool call almost immediately. It therefore
+ * says three things and stops: which tool, that the transcript is not a channel,
+ * and what the minimum call is. It asks the model to decide nothing and to
+ * re-read nothing — a sentence sending it back to `/policy/task`, or to its own
+ * brief, would spend the runway on a `read`.
+ *
+ * The last clause repeats `SUBMIT_REPORT_DESCRIPTION`'s warning about the four
+ * host-composed fields because a model that reaches this point has already
+ * failed to call the tool once, and §6.2.1's `additionalProperties: false`
+ * turns a remembered `task_id:` into a refusal — a second round trip this epoch
+ * cannot afford.
+ */
+export const NAG_TEXT =
+  "You have not called `submit_report` for this task, and nothing you wrote in " +
+  "this transcript reaches the host — that tool is the only channel. Call it now. " +
+  "`status` and `summary` are its only required arguments; `task_id`, `epoch` and " +
+  "`worker` are read from host state and must not be passed.";
+
+/**
+ * Should this epoch be nagged? Three clauses, each of which is a separate way
+ * layer 3 could become a nuisance.
+ *
+ * - **`delivered`** — the report is in. §11 Q3 measured `agent_end` firing 2-4ms
+ *   after a terminating tool result, so this handler runs on the happy path of
+ *   every delivery in the fleet, and a nag there would tell a worker that just
+ *   did its job to do it again.
+ * - **`nagged`** — §6.3's *"One nag, not a loop."* Q1 measured the `followUp`
+ *   EXTENDING the turn, which is exactly what makes an unbounded version a loop
+ *   rather than a no-op: nag, extend, `agent_end`, nag, until the token ceiling
+ *   ends the run on exit 5 (`Docs/SRD-TRIAGE-CONSOLE.md` Finding C).
+ * - **`toolCalls > 0`** — §6.3's third constraint and SRD task 4.2. A worker
+ *   that made no tool call this epoch either was not asked to do anything or was
+ *   asked a question, and *"an idle worker between dispatches must be left
+ *   alone, and so must a worker whose brief was a question."* The other half of
+ *   4.2 is not here because it cannot be: an idle worker has no live task, so
+ *   there is no tally to ask about, and the `agent_end` handler returns before
+ *   reaching this function.
+ *
+ * **A worker that ran one `ls` and quit IS nagged**, and that is deliberate. It
+ * held a live task and produced nothing, which is defect 5's exact shape and the
+ * case layer 3 exists for; one call is not "nothing to report", it is a report
+ * not written. The bar is a tool call, not a productive one.
+ *
+ * Pure, exported and total, so each clause can be reddened on its own without a
+ * filesystem or an event in the way.
+ */
+export function shouldNag(tally: EpochTally): boolean {
+  if (tally.delivered) return false;
+  if (tally.nagged) return false;
+  return tally.toolCalls > 0;
+}
+
+/**
  * What the model is told about the tool.
  *
  * The description names the four fields it must NOT try to supply, because the
@@ -1095,6 +1228,24 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
    * file, so one test's delivered epoch would silence the next test's.
    */
   const tracker = createEpochTracker();
+
+  /**
+   * The tally for the epoch `/policy/task` says is live, right now.
+   *
+   * Re-read rather than captured, because the `agent_end` handler below calls
+   * it on both sides of the nag and the nag CHANGES it. A single snapshot taken
+   * at the top would compose the entry from a tally that predated `noteNag`, and
+   * `nagged` would read `false` on the very entry whose job is to mirror the nag
+   * — a lie that only shows up when the turn does not extend, which is the case
+   * §11 Q1 warns arrives intermittently.
+   *
+   * `emptyTally` when the tracker's one slot is about some OTHER epoch. That is
+   * the worker dispatched and silent: never counted, so never tracked.
+   */
+  const tallyFor = (live: LiveTask): EpochTally => {
+    const tracked = tracker.current();
+    return tracked !== null && sameEpoch(tracked, live) ? tracked : emptyTally(live);
+  };
 
   pi.registerTool({
     name: "submit_report",
@@ -1142,10 +1293,13 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
         // above ran BEFORE this `try`, so `agent_end` knows this epoch was
         // delivered and writes no `pifleet.no_submit/v1`. The three cases are
         // now distinct in the session: a submit entry means delivered and
-        // recorded; a no_submit entry means nothing was delivered; NEITHER
-        // entry means delivered with the session write lost — which is this
-        // branch, and which is the case a host reader must not mistake for
-        // silence. The file on disk remains the thing the host decides on.
+        // recorded; a no_submit entry means nothing had been delivered when
+        // that `agent_end` fired; NEITHER entry means delivered with the
+        // session write lost — which is this branch, and which is the case a
+        // host reader must not mistake for silence. (The tense in the second is
+        // task 4.1's: a nagged epoch can produce a no_submit and then a submit,
+        // so the entries for one epoch are read in order and a submit settles
+        // it.) The file on disk remains the thing the host decides on.
       }
       return {
         content: [
@@ -1207,7 +1361,8 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
   });
 
   /*
-   * Layer 4's other half (§6.3, task 3.3): non-delivery becomes a fact.
+   * Layers 3 and 4 (§6.3, tasks 3.3 and 4.1): non-delivery is asked about once,
+   * and it becomes a fact whether or not the asking works.
    *
    * **The live task decides WHICH epoch this is about; the tally supplies only
    * the count and the delivery.** The tracker holds one slot, so after a settle
@@ -1227,20 +1382,25 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
    *   measured `agent_end` firing 2-4ms after a terminating tool result, so
    *   this is the happy path of every delivery in the fleet and its silence is
    *   a property, not the absence of one.
-   * - **The tally is about this epoch and says otherwise** — the entry, with the
-   *   epoch's cumulative count.
+   * - **The tally is about this epoch and says otherwise** — layer 3 if
+   *   `shouldNag`, then the entry, with the epoch's cumulative count and the
+   *   nag it just sent.
    * - **The tally is about some other epoch, or there is none** — an
    *   `emptyTally`, and the entry reads `tool_calls: 0`. That is the worker
    *   that was dispatched and made no move at all: the most severe shape defect
    *   5 has, and the one least likely to be guessed at, so it gets a record
-   *   rather than silence.
+   *   rather than silence. **No nag** — `shouldNag` requires a tool call, task
+   *   4.2 — because a worker that did nothing was not necessarily asked to do
+   *   anything.
    *
    * ONE ENTRY PER `agent_end`, not one per epoch, and the count is cumulative
-   * across the epoch. Q1 measured a phase-4 `sendUserMessage(followUp)` from
-   * here landing as a `queue_update` that EXTENDS the turn, so a nagged epoch
-   * ends more than once; an entry written only at the first `agent_end` could
-   * never carry 150, and `tool_calls` would lose exactly the discrimination
-   * §7.2 built it for. The last entry for an epoch is that epoch's final word.
+   * across the epoch. Q1 measured a `sendUserMessage(followUp)` from here
+   * landing as a `queue_update` that EXTENDS the turn, so a nagged epoch ends
+   * more than once; an entry written only at the first `agent_end` could never
+   * carry 150, and `tool_calls` would lose exactly the discrimination §7.2
+   * built it for. The last no_submit entry for an epoch is its last word about
+   * non-delivery — **and a `pifleet.submit/v1` after one settles the epoch**,
+   * which is what a successful nag looks like from the host's side.
    *
    * The `catch` is narrower in purpose than the one above. `emit`
    * (`runner.js:530-548`) already catches a throwing handler, so this is not
@@ -1253,12 +1413,48 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
     try {
       const live = readLiveTaskQuietly(mounts.policyPath);
       if (live === null) return;
-      const tracked = tracker.current();
-      const tally = tracked !== null && sameEpoch(tracked, live) ? tracked : emptyTally(live);
-      if (tally.delivered) return;
+      if (tallyFor(live).delivered) return;
+
+      /*
+       * Layer 3 (§6.3, task 4.1) — the bounded nag, and it runs BEFORE the
+       * entry for one reason: §6.3 asks for the bound to be *"mirrored through
+       * `pi.appendEntry`"*, and the only mirror this file has is `nagged` on the
+       * entry immediately below. Send after the append and the mirror lags by
+       * one entry — which is harmless when the turn extends and total when it
+       * does not, because there would be no second `agent_end` to carry the
+       * truth and the nag would leave no trace at all.
+       *
+       * **The send is wrapped separately from the outer `catch`, and that is
+       * §6.5's fence in code.** Layer 3 is a courtesy and layer 4 is evidence;
+       * a courtesy that fails must not take the evidence with it. Sharing the
+       * outer `catch` would let a throwing `sendUserMessage` skip the append and
+       * lose the record of an epoch that reported nothing — the layer with no
+       * authority silencing the layer whose whole job is to be read.
+       *
+       * `noteNag` is INSIDE the try and after the call, so a send that threw
+       * leaves `nagged` false. The entry then says, accurately, that this epoch
+       * was not re-prompted, and the next `agent_end` may try again. That retry
+       * is not the loop §6.3 forbids: a `sendUserMessage` that throws delivers
+       * no message and therefore spends no tokens, so what is bounded — model
+       * turns bought with a nag — stays bounded at one.
+       */
+      if (shouldNag(tallyFor(live))) {
+        try {
+          pi.sendUserMessage(NAG_TEXT, { deliverAs: "followUp" });
+          tracker.noteNag(live);
+        } catch {
+          // A failed nag is a nag that did not happen. Nothing is recorded and
+          // nothing is claimed; the entry below tells the truth either way.
+        }
+      }
+
       pi.appendEntry(
         NO_SUBMIT_ENTRY_SCHEMA,
-        composeNoSubmitEntry(tally, ctx.sessionManager.getSessionId(), new Date().toISOString()),
+        composeNoSubmitEntry(
+          tallyFor(live),
+          ctx.sessionManager.getSessionId(),
+          new Date().toISOString(),
+        ),
       );
     } catch {
       // See above: a failed diagnostic write is not worth an error banner.
