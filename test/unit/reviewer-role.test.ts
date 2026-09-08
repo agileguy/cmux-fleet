@@ -483,7 +483,7 @@ describe("the reviewer's grant is what the document says it is", () => {
    * ## Why the SENTENCE came forward and §8.1's mechanics did not
    *
    * Only the sentences stating WHAT THE GRANT IS move with the grant, because
-   * those are the ones a model acts on. `roles/reviewer.md:39-138` — the four
+   * those are the ones a model acts on. `roles/reviewer.md:45-144` — the four
    * envelope sections `submit_report` makes redundant — is task 8.1's and stays
    * deferred; deleting it is a size decision that costs nothing when it is late.
    * A false statement of the grant is not that kind of debt.

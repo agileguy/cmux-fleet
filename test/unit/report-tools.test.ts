@@ -847,7 +847,7 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
    * A call carrying BOTH a valid `report` and an inadmissible artifact must
    * write neither. An implementation that wrote the report file first and
    * validated artifacts second would leave a file in `files/` that no envelope
-   * declares — which is `roles/reviewer.md:47-52`'s undeclared-artifact
+   * declares — which is `roles/reviewer.md:53-58`'s undeclared-artifact
    * discrepancy, produced by the very tool that exists to make it impossible.
    */
   test("a refused call carrying a valid report writes no report file either", () => {

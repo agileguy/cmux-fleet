@@ -849,11 +849,11 @@ export interface ResultEnvelope {
  * report" is one an operator reading the raw JSON should keep.
  *
  * When a `report` was written, its file is appended to `artifacts`, so the
- * declare-what-you-wrote rule (`roles/reviewer.md:47-52`) cannot be forgotten —
+ * declare-what-you-wrote rule (`roles/reviewer.md:53-58`) cannot be forgotten —
  * it is no longer something the model has to remember to do.
  *
  * **The appended claim is RELATIVE — `files/<name>` — and not the absolute
- * `/outbox/<task-id>/files/<name>` that `roles/reviewer.md:114`'s example
+ * `/outbox/<task-id>/files/<name>` that `roles/reviewer.md:120`'s example
  * shows.** Both are accepted; the relative one is chosen because it is the
  * only spelling that is true in more than one place. An absolute claim is a
  * statement about the container's filesystem, so composing one means either
