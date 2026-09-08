@@ -741,7 +741,17 @@ parameters**; writes `/outbox/<task-id>/result.json` atomically; and, when `repo
 writes `/outbox/<task-id>/files/<filename>` first and appends a matching entry to `artifacts` so the
 declare-what-you-wrote rule (`roles/reviewer.md:47-52`) cannot be forgotten. Returns
 `{ content: [{ type: "text", text: "Report delivered: <n> bytes at <path>." }], details: { path, bytes, status }, terminate: true }`
-and calls `pi.appendEntry("pifleet.submit/v1", { task_id, epoch, status, bytes, at })`.
+and calls `pi.appendEntry("pifleet.submit/v1", …)` with **§7.1's eight fields** — the five above
+plus `schema`, `worker` and `artifact_files`.
+
+**CORRECTED 2026-09-08, by the engineer building 3.2, who followed §7.1 rather than this line.**
+This sentence listed five fields and §7.1's example carries eight; a reader who trusted the prose
+over the example would have shipped an entry missing the worker id and the file list — the two
+fields that make the entry useful to somebody who has four seats and a missing report. §7.1 is
+authoritative for the shape, and this line is now a pointer to it rather than a second copy of it.
+**`artifact_files` is the ENVELOPE's claim list, not the call's**, and the two differ by exactly the
+file the tool wrote itself; it is carried verbatim rather than by basename, since `files/notes.md`
+and `/workspace/notes.md` are both `notes.md` once the directory is gone and §6.2.1 admits both.
 
 **Note four fields are absent from the schema and are the point.** `schema`, `task_id`, `epoch` and
 `worker` are not parameters. `skills/pifleet-worker/SKILL.md:203-215` spends thirteen lines
