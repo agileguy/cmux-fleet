@@ -433,7 +433,7 @@ roles:
   sre:                                    # diagnoses AND remediates
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base                       # gcloud/kubectl/helm are in every image
-    tools: [read, write, edit, bash, grep, find, ls]
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
@@ -445,7 +445,7 @@ roles:
     model: Qwen3.5-35B-A3B-8bit
     thinking: high                        # reconciling four disagreeing channels is the job
     toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
-    tools: [read, write, bash, grep, find, ls]   # write is for the outbox artifact only
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox artifact only
     skills: [pifleet-worker, observer-ops]
     cloud_access: true                    # ADC, read verbs only — §5.10 refuses every mutation
     egress_access: true                   # a ROUTE to the proxy; destinations are egress.allow
@@ -464,7 +464,7 @@ roles:
   verifier:                               # confirms a remediation actually worked
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base
-    tools: [read, bash, grep, find, ls]
+    tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     cloud_access: true
     isolation: none
@@ -474,7 +474,7 @@ roles:
   engineer:
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: node
-    tools: [read, write, edit, bash, grep, find, ls]
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/engineer.md
   reviewer:
@@ -506,14 +506,14 @@ roles:
     # operator's checkout at /workspace — mounted `:ro`, so the grant would buy
     # nothing it could use and would widen the writer set for no capability.
     # NO `bash`, unchanged: §12.1 stands where its argument applies.
-    tools: [read, write, grep, find, ls]
+    tools: [read, write, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/reviewer.md
     isolation: shared-ro
   tester:
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: python
-    tools: [read, bash, grep, find, ls]
+    tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/tester.md
 
@@ -530,7 +530,7 @@ roles:
     # combination actually is — a shell and a live write credential for a system
     # of record — and see `roles/ticketing.md` on why scope discipline, not the
     # container boundary, is the control that binds here.
-    tools: [read, write, edit, bash, grep, find, ls]
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker, ticket-ops]
     # NO Google identity. This role has no reason to hold one, and `egress`
     # below is a separate decision from `cloud_access` precisely so that
@@ -606,7 +606,7 @@ roles:
     #
     # NO `edit`, for `reviewer`'s reason: nothing it can see is writable except
     # its own outbox, so the grant would widen the writer set and buy nothing.
-    tools: [read, write, grep, find, ls]
+    tools: [read, write, grep, find, ls, submit_report]
     # `pifleet-worker` alone. There is deliberately NO `triage` bundle: a name
     # with no directory under skills/ is a refusal at `up`, not a silently
     # shorter bundle, and inventing one to make this line look complete is the
