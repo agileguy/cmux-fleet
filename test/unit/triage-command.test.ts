@@ -80,6 +80,9 @@ import {
   triageActorLogPath,
   triageActorRecord,
   triageActorRecordPath,
+  triageCursorPath,
+  readTriageSweepCursor,
+  writeTriageSweepCursor,
   writeTriageActorRecord,
   TRIAGE_COLLATOR,
   type TriageConsolePorts,
@@ -3023,5 +3026,73 @@ describe("readSweepPartition tells a refused partition from an absent one", () =
     const { assignments, logged } = await partitionWithLog(run, "T-sweep-3");
     expect(assignments).toEqual([]);
     expect(logged).toEqual([]);
+  });
+});
+
+/**
+ * §6.6 layer 2's counter must outlive the actor, and until 2026-09-07 it did not.
+ *
+ * `triage-relay.json` was two things with opposite lifetimes: the pidfile
+ * `scripts/triage`'s `stopActor` MUST delete (a pidfile outliving its process is
+ * a pid the next stop signals blind) and the sweep cursor `resumedCursor` reads.
+ * `seedCursor` tolerated an absent record *"because `highestSweepNumber`
+ * re-derives the counter from the run tree"* — true while the run persists, false
+ * across a recreate, which mints an EMPTY tree and stops the actor first. Both
+ * sources read zero at the same moment.
+ *
+ * Observed: twelve restarts, twelve sweeps numbered `T-sweep-1`, against the rule
+ * that no sweep ever reuses an id.
+ */
+describe("the sweep counter survives what deletes the pidfile", () => {
+  test("the cursor is NOT the record path — deleting one leaves the other", async () => {
+    const env = { ...process.env };
+    expect(triageCursorPath(env)).not.toBe(triageActorRecordPath(env));
+    expect(triageCursorPath(env)).toMatch(/-cursor\.json$/);
+  });
+
+  test("a written counter is read back after the record is gone", async () => {
+    const base = await tempBase();
+    const env = { HOME: base, PIFLEET_RUNS_DIR: join(base, ".pifleet", "runs") };
+    await mkdir(join(base, ".pifleet"), { recursive: true });
+
+    await writeTriageSweepCursor(41, env);
+    // The record is what `stopActor` removes; it was never written here at all,
+    // which is exactly the post-stop state.
+    expect(existsSync(triageActorRecordPath(env))).toBe(false);
+    expect(await readTriageSweepCursor(env)).toBe(41);
+  });
+
+  /**
+   * The counter is a HINT that raises a floor, never a throw: a corrupt file must
+   * not stop a console sweeping, because the run tree is still consulted and
+   * `resumedCursor` takes the max of both.
+   */
+  /**
+   * THE ONE THAT MATTERS, and the three above do not replace it.
+   *
+   * Those exercise the read/write helpers in isolation and stay green while
+   * `seedCursor` ignores the file entirely — measured: stubbing the seed's read
+   * to 0 left all three passing. What must be asserted is the ID THE CONSOLE
+   * MINTS, because that is the thing §6.6 layer 2 is about.
+   *
+   * A persisted counter of 41 and a FRESH run tree — the exact post-recreate
+   * state — must produce `T-sweep-42`, not `T-sweep-1`.
+   */
+  test("a persisted counter raises the next sweep id, against an empty run tree", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-42Z-4242");
+    await writeTriageSweepCursor(41, fleet.effects.env);
+    const deps = productionTriageDeps(async () => fleet.effects);
+    const { err } = await runTriage(["--once"], deps);
+    expect(err).toBeNull();
+    expect(fleet.dispatched[0]).toBe(`${TRIAGE_COLLATOR}:T-sweep-42`);
+  });
+
+  test("an absent or corrupt counter reads 0 rather than throwing", async () => {
+    const base = await tempBase();
+    const env = { HOME: base, PIFLEET_RUNS_DIR: join(base, ".pifleet", "runs") };
+    await mkdir(join(base, ".pifleet"), { recursive: true });
+    expect(await readTriageSweepCursor(env)).toBe(0);
+    await writeFile(triageCursorPath(env), "{not json", "utf8");
+    expect(await readTriageSweepCursor(env)).toBe(0);
   });
 });

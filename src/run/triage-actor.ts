@@ -163,6 +163,67 @@ export function triageActorRecordPath(
   return relayRecordPath(TRIAGE_CONSOLE, env);
 }
 
+/**
+ * §6.6 layer 2's counter, in a file of its OWN — separate from §7.7's record.
+ *
+ * ## Why these cannot share a file, measured 2026-09-07
+ *
+ * `triage-relay.json` is two things at once: the pidfile an operator's
+ * `--actor-stop` needs, and the sweep cursor `resumedCursor` reads. Those have
+ * OPPOSITE lifetimes. `scripts/triage`'s `stopActor` deletes the record — it must,
+ * because a pidfile outliving its process is a pid the next stop would signal
+ * blind, and `down.ts` refuses every pid it cannot confirm for the same reason.
+ * The counter must survive exactly that event.
+ *
+ * `seedCursor`'s docblock says an absent record is safe *"because
+ * `highestSweepNumber` re-derives the counter from the run tree"*, and that is
+ * true while the run persists. It is false across a recreate, which mints an
+ * EMPTY run tree — and a recreate stops the actor first, so both sources read
+ * zero at the same moment. The two fallbacks were assumed independent and are
+ * not: they fail together, always, and the observable is a console minting
+ * `T-sweep-1` after every restart. Measured: twelve restarts, twelve sweeps
+ * numbered 1, against §6.6 layer 2's rule that *"no sweep ever reuses an id"*.
+ *
+ * ## Only the counter lives here
+ *
+ * `runs` and `consecutive_skips` are per-console-life and SHOULD reset: a new
+ * console has new pins and has skipped nothing. The sweep number is the one
+ * value whose whole contract is that it never goes backwards, so it is the one
+ * value that outlives the process.
+ */
+export function triageCursorPath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return relayRecordPath(TRIAGE_CONSOLE, env).replace(/-relay\.json$/, "-cursor.json");
+}
+
+/** The persisted counter, or 0 when absent/unreadable — never a throw. */
+export async function readTriageSweepCursor(
+  env: Record<string, string | undefined> = process.env,
+): Promise<number> {
+  try {
+    const text = await Bun.file(triageCursorPath(env)).text();
+    const v = (JSON.parse(text) as { sweep_cursor?: unknown }).sweep_cursor;
+    return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+  } catch {
+    /*
+     * Absent and unreadable collapse to 0 deliberately, exactly as `seedCursor`
+     * treats the record. The counter is a HINT that raises a floor; the run tree
+     * is still consulted and `resumedCursor` takes the max of both. A corrupt
+     * hint must not stop a console sweeping.
+     */
+    return 0;
+  }
+}
+
+/** Write the counter. Best-effort by the same argument as the read. */
+export async function writeTriageSweepCursor(
+  sweepCursor: number,
+  env: Record<string, string | undefined> = process.env,
+): Promise<void> {
+  await Bun.write(triageCursorPath(env), JSON.stringify({ sweep_cursor: sweepCursor }));
+}
+
 /** §7.7's log — appended, never truncated. */
 export function triageActorLogPath(
   env: Record<string, string | undefined> = process.env,

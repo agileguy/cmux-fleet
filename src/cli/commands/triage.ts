@@ -168,7 +168,9 @@ import {
   triageActorLogPath,
   triageActorRecord,
   triageActorRecordPath,
+  readTriageSweepCursor,
   writeTriageActorRecord,
+  writeTriageSweepCursor,
   type TriageActorCursor,
   type TriageActorEvent,
   type TriageActorExit,
@@ -1150,14 +1152,25 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
      * and both are safe because `highestSweepNumber` re-derives the counter from
      * the run tree before the pass mints anything (§6.6 layer 2, D12).
      */
+    /*
+     * THE COUNTER COMES FROM ITS OWN FILE, and the record can only raise it.
+     *
+     * The comment above is right that an absent record is safe *because the run
+     * tree re-derives the counter* — while the run persists. A recreate mints an
+     * empty tree, and a recreate stops the actor first, which deletes the record;
+     * so both sources read zero at the same moment and the console mints
+     * `T-sweep-1` again. `triage-cursor.json` is the source `stopActor` does not
+     * delete, and `max` is taken so neither can move the counter backwards.
+     */
+    const persisted = await readTriageSweepCursor(env);
     cursor =
       record.kind === "ok"
         ? {
             runs: record.record.runs,
-            sweep_cursor: record.record.sweep_cursor,
+            sweep_cursor: Math.max(record.record.sweep_cursor, persisted),
             consecutive_skips: record.record.consecutive_skips,
           }
-        : { runs: {}, sweep_cursor: 0, consecutive_skips: 0 };
+        : { runs: {}, sweep_cursor: persisted, consecutive_skips: 0 };
     return cursor;
   };
 
@@ -1477,11 +1490,19 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
          * for the same reason after the same five negatives.
          */
         isCollatorLive: async () => watched !== null && (await e.isCollatorLive(watched)),
-        saveCursor: async (next) =>
+        saveCursor: async (next) => {
           await writeTriageActorRecord(
             triageActorRecordPath(e.env),
             triageActorRecord(identity, next),
-          ),
+          );
+          /*
+           * AFTER the record, and separately: the record is the pidfile and dies
+           * with the actor; this is the counter and must outlive it. Written on
+           * every pass rather than at shutdown, because an actor that is killed
+           * -9 never reaches a shutdown path and the counter would rewind.
+           */
+          await writeTriageSweepCursor(next.sweep_cursor, e.env);
+        },
         log,
         sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
         ports,
