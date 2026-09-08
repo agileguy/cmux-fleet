@@ -1968,6 +1968,68 @@ const DISPATCH_TRIGGER_POLL_BUDGET_MS = 1_500;
  * this point, so the honest answer is to hand the operator the line and say why
  * — never to throw away six writes because one convenience was unavailable.
  */
+/**
+ * Clear a pane worker's session AFTER its task has settled.
+ *
+ * ## The moment is the whole design, and it is not the one tried first
+ *
+ * The obvious placement is before the next dispatch — clear, then trigger. That
+ * is unavailable and for a good reason: when `auto_trigger` is set the host
+ * deliberately types NOTHING ({@link sendStagedTrigger}'s early return), because
+ * the extension starting the turn *"never touches a terminal that may have become
+ * a shell"* and because `supervisor/tui.ts`'s `attributedToStage` recognises only
+ * `AUTO_TRIGGER_TEXT` — a line typed ahead of it would put an unattributable turn
+ * in the transcript and drop every staged turn back to the approximate growth
+ * heuristic. Clearing before the trigger fights all of that.
+ *
+ * Clearing AFTER settle fights none of it:
+ *
+ *  - it is not a trigger, so the delegation contract is untouched — the extension
+ *    still starts every turn and the host still types nothing on that path;
+ *  - it precedes no staged turn, so there is nothing for `attributedToStage` to
+ *    mis-attribute;
+ *  - `wait` has already returned, so it cannot be confused with a stage waiting
+ *    on a keypress;
+ *  - and the worker is IDLE, which is the one moment typing at its surface cannot
+ *    interrupt a turn.
+ *
+ * The freshness is identical. A session cleared after task N is a session that
+ * starts empty for task N+1; only the instant differs, and this instant is the
+ * one with no contract on it.
+ *
+ * ## What it does NOT do
+ *
+ * It does not reach `rpc` workers, which have no surface — those are handled by
+ * §6.6's recycle, which works for exactly the seats this does not. It is
+ * best-effort by construction: a failure is REPORTED and never thrown, because
+ * the task has already settled and its result is already durable. Throwing here
+ * would turn a cosmetic failure into a lost outcome.
+ */
+export async function resetPaneSession(
+  worker: string,
+  presentation: Presentation,
+  loadBackendFn: typeof loadBackend = loadBackend,
+): Promise<{ readonly reset: boolean; readonly reason: string | null }> {
+  const kind = presentation.surface_backend;
+  const surface = presentation.surface_ref;
+  if (kind === null || surface === null) {
+    return { reset: false, reason: `no addressable surface for ${worker}` };
+  }
+  try {
+    assertHostAuthoredPaneLine("session reset", SESSION_RESET_LINE);
+    const backend = await loadBackendFn(kind);
+    if (backend.sendText === undefined || backend.sendKey === undefined) {
+      return { reset: false, reason: `backend ${kind} cannot type into a pane` };
+    }
+    const pane = { backend: kind, id: surface };
+    await backend.sendText(pane, SESSION_RESET_LINE);
+    await backend.sendKey(pane, SUBMIT_KEY);
+    return { reset: true, reason: null };
+  } catch (err) {
+    return { reset: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function sendStagedTrigger(
   worker: string,
   presentation: Presentation,
@@ -1997,7 +2059,6 @@ export async function sendStagedTrigger(
     };
   }
   try {
-    assertHostAuthoredPaneLine("session reset", SESSION_RESET_LINE);
     assertHostAuthoredPaneLine("staged trigger", STAGED_TRIGGER_LINE);
     const backend = await loadBackendFn(kind);
     if (backend.sendText === undefined || backend.sendKey === undefined) {
@@ -2008,25 +2069,6 @@ export async function sendStagedTrigger(
       };
     }
     const pane = { backend: kind, id: surface };
-    /*
-     * CLEAR THE SESSION FIRST, then trigger — and the ORDER is the whole point.
-     *
-     * A tui worker keeps its session across dispatches, so without this the
-     * staged turn begins on top of every previous task's transcript and a model
-     * holding the last four answers from what it already has rather than from the
-     * brief it was just handed (`fresh-dispatch.ts`'s measured case). `/new` is
-     * interactive-mode's own command and reaches `newSession` through the only
-     * context that has it; no extension can, which is why this is typed here
-     * rather than done in `dispatch-trigger.ts` (see {@link SESSION_RESET_LINE}).
-     *
-     * Reset BEFORE the trigger, never after: after would clear the turn that was
-     * just started. Two sends and two submits, and the reset is not conditional
-     * on the trigger succeeding — a cleared session with no turn is a worker
-     * waiting, which is the state a re-dispatch recovers from. The reverse is a
-     * turn running against a stale transcript, which nothing detects.
-     */
-    await backend.sendText(pane, SESSION_RESET_LINE);
-    await backend.sendKey(pane, SUBMIT_KEY);
     await backend.sendText(pane, STAGED_TRIGGER_LINE);
     await backend.sendKey(pane, SUBMIT_KEY);
     return { sent: true, delegated: false, reason: null };

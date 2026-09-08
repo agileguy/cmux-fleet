@@ -213,42 +213,32 @@ describe("the trigger reaches a surface adopted by --attach-here", () => {
   });
 });
 
-describe("the session is cleared before a staged task starts", () => {
+describe("the session is cleared AFTER the task settles", () => {
   const src = () =>
     Bun.file(new URL("../../src/cli/commands/dispatch.ts", import.meta.url).pathname).text();
   const code = (text: string): string =>
     text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
   /**
-   * **The ORDER is the property, not the presence.** Reset after the trigger
-   * would clear the turn that was just started — a worker that looks triggered,
-   * settles nothing, and reports no error. Asserted on the code with comments
-   * stripped, because the docblock beside it discusses both orderings.
+   * **The trigger types the trigger and nothing else, and that is the property.**
+   * A reset typed before the trigger fights three separate decisions — the
+   * `auto_trigger` delegation (the host types NOTHING on that path), the turn
+   * attribution `attributedToStage` performs on `AUTO_TRIGGER_TEXT` alone, and
+   * `wait`'s handling of an armed stage. Asserted on the code with comments
+   * stripped, because the docblocks discuss both placements at length.
    */
-  test("the reset is typed BEFORE the trigger, not after", async () => {
-    const body = code((await src()).slice((await src()).indexOf("async function sendStagedTrigger")));
-    /*
-     * On the SEND CALLS, not on any mention of the constants. The first version
-     * of this test searched for the bare names and did not redden when the two
-     * sends were swapped — `STAGED_TRIGGER_LINE` appears again below in the
-     * "type this at your terminal" refusal, so "an occurrence after the reset"
-     * was true either way. A degenerate assertion in the test that exists to
-     * catch the ordering is worse than no test, and the mutation is what found
-     * it rather than a reading.
-     */
-    const reset = body.indexOf("sendText(pane, SESSION_RESET_LINE)");
-    const trigger = body.indexOf("sendText(pane, STAGED_TRIGGER_LINE)");
-    expect(reset).toBeGreaterThan(-1);
-    expect(trigger).toBeGreaterThan(-1);
-    expect(trigger).toBeGreaterThan(reset);
+  test("sendStagedTrigger does not type the session reset", async () => {
+    const text = await src();
+    const body = code(text.slice(text.indexOf("export async function sendStagedTrigger")));
+    expect(body).not.toContain("SESSION_RESET_LINE");
   });
 
   /**
-   * `/new` is interactive-mode's own command and reaches `newSession` through
-   * the only context that has it. Measured 2026-09-07: an extension cannot —
-   * `EVENT_CTX newSession=no`, `COMMAND_CTX newSession=YES`, and the API has no
-   * `executeCommand`. If this string changes, it stops being a command and
-   * becomes four characters of user text the model reasons about.
+   * `/new` is interactive-mode's own command and reaches `newSession` through the
+   * only context that has it. Measured 2026-09-07: an extension cannot — at
+   * `session_start` the handler context reports `newSession=no`, `compact=YES`,
+   * and the API has no `executeCommand`. If this string changes it stops being a
+   * command and becomes four characters of user text.
    */
   test("the reset line is the command, exactly, and one line", () => {
     expect(SESSION_RESET_LINE).toBe("/new");
@@ -256,17 +246,46 @@ describe("the session is cleared before a staged task starts", () => {
   });
 
   /**
-   * THE NEGATIVE ARM, and it is the one worth having. The staged route's whole
-   * safety claim is that a brief never reaches a terminal; the set is what makes
-   * that structural rather than a matter of each call site passing a constant.
+   * THE NEGATIVE ARM. The staged route's safety claim is that a brief never
+   * reaches a terminal; the closed set is what makes that structural rather than
+   * a matter of every call site remembering to pass a constant.
    */
   test("a brief line is refused by the staged route's gate", () => {
     expect(() => assertHostAuthoredPaneLine("x", "rm -rf / # from a worker's brief")).toThrow(
       /HOST_AUTHORED_PANE_LINES/,
     );
-    // …and both host lines are accepted, so the gate is not vacuously closed.
     expect(() => assertHostAuthoredPaneLine("x", SESSION_RESET_LINE)).not.toThrow();
     expect(() => assertHostAuthoredPaneLine("x", STAGED_TRIGGER_LINE)).not.toThrow();
     expect(HOST_AUTHORED_PANE_LINES.size).toBe(2);
+  });
+
+  /**
+   * `resetPaneSession` reports rather than throws, and an rpc seat is the
+   * ORDINARY case rather than a fault: those seats have no surface and are
+   * served by §6.6's recycle, which works for exactly the seats this does not.
+   */
+  test("a seat with no surface is reported, not thrown", async () => {
+    const { resetPaneSession } = await import("../../src/cli/commands/dispatch.ts");
+    const noSurface = {
+      schema: "pifleet.presentation/v1",
+      worker: "rpc-1",
+      backend: "headless",
+      workspace_ref: null,
+      workspace_name: null,
+      surface_ref: null,
+      window_ref: null,
+      adopted_terminal: false,
+      surface_backend: null,
+      attach_process: null,
+    } as unknown as Parameters<typeof resetPaneSession>[1];
+    const out = await resetPaneSession(
+      "rpc-1",
+      noSurface,
+      async () => {
+        throw new Error("must not load a backend when there is no surface");
+      },
+    );
+    expect(out.reset).toBe(false);
+    expect(out.reason).toContain("no addressable surface");
   });
 });

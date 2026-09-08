@@ -119,6 +119,10 @@ let triageEffectModules: Promise<{
   /* §6.3 step 5 routes each observer to its OWN run — see the dispatch below. */
   triage_cmd: typeof import("./commands/triage.ts");
   paths: typeof import("../run/paths.ts");
+  /* §6.6's freshness for pane seats — see the reset after `awaitSettled`. */
+  dispatch_cmd: typeof import("./commands/dispatch.ts");
+  state: typeof import("../run/state.ts");
+  backends: typeof import("../backends/registry.ts");
 }> | null = null;
 
 function loadTriageEffectModules(): NonNullable<typeof triageEffectModules> {
@@ -133,6 +137,9 @@ function loadTriageEffectModules(): NonNullable<typeof triageEffectModules> {
     down: await import("./commands/down.ts"),
     triage_cmd: await import("./commands/triage.ts"),
     paths: await import("../run/paths.ts"),
+    dispatch_cmd: await import("./commands/dispatch.ts"),
+    state: await import("../run/state.ts"),
+    backends: await import("../backends/registry.ts"),
   }))();
   return triageEffectModules;
 }
@@ -228,6 +235,35 @@ function productionSweepDispatchFor(
       throw err;
     }
     await transport.awaitSettled(target, { worker, taskId });
+    /*
+     * THE WORK IS DONE — clear the seat's session so the next task starts empty.
+     *
+     * A `pane_mode: tui` worker keeps its session across dispatches, and this
+     * console dispatches to the same two seats every cadence forever, so without
+     * this the collator accumulates every sweep of the day into one transcript
+     * and answers from what it already holds (`fresh-dispatch.ts`'s measured
+     * case). §6.6's recycle is the designed remedy and cannot serve these seats:
+     * it is a headless `up`, which cannot recreate a pane.
+     *
+     * AFTER settle, never before the trigger. Before would fight three things at
+     * once — see `resetPaneSession` — and gains nothing: a session cleared after
+     * task N is empty for task N+1 either way. Only the instant differs, and this
+     * is the instant with no contract on it and no turn to interrupt.
+     *
+     * Best-effort and never awaited for correctness: the task has settled and its
+     * result is durable, so a failed reset costs freshness on the next sweep and
+     * nothing else. `resetPaneSession` reports rather than throws for that reason,
+     * and an rpc seat with no surface reports `no addressable surface` here, which
+     * is the ordinary case rather than a fault.
+     */
+    const presentation = await m.state.readPresentation(m.paths.workerPaths(target, worker));
+    const reset =
+      presentation === null
+        ? { reset: false, reason: `no presentation record for ${worker}` }
+        : await m.dispatch_cmd.resetPaneSession(worker, presentation, m.backends.loadBackend);
+    if (!reset.reset && reset.reason !== null) {
+      console.error(`triage: session reset skipped for ${worker}: ${reset.reason}`);
+    }
     return { kind: "accepted" };
   };
 }
