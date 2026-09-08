@@ -490,10 +490,23 @@ describe("config validate — the triage pair", () => {
    * here that deliberately does not build a rig.
    *
    * `fleet.example.yaml` sits beside `triage/`, so this is the assertion that
-   * the files task 3.6 tracks are the files `config validate` actually reads,
-   * that they parse, and that `triage/console.yaml` carrying nothing but
-   * `version: 1` resolves to §7.8's documented defaults rather than to an error
-   * — which is the entire reason that file is empty.
+   * the files task 3.6 tracks are the files `config validate` actually reads
+   * and that they parse.
+   *
+   * **It no longer asserts the DEFAULTS, and that is not a weakening.** This
+   * test used to read `cadence_s: 300` / `sweep_deadline_s: 240` off the
+   * tracked pair on the grounds that `triage/console.yaml` "carrying nothing
+   * but `version: 1`" proved §7.8's defaults were reachable. That file stopped
+   * being empty on 2026-09-07: a 35B observer was measured being cut off
+   * mid-artifact at the 240s deadline, so the operator set `cadence_s: 900` and
+   * `reserve_s: 120` with the measurement written beside them. The assertion
+   * was then reading one document to make a claim about a different one, and it
+   * failed the moment the operator's measurement landed.
+   *
+   * So the claim was SPLIT rather than dropped. This test asserts what the
+   * tracked file says; `defaults are reachable from a version-only console`
+   * below asserts the reachability, against a fixture that really does state
+   * only its version — which is the document the claim was always about.
    *
    * The example declares `cloud.kubeconfig: null`, so the kube-context fence has
    * no reach to check against and the pass says so in a warning instead of
@@ -510,13 +523,54 @@ describe("config validate — the triage pair", () => {
     expect(d.triage.console_path).toBe(join(REPO_ROOT, "triage", "console.yaml"));
     expect(d.triage.environments).toEqual(["cni-dev"]);
     expect(d.triage.services).toBe(3);
-    // §7.8's defaults, reached by a file that states only its version.
-    expect(d.triage.cadence_s).toBe(300);
-    expect(d.triage.sweep_deadline_s).toBe(240);
+    // The tracked file's own values, and the derivation between them:
+    // `sweep_deadline_s` is `cadence_s - reserve_s` (§7.8 property 1) and is
+    // not a field, so 900 - 120 = 780 is the arithmetic being checked here as
+    // much as the two numbers are.
+    expect(d.triage.cadence_s).toBe(900);
+    expect(d.triage.sweep_deadline_s).toBe(780);
     // Not fenced, and never silently so.
     expect(d.triage.fenced).toBe(false);
     expect(r.stderr).toContain("was NOT fenced");
     expect(r.stderr).toContain("REFUSES TO START");
+  }, cliBudget(1));
+
+  /**
+   * The half of the test above that the tracked file can no longer carry.
+   *
+   * §7.8's table gives nine knobs documented defaults, and `triage/console.yaml`'s
+   * header argues at length that writing any of them into a tracked file makes a
+   * second definition that outranks the schema the day the schema changes. The
+   * proof that the defaults are REACHABLE therefore has to come from a document
+   * that states only its version — and since 2026-09-07 that is no longer the
+   * tracked one, which now carries four measured overrides.
+   *
+   * Written as a fixture rather than by restoring the tracked file, because the
+   * operator's 900/120 is a measurement (a 35B observer cut off mid-artifact at
+   * 240s) and a test is not a reason to give it back.
+   *
+   * `sweep_deadline_s` is asserted alongside `cadence_s` because it is DERIVED —
+   * `cadence_s - reserve_s`, §7.8 property 1, not a field — so a default that
+   * resolved for one and not the other would otherwise pass.
+   */
+  test("§7.8's defaults are reachable from a console stating only its version", async () => {
+    // A targets file is required for `triage` to be a summary at all rather
+    // than `null` — the console is the PAIR, and half of it summarises to
+    // nothing (the "no console" case the first test in this block asserts).
+    const dir = await rig({
+      contexts: null,
+      targets: TARGETS("cni-dev", "cni-dev"),
+      consoleYaml: "version: 1\n",
+    });
+    try {
+      const r = await validate(dir, ["--json"]);
+      expect(r.code).toBe(EXIT.SUCCESS);
+      const d = JSON.parse(r.stdout);
+      expect(d.triage.cadence_s).toBe(300);
+      expect(d.triage.sweep_deadline_s).toBe(240);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }, cliBudget(1));
 
   /**
@@ -553,7 +607,9 @@ describe("config validate — the triage pair", () => {
       expect(d.triage.fenced).toBe(true);
       expect(d.triage.environments).toEqual(["cni-dev"]);
       expect(d.triage.services).toBe(3);
-      expect(d.triage.sweep_deadline_s).toBe(240);
+      // 900 - 120, off the tracked console.yaml copied in above — see the
+      // previous test for why this is no longer §7.8's default of 240.
+      expect(d.triage.sweep_deadline_s).toBe(780);
       expect(r.stderr).not.toContain("was NOT fenced");
     } finally {
       await rm(dir, { recursive: true, force: true });

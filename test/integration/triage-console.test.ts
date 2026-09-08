@@ -283,18 +283,34 @@ async function plantBusyRun(rig: Rig, runId: string, worker: string): Promise<vo
   await writeWorkerState(wp, { ...state, phase: "busy", task_id: "T-sweep-1" });
 }
 
-describe("--dry-run prints four panes and touches nothing", () => {
+describe("--dry-run prints the console's seats and touches nothing", () => {
   /**
    * §12: *"`./scripts/triage --dry-run` prints four panes and touches nothing."*
    *
    * The panes are asserted BY NAME against `DEFAULT_TRIAGE_WORKERS` rather than
-   * by counting four lines. A console that printed four panes for the wrong four
-   * workers satisfies a count and is the exact defect
+   * by counting lines. A console that printed the right number of panes for the
+   * wrong workers satisfies a count and is the exact defect
    * `test/integration/operations-console.test.ts` was written after: pane 1
    * brought up one worker and rendered another.
+   *
+   * **The literal `4` that used to sit under the name assertion is gone, and
+   * that is the whole of this test's edit.** The console was collapsed to two
+   * seats by the operator on 2026-09-07 — one collator, one observer — and the
+   * count was a SECOND statement of the roster's size standing beside the
+   * first. It disagreed with `DEFAULT_TRIAGE_WORKERS` the moment the roster
+   * changed and failed while the assertion above it passed, which is the
+   * argument `triage/console.yaml`'s own header makes about duplicated
+   * defaults, arriving here as a red test rather than as a drifting default.
+   *
+   * A non-empty check replaces it, because that is the one thing `toEqual`
+   * cannot do alone: an emptied `DEFAULT_TRIAGE_WORKERS` makes both sides `[]`
+   * and the name assertion passes against a console with no panes at all.
+   *
+   * §12's sentence still says "four" and is left alone: it is quoted here, and
+   * this document does not get to edit SRD-TRIAGE-CONSOLE by paraphrase.
    */
   test.skipIf(!EXEC_TMP)(
-    "the four seats, by name, in pane order",
+    "the seats, by name, in pane order",
     async () => {
       const rig = await makeRig("dry");
       const r = await triage(rig, ["--dry-run"]);
@@ -303,7 +319,7 @@ describe("--dry-run prints four panes and touches nothing", () => {
 
       const titles = [...r.out.matchAll(/^pane \d+ \((.+)\):$/gm)].map((m) => m[1]!);
       expect(titles).toEqual([...DEFAULT_TRIAGE_WORKERS]);
-      expect(titles.length).toBe(4);
+      expect(titles.length).toBeGreaterThan(0);
     },
     cliBudget(1),
   );
