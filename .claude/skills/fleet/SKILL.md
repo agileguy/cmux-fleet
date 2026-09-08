@@ -286,5 +286,85 @@ tests can run at all.
   making the launch directory the workspace fixed it on the first try. The
   lesson generalises: **a worker doing the wrong thing consistently is usually
   being handed the wrong thing.**
+- **A stale ACTOR holds the lock and survives `--recreate`, and the error names a
+  file rather than the cause.** Symptom: every attempt to start an actor exits
+  having done nothing —
+
+  ```
+  actor_refused: another triage actor holds /Users/<you>/.pifleet/triage-relay.lock;
+  this one started nothing (§6.3b)
+  ```
+
+  — and no sweep ever runs, while `status --all` shows both seats healthy and idle.
+
+  **The cause is an actor left ALIVE serving a run that has since been torn down.**
+  `--actor-stop` targets the console's CURRENT run, so once the run id has moved it
+  silently matches nothing, prints nothing, and exits zero. `--restart <id>` and
+  even `--recreate` do not reach it either — measured 2026-09-08: one actor survived
+  a `--recreate` of the whole workspace and blocked four consecutive attempts to
+  start a sweep.
+
+  **Diagnose it in two commands, and do not confuse it with an orphaned seat:**
+
+  ```bash
+  cat ~/.pifleet/triage-relay.lock     # first line is the holder's pid
+  ps -p <pid>                          # alive? then it is a stale actor
+  ```
+
+  A lock held by a **dead** pid is taken over automatically — that case needs
+  nothing but running the script again. A lock held by a **live** pid whose run is
+  gone is the one case where killing the process is the correct move, and it is
+  safe: seats are untouched, and the next actor takes the now-dead lock over on the
+  first try. **This is the only `kill` this skill endorses**; seats are still never
+  `abort`ed or `pkill`ed, per the entry above.
+
+  The tell that distinguishes the two failures: a stale actor leaves the SEATS fine
+  (`docker ps` shows real containers matching `status`); an orphaned seat leaves the
+  status table claiming `alive=True phase=busy` with **no container at all**.
+
 - **The consoles are not the fleet.** Workers survive a closed cmux window;
   `status --all` is the truth, a visible pane is not.
+- **NEVER `abort` or `pkill` a seat. It ORPHANS the worker, and the damage is
+  invisible in `status`.** Both kill the process `up --attach-here` registers,
+  and nothing cleans up the run record behind it. What you are left with is a
+  worker that `status --all` reports as `alive=True phase=busy task=<something>`
+  while `docker ps -a` shows **no container at all** — and every subsequent
+  dispatch to it is refused with:
+
+  ```
+  worker <id> has an adopted terminal but no record of the attach process, so
+  pifleet cannot tell whether anybody is still there to run a staged task.
+  ```
+
+  Measured 2026-09-08, three times in one session, on `tri-1` and then twice on
+  `obs-t1`. Each time the next sweep died `pass_failed` on a seat the status table
+  swore was healthy, and each time the minutes went into re-reading the sweep code
+  rather than the one line that said the container was gone.
+
+  **`--restart <id>` is the only thing that repairs it**, because it is the only
+  path that re-runs `up --attach-here` and writes a new record. It is also the
+  only verb you need: to stop work, to clear a staged task, to recover an orphan.
+  If you are reaching for `abort` to "just clear this one task", you are choosing
+  the verb that breaks the seat over the verb that fixes it.
+
+  **The ACTOR is the exception, and the first version of this entry got it
+  backwards.** A lock held by a DEAD pid is taken over automatically — measured
+  2026-09-08: killing the holder and starting a new actor succeeded on the first
+  try. The hazard is the opposite one: an actor left ALIVE while the run it serves
+  is torn down. `--actor-stop` targets the console's CURRENT run, so it silently
+  matches nothing once the run id has moved, prints nothing, and exits zero — and
+  the zombie keeps the lock, so every later actor refuses with
+  `actor_refused: another triage actor holds the lock`, including after
+  `--recreate`. That is a stale actor, not an orphaned seat, and the two look
+  nothing alike: check `cat ~/.pifleet/triage-relay.lock`, then `ps -p <pid>`.
+  Holder alive and serving a dead run is the one case where killing it is correct.
+  Seats are still never `abort`ed or `pkill`ed — that part stands.
+
+- **Refresh EVERY seat a run touches, not the one you are thinking about.**
+  "Recreate on dispatch" is not satisfied by recreating the worker you are
+  dispatching TO when a second seat serves the same run. Measured 2026-09-08:
+  `obs-t1` was rebuilt for a fresh skill mount and `tri-1` was left up across four
+  failed sweeps, carrying ten transcript entries of its own earlier refusals into
+  what was supposed to be a clean pass. A triage sweep is `tri-1` AND `obs-t*`;
+  a review fan-out is `col-1` AND the three reviewers. Restart the set, then
+  start the actor — never one seat and a hope.

@@ -136,6 +136,117 @@ export function triageDocumentPath(run: RunPaths, collateTaskId: string): string
   );
 }
 
+/**
+ * Rewrite the outbox path in a slice brief to the id the slice is DISPATCHED
+ * under, whatever id the collator wrote there.
+ *
+ * **Both prompts already forbid the mistake this repairs, and both were
+ * disobeyed on the same sweep.** `roles/triage.md:212` tells `tri-1` to name
+ * *"its own task id, not yours"*; `roles/observer.md:139` tells the observer to
+ * write *"in the directory named by the id you were dispatched under"*. Measured
+ * 2026-09-07 on `T-sweep-1`: `tri-1` wrote `/outbox/T-sweep-1/files/` — its OWN
+ * id, the one word its instruction excludes — and `obs-t1` believed the brief
+ * over its own envelope and wrote there. `T-sweep-1-slice1/files/` stayed empty.
+ *
+ * **The failure is silent in the direction that matters.** `observerArtifactPath`
+ * reads `<seat>/outbox/<worker>/<child-task-id>/files/`, so a report at the
+ * parent's id is indistinguishable from a seat that wrote nothing: three services
+ * came back unobserved, `consecutive_indeterminate` climbed 52 -> 55 across three
+ * sweeps, and `last_artifact_ref` stayed `null` — while the observer was
+ * producing correct, correctly-shaped artifacts the whole time. The console
+ * reported `coverage` on a cluster that had answered, which is the exact defect
+ * `seatRun`'s note above was added for, one layer further out.
+ *
+ * **A third prompt line was the obvious fix and is the wrong one.** Two emphatic
+ * instructions did not hold; the host, at the one line that already computes the
+ * correct id, is where this stops being a matter of a model remembering. The
+ * pattern is `renderCollationEnvelope`'s: the host writes the reporting path it
+ * will later read, rather than asking for it back.
+ *
+ * Rewrites rather than refuses, deliberately, and it is the one judgement here
+ * worth revisiting: refusing would match this file's preference for a loud stop
+ * over a quiet repair, but it would also stop every sweep until a model changes
+ * its mind, and the console's job is to watch the environment rather than to
+ * hold it hostage to its own collator. The substitution is reported by the caller
+ * so it is repaired AND visible, never silently.
+ *
+ * Returns the brief unchanged when it names no outbox path, or already names the
+ * right one.
+ */
+export function normalizeSliceReportingPath(
+  brief: string,
+  childTaskId: string,
+): { readonly brief: string; readonly rewrote: readonly string[] } {
+  const wrong: string[] = [];
+  const rewritten = brief.replace(
+    /\/outbox\/([A-Za-z0-9._-]+)\/files\//g,
+    (whole, named: string) => {
+      if (named === childTaskId) return whole;
+      wrong.push(named);
+      return `/outbox/${childTaskId}/files/`;
+    },
+  );
+  return { brief: rewritten, rewrote: wrong };
+}
+
+/**
+ * Guarantee the slice brief carries §7.4's freshness-echo INSTRUCTION.
+ *
+ * **This appends a demand, never an answer, and the distinction is the whole
+ * design.** `sweepIdEcho`'s comparand is the host's own minted id precisely so a
+ * value the artifact supplied cannot be compared to itself — the same argument
+ * `windowEcho` makes about `dispatched_at`. So the host must never write
+ * `sweep_id` INTO an artifact; doing so would leave the check passing forever and
+ * §6.6 layer 3 guarding nothing. What the host may do is make sure the observer
+ * was told, which is the fault `sweepIdEcho` names when it returns `absent`
+ * rather than `stale`: *"a contract violation by a worker that may never have
+ * been told, which is a different thing to go and fix."*
+ *
+ * It had never been told. Measured 2026-09-08: `roles/triage.md:186` instructs the
+ * collator to carry "the sweep id, verbatim, with the instruction to echo it in
+ * `observer-ops.json`", and across five sweeps the collator carried the VALUE
+ * ("Sweep T-sweep-1. Observation window opens ...") and dropped the INSTRUCTION
+ * every time. Five artifacts with correct workloads and real findings — including a
+ * Grafana rule-evaluator fault — were discarded whole, `consecutive_indeterminate`
+ * reached 60, and the console reported `coverage` on an environment that had
+ * answered. Nothing in the observer's output looked wrong, because nothing in it
+ * was.
+ *
+ * Both values are already present in the brief as prose, so this adds no
+ * information the observer did not have; it adds the sentence that says what to do
+ * with them. The observer still has to copy them, and a replayed artifact still
+ * fails the comparison.
+ *
+ * Returns the brief unchanged when it already names both fields.
+ */
+export function ensureFreshnessEcho(
+  brief: string,
+  sweepId: string,
+): { readonly brief: string; readonly appended: boolean; readonly window: string | null } {
+  /*
+   * The window instant is READ OUT OF THE BRIEF rather than passed in, and that is
+   * not a convenience. `dispatchObserver` does not hold `dispatched_at`, and the
+   * host minting a second instant here would put a value in front of the observer
+   * that `windowEcho` never compared against — a third spelling of the same
+   * quantity, which §7.4 spends a whole field's justification avoiding. If the
+   * collator dropped the instant from the brief, the host genuinely cannot supply
+   * it, and `window: null` says so instead of inventing one.
+   */
+  const window = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/.exec(brief)?.[1] ?? null;
+  if (brief.includes("sweep_id") && brief.includes("window_opened_at")) {
+    return { brief, appended: false, window };
+  }
+  const windowClause =
+    window === null
+      ? "`window_opened_at` exactly as this brief states the observation window opening"
+      : `\`window_opened_at\` exactly "${window}"`;
+  const demand =
+    ` Echo \`sweep_id\` exactly "${sweepId}" and ${windowClause} as top-level fields of ` +
+    `\`observer-ops.json\`, copied from this brief and from nowhere else. An artifact ` +
+    `missing either is discarded whole and every service in it is recorded as unobserved.`;
+  return { brief: `${brief.trimEnd()}${demand}`, appended: true, window };
+}
+
 // ---------------------------------------------------------------------------
 // §7.2 — the verdict rule, which travels because the skill does not carry it
 // ---------------------------------------------------------------------------
@@ -1062,11 +1173,35 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
           `refusing.`,
       );
     }
+    const childId = childTaskId(sweepId, seat.aspect);
+    /*
+     * The collator names the reporting directory in prose and has named the
+     * WRONG one — see `normalizeSliceReportingPath`. The host holds the right id
+     * on the line above and is the last place that can still act on it.
+     */
+    const reporting = normalizeSliceReportingPath(item.brief, childId);
+    const freshness = ensureFreshnessEcho(reporting.brief, sweepId);
+    if (freshness.appended) {
+      console.warn(
+        `triage: ${assignment.worker}'s brief for ${sweepId} carried no freshness-echo ` +
+          `instruction; appended one. roles/triage.md:186 asks the collator for it, and an ` +
+          `artifact without sweep_id/window_opened_at is discarded whole (sweepIdEcho -> absent).`,
+      );
+    }
+    if (reporting.rewrote.length > 0) {
+      console.warn(
+        `triage: ${assignment.worker}'s brief for ${sweepId} named outbox ` +
+          `${reporting.rewrote.map((id) => `/outbox/${id}/files/`).join(", ")}; rewritten to ` +
+          `/outbox/${childId}/files/, the id it is dispatched under and the only one ` +
+          `observerArtifactPath reads. The collator is not copying its slice ids ` +
+          `(roles/triage.md:212).`,
+      );
+    }
     const outcome = await deps.dispatch({
-      taskId: childTaskId(sweepId, seat.aspect),
+      taskId: childId,
       worker: assignment.worker,
       title: item.title,
-      brief: item.brief,
+      brief: freshness.brief,
     });
     if (outcome.kind !== "accepted") {
       throw new SweepEnvelopeError(
@@ -1182,7 +1317,50 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
 
     const path = triageDocumentPath(deps.run, collateTaskId);
     const found = await readTriageDocumentAt(path, { worker: TRIAGE_COLLATOR, path }, read);
-    return { document: found.kind === "ok" ? found.document : null, evidenceRef };
+    if (found.kind !== "ok") {
+      /*
+       * **The reason was being computed and thrown away, and that is the whole
+       * defect.** `parseTriageDocument` returns a refusal that names the field and
+       * the offending value; collapsing it to `null` here left the sweep recording
+       * `coverage` on every service with nothing anywhere saying why.
+       *
+       * Measured 2026-09-08: five consecutive sweeps were lost to
+       * `services.2.assessment: Invalid option: expected one of
+       * "healthy"|"degraded"|"unhealthy"|"indeterminate"` - one row graded `failed`,
+       * a task-status word that is not an assessment token. The document is parsed
+       * whole, so that single word refused the document entire and took two healthy
+       * services and a real Grafana fault down with it. The operator saw
+       * `consecutive_indeterminate` climb and had no way to reach that sentence.
+       *
+       * A refused collation is a WORKER contract violation, not a host fault, so it
+       * warns rather than throws - the sweep still completes and still reports the
+       * services as unobserved, which remains the correct outcome. What changes is
+       * that the reason is now sayable.
+       */
+      if (found.kind === "refused") {
+        const detail =
+          found.issues.length > 0
+            ? found.issues.map((i) => `${i.path}: ${i.message}`).join("; ")
+            : found.reason;
+        console.warn(
+          `triage: ${TRIAGE_COLLATOR}'s collation for ${sweepId} was REFUSED (${found.code}) ` +
+            `and every service in it will be recorded unobserved - ${detail}`,
+        );
+      } else {
+        /*
+         * ABSENT is the other silence and a DIFFERENT fault to go and fix: the
+         * collator never wrote the document at all, rather than writing one this
+         * contract rejects. Naming them apart is the same distinction
+         * `sweepIdEcho` draws between `stale` and `absent`.
+         */
+        console.warn(
+          `triage: ${TRIAGE_COLLATOR} wrote no collation for ${sweepId} at ${found.path}; ` +
+            `every service in it will be recorded unobserved.`,
+        );
+      }
+      return { document: null, evidenceRef };
+    }
+    return { document: found.document, evidenceRef };
   };
 
   return { openSweep, dispatchObserver, join: joinSweep, collate };

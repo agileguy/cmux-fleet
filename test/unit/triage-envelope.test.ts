@@ -82,6 +82,8 @@ import {
   type ForbiddenEnvelopeClass,
   type SweepDispatchOutcome,
   type SweepEnvelopeInput,
+  normalizeSliceReportingPath,
+  ensureFreshnessEcho,
 } from "../../src/run/triage-envelope.ts";
 
 // ---------------------------------------------------------------------------
@@ -1133,5 +1135,108 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     }
     expect(thrown).toBeInstanceOf(SweepEnvelopeError);
     expect(sent).toHaveLength(0);
+  });
+});
+
+/**
+ * The slice brief's reporting path — the defect measured on `T-sweep-1`,
+ * 2026-09-07.
+ *
+ * `roles/triage.md:212` forbids exactly this ("its own task id, not yours") and
+ * the collator did it anyway; `observerArtifactPath` reads only the child id, so
+ * the report landed where nothing looks and three services graded `coverage`
+ * while the observer was writing correct artifacts. The host is the last holder
+ * of the right id, so the repair belongs here rather than in a third prompt line.
+ */
+describe("normalizeSliceReportingPath", () => {
+  test("rewrites the collator's own id to the id the slice is dispatched under", () => {
+    const brief =
+      "Write the artifact pair `observer-ops.json` and `observer-ops.md` into " +
+      "`/outbox/T-sweep-1/files/` — its own task id, not yours.";
+    const result = normalizeSliceReportingPath(brief, "T-sweep-1-slice1");
+    expect(result.rewrote).toEqual(["T-sweep-1"]);
+    expect(result.brief).toContain("/outbox/T-sweep-1-slice1/files/");
+    expect(result.brief).not.toContain("/outbox/T-sweep-1/files/");
+  });
+
+  test("a brief already naming the child id is returned unchanged and reports nothing", () => {
+    const brief = "write into /outbox/T-sweep-1-slice1/files/ and nowhere else";
+    const result = normalizeSliceReportingPath(brief, "T-sweep-1-slice1");
+    expect(result.rewrote).toEqual([]);
+    expect(result.brief).toBe(brief);
+  });
+
+  test("a brief naming no outbox path is untouched", () => {
+    const brief = "check grafana in aodapnc-grafana-dev";
+    const result = normalizeSliceReportingPath(brief, "T-sweep-1-slice1");
+    expect(result.rewrote).toEqual([]);
+    expect(result.brief).toBe(brief);
+  });
+
+  /**
+   * Every wrong id is REPORTED, not just the first — a brief that names two is a
+   * collator that has lost the thread twice, and a log naming one of them sends
+   * the reader looking for a single typo.
+   */
+  test("reports every wrong id it rewrites", () => {
+    const result = normalizeSliceReportingPath(
+      "pair into /outbox/T-9/files/ then also /outbox/T-9-slice2/files/",
+      "T-9-slice1",
+    );
+    expect(result.rewrote).toEqual(["T-9", "T-9-slice2"]);
+    expect(result.brief).toBe(
+      "pair into /outbox/T-9-slice1/files/ then also /outbox/T-9-slice1/files/",
+    );
+  });
+});
+
+/**
+ * §7.4's freshness echo, and the fault `sweepIdEcho` calls `absent` — an artifact
+ * from a worker that was never told. Measured 2026-09-08: five sweeps produced
+ * correct artifacts and every one was discarded for want of two strings, because
+ * the collator carried the VALUES into the brief and dropped the INSTRUCTION.
+ */
+describe("ensureFreshnessEcho", () => {
+  const WINDOW = "2026-09-08T01:21:10.427Z";
+  const REAL_BRIEF =
+    `Sweep T-sweep-1. Observation window opens ${WINDOW}. Check \`grafana\` in namespace ` +
+    "`aodapnc-grafana-dev`. Both files, every time.";
+
+  test("appends the demand, quoting the sweep id and the window read from the brief", () => {
+    const r = ensureFreshnessEcho(REAL_BRIEF, "T-sweep-1");
+    expect(r.appended).toBe(true);
+    expect(r.window).toBe(WINDOW);
+    expect(r.brief).toContain('`sweep_id` exactly "T-sweep-1"');
+    expect(r.brief).toContain(`\`window_opened_at\` exactly "${WINDOW}"`);
+    expect(r.brief.startsWith("Sweep T-sweep-1.")).toBe(true);
+  });
+
+  test("a brief already naming both fields is returned unchanged", () => {
+    const already = `${REAL_BRIEF} Echo sweep_id and window_opened_at in the json.`;
+    const r = ensureFreshnessEcho(already, "T-sweep-1");
+    expect(r.appended).toBe(false);
+    expect(r.brief).toBe(already);
+  });
+
+  /**
+   * The host must not mint a second spelling of the instant. If the collator dropped
+   * it, `window` is null and the demand names the brief rather than a value.
+   */
+  test("no instant in the brief means window null and no invented value", () => {
+    const r = ensureFreshnessEcho("Sweep T-sweep-9. Check grafana.", "T-sweep-9");
+    expect(r.appended).toBe(true);
+    expect(r.window).toBeNull();
+    expect(r.brief).toContain('`sweep_id` exactly "T-sweep-9"');
+    expect(r.brief).not.toMatch(/window_opened_at` exactly "/);
+  });
+
+  test("the appended demand survives path normalization order", () => {
+    const norm = normalizeSliceReportingPath(
+      `${REAL_BRIEF} Write into /outbox/T-sweep-1/files/.`,
+      "T-sweep-1-slice1",
+    );
+    const r = ensureFreshnessEcho(norm.brief, "T-sweep-1");
+    expect(r.brief).toContain("/outbox/T-sweep-1-slice1/files/");
+    expect(r.brief).toContain('`sweep_id` exactly "T-sweep-1"');
   });
 });

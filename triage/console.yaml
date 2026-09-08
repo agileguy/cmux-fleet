@@ -68,9 +68,31 @@ version: 1
 # way. Measured 2026-09-07: three consecutive sweeps each dispatched, completed in
 # ~90s having collected nothing, and recycled the still-working observer.
 #
-# 6 is thirty minutes at the default cadence: several passes, so a sweep can
-# settle and be resumed, while the collator still starts fresh many times a day.
-recycle_after_sweeps: 6
+# DISABLED, because this console's seats are `pane_mode: tui` and the two cannot
+# both hold. §6.6 layer 4's recycle is a HEADLESS `up` — "no `--attach-here`,
+# which is the whole reason this console can be recycled by a process with no
+# terminal". A headless run creates no pane, so a recycle takes a tui seat DOWN
+# and cannot bring it back: measured 2026-09-07, the console died at 15:57 that
+# way and both seats stayed down until they were rebuilt by hand.
+#
+# The recycle is the half given up rather than the panes, because every worker in
+# this fleet is a tui and an operator who cannot watch the console cannot trust
+# it — while the recycle's job, stopping a day's transcript accumulating into one
+# session, can be done deliberately with `./scripts/triage --recreate`.
+#
+# THE COST IS REAL and returns the moment this is 0: the collator keeps its
+# session between dispatches, so it accumulates every sweep of the day and a model
+# holding four previous sweeps answers from what it already has
+# (`fresh-dispatch.ts` records the measured case). Recreate the console by hand
+# when the panes get long. If this is ever set back above 0, the seats must go
+# back to `rpc` in the same edit.
+#
+# (6 was the value while the seats were rpc — thirty minutes at a 300s cadence.
+# 1 does NOT work at any pane_mode: a sweep spans more than one pass, and a
+# recycle every pass strands each sweep's outbox in a run the next pass cannot
+# see. Measured: three sweeps dispatched, completed in ~90s having collected
+# nothing, and recycled the still-working observer.)
+recycle_after_sweeps: 0
 
 # A 35B OBSERVER NEEDS LONGER THAN A FIVE-MINUTE TICK.
 #
