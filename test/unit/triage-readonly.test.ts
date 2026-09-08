@@ -64,6 +64,43 @@
  * standard-library cancellation primitive and not the fleet's `abort` verb. The
  * verbs below are banned by MODULE and by the exported names a caller would need,
  * which have no such collision.
+ *
+ * ## WHAT THIS FILE DOES NOT COVER AT ALL: worker-side code, where its coverage
+ * ## is ZERO — so "the read-only guard is green" does not speak to it
+ *
+ * `Docs/SRD-WORKER-DISPATCH-EXTENSION.md` §4.3, recorded here rather than left
+ * there because the next person to widen this guard reads this header first and
+ * that SRD not at all.
+ *
+ * **The scope is pinned by construction rather than by convention.** {@link SRC}
+ * is `../../src/` at `:73` and is not a parameter; every read joins against it
+ * (`:143-145`, `:160-165`, `:180`, `:198`, `:256`), and the walk follows relative
+ * specifiers only (`:164`). No path expression in this file can name a byte
+ * outside `src/`.
+ *
+ * **The negative evidence, because a scope claim is worth only the grep that
+ * failed to break it.** Measured 2026-09-07 over this file: ZERO occurrences of
+ * `roles/`, `skills/`, `outbox` or `replies`. The one `docker` hit is `:33`, and
+ * it is a citation of the source module `monitor/read/docker.ts` — not the
+ * `docker/` build context, which this file has never opened.
+ *
+ * **The blind spot is already occupied, which is why this is a note and not a
+ * footnote.** `docker/pi-extensions/` holds two extensions running inside the
+ * worker container today — `dispatch-trigger.ts` and `truncation-recovery.ts` —
+ * and `tsconfig.json:32` includes only `src/**` and `test/**`, so that directory
+ * is outside the typechecker as well as outside this walk.
+ *
+ * **The advantage, and then the hazard.** A worker-side extension may hold write
+ * capability without widening this console's read-only closure by one edge,
+ * because it is not in the closure — not the same process, the same runtime, or
+ * the same machine boundary. **The hazard is the inference: a reader who sees the
+ * tests below green and concludes "the worker-side code was checked" has taken a
+ * result this file never produced.** `dispatch-trigger.ts` is the live case — it
+ * polls `/policy/dispatch` and calls `pi.sendUserMessage()`, participating in the
+ * dispatch pathway from code no assertion here has ever loaded. It is sound,
+ * because the host alone decides what is staged and the extension only turns a
+ * staged file into a turn — **but nothing in this file is what makes it sound.**
+ * Worker-side guarantees need worker-side guards.
  */
 
 import { describe, expect, test } from "bun:test";
