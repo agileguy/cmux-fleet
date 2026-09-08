@@ -347,9 +347,9 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
  * A probe that only noticed "the tools list changed" would be satisfied by
  * adding `write` OR by adding `bash`, which would make the battery's bash-refusal
  * mutation stop meaning what its name says. So each member is asserted on its
- * own: `write` present because the role could not write `result.json` without it
- * and the console could not function, `bash` and `edit` absent because §12.1's
- * argument is about a shell and `edit` buys nothing against a `:ro` checkout.
+ * own: `write` ABSENT because `submit_report` is now the role's only writing
+ * verb, `bash` and `edit` absent because §12.1's argument is about a shell and
+ * `edit` buys nothing against a `:ro` checkout.
  *
  * **Read from `fleet.example.yaml`, which is TRACKED.** `fleet.yaml` is
  * gitignored and `ci.yml` is checkout → `bun install` → `bun test test/unit` with
@@ -361,8 +361,44 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
 describe("the reviewer's grant is what the document says it is", () => {
   const EXAMPLE = exampleConfig();
 
-  test("write IS granted — the role could not report without it", () => {
-    expect(grantedTools(EXAMPLE, "reviewer")).toContain("write");
+  /**
+   * WITHDRAWN 2026-09-08 (SRD-WORKER-DISPATCH-EXTENSION task 7.1, Phase B), and
+   * the assertion is INVERTED rather than deleted, because the two states this
+   * role has been in are both defects and a deleted probe guards against
+   * neither.
+   *
+   * The grant was real. `config/schema.ts` makes {write, edit, bash} the writer
+   * set; a reviewer holding none of them could not write `result.json`, nothing
+   * host-side writes it, and the console reported three empty lenses while every
+   * status stayed green. That is why the version of this test above the
+   * inversion existed at all.
+   *
+   * What retired it is `submit_report`: `docker/pi-extensions/report-tools.ts`
+   * writes the envelope, and the `report` parameter writes the long review into
+   * `files/` and claims it — the extension's file access, not the model's grant.
+   * So the capability survives the withdrawal and only the general verb goes.
+   *
+   * **And the withdrawal is what makes the tool's refusals binding.** A bad
+   * `status` is refused in typebox before `execute`, in front of the model,
+   * while it still has budget — the `rev-lang-1` failure exactly. A
+   * hand-written `result.json` meets no schema until the harvester parses it on
+   * the host minutes later, and `report-tools.ts` has to stat the envelope on
+   * disk at `agent_end` precisely because a `write` past the tool leaves no
+   * trace in the extension. While `write` stands the refusal is advice, so this
+   * probe reddening means the console has quietly got its bypass back.
+   */
+  test("write is NOT granted — submit_report is the only writing verb", () => {
+    expect(grantedTools(EXAMPLE, "reviewer")).not.toContain("write");
+    /*
+     * The premise, asserted in the same test rather than assumed. "No `write`"
+     * on a role that also lost `submit_report` is the ORIGINAL defect wearing
+     * this probe's green tick — a reviewer that cannot report at all — and the
+     * withdrawal above is only sound while the replacement is in the grant.
+     */
+    expect(
+      grantedTools(EXAMPLE, "reviewer"),
+      "the role has no writing verb at all — this is the pre-2026-09-04 defect",
+    ).toContain("submit_report");
   });
 
   test("bash is NOT granted", () => {
@@ -374,23 +410,28 @@ describe("the reviewer's grant is what the document says it is", () => {
   });
 
   /**
-   * SIX since 2026-09-08 (SRD-WORKER-DISPATCH-EXTENSION task 6.2, Phase A). The
-   * list is MOVED rather than loosened to a `toContain`: it is a by-value
-   * inventory, and the failure it exists to catch is a grant that grew without
-   * anybody deciding it should.
+   * FIVE since 2026-09-08 (SRD-WORKER-DISPATCH-EXTENSION task 7.1, Phase B) —
+   * six for the four days Phase A ran with both routes open, and four before
+   * Phase A added `submit_report`.
    *
-   * `write` stays. Phase A opens the new route beside the old one and removes
-   * nothing — Phase 7 is where `write` is withdrawn, and `config validate` warns
-   * about the overlap in the meantime, which is the point rather than a defect.
+   * The list stays a BY-VALUE inventory rather than being loosened to a set of
+   * `toContain`s, and the shrink is the reason to say so again: the failure this
+   * catches is a grant that GREW without anybody deciding it should, and that
+   * failure gets easier to hide, not harder, as the list gets shorter. A
+   * `toContain` battery would have accepted every one of the three states above
+   * plus `bash`.
+   *
+   * Phase A opened the new route beside the old one and removed nothing, which
+   * left `config validate` warning about the overlap. Phase B removes `write`,
+   * so the overlap and the warning go together.
    */
-  test("the grant is exactly the six tools the document enumerates", () => {
+  test("the grant is exactly the five tools the document enumerates", () => {
     expect([...grantedTools(EXAMPLE, "reviewer")].sort()).toEqual([
       "find",
       "grep",
       "ls",
       "read",
       "submit_report",
-      "write",
     ]);
   });
 
@@ -398,6 +439,22 @@ describe("the reviewer's grant is what the document says it is", () => {
    * The document's own sentence against the grant, both ways: a tool it claims
    * and does not have costs an epoch to discover, and a tool it has and does not
    * mention is a capability the model will not use.
+   *
+   * **ONE DIRECTION IS ASSERTED AND THE OTHER IS DELIBERATELY UNENFORCED FOR THE
+   * LENGTH OF PHASE B — read this before "fixing" it.** The loop runs over the
+   * GRANT, so it catches a granted tool the opening line omits and says nothing
+   * about a tool the line names and the grant no longer holds. Since task 7.1
+   * withdrew `write`, that second direction is exactly the state this file is
+   * in: `roles/reviewer.md:1` still says *"You have read, write, …"*.
+   *
+   * That is the migration's own instruction rather than an oversight. SRD §8.1:
+   * *"the rollback boundary is phase B and it is one config line … the prose is
+   * still there because phase C has not run for that role. This is why the order
+   * is prose-last."* Tightening this probe now would buy a correct assertion at
+   * the price of the property the phase order exists for — restoring `write` to
+   * one `tools:` line would no longer restore a coherent worker. The reverse
+   * direction becomes enforceable when task 8.1 rewrites the opening line, and
+   * belongs in that commit, with the prose it grades.
    */
   test("the document's opening tool sentence matches the grant", () => {
     const first = REVIEWER.split("\n")[0]!;
@@ -408,6 +465,16 @@ describe("the reviewer's grant is what the document says it is", () => {
     expect(first).toContain("no edit");
   });
 
+  /**
+   * KEPT GREEN THROUGH PHASE B ON PURPOSE, for the reason in the block above.
+   *
+   * This sentence bounds a tool the role no longer holds, so it reads as stale —
+   * and it is, in the way §8.1 requires it to be. Deleting it is task 8.1's, and
+   * only after this role has completed a full review-console cycle without
+   * `write`. Until then the sentence is the other half of the one-config-line
+   * rollback: put `write` back and the briefing that describes it is still
+   * correct and still in place.
+   */
   test("the document bounds the write to the outbox", () => {
     expect(REVIEWER).toContain("The write is for `/outbox` alone");
   });
