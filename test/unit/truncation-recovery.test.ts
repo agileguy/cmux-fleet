@@ -26,6 +26,10 @@
  *   That is the case where the visible bytes actively mislead.
  * - **The pass-through.** Untruncated results and non-bash tools come back
  *   `undefined`, byte-identical to what Pi produced.
+ * - **The refusal of the other extension's tool.** `report-tools.ts` puts
+ *   `submit_report` into the same tool path (SRD §11 Q9), and this file's
+ *   handler sees every result in it. A delivery receipt must come back
+ *   `undefined` — and must do so because of the tool NAME, not by coincidence.
  *
  * The fixtures are deliberately ASYMMETRIC: the truncated text and the
  * complete file never share content, so an implementation that banners the
@@ -124,6 +128,102 @@ describe("results this extension does not touch", () => {
   test("a path without a truncation does not trigger a banner", () => {
     const e = bashEvent({ truncation: untruncated, fullOutputPath: "/tmp/pi-bash-x.log" });
     expect(rewriteBashResult(e, serving("/tmp/pi-bash-x.log", "{}"))).toBeUndefined();
+  });
+});
+
+/**
+ * SRD §11 Q9 — the two extensions meeting in the tool path.
+ *
+ * `report-tools.ts` registers `submit_report`; this file registers a
+ * `tool_result` middleware, and `docker/Dockerfile` loads both into every
+ * worker. They meet on every delivery. A middleware that rewrote a delivery
+ * receipt would be editing the one result the host counts, so the question is
+ * which branch such a result takes.
+ *
+ * It takes the first one: `rewriteBashResult` opens with
+ *
+ *     if (event.toolName !== "bash") return undefined;
+ *
+ * and `undefined` is Pi's "no opinion" — the result reaches the model exactly
+ * as `submit_report` returned it. No fix was needed; what follows pins that.
+ *
+ * **The shape below is a LITERAL, transcribed from SRD §6.2.1 (line 709):**
+ *
+ *     { content: [{ type: "text", text: "Report delivered: <n> bytes at <path>." }],
+ *       details: { path, bytes, status }, terminate: true }
+ *
+ * not an import. `report-tools.ts` is being written in parallel with this
+ * block, and importing it would make the answer to a question about THIS file
+ * depend on that one compiling. `terminate` is absent from the fixtures because
+ * it is not part of a `tool_result` event — it is on the tool's return value.
+ * The three fields this handler can see are `toolName`, `content` and
+ * `details`.
+ *
+ * **Two guards refuse a real `submit_report` result independently** — the tool
+ * name, and then `details.truncation` — and a test that passes for two reasons
+ * proves neither. So each is pinned with a fixture that isolates it.
+ */
+describe("a submit_report result is not rewritten — SRD §11 Q9", () => {
+  const RECEIPT_PATH = "/outbox/T-q9/result.json";
+  const LOG = "/tmp/pi-bash-q9.log";
+  const JSON_FULL = JSON.stringify({ success: true, data: [{ id: 1 }], error: null });
+
+  /** §6.2.1's `details: { path, bytes, status }`, filled with one delivery. */
+  const SUBMIT_REPORT_DETAILS = { path: RECEIPT_PATH, bytes: 812, status: "success" };
+
+  const submitReportResult = (): ToolResultEventLike => ({
+    type: "tool_result",
+    toolName: "submit_report",
+    content: [{ type: "text", text: `Report delivered: 812 bytes at ${RECEIPT_PATH}.` }],
+    details: SUBMIT_REPORT_DETAILS,
+  });
+
+  /** THE ANSWER TO Q9: the receipt the host counts comes back untouched. */
+  test("the delivery receipt is passed through unchanged", () => {
+    expect(rewriteBashResult(submitReportResult(), unreadable)).toBeUndefined();
+  });
+
+  /**
+   * The tool-name guard, isolated — and the reason this test carries a fixture
+   * `submit_report` would never produce.
+   *
+   * Handed §6.2.1's own details the handler refuses TWICE, so deleting the name
+   * check leaves the test above green and proves nothing about the name. These
+   * details are a real truncation over a readable, parseable complete output:
+   * the event is one the handler would banner, with a shape line and a `jq`
+   * suggestion, the instant the name stopped matching. The second assertion is
+   * the positive control — the same details on a `bash` result DO banner, so
+   * the pass-through above cannot be an artefact of an inert fixture.
+   */
+  test("it is the tool NAME that refuses it, not the absence of a truncation", () => {
+    const rewritable = { truncation: MEASURED, fullOutputPath: LOG };
+    const e: ToolResultEventLike = { ...submitReportResult(), details: rewritable };
+    expect(rewriteBashResult(e, serving(LOG, JSON_FULL))).toBeUndefined();
+    expect(
+      textOf(rewriteBashResult({ ...e, toolName: "bash" }, serving(LOG, JSON_FULL))),
+    ).toContain("valid JSON");
+  });
+
+  /**
+   * The truncation guard, isolated: `submit_report`'s own details on a `bash`
+   * event, so the name check is already satisfied and only `details.truncation`
+   * is left to refuse it.
+   *
+   * This is the "details it does not recognise" case, and it is distinct from
+   * the two beside it — `bashEvent(undefined)` has no details object at all,
+   * and the `untruncated` fixture has a `truncation` this handler reads and
+   * rejects. Here the object is present, populated, and carries no field this
+   * file knows. Silence is the only correct answer: a banner assembled from
+   * absent numbers would report a size and a clipped end that nothing measured.
+   */
+  test("a details object with no truncation field is not enough to banner", () => {
+    const e: ToolResultEventLike = {
+      type: "tool_result",
+      toolName: "bash",
+      content: [{ type: "text", text: `Report delivered: 812 bytes at ${RECEIPT_PATH}.` }],
+      details: SUBMIT_REPORT_DETAILS,
+    };
+    expect(rewriteBashResult(e, unreadable)).toBeUndefined();
   });
 });
 
