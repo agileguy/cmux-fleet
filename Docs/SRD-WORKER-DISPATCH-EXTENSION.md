@@ -502,10 +502,24 @@ to stop having the sentence be the mechanism.
 
 Anything new under `src/` meets `scripts/coverage-modules.ts`'s gate the way
 `Docs/SRD-TRIAGE-CONSOLE.md` §3.3 describes. **But most of this design's new code is not under
-`src/`** — it is under `docker/pi-extensions/`, which is outside `tsconfig.json`'s `include` exactly
-as `scripts/` is (ISC-572's closing note, cited in `Docs/SRD-TRIAGE-CONSOLE.md` §12: *"`scripts/` is
-outside `tsconfig.json`'s `include`, so a console that forgot `quiesce` is caught by neither
-`bun run typecheck` nor the suite"*). **That is this design's sharpest verification hazard and §12
+`src/`** — it is under `docker/pi-extensions/`, which is outside `tsconfig.json`'s `include`.
+
+**CORRECTED 2026-09-08 by the engineer landing task 5.4, and the analogy this paragraph drew was the
+wrong one.** It said the directory is outside the typechecker *"exactly as `scripts/` is"*, citing
+ISC-572's closing note. **The two are not alike, and the difference is IMPORTABILITY.** `scripts/` is
+outside `include` **and unimportable from `test/`**, so nothing pulls it into the program and a
+forgotten `quiesce` really is caught by neither `bun run typecheck` nor the suite. `report-tools.ts`
+is imported by `test/unit/report-tools.test.ts`, which IS in `include` — so `tsc` pulls it in
+transitively and checks it.
+
+**Measured rather than argued, twice and independently:** `tsc --listFiles` names
+`docker/pi-extensions/report-tools.ts`, and injecting `const x: number = "s"` into it produces
+`report-tools.ts(1984,7): error TS2322` from a plain `bun run typecheck`. **So a type-level tripwire
+in the extension DOES redden**, which changes what a criterion there may be pinned to — and this
+paragraph, repeated into six engineer briefs, said the opposite. What remains true is the narrower
+claim §12 was really built on: **the file is not COMPILED into anything, `bun test` strips types, and
+no host code imports it** — so a defect that is not type-level and not covered by a unit test reaches
+the image unchecked, which is why the integration test at the image exists. **That is this design's sharpest verification hazard and §12
 answers it directly**: the extension is tested the way `dispatch-trigger.ts` is — an integration test
 that runs `pi` inside the real image and reads what came back — and the shared logic that *can* live
 under `src/` (the schemas, the path derivation, the declared-reply contract) does, so that the
@@ -1000,9 +1014,12 @@ rather than a rendering change.
 §0.2 row 7 is the measurement.
 
 **Rejected: deriving the tool list from the extension at build time.** Attractive, and it would make
-drift impossible — but `docker/pi-extensions/` is outside `tsconfig.json`'s `include` (§3.2), so the
-derivation would run in neither `bun run typecheck` nor the suite, and a build-time step that CI does
-not exercise is a second silence. **§12's integration test closes the loop from the other end
+drift impossible — but a build-time derivation step is exercised by neither `bun run typecheck` nor
+the suite, and a build step that CI does not run is a second silence. (**The reason given here used to
+be that `docker/pi-extensions/` is outside `tsconfig.json`'s `include`. It is outside `include`, but
+that is NOT why — see §3.2's correction: the file is pulled into the program transitively by its own
+unit test and is typechecked. The rejection stands on the build STEP being unexercised, which is a
+different and still-true argument.**) **§12's integration test closes the loop from the other end
 instead**: it asserts that the names in `PI_EXTENSION_TOOLS` are exactly the names the real image
 registers, which is a check that runs where the truth is.
 

@@ -42,6 +42,7 @@ import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { DISPATCH_POLICY_MOUNT } from "../../src/run/dispatch-policy.ts";
 import { REPLIES_MOUNT } from "../../src/run/replies.ts";
 import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
+import { REPLIES_POLICY_MOUNT } from "../../src/run/replies-policy.ts";
 import { SECRETS_MOUNT } from "../../src/run/worker-env.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
 import {
@@ -3105,6 +3106,23 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // create a DIRECTORY at the host path, which is why `directory: false` is
     // the interesting half of this row rather than the mode.
     [DISPATCH_POLICY_MOUNT]: { directory: false, mode: 0o444 },
+    /*
+     * The DECLARED reply set — a file, not the plane below it, and the two are
+     * easy to confuse because they differ by one word in the mount path.
+     *
+     * `directory: false` is the interesting half here for the reason the task
+     * drop's row gives: nothing staged means Docker invents a DIRECTORY at the
+     * host path, and a directory here is permanent — `writeRepliesPolicy` then
+     * fails EISDIR and `get_replies` reads nothing, silently, forever. That was
+     * ISC-1091, and it was live on this branch between Phase 5.2 adding the
+     * mount and ISC-1091 adding the `establishing` block; THIS ROW is what
+     * would have caught it, and it did not exist yet. It does now.
+     *
+     * 0444 like its two siblings: the worker may read the set the host declared
+     * for it and may not widen it, which is the whole of §7.4's "declaring and
+     * publishing are one act" as seen from inside the container.
+     */
+    [REPLIES_POLICY_MOUNT]: { directory: false, mode: 0o444 },
     /*
      * The reply plane, present for EVERY worker on the same argument the two
      * rows above carry: the `-v` is unconditional, so the source has to be
