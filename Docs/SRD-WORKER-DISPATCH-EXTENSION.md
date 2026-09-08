@@ -1295,6 +1295,102 @@ unrepresentable. §6.9.
 | **Q8** | **Does the `report` parameter's `content` field hit a provider-side argument-size limit?** `skills/pifleet-worker/SKILL.md:152-157` records a measured failure — *"Past a certain length that write fails with `arguments must be valid JSON, got parse error`"* — for the `write` tool. **A tool call is a tool call**, so `report.content` carrying an 8709-byte review (`roles/reviewer.md:120-126`'s measured case) may hit the same wall | Call `submit_report` with a 4 KB, 16 KB and 64 KB `report.content` against each model. **Must be run before Phase B narrows `reviewer`**, because a reviewer without `write` and with a size-capped tool has no route at all | **§8.1 Phase B for `reviewer`.** If it fails, `report` needs chunking or `reviewer` keeps `write` |
 | **Q9** | **Should `truncation-recovery.ts` and this extension share a file after all?** They are separate today for good reasons (§6.1), but both now sit in the tool path and a `tool_result` middleware that rewrites a `submit_report` result is a real interaction nobody has thought about | Read `truncation-recovery.ts`'s handler against a `submit_report` result shape. **Cheap, and it should be done in Phase 2 rather than deferred** | **Nothing.** It is a correctness check, not a design fork |
 
+### MEASURED — Phase 0, 2026-09-08
+
+**Four seats, one per model in `fleet.yaml`, one scratch extension.** The vehicle is worth recording
+because it cost nothing tracked: `render.ts:256` already emits
+`--extension /opt/pifleet/truncation-recovery.ts` unconditionally, so the probe was a **local image
+layer** replacing that file with a wrapper calling the real extension and the probe in turn, tagged
+under a different `image_prefix` at the same content hash. No Dockerfile edit, no
+`BUILD_CONTEXT_ASSETS` edit, no `render.ts` edit, and the real images and every running seat
+untouched. The scratch role declared **no `tools:` key at all** — `render.ts:265` emits `--tools`
+only when a list resolves, and `--tools` is an allowlist that deletes extension tools, so the probe's
+tools exist only while the flag is absent. That is §6.6 interaction 1, met from the other side.
+
+**Q1 — ANSWERED: the turn EXTENDS. The best of the three outcomes §11 allowed.**
+`pi.sendUserMessage(text, {deliverAs: "followUp"})` from `agent_end` lands as a `queue_update` event
+carrying the text in `followUp[]`, and Pi then runs a further agent cycle. All four models called the
+tool the nag asked for, and the epoch settled `verdict: success, reason: quiesced`:
+
+| model | nag sent | tool called | settled | margin |
+|---|---|---|---|---|
+| gemma-4-26b-a4b-it-bf16 | 05:56:25.442 | 05:56:27.513 | 05:56:28.348 | 0.84s |
+| deepseek-v4-pro:0813 | 05:56:25.246 | 05:56:27.681 | 05:56:28.082 | 0.40s |
+| qwen3.5:397b | 05:56:26.269 | 05:56:29.930 | 05:56:30.975 | 1.05s |
+| glm-5.3 | 05:56:26.305 | 05:56:28.165 | 05:56:28.347 | 0.18s |
+
+**The margin column is the caveat, and it is the number to design against.** The supervisor did not
+settle early — it waited for the nag's cycle — but it settled between 0.18 and 1.05 seconds after the
+model acted. Layer 3's runway is about a second of slack, not a turn. A model slower to answer a nag
+than these four would have its delivery land after the epoch had already settled, which is Q1's third
+outcome arriving intermittently rather than never. Layer 3 should therefore be built to make
+non-delivery a FACT (layer 4's session entry) rather than to rely on the nag winning.
+
+**Q3 — ANSWERED: `terminate: true` is a clean end, and it skips the follow-up call.**
+`agent_end` fired 2-4ms after the terminating tool result returned on every model, and every task
+settled `success` / `quiesced`. The supervisor read nothing as an anomaly. It did NOT suppress the
+nag's cycle, which is consistent with the doc rather than a contradiction of it: the hint governs the
+*automatic follow-up LLM call after a tool batch*, and a queued `followUp` user message starts a new
+agent run. Layer 2 works, and it is compatible with layer 3.
+
+**Q4 — ANSWERED: every model recovers, on the first retry, with no shim.**
+A tool that threw on call 1 and succeeded on call 2 was called exactly twice by all four models. None
+looped on the invalid call; none abandoned the tool after the error. Retry latency
+0.8s (glm), 1.1s (gemma), 1.4s (deepseek), 2.1s (qwen). **§6.2's refusals can be strict, and
+`prepareArguments` is not needed** — a typed refusal is a correction, not a token sink.
+
+**Q8 — ANSWERED, and the prediction was wrong in a way that strengthens §6.9.**
+
+The probe returned a non-repeating payload of a known size from one tool and asked the model to pass
+it verbatim into another, which records the bytes that ACTUALLY ARRIVED. Payloads were verified
+untruncated on the way in: deepseek quoted the 16 KB tail (`...3f0.`) and the 64 KB tail
+(`...cwa.cwb.cwc.`) back correctly, both of which match the generator.
+
+| model | 4 KB | 8 KB | 16 KB | 64 KB |
+|---|---|---|---|---|
+| deepseek-v4-pro:0813 | 4096 ✅ | — | 16384 ✅ | **no tool call** |
+| qwen3.5:397b | 4096 ✅ | — | 16384 ✅ | **no tool call** |
+| glm-5.3 | 4096 ✅ | — | 16384 ✅ | **no tool call** |
+| gemma-4-26b-a4b-it-bf16 | 4096 ✅ | **3219 of 8192** | request stalled 17 min | — |
+
+**There are three distinct failure modes here and none of them is the predicted parse error.**
+
+1. **64 KB on all three hosted models: the call is never emitted.** The model reads the payload,
+   reasons about transcribing it, and produces no tool call at all. The epoch settles
+   `verdict: failed, reason: no_tool_calls`. deepseek's own thinking, recorded verbatim:
+   *"This is a massive 64KB payload… I need to reproduce the ENTIRE 64KB content… Given the enormous
+   size, I'll carefully copy the full text."* — and then nothing. **This is ISC-517's shape exactly**:
+   a report the model had and never delivered. It is the failure §6.9 exists to meet, arriving from a
+   direction §11 did not predict.
+2. **8 KB on gemma: the call SUCCEEDS and the content is silently short.** 3219 bytes of 8192
+   arrived, `isError` false, epoch `success`. Whether the model abbreviated or the argument was
+   clipped, the observable for `submit_report` is identical and is the worst of the three: **a
+   delivered report, a green epoch, and 39% of the content.** Nothing downstream can detect it.
+3. **16 KB on gemma: the request stalls.** No further event for 17 minutes at 0.05% container CPU,
+   against an oMLX endpoint measured healthy and answering a fresh completion in 0.81s throughout.
+
+**What this decides.** Phase 7 for `reviewer` is CLEARED at the size that matters:
+`roles/reviewer.md:120-126`'s measured 8709-byte review is inside the 16 KB that all three reviewer
+models passed byte-exact, with margin. **Phase 7 for `triage` and `observer` is NOT cleared**, because
+their model truncates silently above 4 KB — those roles need either a chunked `report` or a size the
+role brief actually bounds.
+
+**Failure mode 9.4 is confirmed and its detection column is wrong.** 9.4 is *"a worker needs to write
+and cannot"*, detected as *"the model narrates the problem and settles"* — and a size-capped tool is
+one way to reach it, which is why Q8 pointed at it. But nothing narrated anything. At 64 KB the model
+produced no output at all and the epoch failed `no_tool_calls`; at 8 KB it produced a SUCCESSFUL call
+carrying 39% of the content and narrated that it had done as asked. So the recorded detection is
+optimistic in both directions, and 9.4's row should say `no_tool_calls`, a short `report.content`, or
+a stalled request — not narration. (An earlier draft of this block said 9.4 "anticipates a loud parse
+error". It does not; the parse error is Q8's own prediction, and 9.4 is about the consequence. Kept
+here because the misreading is the easy one to make.)
+
+**One limitation, stated rather than left for a reader to find.** The probe made the model COPY a
+payload, and `submit_report` will make it COMPOSE one. Copying verbatim is a different and possibly
+harder task than authoring, so these numbers may understate the ceiling for genuinely-authored
+content. What they do establish is that the WIRE carries 16 KB on the hosted models — that half is
+not model-dependent.
+
 ---
 
 ## 12. Hooks for acceptance criteria
@@ -1417,8 +1513,8 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
 
 | Phase | Deliverable | Depends on | Exit criteria |
 |---|---|---|---|
-| **0 — Probes** | Q1, Q3, Q4 measured; Q8 measured for `reviewer` | — | Four numbers recorded in §11 with dates. **Every probe is one dispatch to one seat; none needs a cluster** |
-| **1 — The declaration** | `PI_EXTENSION_TOOLS`, `PI_ALL_TOOLS`, `ToolNameSchema` widened, ISC-59 unchanged | — | `config validate` refuses a misspelling; the ISC-59 anti-criterion is green |
+| **0 — Probes** ✅ **DONE 2026-09-08** | Q1, Q3, Q4 measured; Q8 measured for `reviewer` | — | Four numbers recorded in §11 with dates. **Every probe is one dispatch to one seat; none needs a cluster** |
+| **1 — The declaration** ✅ **DONE 2026-09-08** | `PI_EXTENSION_TOOLS`, `PI_ALL_TOOLS`, `ToolNameSchema` widened, ISC-59 unchanged | — | `config validate` refuses a misspelling; the ISC-59 anti-criterion is green |
 | **2 — The extension** | `report-tools.ts`, `submit_report` only, in the image | 1 | The integration test finds it registered under the real image tag |
 | **3 — Layers 2 and 4** | `terminate: true`; both session entries | 2 | Fixtures assert both entry shapes; `tool_calls` is right |
 | **4 — Layer 3** | The bounded nag | 2, Q1 | One nag per epoch, constant text |
@@ -1431,9 +1527,15 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
 two session entries, one nag, one host contract. Phase 0 is parallel with 1 and 2 and gates only 4
 and 7.
 
-### Phase 0 — Probes
+### Phase 0 — Probes ✅ COMPLETE 2026-09-08
 
 **Intent.** Replace four expectations with four measurements before anything irreversible.
+
+**All four are answered — §11's `MEASURED — Phase 0` block carries the numbers, the dates and
+the vehicle.** Two of the four came back differently from the prediction: Q1 got its BEST
+outcome (the turn extends) with a one-second margin worth designing against, and Q8's failure is
+not the parse error §11 expected but three silent ones — a truncated-but-successful call, a
+never-emitted call, and a hang. Nothing tracked was written to run them.
 
 **Does not.** Write production code.
 
@@ -1451,9 +1553,21 @@ and 7.
   Touches: nothing tracked. *Acceptance: a per-model ceiling in §11. **This gates Phase 7 for
   `reviewer` specifically** — see failure mode 9.4.*
 
-### Phase 1 — The declaration
+### Phase 1 — The declaration ✅ COMPLETE 2026-09-08
 
 **Intent.** Make an extension tool name a thing config can request and misspell loudly.
+
+**Exit criteria met, through the real CLI rather than through the schema.** `tools:
+[submit_reprot]` exits 2 naming `roles.observer.tools.1` and listing the nine legal options;
+the same document with the spelling corrected exits 0. ISC-59's by-value anti-criterion is
+green and reddens under the documented mutation.
+
+**Task 1.3 was not finished by the commit that wrote it.** `submitReportWriteWarning` shipped
+with five green tests and no caller — `config validate` reached its sibling
+`observerTuiEpochWarning` and not this one, so the only command that tells an operator what
+their document gives up said nothing. The five tests call the pair directly and stay green with
+the wiring deleted, which is how the hole stayed open; the test added with the fix drives the
+CLI and is the only one that reddens on that mutation.
 
 **Does not.** Change `render.ts`. `:260` already joins whatever `w.tools` holds.
 
@@ -1482,6 +1596,16 @@ and 7.
   reading, path derivation, atomic envelope write, every §6.2.1 refusal. Touches:
   `docker/pi-extensions/report-tools.ts` (new).
   *Acceptance: unit-testable parts covered; the whole file loads under jiti.*
+
+  **`import { Type } from "typebox"` RESOLVES from `/opt/pifleet/` — measured 2026-09-08 in the real
+  base image, as a by-product of Phase 0.** §6.2 already SPECIFIES `Type` from `typebox`, so this
+  confirms an assumption rather than settling an open question — but it was an assumption, and the two
+  extensions already in that directory both avoid third-party imports and declare their `ExtensionAPI`
+  structurally, which reads as a precedent forbidding it. It is not one: `typebox` is a dependency of `@earendil-works/pi-coding-agent` and
+  jiti resolves it from Pi rather than from the extension's own directory. So `parameters` may be a
+  real `Type.Object(...)` and need not be a hand-written JSON Schema literal. It does NOT resolve from
+  an arbitrary path outside the image — the same import failed from a scratch directory on the host —
+  so this is a property of the image, not of the file.
 - **2.2** `COPY --chmod=0444` it to `/opt/pifleet/report-tools.ts`, with the
   `BUILD_CONTEXT_ASSETS` reminder comment the other two COPYs carry (`Dockerfile:413-415`,
   `:433-435`, `:444-445`). Touches: `docker/Dockerfile`.
