@@ -395,7 +395,7 @@ describe("a child task id has to be a filename", () => {
 // ---------------------------------------------------------------------------
 
 /**
- * The real `docker/verbgate`, with its four hard-coded surfaces re-rooted into a
+ * The real `docker/verbgate`, with its five hard-coded surfaces re-rooted into a
  * host sandbox.
  *
  * Every substitution is CHECKED. A renamed constant would otherwise leave the
@@ -412,6 +412,11 @@ async function sandboxGate(sandbox: string): Promise<string> {
     ['"/policy/cloud-allow"', `"${join(root, "policy", "cloud-allow")}"`],
     ['"/policy/task"', `"${join(root, "policy", "task")}"`],
     ['"/policy/dispatch"', `"${join(root, "policy", "dispatch")}"`],
+    // ISC-1092's fourth file surface. Added here because the assertion below is
+    // designed to force it: a surface declared in the gate and missing from
+    // `swaps` would be checked against the real `/policy/replies`, which is
+    // absent on a developer's Mac and on CI and therefore reads as clean.
+    ['"/policy/replies"', `"${join(root, "policy", "replies")}"`],
     [`"${REPLIES_MOUNT}"`, `"${join(root, "replies")}"`],
     // The ledger stays OUTSIDE `root/`, because `/outbox` is writable in
     // production and `root/` is standing in for the read-only container root.
@@ -429,7 +434,7 @@ async function sandboxGate(sandbox: string): Promise<string> {
     ).toBe(1);
     text = text.replace(from, to);
   }
-  // And nothing absolute survived. A fifth surface added to the gate without
+  // And nothing absolute survived. A sixth surface added to the gate without
   // being added to `swaps` would be checked against a real host path — usually
   // absent, which reads as clean, and occasionally present, which does not.
   expect(text).not.toMatch(/^\w+="\/(?:policy|replies)/m);
@@ -491,6 +496,10 @@ async function gateSandbox(): Promise<{
     ["cloud-allow", ""],
     ["task", "T-collate\n3\n"],
     ["dispatch", '{"schema":"pifleet.dispatch/v1","staged":false}\n'],
+    // The declared reply set, ISC-1092's addition to the same loop. Present so
+    // this sandbox is the production shape: an ABSENT path reads `[ -w ]` false
+    // and would let the loop pass for the wrong reason.
+    ["replies", '{"schema":"pifleet.replies/v1","task_id":"T-collate","replies":[]}\n'],
   ] as const) {
     const p = join(root, "policy", name);
     await writeFile(p, body);

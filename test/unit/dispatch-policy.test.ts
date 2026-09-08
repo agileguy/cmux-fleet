@@ -29,11 +29,13 @@
  * - **A prompt cannot forge the split.** The brief is operator text and may
  *   quote this file's own format — an SRD excerpt about the drop is the obvious
  *   case, and this test suite's own fixtures are the next one.
- * - **The gate checks all three policy files.** D4's recorded cost is that the
- *   integrity loop gains a path, and `docker/verbgate:120-127`'s exit-78 is the
- *   only thing enforcing read-only-ness. A mount added without a check is the
+ * - **The gate checks every policy file, now four.** D4's recorded cost is that
+ *   the integrity loop gains a path, and `docker/verbgate`'s exit-78 is the only
+ *   thing enforcing read-only-ness. A mount added without a check is the
  *   failure, so the probe derives the expected set from the gate's own
- *   declarations rather than counting to three.
+ *   declarations rather than counting to three — which is what let ISC-1092's
+ *   `/policy/replies` be added to that surface, and then to this loop, without
+ *   the probe having to be rewritten to notice.
  */
 import { describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
@@ -50,6 +52,12 @@ import {
   splitDispatchPolicy,
   writeDispatchPolicy,
 } from "../../src/run/dispatch-policy.ts";
+/**
+ * ISC-1092's constant, imported from the HOST rather than typed: the gate and
+ * the renderer are asserted against one spelling of `/policy/replies`, and a
+ * literal here would be a third that agrees with them until the day it does not.
+ */
+import { REPLIES_POLICY_MOUNT } from "../../src/run/replies-policy.ts";
 import { TASK_POLICY_NONE } from "../../src/run/task-policy.ts";
 import { renderPrompt } from "../../src/supervisor/index.ts";
 
@@ -327,7 +335,7 @@ describe("the gate holds the drop to the same integrity bar as the other two", (
     // and that is what keeps it a probe. `ledger="/outbox/ledger/verbgate.jsonl"`
     // is a declaration too, and it is on a mount the worker legitimately WRITES
     // — a pattern loose enough to catch it would demand the loop refuse every
-    // verb on every fleet. Adding a fifth surface therefore costs one word here,
+    // verb on every fleet. Adding a sixth surface therefore costs one word here,
     // deliberately, so that the addition is a decision rather than a default.
     const declared = [
       ...gate.matchAll(/^(\w+)="(\/(?:policy\/[A-Za-z0-9._-]+|replies))"$/gm),
@@ -337,7 +345,7 @@ describe("the gate holds the drop to the same integrity bar as the other two", (
      * THE WHOLE INTEGRITY SECTION, not one `for` line, and the widening is
      * forced by a real asymmetry rather than by convenience.
      *
-     * The three FILE surfaces are checked directly AND through their parent,
+     * The four FILE surfaces are checked directly AND through their parent,
      * because a writable `/policy` replaces a 0444 `cloud-allow` wholesale. The
      * reply plane is a DIRECTORY: its own write bit already carries that, and
      * giving it the parent arm asks `[ -w / ]`, which is TRUE for root — the uid
@@ -363,11 +371,55 @@ describe("the gate holds the drop to the same integrity bar as the other two", (
       declared.includes(n),
     );
 
-    // CONTROL: four today — allow, task, drop, and the reply plane
-    // (SRD-REVIEW-CONSOLE D6). The equality below is the assertion; this line
-    // is what stops both extractors matching nothing.
-    expect(declared.length).toBe(4);
+    // CONTROL: five today — allow, task, drop, the DECLARED REPLY SET
+    // (`/policy/replies`, SRD-WORKER-DISPATCH-EXTENSION §7.4), and the reply
+    // plane (`/replies`, SRD-REVIEW-CONSOLE D6). The equality below is the
+    // assertion; this line is what stops both extractors matching nothing.
+    //
+    // MOVED FROM FOUR RATHER THAN RELAXED, and the number is what makes the
+    // move visible: the equality alone goes green for a surface that is neither
+    // declared nor checked, so a declaration DELETED from the gate would read as
+    // clean. Four to five is the record that a fifth arrived, and it is the arm
+    // that reddens when the declaration goes away while the loop still names it.
+    expect(declared.length).toBe(5);
     expect([...covered].sort()).toEqual([...declared].sort());
+  });
+
+  /**
+   * WHAT WOULD BREAK IF THIS WERE DELETED: the surface above is DERIVED from the
+   * gate's own text, so it is satisfied by any five declarations that are all
+   * looped — including five that no longer include this one. The set criterion
+   * cannot notice a path being renamed out from under the host; this row names
+   * it, from the host's constant, at both ends of the one mount.
+   *
+   * ISC-1092, and the sibling of the drop's row below it. `/policy/replies` is
+   * one word from `/replies` and they are different objects — a FILE naming
+   * which replies count for this turn, against a DIRECTORY holding them — so the
+   * path is asserted against the host's own constant rather than by eye, and the
+   * FILE loop is named rather than "the integrity section".
+   *
+   * The renderer's half is deliberately NOT re-asserted here. `render.test.ts`
+   * pins `${repliesPolicyHostPath(worker.dir)}:${REPLIES_POLICY_MOUNT}:ro`
+   * against the renderer's real output, which is strictly stronger than a
+   * `toContain` over its source, and a weaker second copy would be a spelling
+   * that can disagree with it.
+   */
+  test("the gate holds the declared reply set in the FILE loop, at the host's constant", async () => {
+    const gate = await readFile("docker/verbgate", "utf8");
+    expect(gate).toContain(`="${REPLIES_POLICY_MOUNT}"`);
+    // In the FILE loop and not beside it: its dirname is `/policy`, which the
+    // other three arms already ask about, where `/replies`'s dirname is `/` and
+    // is TRUE for the root the image build's smoke-test layer runs these shims
+    // as. Putting the reply PLANE in this loop failed the build; putting the
+    // declared SET in it costs nothing, and the two facts differ by one word.
+    const loop = gate.match(/^for policy_path in (.+); do$/m);
+    expect(loop, "the integrity loop was not found — this probe has rotted").not.toBeNull();
+    // `/` needs no escaping in a RegExp built from a string, and the mount is a
+    // constant of this repository rather than input — so it is interpolated
+    // directly, which keeps the one spelling of the path the one being asserted.
+    const declaredAs = gate.match(new RegExp(`^(\\w+)="${REPLIES_POLICY_MOUNT}"$`, "m"));
+    expect(declaredAs, "the gate no longer declares the reply set").not.toBeNull();
+    expect(loop![1]).toContain(`\${${declaredAs![1]!}}`);
   });
 
   test("the gate reads the drop at the path the renderer mounts it on", async () => {

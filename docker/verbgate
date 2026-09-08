@@ -59,13 +59,29 @@ task_file="/policy/task"
 # report success on the one it wrote, and this loop's exit 78 is the only thing
 # enforcing that.
 drop_file="/policy/dispatch"
+# The DECLARED REPLY SET: which of the files in the reply plane below belong to
+# THIS turn, as one host-rewritten JSON document
+# (SRD-WORKER-DISPATCH-EXTENSION §7.4, D6). The fourth policy file the integrity
+# block below said would cost one word, and it did. Declared beside the three
+# above, never READ here for the drop's reason — the gate has no use for a reply
+# set, and parsing one would be a second place that has to agree with the host
+# about a format.
+#
+# ONE WORD APART IN ITS PATH FROM THE REPLY PLANE BELOW, AND A DIFFERENT OBJECT.
+# This is a FILE naming which replies count; that is a DIRECTORY holding them.
+# The host side keeps them apart by basename — `replies-policy` beside
+# `task-policy`, argued in src/run/replies-policy.ts — and the two names here are
+# the same fence on this side. Confusing them is the obvious mistake, and it is
+# the expensive one: the plane's dirname is / and this one's is /policy, which is
+# exactly what decides which of them may join the loop.
+replies_policy_file="/policy/replies"
 # The REPLY PLANE: one file per child task, holding that child's harvested
 # result, mounted read-only for the collator that asked for the work
-# (SRD-REVIEW-CONSOLE §6.4, D6). Declared beside the three above, never READ
+# (SRD-REVIEW-CONSOLE §6.4, D6). Declared beside the four above, never READ
 # here, and named for the same reason the drop is — so the integrity loop can
 # hold it to the same read-only bar.
 #
-# It is a DIRECTORY where the three above are files, so it is checked beside the
+# It is a DIRECTORY where the four above are files, so it is checked beside the
 # loop rather than inside it — a directory needs its own write bit tested and
 # nothing else, where a file also needs its parent's. The measurement behind both
 # halves of that is recorded at the integrity check itself.
@@ -153,10 +169,21 @@ log_ledger() {
 # and it is deliberately spelled as a THIRD element of a list rather than as a
 # second condition, so a fourth policy file is one word.
 #
-# The reply plane is the fourth (SRD-REVIEW-CONSOLE §6.4, D6). A reply says what
-# a child worker actually found; a collator that can rewrite one can put words in
-# another worker's mouth and then collate them — the drop's hazard aimed sideways
-# instead of backwards.
+# The declared reply set is that fourth, and it cost exactly the one word
+# (SRD-WORKER-DISPATCH-EXTENSION §7.4, D6). It is the drop's hazard turned to
+# face the ANSWERS rather than the question: the drop says what the task is, and
+# this says which replies belong to it. A worker that can rewrite it does not
+# need to forge a single reply — it re-declares the SET, and collates last
+# sweep's answers, or another worker's, with every individual file still honest.
+# Its dirname is /policy, which the three arms above already ask about, so it
+# joins the loop at no new cost and asks no new question; the reply plane below
+# is excluded for exactly the opposite reason and the block after this one is
+# where that is measured.
+#
+# The reply plane is the fifth surface (SRD-REVIEW-CONSOLE §6.4, D6). A reply
+# says what a child worker actually found; a collator that can rewrite one can
+# put words in another worker's mouth and then collate them — the drop's hazard
+# aimed sideways instead of backwards.
 #
 # THE PER-FILE GLOB IS GONE, which reverses this check's first version. That
 # version iterated `"${replies_dir}"/*` and justified the cost by claiming a bare
@@ -189,8 +216,8 @@ log_ledger() {
 # puts an external binary and a pipeline on the refusal path, in a script whose
 # whole posture is that it decides before it trusts anything.
 #
-# BUT THE REPLY PLANE IS NOT A FOURTH ELEMENT OF THAT LOOP EITHER, and this is
-# the part the glob was silently getting right for a reason nobody wrote down.
+# BUT THE REPLY PLANE IS NOT AN ELEMENT OF THAT LOOP AT ALL, and this is the
+# part the glob was silently getting right for a reason nobody wrote down.
 # The loop checks each surface AND ITS PARENT, because a writable `/policy` lets
 # a worker replace a 0444 `cloud-allow` wholesale — the file's own mode is not
 # sufficient for a FILE. The dirname of /replies is `/`, and asking whether the
@@ -203,6 +230,22 @@ log_ledger() {
 #
 #   uid 0      [ -w / ] YES     <- the build's smoke-test layer
 #   uid 10001  [ -w / ] no      <- every production worker
+#
+# AND `/policy` IS NOT SAFER THAN `/` — it is EARLIER, which is the hinge the
+# four file surfaces above all hang from and which nothing had written down.
+# MEASURED 2026-09-08 in the built base image, the same two uids:
+#
+#   uid 0      [ -w /policy ] YES
+#   uid 10001  [ -w /policy ] no
+#
+# So the parent arm would refuse the smoke-test layer for `cloud-allow` exactly
+# as it does for a reply — except that the layer runs at `docker/Dockerfile`'s
+# smoke test, and `/policy` is not created until the `mkdir` AFTER it. The
+# directory does not exist yet, `[ -w ]` is false on an absent path, and the
+# loop passes. Moving that smoke test below the `mkdir`, or creating `/policy`
+# earlier, exits 78 on every shim and fails the build — for all four files at
+# once, not just the newest. That is a Dockerfile ordering constraint the
+# Dockerfile does not state, and this is where it is measured.
 #
 # The unmatched glob had hidden this: with no `/replies` present, `/replies/*`
 # stays literal and its dirname is `/replies`, not `/`. So the glob's real and
@@ -231,7 +274,7 @@ refuse_writable() {
 }
 
 # The FILE surfaces: direct, and through the parent that could replace them.
-for policy_path in "${allow_file}" "${task_file}" "${drop_file}"; do
+for policy_path in "${allow_file}" "${task_file}" "${drop_file}" "${replies_policy_file}"; do
   if [ -w "${policy_path}" ] || [ -w "$(dirname "${policy_path}")" ]; then
     refuse_writable "${policy_path}" "$@"
   fi
