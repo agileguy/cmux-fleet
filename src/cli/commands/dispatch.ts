@@ -40,8 +40,10 @@ import { renderPrompt } from "../../supervisor/index.ts";
 import { launchPaneMode } from "../../container/interrupt.ts";
 import { loadBackend } from "../../backends/registry.ts";
 import {
+  assertHostAuthoredPaneLine,
   assertPaneKey,
   assertPaneTypeableLine,
+  SESSION_RESET_LINE,
   STAGED_TRIGGER_LINE,
 } from "../../util/pane-text.ts";
 import { writeTaskPolicy } from "../../run/task-policy.ts";
@@ -1995,7 +1997,8 @@ export async function sendStagedTrigger(
     };
   }
   try {
-    assertPaneTypeableLine("staged trigger", STAGED_TRIGGER_LINE);
+    assertHostAuthoredPaneLine("session reset", SESSION_RESET_LINE);
+    assertHostAuthoredPaneLine("staged trigger", STAGED_TRIGGER_LINE);
     const backend = await loadBackendFn(kind);
     if (backend.sendText === undefined || backend.sendKey === undefined) {
       return {
@@ -2005,6 +2008,25 @@ export async function sendStagedTrigger(
       };
     }
     const pane = { backend: kind, id: surface };
+    /*
+     * CLEAR THE SESSION FIRST, then trigger — and the ORDER is the whole point.
+     *
+     * A tui worker keeps its session across dispatches, so without this the
+     * staged turn begins on top of every previous task's transcript and a model
+     * holding the last four answers from what it already has rather than from the
+     * brief it was just handed (`fresh-dispatch.ts`'s measured case). `/new` is
+     * interactive-mode's own command and reaches `newSession` through the only
+     * context that has it; no extension can, which is why this is typed here
+     * rather than done in `dispatch-trigger.ts` (see {@link SESSION_RESET_LINE}).
+     *
+     * Reset BEFORE the trigger, never after: after would clear the turn that was
+     * just started. Two sends and two submits, and the reset is not conditional
+     * on the trigger succeeding — a cleared session with no turn is a worker
+     * waiting, which is the state a re-dispatch recovers from. The reverse is a
+     * turn running against a stale transcript, which nothing detects.
+     */
+    await backend.sendText(pane, SESSION_RESET_LINE);
+    await backend.sendKey(pane, SUBMIT_KEY);
     await backend.sendText(pane, STAGED_TRIGGER_LINE);
     await backend.sendKey(pane, SUBMIT_KEY);
     return { sent: true, delegated: false, reason: null };

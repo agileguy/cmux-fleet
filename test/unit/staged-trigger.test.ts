@@ -21,6 +21,9 @@ import {
   STAGED_TRIGGER_LINE,
   assertPaneTypeableLine,
   PANE_KEYS,
+  SESSION_RESET_LINE,
+  HOST_AUTHORED_PANE_LINES,
+  assertHostAuthoredPaneLine,
 } from "../../src/util/pane-text.ts";
 
 describe("the staged trigger cannot execute if it lands in a shell", () => {
@@ -207,5 +210,63 @@ describe("the trigger reaches a surface adopted by --attach-here", () => {
     await expect(backend.focus({ backend: "cmux", id: "surface-only" })).rejects.toThrow(
       /--attach-here/,
     );
+  });
+});
+
+describe("the session is cleared before a staged task starts", () => {
+  const src = () =>
+    Bun.file(new URL("../../src/cli/commands/dispatch.ts", import.meta.url).pathname).text();
+  const code = (text: string): string =>
+    text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  /**
+   * **The ORDER is the property, not the presence.** Reset after the trigger
+   * would clear the turn that was just started — a worker that looks triggered,
+   * settles nothing, and reports no error. Asserted on the code with comments
+   * stripped, because the docblock beside it discusses both orderings.
+   */
+  test("the reset is typed BEFORE the trigger, not after", async () => {
+    const body = code((await src()).slice((await src()).indexOf("async function sendStagedTrigger")));
+    /*
+     * On the SEND CALLS, not on any mention of the constants. The first version
+     * of this test searched for the bare names and did not redden when the two
+     * sends were swapped — `STAGED_TRIGGER_LINE` appears again below in the
+     * "type this at your terminal" refusal, so "an occurrence after the reset"
+     * was true either way. A degenerate assertion in the test that exists to
+     * catch the ordering is worse than no test, and the mutation is what found
+     * it rather than a reading.
+     */
+    const reset = body.indexOf("sendText(pane, SESSION_RESET_LINE)");
+    const trigger = body.indexOf("sendText(pane, STAGED_TRIGGER_LINE)");
+    expect(reset).toBeGreaterThan(-1);
+    expect(trigger).toBeGreaterThan(-1);
+    expect(trigger).toBeGreaterThan(reset);
+  });
+
+  /**
+   * `/new` is interactive-mode's own command and reaches `newSession` through
+   * the only context that has it. Measured 2026-09-07: an extension cannot —
+   * `EVENT_CTX newSession=no`, `COMMAND_CTX newSession=YES`, and the API has no
+   * `executeCommand`. If this string changes, it stops being a command and
+   * becomes four characters of user text the model reasons about.
+   */
+  test("the reset line is the command, exactly, and one line", () => {
+    expect(SESSION_RESET_LINE).toBe("/new");
+    expect(SESSION_RESET_LINE.includes("\n")).toBe(false);
+  });
+
+  /**
+   * THE NEGATIVE ARM, and it is the one worth having. The staged route's whole
+   * safety claim is that a brief never reaches a terminal; the set is what makes
+   * that structural rather than a matter of each call site passing a constant.
+   */
+  test("a brief line is refused by the staged route's gate", () => {
+    expect(() => assertHostAuthoredPaneLine("x", "rm -rf / # from a worker's brief")).toThrow(
+      /HOST_AUTHORED_PANE_LINES/,
+    );
+    // …and both host lines are accepted, so the gate is not vacuously closed.
+    expect(() => assertHostAuthoredPaneLine("x", SESSION_RESET_LINE)).not.toThrow();
+    expect(() => assertHostAuthoredPaneLine("x", STAGED_TRIGGER_LINE)).not.toThrow();
+    expect(HOST_AUTHORED_PANE_LINES.size).toBe(2);
   });
 });
