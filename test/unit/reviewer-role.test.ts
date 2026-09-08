@@ -373,12 +373,23 @@ describe("the reviewer's grant is what the document says it is", () => {
     expect(grantedTools(EXAMPLE, "reviewer")).not.toContain("edit");
   });
 
-  test("the grant is exactly the five tools the document enumerates", () => {
+  /**
+   * SIX since 2026-09-08 (SRD-WORKER-DISPATCH-EXTENSION task 6.2, Phase A). The
+   * list is MOVED rather than loosened to a `toContain`: it is a by-value
+   * inventory, and the failure it exists to catch is a grant that grew without
+   * anybody deciding it should.
+   *
+   * `write` stays. Phase A opens the new route beside the old one and removes
+   * nothing — Phase 7 is where `write` is withdrawn, and `config validate` warns
+   * about the overlap in the meantime, which is the point rather than a defect.
+   */
+  test("the grant is exactly the six tools the document enumerates", () => {
     expect([...grantedTools(EXAMPLE, "reviewer")].sort()).toEqual([
       "find",
       "grep",
       "ls",
       "read",
+      "submit_report",
       "write",
     ]);
   });

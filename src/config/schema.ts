@@ -64,8 +64,77 @@ export const durationSeconds = z.union([
  * loud schema error.
  */
 export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
-export const ToolNameSchema = z.enum(PI_BUILTIN_TOOLS);
+
+/**
+ * Tools registered by `docker/pi-extensions/report-tools.ts`, exactly. Closed
+ * for `PI_BUILTIN_TOOLS`' reason and for one more that was MEASURED rather than
+ * inherited: `--tools` filters the EXTENSION registry too, so a name that does
+ * not exist is silently granted nothing AND a name that is omitted silently
+ * deletes a tool that does exist (SRD-WORKER-DISPATCH-EXTENSION §0.2, measured
+ * 2026-09-07 against `pifleet/pi-worker:0.79.6-base-b722edcf4699`).
+ *
+ * Both halves came off one probe table, read out of the image the live triage
+ * console runs. `--tools read,bash,submit_report,does_not_exist` built a
+ * registry of `read, bash, submit_report`: `does_not_exist` vanished with no
+ * error, no warning and no log line, which is the first time the claim above
+ * has been demonstrated rather than asserted — and it is now true of a second
+ * class of name. `--tools read,bash` built a registry with no `submit_report`
+ * in it at all, because Pi applies the allowlist at registry CONSTRUCTION
+ * (`dist/core/agent-session.js:1830,1838`) rather than at activation; an
+ * omitted extension name does not leave the tool inactive, it deletes it.
+ * Every role in `fleet.yaml` declares `tools:`, so an extension shipped
+ * without a config edit is granted to nobody, silently.
+ *
+ * A free-string list here would be the enum's own counter-argument. This stays
+ * closed so that `submit_reprot` fails `config validate` naming the field,
+ * instead of buying a worker nothing at all.
+ */
+export const PI_EXTENSION_TOOLS = ["submit_report", "get_replies"] as const;
+
+/**
+ * The vocabulary `tools:` and `exclude_tools:` range over — and the whole of
+ * what declaring an extension tool costs.
+ *
+ * `render.ts:260` already joins whatever `tools` holds, so widening the
+ * vocabulary is what makes an extension tool requestable; nothing in rendering
+ * learns a new case. That is the property that keeps this a schema change.
+ *
+ * It is deliberately NOT what an omitted `tools:` resolves to — see
+ * `effectiveToolGrant`, which is the interaction this union has to survive.
+ */
+export const PI_ALL_TOOLS = [...PI_BUILTIN_TOOLS, ...PI_EXTENSION_TOOLS] as const;
+
+export const ToolNameSchema = z.enum(PI_ALL_TOOLS);
 export type ToolName = z.infer<typeof ToolNameSchema>;
+
+/**
+ * What an OMITTED `tools:` resolves to for ISC-59's `read_only`/`bash`
+ * cross-check: the BUILT-IN set, never `PI_ALL_TOOLS`.
+ *
+ * Omitting `tools` is not "no tools". pifleet then passes no `--tools` flag at
+ * all and Pi grants every builtin, `bash` among them, which is why the guard
+ * resolves the omission before testing it — `tools?.includes` let the most
+ * common shape of the violation through silently. What the omission resolves
+ * to must therefore be what Pi would actually grant, and Pi's own defaults do
+ * not include a tool this repository invented: an extension tool reaches a
+ * worker only when a role names it. Resolving to the union would make the
+ * guard reason about a grant nobody made
+ * (SRD-WORKER-DISPATCH-EXTENSION §6.6 interaction 1).
+ *
+ * Exported, and a named function rather than a closure inside the refinement,
+ * because that particular mistake is INVISIBLE from the outside.
+ * `PI_ALL_TOOLS` is a superset of `PI_BUILTIN_TOOLS`, so swapping the default
+ * leaves `includes("bash")` true, every ISC-59 message unchanged and every
+ * existing rejection intact. No config loads differently; no probe through
+ * `loadConfig` can go red. The only assertion that can hold this invariant is
+ * one made against the default itself, and it can only be made against the
+ * default if the default has a name.
+ */
+export function effectiveToolGrant(
+  declared: readonly ToolName[] | undefined,
+): readonly ToolName[] {
+  return declared ?? PI_BUILTIN_TOOLS;
+}
 
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
@@ -1584,15 +1653,16 @@ export const FleetConfigSchema = z
     // at the document position a human would edit.
     // Omitting `tools` is NOT "no tools" — pifleet then passes no `--tools`
     // flag and Pi grants every builtin, `bash` among them. Resolving the
-    // omission to the builtin set before the check is what makes the guard
-    // catch the default case; testing `tools?.includes` let the most common
-    // shape of the violation through silently.
+    // omission before the check is what makes the guard catch the default
+    // case; testing `tools?.includes` let the most common shape of the
+    // violation through silently. `effectiveToolGrant` IS that resolution, and
+    // its docblock argues why it resolves to the built-in set rather than to
+    // `ToolNameSchema`'s wider vocabulary — the two are not interchangeable
+    // here even though every ISC-59 message would look identical.
     const defaultTools = cfg.defaults.tools;
-    const effective = (declared: readonly ToolName[] | undefined): readonly ToolName[] =>
-      declared ?? PI_BUILTIN_TOOLS;
     for (const [name, role] of Object.entries(cfg.roles)) {
       const readOnly = role.read_only ?? cfg.defaults.read_only ?? false;
-      const tools = effective(role.tools ?? defaultTools);
+      const tools = effectiveToolGrant(role.tools ?? defaultTools);
       if (readOnly && tools.includes("bash")) {
         ctx.addIssue({
           code: "custom",
@@ -1609,7 +1679,7 @@ export const FleetConfigSchema = z
       if (!role) return; // already reported above
       const readOnly = w.read_only ?? role.read_only ?? cfg.defaults.read_only ?? false;
       const declared = w.tools ?? role.tools ?? defaultTools;
-      const tools = effective(declared);
+      const tools = effectiveToolGrant(declared);
       if (readOnly && tools.includes("bash")) {
         ctx.addIssue({
           code: "custom",
@@ -1832,22 +1902,134 @@ export function observerTuiWorkers(cfg: FleetConfig): string[] {
  *
  * NOT a refusal — a fleet may deliberately want this pane visible, and
  * `scripts/operations` already reads `paneMode === "tui"` to decide whether
- * to attach one for exactly this role. What must not stay silent is the
- * mechanism: `tui` allocates no epoch, so there is no `already_completed`
- * fence, and a re-dispatched pass runs the same task twice. An observer
- * watch is BUILT on repeated dispatch of near-identical tasks (§7.5), which
- * makes this the one role least able to afford that gap.
+ * to attach one for exactly this role.
+ *
+ * **NARROWED 2026-09-07, because the unconditional claim was false.** This used
+ * to say flatly that *"`tui` allocates no epoch"*. That is true of ONE of the two
+ * tui routes. `stageForAdoptedTerminal` calls the supervisor's `stage` verb,
+ * which allocates through the same `em.allocate` against the same durable
+ * `attempts` map as the RPC route — delivery and allocation are separate concerns
+ * and only delivery needs a socket (SRD-TUI-DISPATCH D6). Measured on the triage
+ * console the day this was narrowed: `tri-1` held epochs 1-7 and `obs-t1` 1-4 in
+ * their `fence.json`, every one from a `via: "staged"` dispatch.
+ *
+ * The gap is real on the OTHER route — a non-adopted pane, where the prompt is
+ * typed at the surface and nothing allocates (ISC-84/85) — so the warning stays.
+ * It now says which route it means, because an operator who reads the old wording,
+ * checks `fence.json` and finds epochs will conclude the warning is noise and stop
+ * reading the rest of them.
  */
 export function observerTuiEpochWarning(workerIds: readonly string[]): string | null {
   if (workerIds.length === 0) return null;
   const n = workerIds.length;
   return (
     `warning: ${n} observer worker(s) resolve pane_mode: tui (${workerIds.join(", ")})\n` +
-    `  tui allocates no epoch (SRD-OBSERVER-001 §6.2): there is no already_completed fence, so ` +
-    `a re-dispatched pass runs the same task twice. An observer watch is built on repeated ` +
-    `dispatch of near-identical tasks (§7.5), which makes this the role least able to afford ` +
-    `it. Set pane_mode: rpc unless a person is deliberately driving this pane by hand.\n`
+    `  a tui pane that is NOT adopted allocates no epoch (SRD-OBSERVER-001 §6.2, ISC-84/85): ` +
+    `the prompt is typed at the surface, nothing allocates, so there is no already_completed ` +
+    `fence and a re-dispatched pass runs the same task twice. An adopted pane IS fenced — ` +
+    `'stage' allocates the same way the rpc route does — so check the delivery plane before ` +
+    `acting on this. An observer watch is built on ` +
+    `repeated dispatch of near-identical tasks (§7.5), which makes this the role least able to ` +
+    `afford the unadopted case. Set pane_mode: rpc unless a person is deliberately driving ` +
+    `this pane by hand.\n`
   );
+}
+
+/**
+ * Workers whose resolved grant holds BOTH `submit_report` and `write`, each
+ * tagged with whether it also holds `bash`
+ * (SRD-WORKER-DISPATCH-EXTENSION §6.6 interaction 2).
+ *
+ * `bash` is CARRIED rather than filtered on, because it is what decides what
+ * the operator should DO about the line, and the two answers are opposite.
+ * `fleet.yaml:542` gives the observer `read, write, bash, grep, find, ls`:
+ * dropping `write` there removes a tool and not a capability, because
+ * `cat > /outbox/...` is two seconds of shell (§6.8). `triage`, `collator` and
+ * `reviewer` hold `[read, write, grep, find, ls]` with no `bash` anywhere
+ * (`fleet.yaml:695`, `:726`, `:839`), and there `write` IS the capability —
+ * it is the whole of what §6.3's layer 1 takes away. One sentence sent to both
+ * seats is a sentence that asks a bash holder to act on something it cannot
+ * change, which is how `observerTuiEpochWarning`'s own narrowing describes a
+ * warning turning into noise and taking the rest of them with it.
+ *
+ * Resolved at the WORKER and then MINUS `exclude_tools`, because what forfeits
+ * layer 1 is the grant Pi is actually launched with. Any of the three levels
+ * can complete the pair on its own — the argument `paneModeIssues` makes — and
+ * `--exclude-tools` is a real subtraction that Pi applies (`render.ts:261`),
+ * so a role that declares `write` and excludes it holds none. Naming that
+ * worker would be a false positive in the one warning whose whole value is
+ * that operators still read it.
+ *
+ * An omitted `tools:` can never appear here, and that falls OUT of
+ * `effectiveToolGrant` rather than being arranged: the omission resolves to
+ * Pi's own builtins, and no built-in is named `submit_report` — an extension
+ * tool reaches a worker only when a role names it. §6.6 interaction 1 pays for
+ * itself a second time.
+ */
+export function submitReportWriteWorkers(cfg: FleetConfig): { id: string; bash: boolean }[] {
+  const out: { id: string; bash: boolean }[] = [];
+  for (const w of cfg.workers) {
+    const role = cfg.roles[w.role];
+    if (!role) continue; // an unknown role is already a superRefine issue
+    const granted = effectiveToolGrant(pickRoleField(w, role, cfg.defaults, "tools"));
+    const excluded = pickRoleField(w, role, cfg.defaults, "exclude_tools") ?? [];
+    const holds = (t: ToolName): boolean => granted.includes(t) && !excluded.includes(t);
+    if (holds("submit_report") && holds("write")) out.push({ id: w.id, bash: holds("bash") });
+  }
+  return out;
+}
+
+/**
+ * The warning `submitReportWriteWorkers` renders, or `null`.
+ *
+ * NOT a refusal, and §13's phase table is the argument rather than taste.
+ * Phase 6 adds `submit_report` to every role and removes nothing; phase 7 then
+ * removes `write`, one role at a time, each narrowing gated on a full console
+ * cycle by the preceding one. The pairing named here is therefore a state the
+ * fleet is REQUIRED to run in for as long as phase 7 takes, and a schema that
+ * refused it would collapse two phases into one commit — the rollout shape
+ * those phases exist to avoid. The observer is a second and permanent case:
+ * §6.8's proposed row keeps `bash`, so its `write` is a tool and not a
+ * capability whichever way the row lands.
+ *
+ * Names what is GIVEN UP rather than restating the config, on
+ * `kubeconfigScopeWarning`'s precedent, and what is given up is specific.
+ * Layer 1 is the only one of §6.3's four layers that is a MECHANISM — layers
+ * 2, 3 and 4 are an incentive, one bounded nag and a session record — and it
+ * holds only while `submit_report` is the only way to create a file at all.
+ * Beside `write`, the three recorded defects layer 1 makes UNREPRESENTABLE go
+ * back to being merely discouraged, which is the state that produced them.
+ */
+export function submitReportWriteWarning(
+  workers: readonly { id: string; bash: boolean }[],
+): string | null {
+  if (workers.length === 0) return null;
+  const forfeits = workers.filter((w) => !w.bash).map((w) => w.id);
+  const shellWriters = workers.filter((w) => w.bash).map((w) => w.id);
+  let out =
+    `warning: ${workers.length} worker(s) resolve both submit_report and write\n` +
+    `  submit_report is a MECHANISM only while it is the only way to create a file at all ` +
+    `(SRD-WORKER-DISPATCH-EXTENSION §6.3 layer 1). Beside write a model can still hand-write ` +
+    `an envelope, so a file called "notes", an envelope carrying a fifth status, and a .md ` +
+    `with no .json all stay representable and merely discouraged; layers 2-4 are an incentive, ` +
+    `one nag and a record, and none of the three is a fence.\n`;
+  if (forfeits.length > 0) {
+    out +=
+      `  Forfeited here, and removing write is the fix (${forfeits.join(", ")}): these hold no ` +
+      `bash, so submit_report would otherwise be their only writing verb of any kind.\n`;
+  }
+  if (shellWriters.length > 0) {
+    out +=
+      `  Never available here, because bash can cat > a file (${shellWriters.join(", ")}): ` +
+      `removing write takes away a tool and not a capability (§6.8). Worth doing anyway for the ` +
+      `smaller reason §6.8 gives — the failure at roles/observer.md:19-22 is a model reasoning ` +
+      `about which tools it holds and concluding wrongly, and a seat whose only writing verb is ` +
+      `named submit_report leaves that reasoning less room.\n`;
+  }
+  out +=
+    `  Not a refusal: §13 phase 6 adds submit_report to every role and removes nothing, and ` +
+    `phase 7 narrows one role at a time behind a full console cycle each.\n`;
+  return out;
 }
 
 /**

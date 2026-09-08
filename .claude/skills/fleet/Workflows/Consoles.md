@@ -7,6 +7,7 @@ The three standing cmux workspaces.
 | operations | `./scripts/operations` | `obs-1` agent, `pifleet monitor`, `tick-1` agent |
 | development | `./scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` — four equal agent panes |
 | review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — four equal agent panes, **plus a host process** |
+| triage | `./scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3` — four equal agent panes, **plus a host process, and no keyboard** |
 
 The development console's fourth seat is `tst-2` on `role: tester`; `rev-1` is
 gone, and review is the `review` console's job now. The review console's four
@@ -83,6 +84,55 @@ two invocations racing cannot both spawn.
 A record it cannot verify (`unreadable`, or a pid whose identity cannot be
 confirmed) is **left exactly where it is and nothing is signalled**. The script
 says so and starts nothing; find out what that pid is, then remove the file.
+
+## The triage console has a fifth process too, and nobody types at the other four
+
+Same shape as review, different reason. `tri-1` is a collator: it can write
+`dispatch-request.json` and nothing else. But where the review console's actor
+waits for an operator to ask for a review, **this one is also the clock** — it
+decides when a sweep happens, every five minutes, forever, with nobody watching.
+That is the whole difference, and it is why this console is the only one whose
+own modules are held read-only by a test that walks their import closure.
+
+The actor is `pifleet triage`, not `pifleet relay`:
+
+```bash
+cd ~/repos/cmux-fleet && ./scripts/triage                 # panes, then the actor
+cd ~/repos/cmux-fleet && ./scripts/triage --no-actor      # panes only; you run the actor by hand
+cd ~/repos/cmux-fleet && ./scripts/triage --actor-stop    # stop the actor, touch no pane
+
+pifleet triage --once             # one sweep, now. The exit code means something
+pifleet triage --poll             # the loop, at triage/console.yaml's cadence
+pifleet triage --status [--json]  # the actor record and the incident record set
+```
+
+Its bookkeeping sits beside review's, per console: `~/.pifleet/triage-relay.json`
+(the record — `pid`, `started`, `runs`, `workers`, `cadence_s`, `sweep_cursor`,
+`consecutive_skips`, `recycled_at`), `triage-relay.log` (appended, never
+truncated) and `triage-relay.lock`. **The incident records are separate** and live
+under `~/.pifleet/triage/<environment>/<service>.json`, with console-health
+incidents at `<scope>/_console/<kind>.json`.
+
+**Three things this console will not do, and each is deliberate.** It will not
+call a service healthy because nobody reported on it — an observer that produced
+nothing is a coverage gap and it says so. It will not notify twice about one
+incident: a service down all day is one message plus its reminders. And it cannot
+command the fleet — the two privileged things it genuinely needs, dispatching a
+sweep and recycling a seat, are built at the composition root and handed in as
+plain functions, so no module the console owns can reach them.
+
+**`--cadence` reaches the actor as `--poll <seconds>`, and only when you type it.**
+A bare run passes no `--poll` at all, so `triage/console.yaml`'s `cadence_s` stays
+the source. Combined with `--actor-stop` or `--no-actor` it is refused — there is
+no actor for it to reach, and dropping an override silently is worse than
+declining it. `./scripts/triage --dry-run --cadence 5m` prints the actor's argv
+without starting anything.
+
+**A second `pifleet triage --poll` against a held lock refuses by name and exits
+nonzero**, dispatching nothing. That is not an error to route around: it means an
+actor is already serving this console. A lock left by a *dead* pid is taken over
+automatically, so the remedy after a crash is to run it again, not to delete a
+file.
 
 ## Restarting one worker
 

@@ -278,6 +278,132 @@ describe("classifyTuiTurn", () => {
     });
   });
 
+  /**
+   * ISC-1105 — the terminating-report exception, in the shapes read off a real
+   * `rev-ctx-1` transcript from the first live Phase A run.
+   *
+   * `submit_report` returns `terminate: true`, which skips Pi's follow-up call,
+   * so the transcript's last assistant message stays `toolUse` for ever. Read as
+   * `in_flight` it resets the quiet clock on every poll and the epoch can only
+   * end at its deadline — three seats delivered complete reports and all three
+   * settled `timed_out`, and a lens that did not succeed is never published as a
+   * reply, so the reviews were discarded in silence.
+   */
+  function toolCallAssistant(id: string, callIds: readonly string[]): TreeEntry {
+    return {
+      type: "message",
+      id,
+      parentId: null,
+      message: {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: callIds.map((c) => ({ type: "toolCall", id: c, name: "submit_report" })),
+      },
+    } as unknown as TreeEntry;
+  }
+  function submitEntry(id: string): TreeEntry {
+    return {
+      type: "custom",
+      id,
+      parentId: null,
+      customType: "pifleet.submit/v1",
+      data: { schema: "pifleet.submit/v1", task_id: "T-1", epoch: 1, status: "success" },
+    } as unknown as TreeEntry;
+  }
+  function toolResult(id: string, callId: string): TreeEntry {
+    return {
+      type: "message",
+      id,
+      parentId: null,
+      message: { role: "toolResult", toolCallId: callId, toolName: "submit_report", content: [] },
+    } as unknown as TreeEntry;
+  }
+
+  test("a toolUse stop that DELIVERED a report has ended — no follow-up is coming", () => {
+    expect(
+      classifyTuiTurn([
+        toolCallAssistant("e1", ["call_a"]),
+        submitEntry("e2"),
+        toolResult("e3", "call_a"),
+      ]),
+    ).toEqual({ phase: "ended", stopReason: "toolUse" });
+  });
+
+  /**
+   * `terminate` is batch-conditional — effective only when EVERY finalized
+   * result in the batch is terminating — so a `submit_report` called alongside a
+   * slow tool still gets its follow-up and is genuinely still working. Without
+   * the answered-calls half, `TUI_QUIET_MS` (2s) would settle such a turn while
+   * a long `bash` was still running.
+   */
+  test("a delivered report with an unanswered sibling call is still in_flight", () => {
+    expect(
+      classifyTuiTurn([
+        toolCallAssistant("e1", ["call_a", "call_slow"]),
+        submitEntry("e2"),
+        toolResult("e3", "call_a"),
+      ]),
+    ).toEqual({ phase: "in_flight", stopReason: "toolUse" });
+  });
+
+  /**
+   * A REFUSED `submit_report` appends no entry and returns no `terminate`, so Pi
+   * does make the follow-up call. Keying this on the tool NAME rather than the
+   * entry would settle a refusal as though it had delivered.
+   */
+  test("a toolUse stop with no submit entry stays in_flight", () => {
+    expect(
+      classifyTuiTurn([toolCallAssistant("e1", ["call_a"]), toolResult("e2", "call_a")]),
+    ).toEqual({ phase: "in_flight", stopReason: "toolUse" });
+  });
+
+  /**
+   * ISC-1107 — a queued user message is a turn that has not happened yet.
+   *
+   * Layer 3's nag is delivered as a `followUp`, so it lands in the transcript as
+   * a user message after the assistant stopped. Reading only the last ASSISTANT
+   * message misses it, and the epoch settled 1.99s later — before any model
+   * could answer. Measured: nag at 19:10:40, settle at 19:10:41.996, model
+   * replied at 19:10:44 and was refused `No task is live`.
+   */
+  test("a user message AFTER the last assistant message is in_flight", () => {
+    expect(classifyTuiTurn([assistant("e1", "stop"), user("e2")])).toEqual({
+      phase: "in_flight",
+      stopReason: null,
+    });
+  });
+
+  /**
+   * The ordinary case must not move: the auto-trigger IS a user message, and it
+   * always precedes the assistant messages of the turn it started. Reading "any
+   * user message" rather than "one after the last assistant" would make every
+   * dispatched epoch permanently in_flight.
+   */
+  test("a user message BEFORE the last assistant message still ends the turn", () => {
+    expect(classifyTuiTurn([user("e1"), assistant("e2", "stop")])).toEqual({
+      phase: "ended",
+      stopReason: "stop",
+    });
+  });
+
+  /** A tool result is not a user message — it is the turn continuing normally. */
+  test("a toolResult after the last assistant message does not make it in_flight", () => {
+    expect(
+      classifyTuiTurn([assistant("e1", "stop"), toolResult("e2", "call_a")]),
+    ).toEqual({ phase: "ended", stopReason: "stop" });
+  });
+
+  /** The entry must belong to THIS batch, not to an earlier delivered epoch. */
+  test("a submit entry BEFORE the last assistant message does not end the turn", () => {
+    expect(
+      classifyTuiTurn([
+        submitEntry("e0"),
+        toolCallAssistant("e1", ["call_a"]),
+        toolResult("e2", "call_a"),
+      ]),
+    ).toEqual({ phase: "in_flight", stopReason: "toolUse" });
+  });
+
   test("a clean stop ends the turn", () => {
     expect(classifyTuiTurn([assistant("e1", "endTurn")])).toEqual({
       phase: "ended",
@@ -337,6 +463,12 @@ describe("verdictForStopReason", () => {
     expect(verdictForStopReason("aborted").verdict).toBe("aborted");
     expect(verdictForStopReason("error").verdict).toBe("failed");
     expect(verdictForStopReason("length").verdict).toBe("unknown");
+    // ISC-1105. Reachable only via `terminatedBySubmit`; carries its own reason
+    // so a delivered turn is distinguishable from a merely quiet one.
+    expect(verdictForStopReason("toolUse")).toEqual({
+      verdict: "success",
+      reason: "transcript_terminating_report",
+    });
   });
 
   /**

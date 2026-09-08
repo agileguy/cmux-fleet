@@ -374,15 +374,15 @@ const MUTATIONS: M[] = [
     id: "O2",
     what: "ADOPTION: titles are compared in ORDER, so a healthy console is refused",
     file: OPS,
-    find: '[...xs].map((t) => t ?? " untitled").sort().join("");',
-    replace: '[...xs].map((t) => t ?? " untitled").join("");',
+    find: '[...xs].map((t) => t ?? "\\u0000untitled").sort().join("\\u0001");',
+    replace: '[...xs].map((t) => t ?? "\\u0000untitled").join("\\u0001");',
     expect: "red",
   },
   {
     id: "O3",
     what: "ADOPTION: BOTH separators dropped, so titles that concatenate alike match",
     file: OPS,
-    find: '[...xs].map((t) => t ?? " untitled").sort().join("");',
+    find: '[...xs].map((t) => t ?? "\\u0000untitled").sort().join("\\u0001");',
     replace: '[...xs].map((t) => t ?? "untitled").sort().join("");',
     expect: "red",
   },
@@ -390,8 +390,8 @@ const MUTATIONS: M[] = [
     id: "O4",
     what: "ADOPTION: only the JOIN separator is dropped (the NUL is not one)",
     file: OPS,
-    find: '[...xs].map((t) => t ?? " untitled").sort().join("");',
-    replace: '[...xs].map((t) => t ?? " untitled").sort().join("");',
+    find: '[...xs].map((t) => t ?? "\\u0000untitled").sort().join("\\u0001");',
+    replace: '[...xs].map((t) => t ?? "\\u0000untitled").sort().join("");',
     expect: "red",
   },
   // ── W: the supervision (§6.5's "dies with the console", §9 Q4). ──────────
@@ -429,9 +429,13 @@ const MUTATIONS: M[] = [
   },
   {
     id: "W5",
+    // RE-ANCHORED for ISC-1057. `servesConsole`'s worker arm was an equality
+    // over a U+0001 join and is now containment over a Set: the record must
+    // serve every seat the caller needs. The mutation is unchanged in intent —
+    // stop comparing the worker set at all — and the anchor follows the code.
     what: "IDENTITY: the worker set is not compared",
     file: CONSOLE,
-    find: "  return a === b;",
+    find: "  return console_.workers.every((w) => served.has(w));",
     replace: "  return true;",
     expect: "red",
   },

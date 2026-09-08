@@ -50,6 +50,7 @@ import {
 } from "../run/paths.ts";
 import { DISPATCH_POLICY_MOUNT, DISPATCH_TRIGGER_PATH } from "../run/dispatch-policy.ts";
 import { REPLIES_MOUNT } from "../run/replies.ts";
+import { REPLIES_POLICY_MOUNT, repliesPolicyHostPath } from "../run/replies-policy.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
@@ -71,6 +72,21 @@ export const BRIEFING_MOUNT = "/briefing/system-append.md";
  * character from being dropped.
  */
 export const TRUNCATION_RECOVERY_PATH = "/opt/pifleet/truncation-recovery.ts";
+
+/**
+ * Container path of the report-tools extension
+ * (SRD-WORKER-DISPATCH-EXTENSION D1).
+ *
+ * Baked root-owned 0444 for the reason the two paths above are, and the reason
+ * is one degree stronger here. Those two READ a session and rewrite what the
+ * model sees; this one WRITES the record the host grades the worker by. A
+ * worker able to edit `submit_report` would be a worker able to compose its own
+ * `pifleet.result/v1` envelope out of values it chose — including the
+ * `task_id`/`epoch` pair that `harvest/outbox.ts` refuses envelopes for
+ * disagreeing with, and which this extension exists to read out of
+ * `/policy/task` on the worker's behalf rather than trust it to copy.
+ */
+export const REPORT_TOOLS_PATH = "/opt/pifleet/report-tools.ts";
 
 /** Everything `render` prints and `up` will later execute. */
 export interface RenderedWorker {
@@ -254,6 +270,37 @@ export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
    * already written to disk. The extension's own header carries the detail.
    */
   argv.push("--extension", TRUNCATION_RECOVERY_PATH);
+  /*
+   * Report tools (D1) — UNCONDITIONAL, on an argument of its own rather than
+   * by inheritance from the block above.
+   *
+   * Truncation recovery is unconditional because a 50KB bash cap is not a pane
+   * concept. This one is unconditional because the RESULT is not: every worker
+   * on this fleet is harvested, and `harvest/outbox.ts` reads
+   * `<outbox>/<task-id>/result.json` through one path that has never asked
+   * which pane mode wrote it — `pane_mode` reaches no line of `src/harvest/`
+   * except a token-usage note. There is no honest predicate to gate on, and the
+   * nearest candidate inverts its own argument: gating on `tui`, by analogy
+   * with the auto-trigger, would exempt the seat A HUMAN IS WATCHING and leave
+   * the hand-driven worker composing `pifleet.result/v1` as text, copying
+   * `schema`, `task_id`, `epoch` and `worker` out of its prompt. That is the
+   * path thirteen lines of `skills/pifleet-worker/SKILL.md` and two host-side
+   * refusal codes exist to defend, and it is the one this file replaces.
+   *
+   * KNOWN, AND THE ORDER IS DELIBERATE: emitting the flag does not by itself
+   * make `submit_report` callable. `--tools` below is applied at registry
+   * CONSTRUCTION and filters extension tools through the same allowlist
+   * (`PI_EXTENSION_TOOLS`' header, `config/schema.ts:68-92`, measured
+   * 2026-09-07 against a real image), and every role in `fleet.yaml` declares
+   * `tools:` — so after this line the extension loads for every worker and the
+   * tool is granted to none of them until the roles name it. Granting it is a
+   * later phase, and this is not the place to work around it. Landing the flag
+   * first is the safe half of the sequence, because it names a path all three
+   * toolchain images already carry; a path they did not would stop Pi from
+   * starting and take out every worker at once, which is why this task was
+   * sequenced behind the bake rather than beside it.
+   */
+  argv.push("--extension", REPORT_TOOLS_PATH);
   argv.push("--provider", w.provider);
   argv.push("--model", w.model);
   if (w.thinking !== undefined) argv.push("--thinking", w.thinking);
@@ -544,6 +591,47 @@ export function buildDockerArgv(
    * drop saying nothing is staged.
    */
   argv.push("-v", `${opts.worker.dispatchPolicy}:${DISPATCH_POLICY_MOUNT}:ro`);
+  /*
+   * The declared reply set — the THIRD file on the policy surface, pinned
+   * immediately after the other two for their reason
+   * (SRD-WORKER-DISPATCH-EXTENSION §7.4, D6).
+   *
+   * It names which replies belong to THIS turn, because `get_replies` cannot
+   * list `/replies` to find out: that directory is one per worker per RUN, and a
+   * standing console publishes into it every sweep — so a listing on sweep 5
+   * returns sweeps 1 through 5, each of which reads like a good answer
+   * (Finding E). The set is therefore declared rather than discovered, and the
+   * declaration is written by whatever publishes the replies, in the same act.
+   *
+   * `:ro` is the whole control and it is doing the same work it does one line
+   * above. The macOS Docker VM squashes bind-mount ownership to the container
+   * user, so the host's 0444 reads as OWNED by uid 10001 inside the container
+   * and the mount flag is all that is left between a worker and the record of
+   * which evidence it is permitted to read.
+   *
+   * UNCONDITIONAL, like both of its siblings and on the argument they carry:
+   * only a collating worker is ever handed a reply set, but the mount is not
+   * what decides that — the publisher is — and a `-v` behind a predicate
+   * `materialize.ts` would have to spell a second time is the ISC-188 shape this
+   * file keeps closing. A worker nothing declares for reads an empty set, which
+   * is a TRUE answer and the one a `readdir` cannot give: "nothing was declared"
+   * rather than "the directory is empty".
+   *
+   * The host path comes from `repliesPolicyHostPath`, the module that also owns
+   * the mount constant, the mode and the rewrite recipe — exactly as `replies.ts`
+   * owns `replyHostPath`. Nothing under the run directory is joined HERE, which
+   * is this file's standing rule.
+   *
+   * CORRECTED 2026-09-08 (ISC-1091): this used to add *"rather than a
+   * `WorkerPaths` field, which is the one way this mount differs from its two
+   * siblings"*. `WorkerPaths.repliesPolicy` now exists — `materialize.ts` needs it
+   * to establish the inode before `docker run`, beside `taskPolicy` and
+   * `dispatchPolicy`. The field is a CACHE of this module's answer, assigned from
+   * `repliesPolicyHostPath(dir)` rather than joining the basename itself, so
+   * there is still exactly one spelling of it; what is false above is only the
+   * claim that no field exists and that this mount is unlike its siblings.
+   */
+  argv.push("-v", `${repliesPolicyHostPath(opts.worker.dir)}:${REPLIES_POLICY_MOUNT}:ro`);
   /*
    * The secret store, `:ro` like every other input the worker only reads.
    *

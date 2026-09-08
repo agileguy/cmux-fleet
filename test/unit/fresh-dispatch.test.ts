@@ -23,7 +23,12 @@
  * operator had already handed it.
  */
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
+import { DEFAULT_TRIAGE_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
+import { relayLockPath } from "../../src/run/console-relay.ts";
+import { triageActorLockPath } from "../../src/run/triage-actor.ts";
 import {
   busyRefusal,
   recreateThenDispatch,
@@ -611,5 +616,547 @@ describe("resolveThenRestart puts the resolution ahead of every irreversible ste
     expect(r.stopped).toEqual([]);
     expect(h.calls).toContain("restartPane");
     expect(h.calls.filter((c) => c.startsWith("down:"))).toEqual([]);
+  });
+});
+
+/**
+ * ── THE FOURTH CONSOLE'S FIFTH PROCESS, READ OUT OF THE FILE ───────────────
+ *
+ * Everything above this line drives the two modules directly, which is the
+ * right way to check an ORDER. None of it can answer whether a console script
+ * supplies the dep at all, and on `scripts/` nothing else can either: ISC-600
+ * measured it — `tsconfig.json`'s `include` is `src/**` and `test/**`, the
+ * scripts run `main()` at import so no test can pull one into the program, and
+ * **every mutation applied to `scripts/review` survived a fully green suite**,
+ * including one that made the review script write the triage console's record.
+ *
+ * So this block reads the working tree. Three things are asked of it, and the
+ * first two are one claim split in half because half of it is satisfiable by
+ * accident.
+ *
+ * ## 1. `null` IS A LIE ON THIS CONSOLE, AND THE MIRROR IS WHAT PROVES IT
+ *
+ * `FreshDispatchDeps.quiesce` is required and nullable so that a console with no
+ * actor must SAY so. That makes `quiesce: null` compile everywhere, and on a
+ * console that has an actor it is the ISC-572 defect wearing the fix's clothes:
+ * the property is present, `console-restart.test.ts`'s handover arm is green,
+ * and the actor is never stopped at all. SRD-TRIAGE-CONSOLE §6.4 fixes which
+ * console is which — *"`scripts/operations` and `scripts/development` pass
+ * `null`; `review` passes a function; `triage` passes a function"* — so the
+ * assertion is a PARTITION over the four scripts rather than a property of one.
+ *
+ * Asserting only "triage does not say null" would be green on a `scripts/triage`
+ * that had no `quiesce` at all, and asserting only "operations says null" would
+ * be green on a repository where nobody had ever written a non-null one. Both
+ * halves, over an asymmetric set, is the shape that cannot pass on a fixture
+ * that agrees with itself.
+ *
+ * ## 2. A DEP THAT STOPS NOTHING IS ALSO A LIE
+ *
+ * `quiesce: async () => {}` satisfies every arm above. So the binding is
+ * followed to the function it names and that function to the signal it sends: a
+ * stop that never reaches `signalRelay` leaves the actor running exactly as
+ * `null` would, and the operator is told it was stopped.
+ *
+ * ## 3. THE ACTOR IT STOPS MUST BE THIS CONSOLE'S
+ *
+ * This is the arm that belongs here rather than anywhere else, and the reason is
+ * the whole point of the block: an ordering that is impeccable about the WRONG
+ * process is not a fixed console. `consoleRelayArgv` spells no `--console`, and
+ * `DEFAULT_CONSOLE = "review"` — so a `scripts/triage` that spawned its argv
+ * unchanged would start a REVIEW actor, hand `recreateThenDispatch` a `quiesce`
+ * that correctly stops it, and leave the triage console with no actor while the
+ * review console silently lost its own. That is §9.13's row reached through the
+ * one caller that did not exist when §9.13 was written, and the call site is in
+ * a file the compiler never opens.
+ */
+describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", () => {
+  const source = (script: string): Promise<string> =>
+    readFile(join(import.meta.dir, "..", "..", "scripts", script), "utf8");
+
+  /** Where `needle` next appears, THROWING when it does not — `at`'s reason. */
+  const at = (src: string, needle: string, from: number, why: string): number => {
+    const i = src.indexOf(needle, from);
+    if (i === -1) throw new Error(`'${needle}' is not in this script after ${from} — ${why}`);
+    return i;
+  };
+
+  /**
+   * The `quiesce` property lines of one module call's dep object.
+   *
+   * LINES whose trimmed text BEGINS with the property name, so a comment saying
+   * `quiesce,` cannot stand in for the property — ISC-572's recorded hole, which
+   * narrowing the span moved rather than closed.
+   */
+  const quiesceProps = (src: string, call: string, script: string): string[] => {
+    const start = at(src, call, 0, `scripts/${script} does not call ${call}`);
+    /*
+     * The options argument closes the dep object, and it is matched by SHAPE
+     * rather than by the variable inside it. It was `{ worker: restartFlag },`
+     * verbatim until ISC-1106 gave `scripts/operations` a `targetWorker` — the
+     * pane titles there are roles, not worker ids, so passing the flag matched
+     * no run and orphaned the container. A helper pinned to one spelling turns
+     * that correction into an unrelated red test in a file about `quiesce`.
+     */
+    const end = at(
+      src,
+      "{ worker: ",
+      start,
+      `scripts/${script}'s ${call} dep object is not closed by the options argument`,
+    );
+    return src
+      .slice(start, end)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("quiesce"));
+  };
+
+  const MODULE_CALLS = ["recreateThenDispatch(", "resolveThenRestart("];
+
+  test("both of its module calls are handed a stop, and neither of them is null", async () => {
+    const src = await source("triage");
+    for (const call of MODULE_CALLS) {
+      const props = quiesceProps(src, call, "triage");
+      expect(props.length).toBeGreaterThan(0);
+      for (const p of props) expect(p).not.toContain("null");
+    }
+  });
+
+  test("the two consoles with no actor still SAY null, which is what makes that a claim", async () => {
+    // The asymmetric half. Without it "triage's quiesce is not null" is a
+    // sentence about a repository in which nothing is ever null.
+    for (const script of ["operations", "development"]) {
+      const src = await source(script);
+      for (const call of MODULE_CALLS) {
+        const props = quiesceProps(src, call, script);
+        expect(props).toEqual(["quiesce: null,"]);
+      }
+    }
+  });
+
+  test("the stop it hands over reaches a signal, not an empty function", async () => {
+    const src = await source("triage");
+
+    // The binding, followed to the helper it names.
+    const bind = at(src, "const quiesce =", 0, "scripts/triage binds no quiesce at all");
+    const bindEnd = at(src, ";", bind, "the quiesce binding is unterminated");
+    expect(src.slice(bind, bindEnd)).toContain("stopActor(");
+
+    // The helper, followed to the signal. A stop that never signals leaves the
+    // actor running exactly as `null` would, and says it did not.
+    const fn = at(src, "function stopActor(", 0, "scripts/triage defines no stopActor");
+    const body = src.slice(fn, at(src, "\n}", fn, "stopActor is unterminated"));
+    expect(body).toContain("signalRelay(");
+    expect(body).toContain("relayRecordPath(CONSOLE)");
+  });
+
+  /**
+   * **THE ACTOR IT STARTS IS THIS CONSOLE'S — and the claim is re-shaped so it
+   * does not redden on its own fix.**
+   *
+   * This arm used to read *"the actor it starts is served `--console triage`"* and
+   * asserted `consoleRelayArgv(` in the body by name. That is TRUE of the actor
+   * this script starts today and FALSE of the one §13 task 6.7 re-points it at:
+   * `pifleet triage` takes no `--console` and must not go anywhere near
+   * `consoleRelayArgv`. **MEASURED, not reasoned** — a fixture applying the whole
+   * correct re-point (argv, starter lock, record) to `scripts/triage` reddened
+   * exactly one test in this repository, and it was this one.
+   *
+   * That is ISC-572's recorded defect a fourth time, in the file that inherited
+   * the lesson: *"the current source-order test asserts the CURRENT order, so it
+   * would redden on the fix — the tripwire points the wrong way."* ISC-572's own
+   * remedy was to REPLACE such a probe rather than regrade it, so the claim is
+   * restated as the property that holds in both worlds:
+   *
+   *   - **relay**: `consoleRelayArgv` emits no `--console` and `DEFAULT_CONSOLE` is
+   *     `"review"`, so the argv must append `"--console", CONSOLE` — §9.13's row
+   *     reached through the one caller that did not exist when it was written.
+   *   - **clock**: `pifleet triage` IS this console's actor by subcommand; there is
+   *     no `--console` to get wrong, and `consoleRelayArgv` must be ABSENT, because
+   *     spawning it would start a review relay from the triage script.
+   *
+   * In both: the identity travels through {@link CONSOLE} and never a bare
+   * literal, and `startActor`'s OWN spawn is given this function's result.
+   */
+  test("the actor it starts is this console's, whichever actor that is", async () => {
+    const src = await source("triage");
+
+    // Declared once, as a constant. The known-limit arm of ISC-600: a comment
+    // carrying this literal satisfies it, which is why every arm below reads
+    // structure instead.
+    expect(src).toContain('const CONSOLE = "triage";');
+
+    const fn = at(
+      src,
+      "function triageActorArgv(",
+      0,
+      "scripts/triage builds no actor argv of its own — spawning consoleRelayArgv's " +
+        "unchanged would start a REVIEW actor, because DEFAULT_CONSOLE is \"review\"",
+    );
+    const body = src.slice(fn, at(src, "\n}", fn, "triageActorArgv is unterminated"));
+
+    if (body.includes("consoleRelayArgv(")) {
+      // The relay world. The flag is what stops §9.13 happening in the other
+      // direction, and it must carry the constant.
+      expect(body).toMatch(/"--console",\s*CONSOLE/);
+      // Never `"--console", "triage"`: the constant is what keeps this file's
+      // five console-shaped facts one fact.
+      expect(body).not.toMatch(/"--console",\s*"/);
+    } else {
+      /*
+       * The clock world. `pifleet triage` has no `--console` option at all, so a
+       * flag here would be a commander usage error handed to a DETACHED process —
+       * and `consoleRelayArgv` must not reappear, because its default IS the
+       * review console.
+       */
+      expect(
+        body,
+        "scripts/triage's actor argv names neither consoleRelayArgv nor the triage subcommand",
+      ).toContain('"triage"');
+      expect(body).not.toContain('"--console"');
+    }
+
+    /*
+     * And the ACTOR'S OWN spawn is given that argv. Anchored inside
+     * `startActor` rather than on the first `Bun.spawn(` in the file, which is
+     * an ordering accident: `runOutput` and `runChecked` spawn too, and a probe
+     * that happened to read one of those would be green with the actor's argv
+     * replaced.
+     */
+    const start = at(src, "function startActor(", 0, "scripts/triage starts no actor");
+    const spawn = at(src, "Bun.spawn(", start, "startActor spawns nothing");
+    expect(src.slice(spawn, spawn + 40)).toContain("triageActorArgv(");
+  });
+
+  test("every bookkeeping path in it is taken through the same constant", async () => {
+    // `console-relay.ts`'s three path functions are the review console's lock,
+    // record and log when handed the wrong name — §9.13, and the symptom is a
+    // review console that silently stops fanning out.
+    const src = await source("triage");
+    for (const fn of ["relayRecordPath", "relayLogPath", "relayLockPath"]) {
+      const calls = [...src.matchAll(new RegExp(`${fn}\\(([^)]*)\\)`, "g"))];
+      if (calls.length === 0) {
+        throw new Error(`${fn} is called nowhere in scripts/triage — the wiring is gone, not fixed`);
+      }
+      for (const c of calls) expect(`${fn}(${c[1]})`).toBe(`${fn}(CONSOLE)`);
+    }
+  });
+
+  /**
+   * ── §13 TASK 4.5a(a): THE SEAT LIST HAS ONE HOME ──────────────────────────
+   *
+   * **THE TASK'S PREMISE IS STALE AND THIS SAYS SO RATHER THAN PRETENDING TO
+   * FIX IT.** §13:2935-2937 reads *"`scripts/triage` spells its four seats as
+   * literals rather than importing `DEFAULT_TRIAGE_WORKERS`"*. It does not, and
+   * did not when the line was written: `scripts/triage:93` imports the constant
+   * and `:263` is the single site that resolves it. What the file DOES spell as
+   * literals is its prose — the usage banner at `:5-8`, the pane diagram at
+   * `:14-20`, and the `--no-actor` help text at `:156` — and that is a real
+   * instance of the divergence the task names, in the one place a compiler was
+   * never going to catch it either way.
+   *
+   * So the claim is split to match what is actually there: the CODE takes the
+   * list from one import, and the DIAGRAM is held to the same four names.
+   *
+   * **A source-text probe is the only instrument available, and that is
+   * measured rather than assumed.** ISC-600: `tsconfig.json`'s `include` is
+   * `src/**` and `test/**`, so `tsc` never opens `scripts/`; the scripts run
+   * `main()` at import, so no test can pull one into the program; and every
+   * mutation applied to `scripts/review` in that round survived a fully green
+   * suite. Reading the working tree is not a stylistic preference here, it is
+   * the only reading there is.
+   */
+  const codeOnly = (src: string): string => {
+    /*
+     * Prose removed, and BOTH kinds are removed by a marker that throws when it
+     * moves. The usage banner is carved out by name because it is prose a human
+     * reads on `--help` rather than a value the program compares against — the
+     * same category as a comment, wearing a template literal.
+     */
+    const usageStart = at(src, "const USAGE = `", 0, "scripts/triage prints no usage banner");
+    const usageEnd = at(src, "\n`;", usageStart, "the usage banner is unterminated");
+    return (src.slice(0, usageStart) + src.slice(usageEnd))
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+  };
+
+  test("the four seats reach its code only through DEFAULT_TRIAGE_WORKERS", async () => {
+    const src = await source("triage");
+    const code = codeOnly(src);
+
+    /*
+     * ONE resolution site. `scripts/triage:254-262` states the hazard itself —
+     * *"Re-deriving `opts.workers ?? DEFAULT_TRIAGE_WORKERS` at each site is how
+     * those two sets come to differ under a `--workers` flag"* — and a second
+     * one would pin the actor's runs to a different set than the panes were
+     * built from.
+     *
+     * COUNTED OVER THE WHOLE STRING, not per line: the expression is one line
+     * here, but a line-wise count of a multi-line needle is an OR of its lines
+     * and miscounts, which is this branch's recorded way of skipping a check
+     * while looking like one. The count runs on `code` and not `src` for a
+     * second reason of the same shape — the docblock above the binding quotes
+     * the expression verbatim, so counting the raw file would answer two.
+     */
+    const RESOLVE = "opts.workers ?? DEFAULT_TRIAGE_WORKERS";
+    expect(code.split(RESOLVE).length - 1).toBe(1);
+
+    /*
+     * And no seat id survives anywhere else in the code. A `--workers` default
+     * re-spelled as a literal, a seat compared by name, a hard-coded reconciler
+     * — each is the divergence §13 names, and each would land here.
+     */
+    for (const seat of DEFAULT_TRIAGE_WORKERS) {
+      expect(code, `scripts/triage spells ${seat} in code, not through the constant`).not.toContain(
+        seat,
+      );
+    }
+  });
+
+  /**
+   * The pane diagram in its header is held to the same four, in the same order.
+   *
+   * This is where the divergence actually lives now: add a fifth seat to
+   * `DEFAULT_TRIAGE_WORKERS` and the code adapts while `scripts/triage:14-20`
+   * goes on drawing a 2x2 of four names, in a file no compiler opens. The
+   * diagram is parsed rather than string-matched, so the assertion is an
+   * EQUALITY in both directions — a seat removed from the constant but left in
+   * the picture reddens too, which a `toContain` per seat would not catch.
+   *
+   * It pins the DIAGRAM against the list and says nothing about pane geometry:
+   * `console-restart.test.ts`'s header records that cmux's reported index and
+   * the `--workers` order disagree, and `triage-plan.test.ts` owns that.
+   */
+  test("its pane diagram names those same four, in the same order", async () => {
+    const src = await source("triage");
+    const open = at(src, "```", 0, "scripts/triage's header draws no pane diagram");
+    const close = at(src, "```", open + 3, "the pane diagram's fence is unterminated");
+
+    const cells = src
+      .slice(open, close)
+      .split("\n")
+      .map((l) => l.replace(/^\s*\*\s?/, "").trim())
+      .filter((l) => l.startsWith("|"))
+      .flatMap((l) =>
+        l
+          .split("|")
+          .map((c) => c.trim())
+          .filter((c) => c !== ""),
+      );
+
+    expect(cells).toEqual([...DEFAULT_TRIAGE_WORKERS]);
+  });
+});
+
+/**
+ * ── §13 TASK 6.7's UNLANDED HALF, MADE REDDENABLE ────────────────────────────
+ *
+ * **What 6.7 still owes, and why it is not the one line its own file claims.**
+ * §13's 6.7 entry reads *"wire the actor start/stop into `scripts/triage` as a
+ * `quiesce` dep"*, and that half is shipped — ISC-604, ISC-605, ISC-631 and
+ * ISC-697 pin it from four directions. What is left is the sentence
+ * `scripts/triage:54-57` writes about itself: *"the clock half is `pifleet
+ * triage` … task 6.7 re-points {@link triageActorArgv} at it AND NOTHING ELSE
+ * HERE CHANGES."* [[ISC-608]] is filed as that line's tripwire — *"this becomes
+ * `[x]` or is deleted at task 6.7"*.
+ *
+ * **Three things change with it, and none of them is visible to a compiler.**
+ * Measured against the shipped modules rather than reasoned:
+ *
+ *   1. **The starter would deadlock the actor it starts.** `triageActorLockPath`
+ *      IS `relayLockPath("triage")` — asserted below, live — and `runTriageActor`
+ *      takes it for the actor's whole life (§6.3b, ISC-932). `scripts/triage`'s
+ *      `startActor` holds that same file across its `Bun.spawn`. `pifleet relay`
+ *      takes no lock, so today the overlap is harmless; the moment the argv names
+ *      `triage`, the fresh actor's claim `EEXIST`s against a LIVE script pid, the
+ *      takeover correctly declines, `runTriageActor` returns `refused` and exits
+ *      nonzero — and the script writes a record naming a pid that has already
+ *      gone. That is §6.4's own failure shape, caused by the fix for it.
+ *   2. **The record the script writes would stop parsing.** It writes
+ *      `pifleet.consolerelay/v1` through `writeRelayRecord`, whose schema is a
+ *      non-strict `z.object` and therefore STRIPS unknown keys; §7.7's
+ *      `TriageActorRecordSchema` requires `cadence_s`, which has no default. So
+ *      `readTriageActorRecord` refuses it and `pifleet triage --status` reports
+ *      `actor: refused` for a healthy actor until its first `saveCursor` lands.
+ *   3. **`--cadence` stops having a reason to refuse.** Its refusal text names
+ *      *"the actor this script starts today is `pifleet relay --console triage` …
+ *      which takes no cadence"*. `pifleet triage` takes `--poll`.
+ *
+ * **THIS BLOCK IS NOT A "STILL RELAY" ASSERTION, and that distinction is the
+ * ISA's own.** ISC-572 records a tripwire that *"asserts the CURRENT order, so it
+ * would redden on the fix — the tripwire points the wrong way"*, and it was
+ * replaced rather than regraded. So what is asserted here is the property that
+ * must hold in BOTH worlds — *the starter never holds the lock the actor it
+ * starts will need, and never writes a record that actor's reader refuses* — with
+ * the script's own argv choosing which half applies. Green today, green after a
+ * correct re-point, red after a careless one.
+ */
+describe("scripts/triage's actor argv and the three things a re-point moves (§13 task 6.7)", () => {
+  const source = (script: string): Promise<string> =>
+    readFile(join(import.meta.dir, "..", "..", "scripts", script), "utf8");
+
+  const at = (src: string, needle: string, from: number, why: string): number => {
+    const i = src.indexOf(needle, from);
+    if (i === -1) throw new Error(`'${needle}' is not in this script after ${from} — ${why}`);
+    return i;
+  };
+
+  /** The script's code with prose removed, so a docblock cannot satisfy an arm. */
+  const codeOnly = (src: string): string => {
+    const usageStart = at(src, "const USAGE = `", 0, "scripts/triage prints no usage banner");
+    const usageEnd = at(src, "\n`;", usageStart, "the usage banner is unterminated");
+    return (src.slice(0, usageStart) + src.slice(usageEnd))
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+  };
+
+  /**
+   * Which actor the script starts, read from the argv builder's BODY.
+   *
+   * `relay` while it spawns `consoleRelayArgv`'s result; `clock` once it names the
+   * `triage` subcommand. Anything else throws rather than defaulting, because a
+   * builder this function cannot classify is one whose blast radius nobody has
+   * checked — and defaulting to `relay` would make every arm below vacuous.
+   */
+  const actorKind = (code: string): "relay" | "clock" => {
+    const fn = at(code, "function triageActorArgv(", 0, "scripts/triage builds no actor argv");
+    const body = code.slice(fn, at(code, "\n}", fn, "triageActorArgv is unterminated"));
+    const relay = body.includes("consoleRelayArgv(");
+    const clock = /"triage"/.test(body);
+    if (relay === clock) {
+      throw new Error(
+        `scripts/triage's triageActorArgv names ${relay ? "BOTH" : "NEITHER"} the relay and the ` +
+          `clock; §13 task 6.7 re-points it from one to the other and this file cannot say which ` +
+          `world it is in. Body was:\n${body}`,
+      );
+    }
+    return relay ? "relay" : "clock";
+  };
+
+  /**
+   * THE PREMISE, live rather than described: the two locks are ONE FILE.
+   *
+   * Without this the source arm below reads as fussiness. With it, "the starter
+   * holds the actor's lock" is a statement about the same inode.
+   */
+  test("the triage actor's lock IS the console lock scripts/triage takes", () => {
+    const env = { ...process.env, PIFLEET_RUNS_DIR: "/tmp/pf-6-7-premise/runs" };
+    expect(triageActorLockPath(env)).toBe(relayLockPath("triage", env));
+    // And it is not the review console's, or the overlap would be with somebody
+    // else's actor and this whole block would be about the wrong pair.
+    expect(triageActorLockPath(env)).not.toBe(relayLockPath("review", env));
+  });
+
+  /**
+   * ARM 1 — the starter and the started may not want the same lock.
+   *
+   * While the actor is `pifleet relay` the script MAY hold it (relay takes no
+   * lock), and it does — asserted, so this arm is a live claim about the current
+   * file rather than a conditional nobody has entered. The day the argv names the
+   * clock, holding it is a deadlock and the arm flips.
+   */
+  test("the starter's lock is compatible with the actor it starts", async () => {
+    const code = codeOnly(await source("triage"));
+    const start = at(code, "function startActor(", 0, "scripts/triage starts no actor");
+    const spawn = at(code, "Bun.spawn(", start, "startActor spawns nothing");
+    const beforeSpawn = code.slice(start, spawn);
+    const holdsLock = beforeSpawn.includes("acquireRelayLock(");
+
+    if (actorKind(code) === "relay") {
+      // `pifleet relay` takes no lock of its own, so the starter's is a real
+      // one-starter-at-a-time mutex and IS held. Asserted rather than permitted,
+      // so "compatible" cannot be satisfied by a script that locks nothing at all.
+      expect(
+        holdsLock,
+        "scripts/triage no longer takes the starter lock while still starting a relay",
+      ).toBe(true);
+      return;
+    }
+    expect(
+      holdsLock,
+      "scripts/triage starts `pifleet triage`, whose runTriageActor takes " +
+        "triageActorLockPath === relayLockPath('triage') for its whole life — so holding that " +
+        "same lock across the spawn makes the fresh actor refuse by name and exit, leaving a " +
+        "record naming a dead pid (§6.3b, §6.4)",
+    ).toBe(false);
+  });
+
+  /**
+   * ARM 2 — whatever record the script writes, the actor's own reader must accept
+   * it.
+   *
+   * `RelayRecordSchema` is a non-strict `z.object`, so adding `cadence_s` to the
+   * literal is NOT enough — `writeRelayRecord` parses and strips it. The two ways
+   * through are to write §7.7's record (`writeTriageActorRecord`) or to write none
+   * and let the actor be its own record's only writer.
+   */
+  test("the record the script writes is one the actor it starts can read", async () => {
+    const code = codeOnly(await source("triage"));
+    const writes = code.includes("writeRelayRecord(");
+
+    if (actorKind(code) === "relay") {
+      expect(writes, "scripts/triage stopped writing the relay record it still needs").toBe(true);
+      return;
+    }
+    expect(
+      writes,
+      "scripts/triage starts `pifleet triage`, whose record is read by " +
+        "readTriageActorRecord against TriageActorRecordSchema — which requires cadence_s and " +
+        "has no default, while writeRelayRecord's non-strict schema strips it. Write §7.7's " +
+        "record or write none",
+    ).toBe(false);
+  });
+
+  /**
+   * ARM 3 — `--cadence` must refuse only while there is nothing to refuse FOR.
+   *
+   * §7.8 calls it *"an override for a hand-run"*. `pifleet relay` has no cadence,
+   * so a refusal is the honest answer; `pifleet triage` has `--poll`, so the same
+   * refusal becomes a flag declining to do the thing it exists for. **It must
+   * reach `--poll` only when the operator gave it** — §13 task 6.9 makes
+   * `console.yaml`'s `cadence_s` the source when `--poll` is absent, and a script
+   * that always passed one would silently defeat that file.
+   */
+  test("--cadence refuses or reaches --poll, whichever the actor can honour", async () => {
+    const code = codeOnly(await source("triage"));
+    const flagAt = at(code, '"--cadence"', 0, "scripts/triage does not read --cadence");
+    // The parse happens either way: a malformed duration is answered as a
+    // duration and never as an unimplemented feature. `parseDuration` is
+    // IMPORTED rather than re-spelled, for §3.3's reason — a second duration
+    // grammar in an untypechecked file is a grammar nobody checks.
+    expect(code).toContain("parseDuration(");
+
+    if (actorKind(code) === "relay") {
+      expect(
+        code.slice(flagAt).includes("throw new Error("),
+        "scripts/triage accepts --cadence while still starting a relay, which has no cadence to " +
+          "set — the value would reach a DETACHED process as a commander usage error and leave " +
+          "a record naming a pid that had already exited",
+      ).toBe(true);
+      return;
+    }
+    /*
+     * The clock has `--poll`, so the flag must reach the ARGV BUILDER — not
+     * merely appear somewhere in the file, which a leftover refusal message
+     * would satisfy.
+     *
+     * What is deliberately NOT asserted here is that the flag is passed
+     * CONDITIONALLY. It must be — §13 task 6.9 makes `console.yaml`'s
+     * `cadence_s` the source when `--poll` is absent, so a script that always
+     * passed one would silently defeat that file — but "only when the operator
+     * gave it" is a property of a VALUE and this file reads TEXT. It belongs at
+     * 6.9's own seam, in `test/unit/triage-command.test.ts`, asserted by value.
+     */
+    const fn = at(code, "function triageActorArgv(", 0, "scripts/triage builds no actor argv");
+    const body = code.slice(fn, at(code, "\n}", fn, "triageActorArgv is unterminated"));
+    expect(
+      body.includes('"--poll"'),
+      "scripts/triage starts `pifleet triage`, so --cadence has somewhere to go and must reach " +
+        "the actor's argv as --poll rather than being refused (§7.8)",
+    ).toBe(true);
   });
 });

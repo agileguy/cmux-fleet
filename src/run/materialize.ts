@@ -102,6 +102,7 @@ import {
 } from "./paths.ts";
 import { clearDispatchPolicy } from "./dispatch-policy.ts";
 import { createRepliesDir } from "./replies.ts";
+import { writeRepliesPolicy } from "./replies-policy.ts";
 import { writeTaskPolicy } from "./task-policy.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import {
@@ -947,6 +948,43 @@ export async function materializeWorkerInputs(
     await establishing(`the task drop for ${workerId}`, async () => {
       await refuseSymlinkDestination(paths.dispatchPolicy);
       await clearDispatchPolicy(paths.dispatchPolicy);
+    });
+
+    /**
+     * The DECLARED REPLY SET, established the same way and for the same reason a
+     * third time (SRD-WORKER-DISPATCH-EXTENSION §7.4, D6): the file
+     * `get_replies` reads to learn which replies belong to THIS turn, written
+     * here with nothing declared so the bind mount has an inode from launch.
+     *
+     * This block is ISC-1091. The mount landed in `config/render.ts` one commit
+     * before it, and nothing on this side answered it — so every worker would
+     * have come up with Docker's own DIRECTORY at the host path, which is not a
+     * degraded declaration but a permanent one: `writeRepliesPolicy` fails
+     * `EISDIR` at every later publish and `get_replies` reads nothing, forever,
+     * with no error anywhere near the collation that quietly returns an empty
+     * set. Measured rather than argued — `docker run -v <absent>:/policy/replies`
+     * against a scratch path reported `drwxr-xr-x /policy/replies`.
+     *
+     * Established for EVERY worker, not only for the collating ones, on the
+     * argument its two siblings above carry: the `-v` is unconditional, and a
+     * mount whose source this module skipped behind a predicate it would have to
+     * spell a second time is exactly the ISC-188 divergence. A worker nothing
+     * ever declares for reads `replies: []`, which is a TRUE answer and the one
+     * a directory listing cannot give — "nothing was declared" rather than "the
+     * directory is empty".
+     *
+     * `writeRepliesPolicy(…, null, [])` and not a `clearRepliesPolicy` helper:
+     * both arguments are the real idle VALUES — no task, and the empty
+     * declaration that is the point of the file existing on a turn with nothing
+     * to declare — so this reads like `writeTaskPolicy(…, null, 0)` above rather
+     * than like `clearDispatchPolicy`, whose helper exists only because its
+     * prompt argument would be a meaningless `""`. An empty FILE would not do:
+     * `get_replies` refuses a body that does not carry the schema tag, so a
+     * zero-byte drop is a worker that cannot read a set it was correctly given.
+     */
+    await establishing(`the declared reply set for ${workerId}`, async () => {
+      await refuseSymlinkDestination(paths.repliesPolicy);
+      await writeRepliesPolicy(paths.repliesPolicy, null, []);
     });
 
     /**

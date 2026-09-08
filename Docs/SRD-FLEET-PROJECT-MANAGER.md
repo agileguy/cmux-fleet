@@ -1701,7 +1701,7 @@ them:**
 | Quantity | Host-side source | Why it cannot be forged |
 |---|---|---|
 | **Denominator** — lenses dispatched | `<run>/relay/<sender>/<parent>.json` → `children[]` (`RelayJournalEntry`, `relay-journal.ts:281-302`) | The journal is written by the relay after it dispatches. `/outbox` is the worker's; `<run>/relay/` is not mounted into any container |
-| **Numerator** — lenses whose report survived | the count of `<replies-dir>/<child-task-id>.json` files that exist | Each is written by the host's `publishReply`, once per survived child (`relay.ts:1180-1183`), and the mount is read-only to the collator (`replies.ts:204-206`) |
+| **Numerator** — lenses whose report survived | the count of `<replies-dir>/<child-task-id>.json` files that exist | Each is written by the host's `publishReplies`, once per collation with the whole surviving set (SRD-WORKER-DISPATCH-EXTENSION task 5.3 made the port set-shaped on 2026-09-08, because a declaration is one document about one task's whole set; the per-child `publishReply` and the `relay.ts:1180-1183` citation are both stale), and the mount is read-only to the collator (`replies.ts:204-206`) |
 
 ```
 coverage_reported  = |{ c in journal.children : replyHostPath(dir, c) exists }|

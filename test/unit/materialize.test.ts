@@ -37,6 +37,8 @@ import { stringify } from "yaml";
 import { ConfigError, parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { EXIT } from "../../src/contracts.ts";
+import { REPLIES_POLICY_SCHEMA } from "../../src/run/replies-policy.ts";
+import { TASK_POLICY_NONE } from "../../src/run/task-policy.ts";
 import {
   MAX_SKILL_DEPTH,
   MAX_SKILL_DIR_ENTRIES,
@@ -244,6 +246,110 @@ describe("the reply plane", () => {
     await chmod(dir, 0o700);
     await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
     expect(await mode(dir)).toBe(0o755);
+  });
+});
+
+/**
+ * ISC-1091 — the declared reply SET, which is a different object from the reply
+ * PLANE above and has to be established separately.
+ *
+ * `config/render.ts` emits `-v <worker dir>/replies-policy:/policy/replies:ro`
+ * unconditionally, and for one commit nothing on this side created the source.
+ * That is not a mount that fails: Docker creates a missing file source as a
+ * DIRECTORY, so every worker would have started with `drwxr-xr-x /policy/replies`
+ * — measured against a scratch path, not supposed — and every later
+ * `writeRepliesPolicy` would fail `EISDIR` while `get_replies` read nothing, for
+ * the life of the container and with no error near the collation it silently
+ * empties.
+ *
+ * So these assert the shape on disk, in the header's terms: a regular FILE, not
+ * merely a path that exists, holding the empty DECLARATION rather than empty
+ * bytes. `replies-policy.test.ts` carries the ordering half — that the
+ * establishing block precedes the launch — which no unit test can schedule a
+ * container against.
+ */
+describe("the declared reply set", () => {
+  test("is a regular FILE holding the empty declaration at 0444", async () => {
+    const f = await fixture();
+    await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
+    const file = workerPaths(f.run, "eng-1").repliesPolicy;
+
+    // A DIRECTORY here is precisely what Docker would have left, so `isFile` is
+    // the assertion and mere existence is not.
+    expect((await stat(file)).isFile()).toBe(true);
+    /*
+     * 0444 like every other file on the `/policy` surface, and asserted at the
+     * ESTABLISHING end because that is the end this test can see. The worker
+     * must never hold write permission on the record of which evidence it is
+     * allowed to read — a collator that can widen its own declared set can
+     * award itself a previous sweep's replies — and on macOS the Docker VM
+     * squashes bind-mount ownership to the container user, so a 0644 here reads
+     * as owner-writable INSIDE the container with only `:ro` left in the way.
+     *
+     * AND the verbgate now catches it too — CORRECTED 2026-09-08, and the
+     * correction reverses this note's conclusion rather than its count. When
+     * this was written the gate's FILE loop iterated three surfaces
+     * (`/policy/cloud-allow`, `/policy/task`, `/policy/dispatch`) and this was
+     * a fourth outside it, which the loop's own comment at `:154` invited
+     * ("a fourth policy file is one word"). ISC-1092 took that up: the loop now
+     * carries `/policy/replies`, so a writable declared reply set refuses EVERY
+     * gated verb with exit 78 rather than yielding one forged file.
+     *
+     * **The 0444 assertion below stays, and it is not now redundant.** The gate
+     * is the container's answer and this is the HOST's: `materialize` is what
+     * makes the file exist at all, and a mode set wrong here would be caught by
+     * the gate only at the cost of the whole worker. Two controls, in the order
+     * an operator meets them. What is no longer true is the old warning that
+     * relaxing the mode would rest on "a guarantee nothing provides" — the
+     * guarantee now exists, and the reason to keep the mode is that failing
+     * closed at the gate is a worse way to learn about it.
+     */
+    expect(await mode(file)).toBe(0o444);
+    /*
+     * The empty DECLARATION and not an empty file. `get_replies` refuses a body
+     * that carries no schema tag, so zero bytes is a worker that cannot read a
+     * set it was correctly given; `replies: []` present is what lets it answer
+     * "nothing was declared" rather than "the directory is empty", which is the
+     * distinction the whole file exists to make.
+     */
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual({
+      schema: REPLIES_POLICY_SCHEMA,
+      task_id: TASK_POLICY_NONE,
+      replies: [],
+    });
+  });
+
+  test("is established for a worker nothing will ever declare a reply for", async () => {
+    // `quiet-1` is not a collator. The `-v` is emitted for it regardless, so the
+    // source must exist for it regardless — a mount behind a predicate this
+    // module would have to spell a second time is the ISC-188 shape, and Docker
+    // answers the divergence by inventing the directory itself.
+    const f = await fixture();
+    await materializeWorkerInputs(f.loaded, f.run, ["quiet-1"]);
+    expect((await stat(workerPaths(f.run, "quiet-1").repliesPolicy)).isFile()).toBe(true);
+  });
+
+  test("materializing the same worker twice rewrites it in place, through its own 0444", async () => {
+    /*
+     * Idempotence is a property this module claims everywhere else, and the
+     * cloud-policy block records what it cost the last time a second pass met a
+     * mode the first pass set: on POSIX the OWNER of a 0444 file cannot open it
+     * for writing either, so `--workers eng-1,eng-1` aborted a whole launch with
+     * an exit-3 environment diagnosis for what was a typo.
+     *
+     * The INODE is asserted as well as the mode, because that is the property the
+     * bind mount pins — a second pass that replaced the file instead of
+     * truncating it would leave the container reading the first pass's inode
+     * forever, with both sides believing the declaration was refreshed.
+     */
+    const f = await fixture();
+    const file = workerPaths(f.run, "eng-1").repliesPolicy;
+    await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
+    const first = await stat(file);
+    await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
+    const second = await stat(file);
+    expect(second.ino).toBe(first.ino);
+    expect(await mode(file)).toBe(0o444);
   });
 });
 

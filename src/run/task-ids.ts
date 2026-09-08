@@ -127,6 +127,130 @@ export const REVIEW_CONSOLE_ASPECTS: readonly AspectSeat[] = [
   { worker: "rev-lang-1", aspect: "lang" },
 ];
 
+/**
+ * The `triage` console's seats — SRD-TRIAGE-CONSOLE §6.1, §6.5.
+ *
+ * **The same data structure as {@link REVIEW_CONSOLE_ASPECTS} and deliberately
+ * not a second mechanism** (D5). A console is a roster plus an aspect table, and
+ * a second console is therefore two values rather than a branch on which console
+ * is being served.
+ *
+ * ## Why the names are positional and the review console's are not
+ *
+ * `arch`, `context` and `lang` are LENSES: the aspect decides what the reviewer
+ * is asked to look for, and it is fixed in config an hour before any request
+ * exists (D11). A triage observer's subject is not fixed that way — §6.5 puts the
+ * partition in the worker's hands *"because it is a judgement — which services
+ * are related, which are cheap, which changed since the last sweep"* — so no seat
+ * here can carry a subject-matter name that would still be true on the next
+ * sweep. A positional name is the honest one: it says which SLICE of the
+ * partition this is and claims nothing about what is in it.
+ *
+ * It still does the two jobs the aspect exists for. It is the segment the child's
+ * task id is derived from, so `T-sweep-7-slice2` is legible; and it is the word
+ * the collation brief uses when it has to say a slice never reported.
+ *
+ * ## The `collate` tripwire, which is the reason this constant needs a test
+ *
+ * **No aspect here may be named `collate`.** `resolveAspects` (`relay.ts:162-169`)
+ * throws {@link RelayAspectError} on one, because the derived child id would be
+ * indistinguishable from a collation and `dispatch-request.ts`'s depth bound
+ * would refuse a legitimate first-round fan-out from it. That is a live
+ * constraint on THIS table rather than a note about the review console's, and
+ * `dispatch-request.test.ts` asserts it by composing the real functions —
+ * `isCollationTaskId(childTaskId(sweepTaskId(n), aspect))` must be `false` for
+ * every seat — so a rename that reintroduces the collision is a red test rather
+ * than an actor that throws on its first tick.
+ */
+export const TRIAGE_CONSOLE_ASPECTS: readonly AspectSeat[] = [
+  { worker: "obs-t1", aspect: "slice1" },
+];
+
+/**
+ * The prefix every sweep task id carries — SRD-TRIAGE-CONSOLE §6.6 layer 2.
+ *
+ * Spelled once, here, because it is consumed in both directions:
+ * {@link sweepTaskId} mints it and {@link sweepNumber} reads it back when the
+ * actor re-derives its cursor from the run tree (D12 — *"the run tree is
+ * authoritative; `~/.pifleet/triage.json` is a cursor"*). A minter without a
+ * recogniser guarantees the recogniser arrives later as a regexp somewhere else,
+ * which is the duplication this module's own header exists to prevent.
+ */
+export const SWEEP_TASK_PREFIX = "T-sweep";
+
+/**
+ * A sweep counter that cannot become a task id.
+ *
+ * **THROWN, not refused, on {@link RelayAspectError}'s asymmetry.** The counter
+ * is a host-side value from the actor's own record; no container can write it, so
+ * a bad one is an actor-side bug that is wrong on the first tick or never.
+ * Answering it with a value would let the loop run around it forever — minting
+ * one unusable id per cadence, 288 times a day.
+ *
+ * The specific hole this closes is that the obvious spelling has no failure mode
+ * to speak of. `T-sweep-${n}` for `n = -1` is `"T-sweep--1"`, which
+ * {@link spellable} ACCEPTS — it begins alphanumeric, ends alphanumeric, and `-`
+ * is a legal interior character — so a negative or fractional cursor would sail
+ * through the grammar check and become a real directory under a worker's outbox.
+ */
+export class SweepCounterError extends Error {
+  constructor(n: number) {
+    super(
+      `${JSON.stringify(n)} is not a sweep number. A sweep counter is an integer of at least 1 ` +
+        `held in the triage actor's record, and it becomes a path segment under <run>/outbox — ` +
+        `note that "${SWEEP_TASK_PREFIX}--1" and "${SWEEP_TASK_PREFIX}-1.5" both satisfy the id ` +
+        `grammar, so the grammar is not what refuses this.`,
+    );
+    this.name = "SweepCounterError";
+  }
+}
+
+/**
+ * The parent task id for sweep `n` — `T-sweep-7` (§6.6 layer 2).
+ *
+ * **Layer 2 of freshness is this function.** Every sweep gets an id no sweep has
+ * used, so `already_completed` never fires for a legitimate new sweep and a
+ * resumed actor that re-derives the same id is refused rather than duplicated.
+ *
+ * **It must never end in `-${COLLATION_ASPECT}`, and that is a constraint on the
+ * FORMAT rather than on any particular counter.** {@link isCollationTaskId} is
+ * consulted by `dispatch-request.ts` before the request file is even read, so a
+ * sweep id ending that way would make `tri-1`'s fan-out refuse with
+ * `collation_parent` — every sweep, forever, with a message about a review
+ * console's depth bound. `T-sweep-<n>` ends in a digit and cannot collide; a
+ * future rename of this prefix must re-check it, which is why
+ * `dispatch-request.test.ts` drives a minted id through the real predicate rather
+ * than restating the rule.
+ */
+export function sweepTaskId(n: number): string {
+  if (!Number.isSafeInteger(n) || n < 1) throw new SweepCounterError(n);
+  return `${SWEEP_TASK_PREFIX}-${n}`;
+}
+
+/**
+ * The counter inside a sweep id, or `null` if the id is not one.
+ *
+ * `null` rather than a throw, and the direction of travel is why: this reads ids
+ * found in a run tree, which holds every task the console has ever dispatched —
+ * children, collations, and whatever an operator ran by hand. "Not a sweep id" is
+ * the ordinary answer for most of them, so it is a value; a malformed COUNTER is
+ * an actor-side bug, so {@link sweepTaskId} throws.
+ *
+ * Anchored at both ends, and derived from {@link SWEEP_TASK_PREFIX} rather than
+ * spelling it a second time. A prefix test alone would answer `7` for
+ * `T-sweep-7-slice2` and for `T-sweep-7-collate`, so an actor re-deriving its
+ * cursor would count children and collations as sweeps and then mint an id a
+ * child already holds.
+ */
+export function sweepNumber(taskId: string): number | null {
+  const head = `${SWEEP_TASK_PREFIX}-`;
+  if (!taskId.startsWith(head)) return null;
+  const digits = taskId.slice(head.length);
+  if (!/^[1-9][0-9]*$/.test(digits)) return null;
+  const n = Number(digits);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 /** An id that can be a path segment, on the grammar every host path is held to. */
 export function spellable(id: string): boolean {
   return id.length > 0 && id.length <= MAX_RELAY_TASK_ID_CHARS && SESSION_ID_RE.test(id);

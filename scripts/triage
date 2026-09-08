@@ -1,0 +1,929 @@
+#!/usr/bin/env bun
+/**
+ * `scripts/triage` — open the standing scheduled triage console.
+ *
+ *   ./scripts/triage                                # tri-1, obs-t1
+ *   ./scripts/triage --dry-run                      # print the plan, touch nothing
+ *   ./scripts/triage --restart obs-t1               # respawn the observer
+ *   ./scripts/triage --restart tri-1 --task t.json  # fresh reconciler, then dispatch
+ *
+ * EQUAL panes. The reconciler takes pane 1 — the seat the keyboard would land
+ * in, if anybody were typing — and the observer sits beside it:
+ *
+ * ```
+ * +---------------+---------------+
+ * |     tri-1     |    obs-t1     |
+ * +---------------+---------------+
+ * ```
+ *
+ * ## What makes this different from `scripts/review`
+ *
+ * Not the shape, and not the fifth process either — both are copied, and
+ * `agentSquarePanes` and `console-relay.ts` are shared rather than duplicated so
+ * the 2x2 and the actor's bookkeeping cannot be got backwards in only one of
+ * them.
+ *
+ * The difference is that NOBODY IS SITTING HERE. Every seat is `pane_mode: rpc`
+ * (SRD-TRIAGE-CONSOLE §6.1), so there is no keyboard in any pane and no
+ * `--attach-here` on any command: this is the first console in this fleet that
+ * runs when nobody is watching, on a five-minute clock, 288 sweeps a day. Two
+ * consequences follow and both are somebody else's code:
+ *
+ *   - the panes are VIEWS, so `--dry-run` is how an operator inspects this
+ *     console far more often than opening it is;
+ *   - a mis-adoption here is quiet in a way a `review` mis-adoption is not —
+ *     four wrong panes in a window nobody opens — which is why `TRIAGE_SPEC`
+ *     exact-matches its workspace title like its three siblings.
+ *
+ * Running it twice is safe and is the expected way to get back to the console: a
+ * `triage` workspace that already exists is selected, not rebuilt — unless its
+ * panes are not this console's, in which case it is REFUSED rather than adopted.
+ *
+ * ## THE FIFTH PROCESS
+ *
+ * The panes are workers and none of them is the ACTOR. `tri-1` can only
+ * ask for a fan-out by writing `dispatch-request.json` into its outbox;
+ * something host-side has to read that and perform the dispatches, and on this
+ * console that same something is also the CLOCK (§6.4 — one process, because a
+ * tick that lands in a run the fan-out no longer serves is a sweep that starts
+ * and never collates).
+ *
+ * It is `pifleet triage` — the clock AND the fan-out in one process — since
+ * SRD-TRIAGE-CONSOLE §13 task 6.7a. It was `pifleet relay --console triage`, the
+ * fan-out half with no clock, and the sentence that stood here said the re-point
+ * *"changes nothing else here"*. **That was false and three things moved with
+ * the argv, none of them visible to a compiler:**
+ *
+ *   1. **THE STARTER NO LONGER TAKES A LOCK.** `runTriageActor` holds
+ *      `triageActorLockPath`, which IS `relayLockPath(CONSOLE)` — the same
+ *      inode this script used to hold across its own `Bun.spawn`. `pifleet
+ *      relay` took no lock, so the overlap was harmless; against the clock the
+ *      fresh actor's claim `EEXIST`s on a LIVE script pid, the takeover
+ *      correctly declines, and the actor exits having started nothing. The
+ *      exclusion did not go away, it MOVED to the actor, which is where §6.3b
+ *      put it: two `./scripts/triage` racing now spawn two actors and the loser
+ *      refuses by name and exits nonzero. That is strictly better than a
+ *      starter-side mutex, because it also excludes an actor nobody started
+ *      from this script.
+ *   2. **THE ACTOR IS ITS OWN RECORD'S ONLY WRITER.** `writeRelayRecord` parses
+ *      through a non-strict `z.object` and STRIPS unknown keys, while §7.7's
+ *      `TriageActorRecordSchema` requires `cadence_s` with no default — so a
+ *      record written from here would make `pifleet triage --status` report
+ *      `actor: refused` for a perfectly healthy actor. Adding the field to the
+ *      literal does not help; the schema strips it on the way out. So this
+ *      script writes NOTHING and the actor writes §7.7's record itself, at the
+ *      end of its first sweep. The cost is stated rather than hidden: between
+ *      the spawn and that first `saveCursor` there is no record, so
+ *      `--actor-stop` cannot name the actor yet.
+ *   3. **`--cadence` IS HONOURED.** `pifleet triage` takes `--poll` and, since
+ *      §13 task 6.9, that override wins over `triage/console.yaml`'s
+ *      `cadence_s`. So the flag is forwarded rather than refused, and it is
+ *      forwarded ONLY when the operator gave it — a script that always passed
+ *      one would silently defeat the file that task 6.9 exists to consult.
+ *
+ * **THERE IS NO `--console` FLAG ON THE CLOCK, and its absence is not an
+ * oversight.** `pifleet triage` IS this console's actor by subcommand: §7.7's
+ * three paths are bound to `TRIAGE_CONSOLE` inside `triage-actor.ts` and no
+ * caller can name the review console at all. That closes §9.13's row here by
+ * construction rather than by remembering a flag — which is what the relay argv
+ * needed, because `consoleRelayArgv` emits no `--console` and `DEFAULT_CONSOLE`
+ * is `"review"`, so spawning it unchanged started a REVIEW actor from this
+ * script and both halves of that were silent.
+ *
+ * WHY THE ACTOR IS NOT WAITED FOR. On a fresh `--recreate` or a first run the
+ * four `pifleet up`s have not finished when this returns, so no run exists to
+ * point an actor at. This script does NOT block: `up` runs the tool-call gate
+ * over every allowlisted model sequentially, and a console script that hangs for
+ * minutes is one an operator kills. It prints the one-line remedy instead — run
+ * this script again, which is already the documented way back to the console.
+ *
+ * Only I/O lives here. The decisions are in
+ * `src/backends/cmux/operations-plan.ts`, `src/backends/cmux/operations.ts`,
+ * `src/run/status-runs.ts`, `src/run/console-relay.ts`, `src/run/fresh-dispatch.ts`
+ * and `src/run/triage-config.ts`, where the unit suites re-check them on every
+ * run. §3.3 is the reason and it is measured: `scripts/` is outside
+ * `tsconfig.json`'s `include` AND unimportable by tests, so nothing in this file
+ * is typechecked or covered (ISC-600). What pins it is
+ * `test/unit/fresh-dispatch.test.ts` and `test/unit/console-restart.test.ts`,
+ * which READ this file.
+ */
+
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+
+import { CmuxClient } from "../src/backends/cmux/client.ts";
+import { loadConfig, resolveWorker } from "../src/config/load.ts";
+import { parseDuration } from "../src/config/schema.ts";
+import { EXIT } from "../src/contracts.ts";
+import {
+  DEFAULT_TRIAGE_WORKERS,
+  TRIAGE_WORKSPACE,
+  triagePanes,
+} from "../src/backends/cmux/operations-plan.ts";
+import {
+  TRIAGE_SPEC,
+  cmuxReachable,
+  ensureTriage,
+  plannedPane,
+  restartConsolePane,
+} from "../src/backends/cmux/operations.ts";
+import {
+  readRelayStatus,
+  relayLockPath,
+  relayLogPath,
+  relayRecordPath,
+  servesConsole,
+  signalRelay,
+} from "../src/run/console-relay.ts";
+import { TRIAGE_CONSOLE_ROSTER } from "../src/run/dispatch-request.ts";
+import { recreateThenDispatch, resolveThenRestart } from "../src/run/fresh-dispatch.ts";
+import { consoleRunPins, relayRunPinValue, runsHoldingAny } from "../src/run/status-runs.ts";
+
+/**
+ * WHICH CONSOLE THIS SCRIPT IS, SPELLED ONCE.
+ *
+ * The actor's record, log and lock are per-console (`console-relay.ts`), and this
+ * name selects all three, plus the identity `servesConsole` compares, plus the
+ * `--console` the actor is launched with. It is a constant rather than six
+ * literals because this file IS the copy `scripts/review`'s own comment
+ * predicted — *"the next console's script is a copy of this one, and a copy in
+ * which exactly one line has to change is a copy that can be made correctly"* —
+ * and scattered `"triage"`s are how §9.13 happens in the other direction: a
+ * copy-paste actor that claims `review-relay.lock`, whose symptom is a review
+ * console that silently stops fanning out.
+ *
+ * `scripts/` is not in `tsconfig.json`'s `include` and this file cannot be
+ * imported by a test — it runs `main()` at import — so nothing here is
+ * typechecked. `relayRecordPath` and friends validate the name at runtime for
+ * exactly that reason, and `CONSOLE_NAMES` is the closed list they check it
+ * against.
+ */
+const CONSOLE = "triage";
+
+const USAGE = `Usage: scripts/triage [options]
+
+  --workers <ids>   comma-separated pifleet workers, in pane order
+                    (default: ${DEFAULT_TRIAGE_WORKERS.join(",")}; at most 4)
+  --backend <kind>  pifleet backend (default: headless)
+  --config <path>   fleet.yaml (default: <repo>/fleet.yaml)
+  --dry-run         print the pane plan and exit without touching cmux
+  --recreate        close an existing triage workspace and rebuild it
+  --restart <id>    respawn ONE worker's pane, leaving the others running
+  --task <path>     with --restart: recreate the worker, then dispatch this
+                    task to the run it comes back in. Waits for any task it
+                    is already holding to finish; never recreates over work.
+  --cadence <dur>   override the sweep cadence for this actor ("5m", "300s").
+                    Reaches it as --poll; without it the actor reads cadence_s
+                    from triage/console.yaml. Not persisted.
+  --no-actor        do not start the actor. The console then has its workers,
+                    no clock and nothing that turns tri-1's dispatch request
+                    into observations; use it when running the actor by hand.
+  --actor-stop      stop this console's actor and exit, touching no pane.
+  -h, --help        this message
+`;
+
+function flag(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(name);
+  if (i === -1) return undefined;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith("--")) {
+    throw new Error(`${name} needs a value`);
+  }
+  return v;
+}
+
+async function main(argv: string[]): Promise<number> {
+  if (argv.includes("-h") || argv.includes("--help")) {
+    process.stdout.write(USAGE);
+    return EXIT.SUCCESS;
+  }
+
+  // `scripts/` sits directly under the repository root.
+  const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+  const watchDir = process.cwd();
+
+  /*
+   * `--cadence` IS PARSED HERE AND HONOURED BY THE ACTOR (§13 task 6.7a).
+   *
+   * §7.8 gives the cadence a home — `cadence_s`, default 300, in
+   * `triage/console.yaml` — and calls this flag *"an override for a hand-run
+   * that does not persist"*. An override needs a process to override and now
+   * there is one: `pifleet triage` takes `--poll`, and since §13 task 6.9 that
+   * flag WINS over the file rather than being the only source. So the value
+   * travels to {@link triageActorArgv} as a number of seconds, and travels only
+   * when the operator typed it — `null` is this script's spelling of *"consult
+   * the file"*, and a script that always passed a number would silently defeat
+   * the file task 6.9 exists to consult.
+   *
+   * `parseDuration` is imported rather than re-spelled here for §3.3's reason —
+   * nothing in this file is typechecked, so a second duration grammar in it
+   * would be a second grammar nobody checks. It throws on `5x`, which is why a
+   * malformed duration is still answered as a duration.
+   *
+   * Parsed before `--actor-stop` because it is a pure judgement about argv and
+   * needs no filesystem, and REFUSED in combination with the two flags that
+   * start no actor: `--actor-stop --cadence 5m` and `--no-actor --cadence 5m`
+   * each name a cadence with nothing to reach, and silently dropping an override
+   * an operator typed is the failure the old unconditional refusal was really
+   * protecting against.
+   */
+  const cadenceFlag = flag(argv, "--cadence");
+  const cadenceS = cadenceFlag === undefined ? null : parseDuration(cadenceFlag);
+  if (cadenceS !== null) {
+    const noActor = ["--actor-stop", "--no-actor"].find((f) => argv.includes(f));
+    if (noActor !== undefined) {
+      throw new Error(
+        `triage: --cadence ${cadenceFlag} is a valid duration (${cadenceS}s) and ${noActor} ` +
+          `starts no actor for it to reach. The cadence is the CLOCK's — it reaches ` +
+          `'pifleet triage' as --poll — so the two flags together mean two incompatible ` +
+          `things. Drop one, or set 'cadence_s' in triage/console.yaml, which is the ` +
+          `value's durable home (SRD-TRIAGE-CONSOLE §7.8).`,
+      );
+    }
+  }
+
+  /*
+   * `--actor-stop` is answered BEFORE the cmux probe, and that is the point of
+   * it: the reason an operator reaches for it is usually that the console is
+   * already gone, and a flag whose whole job is to stop a stray host process
+   * must not require the GUI that stray process outlived. `--relay-stop`'s
+   * argument on `scripts/review`, and it applies harder here — this console is
+   * the one nobody has open, so "the GUI is gone and something is still
+   * running" is its ordinary state rather than its unusual one.
+   */
+  if (argv.includes("--actor-stop")) {
+    await stopActor("because --actor-stop was given");
+    return EXIT.SUCCESS;
+  }
+
+  const workersFlag = flag(argv, "--workers");
+
+  const opts = {
+    repoRoot,
+    watchDir,
+    ...(workersFlag === undefined
+      ? {}
+      : {
+          workers: workersFlag
+            .split(",")
+            .map((w) => w.trim())
+            .filter((w) => w !== ""),
+        }),
+    ...(flag(argv, "--backend") === undefined ? {} : { backend: flag(argv, "--backend")! }),
+    ...(flag(argv, "--config") === undefined ? {} : { configPath: flag(argv, "--config")! }),
+  };
+
+  /**
+   * The console's workers, resolved ONCE.
+   *
+   * The actor's `PIFLEET_RELAY_RUNS` pin has to name the same set the panes were
+   * built from, or it pins three of four and `consoleRunResolution` — which
+   * takes the pinned branch whole — leaves the fourth unresolved for the life of
+   * the process. Re-deriving `opts.workers ?? DEFAULT_TRIAGE_WORKERS` at each
+   * site is how those two sets come to differ under a `--workers` flag.
+   */
+  const triageWorkers = opts.workers ?? DEFAULT_TRIAGE_WORKERS;
+
+  /**
+   * Which of these workers want Pi's own interface — READ FROM THE CONFIG, and
+   * on this console the expected answer is NONE.
+   *
+   * All four seats are `pane_mode: rpc` (§6.1), so `tuiWorkers` should come back
+   * empty and no pane should carry `--attach-here`. It is still read rather than
+   * assumed, for the reason `scripts/development` records in the opposite
+   * direction: the config is what decides, this script is not, and a hard-coded
+   * `[]` here would be a decision in `scripts/` about a fact `fleet.yaml` owns.
+   * What stops a `tui` seat appearing on this console is the config and `up`'s
+   * own one-tui-worker guard — see `DEFAULT_TRIAGE_WORKERS` for why that
+   * enforcement is deliberately not here.
+   */
+  let tuiWorkers: string[] = [];
+  try {
+    const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
+    const set = triageWorkers;
+    tuiWorkers = set.filter((w) => resolveWorker(loaded, w).paneMode === "tui");
+  } catch (err) {
+    process.stderr.write(
+      `triage: could not read pane_mode from the config ` +
+        `(${err instanceof Error ? err.message : String(err)}); the panes will tail their logs\n`,
+    );
+  }
+
+  // Built before the cmux probe on purpose: a bad `--workers` is an argv
+  // mistake, and diagnosing it must not depend on whether the GUI is running.
+  // See `scripts/operations`: the preview must print the command that will
+  // actually run, and the live path folds the title in at `planPanes`.
+  const panes = triagePanes({ ...opts, tuiWorkers, workspaceName: TRIAGE_SPEC.name });
+
+  if (argv.includes("--dry-run")) {
+    process.stdout.write(`workspace: ${TRIAGE_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
+    for (const [i, p] of panes.entries()) {
+      process.stdout.write(`pane ${i + 1} (${p.title}):\n  ${p.command}\n\n`);
+    }
+    /*
+     * THE FIFTH PROCESS IS PREVIEWED TOO, and on this console that matters more
+     * than it would anywhere else: `--dry-run` is how an operator inspects a
+     * console nobody has open, and the actor is the half that runs when nobody
+     * is watching. Printed from {@link triageActorArgv} rather than described,
+     * so a preview that disagreed with what is spawned is unreachable — the
+     * hazard `operations-console.test.ts` records for the pane commands, applied
+     * to the one command those four panes do not carry.
+     *
+     * It is also the only place `--cadence`'s effect is VISIBLE without starting
+     * anything, which is what makes an honoured flag inspectable at all.
+     */
+    process.stdout.write(
+      `actor (${argv.includes("--no-actor") ? "--no-actor: NOT started" : "started last"}):\n` +
+        `  ${triageActorArgv(`${repoRoot}/src/cli/index.ts`, cadenceS).join(" ")}\n\n`,
+    );
+    return EXIT.SUCCESS;
+  }
+
+  /*
+   * `--recreate` stops the runs the OLD panes created, before the new ones make
+   * more — four runs here, as on `review` and `development`, so without it every
+   * rebuild strands four unattached containers and the stale run directories
+   * make `logs --worker` resolve "the most recent run" to whichever still
+   * exists.
+   *
+   * Only runs holding one of THIS console's workers are stopped; the other three
+   * consoles' runs are somebody else's and must survive a triage rebuild.
+   */
+  if (argv.includes("--recreate")) {
+    // BEFORE the runs go down, not after: the actor holds their ids.
+    await stopActor("before the console's runs are stopped");
+    const mine = new Set(triageWorkers);
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, mine)) {
+      process.stderr.write(`triage: stopping run ${runId} before rebuilding\n`);
+      // Best effort. A run that cannot be stopped is worth a line, not a
+      // refusal to open the console the operator asked for.
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+  }
+
+  const client = new CmuxClient();
+  if (!(await cmuxReachable(client))) {
+    process.stderr.write(
+      "triage: no cmux is listening on ~/.local/state/cmux/cmux.sock.\n" +
+        "Start the cmux app, then run this again.\n",
+    );
+    return EXIT.BACKEND_UNAVAILABLE;
+  }
+
+  /*
+   * `--restart <worker>` — one pane, and nothing else touched.
+   *
+   * ORDER IS THE WHOLE OF IT: stop the run, THEN respawn the pane. Respawning
+   * first kills the pane's shell, and the supervisor it launched — which owns a
+   * detached container — is signalled by the dying shell rather than told to
+   * quiesce, leaving a container that no run refers to.
+   */
+  const restartFlag = flag(argv, "--restart");
+  if (restartFlag !== undefined) {
+    /*
+     * REFUSE BEFORE DESTROYING — the pure resolution, handed to whichever
+     * module owns the ordering of the path taken below.
+     *
+     * Everything either path does is irreversible — the actor stop and the run
+     * teardown both — and `plannedPane` is pure, so calling it first costs
+     * nothing when it succeeds and costs nothing when it does not. See
+     * `resolveThenRestart` for the measurement that put this here.
+     */
+    const plan = (): unknown => plannedPane(TRIAGE_SPEC, { ...opts, tuiWorkers }, restartFlag);
+
+    /*
+     * ANY pane, not only the reconciler's. The actor holds `--run` for `tri-1`
+     * and a `PIFLEET_RELAY_RUNS` pin for the three observers, both fixed for the
+     * life of the process, so respawning an observer's pane leaves an actor
+     * whose pin names a run that no longer exists — and a pinned worker that
+     * cannot be resolved refuses every fan-out, quietly, forever. On a console
+     * with no keyboard, "quietly, forever" is the whole failure.
+     *
+     * Passed to BOTH modules rather than called here, so that WHEN it happens is
+     * checked by the unit suite instead of by reading this file. The two paths
+     * need it at different moments and only the modules know which: the bare
+     * path stops it once the title resolves, and the `--task` path stops it once
+     * the worker has gone idle — because that path's wait can end in a refusal,
+     * and a script that stopped it first would make that refusal's "Nothing has
+     * been stopped" false. That is ISC-572, filed on `review` and inherited here
+     * rather than rediscovered.
+     */
+    const quiesce = (): Promise<void> => stopActor(`before the ${restartFlag} pane is respawned`);
+    const taskFlag = flag(argv, "--task");
+    const restartPane = async (): Promise<string> => {
+      const r = await restartConsolePane(client, TRIAGE_SPEC, { ...opts, tuiWorkers }, restartFlag);
+      return r.surfaceId;
+    };
+
+    /*
+     * `--task` makes this RECREATE-THEN-DISPATCH. NOTHING is stopped until the
+     * worker is holding no task, staged ones included — the actor included too,
+     * which is why the stop is handed over below instead of being called here.
+     * The waiting, the refusal and the ordering are in
+     * `src/run/fresh-dispatch.ts` where they are unit-tested.
+     */
+    if (taskFlag !== undefined) {
+      plan();
+      const r = await recreateThenDispatch(
+        {
+          status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          quiesce,
+          down: async (runId) => {
+            process.stderr.write(`triage: stopping run ${runId}\n`);
+            await runOutput(repoRoot, ["down", "--run", runId]);
+          },
+          restartPane: async () => {
+            process.stderr.write(`triage: respawning the ${restartFlag} pane\n`);
+            await restartPane();
+          },
+          // `runChecked`, not `runOutput`: a dispatch's exit status is the only
+          // evidence the task landed, and the wrapper above discards it.
+          dispatch: (runId) =>
+            runChecked(repoRoot, [
+              "dispatch",
+              "--worker",
+              restartFlag,
+              "--run",
+              runId,
+              "--task",
+              taskFlag,
+              "--json",
+            ]),
+          sleep: (ms) => Bun.sleep(ms),
+          now: () => Date.now(),
+        },
+        { worker: restartFlag },
+      );
+      process.stdout.write(
+        `triage: recreated ${restartFlag} into run ${r.runId} ` +
+          `(waited ${Math.round(r.settleWaitMs / 1000)}s for it to go idle, ` +
+          `stopped ${r.stopped.length === 0 ? "nothing" : r.stopped.join(", ")}) ` +
+          `and dispatched ${taskFlag}\n${r.dispatched}`,
+      );
+      if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers, cadenceS);
+      return EXIT.SUCCESS;
+    }
+
+    /*
+     * The bare restart — resolve, quiesce, stop, respawn — and the ORDER of
+     * those four is `resolveThenRestart`'s, not this script's. What is left here
+     * is what only a script can supply: a subprocess runner, a stderr line, an
+     * actor pidfile and a cmux client.
+     */
+    const r = await resolveThenRestart(
+      {
+        plan,
+        status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+        quiesce,
+        down: async (runId) => {
+          process.stderr.write(`triage: stopping run ${runId} before restarting ${restartFlag}\n`);
+          await runOutput(repoRoot, ["down", "--run", runId]);
+        },
+        restartPane,
+      },
+      { worker: restartFlag },
+    );
+    process.stdout.write(
+      `triage: respawned the ${restartFlag} pane (surface ${r.pane}); ` +
+        `the other panes were not touched\n`,
+    );
+    if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers, cadenceS);
+    return EXIT.SUCCESS;
+  }
+
+  const recreate = argv.includes("--recreate");
+  const result = await ensureTriage(client, { ...opts, tuiWorkers }, recreate);
+  process.stdout.write(
+    result.created
+      ? `triage: ${recreate ? "rebuilt" : "created"} workspace ${result.workspaceId} ` +
+        `with ${panes.length} panes\n`
+      : `triage: workspace ${result.workspaceId} is already in place — selected it, ` +
+        `changed nothing (use --recreate to rebuild its panes)\n`,
+  );
+
+  /**
+   * THE FIFTH PROCESS, started last.
+   *
+   * After the panes and never before them: on an adoption the runs are already
+   * up and the pin resolves immediately, and on a fresh create nothing is up yet
+   * either way. Starting first would only mean pointing an actor at the console
+   * that existed a moment ago.
+   *
+   * A failure here does NOT fail the script. The console was built, which is
+   * what the operator asked for; `startActor` prints the remedy on every path it
+   * declines.
+   */
+  if (!argv.includes("--no-actor")) await startActor(repoRoot, triageWorkers, cadenceS);
+  return EXIT.SUCCESS;
+}
+
+/**
+ * The argv this console's actor is launched with — `pifleet triage`, the CLOCK
+ * and the fan-out in one process (§13 task 6.7a).
+ *
+ * ## Three flags this deliberately does not spell
+ *
+ * **No `--console`.** `pifleet triage` has no such option, so one here would be
+ * a bare `commander` usage error handed to a DETACHED process — a record naming
+ * a pid that had already exited, which is §6.4's own failure shape. The flag was
+ * needed by the relay argv because `consoleRelayArgv` emits none and
+ * `DEFAULT_CONSOLE` is `"review"`; the clock closes §9.13's row by construction
+ * instead, because `triage-actor.ts` binds §7.7's three paths to
+ * `TRIAGE_CONSOLE` and no caller can name the other console.
+ *
+ * **No `--run`.** The relay was pointed at one run for its whole life. The clock
+ * re-derives every seat's pin each pass (§6.6 layer 4), and mints new runs
+ * itself when a seat is due, so a run id fixed at spawn would be stale by the
+ * first recycle.
+ *
+ * **No `--poll` unless the operator typed `--cadence`.** `null` means *"consult
+ * `triage/console.yaml`"*, which is exactly what §13 task 6.9 made possible — a
+ * script that always passed a number would silently defeat the file.
+ *
+ * `"triage"` is a SUBCOMMAND name and not this console's identity, which is why
+ * it is a literal here while every path below goes through {@link CONSOLE}: the
+ * subcommand would still be spelled `triage` on a console called something else,
+ * and `test/unit/fresh-dispatch.test.ts` reads this body to decide which world
+ * the file is in.
+ */
+function triageActorArgv(cliEntry: string, cadenceS: number | null): string[] {
+  return [
+    "bun",
+    "run",
+    cliEntry,
+    "triage",
+    ...(cadenceS === null ? [] : ["--poll", String(cadenceS)]),
+  ];
+}
+
+/**
+ * Stop this console's actor, if one we recorded is still running.
+ *
+ * Called before anything that stops a run — `--recreate` and every `--restart` —
+ * because an actor's whole configuration is run ids. It holds `--run <id>` for
+ * `tri-1` and, when the map was complete, a `PIFLEET_RELAY_RUNS` pin for the
+ * three observers; both are fixed for the life of the process. Restarting ANY
+ * pane invalidates them, and an actor left pointing at a dead run polls forever
+ * in silence.
+ *
+ * An UNREADABLE record is left exactly where it is and nothing is signalled. The
+ * pid in it could not be identified, and a pidfile whose identity cannot be
+ * confirmed is the one thing this must never send a signal to — `down.ts`
+ * refuses every pid it cannot confirm for the same reason.
+ */
+async function stopActor(why: string): Promise<void> {
+  const path = relayRecordPath(CONSOLE);
+  const status = await readRelayStatus(path);
+  switch (status.kind) {
+    case "absent":
+      return;
+    case "unreadable":
+      process.stderr.write(
+        `triage: the actor record at ${path} could not be read (${status.reason}); ` +
+          `nothing was signalled and the file was left alone\n`,
+      );
+      return;
+    case "stale":
+      await rm(path, { force: true });
+      return;
+    case "live": {
+      const outcome = signalRelay(status.record.pid);
+      process.stderr.write(
+        `triage: stopping the actor (pid ${status.record.pid}, run ${status.record.run_id}) ` +
+          `${why} — ${outcome}\n`,
+      );
+      if (outcome !== "refused") await rm(path, { force: true });
+      return;
+    }
+  }
+}
+
+/**
+ * Start this console's actor, or say precisely why it was not started.
+ *
+ * ## Idempotent, because "run it again" is the whole supervision story
+ *
+ * An actor derives its state from the run tree, so restarting one costs nothing
+ * and losing one costs only latency. That only holds if something restarts it,
+ * and the something is this script. So a LIVE actor serving THIS console is left
+ * alone and a dead record is replaced, and running `./scripts/triage` twice never
+ * produces two.
+ *
+ * **The record this reads is now written by the ACTOR and never by this script**
+ * (§13 task 6.7a). §7.7's `TriageActorRecordSchema` requires `cadence_s`, which
+ * `writeRelayRecord`'s non-strict schema would strip on the way to disk, so a
+ * record written from here is one `pifleet triage --status` reports as
+ * `actor: refused` — a healthy actor wearing a broken record's costume. One
+ * writer, and it is the process the record is about. The window that opens is
+ * named rather than hidden: from the spawn until the actor's first `saveCursor`
+ * there is no record, so a `./scripts/triage` in that gap starts a second actor
+ * and the second one refuses on §7.7's lock and exits nonzero.
+ *
+ * ## NOTHING IS LOCKED ACROSS THE SPAWN, and that is the same fact from the
+ * other side
+ *
+ * `runTriageActor` takes `triageActorLockPath` — which IS
+ * `relayLockPath(CONSOLE)`, one inode — for the actor's whole life. A
+ * one-starter-at-a-time mutex held here across `Bun.spawn` would therefore
+ * `EEXIST` against a LIVE script pid, the takeover would correctly decline, and
+ * the actor would exit having started nothing. The exclusion moved to §6.3b's
+ * own lock, which is a better place for it: it also excludes an actor this
+ * script did not start.
+ *
+ * ## The pin is all-or-nothing and usually absent on a fresh create
+ *
+ * `relayRunPinValue` refuses to spell a partial pin, because
+ * `consoleRunResolution` takes the pinned branch WHOLE and a worker missing from
+ * the pin is missing for the life of the process. On a fresh create no run
+ * exists yet, so nothing is pinned and nothing is started; on the re-run that
+ * adopts the console, all four are live and the pin is exact.
+ */
+async function startActor(
+  repoRoot: string,
+  workers: readonly string[],
+  cadenceS: number | null,
+): Promise<void> {
+  /**
+   * THE CONSOLE IS RESOLVED FIRST, and the order is what makes the comparison
+   * possible at all: asking whether *an* actor is running answers yes for one
+   * serving a console that was closed an hour ago. `servesConsole` performs the
+   * comparison; this finds the seat it is made against.
+   *
+   * `TRIAGE_CONSOLE_ROSTER.collators` rather than "pane 1", for the reason
+   * `dispatch-request.ts` gives: deriving the role boundary from the LAYOUT
+   * means the day someone reorders the panes, the console keeps starting four
+   * healthy workers and refuses every dispatch.
+   */
+  const reconciler = workers.find((w) => TRIAGE_CONSOLE_ROSTER.collators.includes(w));
+  if (reconciler === undefined) {
+    process.stderr.write(
+      `triage: none of ${workers.join(", ")} is a reconciler ` +
+        `(${TRIAGE_CONSOLE_ROSTER.collators.join(", ")}), so there is no inbox a dispatch ` +
+        `request could arrive in and no actor was started\n`,
+    );
+    return;
+  }
+
+  const map = consoleRunPins(await runOutput(repoRoot, ["status", "--all", "--json"]), workers);
+  const runId = map.pins.get(reconciler);
+
+  const path = relayRecordPath(CONSOLE);
+  const existing = await readRelayStatus(path);
+
+  /**
+   * A record we cannot parse, or whose identity we cannot compare, is left
+   * exactly where it is and nothing is signalled. `unverifiable` is the arm the
+   * capture-failed sentinel and a signal-killed `ps` land in, and both describe
+   * a process that may well be alive — replacing it would leave a second actor
+   * running with no record naming it, which is the state the record exists to
+   * prevent.
+   */
+  if (existing.kind === "unreadable" || existing.kind === "unverifiable") {
+    process.stderr.write(
+      `triage: the actor record at ${path} cannot be trusted (${existing.reason}), so no actor ` +
+        `was started and nothing was signalled — the console has no actor this script will admit ` +
+        `to. Find out what pid ${
+          existing.kind === "unverifiable" ? existing.record.pid : "in that file"
+        } belongs to, then remove the file.\n`,
+    );
+    return;
+  }
+
+  if (existing.kind === "live") {
+    if (runId !== undefined && servesConsole(existing.record, { name: CONSOLE, runId, workers })) {
+      process.stdout.write(
+        `triage: the actor is already running (pid ${existing.record.pid}, run ` +
+          `${existing.record.run_id}); its output is in ${existing.record.log_path}\n`,
+      );
+      return;
+    }
+    if (runId === undefined) {
+      /*
+       * We cannot see this console's reconciler yet, so we cannot say the
+       * running actor is the wrong one. Left alone deliberately: killing it on a
+       * guess would tear down the actor of a console that IS up while this one
+       * is still coming up.
+       */
+      process.stdout.write(
+        `triage: an actor is running for run ${existing.record.run_id}, and this console's ` +
+          `reconciler is not live yet, so it was left alone. Run ./scripts/triage again once ` +
+          `the panes have come up and it will be replaced if it is serving a different ` +
+          `console.\n`,
+      );
+      return;
+    }
+    /*
+     * The mismatch is NAMED rather than assumed to be the run, because a record
+     * written before the actor named its console carries `""`, which matches
+     * nobody — and on the upgrade run its run id can be this console's, so
+     * "serves run r-1, not this console's r-1" would read as a bug in the script
+     * rather than as the one-time replacement it is.
+     */
+    /*
+     * THE THIRD ARM IS ISC-1057's, and its absence is what made that criterion's
+     * restart loop silent. With the console and the run both equal, the only
+     * remaining reason `servesConsole` said no is the worker set — and this
+     * expression fell through to the run arm and printed
+     * `serves run r-1, not this console's r-1`, the same id twice. That is
+     * precisely the reading the comment above calls "a bug in the script": an
+     * operator watching a healthy actor be replaced was told the runs differed
+     * when they did not.
+     */
+    const unserved = workers.filter((w) => !existing.record.workers.includes(w));
+    const mismatch =
+      existing.record.console !== CONSOLE
+        ? `serves console ${JSON.stringify(existing.record.console)}, not ${JSON.stringify(CONSOLE)}` +
+          `${existing.record.console === "" ? " (a record written before the actor named its console)" : ""}`
+        : existing.record.run_id !== runId
+          ? `serves run ${existing.record.run_id}, not this console's ${runId}`
+          : `does not serve ${unserved.join(", ")} — it covers ${existing.record.workers.join(", ")}`;
+    process.stderr.write(
+      `triage: the running actor (pid ${existing.record.pid}) ${mismatch} — stopping it\n`,
+    );
+    await stopActor("because it serves a different console");
+  }
+
+  if (runId === undefined) {
+    const why = map.ambiguous.has(reconciler)
+      ? `${reconciler} is held by ${(map.ambiguous.get(reconciler) ?? []).join(", ")}, so which ` +
+        `run is this console's is not decidable from the outside`
+      : `no live run holds ${reconciler} yet`;
+    process.stdout.write(
+      `triage: the actor was NOT started — ${why}. The console has its workers, no clock and ` +
+        `nothing that turns ${reconciler}'s dispatch request into observations until it is. Run ` +
+        `./scripts/triage again once the panes have come up.\n`,
+    );
+    return;
+  }
+
+/**
+ * `~/.env`, parsed for the ACTOR — the one process on this console that needs it
+ * and the only one that was not getting it.
+ *
+ * **The asymmetry this closes.** Every pane command begins
+ * `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a`, so the four workers
+ * have always had the operator's environment. The actor is spawned from this
+ * script with a bare `process.env`, which is whatever shell happened to run
+ * `./scripts/triage`. That is fine for everything the actor did until §6.9 gave
+ * it a notification channel: `notify.token_env` names a variable that lives in
+ * `~/.env`, and the actor is the ONLY process that ever reads it.
+ *
+ * Measured 2026-09-07: with a valid token minted and `token_env: NTFY_TOKEN` set,
+ * every announcement was still recorded undelivered, because the actor's
+ * environment had no `NTFY_TOKEN` in it. The endpoint was fine, the token was
+ * fine, the config was fine, and nothing said so — the console reported a
+ * delivery failure that was really a missing variable two layers away.
+ *
+ * **The shell's values WIN.** This fills gaps rather than overriding: an operator
+ * who exported a different token for one run means it, and a file quietly
+ * replacing an explicit export is the surprise this must not be. Parsing is
+ * deliberately minimal — `KEY=VALUE`, `#` comments, optional surrounding quotes,
+ * `export ` prefix tolerated — because this reads one operator's file on one
+ * machine and a general dotenv parser here would be a second, untested contract.
+ */
+function hostEnvFile(): Record<string, string> {
+  const path = `${process.env["HOME"] ?? ""}/.env`;
+  if (path === "/.env" || !existsSync(path)) return {};
+  const out: Record<string, string> = {};
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    const line = raw.trim().replace(/^export\s+/, "");
+    if (line === "" || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = line.slice(eq + 1).trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+  const pinned = relayRunPinValue(map, workers);
+  const logPath = relayLogPath(CONSOLE);
+  // Appended to, never truncated: the log is the only place a refusal a
+  // detached process printed can be read afterwards, and a restart must not
+  // erase the reason the previous actor stopped. On this console it is also
+  // the only place ANYTHING is read from — nobody is watching the panes, and
+  // between the spawn and the actor's first `saveCursor` it is the ONLY thing
+  // naming the actor at all.
+  const fd = openSync(logPath, "a");
+  let proc: Bun.Subprocess;
+  try {
+    proc = Bun.spawn(triageActorArgv(`${repoRoot}/src/cli/index.ts`, cadenceS), {
+      cwd: repoRoot,
+      // `~/.env` UNDER `process.env`, so an explicit export always wins.
+      env: {
+        ...hostEnvFile(),
+        ...process.env,
+        ...(pinned === null ? {} : { PIFLEET_RELAY_RUNS: pinned }),
+      },
+      stdin: "ignore",
+      stdout: fd,
+      stderr: fd,
+      /**
+       * A NEW SESSION, not merely an unreferenced child. `proc.unref()`
+       * releases Bun's event loop and does nothing to the OS: the child stays
+       * in this script's process group, so a SIGINT to the terminal that
+       * launched the console — or closing it — takes the actor with it.
+       * `detached` is what makes the actor outlive the command that started
+       * it, and on a console meant to run unattended for days that is not a
+       * nicety.
+       */
+      detached: true,
+    });
+  } finally {
+    closeSync(fd);
+  }
+  proc.unref();
+
+  process.stdout.write(
+    `triage: started the actor (pid ${proc.pid}) for run ${runId}` +
+      `${pinned === null ? " with no worker pin — it resolves each seat from the run tree" : ` pinned to ${pinned}`}` +
+      `${cadenceS === null ? ", at triage/console.yaml's cadence_s" : `, at --poll ${cadenceS}s`}\n` +
+      `triage: its output is in ${logPath}; it exits on its own when this console goes away, ` +
+      `and ./scripts/triage --actor-stop stops it once it has written ${path} — which it does ` +
+      `at the end of its first sweep and not before (§7.7)\n`,
+  );
+  /*
+   * WHY THIS SCRIPT CANNOT REPORT A REFUSAL, said rather than left to be
+   * discovered. `pifleet triage` takes `relayLockPath(CONSOLE)` for its own life
+   * (§6.3b) and exits nonzero if another actor already holds it — but this spawn
+   * is DETACHED and unwaited, deliberately (see the header: a console script
+   * that blocks for minutes is one an operator kills), so that refusal lands in
+   * the log and nowhere else. Naming the file is what makes the log line
+   * actionable, and taking the name from {@link CONSOLE} is what stops it
+   * naming the review console's lock — §9.13 in a sentence rather than in a
+   * signal.
+   */
+  process.stdout.write(
+    `triage: if it refused instead, the reason is in that log and the file to look at is ` +
+      `${relayLockPath(CONSOLE)} — this console's one-actor-at-a-time lock, which the actor ` +
+      `takes itself and this script deliberately does not\n`,
+  );
+}
+
+/**
+ * Run a `pifleet` subcommand and return its stdout, swallowing failure.
+ *
+ * `stderr: "ignore"` is what makes stdout a clean JSON document for
+ * `runsHoldingAny` and `consoleRunPins` — `status` writes its warnings to the
+ * other stream.
+ */
+async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
+  try {
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The same subcommand, with the FAILURE KEPT — for `dispatch` and nothing else.
+ *
+ * `runOutput` above swallows a non-zero exit and discards stderr, which is the
+ * right stance for `status` and for `down` and the wrong one for a dispatch,
+ * where the exit status is the only evidence the task landed. MEASURED on the
+ * review console: a task envelope was refused by the validator, `dispatch`
+ * exited 2, the swallowing wrapper returned `""`, and the script reported a
+ * dispatch that had never reached an inbox. `recreateThenDispatch` refuses an
+ * unlanded dispatch whatever runner it is handed; this is what makes the refusal
+ * SAY SOMETHING, by keeping the validator's own complaint.
+ */
+async function runChecked(repoRoot: string, args: readonly string[]): Promise<string> {
+  const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [out, err] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const code = await proc.exited;
+  if (code !== 0) {
+    // Returned rather than thrown: the caller's own check turns a non-landing
+    // into its refusal, and it names what the recreate already did. Throwing
+    // here would lose that half.
+    return `${out.trim()}\n${err.trim()}`.trim();
+  }
+  return out;
+}
+
+try {
+  process.exit(await main(process.argv.slice(2)));
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`${msg.startsWith("triage:") ? msg : `triage: ${msg}`}\n`);
+  process.exit(EXIT.USAGE);
+}

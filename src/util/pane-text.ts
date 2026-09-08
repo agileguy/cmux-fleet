@@ -169,6 +169,112 @@ export const STAGED_TRIGGER_LINE =
   "# pifleet: a task was staged for you — read /policy/dispatch and do what it says";
 
 /**
+ * Clear the pane's session before a staged task is triggered.
+ *
+ * ## Why this is typed at a pane and not called through the extension API
+ *
+ * `newSession()` is the capability wanted, and it is **unreachable from an
+ * extension**. Measured 2026-09-07 against the pinned image, three ways:
+ *
+ *   EVENT_CTX    newSession=no   compact=YES   ← what `pi.on(...)` handlers get
+ *   COMMAND_CTX  newSession=YES  compact=YES   ← what a command handler gets
+ *   ExtensionAPI executeCommand=undefined, runCommand=undefined
+ *
+ * So an extension cannot reach it from an event, cannot reach it from a shortcut
+ * (`interactive-mode.js`'s shortcut `createContext()` builds `abort`, `compact`
+ * and `shutdown` and no more), and has no API with which to invoke its own
+ * registered command. `sendUserMessage` cannot carry it either — it calls
+ * `prompt()` with `expandPromptTemplates: false` *"to skip command handling"*
+ * (`agent-session.js:1013`), so `/new` sent that way arrives as four characters
+ * of user text and the model reasons about them.
+ *
+ * `newSession` lives in interactive-mode's `commandContextActions`. The only
+ * caller that can reach it is the TUI's own command input — which is a PANE, and
+ * a pane is something this host can already type into.
+ *
+ * ## What it buys, and the problem it actually solves
+ *
+ * A `pane_mode: tui` worker keeps its session across dispatches, so a standing
+ * console accumulates every task of the day into one transcript and a model
+ * holding the last four answers the cheapest way it can — from what it already
+ * has. `fresh-dispatch.ts` records the measured case. The existing remedy is a
+ * container recycle, and that remedy is unavailable to exactly the workers that
+ * need it most: §6.6's recycle is a HEADLESS `up`, which cannot recreate a pane,
+ * so a tui console that recycles tears its seats down and cannot bring them back.
+ * This is the same freshness without the teardown.
+ *
+ * ## `#` does not protect this one, and that is stated rather than glossed
+ *
+ * {@link STAGED_TRIGGER_LINE} is inert in a shell because it begins `#`. THIS
+ * LINE IS NOT, and the hazard it is exposed to is the same one: `docker attach
+ * --detach-keys` makes detach a single keypress pifleet cannot observe, and after
+ * it — or after the container exits — the surface hosts the operator's own shell.
+ *
+ * What happens to `/new` there is a NOISY FAILURE and not an execution. It names
+ * an absolute path that does not exist, so `bash` answers `No such file or
+ * directory` and `zsh` answers `no such file or directory: /new`. It takes no
+ * arguments, expands nothing, and cannot be a prefix of anything else, because
+ * it is the whole line. That is a weaker guarantee than a comment and a stronger
+ * one than arbitrary text, and it is the reason this constant is a CONSTANT
+ * rather than a parameter — see {@link assertHostAuthoredPaneLine}.
+ */
+export const SESSION_RESET_LINE = "/new";
+
+/**
+ * Every line the STAGED-TRIGGER route may type, as a closed set.
+ *
+ * ## Scoped to that route, and the scope is not a detail
+ *
+ * This is NOT "every line this host may type at a surface", and the first draft
+ * of this docblock said that and was wrong. `paneKeystrokes` (`dispatch.ts:382`,
+ * live at `:597`) turns a rendered prompt into N text sends and types it line by
+ * line — arbitrary, worker-visible brief text, guarded by
+ * {@link assertPaneTypeableLine} alone, because what it types cannot be a closed
+ * set and never could be.
+ *
+ * That is the backend-managed route. The STAGED route is the one whose claim is
+ * that a brief never goes near a terminal (`relay.ts:2362`), and it is the only
+ * route this set governs. Two routes, two standards, and conflating them would
+ * either strangle the first or grant the second more than it has earned.
+ *
+ * ## The rule was real and lived nowhere
+ *
+ * `relay.ts:2362` argues that what may land in a shell is `STAGED_TRIGGER_LINE`
+ * *"rather than a markdown brief delivered line by line"* — and that was true by
+ * CONVENTION, held up by each call site passing a constant. Nothing checked it.
+ * A second line to type is exactly the edit that turns a convention into a
+ * regression, so the rule is written down here on the way in.
+ *
+ * `assertPaneTypeableLine` is unchanged and still applies: it rules on what a
+ * pane does to a string (control characters, `\n` becoming Enter, the 1024-char
+ * cap). This is the other question — whether the HOST authored the string at all
+ * — and the two are deliberately separate predicates, because a future line will
+ * need both answers and only one of them is about the text.
+ */
+export const HOST_AUTHORED_PANE_LINES: ReadonlySet<string> = new Set([
+  STAGED_TRIGGER_LINE,
+  SESSION_RESET_LINE,
+]);
+
+/**
+ * {@link assertPaneTypeableLine}, plus: the host wrote this, not a worker.
+ *
+ * The refusal names the set rather than the offending value, because the value
+ * is the thing that must not be echoed if it ever turns out to be a brief.
+ */
+export function assertHostAuthoredPaneLine(what: string, v: string): void {
+  assertPaneTypeableLine(what, v);
+  if (!HOST_AUTHORED_PANE_LINES.has(v)) {
+    throw new Error(
+      `refusing to type ${what} at a pane — only the ${HOST_AUTHORED_PANE_LINES.size} host-authored ` +
+        `lines in HOST_AUTHORED_PANE_LINES may reach a surface, and this is not one of them. ` +
+        `A surface is not reliably the agent: after a detach or a container exit it is the ` +
+        `operator's own shell.`,
+    );
+  }
+}
+
+/**
  * What the auto-trigger extension sends when a staged brief appears (§9 Q4).
  *
  * ## Two copies, on purpose, with a test holding them equal

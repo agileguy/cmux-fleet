@@ -61,14 +61,16 @@
 import { describe, expect, test } from "bun:test";
 
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { stripComments } from "../support/source-structure.ts";
 
 import type { Verdict } from "../../src/contracts.ts";
-import type { RunPaths } from "../../src/run/paths.ts";
+import { runPaths, workerPaths, workerRepliesDir, type RunPaths } from "../../src/run/paths.ts";
+import { createRepliesDir } from "../../src/run/replies.ts";
+import { DuplicateReplyError, writeRepliesPolicy } from "../../src/run/replies-policy.ts";
 import {
   RELAY_SETTLE_DEADLINE_MS,
   RELAY_SETTLE_POLL_MS,
@@ -177,7 +179,20 @@ interface Recorder {
      */
     via: string;
   }>;
-  readonly replies: Array<{ run: string; collator: string; child: string; reply: unknown }>;
+  /**
+   * ONE ROW PER PUBLISHED REPLY, plus the `taskId` the whole set was DECLARED
+   * under — because §7.4 makes those one act and a recorder that kept only the
+   * children could not tell a declared set from an undeclared one.
+   */
+  readonly replies: Array<{
+    run: string;
+    collator: string;
+    taskId: string;
+    child: string;
+    reply: unknown;
+  }>;
+  /** One row per `publishReplies` CALL — the act, not the entries. */
+  readonly declared: Array<{ run: string; collator: string; taskId: string; children: string[] }>;
   readonly harvested: string[];
   readonly slept: number[];
 }
@@ -207,6 +222,7 @@ function effects(
   const rec: Recorder = {
     sent: [],
     replies: [],
+    declared: [],
     harvested: [],
     slept: [],
   };
@@ -267,8 +283,16 @@ function effects(
     async listTaskOutbox() {
       return { kind: "unlistable" as const };
     },
-    async writeReply(run, collator, child, reply) {
-      rec.replies.push({ run: run.runId, collator, child, reply });
+    async publishReplies(run, collator, taskId, replies) {
+      rec.declared.push({
+        run: run.runId,
+        collator,
+        taskId,
+        children: replies.map((r) => r.task_id),
+      });
+      for (const r of replies) {
+        rec.replies.push({ run: run.runId, collator, taskId, child: r.task_id, reply: r.reply });
+      }
     },
     now: () => clock,
     async sleep(ms) {
@@ -991,24 +1015,51 @@ describe("harvest", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. `publishReply` — into the COLLATOR's replies dir, via writeReply.
+// 5. `publishReplies` — into the COLLATOR's replies dir AND its declaration.
 // ---------------------------------------------------------------------------
 
-describe("publishReply", () => {
+describe("publishReplies", () => {
   /**
-   * `writeReply` already performs the chmod-0644 → truncate-in-place →
-   * chmod-0444 recipe, and it must not be reimplemented: a bind mount pins the
-   * inode, so an implementation that wrote a temp file and renamed would
-   * deliver a reply the collator's mount can never see. This asserts the
-   * routing — the right directory owner and the right child id — and leaves the
-   * recipe to `replies.ts`, which owns it.
+   * `writeReply` and `writeRepliesPolicy` already perform the chmod-0644 →
+   * truncate-in-place → chmod-0444 recipe, and it must not be reimplemented: a
+   * bind mount pins the inode, so an implementation that wrote a temp file and
+   * renamed would deliver a reply the collator's mount can never see. This
+   * asserts the routing — the right directory owner, the right child ids, the
+   * right declaring task — and leaves the recipe to the modules that own it.
    */
   test("routes to the collator's own replies dir under the collator's run", async () => {
     const { fx, rec } = effects();
-    await consoleTransport("col-1", fx).publishReply(COL_RUN, "T1-arch", { v: 1 });
-    expect(rec.replies).toEqual([
-      { run: "run-col", collator: "col-1", child: "T1-arch", reply: { v: 1 } },
+    await consoleTransport("col-1", fx).publishReplies(COL_RUN, "T1-collate", [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { v: 1 } },
     ]);
+    expect(rec.replies).toEqual([
+      { run: "run-col", collator: "col-1", taskId: "T1-collate", child: "T1-arch", reply: { v: 1 } },
+    ]);
+  });
+
+  /**
+   * **THE TRANSPORT ADDS NOTHING AND DROPS NOTHING.**
+   *
+   * §7.4's property is that the published set and the declared set cannot
+   * differ, and the mechanism is that ONE array reaches ONE effect. A transport
+   * that filtered, reordered or de-duplicated on the way through would be a
+   * second opinion about the set, and the two halves would then agree only as
+   * long as that opinion did. Asserted by identity rather than by value, which
+   * is the strongest form available here: `toBe` on the array itself.
+   */
+  test("forwards the set by identity — no copy, no filter, no reorder", async () => {
+    let seen: unknown = null;
+    const { fx } = effects({
+      async publishReplies(_run, _collator, _taskId, replies) {
+        seen = replies;
+      },
+    });
+    const set = [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { v: 1 } },
+      { task_id: "T1-ctx", worker: "rev-ctx-1", aspect: "ctx", reply: { v: 2 } },
+    ];
+    await consoleTransport("col-1", fx).publishReplies(COL_RUN, "T1-collate", set);
+    expect(seen).toBe(set);
   });
 });
 
@@ -2296,13 +2347,13 @@ describe("a failed harvest carries a pointer to what it could not read", () => {
   });
 });
 
-describe("writeReply refuses a missing replies mount, by type", () => {
+describe("publishReplies refuses a missing replies mount, by type", () => {
   test("a missing replies directory throws RelayReplyError carrying the facts", async () => {
     const root = await mkdtemp(join(tmpdir(), "pifleet-replies-"));
     // No `up`, so nothing created the collator's replies directory.
-    const p = productionRelayEffects.writeReply({ root } as RunPaths, "col-1", "T1-arch", {
-      verdict: "success",
-    });
+    const p = productionRelayEffects.publishReplies({ root } as RunPaths, "col-1", "T1-collate", [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { verdict: "success" } },
+    ]);
 
     await expect(p).rejects.toBeInstanceOf(RelayReplyError);
     const err = (await p.catch((e: unknown) => e)) as RelayReplyError;
@@ -2314,6 +2365,72 @@ describe("writeReply refuses a missing replies mount, by type", () => {
     expect((err.cause as NodeJS.ErrnoException | undefined)?.code).toBe("ENOENT");
     // And the sentence still tells an operator whose job the directory is.
     expect(err.message).toContain("pifleet up");
+  });
+});
+
+/**
+ * The production publish, over a real directory — WHOSE plane, and whose
+ * declaration.
+ *
+ * The probes in section 5 above inject the effect, so they pin the transport's
+ * ARGUMENTS and not the directory the production effect derives from them. That
+ * gap was measured rather than suspected: `test/mutation/collator-relay.battery.ts`'s
+ * M13 was re-anchored onto `publishReplies` after task 5.3 made the port
+ * set-shaped, and BOTH a subtle wrong plane (the first child's task id) and a
+ * plainly wrong one (`collator + "-elsewhere"`) SURVIVED the whole file. Nothing
+ * here read a byte back off disk at a path it computed independently.
+ *
+ * It is the same argument the `listTaskOutbox` block below makes in as many
+ * words — *"nothing there would notice if the effect derived the wrong host
+ * path, and the path is exactly what it exists to supply"* — and `publishReplies`
+ * had no equivalent. What a wrong plane costs is specific: replies filed under a
+ * child's own directory are invisible to the collator that asked for them,
+ * because `/replies` is mounted per worker, and the collator then reports every
+ * lens missing while every lens sits on disk.
+ *
+ * Both halves of §7.4's one act are checked, at paths this test builds itself
+ * from `join` rather than from the module under test.
+ */
+describe("the production publishReplies files under the COLLATOR's own plane", () => {
+  test("the reply and the declaration both land under the collator, not the child", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-plane-"));
+    try {
+      const collator = "col-1";
+      const child = "T1-arch";
+      // `up` normally makes both; this test is about WHERE, so it makes the
+      // same two by hand and then asserts the effect chose them.
+      await mkdir(join(root, "replies", collator), { recursive: true });
+      await mkdir(join(root, "workers", collator), { recursive: true });
+
+      // `workersDir` as well as `root`: the declaration half reaches
+      // `workerPaths`, which the error-path probe above never gets far enough to
+      // touch. A cast that satisfied only the reply half would have made this
+      // test fail for a reason that is not the one it is about.
+      const run = { root, workersDir: join(root, "workers") } as RunPaths;
+      await productionRelayEffects.publishReplies(run, collator, "T1-collate", [
+        { task_id: child, worker: "rev-arch-1", aspect: "arch", reply: { verdict: "success" } },
+      ]);
+
+      // The reply is in the collator's plane...
+      const landed = await readdir(join(root, "replies", collator));
+      expect(landed).toEqual([`${child}.json`]);
+
+      // ...and NOT in a plane of the child's own, which is what M13's mutation
+      // produces and what nothing in this file could previously see.
+      await expect(readdir(join(root, "replies", child))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      // And the declaration is the collator's, naming that child.
+      const declared = JSON.parse(
+        readFileSync(join(root, "workers", collator, "replies-policy"), "utf8"),
+      ) as { schema: string; task_id: string; replies: Array<{ task_id: string }> };
+      expect(declared.schema).toBe("pifleet.replies/v1");
+      expect(declared.task_id).toBe("T1-collate");
+      expect(declared.replies.map((r) => r.task_id)).toEqual([child]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2473,5 +2590,51 @@ describe("a failed harvest carries its reason", () => {
     const note = harvestFailureNote(undefined);
     expect(note).toBe("it was dispatched but could not be harvested");
     expect(note).not.toContain("FAILED");
+  });
+});
+
+/**
+ * THE DUPLICATE IS REFUSED BEFORE A BYTE LANDS — §7.4, `DuplicateReplyError`.
+ *
+ * Two declared entries naming one child task name ONE file with two
+ * attributions, because the reply path is derived from the child id and only the
+ * second `writeReply` survives. `replies-policy.ts` refuses rather than
+ * deduplicates for that reason; what THIS publisher adds is the ordering that
+ * makes the refusal total, and it is the ordering rather than the throw that has
+ * to be asserted. A publisher that discovered the duplicate after its loop would
+ * leave one lens's bytes on disk under another lens's name, with no declaration
+ * naming them and nothing anywhere saying so.
+ *
+ * So both artefacts are read back after the rejection: the directory is empty
+ * and the previous turn's declaration is byte-for-byte unchanged.
+ */
+describe("publishReplies refuses a duplicate child id and publishes NOTHING", () => {
+  test("nothing is written and the previous declaration is untouched", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-dup-"));
+    const run = runPaths("2026-09-06T00-00-40Z-0040", join(root, ".pifleet"));
+    const paths = workerPaths(run, "col-1");
+    await mkdir(paths.dir, { recursive: true });
+    const repliesDir = workerRepliesDir(run.root, "col-1");
+    await createRepliesDir(repliesDir);
+    // The state a real console is in: a previous turn, correctly declared.
+    await writeRepliesPolicy(paths.repliesPolicy, "T0-collate", [
+      { task_id: "T0-arch", worker: "rev-arch-1", aspect: "arch" },
+    ]);
+    const before = readFileSync(paths.repliesPolicy, "utf8");
+
+    const p = productionRelayEffects.publishReplies(run, "col-1", "T1-collate", [
+      { task_id: "T1-arch", worker: "rev-arch-1", aspect: "arch", reply: { v: 1 } },
+      // Same child, different attribution — the state that cannot be repaired.
+      { task_id: "T1-arch", worker: "rev-ctx-1", aspect: "ctx", reply: { v: 2 } },
+    ]);
+    await expect(p).rejects.toBeInstanceOf(DuplicateReplyError);
+
+    // NOTHING was published: not even the first entry, which is legal on its own.
+    expect(await readdir(repliesDir)).toEqual([]);
+    // And the previous turn's declaration still stands, byte for byte.
+    expect(readFileSync(paths.repliesPolicy, "utf8")).toBe(before);
+
+    // Swept on the SUCCESS path only, so a failure leaves the tree to read.
+    await rm(root, { recursive: true, force: true });
   });
 });

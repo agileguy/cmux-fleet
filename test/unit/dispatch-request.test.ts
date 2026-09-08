@@ -48,8 +48,24 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { DEFAULT_REVIEW_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
+import { parseConfig } from "../../src/config/load.ts";
 import { workerOutboxDir } from "../../src/run/paths.ts";
-import { collationTaskId, isCollationTaskId } from "../../src/run/relay.ts";
+import {
+  collationTaskId,
+  isCollationTaskId,
+  relayFanOut,
+  type RelayTransport,
+} from "../../src/run/relay.ts";
+import {
+  COLLATION_ASPECT,
+  SWEEP_TASK_PREFIX,
+  SweepCounterError,
+  TRIAGE_CONSOLE_ASPECTS,
+  childTaskId,
+  spellable,
+  sweepNumber,
+  sweepTaskId,
+} from "../../src/run/task-ids.ts";
 import {
   ConsoleRosterError,
   DISPATCH_REQUEST_FILE,
@@ -58,15 +74,23 @@ import {
   MAX_DISPATCH_ID_CHARS,
   MAX_DISPATCH_REQUEST_BYTES,
   MAX_DISPATCH_REQUEST_ITEMS,
+  MAX_DISPATCH_SERVICES,
   MAX_DISPATCH_TEXT,
   REVIEW_CONSOLE_ROSTER,
+  TRIAGE_CONSOLE_ROSTER,
   type ConsoleRoster,
+  type DispatchRefusal,
   type DispatchRequestContext,
   type DispatchRequestRead,
   dispatchRequestPath,
   parseDispatchRequest,
   readDispatchRequest,
 } from "../../src/run/dispatch-request.ts";
+import {
+  MAX_SERVICES_PER_ENVIRONMENT,
+  TriageServiceSchema,
+} from "../../src/run/triage-targets.ts";
+import { ROOT, exampleConfig } from "../support/role-docs.ts";
 
 const PARENT = "T-review-1";
 
@@ -89,6 +113,7 @@ const CTX: DispatchRequestContext = {
 const TWO_COLLATORS: ConsoleRoster = {
   collators: ["col-1", "col-2"],
   reviewers: REVIEW_CONSOLE_ROSTER.reviewers,
+  services: "refused",
 };
 
 /**
@@ -103,7 +128,20 @@ const TWO_COLLATORS: ConsoleRoster = {
 const MAX_ROSTER: ConsoleRoster = {
   collators: ["col-1"],
   reviewers: Array.from({ length: MAX_DISPATCH_REQUEST_ITEMS }, (_, i) => `rev-max-${i + 1}`),
+  services: "refused",
 };
+
+/**
+ * {@link MAX_ROSTER} with §7.3's service list REQUIRED.
+ *
+ * The byte-cap fixture below has to be the largest document the SCHEMA can
+ * express, and after §7.3 that document carries eight full `services` lists —
+ * which no roster spelling `services: "refused"` will ever accept. Without this
+ * fixture the maximal-document test would silently become a test of the maximal
+ * document MINUS its largest ASCII term, and the arithmetic in
+ * `MAX_DISPATCH_TEXT`'s docblock would go back to being prose nothing executes.
+ */
+const MAX_TRIAGE_ROSTER: ConsoleRoster = { ...MAX_ROSTER, services: "required" };
 
 /**
  * The most expensive single UTF-16 code unit a JSON document can carry.
@@ -895,13 +933,30 @@ describe("a document that VALIDATES is a document that READS", () => {
    * its bound with the most expensive character there is — measures it, and puts
    * it through the real reader. Any future edit to any of the three constants
    * either keeps the invariant or turns this red.
+   *
+   * **§7.3 added a fifth constant to that list and the fixture grew with it.**
+   * `services` is `MAX_DISPATCH_SERVICES` names of `MAX_DISPATCH_ID_CHARS`
+   * characters per entry — 33.5 KiB of ASCII across the document, the largest
+   * non-text term there is. A maximal fixture that omitted it would still be
+   * over 3 MiB and would still pass, which is exactly why it is spelled: the
+   * term that is absent from the fixture is the term nobody re-derives when the
+   * cap is next argued about.
    */
   test("accepts the largest document the schema can express", async () => {
     const filler = WORST_CASE_UNIT.repeat(MAX_DISPATCH_TEXT);
+    // ASCII at the id bound, and distinct per name so nothing can dedupe them.
+    const services = Array.from({ length: MAX_DISPATCH_SERVICES }, (_, i) =>
+      `svc-${i}`.padEnd(MAX_DISPATCH_ID_CHARS, "x"),
+    );
     const body = JSON.stringify({
       schema: DISPATCH_REQUEST_SCHEMA,
       parent_task_id: PARENT,
-      requests: MAX_ROSTER.reviewers.map((worker) => ({ worker, title: filler, brief: filler })),
+      requests: MAX_TRIAGE_ROSTER.reviewers.map((worker) => ({
+        worker,
+        title: filler,
+        brief: filler,
+        services,
+      })),
     });
 
     // The fixture has to be genuinely large or it proves nothing — a maximal
@@ -912,7 +967,7 @@ describe("a document that VALIDATES is a document that READS", () => {
 
     const root = await runRoot();
     await stage(root, "col-1", PARENT, body);
-    const read = await readDispatchRequest({ runRoot: root, ...CTX, roster: MAX_ROSTER });
+    const read = await readDispatchRequest({ runRoot: root, ...CTX, roster: MAX_TRIAGE_ROSTER });
 
     expect(read.kind).toBe("ok");
     if (read.kind !== "ok") return;
@@ -923,6 +978,7 @@ describe("a document that VALIDATES is a document that READS", () => {
     expect(read.request.requests).toHaveLength(MAX_DISPATCH_REQUEST_ITEMS);
     expect(read.request.requests[0]!.brief.length).toBe(MAX_DISPATCH_TEXT);
     expect(read.request.requests.at(-1)!.title.length).toBe(MAX_DISPATCH_TEXT);
+    expect(read.request.requests.at(-1)!.services).toHaveLength(MAX_DISPATCH_SERVICES);
   });
 });
 
@@ -1079,6 +1135,7 @@ describe("the shape bounds are bounds, not decoration", () => {
   test("refuses more entries than requests[] may hold", () => {
     const roomy: ConsoleRoster = {
       collators: ["col-1"],
+      services: "refused",
       reviewers: Array.from(
         { length: MAX_DISPATCH_REQUEST_ITEMS + 1 },
         (_, i) => `rev-many-${i + 1}`,
@@ -1170,6 +1227,7 @@ describe("the roster is checked before it is trusted", () => {
     const tautology: ConsoleRoster = {
       collators: ["col-1"],
       reviewers: ["col-1", "rev-arch-1", "eng-1"],
+      services: "refused",
     };
 
     expect(() => parseDispatchRequest(valid(), { ...CTX, roster: tautology })).toThrow(
@@ -1186,10 +1244,16 @@ describe("the roster is checked before it is trusted", () => {
    */
   test("refuses a roster with an empty half", () => {
     expect(() =>
-      parseDispatchRequest(valid(), { ...CTX, roster: { collators: [], reviewers: ["rev-arch-1"] } }),
+      parseDispatchRequest(valid(), {
+        ...CTX,
+        roster: { collators: [], reviewers: ["rev-arch-1"], services: "refused" },
+      }),
     ).toThrow(ConsoleRosterError);
     expect(() =>
-      parseDispatchRequest(valid(), { ...CTX, roster: { collators: ["col-1"], reviewers: [] } }),
+      parseDispatchRequest(valid(), {
+        ...CTX,
+        roster: { collators: ["col-1"], reviewers: [], services: "refused" },
+      }),
     ).toThrow(ConsoleRosterError);
   });
 
@@ -1218,6 +1282,7 @@ describe("the roster is checked before it is trusted", () => {
     const twins: ConsoleRoster = {
       collators: ["col-1"],
       reviewers: ["Col-1", "rev-arch-1"],
+      services: "refused",
     };
 
     expect(() => parseDispatchRequest(valid(), { ...CTX, roster: twins })).toThrow(
@@ -1406,5 +1471,804 @@ describe("D7 — a fan-out may not be dispatched from a collation (the depth arm
     expect(isCollationTaskId(collationTaskId(PARENT))).toBe(true);
     expect(collationTaskId(PARENT)).toBe(`${PARENT}-collate`);
     expect(isCollationTaskId(PARENT)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-CONSOLE §13 Phase 2 task 2.1 — a second console, as DATA.
+//
+// The three blocks below are one argument. The first says the request plane
+// serves the triage console with a value and no branch (§2.1, D5). The second
+// pins the two collisions that would make that value unusable at runtime — an
+// aspect named `collate`, and a sweep id ending `-collate` — at the sites that
+// would actually fire, rather than by restating the rules. The third fixes the
+// two refusal codes the partition check will spend (§6.5, D6).
+//
+// **Every fixture here is asymmetric on the suite's own rule.** A triage fixture
+// that would also be refused for a review-console reason proves nothing about
+// the triage roster, so each one is valid in every respect except the thing its
+// test names — and each collision test carries the CONTROL arm that shows the
+// probe can go red, because a predicate that answered `false` unconditionally
+// would satisfy every collision assertion in this file.
+// ---------------------------------------------------------------------------
+
+/** The sweep this suite dispatches: a full day of them at the default cadence. */
+const SWEEP = sweepTaskId(288);
+
+/**
+ * The `cni-dev` environment `triage/targets.yaml` declares (§6.2).
+ *
+ * Real names rather than `a`/`b`/`c`, for `triage-partition.test.ts`'s reason: a
+ * fixture spelled alphabetically makes an order-dependent bug read as an
+ * alphabetisation bug.
+ */
+const TRIAGE_SERVICES = ["mia", "authorization", "authentication"] as const;
+
+/**
+ * `tri-1`'s fan-out — one entry per observer, which is the width §6.5 fixes.
+ *
+ * Every entry carries a `services` share, because after §7.3 a triage request
+ * without one is refused `services_missing` before any roster rule is reached —
+ * so a helper that omitted it would make every OTHER test in this block assert
+ * its refusal for the wrong reason, which is the asymmetry rule this file opens
+ * with, broken by a fixture helper rather than by a fixture.
+ */
+function triageFanOut(taskId: string, workers: readonly string[]): string {
+  return JSON.stringify({
+    schema: DISPATCH_REQUEST_SCHEMA,
+    parent_task_id: taskId,
+    requests: workers.map((w, i) => item(w, { services: [TRIAGE_SERVICES[i % 3]] })),
+  });
+}
+
+/** The triage console, as `readDispatchRequest` will be handed it by the actor. */
+function triageCtx(taskId: string): DispatchRequestContext {
+  return { sender: "tri-1", taskId, roster: TRIAGE_CONSOLE_ROSTER };
+}
+
+describe("the triage console is a second ROSTER, not a second mechanism", () => {
+  /**
+   * The positive control, and the block does not mean anything without it.
+   *
+   * Every other test here asserts a refusal, and a roster that refused
+   * everything would satisfy all of them while being a console that sweeps
+   * nothing 288 times a day. This is the test that fails on that.
+   */
+  test("accepts tri-1's fan-out to its three observers", () => {
+    const read = parseDispatchRequest(
+      triageFanOut(SWEEP, TRIAGE_CONSOLE_ROSTER.reviewers),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    expect(read.request.requests.map((r) => r.worker)).toEqual(["obs-t1"]);
+  });
+
+  /**
+   * §12's own partition probe, quoted: *"A request naming one observer twice is
+   * refused. Probe: the existing `duplicate_target` code, driven through the
+   * triage roster — this asserts the roster is wired, not that zod works."*
+   *
+   * The value of the refusal is `duplicate_target` and not a new code, which is
+   * D5 arriving as behaviour: a partition that names one observer twice is a
+   * LOST SERVICE — the third observer is never asked — and the rule that catches
+   * it was written for the review console's consensus arithmetic and needed no
+   * amendment to catch this.
+   */
+  test("refuses a partition naming one observer twice, on the existing code", () => {
+    const read = parseDispatchRequest(
+      triageFanOut(SWEEP, ["obs-t1", "obs-t1"]),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("duplicate_target");
+  });
+
+  /**
+   * The sharpest available fixture, and it is sharp because the target is REAL.
+   *
+   * `rev-arch-1` is a live worker with a live socket in the review console, so
+   * nothing downstream would refuse a dispatch to it: the triage actor would
+   * quietly hand a hosted reviewer a cluster-observation brief, 288 times a day,
+   * and the only trace would be tasks in a run nobody is watching. The reason
+   * must name the TRIAGE observers, because a refusal listing `rev-arch-1,
+   * rev-ctx-1, rev-lang-1` as the permitted set would mean the review console's
+   * roster was the one in force — the exact defect this test exists to catch,
+   * and one that a bare `expect(refused)` would sail past.
+   */
+  test("refuses a worker that belongs to the OTHER console", () => {
+    const outsider = "rev-arch-1";
+    const read = parseDispatchRequest(
+      triageFanOut(SWEEP, ["obs-t1", outsider, "obs-t3"]),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("worker_not_in_console");
+    expect(read.reason).toContain(outsider);
+    // The PERMITTED set the reason prints is the triage one. The offender is
+    // quoted too, which is why it is excluded below rather than asserted absent.
+    for (const observer of TRIAGE_CONSOLE_ROSTER.reviewers) {
+      expect(read.reason).toContain(observer);
+    }
+    for (const reviewer of REVIEW_CONSOLE_ROSTER.reviewers.filter((r) => r !== outsider)) {
+      expect(read.reason).not.toContain(reviewer);
+    }
+  });
+
+  /**
+   * An observer that asks for a fan-out is a worker with `cloud_access: true`
+   * and `egress_access: true` acquiring the right to task the other two. The
+   * sender is the DIRECTORY, so this is a worker that genuinely attempted it.
+   */
+  test("refuses an observer asking for a dispatch, because only tri-1 may ask", () => {
+    const read = parseDispatchRequest(triageFanOut(SWEEP, ["obs-t2"]), {
+      sender: "obs-t1",
+      taskId: SWEEP,
+      roster: TRIAGE_CONSOLE_ROSTER,
+    });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("sender_not_collator");
+    expect(read.reason).toContain("tri-1");
+  });
+
+  /**
+   * The anti-drift pin, and it is against the TRACKED config for CI's reason:
+   * `fleet.yaml` is gitignored, so a probe reading it is red on a clean
+   * checkout (`reviewer-role.test.ts:354-359`).
+   *
+   * Without this the roster is a second, private spelling of the console's
+   * membership. Rename a seat in `fleet.example.yaml` and not here and the
+   * console comes up with four healthy `rpc` workers while every sweep's
+   * fan-out is refused as "outside the console" — a failure whose message
+   * points at the roster rather than at the rename.
+   *
+   * **The ROLE is asserted as well as the id**, because an id that still exists
+   * under a different role is the more likely edit and the more confusing
+   * outcome: `tri-1` demoted to `observer` would still be found here and would
+   * be dispatched a partition brief it has no prompt for.
+   *
+   * **What this does NOT pin, so the silence is not read as coverage.**
+   * `REVIEW_CONSOLE_ROSTER` is pinned to `DEFAULT_REVIEW_WORKERS` as a SET, in
+   * both directions. This console has no worker-set export yet — the pane plan
+   * is Phase 4 — so a FIFTH seat added to the config and not to this roster
+   * passes here. When `DEFAULT_TRIAGE_WORKERS` lands, this should become the
+   * same set equality.
+   */
+  test("names four seats the tracked example declares, by id and by role", async () => {
+    const path = `${ROOT}fleet.example.yaml`;
+    const { config } = await parseConfig(exampleConfig(), path);
+    const roles = new Map(config.workers.map((w) => [w.id, w.role]));
+
+    expect(TRIAGE_CONSOLE_ROSTER.collators.map((id) => [id, roles.get(id)])).toEqual([
+      ["tri-1", "triage"],
+    ]);
+    expect(TRIAGE_CONSOLE_ROSTER.reviewers.map((id) => [id, roles.get(id)])).toEqual([
+      ["obs-t1", "observer"],
+
+    ]);
+  });
+
+  /**
+   * Two consoles sharing a seat is two actors dispatching one worker, and
+   * neither would ever see the other's tasks. `assertRoster` cannot detect it —
+   * it is handed one roster at a time — so the only place it is visible is
+   * here, where both are in scope.
+   */
+  test("shares no worker with the review console", () => {
+    const review = new Set([...REVIEW_CONSOLE_ROSTER.collators, ...REVIEW_CONSOLE_ROSTER.reviewers]);
+    const triage = [...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ROSTER.reviewers];
+
+    expect(triage.filter((id) => review.has(id))).toEqual([]);
+  });
+});
+
+describe("the two `collate` collisions task 2.1 names are pinned, not remembered", () => {
+  /**
+   * A transport that must never be reached.
+   *
+   * `relayFanOut` validates its aspect table SYNCHRONOUSLY, before the returned
+   * promise exists, and resolves `run_unresolved` on an empty worker→run map
+   * without dispatching anything. So every method here is a claim: if one is
+   * called, the test's premise is wrong and it says so rather than passing.
+   */
+  const NEVER_REACHED: RelayTransport<string> = {
+    dispatch: () => {
+      throw new Error("the aspect table is validated before anything is dispatched");
+    },
+    awaitSettled: () => {
+      throw new Error("no child was dispatched, so none can settle");
+    },
+    harvest: () => {
+      throw new Error("no child was dispatched, so none can be harvested");
+    },
+    publishReplies: () => {
+      throw new Error("no reply exists to publish");
+    },
+  };
+
+  /**
+   * TRIPWIRE 1 — no triage aspect may be named `collate`.
+   *
+   * `resolveAspects` (`relay.ts:162-169`) throws `RelayAspectError` on one, so a
+   * rename that reintroduced the collision would take the actor down on its
+   * first tick rather than on the 288th sweep — but only if something calls it,
+   * and nothing in this repository calls it with the triage table yet.
+   *
+   * So the collision is asserted through the MECHANISM rather than by comparing
+   * the table to a copy of the rule: derive each seat's child id with the real
+   * `childTaskId` and ask the real `isCollationTaskId` about it. That is the
+   * composition the guard exists to prevent, and it is red the moment an aspect
+   * is renamed — including if `COLLATION_ASPECT` itself is renamed to match one.
+   */
+  test("no triage aspect derives a child id the collation predicate accepts", () => {
+    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+      expect(seat.aspect).not.toBe(COLLATION_ASPECT);
+      expect(isCollationTaskId(childTaskId(SWEEP, seat.aspect))).toBe(false);
+    }
+
+    // THE CONTROL ARM. Without it the loop above passes against a predicate that
+    // answers `false` to everything, which is exactly the mutation that would
+    // make this criterion decorative.
+    expect(isCollationTaskId(childTaskId(SWEEP, COLLATION_ASPECT))).toBe(true);
+  });
+
+  /**
+   * TRIPWIRE 1, at the guard rather than at the mechanism.
+   *
+   * The table is handed to the same `relayFanOut` the review console uses, so
+   * `resolveAspects` runs on it for real: an aspect named `collate`, a duplicate
+   * aspect, a duplicate worker or an unspellable name all throw here and this
+   * test reports the throw. Reaching `run_unresolved` is the proof the table was
+   * validated and ACCEPTED — the outcome is the next decision after it.
+   */
+  test("the triage aspect table is accepted by the fan-out's own validator", async () => {
+    const read = parseDispatchRequest(
+      triageFanOut(SWEEP, TRIAGE_CONSOLE_ROSTER.reviewers),
+      triageCtx(SWEEP),
+    );
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+
+    const outcome = await relayFanOut({
+      request: read.request,
+      sender: "tri-1",
+      runs: new Map<string, string>(),
+      transport: NEVER_REACHED,
+      aspects: TRIAGE_CONSOLE_ASPECTS,
+    });
+
+    expect(outcome.kind).toBe("refused");
+    expect(outcome.kind === "refused" && outcome.code).toBe("run_unresolved");
+  });
+
+  /**
+   * TRIPWIRE 2 — no sweep task id may end `-collate`.
+   *
+   * `isCollationTaskId` is consulted by `checkDepth` BEFORE the request file is
+   * parsed, so a sweep id ending that way would refuse `tri-1`'s fan-out
+   * outright — every sweep, forever, with a message about a review console's
+   * depth bound. The id is minted rather than written as a literal, so the
+   * assertion is about the FORMAT and survives a change to the counter.
+   */
+  test("no minted sweep id is a collation id", () => {
+    for (const n of [1, 2, 288, 100_000, Number.MAX_SAFE_INTEGER]) {
+      expect(isCollationTaskId(sweepTaskId(n))).toBe(false);
+    }
+  });
+
+  /**
+   * TRIPWIRE 2, at the site that enforces it.
+   *
+   * The pair is the whole test. A sweep id fans out; the same id with
+   * `-collate` appended is refused `collation_parent` by the same call, with
+   * the same roster and the same bytes otherwise. So the acceptance above is
+   * attributable to the id's shape and to nothing else, and the refusal is
+   * demonstrably reachable rather than assumed.
+   */
+  test("a sweep id fans out, and the same id suffixed `-collate` does not", () => {
+    const observers = TRIAGE_CONSOLE_ROSTER.reviewers;
+    expect(parseDispatchRequest(triageFanOut(SWEEP, observers), triageCtx(SWEEP)).kind).toBe("ok");
+
+    const collation = `${SWEEP}-${COLLATION_ASPECT}`;
+    const read = parseDispatchRequest(triageFanOut(collation, observers), triageCtx(collation));
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("collation_parent");
+  });
+
+  /**
+   * The sweep id has to survive both derivations it will actually undergo —
+   * §6.3 step 5 derives three children from it and step 8 derives
+   * `T-sweep-<n>-collate`. Both throw above 64 characters, so this is the bound
+   * the counter is really held to, asserted at a counter no fleet will reach.
+   *
+   * `sweepNumber` is anchored at BOTH ends, which is what stops an actor
+   * re-deriving its cursor from the run tree (D12) from reading a child or a
+   * collation as a sweep and minting an id one of them already holds.
+   */
+  test("a sweep id round-trips, and its children and collation are derivable", () => {
+    const n = Number.MAX_SAFE_INTEGER;
+    const sweep = sweepTaskId(n);
+
+    expect(sweepNumber(sweep)).toBe(n);
+    expect(collationTaskId(sweep)).toBe(`${sweep}-${COLLATION_ASPECT}`);
+    expect(spellable(collationTaskId(sweep))).toBe(true);
+
+    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+      expect(spellable(childTaskId(sweep, seat.aspect))).toBe(true);
+      expect(sweepNumber(childTaskId(sweep, seat.aspect))).toBeNull();
+    }
+    expect(sweepNumber(collationTaskId(sweep))).toBeNull();
+    expect(sweepNumber(SWEEP_TASK_PREFIX)).toBeNull();
+  });
+
+  /**
+   * The counter is refused, and the second assertion is why the first has to
+   * exist at all.
+   *
+   * `T-sweep--1` and `T-sweep-1.5` both SATISFY the id grammar — they begin
+   * alphanumeric, end alphanumeric, and `-` and `.` are legal interior
+   * characters — so `spellable` is not what refuses a bad cursor and a template
+   * with no check would put either on disk as a real outbox directory.
+   */
+  test("a counter that is not a sweep number is refused, and the grammar is not what refuses it", () => {
+    for (const n of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
+      expect(() => sweepTaskId(n)).toThrow(SweepCounterError);
+    }
+
+    expect(spellable(`${SWEEP_TASK_PREFIX}--1`)).toBe(true);
+    expect(spellable(`${SWEEP_TASK_PREFIX}-1.5`)).toBe(true);
+  });
+});
+
+describe("the partition's two refusal codes join the request plane's alphabet", () => {
+  /**
+   * **The probe for membership is `bun run typecheck`, not this array.**
+   * `satisfies` makes the assignment a compile-time claim: delete either code
+   * from `DispatchRefusal` and `tsc --noEmit` fails on this line. A runtime
+   * check could only compare two string literals to themselves.
+   */
+  const PARTITION_REFUSALS = [
+    "partition_incomplete",
+    "partition_duplicate",
+  ] as const satisfies readonly DispatchRefusal[];
+
+  test("the two codes are distinct, because they are different operator answers", () => {
+    // §6.5 makes them different failures: a service nobody looked at, versus a
+    // service two observers both claimed. One code for both would report the
+    // second as the first and send an operator looking for a missing report.
+    expect(new Set<string>(PARTITION_REFUSALS).size).toBe(PARTITION_REFUSALS.length);
+  });
+
+  /**
+   * The boundary D6 draws, asserted from this side of it.
+   *
+   * A two-of-three partition is a REFUSAL — `partition_incomplete`, and the
+   * whole file — but not here and not by this module: completeness is a question
+   * about `triage/targets.yaml`, which this module has never heard of. So the
+   * request plane must ACCEPT this document and `src/run/triage-partition.ts`
+   * (Phase 5) must refuse it.
+   *
+   * **This is the test that reddens if a future edit tries to answer
+   * completeness here**, which is the plausible mistake now that the codes are
+   * declared in this file — and it would be a quiet one, because a module that
+   * refused a short partition would look like it was doing the right thing while
+   * holding a dependency on a config file it must not have.
+   */
+  test("a two-of-three partition is accepted HERE — completeness is not this module's question", () => {
+    const read = parseDispatchRequest(
+      triageFanOut(SWEEP, ["obs-t1"]),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    expect(read.request.requests).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-CONSOLE §7.3 (RESOLVED 2026-09-06, arm 1) — `services` on the
+// request, and the roster as the discriminator.
+//
+// §7.3 makes the two halves ONE rule rather than a concession: *"A field merely
+// optional everywhere would make `partition_incomplete` unreachable by the
+// cheapest failure available to a model — omitting it — and an unreachable
+// refusal is a check that passes because nothing asked."* So the block below is
+// shaped around that pair. Every fixture is asymmetric on this file's own rule:
+// each is valid in every respect except the one thing its test names.
+//
+// **The degenerate implementation this block exists to kill** is one that reads
+// the console off something other than the roster — the sender's id, the `obs-`
+// prefix on the targets, a literal `"triage"` — because such an implementation
+// is GREEN on every fixture that pairs the triage roster with triage ids, and
+// every obvious fixture does exactly that. The two crossed rosters below are
+// what separate it.
+// ---------------------------------------------------------------------------
+
+/** The triage ids under a roster that REFUSES service lists — a crossed pair. */
+const TRIAGE_IDS_NO_SERVICES: ConsoleRoster = { ...TRIAGE_CONSOLE_ROSTER, services: "refused" };
+
+/** The review ids under a roster that REQUIRES them — the mirror of the above. */
+const REVIEW_IDS_WITH_SERVICES: ConsoleRoster = { ...REVIEW_CONSOLE_ROSTER, services: "required" };
+
+/** A triage fan-out with the `services` key omitted from every entry. */
+function triageFanOutWithoutServices(taskId: string, workers: readonly string[]): string {
+  return JSON.stringify({
+    schema: DISPATCH_REQUEST_SCHEMA,
+    parent_task_id: taskId,
+    requests: workers.map((w) => item(w)),
+  });
+}
+
+describe("§7.3 — `services` is required on triage and refused on review", () => {
+  /**
+   * The positive control for the required half. Without it, an implementation
+   * that refused every triage request would satisfy the refusal test below while
+   * being a console that sweeps nothing 288 times a day.
+   */
+  test("a triage request carrying its share is accepted, and the share survives the parse", () => {
+    const read = parseDispatchRequest(
+      triageFanOut(SWEEP, TRIAGE_CONSOLE_ROSTER.reviewers),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    // BY VALUE. A parse that dropped the field would leave `partitionFromRequests`
+    // projecting an idle observer and the sweep refused as incomplete — a
+    // failure whose message points at the model rather than at the schema.
+    expect(read.request.requests.map((r) => r.services)).toEqual([["mia"]]);
+  });
+
+  /**
+   * §7.3's triage row: *"refused, `services_missing`"*.
+   *
+   * **This is the cheapest failure a model has** — not writing a field — and
+   * §7.3's whole argument for making the field required rather than optional is
+   * that this refusal must exist. An optional field makes this document legal,
+   * `partitionFromRequests` project three empty shares, and the sweep refused
+   * downstream as `partition_incomplete` naming every service in the
+   * environment: a true statement that points the operator at the targets file
+   * instead of at the request that dropped the list.
+   */
+  test("a triage request with no services is refused, by code", () => {
+    const read = parseDispatchRequest(
+      triageFanOutWithoutServices(SWEEP, TRIAGE_CONSOLE_ROSTER.reviewers),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("services_missing");
+  });
+
+  /**
+   * §7.3's review row: *"refused, `services_not_permitted`"* — the section's own
+   * promise, *"refused whole, with the field named"*, **spent on the new field
+   * rather than weakened by it**.
+   */
+  test("a review request carrying services is refused, by code", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: PARENT,
+      requests: [item("rev-arch-1"), item("rev-ctx-1", { services: ["mia"] }), item("rev-lang-1")],
+    });
+
+    const read = parseDispatchRequest(body, CTX);
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("services_not_permitted");
+    // The whole file, and the OFFENDING entry named. A refusal that said only
+    // "this console does not take services" would leave an eight-entry document
+    // to be bisected by hand.
+    expect(read.reason).toContain("request 2");
+  });
+
+  /**
+   * **NO REVIEW REQUEST CHANGES BEHAVIOUR**, which is §7.3's argument for why
+   * arm 1 costs "a schema line" rather than "a console". The shipping review
+   * document is exactly today's shape and is accepted.
+   */
+  test("the review console's own document is unchanged — accepted, with no services", () => {
+    const read = parseDispatchRequest(valid(), CTX);
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    for (const entry of read.request.requests) expect(entry.services).toBeUndefined();
+  });
+
+  /**
+   * THE DISCRIMINATOR IS THE ROSTER, AND THIS PAIR IS THE ONLY THING THAT SAYS SO.
+   *
+   * Both fixtures cross the ids with the rule: triage senders and triage targets
+   * under a roster that refuses service lists, and review senders and review
+   * targets under one that requires them. Nothing else about either document
+   * changes.
+   *
+   * An implementation that read the console from the sender id, from the `obs-`
+   * prefix on the targets, from a literal `"triage"`, or from
+   * `roster === TRIAGE_CONSOLE_ROSTER` is GREEN on every other fixture in this
+   * file and RED on both of these — which is the degenerate-fixture defect this
+   * block's header names, applied to a discriminator rather than to a set.
+   */
+  test("the roster decides, not the sender and not the worker ids", () => {
+    const onTriageIds = parseDispatchRequest(triageFanOut(SWEEP, ["obs-t1"]), {
+      sender: "tri-1",
+      taskId: SWEEP,
+      roster: TRIAGE_IDS_NO_SERVICES,
+    });
+
+    expect(onTriageIds.kind).toBe("refused");
+    if (onTriageIds.kind !== "refused") return;
+    expect(onTriageIds.code).toBe("services_not_permitted");
+  });
+
+  test("the roster decides in the other direction too", () => {
+    const onReviewIds = parseDispatchRequest(valid(), {
+      sender: "col-1",
+      taskId: PARENT,
+      roster: REVIEW_IDS_WITH_SERVICES,
+    });
+
+    expect(onReviewIds.kind).toBe("refused");
+    if (onReviewIds.kind !== "refused") return;
+    expect(onReviewIds.code).toBe("services_missing");
+  });
+
+  /**
+   * §6.4's whole-file rule, on the new field: one entry short of a share poisons
+   * the document rather than being dropped from it.
+   *
+   * The other two entries are perfectly formed, so an implementation that
+   * filtered — turning a three-observer sweep into a two-observer one — is green
+   * on a bare `expect(refused)` and red here, because the refusal is asserted
+   * against the entry INDEX.
+   */
+  test("one entry missing its share refuses the whole file, naming that entry", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      // The console has one observer, so the file is one entry — and that entry
+      // omits `services` entirely, which is the refusal this test is about.
+      requests: [item("obs-t1")],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("services_missing");
+    expect(read.reason).toContain("request 1");
+  });
+
+  /**
+   * AN EMPTY LIST IS PRESENT, and this is the boundary §6.5 and §7.3 draw
+   * between the two modules.
+   *
+   * §6.5's `1 ≤ N < 3` row — *"an idle observer is not an error"* — makes an
+   * empty share legal, and completeness is a question about `triage/targets.yaml`
+   * that this module *"has never heard of and must not grow a dependency on"*.
+   * So `[]` is accepted HERE and refused by `checkTriagePartition`, which
+   * `triage-partition.test.ts` drives end to end.
+   *
+   * The hazard this pins is a `.min(1)` added here for tidiness: it would refuse
+   * the legal small environment, and it would answer a targets-file question in
+   * the one module that must not read one.
+   */
+  test("an empty share is present, not missing — completeness is the other module's question", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [item("obs-t1", { services: [] })],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    expect(read.request.requests[0]!.services).toEqual([]);
+  });
+
+  /**
+   * PRECEDENCE, and it is a decision rather than an accident of statement order.
+   *
+   * A request that both reaches outside the console AND drops its share reports
+   * the reach. The roster rules answer *"may this dispatch happen at all, and to
+   * whom"* — `rev-arch-1` is a live worker with a live socket, so a dispatch to
+   * it SUCCEEDS and leaves its only trace in a run nobody is watching — and a
+   * capability fault of that kind must never be masked by a complaint about a
+   * field's absence.
+   *
+   * The mirror fixture is what makes this an assertion about ordering rather
+   * than about one document: the same missing share, with every target legal,
+   * reports `services_missing`. Swap the two checks in `parseDispatchRequest`
+   * and exactly one of this pair goes red.
+   */
+  test("a roster fault outranks a missing share", () => {
+    const read = parseDispatchRequest(
+      triageFanOutWithoutServices(SWEEP, ["obs-t1", "rev-arch-1"]),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("worker_not_in_console");
+  });
+
+  test("the same missing share, with every target legal, reports the share", () => {
+    const read = parseDispatchRequest(
+      triageFanOutWithoutServices(SWEEP, ["obs-t1"]),
+      triageCtx(SWEEP),
+    );
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("services_missing");
+  });
+});
+
+describe("§7.3 — the shape of a service list, and the two constants behind it", () => {
+  /**
+   * **The probe for membership is `bun run typecheck`, not this array.** Same
+   * mechanism as `PARTITION_REFUSALS` above: delete either code from
+   * `DispatchRefusal` and `tsc --noEmit` fails on this line.
+   */
+  const SERVICE_REFUSALS = [
+    "services_missing",
+    "services_not_permitted",
+  ] as const satisfies readonly DispatchRefusal[];
+
+  test("the four triage codes are four distinct operator answers", () => {
+    // §6.5's two and §7.3's two, together: a service nobody looked at, a service
+    // two observers claimed, a request that named none, and a request that named
+    // some on a console with no environment to name them from. Collapsing any
+    // pair reports one as the other and sends an operator to the wrong file.
+    const all: string[] = [...SERVICE_REFUSALS, "partition_incomplete", "partition_duplicate"];
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  /**
+   * The wire tag stays `v1`, and §7.3 records that as a DECISION: *"a v1 reader
+   * meeting a triage request refuses it on `services_not_permitted` regardless,
+   * so a bump buys no refusal that is not already there."*
+   *
+   * Pinned because the plausible edit — a schema grew a field, bump the tag — is
+   * one this document specifically argued against, and it would cost an edit to
+   * `roles/collator.md`, a model-facing prompt with no test.
+   */
+  test("the wire tag is unchanged", () => {
+    expect(DISPATCH_REQUEST_SCHEMA).toBe("pifleet.dispatchrequest/v1");
+  });
+
+  /**
+   * The cap on one share is the cap on one ENVIRONMENT, and the two constants
+   * are spelled in two modules on purpose — `dispatch-request.ts` must not grow
+   * a dependency on `triage/targets.yaml`. This is the pin that makes the
+   * duplication safe: raise `MAX_SERVICES_PER_ENVIRONMENT` alone and a legal
+   * partition starts being refused as `schema`, which names neither file.
+   */
+  test("a share may be as large as the environment the targets file may declare", () => {
+    expect(MAX_DISPATCH_SERVICES).toBe(MAX_SERVICES_PER_ENVIRONMENT);
+  });
+
+  test("refuses a share longer than one environment may be", () => {
+    const services = Array.from({ length: MAX_DISPATCH_SERVICES + 1 }, (_, i) => `svc-${i}`);
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [item("obs-t1", { services })],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("schema");
+  });
+
+  test("accepts a share of exactly the bound, so > cannot silently become >=", () => {
+    const services = Array.from({ length: MAX_DISPATCH_SERVICES }, (_, i) => `svc-${i}`);
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [item("obs-t1", { services })],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    expect(read.request.requests[0]!.services).toHaveLength(MAX_DISPATCH_SERVICES);
+  });
+
+  /**
+   * A SERVICE NAME BECOMES A PATH SEGMENT, so it is held to a GRAMMAR and not
+   * merely to a length — `parent_task_id`'s argument, one level further out.
+   *
+   * §6.8 keys an incident record by service name under `~/.pifleet/triage/`, and
+   * the value on this path was written by a container. A length bound alone
+   * accepts `../../control-auth.json`; the fixture below is that exact string,
+   * so the refusal is a traversal refusal and not a naming convention.
+   *
+   * **Refused HERE rather than left to the partition check**, which could only
+   * ever report such a name as `undeclared` — true, and arriving after the
+   * string has already been carried through the actor.
+   */
+  test("refuses a service name that is a traversal rather than a name", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [item("obs-t1", { services: ["mia", "../../control-auth.json"] })],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("schema");
+  });
+
+  test("refuses a service name longer than a name may be", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [item("obs-t1", { services: ["s".repeat(MAX_DISPATCH_ID_CHARS + 1)] })],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("schema");
+  });
+
+  /**
+   * The grammar this module holds a CLAIMED name to is the grammar
+   * `triage-targets.ts` holds a DECLARED one to, and the pin is executed against
+   * both schemas rather than asserted in prose.
+   *
+   * Asymmetric on purpose: the table carries names that pass BOTH and names that
+   * fail BOTH, and a fixture holding only one of the two would be satisfied by a
+   * grammar that admits everything or nothing. If the two ever diverge, a
+   * partition naming a service the operator legitimately declared would be
+   * refused `schema` — a refusal that names neither file.
+   */
+  test("a claimed name is held to the same grammar as a declared one", () => {
+    const cases: readonly (readonly [string, boolean])[] = [
+      ["mia", true],
+      ["authorization", true],
+      ["a.b_c-d", true],
+      ["../../etc", false],
+      ["a/b", false],
+      [".hidden", false],
+      ["", false],
+    ];
+
+    for (const [name, legal] of cases) {
+      const declared = TriageServiceSchema.safeParse({
+        name,
+        namespace: "cni-dev",
+        checks: ["rollout"],
+      });
+      const body = JSON.stringify({
+        schema: DISPATCH_REQUEST_SCHEMA,
+        parent_task_id: SWEEP,
+        requests: [item("obs-t1", { services: [name] })],
+      });
+      const claimed = parseDispatchRequest(body, triageCtx(SWEEP));
+
+      expect(declared.success, `declared "${name}"`).toBe(legal);
+      expect(claimed.kind, `claimed "${name}"`).toBe(legal ? "ok" : "refused");
+    }
   });
 });

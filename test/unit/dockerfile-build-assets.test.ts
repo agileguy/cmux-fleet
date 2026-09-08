@@ -2,12 +2,27 @@
  * Every `COPY` source in `docker/Dockerfile` is enrolled in `BUILD_CONTEXT_ASSETS`
  * (ISC-270).
  *
- * WHAT IS BROKEN TODAY: NOTHING, and that is the point. The array is
- * `["Dockerfile", "verbgate", "entrypoint.sh"]` and the only context sources in
- * the Dockerfile are `docker/verbgate` (lines 78-82) and `docker/entrypoint.sh`
- * (line 164), so it covers the build context exactly. This file is not a
- * repair. It is the thing that keeps the array correct once nobody remembers
- * that it has to be.
+ * WHAT IS BROKEN TODAY: NOTHING, and that is the point. `BUILD_CONTEXT_ASSETS`
+ * carries eight names; the Dockerfile reads seven distinct files out of the
+ * build context — `docker/verbgate` (COPYed five times, once per gated cloud
+ * binary), `docker/ticket-cli`, `docker/entrypoint.sh`, `docker/honeypot.cjs`,
+ * and the three `docker/pi-extensions/*.ts` — and `Dockerfile` itself is the
+ * eighth enrolled name, the one nothing COPYs because it IS the recipe. So the
+ * array covers the build context exactly. This file is not a repair. It is the
+ * thing that keeps the array correct once nobody remembers that it has to be.
+ *
+ * AND THAT PARAGRAPH HAS BEEN WRONG BEFORE, which is the more useful fact
+ * about it. It read, until 2026-09-08: *"The array is `["Dockerfile",
+ * "verbgate", "entrypoint.sh"]` and the only context sources in the Dockerfile
+ * are `docker/verbgate` (lines 78-82) and `docker/entrypoint.sh` (line 164)"*.
+ * Every clause of that was true when it was written and not one of them was
+ * true when it was read: `honeypot.cjs`, `ticket-cli` and three pi-extensions
+ * arrived after it, and both line numbers had moved by hundreds. A header that
+ * enumerates is a header that rots, and a rotted header that still SOUNDS
+ * authoritative is worse than none — it tells the next reader the array is
+ * three names long while they are looking at eight. The enumerations that are
+ * load-bearing are therefore the assertions below, which fail when they are
+ * wrong; the count above is prose and no line number appears in it deliberately.
  *
  * THE FAIL-OPEN IT CLOSES. `configHash` hashes the content of every file in
  * `BUILD_CONTEXT_ASSETS` and nothing else, and the array is maintained BY HAND.
@@ -26,14 +41,49 @@
  * reader in BOTH directions, so `expect(offenders).toEqual([])` below is an
  * empty array the reader is demonstrably capable of filling.
  *
+ * ENROLMENT IS NOT THE WHOLE CLAIM, and the last block in this file is the
+ * other half. Everything above asks whether a name is IN a list. What ISC-270
+ * actually protects is that the image TAG moves when an enrolled file's bytes
+ * move, and those are different claims: the first is satisfied by an array
+ * entry, the second by `configHash` reading that entry off disk and the tag
+ * carrying the result. `test/unit/render.test.ts`'s ISC-160 block is the
+ * closest existing mechanism, and it moves a digest STRING inside an
+ * `ImageInputs` record rather than moving bytes on disk.
+ *
+ * UPDATED 2026-09-08 (GAP-160, ISC-1075). When this docblock was written that
+ * block covered `Dockerfile`, `verbgate` and `entrypoint.sh` ONLY, and for
+ * every other enrolled name the strongest assertion anywhere was MEMBERSHIP —
+ * one `expect(BUILD_CONTEXT_ASSETS).toContain(...)` apiece in
+ * `ticket-cli.test.ts`, `auto-trigger.test.ts` and
+ * `truncation-recovery.test.ts`, and for `honeypot.cjs` not even that. It now
+ * ranges over `honeypot.cjs`, `ticket-cli` and both older `pi-extensions/`
+ * files as well. **That does not make this file redundant, and the distinction
+ * is why both exist**: the widened block still moves a digest string, so it
+ * proves the hash READS each entry; this file moves real bytes, so it proves
+ * the tag MOVES. `report-tools.ts` had
+ * nothing at all before this file. The final block below
+ * closes that for `pi-extensions/report-tools.ts` end to end: it calls the real
+ * `imageTag` twice across a real edit to the real file and compares the twelve
+ * hex characters. Delete the array entry and it goes red, which is the whole
+ * point of writing it that way round.
+ *
  * Two files off disk, no daemon, no image build: this runs in the fast `test`
  * job on every PR and does not wait on the `up` image gate that ISC-32 and
  * ISC-189 are blocked behind.
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { BUILD_CONTEXT_ASSETS, buildContextPath, dockerfilePath } from "../../src/container/image.ts";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { loadConfig } from "../../src/config/load.ts";
+import {
+  BUILD_CONTEXT_ASSETS,
+  buildContextDigests,
+  buildContextPath,
+  dockerfilePath,
+  imageTag,
+} from "../../src/container/image.ts";
 import {
   assetNameOf,
   buildContextSources,
@@ -58,7 +108,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
     // the Dockerfile is clean and when the parse silently matched nothing, and
     // only one of those two is evidence.
     const sources = buildContextSources(DOCKERFILE);
-    expect(sources.length).toBeGreaterThanOrEqual(6);
+    expect(sources.length).toBeGreaterThanOrEqual(7);
 
     const names = new Set(sources.map((s) => assetNameOf(s.source)));
     expect(names).toEqual(
@@ -69,6 +119,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "ticket-cli",
         "pi-extensions/dispatch-trigger.ts",
         "pi-extensions/truncation-recovery.ts",
+        "pi-extensions/report-tools.ts",
       ]),
     );
   });
@@ -96,6 +147,13 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // every clipped result goes back to looking exactly as it did when a
       // worker re-ran the same command twice and answered nothing.
       "pi-extensions/truncation-recovery.ts",
+      // Added 2026-09-08. The third in-process extension, and the only one of
+      // the three that does not fail by falling silent: `submit_report`
+      // validates and only then writes, so a stale copy keeps emitting
+      // well-formed `pifleet.result/v1` envelopes — against a rule set that has
+      // moved, and reading `task_id`/`epoch` out of `/policy/task` by a recipe
+      // that has moved. The harvester cannot tell the two apart.
+      "pi-extensions/report-tools.ts",
     ]);
   });
 
@@ -207,5 +265,89 @@ describe("the reader itself — both directions, on fixtures", () => {
   test("lowercase instructions are Dockerfile-legal and are read", () => {
     const text = ["FROM scratch", "copy docker/somefile /x"].join("\n");
     expect(unenrolledSources(text, enrolled)).toHaveLength(1);
+  });
+});
+
+/**
+ * The acceptance ISC-270 is actually about: the TAG MOVES.
+ *
+ * Everything above is enrolment — a name is in a list, and a `COPY` has a
+ * matching entry. That is necessary and it is not the claim. The claim is that
+ * editing the file produces a different image tag, and enrolment only implies
+ * it if `configHash` really reads the enrolled name off disk and the tag really
+ * carries the result. Those are three functions and a filesystem, and the
+ * membership assertions above exercise none of them.
+ *
+ * WHY THE FILE IS EDITED FOR REAL. `render.test.ts`'s ISC-160 block does this
+ * for `Dockerfile`, `verbgate` and `entrypoint.sh` by taking `imageInputs()`
+ * and appending `"-edited"` to one digest inside the returned record. That is a
+ * good test of `configHash` and it deliberately stops short of the filesystem:
+ * the string it substitutes is one `assetDigestAt` could never produce. The
+ * gap it leaves is the one that matters here — whether `buildContextPath`
+ * resolves this asset to the file the Dockerfile COPYs — so this test moves
+ * bytes on disk and calls the real `imageTag` on both sides, which is the
+ * end-to-end statement and the one the SRD asks for.
+ *
+ * THE EDIT IS APPEND-ONLY, RESTORED IN `finally`, AND THE RESTORE IS ASSERTED.
+ * A test that mutates a tracked file owes the reader all three. The window is a
+ * few microseconds inside one synchronous block, `bun test` runs files
+ * serially, and the restore is checked by digest AFTER the `finally` rather
+ * than assumed — a `finally` that silently failed to write would otherwise
+ * leave the tree dirty and this test still green.
+ */
+describe("the tag moves when an enrolled file's bytes move (ISC-270 acceptance)", () => {
+  const EXAMPLE = join(import.meta.dir, "..", "..", "fleet.example.yaml");
+  const ASSET = "pi-extensions/report-tools.ts" as const;
+  /** The last field of `<prefix>:<pi-version>-<toolchain>-<config-hash>`. */
+  const TAG = /^(.*)-([0-9a-f]{12})$/;
+
+  /** sha256 of raw bytes — for proving the restore, not for hashing content. */
+  const bytesOf = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
+
+  test("editing docker/pi-extensions/report-tools.ts changes imageTag's twelve hex characters", async () => {
+    const { config } = await loadConfig(EXAMPLE);
+    const path = buildContextPath(ASSET);
+    const original = readFileSync(path);
+
+    const before = imageTag(config, "base");
+    let after: string;
+    try {
+      // Append-only, and content a source file would never carry by accident:
+      // the point is a byte change, and the smallest honest one is a comment.
+      writeFileSync(path, Buffer.concat([original, Buffer.from("\n// ISC-270 tag-movement probe\n")]));
+      after = imageTag(config, "base");
+    } finally {
+      writeFileSync(path, original);
+    }
+
+    // The restore, first and unconditionally: every assertion below is worth
+    // less than a clean tree, and this is the one that reports a dirty one.
+    expect(bytesOf(readFileSync(path))).toBe(bytesOf(original));
+
+    // Both sides are real tags. Without this, "the hashes differ" would also be
+    // satisfied by a garbage value or a truncated string.
+    const b = TAG.exec(before);
+    const a = TAG.exec(after);
+    expect(b, `${before} is not in imageTag's format`).not.toBeNull();
+    expect(a, `${after} is not in imageTag's format`).not.toBeNull();
+
+    // The hash moved…
+    expect(a![2]).not.toBe(b![2]);
+    // …and ONLY the hash moved. The prefix carries the image name, the pi
+    // version and the toolchain, none of which this edit touches — so pinning
+    // it is what makes the inequality above a statement about the build
+    // context rather than about two unrelated tags.
+    expect(a![1]).toBe(b![1]);
+  });
+
+  test("the digest the hash records for the extension is the bytes on disk", () => {
+    // Derived independently of `image.ts`, so this compares two separately
+    // arrived-at values rather than a function against itself. Without it the
+    // test above would still pass if `buildContextPath` resolved somewhere
+    // else entirely and the edit happened to land in the hashed file anyway.
+    const onDisk = createHash("sha256")
+      .update(readFileSync(buildContextPath(ASSET), "utf8").replace(/\r\n/g, "\n"))
+      .digest("hex");
+    expect(buildContextDigests()[ASSET]).toBe(onDisk);
   });
 });

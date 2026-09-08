@@ -1,0 +1,118 @@
+# The triage console's own configuration — `pifleet.triageconsole/v1`.
+#
+# SRD-TRIAGE-CONSOLE §7.8. Tracked, and validated by `pifleet config validate`
+# in the same pass as `fleet.yaml` and `triage/targets.yaml`.
+#
+# ------------------------------------------------------------------------------
+# THE EMPTINESS IS THE DELIVERABLE. DO NOT HELPFULLY FILL THIS IN.
+#
+# §13 task 3.6 asks for this file to carry `version: 1` and nothing else, "so
+# that the tracked example is also the proof that the defaults are reachable".
+# Every one of the nine knobs and the whole `notify` block have documented
+# defaults in §7.8's table, and a default an operator has to type is not a
+# default — it is a value with a suggested spelling, and the second copy of it
+# in this file is the one that drifts. Writing `cadence_s: 300` here would look
+# like documentation and would in fact be a second definition of 300, silently
+# outranking the schema the day the schema changes.
+#
+# So the shipped values live in `TriageConsoleConfigSchema`
+# (`src/run/triage-config.ts`) and this file proves you can reach them:
+#
+#   cadence_s              300     §6.4's tick. `--cadence` overrides a hand-run
+#   reserve_s               60     the margin sweep_deadline_s is derived against
+#   max_consecutive_skips    3     fifteen minutes of not sweeping (§6.8a)
+#   recycle_after_sweeps    48     four hours; 0 disables (§6.6, Q5)
+#   flap_threshold           3     §6.8
+#   flap_window_s         3600     §6.8
+#   renotify_after_s     21600     six hours; 0 disables. §6.8 and §8 both warn
+#                                  that setting this small undoes the design
+#   notify                 the ntfy block; `notify: null` disables the channel
+#                          without disabling the console (§6.9 requirement 7)
+#
+# `sweep_deadline_s` IS NOT A FIELD. It is computed as `cadence_s - reserve_s`
+# (§7.8 property 1), so with the defaults it is 240s. Writing the key here is a
+# field-level error naming the key, because a value that must always equal a
+# function of two others is one that will one day disagree with them. Raise
+# `reserve_s` to shorten the deadline.
+#
+# `notify.token_env` defaults to `null` and the shipped endpoint
+# (https://ntfy.agileguy.ca/Alerts) refused an anonymous read with 403 when it
+# was measured on 2026-09-06 — so out of the box this console will not publish.
+# That is deliberate and is §11 Q11: the alternative is a credential baked into
+# a tracked file, which is the thing `notifyEndpointIssue` exists to refuse from
+# the other direction. Mint a token, export it on the HOST, and name the
+# variable — never the value — here:
+#
+#   notify:
+#     token_env: NTFY_TOKEN
+#
+# An endpoint carrying the token instead — userinfo, or ntfy's own documented
+# `?auth=<token>` query form — is REFUSED at load, because this file is tracked,
+# `~/.pifleet/triage.log` appends forever, and `pifleet triage --status` prints
+# the endpoint.
+# ------------------------------------------------------------------------------
+
+version: 1
+
+# HOW OFTEN THE SEATS ARE RECREATED, and why this is not 1.
+#
+# A tui/rpc seat keeps its session between dispatches, so a low number is what
+# stops the collator accumulating a day of sweeps into one transcript and
+# answering from what it already holds (fresh-dispatch.ts has the measured case).
+#
+# But 1 does NOT work, and it was tried: a sweep spans more than one pass by
+# design — the pass dispatches the observers without waiting, and a LATER pass
+# collects their artifacts through `resumableSweep`, which reads the CURRENT
+# run's tree. A recycle mints a new run, so at 1 every sweep's outbox is stranded
+# in a run the next pass cannot see, and the observer is torn down mid-turn on the
+# way. Measured 2026-09-07: three consecutive sweeps each dispatched, completed in
+# ~90s having collected nothing, and recycled the still-working observer.
+#
+# DISABLED, because this console's seats are `pane_mode: tui` and the two cannot
+# both hold. §6.6 layer 4's recycle is a HEADLESS `up` — "no `--attach-here`,
+# which is the whole reason this console can be recycled by a process with no
+# terminal". A headless run creates no pane, so a recycle takes a tui seat DOWN
+# and cannot bring it back: measured 2026-09-07, the console died at 15:57 that
+# way and both seats stayed down until they were rebuilt by hand.
+#
+# The recycle is the half given up rather than the panes, because every worker in
+# this fleet is a tui and an operator who cannot watch the console cannot trust
+# it — while the recycle's job, stopping a day's transcript accumulating into one
+# session, can be done deliberately with `./scripts/triage --recreate`.
+#
+# THE COST IS REAL and returns the moment this is 0: the collator keeps its
+# session between dispatches, so it accumulates every sweep of the day and a model
+# holding four previous sweeps answers from what it already has
+# (`fresh-dispatch.ts` records the measured case). Recreate the console by hand
+# when the panes get long. If this is ever set back above 0, the seats must go
+# back to `rpc` in the same edit.
+#
+# (6 was the value while the seats were rpc — thirty minutes at a 300s cadence.
+# 1 does NOT work at any pane_mode: a sweep spans more than one pass, and a
+# recycle every pass strands each sweep's outbox in a run the next pass cannot
+# see. Measured: three sweeps dispatched, completed in ~90s having collected
+# nothing, and recycled the still-working observer.)
+recycle_after_sweeps: 0
+
+# A 35B OBSERVER NEEDS LONGER THAN A FIVE-MINUTE TICK.
+#
+# `sweep_deadline_s` is `cadence_s - reserve_s` and is not a field. At the
+# defaults (300 - 60 = 240s) the join gave up on a live sweep at 240,087 ms while
+# the observer was still working -- measured 2026-09-07 with Qwen3.5-35B-A3B-8bit
+# in the seat, mid-way through writing its artifact. That is the deadline being
+# wrong, not the observer: 474 tool calls and 13 writes is what checking three
+# services against a live control plane actually costs on a 35B.
+#
+# 900 - 120 = 780s. Thirteen minutes for a sweep, and a tick every fifteen.
+cadence_s: 900
+reserve_s: 120
+
+# The channel. Only the env var NAME is here — §6.9 requirement 4 and the block
+# comment above: a token in a tracked file is the thing `notifyEndpointIssue`
+# exists to refuse, and `pifleet triage --status` prints the endpoint.
+#
+# Measured 2026-09-07 before this was set: anonymous POSTs to the endpoint below
+# were answered 403 and every announcement was recorded undelivered, which is the
+# "out of the box this console will not publish" case the comment above predicts.
+notify:
+  token_env: NTFY_TOKEN

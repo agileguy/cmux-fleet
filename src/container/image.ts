@@ -131,6 +131,18 @@ export const BUILD_CONTEXT_ASSETS = [
   // exactly as it did on the day a worker re-ran the same command twice and
   // answered nothing. Nothing fails; the banner is just absent.
   "pi-extensions/truncation-recovery.ts",
+  // The result-envelope extension (SRD-WORKER-DISPATCH-EXTENSION D1). The third
+  // in-process asset, and the one whose staleness is hardest to see from
+  // outside, because it is the only one that does not fail by ABSENCE.
+  // `submit_report` validates and only then writes, and it composes
+  // `schema`/`task_id`/`epoch`/`worker` by READING `/policy/task` rather than
+  // by trusting the model — so an image carrying an older copy goes on emitting
+  // well-formed `pifleet.result/v1` envelopes on the ordinary path. What has
+  // moved is the rule set they were checked against and the recipe those four
+  // fields came from, and the harvester cannot tell an envelope written by a
+  // stale validator from one written by the current one. The two extensions
+  // above at least fall silent; this one keeps answering.
+  "pi-extensions/report-tools.ts",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 
@@ -202,11 +214,16 @@ export interface ImageInputs {
    * without being added to `BUILD_CONTEXT_ASSETS`.)
    *
    * Hashing the Dockerfile alone closed only part of that. The Dockerfile
-   * `COPY`s two files it does not contain: `docker/verbgate`, which IS the
+   * `COPY`s files it does not contain, and the two that motivated this were
+   * `docker/verbgate`, which IS the
    * cloud-mutation gate enforcing ISC-104/105/106/107, and
    * `docker/entrypoint.sh`, which renders `models.json`. Editing either left
    * the tag fixed, so a stale image with an OLD verb gate — the highest-
    * consequence staleness there is — was silently reusable.
+   * (COUNT DELIBERATELY NOT RESTATED, 2026-09-08: it was "two" when this was
+   * written and is seven now, and a number in prose beside the array that
+   * defines it is a second definition of the same fact. `BUILD_CONTEXT_ASSETS`
+   * below IS the count; that is what a reader should count from.)
    */
   assets: Record<BuildContextAsset, string>;
 }

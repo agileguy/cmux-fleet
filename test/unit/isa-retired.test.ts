@@ -148,6 +148,48 @@ export function retirementProblems(isa: string): string[] {
   return problems;
 }
 
+/**
+ * Retirements that legitimately carry NO registered claim, each with its reason.
+ *
+ * The test below says *"if a retirement legitimately has none, say so here
+ * rather than deleting this"*, so this is that saying-so, and it is a set rather
+ * than a loosened assertion: a retirement not named here still has to carry a
+ * guard. The distinction is whether the retired premise ever had a mechanism of
+ * its own to lose. Both 2026-08-30 retirements did — a grant line that names
+ * variables rather than values, an empty policy write, the absence of
+ * `PIFLEET_TASK_ID` from `src/` — and dropping those would have used `[-]` to
+ * delete a live guard by re-grading the document above it.
+ */
+const NO_CLAIMS_BY_CONSTRUCTION = new Map<string, string>([
+  [
+    "ISC-608",
+    "Its subject was a BLANKET `--cadence` refusal in `scripts/triage`, and task 6.7a removed the " +
+      "blanket: the flag now reaches the actor as `--poll <seconds>`. `scripts/` is invisible to both " +
+      "`tsc` and the test loader (ISC-600), so this criterion never had a registry claim to lose — its " +
+      "evidence was always a source probe in `fresh-dispatch.test.ts`, and that probe survives as " +
+      "ISC-1053's, asserting the half that is still true.",
+  ],
+  [
+    "ISC-1034",
+    "Its subject was `actor_unbudgeted`, an EVENT whose whole purpose was to announce that §6.10's " +
+      "producer was built and not yet wired — and whose retirement is the wire landing. The event, " +
+      "its union arm, its log line and its two tests were deleted together, so there is no shipped " +
+      "code left for a claim to guard: the guarantee moved into the type system, where " +
+      "`TriageConsolePorts.budget` being REQUIRED is the mechanism and `bun run typecheck` runs it. " +
+      "A registry claim here would assert the absence of a deleted event, which is weaker than what " +
+      "the compiler already says.",
+  ],
+  [
+    "ISC-698",
+    "Its subject was `window_checked`, a FIELD that task 5.3d deleted, and its probe was a " +
+      "test asserting that field's two values. There is no shipped code left for a claim to " +
+      "guard: the guarantee moved into the type system, where ISC-760's two @ts-expect-error " +
+      "directives are the mechanism and `bun run typecheck` is what runs them. A registry " +
+      "claim here would have to assert the absence of a deleted field, which is a weaker " +
+      "statement than the compiler already makes and would go stale the day the name is reused.",
+  ],
+]);
+
 describe("every retirement in ISA.md is a supersession (ISC-368)", () => {
   test("each [-] criterion names a closed criterion that names it back", () => {
     const problems = retirementProblems(ISA);
@@ -166,8 +208,8 @@ describe("every retirement in ISA.md is a supersession (ISC-368)", () => {
    * one. Retiring a third criterion is a legitimate thing to do; doing it
    * without touching this file is not.
    */
-  test("the retired set is exactly the two criteria whose premises were superseded", () => {
-    expect(retiredIds(ISA)).toEqual(["ISC-307", "ISC-360"]);
+  test("the retired set is exactly the criteria whose premises were superseded", () => {
+    expect(retiredIds(ISA)).toEqual(["ISC-307", "ISC-360", "ISC-608", "ISC-698", "ISC-1034"]);
   });
 
   /**
@@ -186,11 +228,11 @@ describe("every retirement in ISA.md is a supersession (ISC-368)", () => {
     for (const id of retiredIds(ISA)) {
       const claims = ISA_CLAIMS.filter((c) => c.isc === id);
       expect(
-        claims.length,
+        claims.length > 0 || NO_CLAIMS_BY_CONSTRUCTION.has(id),
         `${id} is retired and has no claims left in test/support/isa-claims.ts. ` +
           `Both criteria retired on 2026-08-30 carried guards over code that still ships; ` +
           `if a retirement legitimately has none, say so here rather than deleting this.`,
-      ).toBeGreaterThan(0);
+      ).toBe(true);
       for (const c of claims) {
         expect(
           c.grade,

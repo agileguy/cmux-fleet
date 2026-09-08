@@ -299,11 +299,46 @@ describe("a restart resolves its title before it stops anything", () => {
     expect(plannedPane(OPERATIONS_SPEC, OPTS, "observer").command).toContain("up");
   });
 
+  /**
+   * The PROPERTY is unchanged — an unplannable name refuses before anything is
+   * destroyed — but `obs-1` is no longer an example of one. ISC-1106 made the
+   * operations console accept its workers' ids as well as its pane titles,
+   * because refusing the id while the title silently orphaned the container was
+   * the trap that left two live runs for one worker, twice. So the refusal is
+   * re-pinned on a name no console builds.
+   */
   test("the measured case refuses, naming what operations does hold", () => {
-    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-1")).toThrow(
+    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-9")).toThrow(
       /not a pane this console plans/,
     );
-    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-1")).toThrow(/observer/);
+    expect(() => plannedPane(OPERATIONS_SPEC, OPTS, "obs-9")).toThrow(/observer/);
+  });
+
+  /**
+   * ISC-1106. `--restart obs-1` used to be refused as "not a pane this console
+   * plans" while `--restart observer` respawned the pane and stopped nothing —
+   * so the console had no safe restart path at all. Both spellings now resolve
+   * to the same pane, and the pane knows which worker it runs.
+   */
+  test("operations resolves a pane by worker id as well as by title", () => {
+    const byTitle = plannedPane(OPERATIONS_SPEC, OPTS, "observer");
+    const byWorker = plannedPane(OPERATIONS_SPEC, OPTS, "obs-1");
+    expect(byWorker.title).toBe("observer");
+    expect(byWorker.command).toBe(byTitle.command);
+    expect(byTitle.worker).toBe("obs-1");
+    expect(plannedPane(OPERATIONS_SPEC, OPTS, "ticketing").worker).toBe("tick-1");
+  });
+
+  /** A pane that runs no worker says so, rather than being given its own title. */
+  test("the monitor pane carries no worker", () => {
+    expect(plannedPane(OPERATIONS_SPEC, OPTS, "monitor").worker).toBeUndefined();
+  });
+
+  /** On the agent-square consoles the two spellings coincide, and must stay equal. */
+  test("an agent-square pane's worker is its title", () => {
+    const p = plannedPane(DEVELOPMENT_SPEC, OPTS, "tst-2");
+    expect(p.worker).toBe("tst-2");
+    expect(p.worker).toBe(p.title);
   });
 
   test("a console asked for another console's live worker refuses too", () => {
@@ -371,7 +406,7 @@ describe("every console script hands its --restart ordering to the module", () =
     return i;
   };
 
-  for (const script of ["operations", "development", "review"]) {
+  for (const script of ["operations", "development", "review", "triage"]) {
     test(`scripts/${script} gives the bare --restart to resolveThenRestart`, async () => {
       const src = await source(script);
       const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
@@ -418,44 +453,215 @@ describe("every console script hands its --restart ordering to the module", () =
     });
   }
 
-  test("scripts/review hands its --task relay stop to the module instead of calling it", async () => {
-    /*
-     * THIS TEST USED TO ASSERT THE OPPOSITE, and was right to at the time.
-     *
-     * `review` stopped the relay itself, on the line before `recreateThenDispatch`,
-     * and what this file checked was that the title was resolved before that
-     * happened. Both facts were true and the ordering was still wrong one level
-     * out: the module's wait can run for twenty minutes and then refuse, saying
-     * *"Nothing has been stopped"* — and on this console it had been. The relay
-     * was gone before the wait began, so the refusal left four healthy workers
-     * and nothing able to turn a collator's dispatch request into reviews.
-     *
-     * The stop is now a dep, fired between the settled wait and the teardown,
-     * and its POSITION is asserted in `test/unit/fresh-dispatch.test.ts` against
-     * recorded calls rather than against source text — the same treatment the
-     * bare path already gets from `resolveThenRestart`. What is left for this
-     * file is the one thing no module can answer: that the script delegates at
-     * all, rather than re-inlining the stop beside a module that also does it.
-     *
-     * The two spans are bounded by markers that THROW when missing, and the
-     * `not.toContain` is deliberately the narrower of the two: it reads only as
-     * far as the module call, so the dep's own `quiesce` reference below cannot
-     * satisfy it and a re-inlined stop cannot hide behind it.
-     */
-    const src = await source("review");
+  /**
+   * ISC-1106 — OPERATIONS ONLY, and the scoping is the point.
+   *
+   * On `review`, `development` and `triage` a pane's title IS its worker id, so
+   * `{ worker: restartFlag }` is accidentally correct there and pinning this
+   * across all four would fail on three consoles that have no defect. Only
+   * `operations` titles its panes by ROLE while running ids, and only it
+   * orphaned containers as a result.
+   *
+   * A SOURCE probe because nothing else can be: `scripts/` is outside
+   * `tsconfig`'s `include` and the scripts are not importable, so
+   * `tsc --listFiles` never names this file and no unit test can call into it.
+   * The defect was invisible for exactly that reason — `{ worker: restartFlag }`
+   * type-checks nowhere and reads fine.
+   */
+  /**
+   * ISC-1057 — the third arm of the mismatch message.
+   *
+   * `servesConsole` compares console, run and worker coverage. The message the
+   * script prints when it replaces an actor only distinguished the first two, so
+   * a WORKERS mismatch fell through to the run arm and printed
+   * `serves run r-1, not this console's r-1` — the same id twice. That is the
+   * reading the surrounding comment calls "a bug in the script": an operator
+   * watching a healthy actor be replaced was told the runs differed when they
+   * did not. Source-level because `scripts/` is outside `tsconfig`'s `include`
+   * and unimportable.
+   */
+  test("scripts/triage names a worker mismatch instead of blaming the run", async () => {
+    const src = await source("triage");
+    const start = at(src, "const mismatch =", 0, "scripts/triage builds no mismatch message");
+    const end = at(src, "stopActor(", start, "the mismatch message reaches no stop");
+    const expr = src.slice(start, end);
+    expect(expr).toContain("does not serve");
+    expect(expr).toContain("existing.record.workers");
+    // The run arm must still be CONDITIONAL, or the workers arm is unreachable.
+    expect(expr).toContain("existing.record.run_id !== runId");
+  });
+
+  /**
+   * The same block referenced `triageWorkers`, which is `main`'s local and not
+   * in `startActor`'s scope — a ReferenceError at the moment an operator is
+   * being told why their actor is being replaced. Nothing else would catch it:
+   * this file is not typechecked and not importable.
+   */
+  test("scripts/triage's startActor uses its own workers parameter", async () => {
+    const src = await source("triage");
+    const fn = at(src, "async function startActor(", 0, "scripts/triage defines no startActor");
+    const end = at(src, "\nasync function ", fn + 10, "startActor is never closed by another function");
+    expect(src.slice(fn, end)).not.toContain("triageWorkers");
+  });
+
+  test("scripts/operations hands the modules a WORKER ID, not a pane title", async () => {
+    const src = await source("operations");
     const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
-    const task = at(src, TASK_PATH, branch, "the --task path has moved out of the branch");
-    const call = at(src, "recreateThenDispatch(", task, "the --task path calls no module");
-    const opts = at(
-      src,
-      "{ worker: restartFlag },",
-      call,
-      "the --task path's dep object is not closed by the options argument",
+    const after = src.slice(branch);
+    expect(after).not.toContain("{ worker: restartFlag }");
+    expect(after).toContain("{ worker: targetWorker }");
+    expect(after).not.toContain('"--worker", restartFlag');
+    expect(after).toContain('"--worker", targetWorker');
+  });
+
+  /**
+   * ── THE ISC-572 ORDERING, ON EVERY CONSOLE THAT HAS AN ACTOR ───────────────
+   *
+   * THIS TEST USED TO ASSERT THE OPPOSITE, and was right to at the time.
+   *
+   * `review` stopped the relay itself, on the line before `recreateThenDispatch`,
+   * and what this file checked was that the title was resolved before that
+   * happened. Both facts were true and the ordering was still wrong one level
+   * out: the module's wait can run for twenty minutes and then refuse, saying
+   * *"Nothing has been stopped"* — and on this console it had been. The relay
+   * was gone before the wait began, so the refusal left four healthy workers
+   * and nothing able to turn a collator's dispatch request into reviews.
+   *
+   * The stop is now a dep, fired between the settled wait and the teardown,
+   * and its POSITION is asserted in `test/unit/fresh-dispatch.test.ts` against
+   * recorded calls rather than against source text — the same treatment the
+   * bare path already gets from `resolveThenRestart`. What is left for this
+   * file is the one thing no module can answer: that the script delegates at
+   * all, rather than re-inlining the stop beside a module that also does it.
+   *
+   * ## IT IS A LOOP BECAUSE THE SAME DEFECT ON A FOURTH CONSOLE IS THE ONE
+   * MOST LIKELY TO SHIP
+   *
+   * ISC-572 was filed on `review` and closed there. `triage` is the second
+   * console with a fifth process, its script is a copy of `review`'s, and
+   * SRD-TRIAGE-CONSOLE §6.4 says so in as many words: *"Getting this wrong on a
+   * fourth console is the same defect a fourth time, and it is the reason §13
+   * Phase 4 names the test before the script."* A per-console copy of this test
+   * would be the same copy-paste one level up, so the two consoles that HAVE an
+   * actor are a list here and the two that do not are absent from it — and
+   * `fresh-dispatch.test.ts` is what checks that the absent two say `null`
+   * rather than merely omitting the field.
+   *
+   * ## THE POSITIVE ARM IS STRUCTURAL, WHICH IT WAS NOT
+   *
+   * The two spans are bounded by markers that THROW when missing, and the
+   * `not.toContain` is deliberately the narrower of the two: it reads only as
+   * far as the module call, so the dep's own `quiesce` reference below cannot
+   * satisfy it and a re-inlined stop cannot hide behind it.
+   *
+   * The arm below it used to be `expect(src.slice(call, opts)).toContain("quiesce")`,
+   * and ISC-572 records what that cost: a wider span was satisfied by the
+   * literal `quiesce,` inside an intervening prose comment. Narrowing the span
+   * did not remove the hole, it only moved it — the deps object is full of
+   * comments too, and one of them saying "quiesce" would still be green with the
+   * property deleted. So the arm now reads LINES and requires one whose trimmed
+   * text BEGINS with the property name: `// quiesce, ...` trims to `// quiesce`
+   * and ` * quiesce,` trims to `* quiesce,`, and neither begins with `quiesce`.
+   */
+  for (const script of ["review", "triage"]) {
+    test(`scripts/${script} hands its --task actor stop to the module instead of calling it`, async () => {
+      const src = await source(script);
+      const branch = at(src, BRANCH, 0, "the --restart branch is not where it was");
+      const task = at(src, TASK_PATH, branch, "the --task path has moved out of the branch");
+      const call = at(src, "recreateThenDispatch(", task, "the --task path calls no module");
+      const opts = at(
+        src,
+        "{ worker: restartFlag },",
+        call,
+        "the --task path's dep object is not closed by the options argument",
+      );
+
+      // Nothing between entering the branch and calling the module may stop it.
+      expect(src.slice(task, call)).not.toContain("quiesce(");
+
+      // And the module is given it, so the module decides when. A LINE that
+      // starts with the property, so no comment in the dep object can stand in
+      // for the property itself.
+      const depLines = src
+        .slice(call, opts)
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.startsWith("quiesce"));
+      if (depLines.length === 0) {
+        throw new Error(
+          `scripts/${script}'s recreateThenDispatch dep object has no quiesce property — ` +
+            `the stop is not handed over, and a comment mentioning it does not count`,
+        );
+      }
+    });
+  }
+
+  /**
+   * ── §13 TASK 4.5a(b): TWO PROBES FOR ISC-572 ON TRIAGE, AND WHICH IS
+   * LOAD-BEARING FOR WHAT ─────────────────────────────────────────────────────
+   *
+   * §13:2938-2940: *"`test/unit/console-restart.test.ts:471` asserts ISC-572 for
+   * triage by reading source text, while `test/integration/triage-console.test.ts`
+   * now EXECUTES it — keep both and say which is load-bearing."* Both run in CI
+   * (`.github/workflows/ci.yml` runs `bun test test/unit` AND
+   * `bun test test/integration`), so this is not a question of one being skipped.
+   * It is a question of what each one can see, and **neither subsumes the other**:
+   *
+   * **The source probe above is the only one that can see the stop being
+   * DROPPED.** Delete the `quiesce` property from `recreateThenDispatch`'s dep
+   * object and the actor is simply never stopped — which is `quiesce: null`'s
+   * behaviour, the defect ISC-572 records wearing the fix's clothes. The
+   * executing test asserts the actor is *still live several polls into the
+   * wait*, and an actor that is never stopped at all is **more** live, so it
+   * stays green. Measured, not reasoned: with the property removed,
+   * `test/integration/triage-console.test.ts` passed and this arm failed.
+   *
+   * **The executing test is the only one that can see the ORDER being wrong in a
+   * way the markers do not span.** The source probe reads two bounded spans; a
+   * stop performed through some path those spans do not cover — a different
+   * helper, an earlier branch, a dep the module calls too early — is a green
+   * source probe and a dead actor. The integration test watches the real record
+   * across real poll cycles and does not care how the script got there.
+   *
+   * So: the source probe is load-bearing for **delegation**, the executing test
+   * for **timing**. The one thing that would make this file's arm redundant is
+   * an executing test that fails when the stop is dropped, and there is no such
+   * test — you cannot observe a stop that never happens by watching a process
+   * stay alive.
+   *
+   * ## THE CLAIM IS PINNED, BECAUSE A COMMENT CANNOT GO RED
+   *
+   * Two arms, and both are about the OTHER file. The first keeps *"keep both"*
+   * honest: if the executing test is deleted or renamed, this reddens and names
+   * it, rather than leaving a paragraph describing a test that no longer exists.
+   * The second pins the division of labour itself — the integration file drives
+   * `scripts/triage` as a PROCESS and never reads it as TEXT, which is exactly
+   * why it cannot see a dropped dep. Someone who adds a source read there has
+   * changed which probe is load-bearing, and should find a red test asking them
+   * to update this paragraph rather than a stale paragraph.
+   */
+  test("the executing half of ISC-572 exists, and cannot see what this file sees", async () => {
+    const integration = await readFile(
+      join(import.meta.dir, "..", "integration", "triage-console.test.ts"),
+      "utf8",
     );
 
-    // Nothing between entering the branch and calling the module may stop it.
-    expect(src.slice(task, call)).not.toContain("quiesce(");
-    // And the module is given it, so the module decides when.
-    expect(src.slice(call, opts)).toContain("quiesce");
+    // 1. It is still there, by the name that carries the claim.
+    expect(
+      integration,
+      "test/integration/triage-console.test.ts no longer executes the ISC-572 wait — " +
+        "the source probe above is now the ONLY check on this console's actor stop",
+    ).toContain("the actor is still live several polls into the wait");
+
+    // 2. And it reads the script as a PROCESS, never as text. `source(` is this
+    //    file's and `fresh-dispatch.test.ts`'s instrument; the integration file
+    //    spawns `bun run scripts/triage` instead, which is what makes a dropped
+    //    `quiesce` invisible to it and this file's arm irreplaceable.
+    expect(integration).toContain("scripts/triage");
+    expect(
+      integration.includes("readFile(") || integration.includes("readFileSync("),
+      "test/integration/triage-console.test.ts now reads source text — re-read task " +
+        "4.5a(b): which probe is load-bearing may have changed",
+    ).toBe(false);
   });
 });

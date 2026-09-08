@@ -7,7 +7,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stringify } from "yaml";
@@ -23,17 +23,21 @@ import {
   resolveAllWorkers,
   resolveWorker,
   type LoadedConfig,
+  type ResolvedWorker,
 } from "../../src/config/load.ts";
 import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
-import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
+import { assertModelsAllowed, tuiWorkerIds } from "../../src/cli/commands/up.ts";
 import { DEFAULT_DEVELOPMENT_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import { REVIEW_CONSOLE_ROSTER } from "../../src/run/dispatch-request.ts";
 import {
   BackendSchema,
+  PI_BUILTIN_TOOLS,
+  PI_EXTENSION_TOOLS,
   RESERVED_ENV_NAMES,
   RESERVED_ENV_PREFIXES,
+  effectiveToolGrant,
   kubeconfigScopeWarning,
   observerTuiEpochWarning,
   observerTuiWorkers,
@@ -42,12 +46,42 @@ import {
   unknownThemeWarning,
   unknownThemeWorkers,
   parseDuration,
+  submitReportWriteWarning,
+  submitReportWriteWorkers,
   workersMissingKubeconfig,
 } from "../../src/config/schema.ts";
 import { omlxRelayTarget } from "../../src/security/relay.ts";
 import { EXIT } from "../../src/contracts.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
+
+/**
+ * The `triage` console's four seats, ENUMERATED once (SRD-TRIAGE-CONSOLE §6.1).
+ *
+ * Named as a set rather than derived from a filter, because every assertion
+ * below is about this set EXISTING as well as about what it resolves to. A
+ * probe written as "every worker whose pane_mode is rpc is on the 20b" is
+ * satisfied by a file with no triage seats in it at all; a probe written
+ * against these four ids is not. That is the whole difference between a
+ * criterion and a tautology here, and the seats are one careless YAML edit
+ * from being deletable without a single test going red.
+ *
+ * Phase 2 introduces the roster constant in `src/` that the console's own code
+ * dispatches through (§13). When it lands this list is what it must agree
+ * with — the same relationship `REVIEW_CONSOLE_ROSTER` already has with
+ * ISC-526's lens map above — and the roster test below is the one place that
+ * has to change.
+ */
+const TRIAGE_SEATS = ["tri-1", "obs-t1"] as const;
+
+/**
+ * D1, settled 2026-09-06 as arm 3: all four seats run the LOCAL 20b, in both
+ * config files. Not a performance choice — §0.2's argument is that an
+ * observer's context (namespaces, pod names, restart counts, log excerpts,
+ * cluster endpoints from a live environment, 288 sweeps a day) may not leave
+ * the machine, and nothing reduces a transcript after it has been sent.
+ */
+const TRIAGE_MODEL = "gpt-oss-20b-MXFP4-Q8";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -118,12 +152,16 @@ function assertDistinctThemes(attended: readonly { id: string; theme?: string }[
 // ---------------------------------------------------------------------------
 
 describe("worked example", () => {
-  // ISC-67: all seven shipped roles load from the shipped default config.
+  // ISC-67: all eight shipped roles load from the shipped default config.
   // observer replaces investigator (SRD-OBSERVER-001 D2) — ISC-391.
-  test("fleet.example.yaml loads with all seven shipped roles", async () => {
+  // `triage` is the eighth (SRD-TRIAGE-CONSOLE §6.1): the console with no
+  // keyboard. It is asserted as a NAME in the set rather than by a bumped
+  // count, for the same reason the worker list below is — a count says one
+  // changed and never which.
+  test("fleet.example.yaml loads with all eight shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
+      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "triage", "verifier"].sort(),
     );
     // Every worker resolves without error, and the SET is asserted rather than
     // its size. A bare `toHaveLength` fails on a number when a worker is added
@@ -143,6 +181,16 @@ describe("worked example", () => {
       "tst-1",
       "tst-2",
       "tick-1",
+      // The `triage` console's four seats (SRD-TRIAGE-CONSOLE §6.1). One run,
+      // four ids, and the three observers are the EXISTING observer role at a
+      // cadence rather than a fourth role — which is why they appear here and
+      // nowhere in the roles assertion above.
+      //
+      // Spliced from `TRIAGE_SEATS` rather than re-typed, so this roster and
+      // the model/pane_mode criteria below cannot come to disagree about which
+      // ids the console has — a second copy of a set is how ISC-264 got two
+      // constants that quietly meant different things.
+      ...TRIAGE_SEATS,
     ];
     expect(loaded.config.workers).toHaveLength(expected.length);
     const resolved = resolveAllWorkers(loaded);
@@ -302,6 +350,242 @@ describe("worked example", () => {
     expect(loaded.config.run.budget.run_timeout).toBe(2 * 3600);
     expect(loaded.config.run.timers.event_stall_warn).toBe(3 * 60);
     expect(loaded.config.cloud.token_refresh).toBe(45 * 60);
+  });
+});
+
+/**
+ * The `triage` console's seats, as configuration (SRD-TRIAGE-CONSOLE §6.1,
+ * §12's configuration block, §13 tasks 1.3 and 1.4).
+ *
+ * THE TRAP THIS BLOCK IS WRITTEN AGAINST, named because falling into it makes
+ * the whole block worthless: a criterion that only asserts "the four seats
+ * resolve to `gpt-oss-20b-MXFP4-Q8`" passes just as happily if someone deletes
+ * the seats entirely, and an absence asserted over a filtered set is satisfied
+ * by an empty set. So every assertion here is made against `TRIAGE_SEATS` —
+ * a list this file NAMES — and the seats' presence is checked before their
+ * properties are. A filter that never narrows anything survives every mutation.
+ *
+ * Everything runs against the TRACKED `fleet.example.yaml`. The operator's live
+ * `fleet.yaml` is gitignored and CI has no copy, so it cannot be read here; the
+ * two files agree at the resolved level and disagree at the role level, and
+ * which of those this block can see is the reason the override test below is
+ * written the way it is.
+ */
+describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
+  /**
+   * The example's four seats, resolved, in the order `TRIAGE_SEATS` names them.
+   *
+   * Throws BY NAME on a missing seat rather than yielding `undefined` into an
+   * expectation, because the two defects want different edits: a seat resolving
+   * to the wrong model is a `model:` line, and a seat that is not there at all
+   * is a deleted worker entry. A `toEqual` against `undefined` reports the
+   * first when it means the second.
+   */
+  function seatsOf(loaded: LoadedConfig): ResolvedWorker[] {
+    const byId = new Map(resolveAllWorkers(loaded).map((w) => [w.id, w]));
+    return TRIAGE_SEATS.map((id) => {
+      const w = byId.get(id);
+      if (w === undefined) {
+        throw new Error(
+          `${loaded.path} declares no worker "${id}" — the seat is GONE, not merely retuned. ` +
+            `It holds: ${[...byId.keys()].join(", ")}`,
+        );
+      }
+      return w;
+    });
+  }
+
+  test("all four resolve to the local 20b on omlx (D1, arm 3)", async () => {
+    // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
+    // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
+    // of them pass while checking nothing.
+    expect(TRIAGE_SEATS).toHaveLength(2);
+
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    // ONE set-shaped comparison rather than four independent expectations: a
+    // seat deleted, repointed at another provider, or left on another model all
+    // fail here with the same readable diff, and the diff says which seat.
+    expect(seatsOf(loaded).map((w) => `${w.id}=${w.provider}/${w.model}`)).toEqual(
+      TRIAGE_SEATS.map((id) => `${id}=omlx/${TRIAGE_MODEL}`),
+    );
+  });
+
+  test("the seats STATE that model — they do not inherit it from the fleet default", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    // The degenerate reading of the test above, closed. If `llm.model` were the
+    // 20b, all four seats would resolve to it with `roles.triage.model` and the
+    // three worker overrides deleted, and that set assertion would still be
+    // green — a decision inferred from silence. It is not the fleet default.
+    expect(loaded.config.llm.model).not.toBe(TRIAGE_MODEL);
+    // The same distinction from the other side: this fleet is not uniformly on
+    // one model, so "resolves to the 20b" is a property of these four seats and
+    // not of every worker in the file.
+    const seatIds = new Set<string>(TRIAGE_SEATS);
+    const others = resolveAllWorkers(loaded).filter((w) => !seatIds.has(w.id));
+    expect(others.length).toBeGreaterThan(0);
+    expect(others.some((w) => w.model !== TRIAGE_MODEL)).toBe(true);
+  });
+
+  /**
+   * §6.1's 2026-09-06 correction, as an assertion rather than as a paragraph.
+   *
+   * §6.11 says the three observers take the `observer` role's model unchanged,
+   * with a worker-level override "only if arm 1 or 2 is taken" — and arm 3 was
+   * taken. That sentence is written against the operator's untracked
+   * `fleet.yaml`, where `observer` IS the 20b, so inheriting there delivers arm
+   * 3 exactly. In THIS file the same role carries a different local model, so
+   * inheriting here would deliver something else, and the override is what
+   * makes the tracked example show the decision rather than a model that merely
+   * shares its posture.
+   *
+   * IF THIS FAILS BECAUSE THE EXAMPLE'S `observer` ROLE BECAME THE 20b, the fix
+   * is to DELETE the three overrides, not to loosen the test: the two files
+   * would then agree at the role level and the override would be the thing that
+   * is wrong. That is the only shape of role-level drift between the two files
+   * this suite can see, and it can see it only in this direction.
+   */
+  test("the three observers carry an explicit model:, and tri-1 deliberately does not", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const observerRoleModel = loaded.config.roles["observer"]?.model;
+    expect(observerRoleModel).toBeDefined();
+    expect(observerRoleModel).not.toBe(TRIAGE_MODEL);
+
+    const stated = loaded.config.workers
+      .filter((w) => w.model !== undefined)
+      .map((w) => `${w.id}=${w.model}`);
+    // Set-shaped again, and over the WHOLE worker list rather than over the
+    // three ids: an override that appears on a fourth worker — the copied-line
+    // defect, arriving on `obs-1` or `tst-2` — fails here too.
+    expect(stated).toEqual(["obs-t1"].map((id) => `${id}=${TRIAGE_MODEL}`));
+
+    // `tri-1` is the mirror and the reason the list above has three entries and
+    // not four: the `triage` role declares the model itself, so §6.1's "no
+    // override" rule holds for that seat in BOTH files. A test demanding an
+    // override on all four would assert the correction's exception as the rule.
+    expect(loaded.config.roles["triage"]?.model).toBe(TRIAGE_MODEL);
+  });
+
+  /**
+   * §12's `Anti: removing it from models_allowlist throws` — and the gap it
+   * pins, which was MEASURED rather than imagined.
+   *
+   * `config validate` stops at `resolveAllWorkers` and never calls
+   * `assertModelAllowed`. So before `gpt-oss-20b-MXFP4-Q8` was added to this
+   * file's `llm.models_allowlist`, the example validated CLEAN and `up` then
+   * refused all four seats with `ModelNotAllowedError` — the operator told the
+   * file was fine and then having it rejected, which is exactly what
+   * `src/cli/commands/config.ts` argues against in its own words. That was
+   * measured by hand against an in-memory copy and nothing re-ran it. This is
+   * what re-runs it.
+   *
+   * The mutation is IN MEMORY. Nothing on disk is touched, so a failure here
+   * cannot leave the repository holding a broken example.
+   */
+  describe("the allowlist entry is what admits the seats, not the model string", () => {
+    /** The loaded example with exactly `entry` removed from `models_allowlist`. */
+    function withoutAllowlistEntry(loaded: LoadedConfig, entry: string): LoadedConfig {
+      const allowlist = loaded.config.llm.models_allowlist;
+      // A mutation that removes nothing proves nothing. If the entry is
+      // renamed, or moves into a `providers.<name>.models_allowlist` block,
+      // this says so — rather than reporting a green "all four refused" off a
+      // config that was never actually changed.
+      expect(allowlist, `"${entry}" is not on llm.models_allowlist to begin with`).toContain(entry);
+      return {
+        ...loaded,
+        config: {
+          ...loaded.config,
+          llm: { ...loaded.config.llm, models_allowlist: allowlist.filter((m) => m !== entry) },
+        },
+      };
+    }
+
+    test("unmutated, all four are admitted — the gate is not refusing everything", async () => {
+      const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+      expect(() => assertModelsAllowed(loaded, TRIAGE_SEATS)).not.toThrow();
+    });
+
+    test("strip the entry and EXACTLY the four seats are refused", async () => {
+      const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+      const mutated = withoutAllowlistEntry(loaded, TRIAGE_MODEL);
+
+      const errors = new Map<string, unknown>();
+      for (const w of resolveAllWorkers(mutated)) {
+        try {
+          assertModelAllowed(mutated, w);
+        } catch (err) {
+          errors.set(w.id, err);
+        }
+      }
+
+      // Set equality over the WHOLE fleet, which is both halves at once.
+      // "All four throw" alone is satisfied by a mutation that emptied the list
+      // and refused every worker in the file; "someone still passes" alone is
+      // satisfied by a mutation that hit the wrong seat. Only the set says the
+      // removal is about THIS entry and reaches PRECISELY these seats.
+      expect([...errors.keys()].sort()).toEqual([...TRIAGE_SEATS].sort());
+
+      for (const id of TRIAGE_SEATS) {
+        const err = errors.get(id);
+        expect(err, `${id} was not refused`).toBeInstanceOf(ModelNotAllowedError);
+        // The typed refusal naming the model, not an incidental throw from
+        // somewhere else in the resolve that happens to land on the same ids.
+        expect((err as ModelNotAllowedError).model).toBe(TRIAGE_MODEL);
+        expect((err as ModelNotAllowedError).exitCode).toBe(EXIT.USAGE);
+      }
+    });
+
+    test("`up` is where it lands, and `config validate` never sees it", async () => {
+      const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+      const mutated = withoutAllowlistEntry(loaded, TRIAGE_MODEL);
+      // `up`'s own gate, not only the per-worker assertion underneath it.
+      expect(() => assertModelsAllowed(mutated, TRIAGE_SEATS)).toThrow(ModelNotAllowedError);
+      // The measured gap, asserted so it stops being folklore: the same mutated
+      // config RESOLVES clean, and resolving is all `config validate` does. The
+      // allowlist entry is the only thing standing between a file that
+      // validates and a fleet that refuses to start.
+      expect(() => resolveAllWorkers(mutated)).not.toThrow();
+    });
+  });
+
+  /**
+   * §12 (freshness, anti): NO SEAT IN THIS CONSOLE RESOLVES TO `pane_mode: tui`.
+   *
+   * §2.3 is the argument. `tui` allocates no epoch; this console dispatches 288
+   * times a day; without the `already_completed` fence a re-dispatched sweep
+   * runs a second time — on the one console nobody is watching. It is also what
+   * keeps layer 4 implementable: a `tui` seat cannot be recycled without a
+   * terminal.
+   *
+   * The hazard §12 names is a COPIED WORKER LINE. This file already ships three
+   * of the shape `{id: tst-2, role: tester, pane_mode: tui, theme: nord}`, and
+   * one of them pasted into the triage block is the entire defect — which is
+   * why the theme half is asserted here rather than left as decoration.
+   */
+  test("no seat in this console resolves to pane_mode: tui", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const seats = seatsOf(loaded);
+
+    // THE ANTI-VACUITY THAT MAKES THIS AN ABSENCE WORTH ASSERTING. An absence
+    // over an empty set is free: `tuiWorkerIds` SKIPS an id the config does not
+    // define, so a file whose triage seats had been deleted would answer "no
+    // tui seats" and pass. The four have to be present before their having no
+    // keyboard means anything at all.
+    expect(seats.map((w) => w.id)).toEqual([...TRIAGE_SEATS]);
+    expect(seats.map((w) => `${w.id}=${w.paneMode}`)).toEqual(
+      TRIAGE_SEATS.map((id) => `${id}=rpc`),
+    );
+
+    // Through the function `up` actually uses to decide who gets a terminal,
+    // rather than only through the resolved field that function reads.
+    expect(tuiWorkerIds(loaded, TRIAGE_SEATS)).toEqual([]);
+    // …and that function still NARROWS. The example does ship attended panes,
+    // so the empty answer above is a fact about these seats and not about a
+    // helper that returns nothing for everybody.
+    expect(tuiWorkerIds(loaded, loaded.config.workers.map((w) => w.id)).length).toBeGreaterThan(0);
+
+    // No theme either (§6.1). A palette on a pane nobody types at is the
+    // visible half of the copied line, and it is the half a reviewer notices.
+    expect(seats.filter((w) => w.theme !== undefined).map((w) => `${w.id}=${w.theme}`)).toEqual([]);
   });
 });
 
@@ -1405,6 +1689,144 @@ describe("merge: relative paths (§6.1 exception 3)", () => {
   });
 });
 
+/**
+ * Extension tool names in `tools:` (SRD-WORKER-DISPATCH-EXTENSION §6.6, §12).
+ *
+ * The hazard these guard is the one `PI_BUILTIN_TOOLS`' docblock was written
+ * against, measured a second time on 2026-09-07 and found to hold for a second
+ * class of name: `--tools read,bash,submit_report,does_not_exist` built a
+ * registry of `read, bash, submit_report` and said nothing about the fourth
+ * name. Widening `ToolNameSchema` to the union is what lets a role ASK for an
+ * extension tool; keeping the union CLOSED is what makes asking wrongly loud.
+ * A widening that dropped the enum would satisfy the first and lose the second,
+ * which is why the misspelling below is asserted next to the acceptance.
+ */
+describe("extension tool declaration (§6.6)", () => {
+  test("a role may request submit_report and it survives to the resolved worker", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { rev: { tools: ["read", "grep", "submit_report"] } };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(doc);
+    // Resolved, not merely parsed: `render.ts:260` joins THIS array into
+    // `--tools`, so a name that validates but is dropped by the merge would be
+    // the same silence with extra steps.
+    expect(resolveWorker(loaded, "w1").tools).toEqual(["read", "grep", "submit_report"]);
+  });
+
+  /**
+   * Driven off the constant rather than a hand-written list, so the name Phase
+   * 5 adds (`get_replies`) is covered the day it becomes requestable instead of
+   * the day someone remembers to extend this test.
+   */
+  test("every name in PI_EXTENSION_TOOLS is accepted in a tools list", async () => {
+    expect(PI_EXTENSION_TOOLS.length).toBeGreaterThan(0);
+    for (const name of PI_EXTENSION_TOOLS) {
+      const doc = baseDoc();
+      doc["roles"] = { rev: { tools: ["read", name] } };
+      doc["workers"] = [{ id: "w1", role: "rev" }];
+      const loaded = await writeAndLoad(doc);
+      expect(resolveWorker(loaded, "w1").tools).toContain(name);
+    }
+  });
+
+  test("a misspelled extension tool name is refused, naming the element", async () => {
+    // `submit_reprot` is what the silence looks like from the operator's side:
+    // Pi drops it from the registry and grants the worker nothing by that name.
+    const doc = baseDoc();
+    doc["roles"] = { rev: { tools: ["read", "submit_reprot"] } };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    await expectIssue(doc, "roles.rev.tools.1");
+  });
+
+  test("exclude_tools ranges over the same vocabulary, and refuses a misspelling", async () => {
+    const ok = baseDoc();
+    ok["roles"] = { rev: { exclude_tools: ["submit_report"] } };
+    ok["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(ok);
+    expect(resolveWorker(loaded, "w1").excludeTools).toEqual(["submit_report"]);
+
+    const bad = baseDoc();
+    bad["roles"] = { rev: { exclude_tools: ["submit_reprot"] } };
+    bad["workers"] = [{ id: "w1", role: "rev" }];
+    await expectIssue(bad, "roles.rev.exclude_tools.0");
+  });
+
+  /**
+   * ANTI-CRITERION (§12, §6.6 interaction 1): ISC-59's default stays the
+   * BUILT-IN set.
+   *
+   * This is asserted against the resolution itself and not through a fixture,
+   * because there is no fixture that can see it. `PI_ALL_TOOLS` is a superset
+   * of `PI_BUILTIN_TOOLS`, so a default swapped to the union leaves
+   * `includes("bash")` true, every ISC-59 message byte-identical and every
+   * existing rejection in place. §12's stated probe — "a role with
+   * `read_only: true` and no `tools:`; assert the `bash` violation still
+   * fires" — stays GREEN under the mutation it names, and was verified to do so
+   * before this test was written. The behavioural test below is kept anyway,
+   * because it is what proves the guard is still WIRED to this function; it is
+   * simply not what makes the mutation red.
+   */
+  test("an omitted tools list resolves to the built-in set, never the union", () => {
+    expect([...effectiveToolGrant(undefined)]).toEqual([...PI_BUILTIN_TOOLS]);
+    for (const name of PI_EXTENSION_TOOLS) {
+      // The whole of the mutation: a grant nobody made. An omitted `tools:`
+      // means "Pi's own defaults", and Pi's own defaults cannot contain a tool
+      // this repository invented — the extension's tools reach a worker only
+      // when a role names one.
+      expect(effectiveToolGrant(undefined)).not.toContain(name);
+    }
+    // A DECLARED list is still returned untouched, extension names included —
+    // the default is the only thing narrowed.
+    expect([...effectiveToolGrant(["read", "submit_report"])]).toEqual(["read", "submit_report"]);
+  });
+
+  test("a read_only role with no tools at all is still rejected for bash", async () => {
+    // The case `effectiveToolGrant` exists for, and the one shape of the ISC-59
+    // violation that had no test: the other three fixtures above all declare a
+    // tools list somewhere, so none of them ever reaches the default.
+    const doc = baseDoc();
+    doc["roles"] = { rev: { read_only: true } };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    await expectIssue(doc, "roles.rev.tools", "no explicit tools");
+  });
+
+  /**
+   * The re-inlining hole, closed by reading the file.
+   *
+   * The value assertion above cannot see a default that is re-inlined at the
+   * call site — someone writing `declared ?? PI_ALL_TOOLS` back into the
+   * refinement leaves `effectiveToolGrant` correct and unused, and every other
+   * test in this file green. What is actually true of this codebase is
+   * narrower and checkable: `PI_ALL_TOOLS` is the vocabulary the SCHEMA ranges
+   * over, and it has exactly two code references — the declaration and the
+   * `z.enum` it feeds. Any third one is either that mistake or a decision worth
+   * a human reading this comment.
+   *
+   * Comment lines are excluded rather than counted: the docblocks in
+   * `schema.ts` argue about `PI_ALL_TOOLS` at length, and a guard that goes red
+   * when someone explains the invariant better is a guard that gets deleted.
+   */
+  test("PI_ALL_TOOLS widens the schema and nothing else", async () => {
+    const text = await readFile(join(REPO_ROOT, "src", "config", "schema.ts"), "utf8");
+    const refs = text
+      .split("\n")
+      .map((line, i) => ({ at: i + 1, text: line.trim() }))
+      .filter((l) => /\bPI_ALL_TOOLS\b/.test(l.text))
+      .filter((l) => !l.text.startsWith("*") && !l.text.startsWith("/*") && !l.text.startsWith("//"));
+    const shown = refs.map((l) => `schema.ts:${l.at}  ${l.text}`).join("\n");
+    const why =
+      "PI_ALL_TOOLS is the vocabulary `tools:`/`exclude_tools:` range over, and nothing else.\n" +
+      "In particular it is NOT what an omitted `tools:` resolves to: it is a superset of\n" +
+      "PI_BUILTIN_TOOLS, so using it as ISC-59's default leaves every message and every\n" +
+      "rejection identical while making the guard reason about a grant nobody made\n" +
+      "(SRD-WORKER-DISPATCH-EXTENSION §6.6 interaction 1). References found:\n" +
+      shown;
+    expect(refs.length, why).toBe(2);
+    expect(refs.filter((l) => /^export const PI_ALL_TOOLS\b/.test(l.text)), why).toHaveLength(1);
+    expect(refs.filter((l) => /z\.enum\(PI_ALL_TOOLS\)/.test(l.text)), why).toHaveLength(1);
+  });
+});
+
 describe("validation rejections", () => {
   // ISC-59, at the role level.
   test("a role combining bash with read_only: true is rejected with a field-level error", async () => {
@@ -1752,6 +2174,184 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(observerTuiWorkers(loaded.config)).toEqual(["obs-1"]);
     expect(resolveWorker(loaded, "obs-2").paneMode).toBe("rpc");
+  });
+});
+
+/**
+ * §6.6 interaction 2: `submit_report` beside `write`.
+ *
+ * The combination is not an error and must never become one. §13's phase 6
+ * adds `submit_report` to every role and removes nothing, and phase 7 removes
+ * `write` one role at a time behind a full console cycle each — so a fleet is
+ * REQUIRED to hold both for as long as phase 7 takes. What must not happen is
+ * that it holds both silently: for `triage`, `collator` and `reviewer` the
+ * second grant is the whole of what §6.3's layer 1 removes, and layer 1 is the
+ * only one of the four layers that is a mechanism rather than a nudge.
+ */
+describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-EXTENSION §6.6)", () => {
+  /** The shipped observer's tools (`fleet.yaml:542`) with phase 6 applied. */
+  const OBSERVER_TOOLS = ["read", "write", "bash", "grep", "find", "ls", "submit_report"];
+  /** The shipped reviewer/collator/triage tools (`:695`, `:726`, `:839`), phase 6 applied. */
+  const BASH_LESS_TOOLS = ["read", "write", "grep", "find", "ls", "submit_report"];
+
+  /**
+   * §12's acceptance hook, verbatim: *"the `observer` fixture; assert one
+   * warning and zero errors, because the observer is the intended case."*
+   *
+   * Zero errors is asserted by `writeAndLoad` RESOLVING — every schema issue
+   * in this file arrives as a thrown `ConfigValidationError`, so a document
+   * that loads is a document with no issues at any path.
+   */
+  test("the observer's pairing warns, names the bash asymmetry, and still loads", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: { tools: OBSERVER_TOOLS } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const loaded = await writeAndLoad(doc); // zero errors, or this throws
+    const found = submitReportWriteWorkers(loaded.config);
+    expect(found).toEqual([{ id: "obs-1", bash: true }]);
+    const warning = submitReportWriteWarning(found);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("obs-1");
+    // The observer belongs in the bash bucket, and the bucket's whole content
+    // is the finding: there is nothing here to take away.
+    expect(warning).toMatch(/bash can cat > a file/);
+    expect(warning).toMatch(/a tool and not a capability/);
+    // And it must not read as a refusal, because phase 6 IS this state.
+    expect(warning).toMatch(/Not a refusal/);
+  });
+
+  /**
+   * The seat the warning exists for. `reviewer` is the `rev-lang-1` seat — the
+   * one whose recorded defect (§6.9, ISC-517) is a valid report that was never
+   * delivered — and it holds no `bash`, so `write` is the entire difference
+   * between layer 1 and no mechanism at all.
+   */
+  test("a bash-less seat is named as the forfeiting case, with the mechanism stated", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: BASH_LESS_TOOLS } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    const found = submitReportWriteWorkers(loaded.config);
+    expect(found).toEqual([{ id: "rev-1", bash: false }]);
+    const warning = submitReportWriteWarning(found);
+    expect(warning).toMatch(/Forfeited here, and removing write is the fix \(rev-1\)/);
+    // The mechanism, not just the fact — this is the part a reader acts on.
+    expect(warning).toMatch(/layer 1/);
+    expect(warning).toMatch(/only way to create a file/);
+    // The bash bucket must be ABSENT, not merely empty of ids: a reader told
+    // "removing write takes away a tool and not a capability" about a seat
+    // that holds no shell has been told the opposite of the truth.
+    expect(warning).not.toMatch(/bash can cat > a file/);
+  });
+
+  /**
+   * The asymmetric fixture, and the reason it is written out rather than
+   * folded into the two above: with one worker per test, a `bash` flag that
+   * was hardcoded, inverted, or read off the wrong tool would satisfy every
+   * single-seat assertion in this block. Only a document holding one of each
+   * can tell the two buckets apart.
+   */
+  test("a bash holder and a bash-less seat land in different buckets, in one document", async () => {
+    const doc = baseDoc();
+    doc["roles"] = {
+      observer: { tools: OBSERVER_TOOLS },
+      reviewer: { tools: BASH_LESS_TOOLS },
+    };
+    doc["workers"] = [
+      { id: "obs-1", role: "observer" },
+      { id: "rev-1", role: "reviewer" },
+    ];
+    const loaded = await writeAndLoad(doc);
+    const found = submitReportWriteWorkers(loaded.config);
+    expect(found).toEqual([
+      { id: "obs-1", bash: true },
+      { id: "rev-1", bash: false },
+    ]);
+    const warning = submitReportWriteWarning(found)!;
+    expect(warning).toContain("2 worker(s)");
+    const forfeitLine = warning.split("\n").find((l) => l.includes("Forfeited here"))!;
+    const shellLine = warning.split("\n").find((l) => l.includes("bash can cat"))!;
+    expect(forfeitLine).toContain("rev-1");
+    expect(forfeitLine).not.toContain("obs-1");
+    expect(shellLine).toContain("obs-1");
+    expect(shellLine).not.toContain("rev-1");
+  });
+
+  /** §6.8's proposed rows — the state phase 7 is trying to reach. */
+  test("submit_report with no write raises nothing", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: ["read", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
+    expect(submitReportWriteWarning([])).toBeNull();
+  });
+
+  /**
+   * Every role in `fleet.yaml` today, before phase 6. A warning that fired on
+   * `write` alone would print on the shipped fleet from the moment it landed
+   * and would name nothing anyone could act on.
+   */
+  test("write with no submit_report raises nothing — this is the pre-phase-6 fleet", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: ["read", "write", "grep", "find", "ls"] } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * `--exclude-tools` is a real subtraction Pi applies (`render.ts:261`), so a
+   * declared-then-excluded `write` is not a grant. Warning about it would be a
+   * false positive, and this warning's only currency is that it is read.
+   */
+  test("exclude_tools removes write for this check, not just from the argv", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { reviewer: { tools: BASH_LESS_TOOLS, exclude_tools: ["write"] } };
+    doc["workers"] = [{ id: "rev-1", role: "reviewer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * Resolved three-level, for `paneModeIssues`' reason: either level can
+   * complete the pair on its own, and a check that read only `roles:` would
+   * miss a fleet that put its tool list in `defaults:` — which is exactly
+   * where a phase 6 rollout is most tempted to put `submit_report`.
+   */
+  test("the pair inherited from defaults is found", async () => {
+    const doc = baseDoc();
+    doc["defaults"] = { tools: BASH_LESS_TOOLS };
+    doc["roles"] = { rev: {} };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([{ id: "w1", bash: false }]);
+  });
+
+  test("a worker override that completes the pair against a narrowed role is found", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { rev: { tools: ["read", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "w1", role: "rev", tools: BASH_LESS_TOOLS }];
+    const loaded = await writeAndLoad(doc);
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([{ id: "w1", bash: false }]);
+  });
+
+  /**
+   * §6.6 interaction 1, observed from the other end. An omitted `tools:`
+   * resolves to Pi's own builtins — which carry `write` and cannot carry
+   * `submit_report`, because an extension tool reaches a worker only when a
+   * role names it. So the most common shape of a role block cannot reach this
+   * warning at all, and it is `effectiveToolGrant`'s default that makes that
+   * true rather than a filter written here.
+   */
+  test("an omitted tools: cannot pair, because no built-in is named submit_report", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { rev: {} };
+    doc["workers"] = [{ id: "w1", role: "rev" }];
+    const loaded = await writeAndLoad(doc);
+    expect(effectiveToolGrant(undefined)).toContain("write");
+    expect(effectiveToolGrant(undefined)).not.toContain("submit_report");
+    expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
   });
 });
 
@@ -2205,6 +2805,47 @@ describe("config validate CLI (ISC-58)", () => {
     const parsed = JSON.parse(r.stdout) as { valid: boolean; errors: { path: string }[] };
     expect(parsed.valid).toBe(false);
     expect(parsed.errors.some((e) => e.path === "workers.0.role")).toBe(true);
+  });
+
+  /**
+   * The WIRING, and it is a separate test because the schema-level block above
+   * passes with `config validate` never calling either function.
+   *
+   * That is not hypothetical here: `submitReportWriteWarning` shipped in commit
+   * 8310846 with five green tests and zero callers outside them, and stayed
+   * that way until it was grepped for. Its sibling `observerTuiEpochWarning` is
+   * reached at `config.ts:124`; this one was not reached at all, so an operator
+   * running the only command that exists to tell them what their document gives
+   * up was told nothing. The deprecated-alias test twelve lines up records the
+   * same lesson from the other direction — a probe that cannot observe the
+   * thing it is named after is worth nothing — and this is its inverse: a
+   * function that no observable surface reaches is worth nothing either.
+   *
+   * Driven through the CLI rather than by calling the pair directly, because
+   * calling them directly is precisely what the block above already does and
+   * what stayed green. The only assertion that reddens when line 127 is deleted
+   * is one that reads the process's own output.
+   */
+  test("`config validate --json` carries the submit_report/write warning to the operator", async () => {
+    const dir = await tempDir();
+    await mkdir(join(dir, "repo"), { recursive: true });
+    const doc = baseDoc();
+    doc["run"] = { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } };
+    doc["roles"] = { observer: { tools: ["read", "write", "bash", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const path = join(dir, "fleet.yaml");
+    await writeFile(path, stringify(doc));
+    const r = await runCli(["config", "validate", "--json", "--config", path]);
+    // Still valid — the pairing is the state phases 6 and 7 REQUIRE the fleet
+    // to run in, so a nonzero exit here would be the refusal §6.6 refuses.
+    expect(r.code).toBe(0);
+    const parsed = JSON.parse(r.stdout) as { valid: boolean; warnings: string[] };
+    expect(parsed.valid).toBe(true);
+    const hit = parsed.warnings.find((w) => w.includes("resolve both submit_report and write"));
+    expect(hit, `warnings did not carry it — got ${parsed.warnings.length}`).toBeDefined();
+    // The seat, not just the category: a warning that names no worker leaves an
+    // operator with a document to re-read rather than a line to change.
+    expect(hit!).toContain("obs-1");
   });
 });
 

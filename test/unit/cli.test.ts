@@ -1,8 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { buildProgram, CliError, exitCodeForError } from "../../src/cli/index.ts";
 import { EXIT, isExitCoded, worstExit } from "../../src/contracts.ts";
 
-/** Every command named in SRD §10's CLI surface table. */
+/**
+ * The commands this file drives, registers, and holds to SRD §10's `--json` rule.
+ *
+ * **It is not "every command named in SRD §10", which is what this comment used
+ * to say, and the gap is measured rather than assumed** (2026-09-06, SRD-
+ * TRIAGE-CONSOLE §13 task 6.2). §10's table names twenty-six commands; this set
+ * holds twenty. `monitor`, `pm-guard`, `relay`, `unstage`, `tui` and `shell` each
+ * have a §10 row and are absent here — see {@link EXCLUDED_COMMANDS}, which now
+ * says so out loud instead of leaving it to whoever counts the rows.
+ */
 const SRD_COMMANDS = [
   "doctor",
   "image",
@@ -24,14 +35,128 @@ const SRD_COMMANDS = [
   "logs",
   "exec",
   "down",
+  /**
+   * SRD-TRIAGE-CONSOLE §13 task 6.2, and the direction was FORCED rather than
+   * chosen — see {@link EXCLUDED_COMMANDS}.
+   */
+  "triage",
 ] as const;
+
+/**
+ * Command modules deliberately NOT driven by {@link SRD_COMMANDS}, each with the
+ * mechanism rather than a verdict.
+ *
+ * ## Why this list exists at all
+ *
+ * Until 2026-09-06 the exclusion was by OMISSION: `registeredCommands` imports
+ * only `SRD_COMMANDS`, so a module absent from that array was never registered
+ * and the bidirectional assertion below said nothing whatever about it. Six
+ * modules were excluded that way, silently, and nothing anywhere recorded that
+ * they were — so "is this command missing on purpose?" had no answer short of
+ * reading `src/cli/index.ts` and diffing it by eye.
+ *
+ * SRD-TRIAGE-CONSOLE §13 task 6.2 requires the seventh — `triage` — to be settled
+ * *"in one direction or the other"*, and §12 states the reason the choice cannot
+ * be ducked: **"the set is asserted in both directions, so silence is not an
+ * option."** An omission IS silence. So the omission is written down, given a
+ * reason apiece, and — in the test below — made structural: every command module
+ * on disk must appear in exactly one of the two lists, which is what stops the
+ * eighth exclusion from being silent the way the first six were.
+ *
+ * ## Which direction `triage` took, and why it was not a choice
+ *
+ * §13 offers two: *"either the set gains `triage` and `Docs/SRD.md` §10 gains its
+ * row, or the exclusion list does and this console has its own importer test."*
+ * It reads as a free choice and it is not one, because a THIRD test decides it.
+ *
+ * `test/unit/docs-currency.test.ts`'s *"every registered command appears in §10"*
+ * enumerates `src/cli/commands/*.ts` and greps each file for
+ * `program.command("…")` — the FILE is what makes a command registered, by that
+ * test's own definition, not an entry in `src/cli/index.ts` and not an entry
+ * here. So `src/cli/commands/triage.ts` existing at all requires a `Docs/SRD.md`
+ * §10 row, and the second direction does not avoid the Docs edit; it only leaves
+ * §10 naming `triage` while this set does not, which is precisely the
+ * inconsistency the six rows above document as a defect.
+ *
+ * So: the first direction. `Docs/SRD.md` §10's row is owed by whoever owns
+ * `Docs/` and `test/unit/docs-currency.test.ts` is RED until it lands — that is a
+ * reported handoff, not an oversight. `test/unit/triage-command.test.ts` exists
+ * regardless, because §12 asks for the in-process importer test on its own
+ * merits.
+ */
+const EXCLUDED_COMMANDS: Readonly<Record<string, string>> = {
+  monitor:
+    "has a §10 row; driven by test/unit/monitor-*.test.ts and its own read-only closure guard.",
+  "pm-guard":
+    "has a §10 row (two, in fact); driven in-process by test/unit/pm-guard-command.test.ts, " +
+    "which exists because this layer fell out of the coverage report once already.",
+  relay:
+    "has a §10 row; the review console's actor, driven by test/unit/collator-relay-adapter.test.ts.",
+  unstage:
+    "has a §10 row; releases a STAGED epoch, deliberately not `abort` (SRD-TUI-DISPATCH §9 Q8).",
+  tui: "has a §10 row; driven in-process by test/unit/tui-command.test.ts.",
+  shell:
+    "has a §10 row; opens an interactive shell in a container, so it has no non-interactive path " +
+    "this suite could drive.",
+};
+
+/** Every `src/cli/commands/*.ts` module, which is the population both lists partition. */
+function commandModulesOnDisk(): string[] {
+  return readdirSync(join(import.meta.dir, "..", "..", "src", "cli", "commands"))
+    .filter((n) => n.endsWith(".ts"))
+    .map((n) => n.slice(0, -".ts".length))
+    .sort();
+}
+
+/**
+ * The one command whose `register` takes a second, REQUIRED argument, and the
+ * deps this file hands it.
+ *
+ * SRD-TRIAGE-CONSOLE §13 task 6.1b makes `triage`'s deps factory compulsory: the
+ * console needs a per-observer dispatch that §12's read-only block forbids its
+ * own modules to build, so `src/cli/index.ts` builds it and hands it in. Every
+ * other command module registers with the program alone.
+ *
+ * **It THROWS rather than returning a stub, and that is the point.** No test in
+ * this file runs a command's action — they inspect the surface — so a factory
+ * that quietly returned something would make "did anything call this?"
+ * unanswerable. Before task 6.1b the helpers below cast every module to
+ * `(p) => void` and called `register(program)`, which for a two-parameter
+ * `register` passes `undefined` and builds a `triage` whose first action throws
+ * a `TypeError`. The cast hid it and no test here could ever see it.
+ */
+const UNUSED_TRIAGE_DEPS = (): never => {
+  throw new Error(
+    "test/unit/cli.test.ts registers commands to inspect the CLI SURFACE and never runs an " +
+      "action; a deps factory being called here means a test started doing something else.",
+  );
+};
+
+/**
+ * Register every {@link SRD_COMMANDS} module onto one program.
+ *
+ * Shared by the three tests below so the `triage` special case is spelled once:
+ * two copies of it is how one of them ends up back on the cast.
+ */
+async function registerAll(program: ReturnType<typeof buildProgram>): Promise<void> {
+  const modules = await Promise.all(
+    SRD_COMMANDS.map(async (n) => [n, await import(`../../src/cli/commands/${n}.ts`)] as const),
+  );
+  for (const [name, m] of modules) {
+    if (name === "triage") {
+      (m as { register: (p: typeof program, d: () => never) => void }).register(
+        program,
+        UNUSED_TRIAGE_DEPS,
+      );
+    } else {
+      (m as { register: (p: typeof program) => void }).register(program);
+    }
+  }
+}
 
 async function registeredCommands(): Promise<Set<string>> {
   const program = buildProgram();
-  const modules = await Promise.all(
-    SRD_COMMANDS.map((n) => import(`../../src/cli/commands/${n}.ts`)),
-  );
-  for (const m of modules) (m as { register: (p: typeof program) => void }).register(program);
+  await registerAll(program);
   return new Set(program.commands.map((c) => c.name()));
 }
 
@@ -50,14 +175,149 @@ describe("CLI surface", () => {
   // Every command supports --json (SRD §10).
   test("every command accepts --json", async () => {
     const program = buildProgram();
-    const modules = await Promise.all(
-      SRD_COMMANDS.map((n) => import(`../../src/cli/commands/${n}.ts`)),
-    );
-    for (const m of modules) (m as { register: (p: typeof program) => void }).register(program);
+    await registerAll(program);
     for (const cmd of program.commands) {
       const flags = cmd.options.map((o) => o.long);
       expect(flags).toContain("--json");
     }
+  });
+
+  /**
+   * **The exclusion is a list, not an omission** (SRD-TRIAGE-CONSOLE §13 task
+   * 6.2, §12: *"the set is asserted in both directions, so silence is not an
+   * option"*).
+   *
+   * The two lists must PARTITION the command modules on disk: every module in
+   * exactly one, and no entry in either naming a module that is not there. That
+   * is the mechanism, and it is what the previous by-omission arrangement lacked
+   * — a new `src/cli/commands/whatever.ts` was invisible to this file, so the
+   * question this test asks could not previously be asked at all.
+   *
+   * Disjointness is asserted separately from coverage because the two failures
+   * read differently: a name in both lists is a contradiction about intent, and a
+   * module in neither is a decision nobody made.
+   */
+  test("SRD_COMMANDS and EXCLUDED_COMMANDS partition the command modules on disk", () => {
+    const onDisk = commandModulesOnDisk();
+    const included = new Set<string>(SRD_COMMANDS);
+    const excluded = new Set(Object.keys(EXCLUDED_COMMANDS));
+
+    for (const name of included) expect(excluded.has(name)).toBe(false);
+    expect([...included, ...excluded].sort()).toEqual(onDisk);
+    // Named, not counted: `monitor-readonly.test.ts`'s rule, which is that
+    // naming the permitted set is what makes an unlisted member fail.
+    expect([...excluded].sort()).toEqual(
+      ["monitor", "pm-guard", "relay", "shell", "tui", "unstage"].sort(),
+    );
+    // `triage` took the FIRST direction and is DRIVEN, not excluded. Asserted
+    // here as well as by the partition above, because "settled in one direction
+    // or the other" is a claim about which one, and a reader of a red diff needs
+    // to see that the answer was not "neither".
+    expect(included.has("triage")).toBe(true);
+    expect(excluded.has("triage")).toBe(false);
+  });
+
+  /** An exclusion that states no mechanism is a verdict, and a verdict rots. */
+  test("every exclusion states a reason", () => {
+    for (const [name, why] of Object.entries(EXCLUDED_COMMANDS)) {
+      expect(why.length, `${name} needs a reason`).toBeGreaterThan(20);
+    }
+  });
+
+  /**
+   * The surface that reports a command as present when it is NOT runnable.
+   *
+   * `pifleet triage` nearly shipped unregistered: the command module existed,
+   * `triage-command.test.ts` drove its `register` onto a real `buildProgram()`,
+   * `Docs/SRD.md` §10 carried its row, and `SRD_COMMANDS` above listed it — four
+   * surfaces all reporting it as present — while `main()` in `src/cli/index.ts`
+   * never imported it, so an operator typing the command got nothing. §13 task
+   * 6.2's own *Touches* line omitted that file, which is how it happened.
+   *
+   * Every other test in this file drives `buildProgram()` and registers
+   * commands itself, so none of them can see this: the module under test is
+   * always reachable BECAUSE the test imported it. Only the shipped entry
+   * point's own import list answers "can an operator run this", and that list
+   * is read as TEXT here for the same reason `scripts/` probes are — importing
+   * `index.ts` to inspect it would run its registration side effects.
+   */
+  test("every command in SRD_COMMANDS is imported by the shipped entry point", () => {
+    const entry = readFileSync(join(import.meta.dir, "..", "..", "src", "cli", "index.ts"), "utf8");
+    const missing = SRD_COMMANDS.filter((c) => !entry.includes(`./commands/${c}.ts`));
+    expect(
+      missing,
+      `${missing.join(", ")} registered in no import in src/cli/index.ts. A command module that ` +
+        `exists, is tested and has a §10 row is still not runnable until main() imports it.`,
+    ).toEqual([]);
+  });
+
+  /**
+   * **The composition root supplies `triage`'s effects, and nothing else may**
+   * (SRD-TRIAGE-CONSOLE §13 task 6.1b).
+   *
+   * The triage console needs one capability §12's read-only block forbids its own
+   * modules to hold — the per-observer dispatch, which lives in a command module
+   * this console may not import and takes a fleet-ledger writer it may not name.
+   * The answer is not a second entry on ISC-826's one-entry allowlist; it is that
+   * `src/cli/index.ts` builds the effect and injects it.
+   *
+   * Two halves, and each fails differently:
+   *
+   *   - **Structural.** `register` takes two parameters, so `main()`'s uniform
+   *     `for (const m of modules) m.register(program)` loop CANNOT register this
+   *     command — the omission is a `tsc` error rather than a runtime surprise.
+   *     A one-parameter `register` here means a refusing or defaulted deps
+   *     factory came back, which puts the hole straight back in the wiring layer
+   *     §3.3 names as the one the coverage gate keeps catching.
+   *   - **Textual**, on ISC-830's own reasoning: importing `index.ts` to inspect
+   *     it would run its registration side effects, so the entry point is read as
+   *     TEXT. `productionTriageEffects` is the builder and it must be passed as a
+   *     THUNK — calling it at registration time would load `fleet.yaml` and
+   *     resolve a worker on every `pifleet --help`, and would make `--status`
+   *     fail on a machine with no fleet.
+   */
+  test("the entry point injects triage's effects rather than defaulting them", async () => {
+    const triage = await import("../../src/cli/commands/triage.ts");
+    expect(triage.register.length).toBe(2);
+    expect(triage.productionTriageDeps.length).toBe(1);
+
+    const entry = readFileSync(join(import.meta.dir, "..", "..", "src", "cli", "index.ts"), "utf8");
+    expect(entry).toContain("productionTriageDeps(productionTriageEffects)");
+    // A THUNK: the builder's name appears without a call at the injection site.
+    expect(entry).not.toContain("productionTriageDeps(await productionTriageEffects()");
+    expect(entry).not.toContain("productionTriageDeps(productionTriageEffects())");
+  });
+
+  /**
+   * **§13 task 6.5b: the recycle's ARGV, pinned by value, because both of its
+   * dangerous edits are one word long and neither has a symptom a test could
+   * otherwise see.**
+   *
+   * The effect itself is unreachable from any test — a unit suite that ran it
+   * would tear down a real container — so what is checkable is the argv the
+   * composition root builds, and this file already reads the entry point as TEXT
+   * for ISC-830's reason (importing it runs its registration side effects).
+   *
+   *   - **`--keep-panes` is load-bearing and its absence is silent.** All four
+   *     triage seats are panes of ONE cmux workspace (§6.1's correction: the
+   *     workspace is `scripts/triage`'s and each pane then runs
+   *     `pifleet up --workers <one worker>`), and `commands/down.ts` destroys
+   *     every distinct `workspace_ref` a run's workers recorded unless told to
+   *     keep it. Dropping the flag turns "recycle one seat" into "destroy the
+   *     operator's whole triage console", 24 times a day, unattended.
+   *   - **`--attach-here` must never appear.** It is what demands a TTY on both
+   *     streams (`src/attended/adopt.ts:96-114`) and §6.6's whole claim that this
+   *     console is recyclable at all is that an `rpc` recreate needs no terminal.
+   *     Pinning the argv by full value is what forbids it, rather than a
+   *     `not.toContain` that a docblock naming the flag would defeat.
+   */
+  test("the triage recycle's argv keeps the operator's panes and asks for no terminal", () => {
+    const entry = readFileSync(join(import.meta.dir, "..", "..", "src", "cli", "index.ts"), "utf8");
+    expect(entry).toContain('["down", "--run", runId, "--keep-panes", "--json"]');
+    expect(entry).toContain('["up", "--workers", seat, "--json"]');
+    // And the two are really the effects the console is handed, not dead code.
+    expect(entry).toContain("downRun: productionDownRun");
+    expect(entry).toContain("upSeat: productionUpSeat");
   });
 });
 

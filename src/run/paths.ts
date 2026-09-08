@@ -23,6 +23,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { bindMountSources } from "../container/docker-argv.ts";
 import { EXIT } from "../contracts.ts";
+import { repliesPolicyHostPath } from "./replies-policy.ts";
 
 /**
  * Root under which every run directory lives.
@@ -288,6 +289,32 @@ export interface WorkerPaths {
    * debugging what a worker was told.
    */
   dispatchPolicy: string;
+  /**
+   * The DECLARED REPLY SET: which replies belong to THIS turn
+   * (SRD-WORKER-DISPATCH-EXTENSION §7.4, D6).
+   *
+   * A THIRD sibling of `taskPolicy` and `dispatchPolicy`, named here for the
+   * reason they are (ISC-188/ISC-231): `config/render.ts` emits the `-v`,
+   * `run/materialize.ts` creates the inode that mount pins, and
+   * `run/replies-policy.ts` rewrites it at each publish. It was NOT named here
+   * when the mount landed, and ISC-1091 is what that cost — the `-v` was
+   * emitted with nothing on the host to satisfy it, so Docker would have
+   * created a DIRECTORY at the source and every `writeRepliesPolicy` after it
+   * would fail `EISDIR` for the life of the container. The same shape, in the
+   * same module, for the third time.
+   *
+   * **The value comes from `repliesPolicyHostPath` rather than a `join` of its
+   * own**, and that is the whole reason this field can exist without
+   * reintroducing the drift it is meant to close. `replies-policy.ts` owns the
+   * basename beside the mount constant, the 0444 mode and the in-place rewrite
+   * recipe; a second spelling here would be a fourth thing naming the file and
+   * would agree with the other three only until one of them moved. So the field
+   * is a CACHE of that module's answer, not an independent derivation —
+   * `materialize.ts` reads `paths.repliesPolicy` exactly as it reads its two
+   * siblings, and `config/render.ts` keeps calling the function directly, which
+   * satisfies its standing rule that it joins no run-dir path itself.
+   */
+  repliesPolicy: string;
   kubeconfig: string;
   /**
    * The per-worker secret store: one file per granted `secrets:` name, holding
@@ -385,6 +412,7 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     cloudAllow: join(dir, "cloud-allow"),
     taskPolicy: join(dir, "task-policy"),
     dispatchPolicy: join(dir, "dispatch-policy"),
+    repliesPolicy: repliesPolicyHostPath(dir),
     kubeconfig: join(dir, "kubeconfig"),
     secretsDir: join(dir, "secrets"),
     launchJson: join(dir, "launch.json"),

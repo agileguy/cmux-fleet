@@ -64,7 +64,22 @@ run:
   # It lives in the gitignored `fleet.yaml`, never here — a consent committed to
   # a shared example is a consent nobody chose.
   # hosted_repo_consent: <the exact remote you mean to send>
-  max_concurrent: 2          # bounded by oMLX throughput, not pane count (§5.9)
+  # RAISED to 4 for the triage console (SRD-TRIAGE-CONSOLE Q3/task 0.4). It
+  # bounds each RUN, not the host, and until the triage console existed every
+  # console in this fleet gave each worker its OWN run --- `agentPaneCommand`
+  # builds `up --workers <one worker>` and `operations-plan.ts:310` says it in
+  # as many words: "Each pane creates its own run". So this key had nothing to
+  # bind on, at any value. The triage console is the first run holding four
+  # seats, and three of them fan out at once; at 1 the sweep serialises and
+  # cannot fit a five-minute cadence.
+  #
+  # THE COST, which is the reason this is 4 and not higher: the bound that
+  # actually matters is oMLX throughput, and all four triage seats are LOCAL
+  # (D1 arm 3). Four concurrent local requests from this run is the ceiling
+  # this number sets, and it is set at the console's size deliberately --- a
+  # larger value would not make the sweep faster and would let some future
+  # multi-worker run outrun the server it shares.
+  max_concurrent: 4          # bounded by oMLX throughput, not pane count (§5.9)
   # The F39 RUNTIME detector (§5.9 detector 2). A worker completing this many
   # consecutive turns with ZERO tool calls is failed `no_tool_calls` rather than
   # settling "successfully" — the startup probe catches a model that cannot emit
@@ -144,6 +159,17 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
     - Qwen3-Coder-30B-A3B-Instruct-4bit
     - Qwen3.5-35B-A3B-8bit
     - GLM-4.5-Air-MLX-4bit
+    # The `triage` console's four seats, all LOCAL — see the role below.
+    #
+    # THIS LINE IS NOT HYGIENE, IT IS THE DIFFERENCE BETWEEN A CONFIG THAT
+    # STARTS AND ONE THAT DOES NOT. The allowlist gates the ROLE, not the
+    # server, and `config validate` never reads it — that command stops at
+    # `resolveAllWorkers` and does not call `assertModelAllowed`. Omit this
+    # entry and the example validates clean, then `up` refuses tri-1 and obs-t1
+    # with ModelNotAllowedError: the operator has been told
+    # the file is fine and then had it rejected, which is precisely the failure
+    # `src/cli/commands/config.ts` argues against in its own words.
+    - gpt-oss-20b-MXFP4-Q8
   require_native_tool_calls: true   # `up` probes each model — see §5.9
   #
   # PER-MODEL CONTEXT WINDOWS live on a PROVIDER block, so they appear under
@@ -407,7 +433,7 @@ roles:
   sre:                                    # diagnoses AND remediates
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base                       # gcloud/kubectl/helm are in every image
-    tools: [read, write, edit, bash, grep, find, ls]
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
@@ -419,7 +445,7 @@ roles:
     model: Qwen3.5-35B-A3B-8bit
     thinking: high                        # reconciling four disagreeing channels is the job
     toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
-    tools: [read, write, bash, grep, find, ls]   # write is for the outbox artifact only
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox artifact only
     skills: [pifleet-worker, observer-ops]
     cloud_access: true                    # ADC, read verbs only — §5.10 refuses every mutation
     egress_access: true                   # a ROUTE to the proxy; destinations are egress.allow
@@ -438,7 +464,7 @@ roles:
   verifier:                               # confirms a remediation actually worked
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base
-    tools: [read, bash, grep, find, ls]
+    tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     cloud_access: true
     isolation: none
@@ -448,7 +474,7 @@ roles:
   engineer:
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: node
-    tools: [read, write, edit, bash, grep, find, ls]
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/engineer.md
   reviewer:
@@ -480,14 +506,14 @@ roles:
     # operator's checkout at /workspace — mounted `:ro`, so the grant would buy
     # nothing it could use and would widen the writer set for no capability.
     # NO `bash`, unchanged: §12.1 stands where its argument applies.
-    tools: [read, write, grep, find, ls]
+    tools: [read, write, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/reviewer.md
     isolation: shared-ro
   tester:
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: python
-    tools: [read, bash, grep, find, ls]
+    tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/tester.md
 
@@ -504,7 +530,7 @@ roles:
     # combination actually is — a shell and a live write credential for a system
     # of record — and see `roles/ticketing.md` on why scope discipline, not the
     # container boundary, is the control that binds here.
-    tools: [read, write, edit, bash, grep, find, ls]
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker, ticket-ops]
     # NO Google identity. This role has no reason to hold one, and `egress`
     # below is a separate decision from `cloud_access` precisely so that
@@ -537,6 +563,70 @@ roles:
     # and it grants no Google identity. That separation is the whole point of the
     # key: reaching one external host does not have to be bought with ADC.
     egress_access: true
+
+  # ---- triage: the console with no keyboard ----
+  triage:
+    # LOCAL 20b, BY OWNER DECISION 2026-09-06 — SRD-TRIAGE-CONSOLE §0.2 arm 3,
+    # recorded as D1. The commission that opened that document asked for
+    # `ollama-cloud/gpt-oss:120b` on all four of this console's seats, which
+    # would have reversed the 2026-09-03 decision that put `observer` on this
+    # model. It was refused, and this line is the refusal.
+    #
+    # WHAT THE ARGUMENT TURNED ON, since a reader who finds only the outcome
+    # will read this as a performance choice: it is not about a model name, it
+    # is about whether an observer's context may leave the machine. This role
+    # reconciles three observers' reports, and an observer's report carries
+    # namespaces, workload names, pod names, restart counts, log excerpts and
+    # cluster endpoints from a LIVE environment — 288 sweeps a day — so it is
+    # the most sensitive context this fleet produces and the one least worth
+    # sending to a third party. There is no ceiling, timeout or scope that
+    # reduces a transcript after it has been sent.
+    #
+    # THE COST, stated rather than waved at (D1). Reconciliation is the one task
+    # here that most wants a bigger model, and a 20B will be worse at it than a
+    # 120B. The failure will not look like a model failure — it will look like a
+    # noisy console. If that is what a day-long run shows, THIS is the first
+    # decision to re-examine, not the last.
+    model: gpt-oss-20b-MXFP4-Q8
+    thinking: high                        # reconciling three reports that disagree IS the job
+    toolchain: base                       # it reads artifacts; there is nothing to build
+    # `reviewer`'s grant above, copied deliberately — the same set the `review`
+    # console's `collator` carries in the operator's own `fleet.yaml`, which is
+    # where the shape was argued. Note what is NOT here.
+    #
+    # `write` is the outbox artifact and nothing else, on exactly the argument
+    # `reviewer` above sets out: /outbox is a worker-scoped bind mount, only the
+    # harvester reads it, and it is already the untrusted-content boundary.
+    #
+    # NO `bash`, and here that is the load-bearing omission rather than an
+    # inherited habit. This role's entire output is a request for something ELSE
+    # to act on — a fan-out to three observers, and a notification that wakes a
+    # human. A shell is exactly what turns a request-WRITING worker into a
+    # DISPATCHING one, and an agent may not dispatch.
+    #
+    # NO `edit`, for `reviewer`'s reason: nothing it can see is writable except
+    # its own outbox, so the grant would widen the writer set and buy nothing.
+    tools: [read, write, grep, find, ls, submit_report]
+    # `pifleet-worker` alone. There is deliberately NO `triage` bundle: a name
+    # with no directory under skills/ is a refusal at `up`, not a silently
+    # shorter bundle, and inventing one to make this line look complete is the
+    # thing the note above `roles:` refuses. The role's own instructions live in
+    # the briefing file at the bottom of this block.
+    skills: [pifleet-worker]
+    # NO `cloud_access` and NO `egress_access`, both left at the `defaults:`
+    # value of off, and that is a design property rather than an omission. The
+    # observers hold the cluster identity and reach the network; this seat reads
+    # what they wrote. Keeping the two apart is why the console can be given a
+    # clock without also being given a way to touch anything.
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    # THE CONSOLE'S DEFINING PROPERTY, restated here rather than inherited from
+    # `defaults:` so that a future edit has to argue with a comment. `tui`
+    # allocates no epoch, and this console dispatches 288 times a day: with no
+    # `already_completed` fence a re-dispatched sweep runs a second time. It is
+    # the first console in this fleet with no keyboard, which is the point — it
+    # is the first one that runs when nobody is watching.
+    pane_mode: rpc
+    append_system_prompt_file: ./roles/triage.md
 
 workers:
   # 8 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
@@ -635,3 +725,41 @@ workers:
   # it and one process has one terminal — so two attended panes are two
   # runs, which `status --all` reports and `--recreate` tears down.
   - {id: tick-1, role: ticketing, pane_mode: tui, theme: catppuccin-latte}
+  # ---- the `triage` console's four seats ----
+  #
+  # NO KEYBOARD, AND NO THEME EITHER. All four resolve to `pane_mode: rpc` from
+  # their roles — `triage` and `observer` both declare it — so no override
+  # belongs here, and a theme would be decoration on a pane nobody types at.
+  # This console runs on a clock rather than on attention: a sweep every five
+  # minutes, 288 a day. `tui` allocates no epoch, and without that fence a
+  # re-dispatched sweep runs twice, which is the one thing a console nobody is
+  # watching cannot afford. The panes are VIEWS, not terminals.
+  #
+  # ONE RUN, one run id, stable for the console's whole life:
+  #   pifleet up --workers tri-1,obs-t1
+  # `run.max_concurrent` must be at least 3 or the three-way fan-out serialises
+  # and a five-minute cadence stops being one. It is 4 at :82, so this console
+  # fits with nothing to spare — a fourth environment is a `max_concurrent`
+  # decision before it is a worker line.
+  - {id: tri-1,  role: triage}
+  # THREE OBSERVERS, ON THE ROLE THAT ALREADY EXISTS, doing the job it was
+  # written for, at a cadence — no new role, no widened grant, and that is the
+  # strongest thing this design has going for it. One seat per environment, so
+  # the sweep fans out in parallel instead of one worker walking a list.
+  #
+  # THE `model:` OVERRIDE, AND WHY IT IS HERE WHEN THE DESIGN SAYS IT SHOULD NOT
+  # BE. SRD-TRIAGE-CONSOLE §6.11 says these three take the `observer` role's
+  # model unchanged, with a worker-level override "only if §0.2 arm 1 or 2 is
+  # taken" — and arm 3 was taken. That sentence is written against the
+  # operator's own untracked `fleet.yaml`, where `observer` IS
+  # `gpt-oss-20b-MXFP4-Q8` by the 2026-09-03 decision, so inheriting there
+  # delivers exactly what the owner ruled. IN THIS FILE the same role carries
+  # `Qwen3.5-35B-A3B-8bit`, so inheriting here would deliver something else.
+  #
+  # Both models are local, so arm 3's privacy property — nothing an observer
+  # reads leaves the machine — holds either way, and this override buys none of
+  # it. What it buys is that the tracked example SHOWS the decision instead of a
+  # model that merely shares its posture: the 2026-09-06 ruling was that all
+  # four seats run gpt-oss-20b. Read as a reversal of §6.11 this looks wrong; it
+  # is the same outcome reached from a file whose `observer` role differs.
+  - {id: obs-t1, role: observer, model: gpt-oss-20b-MXFP4-Q8}

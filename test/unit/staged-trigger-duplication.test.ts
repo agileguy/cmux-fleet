@@ -137,6 +137,9 @@ describe("a stage on an auto-triggered worker is triggered ONCE", () => {
 
     const outcome = await sendStagedTrigger("rev-arch-1", PRESENTATION, launch(false), async () => backend);
 
+    // The trigger types the trigger and NOTHING else. The session reset moved to
+    // `resetPaneSession`, after settle — see its docblock for why before-the-
+    // trigger fights the delegation contract, attribution and `wait` at once.
     expect(typed).toEqual([STAGED_TRIGGER_LINE]);
     expect(keys).toEqual(["enter"]);
     expect(outcome.sent).toBe(true);
@@ -155,6 +158,9 @@ describe("a stage on an auto-triggered worker is triggered ONCE", () => {
 
     const outcome = await sendStagedTrigger("rev-arch-1", PRESENTATION, null, async () => backend);
 
+    // The trigger types the trigger and NOTHING else. The session reset moved to
+    // `resetPaneSession`, after settle — see its docblock for why before-the-
+    // trigger fights the delegation contract, attribution and `wait` at once.
     expect(typed).toEqual([STAGED_TRIGGER_LINE]);
     expect(keys).toEqual(["enter"]);
     expect(outcome.delegated).toBe(false);
@@ -175,6 +181,9 @@ describe("a stage on an auto-triggered worker is triggered ONCE", () => {
 
     await sendStagedTrigger("rev-arch-1", PRESENTATION, off, async () => backend);
 
+    // The trigger types the trigger and NOTHING else. The session reset moved to
+    // `resetPaneSession`, after settle — see its docblock for why before-the-
+    // trigger fights the delegation contract, attribution and `wait` at once.
     expect(typed).toEqual([STAGED_TRIGGER_LINE]);
   });
 

@@ -49,7 +49,9 @@ const USAGE = `Usage: scripts/operations [options]
   --poll <seconds>  git pane refresh interval (default: 5)
   --dry-run         print the pane plan and exit without touching cmux
   --recreate        close an existing operations workspace and rebuild it
-  --restart <title> respawn ONE pane by title, leaving the others running
+  --restart <pane>  respawn ONE pane, leaving the others running. Takes a pane
+                    title (observer, monitor, ticketing) or the worker id that
+                    pane runs (obs-1, tick-1) — both name the same pane
   --task <path>     with --restart: recreate the worker, then dispatch this
                     task. Waits for work it already holds; never recreates
                     over a running or staged task.
@@ -250,6 +252,38 @@ async function main(argv: string[]): Promise<number> {
     const plan = (): unknown => plannedPane(OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
 
     /*
+     * ISC-1106 — THE RUN IS FOUND BY WORKER ID, AND THIS CONSOLE'S TITLES ARE
+     * NOT WORKER IDS.
+     *
+     * `resolveThenRestart` and `recreateThenDispatch` use `opts.worker` for one
+     * thing: the run lookup keyed by worker id. Handing them `observer` matched
+     * no run, so `down` was never called and the pane was respawned beside its
+     * own still-running container — 12 workers became 14, twice, an hour apart,
+     * and both orphans had to be stopped by hand. The other two consoles were
+     * never exposed because their pane titles ARE their worker ids.
+     *
+     * `plannedPane` is pure and already refuses an unknown name, so resolving
+     * here costs nothing and happens before anything irreversible. A pane that
+     * runs no worker (`fleet-status`, the monitor) keeps its TITLE as the
+     * lookup key: nothing holds it, so nothing is stopped and it is simply
+     * respawned — which is the behaviour the block comment above promises.
+     */
+    const targetPane = plannedPane(OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+    const targetWorker = targetPane.worker ?? restartFlag;
+
+    /*
+     * TWO LOOKUPS, TWO DIFFERENT KEYS, and conflating them is how this defect
+     * was half-fixed once already. The RUN is found by worker id; the live cmux
+     * PANE is found by title, because that is what `rename-tab --title` wrote.
+     * Passing the operator's word to both worked only while the two were the
+     * same string. Measured while fixing ISC-1106: `--restart obs-1` correctly
+     * stopped the run and then failed with `no pane titled 'obs-1'`, leaving the
+     * worker down with no pane — the run teardown had already happened, so the
+     * ordering guarantee bought nothing. Both keys come off the resolved pane
+     * now, and neither comes off `restartFlag`.
+     */
+
+    /*
      * `--task` makes this recreate-then-dispatch. See the same branch in
      * `scripts/development` and `src/run/fresh-dispatch.ts`: a tui worker
      * keeps its session across epochs, so a dispatch can be answered from the
@@ -259,6 +293,17 @@ async function main(argv: string[]): Promise<number> {
     const taskFlag = flag(argv, "--task");
     if (taskFlag !== undefined) {
       plan();
+      /*
+       * A pane with no worker has nothing to dispatch TO. Before ISC-1106 this
+       * sent `dispatch --worker fleet-status`, which cannot succeed; refusing
+       * names the pane instead of failing one layer down on a worker id no
+       * `fleet.yaml` will ever contain.
+       */
+      if (targetPane.worker === undefined) {
+        throw new Error(
+          `operations: '${restartFlag}' runs no worker, so there is nothing to dispatch --task to`,
+        );
+      }
       const fresh = await recreateThenDispatch(
         {
           status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
@@ -270,17 +315,17 @@ async function main(argv: string[]): Promise<number> {
           },
           restartPane: async () => {
             process.stderr.write(`operations: respawning the ${restartFlag} pane\n`);
-            await restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+            await restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, targetPane.title);
           },
           dispatch: (runId) =>
             runOutput(repoRoot, [
-              "dispatch", "--worker", restartFlag, "--run", runId,
+              "dispatch", "--worker", targetWorker, "--run", runId,
               "--task", taskFlag, "--json",
             ]),
           sleep: (ms) => Bun.sleep(ms),
           now: () => Date.now(),
         },
-        { worker: restartFlag },
+        { worker: targetWorker },
       );
       process.stdout.write(
         `operations: recreated ${restartFlag} into run ${fresh.runId} ` +
@@ -315,9 +360,9 @@ async function main(argv: string[]): Promise<number> {
           await runOutput(repoRoot, ["down", "--run", runId]);
         },
         restartPane: () =>
-          restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag),
+          restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, targetPane.title),
       },
-      { worker: restartFlag },
+      { worker: targetWorker },
     );
     process.stdout.write(
       `operations: respawned the ${restartFlag} pane (surface ${r.pane.surfaceId}) ` +

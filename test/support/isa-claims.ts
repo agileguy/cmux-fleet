@@ -1537,8 +1537,28 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "the claim is pinned to the ABSENCE, so the commit that builds it goes red and the row " +
       "cannot keep saying NOT BUILT after it stops being true. A mitigation named in the " +
       "present tense that does not exist is worse than a blank cell, because it stops the " +
-      "reader looking further — and §13 is read mid-incident.",
-    argv: ["grep", "-rF", "backoff", "src/"],
+      "reader looking further — and §13 is read mid-incident. " +
+      "RESCOPED 2026-09-06, and the reason is worth more than the fix. This fired RED on " +
+      "`src/run/triage-notify.ts`, which is SRD-TRIAGE-CONSOLE §6.9's cadence-as-backoff for " +
+      "NOTIFICATIONS — one attempt per notification per sweep, in sweep units. F13 is " +
+      "`auto_retry_*`, a PROVIDER rate-limit retry living in `src/supervisor/index.ts:1370` " +
+      "and `src/rpc/completion.ts:55` (SRD.md:2316, :2366). Two unrelated mechanisms sharing " +
+      "one English word. The tripwire's own text anticipated the opposite weakness — a " +
+      "`setTimeout` doubling delay would leave it green — and not this one, an unrelated " +
+      "module introducing the identifier. " +
+      "SCOPED TO F13'S SUBJECT rather than excluded file by file, and the first attempt at " +
+      "this fix is why. `--exclude=triage-notify.ts` left `src/run/triage-config.ts` still " +
+      "matching — the same notification backoff, named in a knob's docblock — and a second " +
+      "`--exclude` would have been the tell that the blanket word had stopped being the " +
+      "claim. The repo did not build F13; it grew a second unrelated meaning for one English " +
+      "word. " +
+      "So the grep now asks where F13's mitigation would HAVE to live. `auto_retry_*` is " +
+      "read in `src/supervisor/index.ts` and `src/rpc/completion.ts` only (`logs.ts` merely " +
+      "renders the event), and the mitigation escalates a worker to `blocked`, which is a " +
+      "supervisor act. A backoff for F13 cannot be built without touching those two trees. " +
+      "This is narrower in surface and SHARPER in meaning: it drops false positives from " +
+      "modules that never could implement F13, and drops no true one.",
+    argv: ["grep", "-rF", "backoff", "src/supervisor/", "src/rpc/"],
     expect: "empty",
   },
   {

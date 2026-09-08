@@ -1236,7 +1236,7 @@ already do. Worker-to-worker network reachability, which stays as it is and stay
 
 | | Cost |
 |---|---|
-| **A new mount** | `/replies`, `:ro`, `0444`, and a fourth path in `docker/verbgate`'s integrity loop. The loop is already a loop, so this is one array element — but it is one more surface whose read-only-ness is load-bearing, enforced only by an exit-78 in a shell script |
+| **A new mount** | `/replies`, `:ro`, `0444`, and one more surface `docker/verbgate` refuses on. **CORRECTED 2026-09-08: it is checked BESIDE the file loop, not as a path in it** (`docker/verbgate:284-286`) — the loop tests each member's PARENT as well, which is safe for a file under `/policy` and meaningless for a directory whose dirname is `/`, so `/replies` gets a direct-only arm of its own. The distinction sharpened when ISC-1092 made `/policy/replies` — a FILE naming which replies count — a genuine fourth loop member one word away in the same script. Either way it is one more surface whose read-only-ness is load-bearing, enforced only by an exit-78 in a shell script |
 | **A new host process** | §6.5, and it has no supervision story. **This is the largest unresolved structural cost in the document** |
 | **A third console script** | ~165 duplicated lines on top of an existing 52.1% duplication (§1.2). D3 |
 | **A disclosure widening** | §4.4. Three vendors instead of one, on a console whose job is breadth, against a §5.9 permission that names four seats and does not include these |

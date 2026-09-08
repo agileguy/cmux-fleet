@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review workspace, or names any fleet worker or console by name.
+description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review/triage workspace, run or check the triage console ("start triaging", "is the triage console running", "what is triage saying", "sweep now"), or names any fleet worker or console by name.
 ---
 
 # fleet
@@ -53,6 +53,30 @@ task envelope. Discover only what dispatch itself mechanically requires — the
 worker's run id — and nothing else. If the instruction is genuinely
 undispatchable, ask the user; do not research your way to an answer.
 
+### This applies to CONFIGURING a console, not only to dispatching one
+
+**Recorded 2026-09-07, because it was violated while fixing the triage console.**
+Told *"use alert notifier, prometheus and grafana in cni-dev"*, the right next
+action was to write those three names into `triage/targets.yaml` and start the
+console. What happened instead was a `kubectl get ns` to find the real namespace
+spellings, and then a `kubectl get deploy,statefulset` in each one to enumerate
+the workloads — through an observer's own container, which is the tell that the
+worker equipped to do it was right there.
+
+**Filling a config field is dispatch preparation and the rule covers it.** The
+operator gave three service names and an environment; expanding those into
+namespaces, workload names and check lists is the discernment the console exists
+to perform. An observer that is handed a workload list has been told what it was
+supposed to find out, and — worse — it will believe the list. A wrong name in a
+targets file becomes `indeterminate`, then a coverage incident, then an operator
+sent to a cluster over a typo the host invented.
+
+The narrow exception is unchanged and is worth stating so it is not stretched:
+running a read to DIAGNOSE a fault the user reported ("the observers had auth
+problems") is answering their question, not doing a worker's job. The line is
+whether the answer becomes an instruction you hand a worker. Diagnosis, yes;
+pre-filling the brief or the targets file, no.
+
 Corollary: **do not summarise, second-guess or "improve" the worker's output
 either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 
@@ -64,9 +88,10 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 |----------|---------|------|
 | **ProjectManager** | "run ProjectManager on <repo> against <SRD>", "implement this SRD with the fleet", "run the SRD through the fleet", "have the fleet build <SRD path>", "project-manage this SRD" | `Workflows/ProjectManager.md` |
 | **DispatchTask** | "use tick-1", "send this to eng-1", "get the fleet to…", "ask the observer" | `Workflows/DispatchTask.md` |
-| **Consoles** | "recreate the operations workspace", "rebuild the development console", "open the review console", "open the consoles", "restart tst-1", "make it a python worker", "launch it from <repo>" | `Workflows/Consoles.md` |
+| **Consoles** | "recreate the operations workspace", "rebuild the development console", "open the review console", "open the triage console", "open the consoles", "restart tst-1", "make it a python worker", "launch it from <repo>" | `Workflows/Consoles.md` |
 | **Observe** | "what is the fleet doing", "is eng-1 still working", "show me the transcript" | `Workflows/Observe.md` |
 | **Intervene** | "steer eng-1", "abort that task", "unstage it", "take the terminal" | `Workflows/Intervene.md` |
+| **Triage** | "start triaging", "sweep now", "is the triage console running", "what is triage saying", "why did I get that alert" | `Workflows/Triage.md` |
 
 ---
 
@@ -80,6 +105,8 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
 | `col-1` | collator | review | `base` | writes the fan-out request; does not review |
 | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | reviewer | review | `base` | three vendors, read-only, `shared-ro` |
+| `tri-1` | triage | triage | `base` | the collator: partitions the environment's services and collates the sweep. **Local `gpt-oss-20b-MXFP4-Q8`** |
+| `obs-t1`, `obs-t2`, `obs-t3` | triage | triage | `base` | one share of services each, per sweep. Same local model; `tools: [read, write, grep, find, ls]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
 is gitignored. The tracked `fleet.example.yaml` differs in three ways worth
@@ -87,7 +114,12 @@ knowing before it is used to reason about this one: its `tester` role declares n
 `egress_access` and its `egress.allow` names no package registry, so **"egress to
 the registries" is false there**; its development seats run local oMLX models
 rather than hosted ones; and the `review` console's four seats are not declared in
-it at all. `rev-1` is gone from both — the development console's fourth seat is
+it at all. **The `triage` console's four ARE** — `{id: tri-1, role: triage}` and the three
+`obs-t*` seats appear in both files, on the local `gpt-oss-20b-MXFP4-Q8` the role pins, so the
+example can stand that console up where it cannot stand up `review`. Checked 2026-09-07 rather
+than assumed: the `workers:` block is a LIST of `{id, role}` maps, and a `^\s+<id>:` search over
+it finds nothing and reads as *"not declared"* — which is how this sentence would have grown a
+fourth false clause. `rev-1` is gone from both — the development console's fourth seat is
 `tst-2` on `role: tester`, and `role: reviewer` now serves the three `review`
 console lenses.
 
@@ -254,5 +286,85 @@ tests can run at all.
   making the launch directory the workspace fixed it on the first try. The
   lesson generalises: **a worker doing the wrong thing consistently is usually
   being handed the wrong thing.**
+- **A stale ACTOR holds the lock and survives `--recreate`, and the error names a
+  file rather than the cause.** Symptom: every attempt to start an actor exits
+  having done nothing —
+
+  ```
+  actor_refused: another triage actor holds /Users/<you>/.pifleet/triage-relay.lock;
+  this one started nothing (§6.3b)
+  ```
+
+  — and no sweep ever runs, while `status --all` shows both seats healthy and idle.
+
+  **The cause is an actor left ALIVE serving a run that has since been torn down.**
+  `--actor-stop` targets the console's CURRENT run, so once the run id has moved it
+  silently matches nothing, prints nothing, and exits zero. `--restart <id>` and
+  even `--recreate` do not reach it either — measured 2026-09-08: one actor survived
+  a `--recreate` of the whole workspace and blocked four consecutive attempts to
+  start a sweep.
+
+  **Diagnose it in two commands, and do not confuse it with an orphaned seat:**
+
+  ```bash
+  cat ~/.pifleet/triage-relay.lock     # first line is the holder's pid
+  ps -p <pid>                          # alive? then it is a stale actor
+  ```
+
+  A lock held by a **dead** pid is taken over automatically — that case needs
+  nothing but running the script again. A lock held by a **live** pid whose run is
+  gone is the one case where killing the process is the correct move, and it is
+  safe: seats are untouched, and the next actor takes the now-dead lock over on the
+  first try. **This is the only `kill` this skill endorses**; seats are still never
+  `abort`ed or `pkill`ed, per the entry above.
+
+  The tell that distinguishes the two failures: a stale actor leaves the SEATS fine
+  (`docker ps` shows real containers matching `status`); an orphaned seat leaves the
+  status table claiming `alive=True phase=busy` with **no container at all**.
+
 - **The consoles are not the fleet.** Workers survive a closed cmux window;
   `status --all` is the truth, a visible pane is not.
+- **NEVER `abort` or `pkill` a seat. It ORPHANS the worker, and the damage is
+  invisible in `status`.** Both kill the process `up --attach-here` registers,
+  and nothing cleans up the run record behind it. What you are left with is a
+  worker that `status --all` reports as `alive=True phase=busy task=<something>`
+  while `docker ps -a` shows **no container at all** — and every subsequent
+  dispatch to it is refused with:
+
+  ```
+  worker <id> has an adopted terminal but no record of the attach process, so
+  pifleet cannot tell whether anybody is still there to run a staged task.
+  ```
+
+  Measured 2026-09-08, three times in one session, on `tri-1` and then twice on
+  `obs-t1`. Each time the next sweep died `pass_failed` on a seat the status table
+  swore was healthy, and each time the minutes went into re-reading the sweep code
+  rather than the one line that said the container was gone.
+
+  **`--restart <id>` is the only thing that repairs it**, because it is the only
+  path that re-runs `up --attach-here` and writes a new record. It is also the
+  only verb you need: to stop work, to clear a staged task, to recover an orphan.
+  If you are reaching for `abort` to "just clear this one task", you are choosing
+  the verb that breaks the seat over the verb that fixes it.
+
+  **The ACTOR is the exception, and the first version of this entry got it
+  backwards.** A lock held by a DEAD pid is taken over automatically — measured
+  2026-09-08: killing the holder and starting a new actor succeeded on the first
+  try. The hazard is the opposite one: an actor left ALIVE while the run it serves
+  is torn down. `--actor-stop` targets the console's CURRENT run, so it silently
+  matches nothing once the run id has moved, prints nothing, and exits zero — and
+  the zombie keeps the lock, so every later actor refuses with
+  `actor_refused: another triage actor holds the lock`, including after
+  `--recreate`. That is a stale actor, not an orphaned seat, and the two look
+  nothing alike: check `cat ~/.pifleet/triage-relay.lock`, then `ps -p <pid>`.
+  Holder alive and serving a dead run is the one case where killing it is correct.
+  Seats are still never `abort`ed or `pkill`ed — that part stands.
+
+- **Refresh EVERY seat a run touches, not the one you are thinking about.**
+  "Recreate on dispatch" is not satisfied by recreating the worker you are
+  dispatching TO when a second seat serves the same run. Measured 2026-09-08:
+  `obs-t1` was rebuilt for a fresh skill mount and `tri-1` was left up across four
+  failed sweeps, carrying ten transcript entries of its own earlier refusals into
+  what was supposed to be a clean pass. A triage sweep is `tri-1` AND `obs-t*`;
+  a review fan-out is `col-1` AND the three reviewers. Restart the set, then
+  start the actor — never one seat and a hope.

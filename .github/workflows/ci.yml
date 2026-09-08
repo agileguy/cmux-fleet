@@ -908,7 +908,76 @@ jobs:
           # adding it here would buy no coverage and pay for a second run
           # inside the expensive job. The comment's reasoning holds; the
           # derivation was what was wrong.
-          TOTAL_EXPECTED: "146"
+          #
+          # 2026-09-08, 151 -> 160: extension-declarations-image.test.ts,
+          # closing ISC-1073. It belongs in THIS job because every one of its
+          # nine probes needs the real image: it reads
+          # @earendil-works/pi-coding-agent's own types.d.ts out of the tag and
+          # checks the three structural `interface ExtensionAPI` declarations in
+          # docker/pi-extensions/ against it. Nothing else can — the package is
+          # installed in the image and is not a dependency of this repository,
+          # so `tsc` has never seen those declarations and a 0.79.x rename of
+          # registerTool would leave the whole suite green.
+          #
+          # DERIVED BY THE HAND METHOD: the seventeen paths with every gate
+          # UNSET report `Ran 151 tests`, the eighteen report `Ran 160`. That
+          # the difference happens to equal this file's nine is a check on the
+          # derivation, not the derivation itself.
+          #
+          # The previous last entry gained a trailing backslash in the same
+          # edit. Without it the new path is a separate shell word after the
+          # command ends — yaml.safe_load parses the block scalar happily either
+          # way, and only reading the argv shows the file was never passed.
+          #
+          # 2026-09-08, 146 -> 148: report-tools-image.test.ts, added by
+          # SRD-WORKER-DISPATCH-EXTENSION task 2.5. It belongs in THIS job by
+          # the same rule that admits probe-in-network.test.ts and excludes
+          # relay-script.test.ts: both of its probes require a real daemon and
+          # the real worker image, so outside this list they have no automated
+          # reader anywhere. The fast `test` job at `:29` collects the file and
+          # skips both of them, which is precisely the self-skipping test this
+          # guard exists to catch.
+          #
+          # DERIVED BY THE HAND METHOD, by running the SEVENTEEN paths the run
+          # step below passes to `probe-guard.sh` with every gate variable
+          # UNSET — not by adding 2 to 146, which is the arithmetic this block
+          # refuses on the record above:
+          #
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,\
+          #       probe-in-network,container-env,container-launch,\
+          #       doctor-preflight,control-socket-uid,full-chain,\
+          #       acceptance-container,honeypot,hostile-pi,\
+          #       mount-preflight-remote,relay-provider-containment,\
+          #       report-tools-image}.test.ts
+          #
+          #   -> 8 pass, 140 skip, 0 fail. Ran 148 tests across 17 files.
+          #
+          # The pass count is unchanged at 8, which is the check worth making:
+          # both new tests are `skipIf(!PIFLEET_DOCKER)` with nothing daemon-free
+          # in the file, so with the gate CLOSED they contribute two skips and
+          # with it OPEN in this job they run. Neither is pinned in a skip list
+          # below, deliberately — a skip here would mean the image build or the
+          # daemon is gone, and that must fail rather than be permitted.
+          #
+          # 2026-09-08, 148 -> 151: three rows added to verbgate.test.ts by
+          # ISC-1092, which puts /policy/replies into the gate's FILE integrity
+          # loop. All three are skipIf(!PIFLEET_DOCKER) — an anti-vacuity mount
+          # check, a :ro control, and the row the loop entry exists for, which
+          # measures the worker's write capability INSIDE the container rather
+          # than hard-coding a per-platform answer.
+          #
+          # DERIVED BY THE HAND METHOD, the seventeen listed paths with every
+          # gate variable UNSET, and not by adding 3 to 148:
+          #
+          #   -> 8 pass, 143 skip, 0 fail. Ran 151 tests across 17 files.
+          #
+          # The pass count is unchanged at 8, which is the check this block
+          # keeps insisting is the one worth making: three new rows that all
+          # need a daemon contribute three SKIPS with the gate shut and three
+          # RUNS with it open, so the collection total moves and the pass total
+          # does not. A new row that ran here with the gate closed would be a
+          # row that does not need the daemon and does not belong in this job.
+          TOTAL_EXPECTED: "160"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -1089,7 +1158,9 @@ jobs:
               test/integration/honeypot.test.ts \
               test/integration/hostile-pi.test.ts \
               test/integration/mount-preflight-remote.test.ts \
-              test/integration/relay-provider-containment.test.ts
+              test/integration/relay-provider-containment.test.ts \
+              test/integration/report-tools-image.test.ts \
+              test/integration/extension-declarations-image.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every

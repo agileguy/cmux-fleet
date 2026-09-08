@@ -192,18 +192,18 @@ describe("the relay record — what makes 'start it again' idempotent (§6.5)", 
     const env = await tempRunsDir();
     // Inside would put a non-run file in the directory `runIdsAscending`
     // enumerates, which is how a stray filename becomes a run id.
-    expect(relayRecordPath(env)).not.toContain(`${env["PIFLEET_RUNS_DIR"]}/`);
-    expect(relayLogPath(env)).not.toContain(`${env["PIFLEET_RUNS_DIR"]}/`);
+    expect(relayRecordPath("review", env)).not.toContain(`${env["PIFLEET_RUNS_DIR"]}/`);
+    expect(relayLogPath("review", env)).not.toContain(`${env["PIFLEET_RUNS_DIR"]}/`);
   });
 
   test("no record is `absent`, which is the ordinary state and not an error", async () => {
     const env = await tempRunsDir();
-    expect((await readRelayStatus(relayRecordPath(env))).kind).toBe("absent");
+    expect((await readRelayStatus(relayRecordPath("review", env))).kind).toBe("absent");
   });
 
   test("a record naming THIS process is live", async () => {
     const env = await tempRunsDir();
-    const path = relayRecordPath(env);
+    const path = relayRecordPath("review", env);
     const { processStartTime } = await import("../../src/safety/procstart.ts");
     await writeFile(
       path,
@@ -211,11 +211,12 @@ describe("the relay record — what makes 'start it again' idempotent (§6.5)", 
         RelayRecordSchema.parse({
           schema: "pifleet.consolerelay/v1",
           pid: process.pid,
+          console: "review",
           started: (await processStartTime(process.pid)) ?? "",
           run_id: "r-1",
           pinned: null,
           started_at: new Date().toISOString(),
-          log_path: relayLogPath(env),
+          log_path: relayLogPath("review", env),
         }),
       ),
     );
@@ -238,20 +239,21 @@ describe("the relay record — what makes 'start it again' idempotent (§6.5)", 
    */
   test("a record with a live pid but the wrong start time is STALE, not live", async () => {
     const env = await tempRunsDir();
-    const path = relayRecordPath(env);
+    const path = relayRecordPath("review", env);
     await writeFile(
       path,
       JSON.stringify(
         RelayRecordSchema.parse({
           schema: "pifleet.consolerelay/v1",
           pid: process.pid,
+          console: "review",
           // PINNED but wrong: `isPinnedIdentity` accepts the format, so only the
           // start-time comparison can separate this from a live relay.
           started: "utc1 Thu Jan  1 00:00:00 2000",
           run_id: "r-1",
           pinned: null,
           started_at: new Date().toISOString(),
-          log_path: relayLogPath(env),
+          log_path: relayLogPath("review", env),
         }),
       ),
     );
@@ -262,7 +264,7 @@ describe("the relay record — what makes 'start it again' idempotent (§6.5)", 
     // Stale means "replace it". Unreadable means "do not signal a pid you could
     // not identify" — `down.ts`'s posture, and the two must not be confused.
     const env = await tempRunsDir();
-    const path = relayRecordPath(env);
+    const path = relayRecordPath("review", env);
     await writeFile(path, JSON.stringify({ pid: 1 }));
     const status = await readRelayStatus(path);
     expect(status.kind).toBe("unreadable");
@@ -345,7 +347,7 @@ describe("§6.10 — the console does not adopt a workspace it did not create", 
  * own failure shape, reached through the mechanism built to close it.
  */
 describe("the watch — the actor's lifetime is bounded by its console's", () => {
-  const AT = { worker: "col-1", runId: "r-1" };
+  const AT = { worker: "col-1", runId: "r-1", console: "review" as const };
 
   test("a live console is never abandoned, however long it runs", () => {
     const w = new ConsoleWatch(3);
@@ -388,6 +390,46 @@ describe("the watch — the actor's lifetime is bounded by its console's", () =>
     for (let i = 1; i < RELAY_ABANDON_PASSES; i += 1) expect(w.observe(false, AT)).toBeNull();
     expect(w.observe(false, AT)).not.toBeNull();
   });
+
+  /**
+   * §13 task 6.3a — the abandonment sentence names the console it was started
+   * for, and this asserts BOTH so the fix cannot be half-made.
+   *
+   * The sentence used to say `scripts/review` and `SRD-REVIEW-CONSOLE`
+   * unconditionally, so a triage actor that reaped itself sent the operator to
+   * the wrong script and the wrong document. Task 6.3 found it and could not fix
+   * it — the file was not in its slice.
+   *
+   * **A fixture that only checked triage would pass an implementation that broke
+   * review**, which is the whole reason both are asserted here, together with
+   * the cross-assertions: each console's reason must NOT carry the other's
+   * script. A single-console check passes a table whose two rows are identical.
+   */
+  test("the reason names the console it was started for, for BOTH consoles", () => {
+    const reasonFor = (console_: "review" | "triage") => {
+      const w = new ConsoleWatch(1);
+      const reason = w.observe(false, { worker: "col-1", runId: "r-1", console: console_ });
+      expect(reason, `${console_} produced no reason at tolerance 1`).not.toBeNull();
+      return reason!;
+    };
+
+    const review = reasonFor("review");
+    expect(review).toContain("scripts/review");
+    expect(review).toContain("SRD-REVIEW-CONSOLE");
+    expect(review).not.toContain("scripts/triage");
+    expect(review).not.toContain("SRD-TRIAGE-CONSOLE");
+
+    const triage = reasonFor("triage");
+    expect(triage).toContain("scripts/triage");
+    expect(triage).toContain("SRD-TRIAGE-CONSOLE");
+    expect(triage).not.toContain("scripts/review");
+    expect(triage).not.toContain("SRD-REVIEW-CONSOLE");
+
+    // The premise that makes the four negatives above meaningful: the two
+    // reasons are genuinely different strings, so a table with two identical
+    // rows cannot satisfy this test by accident.
+    expect(review).not.toBe(triage);
+  });
 });
 
 describe("identity — whether a running relay is THIS console's", () => {
@@ -395,6 +437,7 @@ describe("identity — whether a running relay is THIS console's", () => {
     schema: "pifleet.consolerelay/v1" as const,
     pid: 1,
     started: "utc1 x",
+    console: "review",
     run_id: "r-1",
     pinned: null,
     workers: [...WORKERS],
@@ -403,9 +446,11 @@ describe("identity — whether a running relay is THIS console's", () => {
   };
 
   test("the same run and the same workers is this console", () => {
-    expect(servesConsole(REC, { runId: "r-1", workers: WORKERS })).toBe(true);
+    expect(servesConsole(REC, { name: "review", runId: "r-1", workers: WORKERS })).toBe(true);
     // Order is the pane plan's business, not the record's.
-    expect(servesConsole(REC, { runId: "r-1", workers: [...WORKERS].reverse() })).toBe(true);
+    expect(
+      servesConsole(REC, { name: "review", runId: "r-1", workers: [...WORKERS].reverse() }),
+    ).toBe(true);
   });
 
   /**
@@ -415,27 +460,49 @@ describe("identity — whether a running relay is THIS console's", () => {
    * console has no actor at all.
    */
   test("a different run is NOT this console, however healthy the process", () => {
-    expect(servesConsole(REC, { runId: "r-5", workers: WORKERS })).toBe(false);
+    expect(servesConsole(REC, { name: "review", runId: "r-5", workers: WORKERS })).toBe(false);
   });
 
-  test("a different worker set is not this console either", () => {
-    expect(servesConsole(REC, { runId: "r-1", workers: ["col-1", "rev-arch-1"] })).toBe(false);
+  /**
+   * ISC-1057 made the workers arm CONTAINMENT rather than equality, so the
+   * discriminating fixture names a seat the relay does not serve. A SUBSET was
+   * the old fixture and is now an adopt — correctly: a relay covering four
+   * reviewers does serve two of them.
+   *
+   * On this console the distinction is theoretical, and that is worth saying
+   * rather than leaving implied: `startRelay` passes the same list the panes
+   * were built from, so `record.workers` equals the caller's set and equality
+   * and containment agree. The rule was changed for `triage`, where the record
+   * is written from a constant the caller's flag can never match.
+   */
+  test("a worker the relay does not serve is not this console either", () => {
+    expect(
+      servesConsole(REC, { name: "review", runId: "r-1", workers: ["col-1", "rev-ghost-1"] }),
+    ).toBe(false);
+  });
+
+  test("the review console's own set still adopts, exactly as before", () => {
+    expect(servesConsole(REC, { name: "review", runId: "r-1", workers: WORKERS })).toBe(true);
+    expect(
+      servesConsole(REC, { name: "review", runId: "r-1", workers: ["col-1", "rev-arch-1"] }),
+    ).toBe(true);
   });
 });
 
 describe("the record is durable, comparable, and singly held", () => {
   test("a torn write cannot be observed — the record is written atomically", async () => {
     const env = await tempRunsDir();
-    const path = relayRecordPath(env);
+    const path = relayRecordPath("review", env);
     await writeRelayRecord(path, {
       schema: "pifleet.consolerelay/v1",
       pid: process.pid,
+      console: "review",
       started: "utc1 whatever",
       run_id: "r-1",
       pinned: null,
       workers: [...WORKERS],
       started_at: new Date().toISOString(),
-      log_path: relayLogPath(env),
+      log_path: relayLogPath("review", env),
     });
     // Round-trips through the schema, which a half-written file cannot.
     const status = await readRelayStatus(path);
@@ -453,16 +520,17 @@ describe("the record is durable, comparable, and singly held", () => {
    */
   test("an unpinned start time is UNVERIFIABLE, never stale", async () => {
     const env = await tempRunsDir();
-    const path = relayRecordPath(env);
+    const path = relayRecordPath("review", env);
     await writeRelayRecord(path, {
       schema: "pifleet.consolerelay/v1",
       pid: process.pid,
+      console: "review",
       started: "",
       run_id: "r-1",
       pinned: null,
       workers: [...WORKERS],
       started_at: new Date().toISOString(),
-      log_path: relayLogPath(env),
+      log_path: relayLogPath("review", env),
     });
     const status = await readRelayStatus(path);
     expect(status.kind).toBe("unverifiable");
@@ -471,16 +539,17 @@ describe("the record is durable, comparable, and singly held", () => {
 
   test("a legacy unpinned format is unverifiable too, not adopted", async () => {
     const env = await tempRunsDir();
-    const path = relayRecordPath(env);
+    const path = relayRecordPath("review", env);
     await writeRelayRecord(path, {
       schema: "pifleet.consolerelay/v1",
       pid: process.pid,
+      console: "review",
       started: "Thu 20 Aug 2026 10:00:00",
       run_id: "r-1",
       pinned: null,
       workers: [...WORKERS],
       started_at: new Date().toISOString(),
-      log_path: relayLogPath(env),
+      log_path: relayLogPath("review", env),
     });
     expect((await readRelayStatus(path)).kind).toBe("unverifiable");
   });
@@ -510,11 +579,12 @@ describe("the record is durable, comparable, and singly held", () => {
       schema: "pifleet.relayrecord/v1" as const,
       pid: 1,
       started: "x",
+      console: "review",
       run_id: "R",
       workers: ["ab", "c"],
     } as unknown as Parameters<typeof servesConsole>[0];
-    expect(servesConsole(rec, { runId: "R", workers: ["ab", "c"] })).toBe(true);
-    expect(servesConsole(rec, { runId: "R", workers: ["a", "bc"] })).toBe(false);
+    expect(servesConsole(rec, { name: "review", runId: "R", workers: ["ab", "c"] })).toBe(true);
+    expect(servesConsole(rec, { name: "review", runId: "R", workers: ["a", "bc"] })).toBe(false);
   });
 
   test("a lock left by a dead process is taken over", async () => {

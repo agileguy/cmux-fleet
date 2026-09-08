@@ -88,6 +88,7 @@ import {
   type RelayOutcome,
   type RelayTaskRef,
   type RelayTransport,
+  type PublishedReply,
 } from "../../src/run/relay.ts";
 
 const PARENT = "T";
@@ -231,7 +232,8 @@ interface FakeOptions {
  * each poll the task record inline, and neither is reusable), so `awaitSettled`
  * is a seam whose production implementation has to be written by the process
  * that owns the poll interval; `harvestTask` runs acceptance commands in a
- * container; and `publishReply` writes a `0444` file into a `:ro` mount. Every
+ * container; and `publishReplies` writes `0444` files into two `:ro` mounts —
+ * the replies themselves and the declaration that names them. Every
  * one of those is a socket, a container or a filesystem, and none of them can
  * appear in a unit test.
  *
@@ -300,9 +302,15 @@ class FakeTransport implements RelayTransport<Run> {
     };
   }
 
-  async publishReply(_run: Run, child: string, reply: unknown): Promise<void> {
-    this.log.push(`reply:${child}`);
-    this.replies.set(child, reply);
+  async publishReplies(
+    _run: Run,
+    _taskId: string,
+    replies: readonly PublishedReply[],
+  ): Promise<void> {
+    for (const r of replies) {
+      this.log.push(`reply:${r.task_id}`);
+      this.replies.set(r.task_id, r.reply);
+    }
   }
 
   /** Every brief that has ever left the host: the children's and the collation's. */

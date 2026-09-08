@@ -296,6 +296,75 @@ export const TUI_POLL_MS = 500;
  */
 const CONTINUING_STOP_REASONS = new Set(["toolUse"]);
 
+/**
+ * The layer-4 entry `submit_report` appends immediately before returning a
+ * TERMINATING tool result (`docker/pi-extensions/report-tools.ts`).
+ *
+ * ## Why this module knows about it, when it knows about nothing else
+ *
+ * `toolUse` means "not over" because Pi always follows an outstanding tool call
+ * with a result and then ANOTHER assistant message. `terminate: true` is the one
+ * documented case where that second half never comes: `docs/extensions.md` calls
+ * it a hint that *"the automatic follow-up LLM call should be skipped after the
+ * current tool batch"*. So the transcript's last assistant message stays
+ * `toolUse` forever, `classifyTuiTurn` reads `in_flight` on every poll, the quiet
+ * clock is reset each time, and the epoch cannot settle by any route but its own
+ * deadline — `timed_out`, on a task that succeeded.
+ *
+ * Measured on the first live Phase A run (ISC-1105): three seats delivered a
+ * complete report through `submit_report`, all three settled `timed_out`, and
+ * `relay.ts` publishes a reply only for a lens that SUCCEEDED — so two of three
+ * reviews were discarded in silence and the collation reported one lens.
+ *
+ * **The ENTRY and not the tool name**, because the two differ exactly where it
+ * matters: a REFUSED `submit_report` appends nothing and returns no `terminate`,
+ * so Pi does make the follow-up call and the turn really is still in flight.
+ * Keying on the name would settle a refusal as though it had delivered.
+ *
+ * This is layer 4 used for what §6.3 built it for — making the delivery legible
+ * to a host reader — so the coupling is to a published contract rather than to
+ * the extension's internals.
+ */
+const SUBMIT_ENTRY_TYPE = "pifleet.submit/v1";
+
+/** Every `toolCall` id in an assistant message's content blocks. */
+function toolCallIds(entry: TreeEntry): string[] {
+  const content = (entry as { message?: { content?: unknown } }).message?.content;
+  if (!Array.isArray(content)) return [];
+  const ids: string[] = [];
+  for (const block of content) {
+    if (typeof block !== "object" || block === null) continue;
+    const b = block as { type?: unknown; id?: unknown };
+    if (b.type === "toolCall" && typeof b.id === "string") ids.push(b.id);
+  }
+  return ids;
+}
+
+/**
+ * Did a terminating `submit_report` end this batch?
+ *
+ * Both halves are required, and the second is not ceremony. `terminate` is
+ * batch-conditional — effective *"only when every finalized tool result in that
+ * batch is terminating"* — so a model that called `submit_report` ALONGSIDE a
+ * slow tool still gets its follow-up call, and the turn is genuinely in flight
+ * while that tool runs. Requiring every call in the batch to have been answered
+ * is what keeps this from settling such a turn early: `TUI_QUIET_MS` is 2s, far
+ * shorter than a long `bash`, so the quiet window alone would not have caught it.
+ */
+function terminatedBySubmit(sinceDispatch: readonly TreeEntry[], lastAssistant: TreeEntry): boolean {
+  const after = sinceDispatch.slice(sinceDispatch.indexOf(lastAssistant) + 1);
+  const delivered = after.some(
+    (e) => e.type === "custom" && (e as { customType?: unknown }).customType === SUBMIT_ENTRY_TYPE,
+  );
+  if (!delivered) return false;
+  const answered = new Set<string>();
+  for (const e of after) {
+    const m = (e as { message?: { role?: unknown; toolCallId?: unknown } }).message;
+    if (m?.role === "toolResult" && typeof m.toolCallId === "string") answered.add(m.toolCallId);
+  }
+  return toolCallIds(lastAssistant).every((id) => answered.has(id));
+}
+
 /** The state of a `tui` epoch as read off its transcript. */
 export type TuiTurnPhase =
   /** No assistant message has been appended since dispatch. */
@@ -338,9 +407,42 @@ export function classifyTuiTurn(sinceDispatch: readonly TreeEntry[]): TuiTurnRea
     if (isAssistantEntry(e)) last = e;
   }
   if (last === null) return { phase: "awaiting_start", stopReason: null };
+  /*
+   * A USER message after the last assistant message means another agent cycle
+   * is queued — Pi has been given something to answer and has not answered it.
+   * Reading only the last ASSISTANT message misses that entirely, and layer 3's
+   * nag is exactly such a message: it is delivered as a `followUp`, so it lands
+   * here and starts a new turn.
+   *
+   * ISC-1107 measured what that cost. `col-1` stopped at 19:10:40, the nag
+   * landed in the same second, and the epoch settled at 19:10:41.996 — a
+   * 1.99-second runway, because growth restarts the quiet clock and the window
+   * IS `TUI_QUIET_MS`. The model answered at 19:10:44 and `submit_report`
+   * refused with `No task is live`: the nag could not be obeyed by any model
+   * slower than the quiet window, which is all of them. Layer 3 was measured on
+   * the `rpc` plane, where settle waits for `agent_end` and the runway was
+   * 0.18-1.05s — the same wrong-plane gap as ISC-1105.
+   *
+   * A queued message nobody ever answers now runs to the DEADLINE rather than
+   * settling `success`. That is the correct trade and not a new hazard: an
+   * epoch with an unanswered prompt in it has not finished, and `timed_out` on
+   * a stuck agent is what the deadline is for. It is also bounded, where the
+   * `toolUse` reading this function used to give was not.
+   */
+  for (let i = sinceDispatch.length - 1; i >= 0; i--) {
+    const e = sinceDispatch[i];
+    if (e === last) break;
+    const role = (e as { message?: { role?: unknown } }).message?.role;
+    if (role === "user") return { phase: "in_flight", stopReason: null };
+  }
   const message = (last as { message?: { stopReason?: unknown } }).message;
   const stopReason = typeof message?.stopReason === "string" ? message.stopReason : null;
   if (stopReason !== null && CONTINUING_STOP_REASONS.has(stopReason)) {
+    // The one documented exception: a terminating tool result skips the
+    // follow-up call, so this `toolUse` is the LAST assistant message this turn
+    // will ever have. See `SUBMIT_ENTRY_TYPE`. The caller's quiet window still
+    // arbitrates — this only stops `in_flight` from resetting it forever.
+    if (terminatedBySubmit(sinceDispatch, last)) return { phase: "ended", stopReason };
     return { phase: "in_flight", stopReason };
   }
   return { phase: "ended", stopReason };
@@ -374,6 +476,13 @@ export function verdictForStopReason(stopReason: string | null): { verdict: Verd
       // `rpc` path has no equivalent because a length stop there is followed
       // by an `agent_end` that says how the turn actually finished.
       return { verdict: "unknown", reason: "transcript_stop_length" };
+    case "toolUse":
+      // Reachable only through `terminatedBySubmit` — every other `toolUse` is
+      // `in_flight` and never reaches a verdict. Named separately from
+      // `transcript_quiesced` because the two are settled on different evidence:
+      // this one ended because the worker DELIVERED, and an operator reading
+      // `timed_out` on a Phase A seat needs to be able to tell the difference.
+      return { verdict: "success", reason: "transcript_terminating_report" };
     default:
       return { verdict: "success", reason: "transcript_quiesced" };
   }

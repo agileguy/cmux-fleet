@@ -12,6 +12,10 @@ import { join } from "node:path";
 import { makeDaemonScratch, makeWorkerAccessible, WORKER_UID } from "../../src/container/mounts.ts";
 import { runPaths, workerOutboxDir, workerVerbgateLedger } from "../../src/run/paths.ts";
 import { createRepliesDir } from "../../src/run/replies.ts";
+import {
+  REPLIES_POLICY_SCHEMA,
+  renderRepliesPolicy,
+} from "../../src/run/replies-policy.ts";
 import { readCollectedVerbgate, VerbgateCollector } from "../../src/run/verbgate-collect.ts";
 import { cliBudget, containerBudget } from "../support/budget.ts";
 
@@ -812,11 +816,37 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
  * so neither platform gets a hard-coded answer and a daemon whose behaviour
  * changed would fail here rather than silently invert the claim.
  */
-describe.skipIf(!DOCKER)("the reply plane is held read-only by the mount, not by the mode", () => {
-  /** The gate's own codes: 77 = verb declined, 78 = a gated surface is writable. */
-  const REFUSED = 77;
-  const POLICY_WRITABLE = 78;
+/** The gate's own codes: 77 = verb declined, 78 = a gated surface is writable. */
+const REFUSED = 77;
+const POLICY_WRITABLE = 78;
 
+/**
+ * A verb no allow list contains, so a gate whose integrity loop PASSED lands on
+ * 77 rather than on success. Deliberately a destructive one: if the gate ever
+ * failed open, this exits 0 against a real `gcloud` rather than quietly looking
+ * like a pass.
+ */
+const DENIED = "gcloud compute instances delete pifleet-nonexistent";
+
+/**
+ * The gate's exit code for `DENIED`, with extra mounts layered over the standard
+ * sandbox.
+ *
+ * MODULE SCOPE because two blocks below need it — the reply PLANE's `:ro` and
+ * the declared reply SET's — and a second copy is a helper that agrees with the
+ * first until one of them is edited.
+ */
+async function gateExit(extraMounts: string[]): Promise<number> {
+  const sb = await makeSandbox();
+  const p = Bun.spawn(
+    ["docker", "run", "--rm", ...sb.mounts, ...extraMounts,
+     "--entrypoint", "bash", IMAGE, "-c", `${PRELUDE}\n${DENIED}`],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return await p.exited;
+}
+
+describe.skipIf(!DOCKER)("the reply plane is held read-only by the mount, not by the mode", () => {
   /**
    * A `/replies` holding one reply at `mode`, shaped the way the actor leaves it.
    *
@@ -849,24 +879,6 @@ describe.skipIf(!DOCKER)("the reply plane is held read-only by the mount, not by
       ["-v", `${dir}:/replies`],
     );
     return out.includes("CAN_WRITE");
-  }
-
-  /**
-   * A verb no allow list contains, so a gate whose integrity loop PASSED lands
-   * on 77 rather than on success. Deliberately a destructive one: if the gate
-   * ever failed open, this exits 0 against a real `gcloud` rather than quietly
-   * looking like a pass.
-   */
-  const DENIED = "gcloud compute instances delete pifleet-nonexistent";
-
-  async function gateExit(replyMount: string[]): Promise<number> {
-    const sb = await makeSandbox();
-    const p = Bun.spawn(
-      ["docker", "run", "--rm", ...sb.mounts, ...replyMount,
-       "--entrypoint", "bash", IMAGE, "-c", `${PRELUDE}\n${DENIED}`],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    return await p.exited;
   }
 
   test("the mount is real — without this every row below is green on an empty mount", async () => {
@@ -968,4 +980,118 @@ describe.skipIf(!DOCKER)("the reply plane is held read-only by the mount, not by
       expect(chmodResult).toBe("CHMOD_DENIED");
     }
   }, containerBudget(1));
+});
+
+/**
+ * ISC-1092 — the DECLARED REPLY SET's `:ro`, against a real mount
+ * (SRD-WORKER-DISPATCH-EXTENSION §7.4, D6).
+ *
+ * `/policy/replies` is the fourth FILE in `docker/verbgate`'s integrity loop, and
+ * it is one word away from the `/replies` the block above covers. They are
+ * different objects and the difference decides where each is checked: the SET is
+ * a file whose dirname is `/policy`, so it joins the loop and gets the parent arm
+ * the other three files get; the PLANE is a directory whose dirname is `/`, which
+ * is writable by the root the image build's smoke-test layer runs these shims as,
+ * so it is checked beside the loop instead. Both facts are asserted in
+ * `test/unit/dispatch-policy.test.ts` and `test/unit/replies.test.ts` as SOURCE
+ * TEXT. Neither of those can say what a real Docker `:ro` does, and that is the
+ * whole claim `render.ts` makes when it appends the flag.
+ *
+ * THE SOURCE-TEXT PROBES ARE NOT ENOUGH ON THEIR OWN, and ISC-1091 is why this
+ * block exists rather than being argued away. Its lesson, one criterion earlier
+ * on the same file, was that a structural probe keeps passing for a change that
+ * is present in the text and inert in the container. A loop entry naming a path
+ * nothing mounts is exactly that shape, and the only reader that can tell the
+ * difference is a container.
+ *
+ * ORDER IS LOAD-BEARING, for the reason the block above records: when the daemon
+ * cannot see the host path it does not fail, it INVENTS an empty directory at the
+ * mount source (ISC-288). For a FILE surface that is worse than for a directory —
+ * `[ -w ]` on a root-owned invented directory is false at uid 10001, so the loop
+ * passes and every row below would be green having observed nothing. `the mount
+ * is real` runs first and is not setup.
+ *
+ * The `78` outcome is PLATFORM-SPECIFIC and is measured rather than assumed, on
+ * the same argument the reply plane's block sets out: the macOS Docker VM
+ * squashes bind-mount FILE ownership to the container user, so a 0644
+ * declaration is owner-writable inside the container and `:ro` is the only
+ * control left; on Linux host ownership passes through, uid 10001 is "other", and
+ * a dropped `:ro` grants nothing for the gate to catch. The invariant that holds
+ * on both is the one asserted: **a declared reply set the worker can actually
+ * write is one that costs it every gated verb.**
+ */
+describe.skipIf(!DOCKER)("the declared reply set is held read-only by the mount, not by the mode", () => {
+  /**
+   * A `/policy/replies` host file holding the empty declaration at `mode`.
+   *
+   * The body comes from the REAL `renderRepliesPolicy`, not from hand-typed
+   * bytes: the gate never parses this file — it is named in the loop and
+   * deliberately never read — but a fixture that is not what the host emits would
+   * quietly turn this block into a probe of a document pifleet does not write.
+   */
+  async function declaration(mode: number): Promise<string> {
+    const dir = await makeDaemonScratch("verbgate-replies-policy");
+    scratches.push(dir);
+    const file = join(dir, "replies-policy");
+    await writeFile(file, renderRepliesPolicy("T-collate", []));
+    await chmod(file, mode);
+    return file;
+  }
+
+  /**
+   * Whether the WORKER can actually write the declaration, measured by trying it
+   * inside the container as uid 10001 rather than by reasoning about modes. The
+   * antecedent of the conditional row below, for the sibling block's reason: a
+   * `process.platform` check encodes today's belief about Docker, where this
+   * reads what the daemon in front of us does.
+   */
+  async function workerCanWrite(file: string): Promise<boolean> {
+    const out = await inImage(
+      `if [ -w /policy/replies ]; then echo CAN_WRITE; else echo READ_ONLY; fi`,
+      ["-v", `${file}:/policy/replies`],
+    );
+    return out.includes("CAN_WRITE");
+  }
+
+  test("the mount is real — without this every row below is green on an invented mount", async () => {
+    const file = await declaration(0o444);
+    const seen = await inImage("cat /policy/replies", ["-v", `${file}:/policy/replies:ro`]);
+    expect(JSON.parse(seen)).toEqual({
+      schema: REPLIES_POLICY_SCHEMA,
+      task_id: "T-collate",
+      replies: [],
+    });
+  }, containerBudget(1));
+
+  test("CONTROL: :ro with a 0444 declaration leaves the gate intact — the verb is merely declined", async () => {
+    const file = await declaration(0o444);
+    expect(await gateExit(["-v", `${file}:/policy/replies:ro`])).toBe(REFUSED);
+  }, containerBudget(1));
+
+  /**
+   * THE ROW THE LOOP ENTRY EXISTS FOR.
+   *
+   * A writable declaration is a worker re-declaring which answers count for its
+   * own turn — last sweep's, or another worker's, with every individual reply
+   * file still perfectly honest — so it must cost it every gated verb. Where a
+   * dropped `:ro` does NOT make the file writable there is nothing to catch and
+   * 77 is the correct answer rather than a miss. Both branches assert; neither is
+   * a skip, and the antecedent is measured in the same container shape the gate
+   * then runs in.
+   */
+  test("a declared reply set the worker can write costs it every verb; one it cannot, does not", async () => {
+    const dropped = await declaration(0o644);
+    const writable = await workerCanWrite(dropped);
+    expect(await gateExit(["-v", `${dropped}:/policy/replies`])).toBe(
+      writable ? POLICY_WRITABLE : REFUSED,
+    );
+
+    // The other branch, made to RUN on both platforms rather than only on the
+    // one where the first went the other way: 0444 read-write is unwritable on
+    // macOS too — the VM squashes ownership so the worker OWNS it, and a POSIX
+    // owner cannot open a 0444 file for writing either.
+    const closed = await declaration(0o444);
+    expect(await workerCanWrite(closed)).toBe(false);
+    expect(await gateExit(["-v", `${closed}:/policy/replies`])).toBe(REFUSED);
+  }, containerBudget(4));
 });
