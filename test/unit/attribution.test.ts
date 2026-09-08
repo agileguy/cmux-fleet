@@ -270,6 +270,33 @@ function trailerBlockOf(body: string): string {
 }
 
 /** Both arms. Returns the reasons, empty when clean. */
+/**
+ * A co-author trailer that names an AI rather than a person.
+ *
+ * Used ONLY when grading the base branch's own tip — see the block at the call
+ * site for why that commit is judged by subject and every commit WE write is
+ * judged by the blanket `FORBIDDEN_PATTERNS` rule instead.
+ */
+const AI_ATTRIBUTED = /claude|anthropic|openai|copilot|\bgpt\b|\[bot\]|-bot@/i;
+
+/**
+ * `body` with human co-author trailers removed and every other line intact.
+ *
+ * Exported shape rather than an inline filter so the narrowing has a fixture
+ * test of its own: the one thing it must never do is drop a line naming Claude,
+ * and an inline `.filter` in an async arm that only runs on the base branch
+ * would be graded by nothing on any branch where the fix is being written.
+ */
+export function withoutHumanCoAuthors(body: string): string {
+  return body
+    .split("\n")
+    .filter((line) => {
+      const m = /^[ \t]*co-authored-by:(.*)$/i.exec(line);
+      return m === null || AI_ATTRIBUTED.test(m[1]!);
+    })
+    .join("\n");
+}
+
 function liveAttributionHits(body: string): string[] {
   const hits: string[] = [];
   const trailer = trailerBlockOf(body);
@@ -412,7 +439,125 @@ describe("ISC-530 (live): this branch's own commits carry no attribution", () =>
     expect(attributionHitsInText(body)).toContain("Co-Authored-By");
   });
 
-  test("the range resolves and is non-empty, so a green result is not an empty set", async () => {
-    expect((await integrationBranchMessages()).length).toBeGreaterThan(0);
+  /**
+   * THE PREMISE, AND THE ONE CASE WHERE AN EMPTY RANGE IS THE TRUTH.
+   *
+   * The check above is vacuously green on an empty range — the empty set has no
+   * offenders — so something has to assert that it actually scanned commits.
+   * The first version asserted that unconditionally, and **it made `main`
+   * permanently red**: on the base branch `main..HEAD` is empty BY DEFINITION,
+   * so every push to `main` from 2026-09-06 onward failed this line while every
+   * other job passed. That is worse than a missing check. A branch that is always
+   * red teaches a reader to ignore its colour, and a real failure on `main` would
+   * then look exactly like the noise.
+   *
+   * **The fix is not to loosen the assertion** — that would delete the premise
+   * and restore the vacuous green this test exists to refuse. It is to say which
+   * of the two empty ranges we are looking at, and they are distinguishable by
+   * one comparison: standing ON the base, `HEAD` and the base ref are the same
+   * commit. Empty with `HEAD` BEHIND the base is a stale checkout or a
+   * misresolved base and still fails, loudly, which is the case worth keeping.
+   *
+   * **And on the base branch it now grades something rather than nothing**,
+   * which closes a hole this file had either way. A squash-merge writes a NEW
+   * commit whose message is the PR title and body — text no branch run ever saw,
+   * because it did not exist while the branch was being graded. If that message
+   * carried an attribution, the branch was green, `main` scanned an empty range,
+   * and nothing anywhere looked at the one commit that has it. So the base-branch
+   * arm reads the tip's own message through the same live matcher.
+   */
+  /**
+   * The narrowing's own fixture, because the arm that uses it runs ONLY on the
+   * base branch — on every branch where somebody might edit it, it is dead code
+   * that no assertion touches. The one failure it must never produce is dropping
+   * a line that names an AI, so that direction is asserted first.
+   */
+  describe("withoutHumanCoAuthors drops people and keeps machines", () => {
+    const CLAUDE = "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>";
+    const HUMAN = "Co-authored-by: agileguy <the.daddy.magoo@gmail.com>";
+
+    test("a Claude co-author survives and still produces a hit", () => {
+      const graded = withoutHumanCoAuthors(`Squashed thing (#1)\n\n${HUMAN}\n${CLAUDE}`);
+      expect(graded).toContain("Claude");
+      expect(liveAttributionHits(graded)).not.toEqual([]);
+    });
+
+    test("a human co-author alone leaves nothing to grade", () => {
+      const graded = withoutHumanCoAuthors(`Squashed thing (#1)\n\n${HUMAN}`);
+      expect(graded).not.toContain("agileguy");
+      expect(liveAttributionHits(graded)).toEqual([]);
+    });
+
+    test("every other attribution form is untouched by the filter", () => {
+      for (const line of [
+        "Claude-Session: https://example.invalid/x",
+        "🤖 Generated with [a tool](https://example.invalid)",
+        "This patch was AI-generated.",
+      ]) {
+        const graded = withoutHumanCoAuthors(`Squashed thing (#1)\n\n${HUMAN}\n${line}`);
+        expect(graded, `the filter removed ${JSON.stringify(line)}`).toContain(line);
+      }
+    });
+
+    test("a bot account is not a person", () => {
+      const bot = "Co-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>";
+      expect(withoutHumanCoAuthors(`x\n\n${bot}`)).toContain("dependabot");
+    });
+  });
+
+  test("the range is empty only when HEAD is the base, and the base's own tip is graded", async () => {
+    const base = await resolveBaseRef();
+    const baseSha = (await git(["rev-parse", `${base}^{commit}`])).out.trim();
+    const headSha = (await git(["rev-parse", "HEAD^{commit}"])).out.trim();
+    const n = (await integrationBranchMessages()).length;
+
+    if (headSha !== "" && headSha === baseSha) {
+      expect(n, `HEAD is ${base}, so ${base}..HEAD must be empty`).toBe(0);
+      const tip = (await git(["log", "-1", "--format=%B"])).out;
+      /*
+       * ONE NARROWING, AND ONLY ON THIS ARM: a co-author trailer that names no AI.
+       *
+       * `FORBIDDEN_PATTERNS` refuses EVERY `Co-Authored-By`, not only Claude's,
+       * because "no co-author trailers at all" is a rule a branch author can
+       * follow and cannot evade by renaming. That rule is ours to keep while we
+       * are writing commits, and the arm above keeps it.
+       *
+       * **The base branch's tip is not written by us.** GitHub's squash-merge
+       * composes it and appends `Co-authored-by:` for the squashed commits'
+       * author, which is how this arm failed on its first run against `main`
+       * (`8f8f134`: `Co-authored-by: agileguy <the.daddy.magoo@gmail.com>`).
+       * Refusing that would make the base arm permanently red and recreate the
+       * exact disease this test was just fixed for, one layer down.
+       *
+       * A first attempt compared the trailer against the merge commit's own
+       * `%ae`/`%ce` and did not work, for a reason worth recording: GitHub sets
+       * the squash's author to the PR author's ACCOUNT email
+       * (`agile.guy@hotmail.com`), its committer to `noreply@github.com`, and
+       * the co-author to the local git identity the branch committed under
+       * (`the.daddy.magoo@gmail.com`). Three different addresses for one person,
+       * none derivable from the others, and the squashed commits that carried
+       * the third are gone from this history.
+       *
+       * So the narrowing is by SUBJECT rather than by identity, which is also
+       * what the governing rule actually says: the prohibition is on attributing
+       * the work to an AI. A co-author line naming a human is dropped; one
+       * naming Claude, Anthropic, Copilot or a `[bot]` account is not, and every
+       * other pattern — `Claude` anywhere in the trailer block, `Claude-Session:`,
+       * the 🤖 footer, `AI-generated` — still fires untouched.
+       */
+      const graded = withoutHumanCoAuthors(tip);
+      expect(
+        liveAttributionHits(graded),
+        "the tip of the base branch carries an attribution — a squash-merge writes its own " +
+          "message, so this is the one commit no branch run could have graded",
+      ).toEqual([]);
+      return;
+    }
+    expect(
+      n,
+      `${base}..HEAD is empty while HEAD (${headSha.slice(0, 8)}) is not ${base} ` +
+        `(${baseSha.slice(0, 8)}) — the base resolved wrongly or this checkout is behind it, ` +
+        "so a green result above would mean nothing was scanned",
+    ).toBeGreaterThan(0);
   });
 });
