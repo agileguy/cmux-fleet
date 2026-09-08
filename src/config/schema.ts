@@ -1944,10 +1944,16 @@ export function observerTuiEpochWarning(workerIds: readonly string[]): string | 
  * the operator should DO about the line, and the two answers are opposite.
  * `fleet.yaml:542` gives the observer `read, write, bash, grep, find, ls`:
  * dropping `write` there removes a tool and not a capability, because
- * `cat > /outbox/...` is two seconds of shell (§6.8). `triage`, `collator` and
- * `reviewer` hold `[read, write, grep, find, ls]` with no `bash` anywhere
- * (`fleet.yaml:695`, `:726`, `:839`), and there `write` IS the capability —
- * it is the whole of what §6.3's layer 1 takes away. One sentence sent to both
+ * `cat > /outbox/...` is two seconds of shell (§6.8). `collator` and `triage`
+ * hold `[read, write, grep, find, ls]` with no `bash` anywhere
+ * (`fleet.yaml:726`, `:839`), and there `write` IS the capability — it is the
+ * whole of what §6.3's layer 1 takes away.
+ *
+ * `reviewer` WAS the third of those and is no longer, because §13 task 7.1
+ * withdrew its `write` — it is the first role Phase B narrowed, and this
+ * sentence is the one place in the source that named the set by hand and so is
+ * the one place a narrowing can leave stale. Whichever role 7.3 and 7.5 take
+ * next, this list shrinks again; nothing computes it, and nothing grades it. One sentence sent to both
  * seats is a sentence that asks a bash holder to act on something it cannot
  * change, which is how `observerTuiEpochWarning`'s own narrowing describes a
  * warning turning into noise and taking the rest of them with it.
