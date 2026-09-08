@@ -322,9 +322,20 @@ loaded at `src/config/render.ts:241` (conditional: `paneMode === "tui" && autoTr
 (unconditional), via `DISPATCH_TRIGGER_PATH` (`src/run/dispatch-policy.ts:111`) and
 `TRUNCATION_RECOVERY_PATH` (`render.ts:73`). Both declare their Pi surface **structurally rather
 than by import** — `dispatch-trigger.ts:98-102`, `truncation-recovery.ts:119-124` — because the
-package is in the image and not in this repository, and `test/integration/auto-trigger-image.test.ts`
-reads the real `.d.ts` out of the image to check the declaration has not drifted. **That is the
-pattern this design copies wholesale**, including the integration test.
+package is in the image and not in this repository. **That structural-declaration pattern is what
+this design copies wholesale.**
+
+**IT DOES NOT COME WITH A DRIFT CHECK, and three passages of this document said it did.**
+CORRECTED 2026-09-08: there is no `test/integration/auto-trigger-image.test.ts` and there never was,
+and no test anywhere in `test/` reads Pi's `.d.ts`. The only `@earendil-works` string in the whole
+tree outside `docker/` is `image.test.ts:249`, which asserts a `.js` PATH appears in a shim — a file
+name, not a type. So the two existing extensions declare a Pi surface that nothing checks against
+Pi, and a 0.79.x bump renaming `registerTool` would be caught by neither of them.
+
+The check is buildable, which is why the criterion survives the correction rather than being struck:
+the type does ship in the image, at
+`/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts`
+(verified 2026-09-08 in `0.79.6-base-72c16f4efb2f`). It is NEW work, not a method to be copied.
 
 Both are also in `BUILD_CONTEXT_ASSETS` (`src/container/image.ts:102-134`), the seven-entry list
 `configHash` walks (`:231-240`) to produce the twelve hex characters in
@@ -1133,9 +1144,12 @@ new fixture possible and which is the closest this design comes to touching defe
 `docker/pi-extensions/report-tools.ts` declares its Pi surface structurally, not by import
 (`dispatch-trigger.ts:81-102`, `truncation-recovery.ts:119-124`), because the package is in the image
 and not in this repository. The declared surface is `registerTool`, `on("agent_end")`,
-`sendUserMessage`, `appendEntry` — and **`test/integration/report-tools-image.test.ts` reads the real
-`.d.ts` out of the image and asserts the declaration has not drifted**, exactly as
-`test/integration/auto-trigger-image.test.ts` does today.
+`sendUserMessage`, `appendEntry`.
+
+**A drift check against the image's `.d.ts` is NOT what `report-tools-image.test.ts` shipped in task
+2.5**, and this paragraph claimed it was. That file diffs Pi's tool registry across two runs and
+pins the baked file's `sha256` to the tag — a real check of §9.1-9.3, and not this one. Nothing in
+the tree compares the structural declaration to Pi's own type; see §3.2's correction.
 
 ---
 
@@ -1475,8 +1489,12 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
   SET-EQUAL to the enum, and that is where the "no name in the enum is unserved" claim is finally
   made. Raised by the engineer implementing 1.1 rather than found by a reader, which is the shape
   these contradictions usually take.
-- The structural type declaration matches the image's `.d.ts`. *Probe: `test/integration/auto-trigger-image.test.ts`'s
-  method, applied to the new file.*
+- The structural type declaration matches the image's `.d.ts`. *Probe: read
+  `dist/core/extensions/types.d.ts` out of the running image and assert `registerTool`,
+  `on`, `sendUserMessage` and `appendEntry` are still declared with compatible shapes. **There is no
+  existing method to copy** — the precedent this bullet named until 2026-09-08 does not exist (§3.2),
+  so this is new work and the only one of D1's bullets that is. Grade it `[ ]`, not `[~]`: nothing
+  partial has been built.*
 
 **The tools (D3, D6)**
 - `submit_report` composes `task_id` and `epoch` from `/policy/task`, never from parameters.
