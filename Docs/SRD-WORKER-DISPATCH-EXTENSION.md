@@ -672,6 +672,29 @@ enum**, on the doc's own instruction: *"Use `StringEnum` … `Type.Union`/`Type.
 with Google's API."* This fleet runs oMLX and Ollama Cloud today, but a schema that is wrong for one
 provider is a latent defect and the correct spelling costs nothing.
 
+**AMENDED 2026-09-08, during Phase 2.1: the IMPORTS are not available and the SPELLING is what
+matters.** Phase 0 measured that `typebox` resolves from `/opt/pifleet/` **inside the image**, and
+that is true and is not enough: `typebox` and `@earendil-works/pi-ai` are **not in this repo's
+`node_modules` at all**, so a top-level import of either makes the file unimportable from `test/`
+and makes task 2.1's own acceptance — *"the whole file loads"* — unprovable on the host. The
+paragraph above was written from the image's resolution and read as a requirement about the source
+text.
+
+The tools therefore declare `parameters` as a **JSON Schema literal**, which `@earendil-works/pi-ai`
+handles as a first-class shape rather than tolerating: `dist/utils/validation.js:257` branches on
+`!hasTypeBoxMetadata(parameters) && isJsonSchemaObject(parameters)` and runs an additional
+JSON-Schema coercion pass for exactly that case. Probed in
+`pifleet/pi-worker:0.79.6-base-b722edcf4699`: valid arguments pass, a bad enum value is refused with
+*"must be equal to one of the allowed values"*, and a missing required field with *"must have
+required properties status"*.
+
+**The `StringEnum` instruction survives intact, because it was never about the import.**
+`StringEnum(["success","partial"])` returns `{"type":"string","enum":[…]}` — byte-identical to the
+literal. What the doc is really forbidding is the `anyOf`/`const` spelling that `Type.Union` of
+`Type.Literal` produces, and that Google's API rejects. So the requirement is a property of the
+emitted schema, and it is asserted as one: a test refuses `anyOf` and `const` anywhere in the
+declared parameters.
+
 #### 6.2.1 `submit_report`
 
 ```ts
@@ -723,7 +746,7 @@ protect two numbers the extension can read out of a file the worker cannot write
 | `status` not in the enum | typebox validation, before `execute` | The `rev-lang-1` defect (§1.1) at the call site instead of in a collation brief |
 | `/policy/task` reads `<none>` | *"No task is live. `/policy/task` says `<none>`."* | `task-policy.ts:51`. Delivering into an idle worker's outbox is a fabrication |
 | `report.filename` containing `/`, `..`, or a leading `@` | *"`filename` is a bare name inside `files/`, not a path."* | `src/harvest/outbox.ts:727-734`'s escape refusal, moved to the call site. The `@` normalization is `docs/extensions.md`'s own warning: *"Some models are idiots and include the @ prefix in tool path arguments"* |
-| `artifacts[].path` resolving outside the task's outbox | *"artifact `<p>` is outside `/outbox/<task-id>/`."* | Same host refusal, same reasoning |
+| `artifacts[].path` resolving outside the task's outbox **OR the worktree** | *"artifact `<p>` escapes the task outbox and worktree."* | **CORRECTED 2026-09-08, during Phase 2.1, by the engineer building it.** The row said *"outside `/outbox/<task-id>/`"* and justified itself as *"same host refusal, same reasoning"* — and it was not the same refusal. `artifactPathProblem` (`src/harvest/outbox.ts:519-541`) accepts EITHER: `if (!inOutbox && !inWorktree)`. Built as written, the tool would refuse an `engineer` naming `/workspace/patch.diff` that the host accepts, which is §6.5 property 2 inverted — *"the tool's validation is a courtesy to the model; the host's is the one that decides"* only holds while the courtesy is the LOOSER of the two. A tool stricter than the host is a second, undocumented policy. |
 | A second call in the same epoch | **Allowed, and it overwrites.** Not a refusal | `roles/observer.md:56-58`: *"Write it, then keep going… A first version on disk at call twenty and a second at call forty is strictly better than one perfect version that never lands."* The tool must not punish the behaviour the prose begs for |
 | Total serialized envelope over `MAX_ITEMS`-equivalent caps | *"`<field>` has `<n>` entries; cap is `<m>`."* | `src/harvest/outbox.ts:680-698` hoists this pre-schema because 2,097,101 elements cost 2.66 GB in zod. The call-site cap makes the host's hoist a second line of defence rather than the first |
 
@@ -1606,6 +1629,13 @@ CLI and is the only one that reddens on that mutation.
   real `Type.Object(...)` and need not be a hand-written JSON Schema literal. It does NOT resolve from
   an arbitrary path outside the image — the same import failed from a scratch directory on the host —
   so this is a property of the image, not of the file.
+
+  **AND IT IS NOT A LICENCE TO IMPORT IT, which 2.1 established the hard way.** `typebox` and
+  `@earendil-works/pi-ai` are not in this repo's `node_modules` at all, so a top-level import makes
+  the file unimportable from `test/` and makes this task's own acceptance unprovable. The measurement
+  above says the import would WORK AT RUNTIME IN THE IMAGE; it says nothing about the host, where the
+  tests live. `parameters` is a JSON Schema literal for that reason — see §6.2's amendment, which
+  also records that pi-ai treats that shape as first-class rather than tolerating it.
 - **2.2** `COPY --chmod=0444` it to `/opt/pifleet/report-tools.ts`, with the
   `BUILD_CONTEXT_ASSETS` reminder comment the other two COPYs carry (`Dockerfile:413-415`,
   `:433-435`, `:444-445`). Touches: `docker/Dockerfile`.
