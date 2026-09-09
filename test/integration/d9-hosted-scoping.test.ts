@@ -95,8 +95,22 @@ async function renderConfig(hosted: boolean): Promise<string> {
     "      base_url: http://omlx.pifleet.internal:8000/v1",
     "      api_key_env: OMLX_API_KEY",
     `      relay_upstream: ${UPSTREAM_NAME}:443`,
-    "      models_allowlist:",
-    "        - Qwen3-Coder-30B-A3B-Instruct-4bit",
+    /*
+     * NO `models_allowlist`, and its absence is load-bearing.
+     *
+     * This block pinned one model, and `fleet.example.yaml`'s roles name
+     * several. That was harmless for as long as `config validate` did not read
+     * the allowlist — and it started reading it on 2026-09-08, at which point
+     * HALF TWO began failing on `obs-1`'s model rather than on anything to do
+     * with `hosted`. The refusal was correct; the document had simply stopped
+     * being the "otherwise-valid" one this helper promises.
+     *
+     * A synthetic `llm:` block spliced over the example's must therefore either
+     * list every model the example's roles resolve to, or declare no allowlist
+     * at all. Empty means "no allowlist" (schema.ts), so the second is both
+     * shorter and immune to a future role gaining a model nobody updated here —
+     * which is exactly the failure that would recur.
+     */
     "",
   ];
   return [...lines.slice(0, llmStart), ...llm, ...lines.slice(llmEnd)].join("\n");
