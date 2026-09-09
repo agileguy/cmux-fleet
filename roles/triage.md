@@ -183,11 +183,21 @@ An observer sees its brief and nothing else. It has no copy of the envelope, no 
 and no memory of the last sweep. **Anything you do not copy into the brief does not exist for
 the observer that needs it**, and four of those things are load-bearing:
 
-- **The sweep id, verbatim, with the instruction to echo it in `observer-ops.json`.** An
-  artifact carrying the wrong sweep id is discarded and its services go unobserved. An artifact
-  carrying no sweep id cannot be told from a stale one.
-- **The timestamp the observation window opens at**, for the same reason and echoed the same
-  way.
+- **The two field names `sweep_id` and `window_opened_at`, spelled exactly that way**, with the
+  instruction to echo them as top-level fields of `observer-ops.json`. An artifact carrying the
+  wrong sweep id is discarded and its services go unobserved; an artifact carrying no sweep id
+  cannot be told from a stale one; and an artifact that answers under any other spelling is
+  read as carrying neither.
+
+  **Write the field names, not a description of them.** Your envelope gives you both spellings
+  under `## This sweep`; copy those two strings. "Echo the sweep id and the window" is a
+  perfectly clear English sentence and it is the wrong output — the host reads
+  `observer-ops.json` for two named keys, so an observer left to infer a key name from prose is
+  an observer whose correct report is discarded whole. Measured on `T-sweep-13` (2026-09-09):
+  this brief said *"Echo sweep id T-sweep-13 and window … in `observer-ops.json`"* — faithful to
+  the sentence this line used to carry, and missing the only two strings the host looks for.
+- **The value of each**, copied from the envelope and from nowhere else — not from your
+  transcript, and not from a previous artifact.
 - **Per service: its name, its namespace, its workload, its `checks[]` and its window,
   copied exactly.** Copy them; do not widen them and do not tidy them. The checks list is a
   closed set chosen for this service, and a brief that asks for more than it names is a brief
@@ -209,10 +219,20 @@ the observer that needs it**, and four of those things are load-bearing:
 
 Then tell each observer how to report, because the failure is silent in every direction:
 
-- **Write the artifact pair `observer-ops.json` and `observer-ops.md` into
-  `/outbox/<task-id>/files/` — its own task id, not yours** — declare both in the envelope's
-  `artifacts` array, and keep the `notes` FIELD of `/outbox/<task-id>/result.json` to a short
-  summary.
+- **Write the artifact pair `observer-ops.json` and `observer-ops.md` into the reporting path
+  your envelope names for that worker** — declare both in the envelope's `artifacts` array, and
+  keep the `notes` FIELD of that same directory's `result.json` to a short summary.
+
+  **The path is given to you; do not compose one.** Your envelope's `## The seats` block lists
+  every worker with the task id its slice will be dispatched under and the exact
+  `/outbox/<id>/files/` string to copy. That id is minted by the host and you cannot derive it —
+  it is not your task id with a suffix you can guess, and the only task id you otherwise hold is
+  your own, which is the one value that is always wrong here. A report filed under your id is
+  read by nothing: the host looks only under the dispatch id, so it is indistinguishable from a
+  seat that answered nothing at all. Measured on `T-sweep-13` (2026-09-09), against an earlier
+  version of this line that said *"its own task id, not yours"*: this brief came back reading
+  *"into `/outbox/T-sweep-13/files/` using the observer's own task id"* — the sentence obeyed,
+  the value impossible.
 - **Say `notes` with the path and the word *field*.** Never "the envelope's `notes`". A worker
   given that phrasing, holding `write` and no shell, once wrote a FILE called `notes` beside
   its report, produced no envelope, and graded as a seat that never reported — the measurement

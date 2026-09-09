@@ -1714,3 +1714,97 @@ describe("§7.4: the published set and the declared set are one set", () => {
     expect(backAgain).toEqual(fromRelay);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ISC-1119 / ISC-1120 — the envelope carries what the role file demands back
+// ---------------------------------------------------------------------------
+
+/**
+ * **The collator can only compose from its envelope, so an envelope that omits a
+ * value is an envelope that forbids compliance.**
+ *
+ * Both host repairs above — `ensureFreshnessEcho` and
+ * `normalizeSliceReportingPath` — fired on every sweep this console has ever run
+ * (22 and 30 times in `~/.pifleet/triage-relay.log`), and both logged the
+ * collator as the faulting party. Measured against `T-sweep-13`'s live request
+ * rather than against those log lines, the collator was obeying both sentences
+ * exactly: *"Echo sweep id T-sweep-13 and window … in `observer-ops.json`"* and
+ * *"into `/outbox/T-sweep-13/files/` using the observer's own task id"*. What it
+ * lacked was the two SPELLINGS the host greps for, and a slice id that is
+ * `childTaskId` over a host constant it has never been shown.
+ *
+ * These tests pin the envelope as SUFFICIENT — the property that was missing.
+ */
+describe("the sweep envelope carries what the collator is asked to emit", () => {
+  test("it names both freshness field names in their exact spellings (ISC-1119)", () => {
+    const { brief } = renderSweepEnvelope(envelopeInput());
+    expect(brief).toContain("`sweep_id`");
+    expect(brief).toContain("`window_opened_at`");
+  });
+
+  test("it names each seat's dispatch id and reporting path (ISC-1120)", () => {
+    const sweepId = sweepTaskId(41);
+    const { brief } = renderSweepEnvelope(envelopeInput({ sweepId }));
+    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+      const child = childTaskId(sweepId, seat.aspect);
+      expect(brief).toContain(seat.worker);
+      expect(brief).toContain(child);
+      expect(brief).toContain(`/outbox/${child}/files/`);
+    }
+  });
+
+  /**
+   * The id the collator holds is the one that is always wrong, so the envelope
+   * has to say so in the same breath as it hands over the right one — otherwise
+   * the nearest value in context wins, which is exactly what `T-sweep-13` did.
+   */
+  test("it says the collator's own id is not the reporting id", () => {
+    const sweepId = sweepTaskId(41);
+    const { brief } = renderSweepEnvelope(envelopeInput({ sweepId }));
+    expect(brief).toContain("Never your own task id");
+    expect(brief).toContain(sweepId);
+  });
+
+  /**
+   * **The acceptance, and the only test here that could not have been written
+   * before the fix.** A brief copied from the envelope must need NO repair. Today
+   * this shape is composable; on 2026-09-09 it was not, because two of its three
+   * strings appeared in no document the collator could read.
+   */
+  test("a brief copied from the envelope needs neither repair", () => {
+    const sweepId = sweepTaskId(41);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    const child = childTaskId(sweepId, seat.aspect);
+    const window = "2026-09-06T12:00:00.000Z";
+    const composed =
+      `Sweep ${sweepId}. Observation window opens ${window}. Check \`grafana\`. ` +
+      `Echo \`sweep_id\` and \`window_opened_at\` as top-level fields of \`observer-ops.json\`. ` +
+      `Write both files into /outbox/${child}/files/.`;
+
+    const reporting = normalizeSliceReportingPath(composed, child);
+    expect(reporting.rewrote).toEqual([]);
+    const freshness = ensureFreshnessEcho(reporting.brief, sweepId);
+    expect(freshness.appended).toBe(false);
+    expect(freshness.brief).toBe(composed);
+  });
+
+  /**
+   * The seats are a parameter so this can render a console that does not exist,
+   * proving the block is derived from the roster rather than from `slice1` being
+   * hard-coded somewhere in the prose.
+   */
+  test("the seat block follows the roster it is given, not a constant", () => {
+    const sweepId = sweepTaskId(41);
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({
+        sweepId,
+        seats: [
+          { worker: "obs-t1", aspect: "slice1" },
+          { worker: "obs-t2", aspect: "slice2" },
+        ],
+      }),
+    );
+    expect(brief).toContain(`/outbox/${sweepId}-slice2/files/`);
+    expect(brief).toContain("obs-t2");
+  });
+});

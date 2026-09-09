@@ -89,7 +89,12 @@ import { replyMountPath } from "./replies.ts";
  * answer this console keeps having to refuse.
  */
 import type { DeclaredReply } from "./replies-policy.ts";
-import { childTaskId, collationTaskId, TRIAGE_CONSOLE_ASPECTS } from "./task-ids.ts";
+import {
+  type AspectSeat,
+  childTaskId,
+  collationTaskId,
+  TRIAGE_CONSOLE_ASPECTS,
+} from "./task-ids.ts";
 import { TRIAGE_COLLATOR } from "./triage-actor.ts";
 import {
   parseTriageDocument,
@@ -175,6 +180,24 @@ export function triageDocumentPath(run: RunPaths, collateTaskId: string): string
  * pattern is `renderCollationEnvelope`'s: the host writes the reporting path it
  * will later read, rather than asking for it back.
  *
+ * **Why they did not hold is sharper than "a model forgot", and it took reading
+ * the artifact to see it (ISC-1120).** `T-sweep-13`'s live request:
+ * *"Write both `observer-ops.json` and `observer-ops.md` into
+ * `/outbox/T-sweep-13/files/` using the observer's own task id."* The collator
+ * reproduced `roles/triage.md:212`'s own phrase — *"its own task id, not yours"* —
+ * and then filled the path with the only id it holds. **It obeyed the sentence and
+ * could not obey the value.** `T-sweep-13-slice1` is `childTaskId(sweepId,
+ * aspect)` over `TRIAGE_CONSOLE_ASPECTS`, a host constant the collator has never
+ * been shown; at the moment it composes the fan-out it possesses exactly one task
+ * id, and it is the one the instruction forbids. No count of emphatic lines closes
+ * a gap that is missing DATA rather than missing attention — which is why the two
+ * that were tried read, in hindsight, like the same line twice.
+ *
+ * `renderSweepEnvelope` now carries a `## The seats` block naming each seat's
+ * dispatch id and reporting path, so the instruction and the datum arrive
+ * together. This function stays: it is the last place that can act, and a
+ * substitution it reports is now a real fault rather than a foregone one.
+ *
  * Rewrites rather than refuses, deliberately, and it is the one judgement here
  * worth revisiting: refusing would match this file's preference for a loud stop
  * over a quiet repair, but it would also stop every sweep until a model changes
@@ -223,6 +246,24 @@ export function normalizeSliceReportingPath(
  * reached 60, and the console reported `coverage` on an environment that had
  * answered. Nothing in the observer's output looked wrong, because nothing in it
  * was.
+ *
+ * **"Dropped the INSTRUCTION" was wrong, and the correction is the whole of
+ * ISC-1119.** Re-measured 2026-09-09 against the artifact rather than against this
+ * warning's own wording — `T-sweep-13`'s request, live on the console:
+ * *"Echo sweep id T-sweep-13 and window 2026-09-09T12:12:44.316Z in
+ * `observer-ops.json`."* The instruction is THERE, and it is a faithful rendering
+ * of what `roles/triage.md:186` asked for. What is absent is the two SPELLINGS.
+ * The check below greps for `sweep_id` and `window_opened_at`; the collator wrote
+ * English, because English is what it was given — neither the role file nor
+ * `renderSweepEnvelope` had ever named a field. So this function's `appended`
+ * warning has been telling the operator that a compliant worker was
+ * non-compliant, 22 times in the log it writes to.
+ *
+ * **The fix is upstream and this stays as the backstop.** `renderSweepEnvelope`
+ * now names both fields in the collator's own brief, which is the only document
+ * the collator composes from. This function should now fire on a genuine
+ * regression and not once per sweep — and that, rather than the repair itself, is
+ * what makes it worth reading when it does.
  *
  * Both values are already present in the brief as prose, so this adds no
  * information the observer did not have; it adds the sentence that says what to do
@@ -642,6 +683,13 @@ export interface SweepEnvelopeInput {
   readonly previousDocument: TriageDocument | null;
   /** Defaults to {@link TRIAGE_VERDICT_RULE}. Audited like everything else. */
   readonly verdictRule?: string;
+  /**
+   * The seats this sweep will fan out to, and the ONE input added because the
+   * collator cannot derive it — see the `## The seats` block in the rendered
+   * brief. Defaults to {@link TRIAGE_CONSOLE_ASPECTS}; a parameter only so a test
+   * can render a two-seat console without editing a host constant.
+   */
+  readonly seats?: readonly AspectSeat[];
 }
 
 /** A `dispatchrequest`-shaped pair. `roles/collator.md:81-91`'s two prose fields. */
@@ -742,6 +790,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
   const declared = input.services.map((s) => s.name);
   const carried = projectPreviousState(input.previousDocument, declared);
   const rule = input.verdictRule ?? TRIAGE_VERDICT_RULE;
+  const seats = input.seats ?? TRIAGE_CONSOLE_ASPECTS;
 
   const title = `${input.environment}: health sweep ${input.sweepId}`;
 
@@ -772,6 +821,28 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     `produces, and into every brief you write. Copy them from here and from nowhere else — not`,
     `from your transcript and not from a previous artifact. The host compares what it minted`,
     `against what comes back, and an artifact echoing the previous sweep's id is discarded.`,
+    "",
+    `**The two field names are \`sweep_id\` and \`window_opened_at\`, spelled exactly that way.**`,
+    `Every brief you write must instruct its observer to echo \`sweep_id\` and \`window_opened_at\``,
+    `as top-level fields of \`observer-ops.json\`, and must use those two spellings — not "sweep`,
+    `id", not "window", not any prose the observer would have to guess a field name from. The`,
+    `host reads the two named fields and nothing else; an artifact missing either is discarded`,
+    `whole and every service in it is recorded unobserved.`,
+    "",
+    "## The seats, and the task id each one's slice is dispatched under",
+    "",
+    `You do not choose these ids and you cannot derive them — they are minted here, and this is`,
+    `the only place you will see them. When you write a request for a worker below, name that`,
+    `worker's outbox path in its brief, exactly as spelled here:`,
+    "",
+    ...seats.map(
+      (s) => `- ${s.worker}: task id \`${childTaskId(input.sweepId, s.aspect)}\`, ` +
+        `reporting path \`/outbox/${childTaskId(input.sweepId, s.aspect)}/files/\``,
+    ),
+    "",
+    `Never your own task id. An artifact written under \`${input.sweepId}\` is read by nothing:`,
+    `the host looks only under the id the slice was dispatched with, so a report filed at your`,
+    `id is indistinguishable from a seat that answered nothing at all.`,
     "",
     "## The services, and the bounds each one was given",
     "",
@@ -1227,9 +1298,11 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
     const freshness = ensureFreshnessEcho(reporting.brief, sweepId);
     if (freshness.appended) {
       console.warn(
-        `triage: ${assignment.worker}'s brief for ${sweepId} carried no freshness-echo ` +
-          `instruction; appended one. roles/triage.md:186 asks the collator for it, and an ` +
-          `artifact without sweep_id/window_opened_at is discarded whole (sweepIdEcho -> absent).`,
+        `triage: ${assignment.worker}'s brief for ${sweepId} did not name the fields ` +
+          `sweep_id/window_opened_at; appended the demand. The sweep envelope spells both ` +
+          `(renderSweepEnvelope, "## This sweep") and roles/triage.md:186 requires them ` +
+          `verbatim, so this is now a collator that had them and did not copy them — before ` +
+          `ISC-1119 it was a collator that was never given them, and this line said otherwise.`,
       );
     }
     if (reporting.rewrote.length > 0) {
@@ -1237,8 +1310,10 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
         `triage: ${assignment.worker}'s brief for ${sweepId} named outbox ` +
           `${reporting.rewrote.map((id) => `/outbox/${id}/files/`).join(", ")}; rewritten to ` +
           `/outbox/${childId}/files/, the id it is dispatched under and the only one ` +
-          `observerArtifactPath reads. The collator is not copying its slice ids ` +
-          `(roles/triage.md:212).`,
+          `observerArtifactPath reads. The sweep envelope names this exact path in its ` +
+          `"## The seats" block, so the collator had it and did not copy it ` +
+          `(roles/triage.md:212). Before ISC-1120 the id was never handed over at all, and ` +
+          `this line blamed the collator for not knowing it.`,
       );
     }
     const outcome = await deps.dispatch({
