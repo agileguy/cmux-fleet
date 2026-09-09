@@ -2522,23 +2522,34 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
  * the reason both arms are here.
  */
 describe("Phase B: a bash-less role holds no writer but submit_report (§13 task 7.4)", () => {
-  /*
-   * THERE IS NO EXEMPTION LIST HERE ANY MORE, and how it went is worth one note.
+  /**
+   * The bash-less roles that hold a writer, and which writers. **A tripwire,
+   * not an allowance:** the test below asserts each exemption is still TRUE, so
+   * the commit that narrows one of these turns this file red and cannot be
+   * finished without deleting its entry — at which point the general assertion
+   * above starts covering it with nobody having to remember that it should.
    *
-   * Task 7.4 shipped with a `NOT_YET_NARROWED` map holding `triage: ["write"]`,
-   * and the test reading it asserted the exemption was still TRUE rather than
-   * merely skipping the role. So when task 7.3 removed that grant one commit
-   * later, this file went red on its own terms and its failure message was the
-   * instruction — *"task 7.3 has landed, so DELETE its NOT_YET_NARROWED entry
-   * and let the criterion above cover it"*. It was deleted, and the general
-   * assertion below picked `triage` up with nobody having to remember it
-   * should. A plain skip-list would have gone quiet on precisely that day.
+   * THE MECHANISM HAS NOW WORKED IN BOTH DIRECTIONS IN ONE DAY, which is worth
+   * recording because the second direction is the one nobody designs for.
+   * Task 7.3 removed `triage`'s `write`, this file went red exactly as
+   * intended, and the entry was deleted. Three sweeps later the grant came
+   * back — `submit_report` writes the ENVELOPE and this role's actual product
+   * is a second file, `/outbox/<task-id>/dispatch-request.json`, which the tool
+   * has no route for — and the entry is back with it.
    *
-   * Every bash-less role in the tracked example is now narrowed, so the
-   * mechanism has no subject and is gone rather than left standing empty. A
-   * future un-narrowed bash-less role does not need it: the assertion below
-   * simply fails, which is the same signal one step louder.
+   * So the exemption below is not "not yet narrowed". It is **narrowed, tried,
+   * and reverted for a stated reason**, and the distinction is the whole value
+   * of writing it down: the next person to read §13 task 7.3 will find a task
+   * marked CLEARED whose acceptance cannot be met, and this is where they learn
+   * why without re-running it.
    */
+  const HOLDS_A_WRITER: Readonly<Record<string, readonly ToolName[]>> = {
+    // Reverted 2026-09-09. Narrowed, `tri-1` composed a correct fan-out and got
+    // `Tool write not found` three times; sweeps 5 and 6 settled `success`
+    // having dispatched nothing at all. Restoring the invariant needs a
+    // `dispatch_request` tool, not a config edit.
+    triage: ["write"],
+  };
 
   async function example(): Promise<LoadedConfig> {
     return await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
@@ -2599,10 +2610,9 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
 
   test("a narrowed bash-less role holds no writer, and holds submit_report instead", async () => {
     const { config } = await example();
-    const narrowed = bashLessRoles(config);
-    // By NAME, or every loop below is free — and both, because task 7.3 joined
-    // `triage` to `reviewer` here and a one-name answer is now the regression.
-    expect(narrowed).toEqual(["reviewer", "triage"]);
+    const narrowed = bashLessRoles(config).filter((r) => !(r in HOLDS_A_WRITER));
+    // By NAME, or every loop below is free.
+    expect(narrowed).toEqual(["reviewer"]);
 
     for (const r of narrowed) {
       const grant = roleGrant(config, r);
@@ -2619,6 +2629,25 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
     }
   });
 
+  test("a bash-less role that holds a writer holds EXACTLY the ones exempted", async () => {
+    const { config } = await example();
+    // The map is not empty, or this test is a no-op that reads like a guard.
+    expect(Object.keys(HOLDS_A_WRITER)).toEqual(["triage"]);
+
+    for (const [r, writers] of Object.entries(HOLDS_A_WRITER)) {
+      // An exemption for a role holding a shell would be excusing a rule that
+      // never applied to it — §6.8 conditions the whole property on bash.
+      expect(bashLessRoles(config), `"${r}" is exempted but is not bash-less`).toContain(r);
+      expect(
+        writeCapableIn(roleGrant(config, r)),
+        `"${r}" no longer holds ${writers.join(", ")}. If that is deliberate, DELETE its ` +
+          `HOLDS_A_WRITER entry and let the criterion above cover it — but read that entry ` +
+          `first: this exact narrowing was tried on 2026-09-09 and reverted, because ` +
+          `submit_report writes the envelope and this role's product is dispatch-request.json`,
+      ).toEqual([...writers]);
+    }
+  });
+
   test("through resolveWorker, every bash-less SEAT obeys the same rule", async () => {
     const loaded = await example();
     const seats = resolveAllWorkers(loaded).filter((w) => !workerGrant(w).includes("bash"));
@@ -2628,7 +2657,8 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
     expect(seats.map((w) => w.id).sort()).toEqual(["tri-1"]);
 
     for (const w of seats) {
-      expect(writeCapableIn(workerGrant(w)), `seat "${w.id}" (role ${w.role})`).toEqual([]);
+      const exempt = HOLDS_A_WRITER[w.role] ?? [];
+      expect(writeCapableIn(workerGrant(w)), `seat "${w.id}" (role ${w.role})`).toEqual([...exempt]);
       expect(workerGrant(w), `seat "${w.id}" has no route to write its envelope`).toContain(
         "submit_report",
       );

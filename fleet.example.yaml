@@ -675,13 +675,41 @@ roles:
     # NO `edit`, for `reviewer`'s reason: nothing it can see is writable except
     # its own outbox, so the grant would widen the writer set and buy nothing.
     #
-    # AND THE WITHDRAWAL IS AN INVARIANT, NOT A VALUE, on 7.1's argument in full:
-    # `effectiveToolGrant` resolves an OMITTED `tools:` to every Pi builtin, so
-    # deleting the line below would silently hand back `write`, `edit` and `bash`
-    # at once. With `read_only: true` set, that deletion is a parse error naming
-    # the three tools it would have restored.
-    read_only: true
-    tools: [read, grep, find, ls, submit_report]
+    # AND THEN IT WAS PUT BACK, 2026-09-09, the same day — because task 7.3 was
+    # WRONG about this role and the console proved it within three sweeps.
+    #
+    # THIS ROLE WRITES TWO FILES AND `submit_report` CARRIES ONE. The envelope
+    # is `result.json` and the tool writes it. The FAN-OUT is
+    # `/outbox/<task-id>/dispatch-request.json` — this role's actual product,
+    # the thing the host reads to dispatch the observers, instructed at
+    # `roles/triage.md:129` — and `submit_report` has no route for it whatever.
+    # Narrowed, `tri-1` composed a correct fan-out naming obs-t1 and three
+    # services, called `write`, and got `Tool write not found`. Three times, on
+    # one sweep. The console dispatched nothing for three consecutive sweeps.
+    #
+    # AND THE FAILURE WAS NOT EVEN LOUD. Sweeps 5 and 6 settled
+    # `status: success` carrying the summary "Dispatched sweep to obs-t1", with
+    # no request file written anywhere. Only sweep 7 reported `failed` and named
+    # the tool. A narrowing whose observable is a green sweep that did nothing
+    # is worse than the grant it removed.
+    #
+    # WHAT §6.8 GOT RIGHT AND WHAT IT MISSED. Its argument — that a bash-less
+    # role's only writing verb should be `submit_report` — holds wherever the
+    # role's whole output IS its envelope, which is `reviewer` (task 7.1, three
+    # lens reports through the tool across two console cycles). It does not hold
+    # here, and 7.3's own text walked past the reason while stating it: "this
+    # role's entire output is a request for something ELSE to act on". That
+    # request is a FILE, and the model has to write it.
+    #
+    # `read_only:` therefore cannot be set on this role, and that is the honest
+    # state rather than an oversight. What restores the invariant is a
+    # `dispatch_request` extension tool that carries the fan-out the way
+    # `submit_report` carries the envelope — host-composed ids, schema refused
+    # in front of the model. Until that exists, this line is the console.
+    #
+    # TRIAGE_DOCUMENT_MAX_BYTES survives all of this: it bounds the collation
+    # document and never depended on which tool wrote it.
+    tools: [read, write, grep, find, ls, submit_report]
     # `pifleet-worker` alone. There is deliberately NO `triage` bundle: a name
     # with no directory under skills/ is a refusal at `up`, not a silently
     # shorter bundle, and inventing one to make this line look complete is the
