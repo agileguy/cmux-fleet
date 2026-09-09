@@ -1352,16 +1352,28 @@ jobs:
           # re-run as a suspected flake — which is what an intermittent-looking
           # deterministic failure costs when nobody reads the body.
           #
-          # `Qwen3.5-35B-A3B-8bit` is chosen over the other passing candidate
-          # because the `container-live` job below already names it, so the two
-          # jobs share one cold load instead of paying for two. The GPU cost in
-          # the paragraph above is the reason that tie-breaker matters.
-          #
           # This does NOT mean the fleet cannot use reasoning models. It means
           # the probe cannot currently READ one, which is a real limitation of
           # `model-probe.ts` and is filed separately rather than papered over
           # by this line.
-          PIFLEET_OMLX_MODEL: Qwen3.5-35B-A3B-8bit
+          #
+          # [CHANGED 2026-09-09] `gemma-4-26b-a4b-it-bf16`, and the reason is
+          # that CI should probe the model the FLEET ACTUALLY RUNS. Both live
+          # triage seats are on it (`fleet.yaml`), and SRD §11 Q8's tool-argument
+          # ceilings were measured against it — so every bound this repository
+          # ships for that wire is derived from a model CI was not exercising.
+          # `Qwen3.5-35B-A3B-8bit` is served by nothing in the fleet.
+          #
+          # MEASURED BEFORE SWITCHING, because the note above this line is the
+          # record of what guessing costs: five consecutive tools-bearing calls
+          # against the live endpoint, same shape as the 2026-08-29 table —
+          #
+          #   gemma-4-26b-a4b-it-bf16            5/5   native tool_calls
+          #
+          # It is also verified served: `model-probe.ts:187` fails outright on a
+          # name the server does not list, so a typo here is a red job and not a
+          # silent fallback.
+          PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
           # Same eighteen the `test` job collects. Unchanged here on purpose:
           # if this number and that one ever disagree, one of the two jobs has
           # stopped seeing the file.
@@ -1436,7 +1448,19 @@ jobs:
       # container, the chain settled `success` 7 runs out of 7, 12.3s to 15.8s
       # each, 42 assertions every time. The probe was never flaky; it was being
       # pointed at a model that could not do the task.
-      PIFLEET_OMLX_MODEL: Qwen3.5-35B-A3B-8bit
+      #
+      # [CHANGED 2026-09-09] `gemma-4-26b-a4b-it-bf16`, matching `omlx-live` so
+      # the two jobs still share one cold load, and matching the model both live
+      # triage seats run. It answers the single-call probe 5/5 (see that job).
+      #
+      # **THE 7/7 ABOVE IS NOT A CLAIM ABOUT THIS MODEL.** The paragraph it sits
+      # in is the record of a model that passed the single-call probe and could
+      # not complete the multi-turn chain, and gemma has been measured on the
+      # single call only. That is the weaker claim this file already warns
+      # about, made deliberately and left visible rather than dressed up: the
+      # chain measurement for gemma is what THIS JOB is now for, and if the
+      # chain goes intermittently red the diagnosis is written directly above.
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
