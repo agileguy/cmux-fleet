@@ -89,6 +89,7 @@ import {
   discoverSessionPath,
   verdictForStopReason,
 } from "./tui.ts";
+import { TOOL_LOOP_REASON, isToolLoop, readToolLoop } from "./tool-loop.ts";
 import { TranscriptReader } from "../harvest/transcript.ts";
 
 /** Event types that end or could end a turn — logged when attributed prior. */
@@ -2462,7 +2463,48 @@ async function main(): Promise<void> {
               });
             }
 
-            const reading = classifyTuiTurn(tuiReader.entries.slice(tuiBaselineCount));
+            const sinceDispatch = tuiReader.entries.slice(tuiBaselineCount);
+
+            /**
+             * ISC-1126, and it is ABOVE the `ended` gate rather than beside the
+             * verdict chain below, which is the only placement that works.
+             *
+             * A seat stuck in a tool loop is mid-tool-call on every poll, so
+             * `classifyTuiTurn` answers `in_flight` for ever and the next four
+             * lines return. Everything after them — the quiet window, the
+             * precedence chain, `settle` — is unreachable for this failure by
+             * construction. That is why no guard this fleet already owned could
+             * see it, and a detector wired one block lower would have been
+             * complete, tested and dead.
+             *
+             * It settles `failed` rather than asking the agent to stop: the rpc
+             * path's escalation writes to a control channel a `tui` seat does
+             * not have, and an epoch whose seat has stopped being able to stop
+             * has not succeeded on any reading. The measured alternative is the
+             * one this replaces — 480 s to `deadline_exceeded_no_terminal_event`
+             * with no artifact, a diagnosis that names the clock instead of the
+             * cause.
+             */
+            const loop = readToolLoop(sinceDispatch);
+            if (isToolLoop(loop)) {
+              logEvent({
+                type: "tui_tool_loop_detected",
+                epoch: live.epoch,
+                task_id: live.task_id,
+                streak: loop.streak,
+                call: loop.call,
+                detail:
+                  `the seat repeated one tool call ${loop.streak} times in a row without ` +
+                  `varying it; settling ${TOOL_LOOP_REASON} rather than letting the epoch ` +
+                  `run to a deadline that would name the clock instead of the cause ` +
+                  `(ISC-1126)`,
+              });
+              tuiQuiet = null;
+              await settle("failed", TOOL_LOOP_REASON);
+              return;
+            }
+
+            const reading = classifyTuiTurn(sinceDispatch);
             if (reading.phase !== "ended") {
               tuiQuiet = null;
               return;

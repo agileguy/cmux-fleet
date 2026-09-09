@@ -576,3 +576,130 @@ describe("a baseline re-bases when the transcript moves under it (ISC-1117)", ()
     Math.max(cliBudget(2), 120_000),
   );
 });
+
+/**
+ * ISC-1126 — a seat stuck in a tool loop settles as a LOOP, not as a deadline.
+ *
+ * ## Why this test exists at this layer and not in the unit suite
+ *
+ * `test/unit/tool-loop.test.ts` grades the fold thoroughly and would stay
+ * entirely green with the supervisor's call to it deleted — which is the exact
+ * way a complete, well-argued, five-green-tests module has shipped unreached in
+ * this repo before. So the wiring is graded here, by driving a real supervisor
+ * and reading the real task record it writes.
+ *
+ * ## The placement this reddens on, which is the whole defect
+ *
+ * A looping seat's last assistant message is mid-tool-call on every poll, so
+ * `classifyTuiTurn` answers `in_flight` for ever and the settle chain's opening
+ * `if (reading.phase !== "ended") return` fires every time. **A detector wired
+ * anywhere below that line is unreachable.** The fixture below is exactly that
+ * shape — it never ends a turn — so under any such placement no task record
+ * appears at all and this goes red on the `waitFor` rather than on a value.
+ *
+ * The deadline is 900 s and is deliberately NOT what is being waited for: a
+ * `timed_out` cannot be what makes this pass, so the record arriving inside the
+ * budget is evidence the loop itself settled the epoch. That is the same
+ * construction ISC-1117's test uses, for the same reason.
+ *
+ * Measured origin: `T-sweep-15-slice1` ran one `kubectl … | grep alert-processor`
+ * 111 times consecutively and `T-sweep-18-slice1` ran one 108 times, every call
+ * succeeding, both settling on the 480 s child deadline with no artifact.
+ */
+describe("a tui seat stuck in a tool loop is diagnosed as one (ISC-1126)", () => {
+  /**
+   * One assistant entry calling the same command, left mid-tool-call.
+   *
+   * `stopReason: "toolUse"` is what makes this transcript permanently
+   * `in_flight`, which is both the real shape and the thing that makes the
+   * placement of the check load-bearing.
+   */
+  function loopCall(n: number, command: string): string {
+    return `${JSON.stringify({
+      type: "message",
+      id: `L${n}`,
+      parentId: n === 1 ? null : `L${n - 1}`,
+      message: {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [{ type: "toolCall", id: `call_${n}`, name: "bash", arguments: { command } }],
+      },
+    })}\n`;
+  }
+
+  test(
+    "an epoch whose seat repeats one call settles failed:transcript_tool_loop",
+    async () => {
+      const rig = await bootTuiSupervisor();
+
+      await writeFile(rig.sessionPath, entry(1) + entry(2));
+      const found = await waitFor(
+        () => readWorkerState(rig.wp),
+        (s: WorkerState) => s.session_path === rig.sessionPath,
+        30_000,
+      );
+      expect(found?.session_path, "the session was never discovered").toBe(rig.sessionPath);
+
+      const reply = await controlCall(rig.run, WORKER, {
+        cmd: "stage",
+        envelope: TaskEnvelopeSchema.parse({
+          schema: "pifleet.task/v1",
+          task_id: "T-LOOP",
+          run_id: RUN_ID,
+          epoch: 0,
+          attempt: 1,
+          worker: WORKER,
+          dispatched_at: new Date().toISOString(),
+          title: "loop",
+          brief: "identify the workload yourself",
+          repo: "unset",
+          host_workdir: "unset",
+          container_workdir: "/workspace",
+          branch: `fleet/${RUN_ID}/${WORKER}`,
+          base_ref: "0".repeat(40),
+          outbox: "/outbox/T-LOOP",
+          // Fifteen minutes. A `timed_out` verdict cannot be what makes this
+          // pass, so a record inside the budget came from the loop check.
+          deadline_s: 900,
+        }),
+        attempt_id: "att-loop",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"], "the stage was refused").toBe(true);
+
+      // Let the baseline land on the two-entry file before the loop is written,
+      // so every repeated call below is inside the epoch's own slice.
+      await new Promise((r) => setTimeout(r, 1_500));
+
+      /*
+       * Comfortably over `TOOL_LOOP_THRESHOLD` and far under what the real
+       * seats produced. Written in one append because the detector reads a
+       * fold, not a rate — and one write is one poll's worth of growth, which
+       * is the harder case for a check that must not need several polls to
+       * accumulate.
+       */
+      let loop = "";
+      for (let n = 1; n <= 30; n++) {
+        loop += loopCall(n, "kubectl get pods -n aodapnc-alerts-notifier-dev | grep alert-processor");
+      }
+      await appendFile(rig.sessionPath, loop);
+
+      const record = await waitFor(
+        () => readTaskRecord(taskRecordPath(rig.wp, "T-LOOP")),
+        () => true,
+        60_000,
+      );
+      expect(
+        record,
+        "no task record — the epoch is still in flight, which is what a detector " +
+          "wired BELOW the `phase !== ended` early return produces: the looping seat " +
+          "never reaches it, and the run burns its whole deadline (ISC-1126)",
+      ).not.toBeNull();
+      expect(record?.reason).toBe("transcript_tool_loop");
+      expect(record?.verdict).toBe("failed");
+    },
+    // One 30 s gate, a 1.5 s baseline settle, one 60 s gate, plus a cold
+    // supervisor start. No CLI subprocess and no container.
+    Math.max(cliBudget(2), 120_000),
+  );
+});
