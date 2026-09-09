@@ -1964,6 +1964,18 @@ async function main(): Promise<void> {
   let tuiBaselineEpoch: number | null = null;
   let tuiBaselineCount = 0;
   /**
+   * WHICH TRANSCRIPT `tuiBaselineCount` COUNTS INTO (ISC-1117).
+   *
+   * The baseline is an INDEX, and an index is meaningless without the file it
+   * indexes. Keyed on the epoch alone it survives a session switch it cannot
+   * survive: `slice(10)` against a transcript that has just been replaced reads
+   * from the wrong offset of the wrong file, and when the new file is shorter
+   * than the index it reads NOTHING — `classifyTuiTurn` sees an empty window,
+   * answers `awaiting_start` for ever, and the epoch runs to its deadline with
+   * the turn long since finished on disk.
+   */
+  let tuiBaselinePath: string | null = null;
+  /**
    * How long the reading has been `ended`, or null whenever it is not.
    *
    * A `Stopwatch` and not a `Date.now()` subtraction (ISC-155). The quiet
@@ -1994,10 +2006,19 @@ async function main(): Promise<void> {
    *
    * Re-running on every poll would readdir the run's session directory twice a
    * second for the life of the worker to catch an event that happens between
-   * tasks, so it is throttled instead. The cost of the throttle is bounded and
-   * uninteresting: a reset session is noticed up to `SESSION_REDISCOVER_MS`
-   * late, and the entries written in that window are read the moment it is
-   * adopted, because `TranscriptReader` starts from the top of a new path.
+   * tasks, so it is throttled instead. A reset session is therefore noticed up
+   * to `SESSION_REDISCOVER_MS` late, and the entries written in that window are
+   * read the moment it is adopted, because `TranscriptReader` starts from the
+   * top of a new path.
+   *
+   * **This paragraph used to end "the cost of the throttle is bounded and
+   * uninteresting", and that was false — see ISC-1117.** The entries are read,
+   * and then discarded: `tuiBaselineCount` was an index into the file being
+   * replaced, so `slice(baseline)` on the new one read from the wrong offset
+   * and, when the new file was shorter than the index, read nothing at all. The
+   * window is small and what falls into it is a whole task. The baseline is now
+   * a `(path, index)` pair and re-bases when the path moves; the throttle is
+   * genuinely uninteresting only because of that.
    *
    * A `Stopwatch` and not two `Date.now()` reads, on ISC-155's rule that wall
    * clock may LABEL a record and must never be subtracted to decide anything.
@@ -2273,15 +2294,65 @@ async function main(): Promise<void> {
               tuiQuiet = null;
               return;
             }
-            if (tuiBaselineEpoch !== live.epoch) {
+            /**
+             * ── RE-BASE WHEN THE TRANSCRIPT MOVES UNDER A LIVE EPOCH (ISC-1117) ──
+             *
+             * Two conditions, not one. A new epoch needs a baseline; so does the
+             * SAME epoch whose session file has been replaced beneath it, and the
+             * second was missing.
+             *
+             * How it happens is ordinary, not exotic: `resetPaneSession` types
+             * `/new` at every settle, so a new session appears between sweeps, and
+             * session re-discovery is throttled to `SESSION_REDISCOVER_MS`. A
+             * stage landing inside that window takes its baseline against the
+             * OUTGOING file and is then pointed at the incoming one.
+             *
+             * Measured on run `2026-09-09T05-21-27Z-6767`, and both directions
+             * appear in the same events file:
+             *
+             *   05:38:38  tui_turn_baseline  T-sweep-11  entries_before: 10
+             *             ...taken on `..._tri-1.jsonl`, which had 11 entries
+             *   05:38:45  tui_session_path_discovered -> `..._01a0849e-….jsonl`
+             *             ...a file four entries long
+             *   06:03:45  deadline_exceeded            <- 25 minutes
+             *
+             *   06:06:38  tui_turn_baseline  T-sweep-12  entries_before: 11
+             *             ...taken on the file it then read
+             *   06:07:00  tui_turn_ended               <- 22 seconds, success
+             *
+             * The turn itself was fine both times. `tri-1` had written its
+             * fan-out and its result within twenty seconds of each trigger.
+             *
+             * **The re-base is to ZERO, and that is not a shortcut.** An adopted
+             * session is one `discoverSessionPath` accepted, which requires a
+             * Pi-generated name and a sole-worker roster (ISC-1112) — such a file
+             * is created by the `/new` this console types at the PREVIOUS settle,
+             * so every entry in it postdates that settle and belongs to the live
+             * epoch. Re-basing to `count` instead would discard exactly the
+             * entries the switch was late for, which is this same defect with a
+             * smaller window.
+             */
+            const transcriptMoved =
+              tuiBaselinePath !== null && tuiBaselinePath !== state.session_path;
+            if (tuiBaselineEpoch !== live.epoch || transcriptMoved) {
+              const newEpoch = tuiBaselineEpoch !== live.epoch;
               tuiBaselineEpoch = live.epoch;
-              tuiBaselineCount = count;
+              tuiBaselinePath = state.session_path;
+              tuiBaselineCount = newEpoch ? count : 0;
               tuiQuiet = null;
               logEvent({
                 type: "tui_turn_baseline",
                 epoch: live.epoch,
                 task_id: live.task_id,
-                entries_before: count,
+                entries_before: tuiBaselineCount,
+                ...(newEpoch
+                  ? {}
+                  : {
+                      rebased_onto: state.session_path,
+                      detail:
+                        "the session file was replaced under a live epoch; the previous " +
+                        "baseline indexed a transcript this worker no longer reads (ISC-1117)",
+                    }),
               });
               return;
             }

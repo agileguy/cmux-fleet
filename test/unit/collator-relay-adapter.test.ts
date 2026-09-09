@@ -72,6 +72,8 @@ import { runPaths, workerPaths, workerRepliesDir, type RunPaths } from "../../sr
 import { createRepliesDir } from "../../src/run/replies.ts";
 import { DuplicateReplyError, writeRepliesPolicy } from "../../src/run/replies-policy.ts";
 import {
+  childDeadlineS,
+  RELAY_CHILD_DEADLINE_MARGIN_MS,
   RELAY_SETTLE_DEADLINE_MS,
   RELAY_SETTLE_POLL_MS,
   RelayDispatchError,
@@ -2636,5 +2638,94 @@ describe("publishReplies refuses a duplicate child id and publishes NOTHING", ()
 
     // Swept on the SUCCESS path only, so a failure leaves the tree to read.
     await rm(root, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-1118 — the child's deadline must sit INSIDE the join that waits for it
+// ---------------------------------------------------------------------------
+
+/**
+ * `RELAY_SETTLE_DEADLINE_MS`'s docblock states this property and states it as a
+ * warning: *"1800 > 1500, so the child settles `timed_out` on its own clock
+ * first and the join observes a real record. **If either number moves, that
+ * ordering is the property to re-check.**"*
+ *
+ * One moved. The triage console passes `deadlineMs: sweep_deadline_s * 1000` —
+ * §7.8's `cadence_s − reserve_s`, 780 s on a 900 s cadence — while the envelope
+ * still carried `dispatch.ts`'s 1500 s default. 780 < 1500, so the join gave up
+ * twelve minutes before the child could settle and **every** turn that reached
+ * the supervisor's deadline failed its pass by construction. Measured on run
+ * `2026-09-09T05-21-27Z-6767`, sweep 11: join stopped at 780 s,
+ * `deadline_exceeded` at 1500 s, task record written into a dead pass.
+ *
+ * Two constants agreeing was the mechanism that failed, so the fix is a
+ * DERIVATION and these tests pin the derivation rather than either number.
+ */
+describe("the child's deadline is derived from the join's bound (ISC-1118)", () => {
+  /**
+   * The property, over the whole range rather than at one point. A test that
+   * only checked the two shipped consoles would pass for a `childDeadlineS`
+   * that returned a constant.
+   */
+  test("the derived deadline is always strictly inside the bound", () => {
+    for (const ms of [301_000, 480_000, 780_000, 900_000, 1_800_000, 3_600_000]) {
+      expect(childDeadlineS(ms) * 1_000, `not inside the bound at ${ms} ms`).toBeLessThan(ms);
+      expect(childDeadlineS(ms), `non-positive at ${ms} ms`).toBeGreaterThan(0);
+    }
+  });
+
+  /**
+   * The review console is UNCHANGED to the second, and that is asserted rather
+   * than assumed: 1_800_000 − 300_000 = 1_500_000 is exactly the envelope value
+   * that console has always sent, so this fix is a no-op there and a repair on
+   * the triage console alone.
+   */
+  test("the review console still sends 1500s", () => {
+    expect(childDeadlineS(RELAY_SETTLE_DEADLINE_MS)).toBe(1_500);
+  });
+
+  /**
+   * REFUSES rather than clamping. A floor would hand the child a deadline
+   * longer than the join and re-create the defect silently — which is worse
+   * than the defect, because the first version at least produced a `timed_out`
+   * an operator could read.
+   */
+  test("a bound with no room for the margin is refused, not clamped", () => {
+    expect(() => childDeadlineS(RELAY_CHILD_DEADLINE_MARGIN_MS)).toThrow(RangeError);
+    expect(() => childDeadlineS(120_000)).toThrow(/ISC-1118/);
+    // The remainder case the first implementation shipped: 1 ms of room floors
+    // to a zero-second deadline, which expires the instant the task starts.
+    expect(() => childDeadlineS(RELAY_CHILD_DEADLINE_MARGIN_MS + 1)).toThrow(RangeError);
+  });
+
+  /**
+   * THE WIRING, and it is the half a pure-function test cannot reach.
+   *
+   * `childDeadlineS` being correct buys nothing if `dispatch` never calls it —
+   * five green tests once stayed green with the wiring deleted. So this drives
+   * the real `consoleTransport` and reads what reached `sendTask`.
+   */
+  test("dispatch sends the derived deadline, not dispatch.ts's default", async () => {
+    const seen: number[] = [];
+    const { fx } = effects({
+      async sendTask(_run, _worker, d) {
+        seen.push(d.deadlineS);
+        return { accepted: true, via: "staged", reason: null, error: null, epoch: 1 };
+      },
+    });
+    // The triage console's own bound: 900 s cadence less a 120 s reserve.
+    await consoleTransport("col-1", fx, { deadlineMs: 780_000 }).dispatch(ARCH_RUN, {
+      worker: "rev-arch-1",
+      taskId: "T1-arch",
+      title: "t",
+      brief: "b",
+    });
+    expect(seen, "sendTask was never reached").toHaveLength(1);
+    expect(seen[0], "the envelope did not carry the transport's derived bound").toBe(480);
+    expect(
+      seen[0]! * 1_000,
+      "the child outlives the join that waits for it — this is ISC-1118 exactly",
+    ).toBeLessThan(780_000);
   });
 });

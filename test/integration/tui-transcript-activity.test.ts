@@ -45,10 +45,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { WorkerLaunchSchema, type WorkerState } from "../../src/contracts.ts";
-import { runPaths, workerPaths, type WorkerPaths } from "../../src/run/paths.ts";
-import { readWorkerState } from "../../src/run/state.ts";
+import {
+  runPaths,
+  taskRecordPath,
+  workerPaths,
+  type RunPaths,
+  type WorkerPaths,
+} from "../../src/run/paths.ts";
+import { readTaskRecord, readWorkerState } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
-import { processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { TaskEnvelopeSchema } from "../../src/contracts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterAll(async () => {
@@ -93,6 +101,7 @@ function entry(n: number): string {
 
 interface Rig {
   wp: WorkerPaths;
+  run: RunPaths;
   sessionPath: string;
   pid: number;
   pgid: number;
@@ -153,6 +162,7 @@ async function bootTuiSupervisor(): Promise<Rig> {
 
   return {
     wp,
+    run,
     // The name `discoverSessionPath` matches on: `<ISO>_<worker>.jsonl`, flat.
     sessionPath: join(run.sessionsDir, `2026-09-01T06-00-09-284Z_${WORKER}.jsonl`),
     pid,
@@ -435,5 +445,134 @@ describe("a tui supervisor follows its seat through a /new (ISC-1112)", () => {
      * three windows plus room for a cold supervisor start.
      */
     90_000,
+  );
+});
+
+/**
+ * ISC-1117 — the baseline is an INDEX, and adoption moves the file under it.
+ *
+ * ISC-1112 taught the supervisor to follow a seat through the `/new` its own
+ * settle types. It did not teach `tuiBaselineCount` to follow, and that count is
+ * an offset into whichever transcript was current when the epoch went live. Move
+ * the file and the offset addresses the wrong place; make the new file shorter
+ * than the offset and it addresses nothing at all — `classifyTuiTurn` reads an
+ * empty window, answers `awaiting_start` for ever, and the epoch runs to its
+ * deadline while the finished turn sits on disk.
+ *
+ * Measured on run `2026-09-09T05-21-27Z-6767`, both directions in one file:
+ * sweep 11 took `entries_before: 10` against an eleven-entry transcript, was
+ * pointed at a four-entry one seven seconds later, and burned 25 minutes to
+ * `deadline_exceeded`; sweep 12 took its baseline against the file it then read
+ * and settled in 22 seconds. The turns were indistinguishable.
+ *
+ * **The deadline is the thing NOT being waited for here.** A test that waited
+ * out a real `deadline_exceeded` would take longer than the suite allows and
+ * would prove the timeout works rather than that the re-base does. What is
+ * asserted instead is the positive: the epoch reaches a terminal verdict from a
+ * turn written entirely into the SECOND transcript. Under the defect no record
+ * appears at all within the budget, which is the failure this reddens on.
+ */
+describe("a baseline re-bases when the transcript moves under it (ISC-1117)", () => {
+  /** A terminating assistant entry — `stopReason: "stop"` ends the turn. */
+  function endsTurn(n: number): string {
+    return `${JSON.stringify({
+      type: "message",
+      id: `x${n}`,
+      parentId: `x${n - 1}`,
+      message: { role: "assistant", content: "done", stopReason: "stop" },
+    })}\n`;
+  }
+  function turnEntry(n: number, role: string): string {
+    return `${JSON.stringify({
+      type: "message",
+      id: `x${n}`,
+      parentId: n === 1 ? null : `x${n - 1}`,
+      message: { role, content: `t${n}` },
+    })}\n`;
+  }
+
+  test(
+    "a turn written wholly into the adopted session still settles",
+    async () => {
+      const rig = await bootTuiSupervisor();
+
+      /*
+       * A LONG first transcript, and the length is the point: it is what makes
+       * the stale index out-of-range on the short file that replaces it, which
+       * is the shape that reads NOTHING rather than merely reading the wrong
+       * offset. Eight entries against the three the second file opens with.
+       */
+      let first = "";
+      for (let n = 1; n <= 8; n++) first += entry(n);
+      await writeFile(rig.sessionPath, first);
+      const found = await waitFor(
+        () => readWorkerState(rig.wp),
+        (s: WorkerState) => s.session_path === rig.sessionPath,
+        30_000,
+      );
+      expect(found?.session_path, "the first session was never discovered").toBe(rig.sessionPath);
+
+      // Stage an epoch. The baseline is taken on the poll after this, against
+      // the EIGHT-entry file above — exactly as sweep 11's was.
+      const reply = await controlCall(rig.run, WORKER, {
+        cmd: "stage",
+        envelope: TaskEnvelopeSchema.parse({
+          schema: "pifleet.task/v1",
+          task_id: "T-REBASE",
+          run_id: RUN_ID,
+          epoch: 0,
+          attempt: 1,
+          worker: WORKER,
+          dispatched_at: new Date().toISOString(),
+          title: "rebase",
+          brief: "do the thing",
+          repo: "unset",
+          host_workdir: "unset",
+          container_workdir: "/workspace",
+          branch: `fleet/${RUN_ID}/${WORKER}`,
+          base_ref: "0".repeat(40),
+          outbox: "/outbox/T-REBASE",
+          // Long enough that a `timed_out` cannot be what makes this pass: the
+          // record this test waits for has to come from the turn being READ.
+          deadline_s: 900,
+        }),
+        attempt_id: "att-rebase",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"], "the stage was refused").toBe(true);
+
+      // Let the baseline land on the first file before the switch, so this
+      // reproduces the ordering rather than dodging it.
+      await new Promise((r) => setTimeout(r, 1_500));
+
+      /*
+       * The `/new`: a Pi-generated session id, which is the only shape
+       * `discoverSessionPath` will adopt (ISC-1112), carrying the WHOLE turn.
+       */
+      const adopted = join(
+        rig.run.sessionsDir,
+        "2026-09-01T06-30-00-000Z_01a08467-0ebe-711a-9a53-e1ab590e5126.jsonl",
+      );
+      await writeFile(adopted, turnEntry(1, "user") + turnEntry(2, "assistant") + endsTurn(3));
+
+      const record = await waitFor(
+        () => readTaskRecord(taskRecordPath(rig.wp, "T-REBASE")),
+        () => true,
+        60_000,
+      );
+      expect(
+        record,
+        "no task record — the epoch never read the turn in the session it had moved to",
+      ).not.toBeNull();
+      // The verdict comes from `stopReason: "stop"`, so it is evidence the
+      // classifier ran over the NEW file's entries and not merely that some
+      // terminal state was reached.
+      expect(record?.reason).toBe("transcript_quiesced");
+      expect(record?.verdict).toBe("success");
+    },
+    // One gate at 30 s, a 1.5 s settle for the baseline, one at 60 s, plus the
+    // supervisor launch. No CLI subprocess and no container: compared against
+    // cliBudget(2) and taken as the larger of the two.
+    Math.max(cliBudget(2), 120_000),
   );
 });
