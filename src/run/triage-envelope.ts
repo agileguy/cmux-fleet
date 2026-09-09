@@ -891,6 +891,31 @@ export function envelopeIssues(
   return issues;
 }
 
+/**
+ * One line naming every class an envelope violated, WITH the evidence, and the
+ * evidence goes before the prose.
+ *
+ * **Measured 2026-09-09, and the cost was diagnosis rather than downtime.** The
+ * `worker_prose` refusal that stopped three `cni-dev` sweeps logged its class and
+ * its reason and dropped `evidence` — so §7.7's log said a string from the last
+ * sweep had crossed, and never which string. The operator could see the console
+ * had stopped and could not see why; the answer took importing this module and
+ * running the guard by hand against the run tree.
+ *
+ * **The evidence leads because §7.7's line is truncated to
+ * `ACTOR_LOG_REASON_MAX_BYTES` and every one of these reasons is a paragraph.**
+ * Put the token after the prose and the one field an operator needs is the first
+ * thing a cap removes.
+ *
+ * `credential` is the exception and it stays one: that class deliberately does
+ * not quote the value back, and its `evidence` is already a description rather
+ * than the secret — so it is printed like any other and nothing new reaches the
+ * log.
+ */
+export function describeIssues(issues: readonly EnvelopeIssue[]): string {
+  return issues.map((i) => `${i.forbidden} [${i.evidence}]: ${i.reason}`).join(" | ");
+}
+
 /** A refusal to emit an envelope, carrying every class it violated. */
 export class SweepEnvelopeError extends Error {
   readonly issues: readonly EnvelopeIssue[];
@@ -1224,8 +1249,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
   ];
   if (issues.length > 0) {
     throw new SweepEnvelopeError(
-      `the rendered sweep envelope for ${input.sweepId} violates §7.2: ` +
-        issues.map((i) => `${i.forbidden}: ${i.reason}`).join(" | "),
+      `the rendered sweep envelope for ${input.sweepId} violates §7.2: ${describeIssues(issues)}`,
       issues,
     );
   }
@@ -1282,7 +1306,7 @@ export function renderCollationEnvelope(input: {
   if (issues.length > 0) {
     throw new SweepEnvelopeError(
       `the rendered collation envelope for ${input.sweepId} violates §7.2: ` +
-        issues.map((i) => `${i.forbidden}: ${i.reason}`).join(" | "),
+        describeIssues(issues),
       issues,
     );
   }

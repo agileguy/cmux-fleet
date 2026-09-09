@@ -75,6 +75,7 @@ import {
   TRIAGE_DOCUMENT_FILE,
   TRIAGE_VERDICT_RULE,
   blockedObservers,
+  describeIssues,
   envelopeIssues,
   MIN_PROSE_LENGTH,
   observerArtifactPath,
@@ -536,6 +537,50 @@ describe("§7.2/§12.6: the four classes an envelope may never carry", () => {
     }
     expect(thrown).toBeInstanceOf(SweepEnvelopeError);
     expect((thrown as SweepEnvelopeError).issues.map((i) => i.forbidden)).toContain("command");
+  });
+
+  /**
+   * **The refusal MESSAGE carries the evidence, because §7.7's log carries the
+   * message and nothing else.**
+   *
+   * `issues[]` is on the error and an operator cannot see it: the actor logs
+   * `why(err)`, which is `err.message`. Measured 2026-09-09 — a `worker_prose`
+   * refusal stopped three `cni-dev` sweeps and the log said a string from the
+   * last sweep had crossed without saying WHICH, so the console's own record of
+   * why it stopped could not answer the only question worth asking. Finding it
+   * meant importing the module and running the guard by hand.
+   */
+  test("the refusal message names the evidence, not just the class", () => {
+    const carrier = PREVIOUS.services[0]!.selector!;
+    let thrown: unknown = null;
+    try {
+      renderSweepEnvelope(
+        envelopeInput({
+          previousDocument: PREVIOUS,
+          verdictRule: `Last sweep selected on ${carrier}.`,
+        }),
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SweepEnvelopeError);
+    const message = (thrown as SweepEnvelopeError).message;
+    expect((thrown as SweepEnvelopeError).issues.map((i) => i.forbidden)).toContain("worker_prose");
+    expect(message).toContain(carrier);
+  });
+
+  /**
+   * And the ORDER, which is the half a reader would call cosmetic. §7.7 truncates
+   * this line to `ACTOR_LOG_REASON_MAX_BYTES` and every one of these reasons is a
+   * paragraph, so evidence printed after the prose is evidence a cap removes
+   * first — the field would be present in the string and absent from the log.
+   */
+  test("the evidence precedes the reason, so truncation cannot take it", () => {
+    const issues = [
+      { forbidden: "worker_prose", evidence: "app=whatever", reason: "a long paragraph" },
+    ] as const;
+    const line = describeIssues([...issues]);
+    expect(line.indexOf("app=whatever")).toBeLessThan(line.indexOf("a long paragraph"));
   });
 });
 
