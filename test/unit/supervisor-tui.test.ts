@@ -841,13 +841,55 @@ describe("the supervisor branches on pane_mode", () => {
   });
 
   test("the turn is read from entries sliced at the epoch's baseline", () => {
+    // The slice is bound once and shared, rather than spelled at each reader:
+    // two readers of one epoch that computed their own window could drift to
+    // two different windows, and only one of them would be the epoch.
     expect(SUPERVISOR).toMatch(
-      /classifyTuiTurn\(tuiReader\.entries\.slice\(tuiBaselineCount\)\)/,
+      /const sinceDispatch = tuiReader\.entries\.slice\(tuiBaselineCount\);/,
     );
+    expect(SUPERVISOR).toMatch(/classifyTuiTurn\(sinceDispatch\)/);
     // Not the whole file. A tui session is long-lived and a person may have
     // driven turns through the pane before any dispatch; folding over
     // everything would settle epoch 1 on a turn that predates it.
     expect(SUPERVISOR).not.toMatch(/classifyTuiTurn\(tuiReader\.entries\)/);
+  });
+
+  /**
+   * ISC-1126, stated in the file it constrains.
+   *
+   * `tui-transcript-activity.test.ts` is the behavioural half and is what
+   * actually proves the wiring — it drives a real supervisor and reddens when
+   * the check is moved. It also takes 60 seconds to do it. This states the
+   * ordering property in the fast suite, on the same argument the
+   * transcript-activity shape test above makes for itself: a future reordering
+   * should be red before anyone waits a minute to find out.
+   *
+   * The ordering is the whole fix. A seat stuck in a tool loop is mid-tool-call
+   * on every poll, so `classifyTuiTurn` answers `in_flight` for ever and the
+   * `phase !== "ended"` return fires every time — anything below it is
+   * unreachable for this failure by construction.
+   */
+  test("the tool-loop check runs BEFORE the ended gate, not after it", () => {
+    const loop = /const transcriptPoll[\s\S]*?\}, TUI_POLL_MS\);/.exec(SUPERVISOR);
+    expect(loop, "the transcript poll could not be located").not.toBeNull();
+    const body = loop![0];
+
+    const check = body.indexOf("readToolLoop(sinceDispatch)");
+    const gate = body.indexOf('if (reading.phase !== "ended")');
+    expect(check, "the tool-loop check is not in the transcript poll").toBeGreaterThan(-1);
+    expect(gate, "the ended gate could not be located").toBeGreaterThan(-1);
+    expect(
+      check,
+      "the tool-loop check sits BELOW the `phase !== ended` early return, where a " +
+        "looping seat can never reach it — the detector is dead code there (ISC-1126)",
+    ).toBeLessThan(gate);
+  });
+
+  test("the loop detector reads the epoch's slice, not the whole transcript", () => {
+    // Folding the whole file would join the tail of a previous turn's repeats to
+    // the head of this one's and manufacture a streak neither had.
+    expect(SUPERVISOR).toMatch(/readToolLoop\(sinceDispatch\)/);
+    expect(SUPERVISOR).not.toMatch(/readToolLoop\(tuiReader\.entries\)/);
   });
 
   /**
