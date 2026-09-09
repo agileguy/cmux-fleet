@@ -300,6 +300,81 @@ export function ensureFreshnessEcho(
   return { brief: `${brief.trimEnd()}${demand}`, appended: true, window };
 }
 
+/**
+ * The THIRD repair, and the one the other two predicted (ISC-1131).
+ *
+ * ## The measurement
+ *
+ * `T-sweep-22`, 2026-09-09, run by hand. The collator's collation was refused
+ * whole and all three services were recorded unobserved, on six copies of one
+ * error:
+ *
+ *     services.N.coverage.M.result: Invalid option:
+ *       expected one of "answered"|"unreachable"|"forbidden"|"not_attempted"
+ *
+ * The observer had written `"result": "healthy"` — a member of
+ * `OBSERVER_ASSESSMENTS`, in a field whose domain is `COVERAGE_RESULTS`. It did
+ * the work correctly otherwise: both channels checked on all three services, a
+ * real selector, a real window, real evidence refs. It got one vocabulary wrong
+ * and lost the entire sweep.
+ *
+ * ## Why it reached for the wrong one, which is the part that generalises
+ *
+ * The brief it was handed named `assessment` and its four values, and named
+ * `coverage[].result` with NO values at all. A model holding one enum and a
+ * field that needs one it was never given will reuse the enum it has. The
+ * observer was not being careless; it was completing the only pattern in front
+ * of it.
+ *
+ * ## Why the fix is here and not in the envelope or the skill
+ *
+ * Both of those were already correct. `renderSweepEnvelope` names `answered`
+ * seven times in the collator's own 5,472-character brief, and
+ * `skills/observer-ops/SKILL.md` carries the full row shape (ISC-1125). The
+ * collator READ the vocabulary and did not COPY it into the child brief it
+ * composed — which is [[ISC-1119]]'s shape exactly, one level down.
+ *
+ * **And it is intermittent, which is what settles the argument.** Sweeps 19 and
+ * 21 produced `answered` correctly from this same code and this same envelope;
+ * sweep 22 did not. So there is no upstream wording left to sharpen: the
+ * instruction is present, it is read, and it is obeyed on some passes and not
+ * others. [[ISC-1121]] is the recorded precedent for what happens next if this
+ * were answered with more prose — a bound that reached the brief, was ignored,
+ * and taught that a prompt cannot make a model deterministic. The host is the
+ * last place that can act, and unlike a sentence it cannot forget.
+ *
+ * ## The vocabulary is IMPORTED, not restated
+ *
+ * From `COVERAGE_RESULTS`, the same constant `evidenceGaps` grades against and
+ * the schema validates with. A repair that spelled its own copy would be a third
+ * spelling of the enum whose second spelling is the bug — and the ISA's own
+ * ISC-869 records the rule: *"an assertion that two copies agree is a third
+ * copy."* Add a fifth member to `COVERAGE_RESULTS` and this sentence grows it
+ * with no edit here.
+ *
+ * ## ALL FOUR, not just one
+ *
+ * A brief carrying `answered` alone is the condition that produced this defect,
+ * not a brief that has escaped it: a partial enum is precisely what invites a
+ * model to invent the rest of it. The repair fires unless the observer can see
+ * the closed set.
+ *
+ * Returns the brief unchanged when it already names every member.
+ */
+export function ensureCoverageVocabulary(
+  brief: string,
+): { readonly brief: string; readonly appended: boolean; readonly missing: readonly string[] } {
+  const missing = COVERAGE_RESULTS.filter((r) => !brief.includes(r));
+  if (missing.length === 0) return { brief, appended: false, missing };
+  const values = COVERAGE_RESULTS.map((r) => `"${r}"`).join(", ");
+  const demand =
+    ` Every \`result\` inside \`coverage\` must be exactly one of ${values} — that field records ` +
+    `whether the CHANNEL ANSWERED YOU, not whether the service is well. It never carries an ` +
+    `assessment word: "healthy" is not a coverage result, and an artifact using one is refused ` +
+    `whole and every service in it is recorded unobserved.`;
+  return { brief: `${brief.trimEnd()}${demand}`, appended: true, missing };
+}
+
 // ---------------------------------------------------------------------------
 // §7.2 — the verdict rule, which travels because the skill does not carry it
 // ---------------------------------------------------------------------------
@@ -1346,6 +1421,13 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
      */
     const reporting = normalizeSliceReportingPath(item.brief, childId);
     const freshness = ensureFreshnessEcho(reporting.brief, sweepId);
+    /*
+     * The third repair, applied last so its sentence lands at the end of the
+     * brief rather than inside either of the other two's. See
+     * `ensureCoverageVocabulary` for why a vocabulary the collator was GIVEN and
+     * did not pass on is the host's to fix and not the envelope's.
+     */
+    const vocabulary = ensureCoverageVocabulary(freshness.brief);
     if (freshness.appended) {
       console.warn(
         `triage: ${assignment.worker}'s brief for ${sweepId} did not name the fields ` +
@@ -1366,11 +1448,21 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
           `this line blamed the collator for not knowing it.`,
       );
     }
+    if (vocabulary.appended) {
+      console.warn(
+        `triage: ${assignment.worker}'s brief for ${sweepId} did not name the coverage ` +
+          `vocabulary (missing ${vocabulary.missing.join(", ")}); appended it. The sweep ` +
+          `envelope spells "answered" in the collator's own brief, so this is a collator that ` +
+          `had the domain and did not pass it on. Measured on T-sweep-22: the observer wrote ` +
+          `"healthy" — an assessment word — into coverage.result, and all three services in ` +
+          `the sweep were recorded unobserved (ISC-1131).`,
+      );
+    }
     const outcome = await deps.dispatch({
       taskId: childId,
       worker: assignment.worker,
       title: item.title,
-      brief: freshness.brief,
+      brief: vocabulary.brief,
     });
     if (outcome.kind !== "accepted") {
       throw new SweepEnvelopeError(

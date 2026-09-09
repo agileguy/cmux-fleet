@@ -45,6 +45,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { OUTBOX_FILES_DIR } from "../../src/harvest/outbox.ts";
+import { COVERAGE_RESULTS, OBSERVER_ASSESSMENTS } from "../../src/run/triage-verdict.ts";
 import {
   runPaths,
   taskRecordPath,
@@ -61,6 +62,7 @@ import {
   collationTaskId,
   sweepTaskId,
 } from "../../src/run/task-ids.ts";
+import { DISPATCH_REQUEST_FILE } from "../../src/run/dispatch-request.ts";
 import { TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
 import type { TriageDocument } from "../../src/run/triage-verdict.ts";
 import type { TriageService } from "../../src/run/triage-targets.ts";
@@ -88,6 +90,7 @@ import {
   type SweepEnvelopeInput,
   type SweepProducerDeps,
   normalizeSliceReportingPath,
+  ensureCoverageVocabulary,
   ensureFreshnessEcho,
 } from "../../src/run/triage-envelope.ts";
 import {
@@ -1806,5 +1809,183 @@ describe("the sweep envelope carries what the collator is asked to emit", () => 
     );
     expect(brief).toContain(`/outbox/${sweepId}-slice2/files/`);
     expect(brief).toContain("obs-t2");
+  });
+});
+
+/**
+ * ISC-1131 — the third repair, and the sweep that earned it.
+ *
+ * `T-sweep-22`, 2026-09-09: the observer wrote `"result": "healthy"` into every
+ * `coverage` entry, the collation was refused whole on six copies of one schema
+ * error, and all three services were recorded unobserved. The brief it had named
+ * `assessment` and its four values and named `coverage[].result` with none, so a
+ * model holding one enum completed the only pattern in front of it.
+ *
+ * The intermittency is what makes this the host's problem: sweeps 19 and 21
+ * produced `answered` from this same code and the same envelope. There is no
+ * wording left to sharpen — see `ensureCoverageVocabulary`.
+ */
+describe("ensureCoverageVocabulary (ISC-1131)", () => {
+  /** The real sweep-22 brief's shape: `assessment` present, the domain absent. */
+  const REAL_BRIEF =
+    "Sweep T-sweep-22. Observation window opens 2026-09-09T14:34:38.315Z. Check `grafana` in " +
+    "namespace `aodapnc-grafana-dev` (checks: [rollout, logs], window: 300s). Report an " +
+    "assessment of healthy, degraded, unhealthy or indeterminate for each.";
+
+  test("appends the domain when the brief names none of it", () => {
+    const r = ensureCoverageVocabulary(REAL_BRIEF);
+    expect(r.appended).toBe(true);
+    expect(r.missing).toEqual([...COVERAGE_RESULTS]);
+    for (const v of COVERAGE_RESULTS) expect(r.brief).toContain(`"${v}"`);
+    // The original survives ahead of the appended sentence.
+    expect(r.brief.startsWith("Sweep T-sweep-22.")).toBe(true);
+  });
+
+  test("says what the field means, because the wrong answer was a plausible one", () => {
+    // `healthy` is not a typo — it is the neighbouring enum. A repair that only
+    // listed values would leave the same confusion one step further on.
+    const r = ensureCoverageVocabulary(REAL_BRIEF);
+    expect(r.brief).toContain("whether the CHANNEL ANSWERED YOU");
+    expect(r.brief).toContain('"healthy" is not a coverage result');
+  });
+
+  test("a brief already naming every member is returned UNCHANGED", () => {
+    const already =
+      `${REAL_BRIEF} Each coverage result is one of answered, unreachable, forbidden, ` +
+      "not_attempted.";
+    const r = ensureCoverageVocabulary(already);
+    expect(r.appended).toBe(false);
+    expect(r.missing).toEqual([]);
+    expect(r.brief).toBe(already);
+  });
+
+  /**
+   * THE ASYMMETRIC CASE.
+   *
+   * Every other test here has all four members present or all four absent, and a
+   * predicate of `includes("answered")` survives every one of them. A brief
+   * carrying ONE member is the condition that produced the defect rather than one
+   * that escaped it: a partial enum is what invites a model to invent the rest.
+   */
+  test("a PARTIAL domain still fires, and names only what was missing", () => {
+    const partial = `${REAL_BRIEF} Use answered when the channel replied.`;
+    const r = ensureCoverageVocabulary(partial);
+    expect(r.appended).toBe(true);
+    expect(r.missing).toEqual(["unreachable", "forbidden", "not_attempted"]);
+    expect(r.missing).not.toContain("answered");
+  });
+
+  /**
+   * The vocabulary is IMPORTED, not restated — so this test is what makes that
+   * claim falsifiable rather than a comment. Add a fifth member to
+   * `COVERAGE_RESULTS` and the appended sentence must grow it with no edit to
+   * the repair; a hand-written copy of the list would fail here.
+   */
+  test("every member of COVERAGE_RESULTS reaches the brief, by construction", () => {
+    const r = ensureCoverageVocabulary("bare brief");
+    for (const v of COVERAGE_RESULTS) expect(r.brief).toContain(`"${v}"`);
+    // And nothing from the neighbouring enum leaks in, which is the confusion
+    // this whole repair exists to end.
+    for (const a of OBSERVER_ASSESSMENTS) {
+      if ((COVERAGE_RESULTS as readonly string[]).includes(a)) continue;
+      expect(r.brief).not.toContain(`"${a}" is a coverage result`);
+    }
+  });
+});
+
+/**
+ * The three repairs at their REAL call site (ISC-1131).
+ *
+ * ## Why this test exists, and what was missing before it
+ *
+ * `normalizeSliceReportingPath`, `ensureFreshnessEcho` and
+ * `ensureCoverageVocabulary` each have a thorough block of unit tests above, and
+ * every one of them calls the function directly. **Not one of them proves that
+ * `dispatchObserver` calls it.** Checked while adding the third: the only test
+ * that drove `dispatchObserver` was the refusal path, which dispatches nothing —
+ * so all three call sites were uncovered, and deleting any one line from the
+ * dispatch path left this whole file green.
+ *
+ * That is the failure `ISC-1104` names and the reason a fourth repair should not
+ * be added without this. The probe is the brief the port ACTUALLY RECEIVES: it
+ * cannot pass unless the repairs ran on the real path, in the real order.
+ *
+ * ## The fixture is deliberately broken in all three ways at once
+ *
+ * A collator brief that names the wrong outbox id, omits the freshness fields
+ * AND omits the coverage domain — which is not a contrived combination but the
+ * union of three separately measured sweeps. Repairing one and not the others
+ * fails here, which is the property a per-repair unit test cannot state.
+ */
+describe("dispatchObserver applies all three brief repairs before sending (ISC-1131)", () => {
+  test("the brief the dispatch port receives is repaired, not the one the collator wrote", async () => {
+    const run = await seedRun("2026-09-09T00-00-31Z-1131");
+    const sweepId = sweepTaskId(22);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    const childId = `${sweepId}-${seat.aspect}`;
+
+    // The collator's fan-out request, broken in all three ways.
+    const dir = join(workerOutboxDir(run.root, TRIAGE_COLLATOR), sweepId);
+    await mkdir(dir, { recursive: true });
+    const collatorBrief =
+      `Sweep ${sweepId}. Observation window opens 2026-09-09T14:34:38.315Z. Check ` +
+      "`grafana` in namespace `aodapnc-grafana-dev` (checks: [rollout, logs], window: 300s). " +
+      `Report an assessment of healthy, degraded, unhealthy or indeterminate. Write both files ` +
+      `into /outbox/${sweepId}/files/.`;
+    await writeFile(
+      join(dir, DISPATCH_REQUEST_FILE),
+      JSON.stringify({
+        schema: "pifleet.dispatchrequest/v1",
+        parent_task_id: sweepId,
+        requests: [
+          {
+            worker: seat.worker,
+            title: "Health sweep",
+            brief: collatorBrief,
+            // §7.3 requires it: the host validates the partition against the
+            // targets file before dispatching, and this is the only
+            // machine-readable statement of what a request covers.
+            services: ["grafana"],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const { sent, producers } = producerFixture(run);
+    await producers.dispatchObserver(sweepId, {
+      worker: seat.worker,
+      services: ["grafana"],
+    });
+
+    expect(sent, "dispatchObserver sent nothing").toHaveLength(1);
+    const brief = sent[0]!.brief;
+
+    // Repair 1 — the reporting path is the child's, not the sweep's.
+    expect(
+      brief,
+      "normalizeSliceReportingPath did not run on the dispatch path (ISC-1120)",
+    ).toContain(`/outbox/${childId}/files/`);
+    expect(brief).not.toContain(`/outbox/${sweepId}/files/`);
+
+    // Repair 2 — the freshness fields are named by their exact spellings.
+    expect(brief, "ensureFreshnessEcho did not run on the dispatch path (ISC-1119)").toContain(
+      "sweep_id",
+    );
+    expect(brief).toContain("window_opened_at");
+
+    // Repair 3 — the coverage domain, every member of it.
+    for (const v of COVERAGE_RESULTS) {
+      expect(
+        brief,
+        `ensureCoverageVocabulary did not run on the dispatch path — "${v}" never reached ` +
+          `the observer, which is how T-sweep-22 lost all three services (ISC-1131)`,
+      ).toContain(`"${v}"`);
+    }
+
+    // And the collator's own words survive: a repair that REPLACED the brief
+    // would satisfy every assertion above while discarding the sweep's content.
+    expect(brief).toContain("aodapnc-grafana-dev");
+    expect(brief.startsWith(`Sweep ${sweepId}.`)).toBe(true);
   });
 });
