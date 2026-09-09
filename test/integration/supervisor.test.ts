@@ -53,6 +53,7 @@ import {
   splitDispatchPolicy,
   writeDispatchPolicy,
 } from "../../src/run/dispatch-policy.ts";
+import { TASK_POLICY_NONE } from "../../src/run/task-policy.ts";
 import { cliBudget, gateBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
@@ -3318,12 +3319,23 @@ describe("a settled epoch leaves the drop disarmed (ISC-1114)", () => {
       ).toBe(false);
 
       /*
-       * And the brief goes with it. A header that says `staged: false` over a
-       * prompt that is still there would keep the last task's text readable at
-       * `/policy/dispatch` for a worker that has been told to go and read it —
-       * half a disarm, and the half that still lies.
+       * And the brief goes with it — but this is a CURRENCY check, not a second
+       * probe of settle, and saying so is the point of the comment.
+       *
+       * `renderDispatchPolicy`'s idle arm hard-codes `<none>` and ignores its
+       * `prompt` argument entirely, so "disarmed header over a live brief" is
+       * unreachable through `clearDispatchPolicy` no matter what settle does.
+       * Measured: a mutation that made the clear preserve the previous prompt
+       * left this test GREEN, because the renderer discarded it anyway. An
+       * assertion phrased as `not.toContain(brief)` therefore reddens for
+       * nothing and would have read as coverage it does not have.
+       *
+       * What it is worth pinning is the pairing itself, against the constant
+       * both halves share: if the idle arm ever starts carrying a body, the
+       * worker at `/policy/dispatch` can read the last task's text after being
+       * told to go and read it, and that is the half-disarm this names.
        */
-      expect(after.prompt).not.toContain("do the integration thing");
+      expect(after.prompt).toBe(`${TASK_POLICY_NONE}\n`);
 
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
       await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
