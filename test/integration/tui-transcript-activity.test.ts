@@ -311,3 +311,129 @@ describe("a tui supervisor with no session file says so rather than staying sile
     40_000,
   );
 });
+
+/**
+ * The `/new` rename, driven through a real supervisor — SRD-WORKER-DISPATCH
+ * ISC-1112.
+ *
+ * `resetPaneSession` types `/new` at an idle `tui` pane so the next task starts
+ * on an empty session. Pi obeys, and names the new session after its OWN
+ * generated id — `--session-id` covers the first session only, and `/session`
+ * reports rather than sets. So the seat's transcript MOVES, to a filename
+ * `discoverSessionPath` was never going to match.
+ *
+ * **What that cost, measured on 2026-09-08/09 rather than reasoned about.**
+ * `tri-1` completed sweep 5 in its worker-named session, was reset, and
+ * completed sweep 6 in a UUID-named one. Every host surface went on reading the
+ * first file: `status` reported the seat frozen at the reset instant, the
+ * triage actor's join waited 780 s for a task record "under tri-1" and failed a
+ * pass the seat had in fact delivered, and the envelope landed carrying
+ * `"worker": "01a08415-…"`. Eight runs hold the same orphaned pair, one of them
+ * having skipped 28 consecutive ticks across 7.7 hours. The work ran and
+ * delivered through `submit_report` every time; only the attribution was lost.
+ *
+ * ## Why this is an integration test and not another unit assertion
+ *
+ * `supervisor-tui.test.ts` pins `discoverSessionPath` — that the search CAN
+ * adopt, and the two conditions under which it refuses. That is the half a pure
+ * function can answer. It cannot answer the half that actually bit: the
+ * supervisor called the search **once**, while `session_path` was null, and
+ * never looked again. A search that adopts perfectly, called once at start-up,
+ * reproduces the entire defect with every unit test green — so the criterion
+ * has to be "a running supervisor notices", and only a running supervisor can
+ * be asked.
+ *
+ * Needs no Docker, for the reason the ISC-492 block above gives: the rig's
+ * `docker` is a shell stub, so this runs in CI's ordinary integration step
+ * rather than behind the container gate.
+ */
+describe("a tui supervisor follows its seat through a /new (ISC-1112)", () => {
+  test(
+    "a Pi-generated session replaces the worker-named one mid-run",
+    async () => {
+      const rig = await bootTuiSupervisor();
+      expect(await processStartTime(rig.pid)).not.toBeNull();
+
+      // Phase 1: the ordinary life of a tui seat. The worker-named session
+      // appears and is found by NAME, which is the pre-existing behaviour and
+      // the baseline everything below is a change from.
+      await writeFile(rig.sessionPath, entry(1) + entry(2));
+      const before = await waitFor<WorkerState>(
+        () => readWorkerState(rig.wp),
+        (s) => (s.transcript_activity?.entries ?? 0) >= 2,
+        20_000,
+      );
+      expect(before, "the supervisor never found the worker-named session").not.toBeNull();
+      expect(before!.session_path).toBe(rig.sessionPath);
+      expect(before!.transcript_activity!.entries).toBe(2);
+
+      /*
+       * Phase 2: the reset. Pi's new session is a SEPARATE file with a
+       * generated id, and the old one simply stops growing — it is not deleted,
+       * which is exactly why the stale path went unnoticed for hours. The
+       * fixture reproduces that: the first file is left in place, intact.
+       *
+       * Three entries rather than a continuation of the first file's two,
+       * because the count is what proves WHICH file is being read. A supervisor
+       * still on the old path reports 2 for ever; one that followed reports 3,
+       * and no arithmetic on the old file produces 3.
+       */
+      const renamed = join(
+        rig.wp.dir,
+        "..",
+        "..",
+        "sessions",
+        "2026-09-01T06-05-00-000Z_01a08415-44aa-7645-b3d1-e1ab590e5126.jsonl",
+      );
+      await writeFile(renamed, entry(1) + entry(2) + entry(3));
+
+      const after = await waitFor<WorkerState>(
+        () => readWorkerState(rig.wp),
+        (s) => s.session_path !== null && s.session_path.includes("01a08415"),
+        30_000,
+      );
+      expect(
+        after,
+        "the supervisor never adopted the renamed session — it is still reading the file " +
+          "the seat stopped writing to, which is the defect this closes",
+      ).not.toBeNull();
+
+      // The path moved…
+      expect(after!.session_path).toBe(renamed);
+      expect(after!.session_path).not.toBe(rig.sessionPath);
+
+      // …and the READING moved with it, which is the half that matters. A
+      // recorded path nothing polls is a cosmetic fix.
+      const read = await waitFor<WorkerState>(
+        () => readWorkerState(rig.wp),
+        (s) => (s.transcript_activity?.entries ?? 0) >= 3,
+        20_000,
+      );
+      expect(read, "the path was adopted but its entries were never counted").not.toBeNull();
+      expect(read!.transcript_activity!.entries).toBe(3);
+
+      // Still an attended seat with no epoch. Asserted because a fix that made
+      // this worker look busy would satisfy everything above and break `wait`,
+      // `report` and the ledger, all of which route on `phase`.
+      expect(read!.phase).toBe("idle");
+      expect(read!.epoch).toBe(0);
+    },
+    /**
+     * A hand-picked literal under the same standing ISC-274 exception the block
+     * above takes, and for the same reason.
+     *
+     * This test spawns twice — the supervisor, and the `ps` behind
+     * `processStartTime` — so `cliBudget(2)` would apply. **That value does not
+     * govern here.** Nearly all of the duration is three `waitFor` windows
+     * totalling 70_000 ms, and they are that wide because the supervisor polls
+     * at `TUI_POLL_MS` while only re-running the session search every
+     * `SESSION_REDISCOVER_MS` — so the adoption is up to five seconds behind
+     * the write on an idle machine and further behind on a loaded one. A
+     * ceiling derived from spawn count could land BELOW those windows, and bun
+     * would then kill the test while it is still legitimately waiting, naming
+     * the timeout instead of the session path that never moved. 90_000 is the
+     * three windows plus room for a cold supervisor start.
+     */
+    90_000,
+  );
+});

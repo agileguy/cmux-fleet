@@ -30,7 +30,7 @@
  */
 
 import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { Verdict } from "../contracts.ts";
 import { isAssistantEntry, type TreeEntry } from "../harvest/transcript.ts";
 import { AUTO_TRIGGER_TEXT } from "../util/pane-text.ts";
@@ -122,6 +122,34 @@ export interface SessionDiscovery {
   /** The absolute path, or null when no file matches yet. */
   path: string | null;
   /**
+   * True when the chosen file is NOT named for this worker — an ADOPTED
+   * session, which is what a `/new` leaves behind.
+   *
+   * `resetPaneSession` types `/new` at an idle pane to give the next task an
+   * empty session (`SESSION_RESET_LINE`). Pi honours it by starting a fresh
+   * session, and it names that one by its own generated id: the seat's second
+   * transcript is `<stamp>_01a08415-44aa-….jsonl`, not `<stamp>_tri-1.jsonl`.
+   * The `--session-id` the host passes at launch applies to the FIRST session
+   * only, and Pi's `/session` command reports state rather than setting it, so
+   * there is nothing to pass again.
+   *
+   * MEASURED before it was fixed, on 2026-09-08/09. `tri-1` completed sweep 5
+   * in its worker-named session, was reset, ran sweep 6 in a UUID-named one —
+   * and every host surface kept reading the first file. `status` showed the
+   * seat frozen at the reset instant; the triage actor's join looked for a task
+   * record "under tri-1", waited 780 s and failed the pass; the envelope landed
+   * with `"worker": "01a08415-…"` where the previous one said `"tri-1"`. **The
+   * work ran and delivered through `submit_report`; only the attribution was
+   * lost.** The same pair of files is present in eight runs, including the one
+   * that skipped 28 consecutive triage ticks over 7.7 hours — so the recurring
+   * "stalled seat" on this fleet was one seat doing its job into a file nobody
+   * was reading.
+   *
+   * This flag is what stops the repair from being silent: an adopted path is a
+   * weaker claim than a matched one and the caller logs it as its own event.
+   */
+  adopted: boolean;
+  /**
    * How many files in the directory matched the suffix. `> 1` means the
    * answer is the newest of several and the caller should say so in its log —
    * see the ambiguity note on `discoverSessionPath`.
@@ -173,19 +201,74 @@ export interface SessionDiscovery {
  * is created LAZILY on the first assistant message (§4.2), so "not there yet"
  * is the expected answer for the first seconds of every worker's life.
  */
+/**
+ * Pi's own generated session id: the 8-4-4-4-12 hex of a v7 UUID.
+ *
+ * Named narrowly rather than "not a worker id", because the two conditions are
+ * not the same and only this one is checkable. `SESSION_ID_RE` in
+ * `contracts.ts` is Pi's session-id GRAMMAR and a worker id satisfies it by
+ * design, so "is it a worker id" has no answer from a filename alone — it needs
+ * the run's roster, which is exactly what a caller may not have.
+ *
+ * This is the second of the two conditions adoption requires, and it is the one
+ * that keeps the containment property when the first is satisfied by accident.
+ * A run whose roster says one worker can still hold a sibling's named
+ * transcript — a relaunch, a repurposed directory, a roster read a moment too
+ * early — and `_eng-2.jsonl` must never be adopted by `eng-1` on the strength
+ * of "nobody claimed it". A generated id cannot be confused with a seat name in
+ * any of those cases, because no worker in this fleet is called
+ * `01a08415-44aa-7645-b3d1-e1ab590e5126`.
+ */
+const PI_GENERATED_SESSION_RE =
+  /_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
+
+function isPiGeneratedSession(name: string): boolean {
+  return PI_GENERATED_SESSION_RE.test(name);
+}
+
 export async function discoverSessionPath(
   sessionsDir: string,
   sessionId: string,
+  runWorkerIds: readonly string[] = [],
 ): Promise<SessionDiscovery> {
   const suffix = sessionFileSuffix(sessionId);
   let names: string[];
   try {
     names = await readdir(sessionsDir);
   } catch {
-    return { path: null, matches: 0 };
+    return { path: null, matches: 0, adopted: false };
   }
-  const candidates = names.filter((n) => n.endsWith(suffix) && n.length > suffix.length);
-  if (candidates.length === 0) return { path: null, matches: 0 };
+  const own = names.filter((n) => n.endsWith(suffix) && n.length > suffix.length);
+
+  /*
+   * WHEN AN UNCLAIMED FILE MAY BE ADOPTED — and this is the half that makes
+   * adoption safe rather than merely convenient.
+   *
+   * A `/new` leaves a session named for Pi's own id, so the only way to
+   * attribute it is by elimination: a transcript in this run's directory named
+   * for NO worker in the run. That reasoning is sound only when this worker is
+   * the run's ONLY one, and `runWorkerIds` is how the caller states that. It
+   * holds for every console seat — `up` gives each pane its own run, and all
+   * eight runs carrying an orphaned session are single-seat.
+   *
+   * **The empty default means UNKNOWN and therefore refuses to adopt**, which
+   * is deliberate and is the direction this must fail. `sessionId` is a worker
+   * id and this directory holds every worker's transcript, so a search that
+   * adopted by default would hand one worker another's evidence the moment a
+   * caller forgot the argument — the exact hazard ISC-95's never-glob rule
+   * exists to prevent, and the reason the match below is a SUFFIX and not a
+   * wildcard. A stale path is a bug; a mis-attributed transcript is a lie, and
+   * the unchanged default keeps every existing caller on the old behaviour.
+   *
+   * With siblings present adoption is withheld for the same reason: two seats
+   * in one run that both reset produce two unclaimed files and nothing in the
+   * name says which is which.
+   */
+  const soleWorker = runWorkerIds.length === 1 && runWorkerIds[0] === sessionId;
+  const unclaimed = soleWorker ? names.filter(isPiGeneratedSession) : [];
+
+  const candidates = [...own, ...unclaimed];
+  if (candidates.length === 0) return { path: null, matches: 0, adopted: false };
 
   let best: string | null = null;
   let bestMtime = -Infinity;
@@ -204,10 +287,21 @@ export async function discoverSessionPath(
       best = full;
     }
   }
-  // `best` can still be null if every candidate vanished; `matches` reports
-  // what was seen, not what survived, because the count is a diagnostic about
-  // the directory and not about this call's success.
-  return { path: best, matches: candidates.length };
+  /*
+   * NEWEST WINS ACROSS BOTH SETS, which is the behaviour that actually repairs
+   * the defect: after a reset the worker-named file stops growing and the
+   * adopted one does not, so mtime is exactly the question "which of these is
+   * the session the seat is speaking into now".
+   *
+   * `matches` still counts only the NAMED matches. It is the ambiguity
+   * diagnostic the event log has always carried and it means "how many files
+   * claimed to be this worker's", which an adopted file does not.
+   */
+  return {
+    path: best,
+    matches: own.length,
+    adopted: best !== null && !own.includes(basename(best)),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +326,24 @@ export async function discoverSessionPath(
  * once per task, at the end.
  */
 export const TUI_QUIET_MS = 2_000;
+
+/**
+ * How long the supervisor may go without re-running the session search.
+ *
+ * A `tui` seat's transcript can be REPLACED mid-run — `resetPaneSession` types
+ * `/new` at an idle pane and Pi opens a session under its own generated id — so
+ * a search that ran once and cached its answer reads a frozen file for the rest
+ * of the run. That is not hypothetical: it cost a triage console 28 consecutive
+ * skipped sweeps over 7.7 hours while the seat was working normally.
+ *
+ * Five seconds is ten polls. The event it exists to catch happens BETWEEN
+ * tasks, at most once per dispatch, so a readdir on every 500 ms poll would be
+ * two orders of magnitude more work than the question deserves. The lateness it
+ * buys costs nothing: `TranscriptReader` reads a newly adopted path from the
+ * top, so entries written during the window arrive with the swap rather than
+ * being skipped.
+ */
+export const SESSION_REDISCOVER_MS = 5_000;
 
 /**
  * How long the transcript must be quiet after an assistant message that

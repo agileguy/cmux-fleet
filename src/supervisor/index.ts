@@ -32,7 +32,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -78,6 +78,7 @@ import {
 } from "./prose-detector.ts";
 import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 import {
+  SESSION_REDISCOVER_MS,
   TUI_POLL_MS,
   TUI_QUIET_MS,
   quietWindowMsFor,
@@ -1928,6 +1929,34 @@ async function main(): Promise<void> {
   let tuiLastCount = 0;
   /** Re-entrancy guard: the poll body awaits, the interval does not wait. */
   let tuiPolling = false;
+  /**
+   * When the session search last ran, so re-discovery is bounded.
+   *
+   * The search used to run only while `session_path` was null — find it once,
+   * keep it for ever. That is correct for a session a worker keeps, and it is
+   * exactly wrong for one it is told to replace: `resetPaneSession` types
+   * `/new` at an idle pane, Pi starts a session named for its own generated id,
+   * and this loop went on polling the previous file until the run ended.
+   * Measured on 2026-09-08/09 — a triage seat that had completed a sweep, been
+   * reset, and completed another, while `status` reported it frozen at the
+   * reset instant and the console's actor failed the pass it had in fact
+   * delivered.
+   *
+   * Re-running on every poll would readdir the run's session directory twice a
+   * second for the life of the worker to catch an event that happens between
+   * tasks, so it is throttled instead. The cost of the throttle is bounded and
+   * uninteresting: a reset session is noticed up to `SESSION_REDISCOVER_MS`
+   * late, and the entries written in that window are read the moment it is
+   * adopted, because `TranscriptReader` starts from the top of a new path.
+   *
+   * A `Stopwatch` and not two `Date.now()` reads, on ISC-155's rule that wall
+   * clock may LABEL a record and must never be subtracted to decide anything.
+   * `clock.test.ts` greps this file for exactly that and caught the first
+   * version of this throttle. The rule earns its keep here specifically: a
+   * suspended laptop is an ordinary event on the machine this fleet runs on,
+   * and it would make a wall-clock interval jump hours in one poll.
+   */
+  const tuiDiscoveryAge = new Stopwatch();
 
   /**
    * Poll the session transcript, and settle the live epoch off it.
@@ -1978,9 +2007,53 @@ async function main(): Promise<void> {
         tuiPolling = true;
         void (async () => {
           try {
-            if (state.session_path === null) {
-              const found = await discoverSessionPath(run.sessionsDir, argv.workerId);
-              if (found.path === null) {
+            if (
+              state.session_path === null ||
+              tuiDiscoveryAge.elapsedMs() >= SESSION_REDISCOVER_MS
+            ) {
+              tuiDiscoveryAge.restart();
+              /*
+               * THE ROSTER IS WHAT AUTHORISES ADOPTION, and it is read here
+               * rather than cached at start-up because `workers/` is the run's
+               * own record and a supervisor outlives edits to it.
+               *
+               * `discoverSessionPath` adopts a Pi-generated session only when
+               * the caller can say this worker is the run's only one. Handing
+               * it the roster is that statement; failing to read it is not an
+               * error, it is the ordinary "cannot say", and the search then
+               * falls back to the matched path exactly as before.
+               */
+              let roster: string[] = [];
+              try {
+                roster = await readdir(run.workersDir);
+              } catch {
+                roster = [];
+              }
+              const found = await discoverSessionPath(run.sessionsDir, argv.workerId, roster);
+              /*
+               * A search that found nothing NEW leaves the recorded path alone.
+               *
+               * Two shapes reach here and neither is a change: the throttle
+               * fired and the same file is still the answer, or the directory
+               * momentarily produced nothing while a path is already held. The
+               * first is the common case by far and must not write an event or
+               * flush state twice a second; the second must not un-record a
+               * session over a transient readdir.
+               */
+              if (found.path !== null && found.path === state.session_path) {
+                // UNCHANGED — the common case by far once a path is held, and
+                // it must not write an event or flush state twice a second.
+                //
+                // `found.path !== null` is load-bearing rather than defensive:
+                // both sides are null before the first session file exists, and
+                // an equality test alone would swallow that case into "nothing
+                // changed" and never reach ISC-492's branch below. Measured —
+                // the first version of this chain did exactly that and turned
+                // `tui-transcript-activity.test.ts` red.
+              } else if (found.path === null && state.session_path !== null) {
+                // A transient readdir that produced nothing must not UN-record
+                // a session already held. Keep it and try again next window.
+              } else if (found.path === null) {
                 /**
                  * WATCHING, AND HAVE SEEN NOTHING — written here rather than
                  * returned past (ISC-492).
@@ -2018,7 +2091,7 @@ async function main(): Promise<void> {
                   void flushState();
                 }
                 return;
-              }
+              } else {
               /**
                * The path, and ONLY the path.
                *
@@ -2048,9 +2121,18 @@ async function main(): Promise<void> {
                 type: "tui_session_path_discovered",
                 path: found.path,
                 matches: found.matches,
+                ...(found.adopted ? { adopted: true } : {}),
               });
               void flushState();
+              }
             }
+            /*
+             * Unreachable by the branches above — every path that leaves
+             * `session_path` null returns — and asserted rather than cast,
+             * because re-discovery made the reasoning long enough to be worth
+             * the compiler checking it instead of a reader.
+             */
+            if (state.session_path === null) return;
             if (tuiReader === null || tuiReader.path !== state.session_path) {
               tuiReader = new TranscriptReader(state.session_path);
               tuiLastCount = 0;
