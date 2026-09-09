@@ -466,10 +466,29 @@ describe("the reviewer's grant is what the document says it is", () => {
    */
   test("deleting the tools line is refused rather than silently re-granting write", async () => {
     const line = "    tools: [read, grep, find, ls, submit_report]";
-    expect(EXAMPLE.split("\n").filter((l) => l === line), "the reviewer's grant line moved").toHaveLength(1);
-    const without = EXAMPLE.split("\n")
-      .filter((l) => l !== line)
-      .join("\n");
+    const lines = EXAMPLE.split("\n");
+
+    /*
+     * SCOPED TO THE REVIEWER'S BLOCK, and it did not have to be until task 7.3.
+     *
+     * This filtered the whole document on string equality, which was
+     * unambiguous while `reviewer` was the only narrowed role. 7.3 narrowed
+     * `triage` to the identical grant, so the same string now matches twice and
+     * a whole-document filter would delete BOTH lines — testing something other
+     * than the sentence above it, and passing anyway because both roles are
+     * `read_only`. The premise assertion caught it rather than letting it
+     * through, which is the only reason this is a fix and not a silent drift.
+     */
+    const from = lines.findIndex((l) => l === "  reviewer:");
+    expect(from, "fleet.example.yaml declares no reviewer role").toBeGreaterThan(-1);
+    const rest = lines.slice(from + 1).findIndex((l) => /^  [a-z][a-z_]*:\s*$/.test(l));
+    const to = rest === -1 ? lines.length : from + 1 + rest;
+
+    const within = lines.slice(from, to).filter((l) => l === line);
+    expect(within, "the reviewer's grant line moved").toHaveLength(1);
+
+    const at = lines.slice(from, to).indexOf(line) + from;
+    const without = [...lines.slice(0, at), ...lines.slice(at + 1)].join("\n");
     const err = await parseConfig(without, `${ROOT}fleet.example.yaml`).then(
       () => null,
       (e: unknown) => e as Error,

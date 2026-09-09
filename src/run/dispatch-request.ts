@@ -243,7 +243,8 @@ export const MAX_DISPATCH_ID_CHARS = 64;
 /**
  * The longest `services` list one request may carry — SRD-TRIAGE-CONSOLE §7.3.
  *
- * 64, which is `MAX_SERVICES_PER_ENVIRONMENT` in `triage-targets.ts`: ONE
+ * 8, which is `MAX_SERVICES_PER_ENVIRONMENT` in `triage-targets.ts` (both were
+ * 64 until task 7.3 sized that constant to the wire): ONE
  * observer's share may be the whole environment, because §6.5 makes ⌈N/3⌉ the
  * worker's judgement rather than a refusal — *"the partition is the triage
  * worker's to make"* — and a bound below the environment's own cap would refuse
@@ -261,7 +262,7 @@ export const MAX_DISPATCH_ID_CHARS = 64;
  * than a partition refused as `schema` — a code naming neither file — the day
  * an operator extends an environment past this number.
  */
-export const MAX_DISPATCH_SERVICES = 64;
+export const MAX_DISPATCH_SERVICES = 8;
 
 /**
  * Hard byte cap, enforced from `fstat` on the open fd BEFORE the read, and

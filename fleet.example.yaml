@@ -640,19 +640,48 @@ roles:
     # console's `collator` carries in the operator's own `fleet.yaml`, which is
     # where the shape was argued. Note what is NOT here.
     #
-    # `write` is the outbox artifact and nothing else, on exactly the argument
-    # `reviewer` above sets out: /outbox is a worker-scoped bind mount, only the
-    # harvester reads it, and it is already the untrusted-content boundary.
+    # `write` WAS HELD HERE AND IS NOW WITHDRAWN — SRD-WORKER-DISPATCH-EXTENSION
+    # task 7.3, Phase B, one console behind `reviewer`'s 7.1. The argument that
+    # bought it is kept rather than deleted, for 7.1's reason: a role with no
+    # member of the writer set looks like an oversight, and this one is not.
+    #
+    # WHAT THE GRANT WAS FOR. `write` was the outbox artifact and nothing else:
+    # /outbox is a worker-scoped bind mount, only the harvester reads it, and it
+    # is already the untrusted-content boundary. `submit_report` now writes
+    # `/outbox/<task-id>/result.json` itself and its `report` parameter writes
+    # the collation into `files/` beside it, so every byte `write` carried has a
+    # route that does not depend on the model spelling a path correctly.
+    #
+    # WHY THIS ROLE WAITED, AND WHAT CLEARED IT. §11's Q8 measured a local model
+    # delivering 39% of an 8 KB tool argument with `isError` false and a GREEN
+    # epoch — the worst shape in the document, because nothing downstream can
+    # detect it. Passing the collation as an ARGUMENT is only safe if the model
+    # carries it intact, so this role kept `write` while `reviewer` lost it. The
+    # gate is now closed from the other side: `TRIAGE_DOCUMENT_MAX_BYTES` bounds
+    # the document at 4 096 bytes and REFUSES above it, and
+    # `MAX_SERVICES_PER_ENVIRONMENT` and `TRIAGE_NOTE_MAX_BYTES` came down to 8
+    # and 1 024 so that bound is reachable rather than nominal. An observed
+    # maximum is not a bound; that cap is.
     #
     # NO `bash`, and here that is the load-bearing omission rather than an
     # inherited habit. This role's entire output is a request for something ELSE
     # to act on — a fan-out to three observers, and a notification that wakes a
     # human. A shell is exactly what turns a request-WRITING worker into a
-    # DISPATCHING one, and an agent may not dispatch.
+    # DISPATCHING one, and an agent may not dispatch. It is also what makes the
+    # withdrawal above mean anything: §6.8 is explicit that a role holding a
+    # shell can `cat > /outbox/...`, so removing `write` there would take a tool
+    # without taking a capability.
     #
     # NO `edit`, for `reviewer`'s reason: nothing it can see is writable except
     # its own outbox, so the grant would widen the writer set and buy nothing.
-    tools: [read, write, grep, find, ls, submit_report]
+    #
+    # AND THE WITHDRAWAL IS AN INVARIANT, NOT A VALUE, on 7.1's argument in full:
+    # `effectiveToolGrant` resolves an OMITTED `tools:` to every Pi builtin, so
+    # deleting the line below would silently hand back `write`, `edit` and `bash`
+    # at once. With `read_only: true` set, that deletion is a parse error naming
+    # the three tools it would have restored.
+    read_only: true
+    tools: [read, grep, find, ls, submit_report]
     # `pifleet-worker` alone. There is deliberately NO `triage` bundle: a name
     # with no directory under skills/ is a refusal at `up`, not a silently
     # shorter bundle, and inventing one to make this line look complete is the

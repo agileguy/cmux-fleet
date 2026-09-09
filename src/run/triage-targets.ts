@@ -93,8 +93,24 @@ export const TRIAGE_TARGETS_SCHEMA = "pifleet.triagetargets/v1";
 export const TRIAGE_CHECKS = ["rollout", "logs", "sink", "endpoint"] as const;
 export type TriageCheck = (typeof TRIAGE_CHECKS)[number];
 
-/** §7.1's cap on one environment's service list. */
-export const MAX_SERVICES_PER_ENVIRONMENT = 64;
+/**
+ * §7.1's cap on one environment's service list.
+ *
+ * **8, lowered from 64 by SRD-WORKER-DISPATCH-EXTENSION §13 task 7.3**, because
+ * Phase B makes `tri-1`'s collation a `submit_report` ARGUMENT rather than a
+ * file it writes, and {@link TRIAGE_DOCUMENT_MAX_BYTES} bounds that argument at
+ * the size the wire was measured to carry. At the ~570 bytes a real row costs,
+ * 64 rows is a 37 KB document — nine times the cap — so the old ceiling was not
+ * a bound this console could ever have reached and Phase B turns "could not
+ * reach" into "refuses". Lowering it is what keeps the two numbers in the same
+ * story.
+ *
+ * Measured demand, not guessed: all 20 collations this console has harvested
+ * carry exactly 3 services or none, so 8 is 2.6x the observed maximum. Raising
+ * it again is legitimate and cheap — but it has to move with the byte cap, and
+ * `triage-document.test.ts` fails if the two stop agreeing.
+ */
+export const MAX_SERVICES_PER_ENVIRONMENT = 8;
 
 const shortStr = z.string().min(1).max(4096);
 

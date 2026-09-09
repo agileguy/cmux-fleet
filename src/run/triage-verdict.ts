@@ -230,7 +230,7 @@ export interface CoverageEntry {
  * `test/unit/triage-verdict.test.ts` asserts the relation, so lowering the
  * notifier's cap reddens here instead of starting a silent truncation.
  */
-export const TRIAGE_NOTE_MAX_BYTES = 4_000;
+export const TRIAGE_NOTE_MAX_BYTES = 1_024;
 
 /**
  * One service's row in `triage.json` — §7.5, and the fields §7.4 requires on the

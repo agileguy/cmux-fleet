@@ -415,7 +415,7 @@ does not exist.
   row, saying what was observed — the sentence a person needs in order to know *what broke*
   before they go and find out *where to look*. It is the one thing you write that can reach an
   operator directly, so it is worth writing well and it is worth leaving out.
-  - **ENFORCED: 4000 bytes.** Above that the document is refused with `note` named and the sweep
+  - **ENFORCED: 1024 bytes.** Above that the document is refused with `note` named and the sweep
     produces nothing. **Bytes, not characters** — accented text and box-drawing glyphs cost two
     to four bytes each, so a note that looks half the length of the limit can be over it. It is
     a ceiling on a pasted log dump, not a target: one or two sentences is the shape, and that
