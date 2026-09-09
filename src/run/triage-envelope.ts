@@ -375,6 +375,83 @@ export function ensureCoverageVocabulary(
   return { brief: `${brief.trimEnd()}${demand}`, appended: true, missing };
 }
 
+/**
+ * How long one cluster call may take before the observer stops waiting for it
+ * (ISC-1134).
+ *
+ * **Derived from the deadline it protects, not chosen.** The child deadline is
+ * 480 s (`childDeadlineS`: a 780 s settle bound less the 300 s margin). A sweep
+ * of three services across two channels is on the order of ten cluster calls,
+ * so a bound of 30 s costs a fully unreachable environment about five minutes of
+ * its eight and still leaves the seat time to write the artifact saying so.
+ * Raising it much past 45 s reinstates the failure — the calls alone consume the
+ * deadline; dropping it much below 20 s starts refusing a slow-but-working API.
+ */
+export const CLUSTER_CALL_TIMEOUT_S = 30;
+
+/**
+ * The FOURTH repair, and the one that turns a correct answer into a timely one
+ * (ISC-1134).
+ *
+ * ## What went wrong, and what did NOT
+ *
+ * 2026-09-09, `utun9` carrying zero routes: every `kubectl` the observer issued
+ * spent about three minutes retrying an unreachable API server before failing on
+ * a client-side rate limiter, and two consecutive sweeps hit the 480 s deadline
+ * with no artifact at all.
+ *
+ * **The console was not wrong about the environment for one second of that.**
+ * Every service record read `firing`, `reason: coverage` — *"I could not tell"* —
+ * and `_console/sweep_produced_nothing` fired. Nothing was reported healthy.
+ * That is SRD-TRIAGE-CONSOLE's central distinction holding under exactly the
+ * condition it was written for, and it is why this is a LATENCY fix and not a
+ * correctness one: the console reached the right answer, it just paid eight
+ * minutes a sweep to get there and produced no artifact an operator could read.
+ *
+ * `COVERAGE_RESULTS` has carried `unreachable` since the beginning. What was
+ * missing is any instruction on how to REACH it: an unbounded call does not fail,
+ * it hangs, and a channel that hangs is never reported as anything.
+ *
+ * ## The spelling is load-bearing, and the obvious one is refused
+ *
+ * `kubectl --request-timeout=30s get ns` is rejected by the container's verbgate
+ * as `kubectl (flags-before-verb) not authorized`; `kubectl get ns
+ * --request-timeout=30s` runs. Both were tried against the live worker before
+ * this text was written, because an instruction the sandbox refuses is worse
+ * than no instruction — it spends the model's turn on a call that cannot run.
+ * The brief therefore shows the legal form as a literal example.
+ *
+ * ## Why a fourth HOST repair rather than a line in the envelope
+ *
+ * `renderSweepEnvelope` is the collator's brief, and the collator composes the
+ * observer's brief from it. Measured on sweeps 26, 27, 28 and 29: it dropped the
+ * coverage vocabulary from that child brief **every time**, though its own brief
+ * named it seven times. Anything that must reach the observer cannot be routed
+ * through a composer with that record.
+ *
+ * **Four repairs is a smell and is recorded as one.** The pattern says the
+ * collator is unreliable at composing a brief, and the standing answer has been
+ * to patch each omission at the host. The alternative — the host composing the
+ * invariant half of every child brief and letting the collator contribute only
+ * the per-sweep judgement — is a real design and is NOT taken here, because it
+ * is a change to §6.3's division of labour rather than a fix. See `## Decisions`.
+ *
+ * Returns the brief unchanged when it already bounds its calls.
+ */
+export function ensureBoundedCalls(
+  brief: string,
+): { readonly brief: string; readonly appended: boolean } {
+  if (brief.includes("--request-timeout")) return { brief, appended: false };
+  const demand =
+    ` Bound every cluster call: pass \`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s\` AFTER the ` +
+    `verb, as in \`kubectl get pods -n <ns> --request-timeout=${CLUSTER_CALL_TIMEOUT_S}s\` — before ` +
+    `the verb it is refused and nothing runs. A call that times out is not a failure to report ` +
+    `later: it is this channel's answer NOW, and its \`result\` is "unreachable". Do not retry it ` +
+    `and do not wait longer. An environment you cannot reach must produce an artifact saying so ` +
+    `inside your deadline; an artifact that never arrives tells the operator nothing at all.`;
+  return { brief: `${brief.trimEnd()}${demand}`, appended: true };
+}
+
 // ---------------------------------------------------------------------------
 // §7.2 — the verdict rule, which travels because the skill does not carry it
 // ---------------------------------------------------------------------------
@@ -1428,6 +1505,12 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
      * did not pass on is the host's to fix and not the envelope's.
      */
     const vocabulary = ensureCoverageVocabulary(freshness.brief);
+    /*
+     * The fourth, and last because its sentence is the longest: the observer
+     * reads a brief top-down and the per-sweep judgement should not be buried
+     * under two paragraphs of host boilerplate.
+     */
+    const bounded = ensureBoundedCalls(vocabulary.brief);
     if (freshness.appended) {
       console.warn(
         `triage: ${assignment.worker}'s brief for ${sweepId} did not name the fields ` +
@@ -1458,11 +1541,20 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
           `the sweep were recorded unobserved (ISC-1131).`,
       );
     }
+    if (bounded.appended) {
+      console.warn(
+        `triage: ${assignment.worker}'s brief for ${sweepId} did not bound its cluster calls; ` +
+          `appended a ${CLUSTER_CALL_TIMEOUT_S}s --request-timeout demand. Unbounded, an ` +
+          `unreachable API server costs ~3 minutes per call and the 480s child deadline expires ` +
+          `with no artifact — measured 2026-09-09 with utun9 carrying zero routes, two sweeps ` +
+          `lost (ISC-1134).`,
+      );
+    }
     const outcome = await deps.dispatch({
       taskId: childId,
       worker: assignment.worker,
       title: item.title,
-      brief: vocabulary.brief,
+      brief: bounded.brief,
     });
     if (outcome.kind !== "accepted") {
       throw new SweepEnvelopeError(

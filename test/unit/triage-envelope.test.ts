@@ -90,6 +90,8 @@ import {
   type SweepEnvelopeInput,
   type SweepProducerDeps,
   normalizeSliceReportingPath,
+  CLUSTER_CALL_TIMEOUT_S,
+  ensureBoundedCalls,
   ensureCoverageVocabulary,
   ensureFreshnessEcho,
 } from "../../src/run/triage-envelope.ts";
@@ -1983,9 +1985,83 @@ describe("dispatchObserver applies all three brief repairs before sending (ISC-1
       ).toContain(`"${v}"`);
     }
 
+    // Repair 4 — the cluster calls are bounded, in the spelling verbgate accepts.
+    expect(
+      brief,
+      "ensureBoundedCalls did not run on the dispatch path — an unreachable cluster " +
+        "costs the whole 480s deadline and produces no artifact (ISC-1134)",
+    ).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+
     // And the collator's own words survive: a repair that REPLACED the brief
     // would satisfy every assertion above while discarding the sweep's content.
     expect(brief).toContain("aodapnc-grafana-dev");
     expect(brief.startsWith(`Sweep ${sweepId}.`)).toBe(true);
+  });
+});
+
+/**
+ * ISC-1134 — bounding the observer's cluster calls.
+ *
+ * Measured 2026-09-09 with `utun9` carrying zero routes: each `kubectl` spent
+ * ~3 minutes retrying an unreachable API server before failing on a client-side
+ * rate limiter, and two consecutive sweeps hit the 480 s child deadline with no
+ * artifact. `unreachable` has always been in `COVERAGE_RESULTS`; nothing told the
+ * observer how to REACH it, because an unbounded call does not fail, it hangs.
+ */
+describe("ensureBoundedCalls (ISC-1134)", () => {
+  const BRIEF = "Sweep T-sweep-30. Check `grafana` in namespace `aodapnc-grafana-dev`.";
+
+  test("appends the bound when the brief sets none", () => {
+    const r = ensureBoundedCalls(BRIEF);
+    expect(r.appended).toBe(true);
+    expect(r.brief).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+    expect(r.brief.startsWith("Sweep T-sweep-30.")).toBe(true);
+  });
+
+  /**
+   * THE SPELLING TEST, and it is the reason this repair is not one line.
+   *
+   * `kubectl --request-timeout=30s get ns` is refused by the container's
+   * verbgate as `kubectl (flags-before-verb) not authorized`; the same flag
+   * AFTER the verb runs. Both were tried against the live worker. An instruction
+   * the sandbox refuses is worse than none — it spends the model's turn on a
+   * call that cannot run — so the brief must show the legal form and say which
+   * it is.
+   */
+  test("shows the flag AFTER the verb, which is the only form verbgate accepts", () => {
+    const brief = ensureBoundedCalls(BRIEF).brief;
+    // The worked example must be legal…
+    expect(brief).toContain(`kubectl get pods -n <ns> --request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+    // …and must never demonstrate the refused form.
+    expect(brief).not.toContain(`kubectl --request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+    expect(brief).toContain("AFTER the verb");
+  });
+
+  test("ties a timed-out call to the coverage result it must produce", () => {
+    // A bound that does not say what to REPORT leaves the observer with a failed
+    // command and no vocabulary for it — which is the ISC-1131 shape again.
+    const brief = ensureBoundedCalls(BRIEF).brief;
+    expect(brief).toContain('"unreachable"');
+    expect(brief).toContain("Do not retry it");
+  });
+
+  test("a brief that already bounds its calls is returned unchanged", () => {
+    const already = `${BRIEF} Use --request-timeout=15s on every call.`;
+    const r = ensureBoundedCalls(already);
+    expect(r.appended).toBe(false);
+    expect(r.brief).toBe(already);
+  });
+
+  /**
+   * The bound is derived from the deadline it protects. Ten-ish calls at the
+   * timeout must leave the seat room to write the artifact inside 480 s — a
+   * bound that consumes the deadline reinstates the exact failure.
+   */
+  test("the timeout leaves an unreachable sweep time to report", () => {
+    const CHILD_DEADLINE_S = 480;
+    const CALLS_PER_SWEEP = 10;
+    expect(CLUSTER_CALL_TIMEOUT_S * CALLS_PER_SWEEP).toBeLessThan(CHILD_DEADLINE_S);
+    // And not so tight it refuses a slow-but-working API.
+    expect(CLUSTER_CALL_TIMEOUT_S).toBeGreaterThanOrEqual(20);
   });
 });
