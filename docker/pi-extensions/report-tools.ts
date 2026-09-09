@@ -63,7 +63,7 @@
  * while the container goes on reading the old one, with both sides believing
  * the policy changed.
  *
- * `/outbox` is a DIRECTORY bind mount (`src/config/render.ts:481`). Nothing
+ * `/outbox` is a DIRECTORY bind mount (`src/config/render.ts:528`). Nothing
  * pins `result.json`'s inode, and the harvester opens it by path on its own
  * schedule, with no coordination with the worker. An in-place write would
  * therefore be readable BY THE HOST while it was half-written, and a
@@ -152,7 +152,7 @@
  * **Layer 4 is two session entries**, both written through `pi.appendEntry`,
  * which *"does NOT participate in LLM context"* (`types.d.ts:871`). They land
  * in the session JSONL under `/sessions`, bind-mounted read-write from the run
- * tree (`render.ts:513`), so the host can read them with no new mount and the
+ * tree (`render.ts:560`), so the host can read them with no new mount and the
  * model never sees either. Together they split one thing
  * `SweepJoin.claimedSuccess` currently cannot: *the worker never called the
  * tool* and *the worker called it and the write failed* look identical from the
@@ -355,7 +355,7 @@ export interface ExtensionAPI {
  * The slice of `ExtensionContext` handed to `execute`.
  *
  * `sessionManager.getSessionId()` is the whole reason this is here.
- * `render.ts:203` launches every worker with `--session-id <w.id>`, so the
+ * `render.ts:219` launches every worker with `--session-id <w.id>`, so the
  * session id IS the worker id, chosen by the host before the container starts
  * and unwritable from inside it. It is the fourth field §6.4 requires and the
  * only one that is not derived from `/policy/task` or from a mount path.
@@ -427,7 +427,7 @@ export interface ToolDefinitionLike<Params = unknown> {
 export const TASK_POLICY_PATH = "/policy/task";
 /** Mirrors `TASK_POLICY_NONE` — the spelling of "no task is live". */
 export const TASK_POLICY_NONE = "<none>";
-/** Mirrors the `/outbox` bind mount (`src/config/render.ts:481`). */
+/** Mirrors the `/outbox` bind mount (`src/config/render.ts:528`). */
 export const OUTBOX_ROOT = "/outbox";
 /** Mirrors `OUTBOX_FILES_DIR` (`src/harvest/outbox.ts:83`) and `SWEEP_FILES_DIR`. */
 export const OUTBOX_FILES_DIR = "files";
@@ -777,6 +777,57 @@ export function artifactPathProblem(
   return `artifact \`${path}\` is outside \`${taskDir}/\`.`;
 }
 
+/**
+ * Whether an artifact claim names a file that is NOT THERE.
+ *
+ * Separate from `artifactPathProblem` on purpose. That one is a predicate about
+ * the SPELLING of a path — control characters, backslashes, containment — and
+ * is pure, which is why it is the one with exhaustive table tests. This one
+ * asks the filesystem, and the two answers fail for unrelated reasons: a claim
+ * can be perfectly shaped and name nothing, which is exactly the case below.
+ *
+ * ## The failure this closes, measured
+ *
+ * `rev-lang-1` submitted T-rv-155's review with
+ * `artifacts: [{kind: "file", path: "files/review.md"}]` and **never wrote the
+ * file**. Its outbox held `result.json` and no `files/` directory at all. The
+ * envelope was accepted, harvested, and collated; the collator recorded the
+ * lens as `reported: true` and then had to note that the artifact "was not
+ * harvested". Eleven findings survived only as the one-paragraph summary the
+ * envelope happened to carry. Nothing refused anything at any point.
+ *
+ * The docblock on `composeEnvelope` says the auto-append means the
+ * declare-what-you-wrote rule "cannot be forgotten — it is no longer something
+ * the model has to remember to do." That is true of the `report` parameter and
+ * ONLY of it. A hand-composed `artifacts` entry goes nowhere near that path, so
+ * the rule was still exactly as forgettable as it had always been for anything
+ * a model wrote itself — and §6.3 calls layer 1 a mechanism rather than an
+ * incentive precisely because it is supposed to make the false claim
+ * unrepresentable rather than merely discouraged.
+ *
+ * ## Why the pending report is exempt
+ *
+ * Phase 1 runs before phase 2 has written anything, so the report file this
+ * very call is about to create does not exist yet. A caller that passes
+ * `report` AND redundantly lists its file in `artifacts` is making a claim that
+ * WILL be true by the time the envelope lands, and refusing it would be a false
+ * positive on a call that does everything right. `pendingReportPath` is that
+ * one path, resolved the same way the claim is, and nothing else is forgiven.
+ */
+export function artifactMissingProblem(
+  path: string,
+  taskDir: string,
+  pendingReportPath: string | null,
+): string | null {
+  const resolved = isAbsolute(path) ? resolve(path) : resolve(taskDir, path);
+  if (pendingReportPath !== null && resolved === pendingReportPath) return null;
+  if (existsSync(resolved)) return null;
+  return (
+    `artifact \`${path}\` does not exist. Declare a file only after writing it, ` +
+    `or pass it as \`report\` and let this tool write and declare it for you.`
+  );
+}
+
 /** Is `child` at or beneath `root`, lexically? */
 function within(root: string, child: string): boolean {
   const rel = relative(resolve(root), child);
@@ -986,9 +1037,16 @@ export function submitReport(
     if (problem !== null) refuse(problem);
   }
 
+  // The path phase 2 is about to write, resolved now so the loop below can tell
+  // "you have not written this yet" from "you are never going to".
+  const pendingReportPath =
+    params.report === undefined ? null : resolve(filesDir, params.report.filename);
+
   for (const artifact of params.artifacts ?? []) {
     const problem = artifactPathProblem(artifact.path, taskDir, roots.workdir);
     if (problem !== null) refuse(problem);
+    const missing = artifactMissingProblem(artifact.path, taskDir, pendingReportPath);
+    if (missing !== null) refuse(missing);
   }
 
   // ---- Phase 2: write. The report file first, the envelope second. --------

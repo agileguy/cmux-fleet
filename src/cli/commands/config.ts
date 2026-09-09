@@ -101,8 +101,18 @@ export function register(program: Command): void {
          *
          * `resolveAllWorkers` is the merge and nothing else: no Docker, no
          * network, no filesystem beyond the briefing paths already resolved
-         * during the parse. It is the same function `up` calls first, so what
-         * passes here is exactly what `up` will accept.
+         * during the parse. It is the same function `up` calls first.
+         *
+         * The agreement is ONE-WAY, and the earlier wording here ("what passes
+         * here is exactly what `up` will accept") claimed two. This command
+         * resolves EVERY worker; `up --workers <subset>` resolves only the ones
+         * named. So `validate` can refuse a config that a sufficiently narrow
+         * `up` would have accepted — it sees a bad worker the subset excludes.
+         * That is the safe direction and is deliberate: a whole-file verdict is
+         * the useful one for a command whose entire job is to answer "is this
+         * file fine". What it must never do is the converse, print `ok:` for a
+         * config any `up` then refuses, and that is what the two calls below
+         * are here to prevent.
          */
         const resolved = resolveAllWorkers(loaded);
         /*
