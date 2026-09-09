@@ -1558,6 +1558,86 @@ describe("models_allowlist is enforced (ISC-190)", () => {
     }
   }
 
+  /** Resolve `w1` under a PROVIDER MAP, returning the assertion's outcome. */
+  async function checkProvider(
+    allowlist: string[],
+    workerModel: string,
+  ): Promise<Error | null> {
+    const doc = docWithProviders(
+      {
+        omlx: providerBlock({ models_allowlist: allowlist }),
+        "ollama-cloud": providerBlock({ hosted: true, base_url: "https://ollama.invalid/v1" }),
+      },
+      { provider: "omlx" },
+    );
+    doc["roles"] = { eng: { model: workerModel } };
+    const loaded = await writeAndLoad(doc);
+    try {
+      assertModelAllowed(loaded, resolveWorker(loaded, "w1"));
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  }
+
+  /**
+   * The gate is over a (provider, model) PAIR, and it was over half of one.
+   *
+   * `assertModelAllowed`'s own docblock says carrying a verdict across providers
+   * "is not a widening of the rule, it is a different rule" — and then the
+   * comparison decomposed each entry and kept `.model`, discarding the provider
+   * it had just parsed. So an entry naming a foreign provider authorized its
+   * bare model name here. Raised independently by the architecture and language
+   * lenses on T-rv-155.
+   *
+   * `ollama-cloud` is declared in the map, so this is not a refusal about an
+   * unknown provider leaking in from somewhere: it is a fully legal entry about
+   * a DIFFERENT endpoint, which is exactly the case that must not carry.
+   */
+  test("an allowlist entry naming another provider does not authorize this one", async () => {
+    const err = await checkProvider(["ollama-cloud/Qwen3"], "Qwen3");
+    expect(err, "a foreign-provider entry admitted this provider's model").not.toBeNull();
+    expect(String(err?.message)).toContain("Qwen3");
+  });
+
+  /**
+   * Anti-vacuity, and the reason this is a filter rather than a refusal.
+   *
+   * The cheapest way to pass the test above is to refuse every prefixed entry,
+   * or to compare the raw strings — both of which break the two spellings an
+   * operator actually writes. A bare entry means THIS provider's model, and a
+   * prefix naming this provider is the same statement written out.
+   */
+  test("a bare entry and a same-provider prefix both still authorize", async () => {
+    expect(await checkProvider(["Qwen3"], "Qwen3"), "a bare entry stopped working").toBeNull();
+    expect(
+      await checkProvider(["omlx/Qwen3"], "Qwen3"),
+      "a prefix naming this provider stopped working",
+    ).toBeNull();
+  });
+
+  /**
+   * A SLASH IS NOT ALWAYS A PROVIDER PREFIX, and the first version of the
+   * provider filter forgot it.
+   *
+   * `mlx-community/Qwen3.5-35B-A3B-4bit` is one model id in the standard
+   * MLX/HuggingFace repo-id form; `mlx-community` is an org, not an endpoint.
+   * Filtering on the decomposed provider refused it, which is the case
+   * `doctor-allowlist.test.ts` names "THE case that was broken" — broken a
+   * second time by the fix for a different defect, and caught only because
+   * that file already pinned it.
+   *
+   * Pinned HERE as well, from the allowlist ENTRY side rather than the
+   * `model:` side, because that is the position the filter reads and the one
+   * the other file does not exercise.
+   */
+  test("a repo-id entry whose prefix is not a declared provider still authorizes", async () => {
+    expect(
+      await checkProvider(["mlx-community/Qwen3"], "Qwen3"),
+      "a HuggingFace repo-id entry was read as a foreign provider",
+    ).toBeNull();
+  });
+
   /**
    * `config validate` MAKES THIS REFUSAL TOO, and until 2026-09-08 it did not.
    *

@@ -899,7 +899,23 @@ export const ProviderSchema = z
      * a field-level refinement cannot see its sibling.
      */
     relay_upstream: shortStr.nullable().default(null),
-    /** Empty means "no allowlist", exactly as the flat key does. */
+    /**
+     * Empty means "no allowlist", exactly as the flat key does.
+     *
+     * An entry may be bare (`gpt-oss`) or provider-prefixed (`ollama/gpt-oss`),
+     * because `assertModelAllowed` decomposes each one with the same
+     * `decomposeModel` a `model:` goes through. Bare means THIS block's
+     * provider. **A prefix naming a DIFFERENT provider constrains nothing
+     * here** — the gate is over a (provider, model) pair, and an entry about
+     * another endpoint is a statement about a different pair, so it matches
+     * nothing rather than authorizing its bare model name. It did authorize it
+     * until 2026-09-08; see the filter in `assertModelAllowed`.
+     *
+     * The type stays `z.array(shortStr)` rather than growing a refinement that
+     * refuses a foreign prefix: a field-level refinement cannot see which
+     * provider block it is in, which is the same limit `relay_upstream`
+     * documents two fields above.
+     */
     models_allowlist: z.array(shortStr).max(64).default([]),
     /**
      * Each model's REAL context window, by model id. Absent means the worker
@@ -1188,6 +1204,12 @@ const LlmObject = z
     api_key_env: apiKeyEnvName("llm.api_key_env").default("OMLX_API_KEY"),
     model: z.string().min(1).max(256),
     thinking: ThinkingLevelSchema.optional(),
+    /**
+     * The flat spelling, with the same grammar the per-provider field
+     * documents: bare entries mean `llm.provider`'s models, a prefix naming
+     * that provider is the same statement written out, and a prefix naming
+     * another provider matches nothing.
+     */
     models_allowlist: z.array(shortStr).max(64).default([]),
     require_native_tool_calls: z.boolean().default(true),
     /**
