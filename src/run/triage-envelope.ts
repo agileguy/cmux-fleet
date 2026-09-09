@@ -733,6 +733,7 @@ const HOST_VOCABULARY: ReadonlySet<string> = new Set<string>([
 function workerAuthoredStrings(
   document: TriageDocument,
   declared: readonly string[] = [],
+  declaredNamespaces: readonly string[] = [],
 ): readonly string[] {
   /*
    * A name the HOST declared is not prose the worker wrote, wherever it appears.
@@ -752,8 +753,28 @@ function workerAuthoredStrings(
    * against `declared`, which this docblock already claimed for `row.service`.
    * An unaccounted name the host never declared is still a worker claim and is
    * still kept — that is the arm this exemption must not widen.
+   *
+   * ## The same defect through `selector`, measured 2026-09-09
+   *
+   * `cni-dev`: `T-sweep-26`'s collation wrote `"selector": "alert-notifier"` —
+   * the bare service name where a label expression belongs — and sweeps 27, 28
+   * and 29 were refused `worker_prose` quoting that name out of the operator's
+   * own targets file. Three passes, 45 minutes, no observation; it ended when an
+   * operator restarted the collator, which cleared it by ACCIDENT rather than by
+   * fix, because a new run tree has no previous document to audit against.
+   *
+   * So `selector` gets the exemption too, and it is wider by exactly one thing:
+   * the host writes every declared NAMESPACE into every brief as well, and a
+   * selector degrading to a namespace trips identically. `unaccounted[]` does NOT
+   * get the namespaces — it is a list of service names, and a namespace appearing
+   * in it is the worker's own claim.
+   *
+   * **Membership, never containment.** `app=authorization` is a string the
+   * collator composed and stays caught; only a value that IS a declared token is
+   * a value the host handed it.
    */
   const hostNames = new Set(declared);
+  const hostTokens = new Set([...declared, ...declaredNamespaces]);
   const out: string[] = [];
   const keep = (value: string | null): void => {
     if (value === null) return;
@@ -762,7 +783,7 @@ function workerAuthoredStrings(
     out.push(value);
   };
   for (const row of document.services) {
-    keep(row.selector);
+    if (row.selector === null || !hostTokens.has(row.selector)) keep(row.selector);
     keep(row.window);
     // §13 task 5.8's carrier, added 2026-09-07. `note` is the one field on this
     // document whose PURPOSE is to be a sentence, so it is never a member of the
@@ -802,6 +823,7 @@ export function envelopeIssues(
   text: string,
   previous: TriageDocument | null,
   declared: readonly string[] = [],
+  declaredNamespaces: readonly string[] = [],
 ): readonly EnvelopeIssue[] {
   const issues: EnvelopeIssue[] = [];
 
@@ -851,7 +873,7 @@ export function envelopeIssues(
   }
 
   if (previous !== null) {
-    for (const prose of workerAuthoredStrings(previous, declared)) {
+    for (const prose of workerAuthoredStrings(previous, declared, declaredNamespaces)) {
       if (!text.includes(prose)) continue;
       issues.push({
         forbidden: "worker_prose",
@@ -1189,9 +1211,16 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
    * crossing between sweeps. The host wrote these names into this very brief.
    */
   const declaredNames = input.services.map((s) => s.name);
+  /*
+   * The namespaces travel with the names because the host writes both into every
+   * brief, and a `selector` that degraded to either is a token the host handed
+   * over rather than prose the worker wrote — see `workerAuthoredStrings`, and
+   * the three sweeps 2026-09-09 spent refusing on `alert-notifier`.
+   */
+  const declaredNamespaces = input.services.map((s) => s.namespace);
   const issues = [
-    ...envelopeIssues(title, input.previousDocument, declaredNames),
-    ...envelopeIssues(brief, input.previousDocument, declaredNames),
+    ...envelopeIssues(title, input.previousDocument, declaredNames, declaredNamespaces),
+    ...envelopeIssues(brief, input.previousDocument, declaredNames, declaredNamespaces),
   ];
   if (issues.length > 0) {
     throw new SweepEnvelopeError(

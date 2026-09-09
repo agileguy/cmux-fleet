@@ -76,6 +76,7 @@ import {
   TRIAGE_VERDICT_RULE,
   blockedObservers,
   envelopeIssues,
+  MIN_PROSE_LENGTH,
   observerArtifactPath,
   parseObserverArtifact,
   projectPreviousState,
@@ -295,6 +296,129 @@ describe("the prose audit exempts names the HOST declared, and only those", () =
     } as TriageDocument;
     const issues = envelopeIssues(`services: ${declared.join(", ")}`, doc);
     expect(issues.map((i) => i.forbidden)).toEqual(["worker_prose"]);
+  });
+
+  /**
+   * **THE SAME DEFECT, ONE FIELD OVER — and this one was measured on the live
+   * console after the `unaccounted` arm was fixed.**
+   *
+   * 2026-09-09, `cni-dev`: `T-sweep-26`'s collation wrote the bare service name
+   * into `selector` — `"selector": "alert-notifier"` rather than a label
+   * expression — and sweeps 27, 28 and 29 were then refused `worker_prose`,
+   * quoting `alert-notifier` out of the operator's own targets file. Three passes
+   * and 45 minutes with no observation, ended only by an operator restarting the
+   * collator, which cleared it by accident: a new run tree has no previous
+   * document, so the check was skipped rather than satisfied.
+   *
+   * `selector` is a field a collator fills from what the observer reported, and
+   * "the thing I selected on" degrading to the service's own name is an ordinary
+   * imprecision rather than a contamination. The host writes that name into every
+   * brief, so auditing it as the previous worker's prose refuses the next sweep
+   * for naming its own targets — the identical failure the block above records,
+   * arriving through the one carrier that looks structural.
+   */
+  const declaredNamespaces = SERVICES.map((s) => s.namespace);
+
+  test("a declared service NAME used as a selector does not trip the audit", () => {
+    // "authorization" is the declared name long enough to clear MIN_PROSE_LENGTH;
+    // "routing" is seven characters and would pass for the wrong reason.
+    const name = "authorization";
+    expect(declared).toContain(name);
+    expect(name.length).toBeGreaterThanOrEqual(MIN_PROSE_LENGTH);
+
+    const doc = {
+      ...PREVIOUS,
+      services: [{ ...PREVIOUS.services[1]!, selector: name }],
+      unaccounted: [],
+    } as TriageDocument;
+    // The brief legitimately names the service — the host put it there.
+    const text = `Check \`${name}\` in namespace \`aodapn-authz\`.`;
+    expect(envelopeIssues(text, doc, declared, declaredNamespaces)).toEqual([]);
+  });
+
+  test("a declared NAMESPACE used as a selector does not trip it either", () => {
+    const ns = "aodapn-authz";
+    expect(declaredNamespaces).toContain(ns);
+
+    const doc = {
+      ...PREVIOUS,
+      services: [{ ...PREVIOUS.services[1]!, selector: ns }],
+      unaccounted: [],
+    } as TriageDocument;
+    const text = `Check \`authorization\` in namespace \`${ns}\`.`;
+    expect(envelopeIssues(text, doc, declared, declaredNamespaces)).toEqual([]);
+  });
+
+  /**
+   * The arm this must not widen, and it is the whole reason the exemption is a
+   * membership test rather than a substring one. A selector the host never
+   * declared is the worker's own string and stays caught — including one that
+   * merely CONTAINS a declared name, because `app=authorization` is a claim the
+   * collator composed rather than a token it echoed.
+   */
+  /**
+   * **THE WIRING, and the three unit cases above are worth little without it.**
+   *
+   * Every assertion in this block calls `envelopeIssues` and hands it the two
+   * declared lists by hand. The live console does not: `renderSweepEnvelope`
+   * builds them off `input.services`, and the defect that cost sweeps 27 to 29
+   * was reachable only through that path. A fix proven at the function and never
+   * passed the namespaces at the call site would leave this repo with four green
+   * tests and a console that still refuses — the failure mode this ISA has
+   * measured more than once.
+   *
+   * So this case goes through the renderer, with a previous document shaped like
+   * the one `tri-1` actually wrote, and asserts the sweep is produced at all.
+   */
+  test("the RENDERER survives a previous selector that degraded to a declared name", () => {
+    const previous = {
+      ...PREVIOUS,
+      services: [
+        { ...PREVIOUS.services[1]!, service: "authorization", selector: "authorization" },
+      ],
+      unaccounted: [],
+    } as TriageDocument;
+    // The premise: this is the exact shape T-sweep-26 wrote, and the renderer
+    // names that service because the host declared it.
+    expect(SERVICES.map((x) => x.name)).toContain("authorization");
+
+    const envelope = renderSweepEnvelope(envelopeInput({ previousDocument: previous }));
+    expect(envelope.brief).toContain("authorization");
+  });
+
+  /**
+   * And the namespace half of the same wiring, because `declaredNamespaces` is a
+   * second list built at the same call site and a fix can pass one and forget it.
+   */
+  test("the RENDERER survives a previous selector that degraded to a declared namespace", () => {
+    const previous = {
+      ...PREVIOUS,
+      services: [{ ...PREVIOUS.services[1]!, selector: "aodapn-authz" }],
+      unaccounted: [],
+    } as TriageDocument;
+    expect(SERVICES.map((x) => x.namespace)).toContain("aodapn-authz");
+
+    const envelope = renderSweepEnvelope(envelopeInput({ previousDocument: previous }));
+    expect(envelope.brief).toContain("aodapn-authz");
+  });
+
+  test("an UNDECLARED selector is still caught, including one containing a declared name", () => {
+    for (const invented of [`app=authorization`, `telemetry-${MARKER}`]) {
+      const doc = {
+        ...PREVIOUS,
+        services: [{ ...PREVIOUS.services[1]!, selector: invented }],
+        unaccounted: [],
+      } as TriageDocument;
+      const issues = envelopeIssues(
+        `last sweep selected on ${invented}`,
+        doc,
+        declared,
+        declaredNamespaces,
+      );
+      expect(issues.map((i) => i.forbidden), `${invented} should be worker_prose`).toContain(
+        "worker_prose",
+      );
+    }
   });
 });
 
