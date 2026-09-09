@@ -181,23 +181,18 @@ Two consequences worth holding on to:
 
 An observer sees its brief and nothing else. It has no copy of the envelope, no targets file
 and no memory of the last sweep. **Anything you do not copy into the brief does not exist for
-the observer that needs it**, and four of those things are load-bearing:
+the observer that needs it**, and three of those things are load-bearing:
 
-- **The two field names `sweep_id` and `window_opened_at`, spelled exactly that way**, with the
-  instruction to echo them as top-level fields of `observer-ops.json`. An artifact carrying the
-  wrong sweep id is discarded and its services go unobserved; an artifact carrying no sweep id
-  cannot be told from a stale one; and an artifact that answers under any other spelling is
-  read as carrying neither.
+- **The instant the observation window opened, as a full ISO-8601 timestamp** —
+  `2026-09-07T11:47:54Z` — copied from your envelope's `## This sweep` block and from nowhere
+  else, not from your transcript and not from a previous artifact.
 
-  **Write the field names, not a description of them.** Your envelope gives you both spellings
-  under `## This sweep`; copy those two strings. "Echo the sweep id and the window" is a
-  perfectly clear English sentence and it is the wrong output — the host reads
-  `observer-ops.json` for two named keys, so an observer left to infer a key name from prose is
-  an observer whose correct report is discarded whole. Measured on `T-sweep-13` (2026-09-09):
-  this brief said *"Echo sweep id T-sweep-13 and window … in `observer-ops.json`"* — faithful to
-  the sentence this line used to carry, and missing the only two strings the host looks for.
-- **The value of each**, copied from the envelope and from nowhere else — not from your
-  transcript, and not from a previous artifact.
+  **This is the one value of the whole contract the host cannot supply for you.** It holds the
+  sweep id and it holds the seat ids, but the window opening reaches it only by being read back
+  out of the text you write. So write exactly ONE timestamp in each brief and make it that one:
+  the host takes the FIRST it finds, and a `since=` argument or a log time written earlier in
+  the sentence is then the value your observer is told to echo — quietly, and on every sweep
+  after it too.
 - **Per service: its name, its namespace, its workload, its `checks[]` and its window,
   copied exactly.** Copy them; do not widen them and do not tidy them. The checks list is a
   closed set chosen for this service, and a brief that asks for more than it names is a brief
@@ -216,6 +211,20 @@ the observer that needs it**, and four of those things are load-bearing:
   precisely so it is the same rule on every sweep — **a rule a model rewrites is a rule that
   drifts between sweeps, and consecutive sweeps being comparable is the whole product.** Do not
   paraphrase it, do not shorten it, and do not add a clause of your own.
+
+**What you no longer write, because the host writes it.** Every brief you compose has three
+paragraphs appended to it before dispatch, under this heading:
+
+> *What your artifact must carry, whatever the brief above says*
+
+They are the `sweep_id` and `window_opened_at` echo demand, with both spellings and both values;
+the closed list of values a `coverage[].result` may take; and the timeout every cluster call
+must carry. Those three do not vary between sweeps, so composing
+them is work that is thrown away — the host appends its own copy whether or not you wrote one,
+and where the two disagree about a field name, a permitted value or a bound, the host's copy is
+the one the observer is told to obey. Spend the words on the slice instead. **The window
+instant above is the exception and that is why it is still yours**: it is the only part of
+those three paragraphs the host quotes from your text rather than from its own state.
 
 Then tell each observer how to report, because the failure is silent in every direction:
 

@@ -254,7 +254,9 @@ export function normalizeSliceReportingPath(
  * rather than `stale`: *"a contract violation by a worker that may never have
  * been told, which is a different thing to go and fix."*
  *
- * It had never been told. Measured 2026-09-08: `roles/triage.md:186` instructs the
+ * It had never been told. Measured 2026-09-08, against the role file as it read
+ * THEN — the bullet ISC-1136 has since removed, because this function now authors
+ * the demand instead of checking for it. `roles/triage.md` instructed the
  * collator to carry "the sweep id, verbatim, with the instruction to echo it in
  * `observer-ops.json`", and across five sweeps the collator carried the VALUE
  * ("Sweep T-sweep-1. Observation window opens ...") and dropped the INSTRUCTION
@@ -269,7 +271,7 @@ export function normalizeSliceReportingPath(
  * warning's own wording — `T-sweep-13`'s request, live on the console:
  * *"Echo sweep id T-sweep-13 and window 2026-09-09T12:12:44.316Z in
  * `observer-ops.json`."* The instruction is THERE, and it is a faithful rendering
- * of what `roles/triage.md:186` asked for. What is absent is the two SPELLINGS.
+ * of what that bullet asked for. What is absent is the two SPELLINGS.
  * The check below greps for `sweep_id` and `window_opened_at`; the collator wrote
  * English, because English is what it was given — neither the role file nor
  * `renderSweepEnvelope` had ever named a field. So this function's `appended`
