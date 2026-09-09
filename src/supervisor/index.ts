@@ -51,6 +51,7 @@ import { CompletionTracker } from "../rpc/completion.ts";
 import { EpochManager, type CancelDecision, type DispatchDecision } from "../rpc/epoch.ts";
 import { isInsideRunTree, runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
 import { writeTaskPolicy } from "../run/task-policy.ts";
+import { clearDispatchPolicy } from "../run/dispatch-policy.ts";
 import {
   initialWorkerState,
   readFence,
@@ -1050,6 +1051,55 @@ async function main(): Promise<void> {
         task_id: settled.task_id,
         tool_errors: settledToolErrors,
         tree_hash: treeHash,
+      });
+    }
+
+    /**
+     * ── DISARM THE DROP, AND DO IT BEFORE THE RECORD IS VISIBLE (ISC-1114) ──
+     *
+     * `/policy/dispatch` is the ONLY thing the auto-trigger extension can see.
+     * It fires on `(task_id, epoch)` and dedups on that pair — but `lastFired`
+     * is closure state belonging to one Pi session, and a session does not
+     * survive `/new`. So a drop still reading `staged: true` after its epoch
+     * closed is not stale cosmetics: it is a LOADED TRIGGER, and the next
+     * session start pulls it.
+     *
+     * That is the reset race, measured on the live triage console
+     * (run `2026-09-09T04-21-26Z-20f5`, every sweep of it):
+     *
+     *   04:22:21.559  tui_turn_ended  T-sweep-8  stop_reason=error -> failed
+     *   04:22:21.567  settled         T-sweep-8            <- pass gives up
+     *   04:22:21.630  a NEW session   (the `/new` this settle authorised)
+     *   04:22:22.673  auto-trigger fires AGAIN for T-sweep-8
+     *   04:22:38      the seat writes dispatch-request.json into a dead epoch
+     *
+     * The work was correct and complete and nobody read it, because the pass
+     * that would have read it had closed seventeen seconds earlier. Sweep 9
+     * did it too, and would have gone on doing it every cadence forever.
+     *
+     * **The ordering is the fix, not an optimisation.** `resetPaneSession` is
+     * typed by the console only after `awaitSettled` returns, and `awaitSettled`
+     * returns on the existence of the record written immediately below. Clearing
+     * after that write leaves a window — short, real, and the same shape as the
+     * one being closed. Clearing before it makes "the record exists" imply "the
+     * drop is idle", which is the property the reset needs and the property
+     * `test/unit/dispatch-policy.test.ts` pins by source order.
+     *
+     * Best-effort, because a settle must not be blocked by a file write: the
+     * epoch is over either way and a task that cannot be recorded is a worse
+     * failure than a trigger that stays armed. A failure is LOGGED rather than
+     * swallowed — the re-fire hazard is back when this line does not run, and
+     * an operator reading `events.jsonl` after a duplicated turn needs to find
+     * that here rather than deduce it.
+     */
+    try {
+      await clearDispatchPolicy(wp.dispatchPolicy);
+    } catch (err) {
+      logEvent({
+        type: "dispatch_drop_clear_failed",
+        task_id: settled.task_id,
+        epoch: settled.epoch,
+        detail: err instanceof Error ? err.message : String(err),
       });
     }
 
