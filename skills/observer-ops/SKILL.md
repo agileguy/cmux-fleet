@@ -32,17 +32,54 @@ runs under and for the same reason — the file nothing inspects is the one that
 carry the evidence. The `.md` is for the human who was not watching; the `.json` is what the
 harvester validates and sweeps for a leaked credential.
 
-**`observer-ops.json` MUST carry three fields the host gates on, and two of them are the
-ones runs keep forgetting:**
+**`observer-ops.json` MUST carry three DOCUMENT fields the host gates on, and four more in
+EVERY ROW. All seven are gates. None of them is optional:**
 
 ```json
 {
   "worker": "<your worker id>",
   "sweep_id": "<the sweep id from your brief, character for character>",
   "window_opened_at": "<the observation-window instant from your brief, verbatim>",
-  ...your rows...
+  "services": [
+    {
+      "name": "<the service name from your brief>",
+      "namespace": "<its namespace from your brief>",
+      "assessment": "healthy | degraded | unhealthy | indeterminate",
+      "coverage": [
+        {"channel": "rollout", "result": "answered"},
+        {"channel": "logs",    "result": "answered"}
+      ],
+      "selector": "<the selector you actually matched on, e.g. app=grafana>",
+      "window": "300s",
+      "evidence_ref": ["<what you read, e.g. deploy/grafana 2/2 ready, 0 restarts 12h>"]
+    }
+  ]
 }
 ```
+
+**`coverage`, `selector`, `window` and `evidence_ref` are why a `healthy` is believed.** The
+host runs `evidenceGaps()` over every row and **downgrades a `healthy` to `indeterminate`
+with reason `unevidenced_healthy`** if any of the four is empty, blank, or — for `coverage` —
+present but every entry `not_attempted`. Three consecutive `indeterminate` on one service
+opens a `coverage` incident and sends an operator to a cluster.
+
+**This is not a style rule and the cost is measured.** On sweep 17 (2026-09-09) this file's
+schema block ended at `...your rows...`, so rows were written `{name, namespace, assessment}`
+— a sensible guess, and evidence-free. Two services graded `healthy` and one real Grafana
+fault were ALL recorded `indeterminate`; `alert-notifier`, `prometheus` and `grafana` each
+reached `consecutive_indeterminate: 3` and every one opened a `coverage` incident on an
+environment that had answered. **The gate was working perfectly. Nothing had ever asked for
+the fields it grades.**
+
+**`coverage[].result` is a closed enum**: `answered | unreachable | forbidden | not_attempted`.
+A channel you did not try is `not_attempted` and says so honestly — but a row whose channels
+are ALL `not_attempted` carries the same information as an empty list and is graded the same
+way, because zero attempts and zero entries mean the same thing.
+
+**A blank does not count as present.** A `selector` of `"   "` is not a named selector and an
+`evidence_ref` of `[""]` is not a ledger entry. The host trims before it checks, so the gate
+cannot be cleared with a space bar — and it should not be, because the failure it exists
+against is *"you told me it was fine but didn't actually check."*
 
 **Copy both out of the brief, and from nowhere else.** Not from your transcript, not from a
 previous artifact, not reconstructed from the clock. The host compares what it minted against

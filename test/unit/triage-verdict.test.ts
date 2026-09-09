@@ -67,6 +67,7 @@ import {
   assessTriageSweep,
   COVERAGE_RESULTS,
   EVIDENCE_GAPS,
+  type EvidenceGap,
   evidenceGaps,
   inferenceSaturationProbe,
   inferenceSubject,
@@ -3452,5 +3453,109 @@ describe("§13 task 5.8's `note` on the host's own row", () => {
     // And the note appears in none of them, checked as text so a future field
     // carrying it is caught without this test having to know the field's name.
     expect(JSON.stringify(noisy)).not.toContain(NOTE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-1125 — the four gated row fields are DOCUMENTED where the observer reads
+// ---------------------------------------------------------------------------
+
+/**
+ * **`evidenceGaps` grades four fields, and nothing had ever asked for three of
+ * them.** This is the third instance on this branch of one shape: the host greps
+ * for a structure it never requests (see ISC-1119's `sweep_id`/`window_opened_at`
+ * and ISC-1120's slice id). It is also the most expensive, because unlike those
+ * two it fails LOUDLY in the wrong direction — it opens an incident.
+ *
+ * Measured on sweep 17 (2026-09-09): `skills/observer-ops/SKILL.md`'s schema
+ * block ended at `...your rows...`, so `obs-t1` wrote rows of
+ * `{name, namespace, assessment}` — a sensible guess from what it was shown, and
+ * evidence-free. Two `healthy` and one real Grafana fault were all recorded
+ * `indeterminate`; `alert-notifier`, `prometheus` and `grafana` each reached
+ * `consecutive_indeterminate: 3` and each opened a `coverage` incident against an
+ * environment that had answered.
+ *
+ * **The gate was working perfectly, which is why a test of the gate could never
+ * have found this.** `evidenceGaps` has unit coverage proving all four conditions
+ * are read; every one of those tests passes with the documentation absent. What
+ * was missing is the link between the grader and the document the graded party
+ * reads — so this test reads the DOC and runs it through the GRADER.
+ */
+describe("the observer's documented row satisfies the gate it is graded by (ISC-1125)", () => {
+  const SKILL = "skills/observer-ops/SKILL.md";
+
+  /** The first ```json block of the skill, parsed. Its own example, not a copy. */
+  function documentedExample(): Record<string, unknown> {
+    const src = readFileSync(join(import.meta.dir, "..", "..", SKILL), "utf8");
+    const block = /```json\n([\s\S]*?)```/.exec(src)?.[1];
+    if (block === undefined) throw new Error(`${SKILL} has no \`\`\`json block to check`);
+    // Placeholders are angle-bracketed prose; swap them for a legal token so the
+    // SHAPE is what is under test rather than the example's wording.
+    const concrete = block.replace(/"<[^">]*>"/g, '"x"');
+    return JSON.parse(concrete) as Record<string, unknown>;
+  }
+
+  test("the documented row names every field evidenceGaps reads", () => {
+    const doc = documentedExample();
+    const rows = doc["services"];
+    expect(Array.isArray(rows), `${SKILL}'s example has no services[] array`).toBe(true);
+    const row = (rows as Record<string, unknown>[])[0];
+    expect(row, `${SKILL}'s example services[] is empty`).toBeDefined();
+    for (const field of ["coverage", "selector", "window", "evidence_ref"]) {
+      expect(
+        row![field],
+        `${SKILL} does not document \`${field}\`, and evidenceGaps() downgrades a healthy ` +
+          `row without it. An observer cannot supply a field nobody names.`,
+      ).toBeDefined();
+    }
+  });
+
+  /**
+   * The half that makes this more than a field-name spell-check: the example is
+   * run through the REAL grader. A doc that names `coverage` but demonstrates
+   * `[]`, or every entry `not_attempted`, teaches a shape the host refuses.
+   */
+  test("a row built exactly as documented produces NO gaps", () => {
+    const doc = documentedExample();
+    const documented = (doc["services"] as Record<string, unknown>[])[0]!;
+    const row: TriageRow = {
+      service: "grafana",
+      assessment: "healthy",
+      coverage: documented["coverage"] as TriageRow["coverage"],
+      selector: documented["selector"] as string,
+      window: documented["window"] as string,
+      evidence_ref: documented["evidence_ref"] as readonly string[],
+      observer: "obs-t1",
+      note: null,
+    };
+    expect(
+      evidenceGaps(row),
+      `a row copied verbatim from ${SKILL} is still downgraded — the documentation teaches a ` +
+        `shape the host refuses, which is worse than documenting nothing.`,
+    ).toEqual([]);
+  });
+
+  /**
+   * Anti-vacuity, and it is the assertion that keeps the two above honest: the
+   * shape the observer ACTUALLY produced must still fail. If this ever passes,
+   * the gate has been loosened rather than the documentation fixed.
+   */
+  test("the shape sweep 17 actually wrote is still refused", () => {
+    const asWritten: TriageRow = {
+      service: "grafana",
+      assessment: "healthy",
+      coverage: [],
+      selector: null,
+      window: null,
+      evidence_ref: [],
+      observer: "obs-t1",
+      note: null,
+    };
+    // Compared as a SET over the canonical vocabulary rather than as a sorted
+    // string list, so this cannot drift from `EVIDENCE_GAPS` and cannot be
+    // satisfied by a name that is not one of the four.
+    const gaps = new Set<EvidenceGap>(evidenceGaps(asWritten));
+    expect([...EVIDENCE_GAPS].every((g) => gaps.has(g))).toBe(true);
+    expect(gaps.size).toBe(EVIDENCE_GAPS.length);
   });
 });

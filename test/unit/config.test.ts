@@ -3629,17 +3629,18 @@ describe("CI generates against the model the fleet already runs (ISC-1116)", () 
 
   test("both CI jobs name that model, and no other", async () => {
     const models = await ciModels();
-    // THREE assignments — `omlx-live`'s warmup step, `omlx-live`'s probe step,
-    // and `container-live`'s job-level one. It was two until 2026-09-09, when
-    // the warmup stopped carrying a hardcoded `GLM-4.5-Air-MLX-4bit` in its
-    // request body and started reading this variable like everything else
-    // (ISC-1124). The count going 2 -> 3 IS the fix: a warmup that names the
-    // model through the same key cannot drift from the probes it warms for.
+    // TWO assignments, one per job, both at JOB level — and the count is the
+    // guard rather than trivia. ISC-290 pins it and states the defect a third
+    // would mean: a step-level pin can drift from the graded one. It HAD
+    // drifted, invisibly, because the drift was a hardcoded model in the
+    // warmup's request body rather than a second assignment (ISC-1124). The
+    // warmup now INHERITS the job-level value, which is what makes the two
+    // structurally incapable of disagreeing.
     //
     // The count is ISC-290's criterion and is asserted there; repeated here so
     // a zero-match regex fails loudly instead of making the comparison below
     // vacuously true.
-    expect(models, "no PIFLEET_OMLX_MODEL assignments found — has the key moved?").toHaveLength(3);
+    expect(models, "no PIFLEET_OMLX_MODEL assignments found — has the key moved?").toHaveLength(2);
 
     const seats = await seatModels();
     // Non-null after the sibling test above, but asserted rather than `!`-ed:

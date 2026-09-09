@@ -1217,6 +1217,24 @@ jobs:
     # way that skipping individual probes inside it would not be: nothing here
     # claims to have run.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # ONE ASSIGNMENT FOR THE WHOLE JOB, and that is the point rather than tidiness.
+    # ISC-290 pins the count of `PIFLEET_OMLX_MODEL:` assignments in this file and
+    # says why a step-level pin is the defect: *"the loaded model can drift from
+    # the graded one."* It drifted. Until 2026-09-09 the warmup step below carried
+    # `GLM-4.5-Air-MLX-4bit` HARDCODED IN ITS REQUEST BODY while the probe step
+    # named gemma, so the job loaded ~58 GB of a model nothing here probes and
+    # gemma then would not fit beside it on the operator's shared oMLX:
+    #
+    #   507 Cannot load gemma-4-26b-a4b-it-bf16: projected memory 109.28GB would
+    #   exceed the metal_cap memory ceiling 107.52GB (current: 58.81GB, ...)
+    #
+    # A live triage seat took that 507 twenty-one seconds after the push that
+    # started this job (`T-sweep-16-slice1`, `failed / transcript_stop_error`,
+    # zero tool calls). Hoisting the value here is what makes the warmup and the
+    # probes structurally incapable of naming different models — inheritance,
+    # not two lines that agree today.
+    env:
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -1332,7 +1350,6 @@ jobs:
         # `models_allowlist`, and nothing in this job probes it.
         env:
           OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
-          PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
         run: |
           set -u
           echo "warming ${PIFLEET_OMLX_MODEL:?} (untimed, ungraded)"
@@ -1405,7 +1422,10 @@ jobs:
           # It is also verified served: `model-probe.ts:187` fails outright on a
           # name the server does not list, so a typo here is a red job and not a
           # silent fallback.
-          PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
+          #
+          # [MOVED 2026-09-09] The assignment itself now lives at JOB level — see
+          # the job header. The warmup step needs the same value and used to
+          # hardcode a different one; inheriting is what stops the two drifting.
           # Same eighteen the `test` job collects. Unchanged here on purpose:
           # if this number and that one ever disagree, one of the two jobs has
           # stopped seeing the file.
