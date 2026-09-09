@@ -1896,12 +1896,12 @@ describe("ensureCoverageVocabulary (ISC-1131)", () => {
 });
 
 /**
- * The three repairs at their REAL call site (ISC-1131).
+ * The four repairs at their REAL call site (ISC-1131, extended by ISC-1134).
  *
  * ## Why this test exists, and what was missing before it
  *
- * `normalizeSliceReportingPath`, `ensureFreshnessEcho` and
- * `ensureCoverageVocabulary` each have a thorough block of unit tests above, and
+ * `normalizeSliceReportingPath`, `ensureFreshnessEcho`, `ensureCoverageVocabulary`
+ * and `ensureBoundedCalls` each have a thorough block of unit tests above, and
  * every one of them calls the function directly. **Not one of them proves that
  * `dispatchObserver` calls it.** Checked while adding the third: the only test
  * that drove `dispatchObserver` was the refusal path, which dispatches nothing —
@@ -1914,12 +1914,12 @@ describe("ensureCoverageVocabulary (ISC-1131)", () => {
  *
  * ## The fixture is deliberately broken in all three ways at once
  *
- * A collator brief that names the wrong outbox id, omits the freshness fields
- * AND omits the coverage domain — which is not a contrived combination but the
- * union of three separately measured sweeps. Repairing one and not the others
+ * A collator brief that names the wrong outbox id, omits the freshness fields,
+ * omits the coverage domain AND bounds nothing — not a contrived combination but
+ * the union of four separately measured sweeps. Repairing one and not the others
  * fails here, which is the property a per-repair unit test cannot state.
  */
-describe("dispatchObserver applies all three brief repairs before sending (ISC-1131)", () => {
+describe("dispatchObserver applies all FOUR brief repairs before sending (ISC-1131, ISC-1134)", () => {
   test("the brief the dispatch port receives is repaired, not the one the collator wrote", async () => {
     const run = await seedRun("2026-09-09T00-00-31Z-1131");
     const sweepId = sweepTaskId(22);
