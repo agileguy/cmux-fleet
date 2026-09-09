@@ -153,12 +153,9 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
   #     allow:
   #       - {host: 192.168.86.49, port: 8000}
   api_key_env: OMLX_API_KEY  # self-hosted server credential, injected by the supervisor
-  model: Qwen3-Coder-30B-A3B-Instruct-4bit
+  model: gemma-4-26b-a4b-it-bf16
   thinking: medium
   models_allowlist:          # checked against GET /v1/models at `up`
-    - Qwen3-Coder-30B-A3B-Instruct-4bit
-    - Qwen3.5-35B-A3B-8bit
-    - GLM-4.5-Air-MLX-4bit
     # The `triage` console's four seats, all LOCAL — see the role below.
     #
     # THIS LINE IS NOT HYGIENE, IT IS THE DIFFERENCE BETWEEN A CONFIG THAT
@@ -439,7 +436,7 @@ defaults:
 roles:
   # ---- SRE / cloud-ops: the primary role set ----
   sre:                                    # diagnoses AND remediates
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: base                       # gcloud/kubectl/helm are in every image
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -450,7 +447,7 @@ roles:
                                            # `investigator` in this same change (D2);
                                            # deploy watches AND ad-hoc service inquiries,
                                            # one skill bundle, `mode` picks the shape
-    model: Qwen3.5-35B-A3B-8bit
+    model: gemma-4-26b-a4b-it-bf16
     thinking: high                        # reconciling four disagreeing channels is the job
     toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
     tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox artifact only
@@ -470,7 +467,7 @@ roles:
                                            # this config would otherwise trip (SRD §6.2, §7.5)
     append_system_prompt_file: ./roles/observer.md
   verifier:                               # confirms a remediation actually worked
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: base
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -480,13 +477,13 @@ roles:
 
   # ---- code roles: available, secondary ----
   engineer:
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: node
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/engineer.md
   reviewer:
-    model: Qwen3.5-35B-A3B-8bit
+    model: gemma-4-26b-a4b-it-bf16
     thinking: high
     toolchain: base
     # READ PLUS `submit_report`, and NO write, NO bash, NO edit.
@@ -565,7 +562,7 @@ roles:
     append_system_prompt_file: ./roles/reviewer.md
     isolation: shared-ro
   tester:
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: python
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -573,7 +570,7 @@ roles:
 
   # ---- ticketing: holds a write credential for a system OUTSIDE the fleet ----
   ticketing:
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     # `base` is deliberate and sufficient. The worker talks to the ticket API as
     # plain REST with `curl` and parses with `jq`, both of which are in every
     # image (`docker/Dockerfile:25`). There is NO vendor CLI and there is not
@@ -874,26 +871,19 @@ workers:
   # strongest thing this design has going for it. One seat per environment, so
   # the sweep fans out in parallel instead of one worker walking a list.
   #
-  # THE `model:` OVERRIDE, AND WHY IT IS HERE WHEN THE DESIGN SAYS IT SHOULD NOT
-  # BE. SRD-TRIAGE-CONSOLE §6.11 says these three take the `observer` role's
-  # model unchanged, with a worker-level override "only if §0.2 arm 1 or 2 is
-  # taken" — and arm 3 was taken. That sentence is written against the
-  # operator's own untracked `fleet.yaml`, where `observer` IS
-  # `gpt-oss-20b-MXFP4-Q8` by the 2026-09-03 decision, so inheriting there
-  # delivers exactly what the owner ruled. IN THIS FILE the same role carries
-  # `Qwen3.5-35B-A3B-8bit`, so inheriting here would deliver something else.
+  # THE `model:` OVERRIDE IS GONE, AND ITS OWN TEST IS WHAT REMOVED IT.
+  # SRD-TRIAGE-CONSOLE §6.11 says these seats take the `observer` role's model
+  # unchanged, with a worker-level override "only if §0.2 arm 1 or 2 is taken".
+  # The override existed because IN THIS FILE `observer` named a different local
+  # model from `triage`, so inheriting would have delivered something other than
+  # what the console runs.
   #
-  # Both models are local, so arm 3's privacy property — nothing an observer
-  # reads leaves the machine — holds either way, and this override buys none of
-  # it. What it buys is that the tracked example SHOWS the decision instead of a
-  # model that merely shares its posture: the 2026-09-06 ruling was that all
-  # four seats run gpt-oss-20b. Read as a reversal of §6.11 this looks wrong; it
-  # is the same outcome reached from a file whose `observer` role differs.
-  #
-  # [SUPERSEDED 2026-09-09] The override stays and its REASON is unchanged — the
-  # `observer` role above is still `Qwen3.5-35B-A3B-8bit`, so inheriting here
-  # would still deliver something other than what the triage console runs. Only
-  # the model moved, to match `triage` above and the live fleet: all triage-
-  # console seats on one local model, which is what keeps a single copy of the
-  # weights resident (ISC-1116).
-  - {id: obs-t1, role: observer, model: gemma-4-26b-a4b-it-bf16}
+  # [SUPERSEDED 2026-09-09] That premise is gone: every role in this file now
+  # names `gemma-4-26b-a4b-it-bf16`, so inheritance delivers the decision
+  # directly and the override only re-stated it. `config.test.ts` predicted this
+  # exact move in its own words — "IF THIS FAILS BECAUSE THE EXAMPLE'S
+  # `observer` ROLE BECAME [the triage model], the fix is to DELETE the three
+  # overrides, not to loosen the test" — and that is what happened: the guard
+  # went red the moment the roles converged, and the file yielded to it rather
+  # than the other way round.
+  - {id: obs-t1, role: observer}

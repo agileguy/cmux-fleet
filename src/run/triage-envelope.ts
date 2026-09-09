@@ -755,13 +755,41 @@ function serviceBlock(service: TriageService, defaultWindowS: number): string {
    * the expensive one: a service whose workload nobody identified comes back
    * `indeterminate`, three sweeps of that is a coverage incident, and the operator
    * is sent to a cluster over a field that was simply left empty on purpose.
+   *
+   * **THE SEARCH IS BOUNDED, and it is bounded because an unbounded one was
+   * measured (ISC-1121).** "Identify it yourself" is an open-ended sub-goal, and
+   * this is the only field in the envelope that sets one. On `T-sweep-15-slice1`
+   * (2026-09-09) `obs-t1` ran `kubectl get pods -n aodapnc-alerts-notifier-dev |
+   * grep alert-processor` **113 times in seven minutes** — and the command
+   * SUCCEEDED every time, returning two `alert-processor` pods `1/1 Running`. It
+   * was not retrying a failure; it had the answer on the first call and could not
+   * stop asking. The epoch ended `timed_out / deadline_exceeded_no_terminal_event`
+   * with no artifact, and the service went unobserved.
+   *
+   * So the bound is on the SEARCH rather than on the answer: three commands, and
+   * an explicit "if you have the answer, you are done looking", because the
+   * observed failure was re-asking a question already answered rather than asking
+   * too many different ones. The deadline caught it — ISC-1118's 480 s did
+   * exactly its job — but a deadline is a floor for the whole pass, not a bound on
+   * one field, and paying 480 s to end a loop that produced nothing costs the
+   * sweep every other service in the slice.
+   *
+   * **Why it had never fired before:** the collator had been SUMMARISING this
+   * field ("workload NOT DECLARED") rather than copying it, which
+   * `roles/triage.md:196` forbids and which happened to withhold the open-ended
+   * instruction. Sweeps 13 and 14 carried the summary; sweep 15 — the first on the
+   * envelope that demands literal copying (ISC-1119/1120) — carried it verbatim,
+   * and the hazard arrived with the compliance. A prompt that starts being obeyed
+   * is a prompt whose contents start mattering.
    */
   const workload =
     service.workload ??
     "NOT DECLARED — identify the workload behind this service yourself, from the " +
       "namespace and the service name, and NAME what you identified in your report. " +
       "If you cannot identify exactly one, say so and report indeterminate rather " +
-      "than guessing.";
+      "than guessing. Identify it in AT MOST THREE commands, and never re-run a " +
+      "command that already returned output — if you have the answer, you are done " +
+      "looking; if three did not settle it, that IS the indeterminate case.";
   return [
     `- service: ${service.name}`,
     `  namespace: ${service.namespace}`,

@@ -424,20 +424,43 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
     );
   });
 
-  test("the seats STATE that model — they do not inherit it from the fleet default", async () => {
+  /**
+   * **This replaces a non-degeneracy guard that the file outgrew, and it is a
+   * STRONGER assertion rather than a relaxed one (ISC-1116).**
+   *
+   * What stood here asserted that `llm.model` was NOT the triage model, and that
+   * some other worker ran something else — anti-vacuity for the set comparison
+   * above, so "the seats resolve to X" could not be true merely because
+   * everything did. That premise was a property of a file with three local
+   * models in it, and on 2026-09-09 the file stopped having them: every role
+   * moved to `gemma-4-26b-a4b-it-bf16`, because a second local model in the
+   * tracked example is the same collision ISC-1116 closed in CI — a cold load
+   * beside the resident weights, which is what returned `stop_reason: "error"`
+   * on a live seat mid-sweep.
+   *
+   * So the anti-vacuity moves to where the risk actually is. "The seats differ
+   * from the default" was a PROXY for "the example does not stand up two sets of
+   * weights"; this asserts the thing itself, and it fails on the drift the proxy
+   * would have missed — a fourth role quietly acquiring its own local model
+   * while the triage seats stay put.
+   */
+  test("the example names EXACTLY ONE local model, fleet-wide (ISC-1116)", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-    // The degenerate reading of the test above, closed. If `llm.model` were the
-    // 20b, all four seats would resolve to it with `roles.triage.model` and the
-    // three worker overrides deleted, and that set assertion would still be
-    // green — a decision inferred from silence. It is not the fleet default.
-    expect(loaded.config.llm.model).not.toBe(TRIAGE_MODEL);
-    // The same distinction from the other side: this fleet is not uniformly on
-    // one model, so "resolves to the 20b" is a property of these four seats and
-    // not of every worker in the file.
-    const seatIds = new Set<string>(TRIAGE_SEATS);
-    const others = resolveAllWorkers(loaded).filter((w) => !seatIds.has(w.id));
-    expect(others.length).toBeGreaterThan(0);
-    expect(others.some((w) => w.model !== TRIAGE_MODEL)).toBe(true);
+    const workers = resolveAllWorkers(loaded);
+    // Anti-vacuity on the walk itself: an empty fleet satisfies "one model".
+    expect(workers.length).toBeGreaterThan(1);
+
+    const local = workers.filter((w) => w.provider === "omlx");
+    expect(local.length).toBeGreaterThan(1);
+    expect([...new Set(local.map((w) => w.model))]).toEqual([TRIAGE_MODEL]);
+
+    // The default is part of the surface: a role added tomorrow with no
+    // `model:` inherits it, so a default off this model reintroduces the second
+    // set of weights through the one line nobody edits.
+    expect(loaded.config.llm.model).toBe(TRIAGE_MODEL);
+    // And the allowlist is the ceiling `up` checks, so a stale entry there is a
+    // standing permission for exactly what this test forbids.
+    expect(loaded.config.llm.models_allowlist).toEqual([TRIAGE_MODEL]);
   });
 
   /**
@@ -458,25 +481,26 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
    * is wrong. That is the only shape of role-level drift between the two files
    * this suite can see, and it can see it only in this direction.
    */
-  test("the three observers carry an explicit model:, and tri-1 deliberately does not", async () => {
+  test("no seat carries a worker-level model: — §6.11's rule, now unqualified", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-    const observerRoleModel = loaded.config.roles["observer"]?.model;
-    expect(observerRoleModel).toBeDefined();
-    expect(observerRoleModel).not.toBe(TRIAGE_MODEL);
 
+    // The override this test used to REQUIRE on obs-t1 is gone, and the
+    // paragraph above is why: it existed only because `observer` named a
+    // different local model, and it does not any more. That deletion was this
+    // test's own prescription — "the fix is to DELETE the three overrides, not
+    // to loosen the test" — followed rather than argued with.
+    const observerRoleModel = loaded.config.roles["observer"]?.model;
+    expect(observerRoleModel).toBe(TRIAGE_MODEL);
+    expect(loaded.config.roles["triage"]?.model).toBe(TRIAGE_MODEL);
+
+    // §6.11 unqualified: the seats INHERIT. Set-shaped over the WHOLE worker
+    // list so the copied-line defect — an override arriving on `obs-1` or
+    // `tst-2` — fails here too, which is the half that still has teeth now that
+    // the expected set is empty.
     const stated = loaded.config.workers
       .filter((w) => w.model !== undefined)
       .map((w) => `${w.id}=${w.model}`);
-    // Set-shaped again, and over the WHOLE worker list rather than over the
-    // three ids: an override that appears on a fourth worker — the copied-line
-    // defect, arriving on `obs-1` or `tst-2` — fails here too.
-    expect(stated).toEqual(["obs-t1"].map((id) => `${id}=${TRIAGE_MODEL}`));
-
-    // `tri-1` is the mirror and the reason the list above has three entries and
-    // not four: the `triage` role declares the model itself, so §6.1's "no
-    // override" rule holds for that seat in BOTH files. A test demanding an
-    // override on all four would assert the correction's exception as the rule.
-    expect(loaded.config.roles["triage"]?.model).toBe(TRIAGE_MODEL);
+    expect(stated).toEqual([]);
   });
 
   /**
@@ -496,31 +520,65 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
    * cannot leave the repository holding a broken example.
    */
   describe("the allowlist entry is what admits the seats, not the model string", () => {
-    /** The loaded example with exactly `entry` removed from `models_allowlist`. */
-    function withoutAllowlistEntry(loaded: LoadedConfig, entry: string): LoadedConfig {
+    /**
+     * The loaded example with `entry` SUBSTITUTED for another name, rather than
+     * removed.
+     *
+     * **Removal stopped being a valid mutation when the example went uniform,
+     * and the reason is a real hazard rather than a test detail.** The allowlist
+     * now holds exactly one entry, and `assertModelAllowed`'s own docblock is
+     * explicit: *"A declared provider with an empty `models_allowlist`
+     * constrains nothing."* So deleting the entry does not refuse the fleet — it
+     * DISARMS THE GATE, and the old assertion here failed with "Received
+     * function did not throw" rather than with a refusal. A one-line allowlist
+     * is one deletion away from off.
+     *
+     * Substituting keeps the gate armed and tests what it is for: that it
+     * discriminates on the NAME. That is the property `up` relies on.
+     */
+    function withAllowlistRepointed(loaded: LoadedConfig, entry: string): LoadedConfig {
       const allowlist = loaded.config.llm.models_allowlist;
-      // A mutation that removes nothing proves nothing. If the entry is
-      // renamed, or moves into a `providers.<name>.models_allowlist` block,
-      // this says so — rather than reporting a green "all four refused" off a
-      // config that was never actually changed.
+      // A mutation that changes nothing proves nothing. If the entry is renamed,
+      // or moves into a `providers.<name>.models_allowlist` block, this says so.
       expect(allowlist, `"${entry}" is not on llm.models_allowlist to begin with`).toContain(entry);
+      const repointed = allowlist.map((m) => (m === entry ? "some-other-model-nobody-runs" : m));
+      // The gate must still be ARMED after the mutation, or the test below is
+      // measuring absence rather than refusal — which is exactly the trap the
+      // removal-shaped mutation fell into.
+      expect(repointed.length).toBeGreaterThan(0);
       return {
         ...loaded,
-        config: {
-          ...loaded.config,
-          llm: { ...loaded.config.llm, models_allowlist: allowlist.filter((m) => m !== entry) },
-        },
+        config: { ...loaded.config, llm: { ...loaded.config.llm, models_allowlist: repointed } },
       };
     }
+
+    /**
+     * The hazard the substitution above sidesteps, asserted so it is a KNOWN
+     * property of a one-model fleet rather than a surprise the next reader meets
+     * as a green test that proves nothing.
+     */
+    test("an EMPTY allowlist disarms the gate — one entry is one deletion from off", async () => {
+      const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+      expect(loaded.config.llm.models_allowlist).toHaveLength(1);
+      const emptied: LoadedConfig = {
+        ...loaded,
+        config: { ...loaded.config, llm: { ...loaded.config.llm, models_allowlist: [] } },
+      };
+      // Not a refusal. Nothing throws, and every worker is admitted.
+      expect(() => assertModelsAllowed(emptied, TRIAGE_SEATS)).not.toThrow();
+      for (const w of resolveAllWorkers(emptied)) {
+        expect(() => assertModelAllowed(emptied, w)).not.toThrow();
+      }
+    });
 
     test("unmutated, all four are admitted — the gate is not refusing everything", async () => {
       const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
       expect(() => assertModelsAllowed(loaded, TRIAGE_SEATS)).not.toThrow();
     });
 
-    test("strip the entry and EXACTLY the four seats are refused", async () => {
+    test("strip the entry and the WHOLE fleet is refused", async () => {
       const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-      const mutated = withoutAllowlistEntry(loaded, TRIAGE_MODEL);
+      const mutated = withAllowlistRepointed(loaded, TRIAGE_MODEL);
 
       const errors = new Map<string, unknown>();
       for (const w of resolveAllWorkers(mutated)) {
@@ -531,12 +589,19 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
         }
       }
 
-      // Set equality over the WHOLE fleet, which is both halves at once.
-      // "All four throw" alone is satisfied by a mutation that emptied the list
-      // and refused every worker in the file; "someone still passes" alone is
-      // satisfied by a mutation that hit the wrong seat. Only the set says the
-      // removal is about THIS entry and reaches PRECISELY these seats.
-      expect([...errors.keys()].sort()).toEqual([...TRIAGE_SEATS].sort());
+      // This used to read "EXACTLY the four seats are refused", and the set
+      // equality was doing real work: the fleet ran three local models, so a
+      // removal that reached every worker meant the mutation had emptied the
+      // list rather than removed one entry. On 2026-09-09 the example went
+      // uniform (ISC-1116) and the honest expectation is now the whole fleet.
+      //
+      // The anti-vacuity that assertion carried moves rather than evaporates:
+      // `withoutAllowlistEntry` already refuses to run if the entry is not on
+      // the list, and the fleet is asserted non-trivial here, so "everything
+      // throws" cannot be satisfied by an empty roster or a no-op mutation.
+      const all = resolveAllWorkers(mutated).map((w) => w.id);
+      expect(all.length).toBeGreaterThan(1);
+      expect([...errors.keys()].sort()).toEqual([...all].sort());
 
       for (const id of TRIAGE_SEATS) {
         const err = errors.get(id);
@@ -550,7 +615,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
 
     test("`up` is where it lands, and `config validate` never sees it", async () => {
       const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-      const mutated = withoutAllowlistEntry(loaded, TRIAGE_MODEL);
+      const mutated = withAllowlistRepointed(loaded, TRIAGE_MODEL);
       // `up`'s own gate, not only the per-worker assertion underneath it.
       expect(() => assertModelsAllowed(mutated, TRIAGE_SEATS)).toThrow(ModelNotAllowedError);
       // The measured gap, asserted so it stops being folklore: the same mutated
