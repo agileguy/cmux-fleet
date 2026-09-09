@@ -2490,6 +2490,7 @@ async function main(): Promise<void> {
       persistFence,
       flushState,
       writeProvenance: (taskId, epoch) => writeTaskPolicy(wp.taskPolicy, taskId, epoch),
+      clearDispatchDrop: () => clearDispatchPolicy(wp.dispatchPolicy),
       ledgerAppend: (event, fields) => ledger.append(event, fields),
       logEvent,
       armDeadlineOnTrigger: (ms) => {
@@ -3202,6 +3203,19 @@ export interface StageDeps {
    * being able to assert.
    */
   writeProvenance: (taskId: string | null, epoch: number) => Promise<void>;
+  /**
+   * `/policy/dispatch` — put the drop back to its idle arm (ISC-1115).
+   *
+   * The fourth durable consequence of a release, and the one `handleUnstage`'s
+   * own list of three walked past. It is NOT the cosmetic sibling of
+   * `writeProvenance`: the drop is what `dispatch-trigger.ts` polls, and a
+   * `staged: true` header outliving its epoch is a loaded trigger that the next
+   * Pi session pulls — ISC-1114's mechanism, reached through the other verb that
+   * ends an epoch. `settle` calls `clearDispatchPolicy` directly; this route is
+   * a `StageDeps` member for `writeProvenance`'s stated reason, so a probe can
+   * assert the release actually disarms rather than inferring it.
+   */
+  clearDispatchDrop: () => Promise<void>;
   ledgerAppend: (
     event: string,
     fields: {
@@ -3367,7 +3381,7 @@ export async function handleStage(
  * `unstage` — release a staged epoch that was never triggered (§9 Q8).
  *
  * `EpochManager.cancel` holds every refusal; this function's own job is the
- * three durable consequences of a successful one, and each is here for a
+ * four durable consequences of a successful one, and each is here for a
  * failure it prevents:
  *
  *   1. **Persist the fence.** The release is a fence mutation like any other.
@@ -3380,7 +3394,14 @@ export async function handleStage(
  *      the cancelled task's id on disk is worse here than after a settle,
  *      because the operator is sitting at that terminal and will keep typing —
  *      every gated verb they run would be stamped with a task that never ran.
- *   3. **Reset `state`.** `phase`/`task_id`/`epoch` are what `status` prints;
+ *   3. **Disarm `/policy/dispatch`.** The one the original three missed, and
+ *      the only one whose cost is not a stale reading: the drop is a TRIGGER
+ *      (`docker/pi-extensions/dispatch-trigger.ts` polls it), its dedup lives
+ *      in per-session closure state, and an armed header outliving its epoch is
+ *      pulled by the next session that starts. Leaving it re-runs a task the
+ *      operator explicitly cancelled — see ISC-1114 for the same mechanism
+ *      reached through `settle`.
+ *   4. **Reset `state`.** `phase`/`task_id`/`epoch` are what `status` prints;
  *      a released worker that still reports `busy` under the cancelled task is
  *      a fleet that looks occupied and is not.
  *
@@ -3400,6 +3421,23 @@ export async function handleUnstage(
 
   await deps.persistFence();
   await deps.writeProvenance(null, 0);
+  /*
+   * Best-effort for `settle`'s reason: a release that has already mutated the
+   * fence must not be undone by a file write, and the refusal an operator is
+   * waiting on must still be returned. Logged rather than swallowed, because
+   * "the trigger is still armed" and "the trigger was disarmed" must not
+   * produce identical output — that equivalence is what let ISC-1114 run for
+   * months behind a docblock asserting the opposite.
+   */
+  try {
+    await deps.clearDispatchDrop();
+  } catch (err) {
+    deps.logEvent({
+      type: "dispatch_drop_clear_failed",
+      task_id: taskId,
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
   deps.disarmStagedDeadline();
   deps.state.epoch = 0;
   deps.state.task_id = null;
