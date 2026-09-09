@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadConfig, resolveWorker } from "../../src/config/load.ts";
 import { EXIT } from "../../src/contracts.ts";
 import { cliBudget } from "../support/budget.ts";
 import { spawnCli } from "../support/spawn-cli.ts";
@@ -679,12 +680,46 @@ describe("render", () => {
    * purely so an integration test could keep re-checking a criterion a unit
    * test already checks harder, would be the wrong trade.
    */
-  test("different roles render different models", async () => {
+  /**
+   * **[SUPERSEDED 2026-09-09] The differing-models half moved for the SAME
+   * reason ISC-63's differing-skills half did, one paragraph up.**
+   *
+   * This asserted `modelOf(sre) !== modelOf(obs)` against `fleet.example.yaml`.
+   * It cannot any more: every role in that file now names
+   * `gemma-4-26b-a4b-it-bf16`, because a second local model in the tracked
+   * example stands up a second set of weights on a shared oMLX — the collision
+   * that starved a live seat (ISC-1116, ISC-1124). A RUNNABLE example and a
+   * differing-brains demonstration are no longer the same file.
+   *
+   * ISC-62 is unaffected and is pinned where ISC-63 already lives:
+   * `test/unit/render.test.ts` → `two roles produce different --model values`,
+   * which is STRICTLY STRONGER than what stood here — it fixes both exact model
+   * strings against its own fixture and asserts the inequality, where this could
+   * only assert the inequality. Loosening the example to keep an integration
+   * test re-checking a criterion a unit test checks harder would be the same
+   * wrong trade the paragraph above refuses.
+   *
+   * What is left here is the half only an END-TO-END render can show: that
+   * `--model` is emitted per worker and carries the RESOLVED value, not the
+   * fleet default by accident. That still fails if the renderer stops threading
+   * a model through, which is the wiring this file exists to check.
+   */
+  test("each worker renders --model with its resolved value", async () => {
     const sre = JSON.parse((await render()).stdout);
     const obs = JSON.parse(
       (await runCli(["render", "-c", "fleet.example.yaml", "--worker", "obs-1", "--json"])).stdout,
     );
     const modelOf = (d: { docker: string[] }) => d.docker[d.docker.indexOf("--model") + 1];
-    expect(modelOf(sre)).not.toBe(modelOf(obs));
+
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    // Read back from the config rather than hard-coded, so this tracks the
+    // example instead of pinning a second copy of the model string.
+    expect(modelOf(sre)).toBe(resolveWorker(loaded, "sre-1").model);
+    expect(modelOf(obs)).toBe(resolveWorker(loaded, "obs-1").model);
+    // Anti-vacuity: `indexOf` returns -1 for a missing flag and `d.docker[0]`
+    // is a real string, so a renderer that dropped --model entirely would
+    // otherwise compare two arbitrary argv tokens.
+    expect(sre.docker).toContain("--model");
+    expect(obs.docker).toContain("--model");
   }, cliBudget(2));
 });
