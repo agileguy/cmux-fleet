@@ -1299,17 +1299,49 @@ jobs:
         # the job. If the warmup cannot reach the server the probes below will
         # say so with a real diagnosis, and a red warmup step would just be a
         # second, worse-worded copy of that message.
+        #
+        # [CHANGED 2026-09-09] WARMS `gemma-4-26b-a4b-it-bf16`, THE MODEL THE
+        # PROBES BELOW ACTUALLY USE — and it is named by the same variable they
+        # are, so the two cannot drift apart again.
+        #
+        # It warmed `GLM-4.5-Air-MLX-4bit` until today, and that was a live
+        # incident rather than waste. This job is a TENANT on the operator's own
+        # oMLX, which the live triage console runs on at the same time. GLM Air
+        # is ~58 GB resident; gemma is ~50 GB; the Metal ceiling on that host was
+        # 107.52 GB. So this step loaded a model nothing here probes, and the
+        # probe's own model then would not fit beside it:
+        #
+        #   507 Cannot load gemma-4-26b-a4b-it-bf16: projected memory 109.28GB
+        #   would exceed the metal_cap memory ceiling 107.52GB
+        #   (current: 58.81GB, model: 50.47GB)
+        #
+        # A live seat took that 507 twenty-one seconds after the push that
+        # triggered this job: `T-sweep-16-slice1` settled `failed /
+        # transcript_stop_error` with ZERO tool calls and the sweep lost every
+        # service in its slice.
+        #
+        # ISC-1116 moved `PIFLEET_OMLX_MODEL` to the fleet's model and left this
+        # line behind, so the job named one model and loaded two. That is the
+        # residue worth naming: an invariant stated as "CI names the model the
+        # fleet runs" is not enforced by pinning the variable the probes read —
+        # anything that can issue a completion can load weights, and a warmup is
+        # exactly that.
+        #
+        # GLM Air was also already DEAD WEIGHT here: the 2026-08-29 table below
+        # records it 0/5 unparseable, it is no longer on `fleet.example.yaml`'s
+        # `models_allowlist`, and nothing in this job probes it.
         env:
           OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
+          PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
         run: |
           set -u
-          echo "warming GLM-4.5-Air-MLX-4bit (untimed, ungraded)"
+          echo "warming ${PIFLEET_OMLX_MODEL:?} (untimed, ungraded)"
           start=$(date +%s)
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 300 \
             http://127.0.0.1:8000/v1/chat/completions \
             -H "Authorization: Bearer $OMLX_API_KEY" \
             -H 'Content-Type: application/json' \
-            -d '{"model":"GLM-4.5-Air-MLX-4bit","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+            -d "{\"model\":\"${PIFLEET_OMLX_MODEL:?}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
             || true)
           echo "warmup HTTP $code after $(( $(date +%s) - start ))s"
       - name: The live-oMLX probes, RUN rather than accounted for

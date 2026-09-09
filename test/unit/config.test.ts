@@ -3581,13 +3581,65 @@ describe("CI generates against the model the fleet already runs (ISC-1116)", () 
     expect(new Set(seats).size, `the triage seats run ${seats.join(" and ")}`).toBe(1);
   });
 
+  /**
+   * **ISC-1124: the ASSIGNMENT is not the only way CI loads weights.**
+   *
+   * The guard below reads `PIFLEET_OMLX_MODEL:` assignments, and that is where
+   * ISC-1116 stopped. It is not sufficient, and the gap was live for a month:
+   * `omlx-live`'s warmup step issued a completion with a model name written
+   * INTO THE REQUEST BODY — `GLM-4.5-Air-MLX-4bit`, ~58 GB — so the job named
+   * gemma in its environment and loaded two models on the operator's server.
+   *
+   * The cost was not CI's. That server is shared with the live triage console,
+   * and gemma then would not fit beside GLM Air under a 107.52 GB Metal
+   * ceiling: `T-sweep-16-slice1` settled `failed / transcript_stop_error` with
+   * ZERO tool calls, twenty-one seconds after the push that started the job.
+   *
+   * So the invariant is not "the pinned variable names the fleet's model" but
+   * **"no model this workflow can load is any other model"** — and anything
+   * that can issue a completion can load weights. This walks every
+   * non-comment line for a model-shaped name and refuses one that is not the
+   * fleet's, which is the check that would have caught the warmup.
+   */
+  test("no ACTIVE line of the workflow names any other model (ISC-1124)", async () => {
+    const src = await readFile(join(REPO_ROOT, CI_YML), "utf8");
+    const [expected] = await seatModels();
+    // Comments are the file's memory — the 0/5 table, the supersession notes —
+    // and stripping them is what makes this assertion about behaviour.
+    const active = src
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    // Anti-vacuity: if the strip ever removes everything, an empty haystack
+    // satisfies "no other model" while checking nothing.
+    expect(active).toContain("PIFLEET_OMLX_MODEL");
+    expect(active).toContain(expected!);
+
+    // Model-shaped: a vendor-ish name carrying a quantisation or size token.
+    // Deliberately broad — this should trip on a name nobody anticipated.
+    const OTHERS =
+      /\b(?:GLM-[\w.]+-Air[\w-]*|Qwen[\w.]*-\d+B[\w-]*|gpt-oss-[\w-]+|Llama-[\w.]+-\d+B[\w-]*|gemma-[\w.]+-(?!26b-a4b-it-bf16)[\w-]+)\b/g;
+    const found = [...new Set([...active.matchAll(OTHERS)].map((m) => m[0]))];
+    expect(
+      found,
+      `ci.yml can load ${found.join(", ")} beside ${expected}. That server is shared with ` +
+        `the live console: a second resident model is what made T-sweep-16-slice1 fail with a 507.`,
+    ).toEqual([]);
+  });
+
   test("both CI jobs name that model, and no other", async () => {
     const models = await ciModels();
-    // Two assignments — `omlx-live`'s step-level pin and `container-live`'s
-    // job-level one. The count is ISC-290's criterion and is asserted there;
-    // repeated here only so a zero-match regex fails loudly instead of making
-    // the comparison below vacuously true.
-    expect(models, "no PIFLEET_OMLX_MODEL assignments found — has the key moved?").toHaveLength(2);
+    // THREE assignments — `omlx-live`'s warmup step, `omlx-live`'s probe step,
+    // and `container-live`'s job-level one. It was two until 2026-09-09, when
+    // the warmup stopped carrying a hardcoded `GLM-4.5-Air-MLX-4bit` in its
+    // request body and started reading this variable like everything else
+    // (ISC-1124). The count going 2 -> 3 IS the fix: a warmup that names the
+    // model through the same key cannot drift from the probes it warms for.
+    //
+    // The count is ISC-290's criterion and is asserted there; repeated here so
+    // a zero-match regex fails loudly instead of making the comparison below
+    // vacuously true.
+    expect(models, "no PIFLEET_OMLX_MODEL assignments found — has the key moved?").toHaveLength(3);
 
     const seats = await seatModels();
     // Non-null after the sibling test above, but asserted rather than `!`-ed:
