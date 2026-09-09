@@ -58,6 +58,45 @@ describe("ISC-59 — read_only is enforced against the EFFECTIVE tool set", () =
     await expect(parseConfig(yaml, "t.yaml")).rejects.toThrow(/bash/);
   });
 
+  /**
+   * `bash` was one member of the set, and the guard named the member.
+   *
+   * "a shell can write" was the original reasoning, and it is true of the two
+   * builtins whose entire purpose is writing. A role declaring `read_only: true`
+   * while holding `write` is the same violation stated more directly, and it
+   * went unreported for as long as the check asked about `bash` alone. Raised by
+   * the architecture lens on T-rv-155, as the reason a withdrawn `write` was a
+   * config VALUE rather than an invariant: `effectiveToolGrant` resolves an
+   * omitted `tools:` to every builtin, so deleting the line restores all three
+   * at once, and nothing refused it.
+   */
+  for (const tool of ["write", "edit"] as const) {
+    test(`a read_only role that explicitly lists ${tool} is rejected`, async () => {
+      const yaml = configWith(`  probe:\n    read_only: true\n    tools: [read, ${tool}]\n`);
+      await expect(parseConfig(yaml, "t.yaml")).rejects.toThrow(new RegExp(tool));
+    });
+  }
+
+  test("the omission message names every writer it would grant, not just bash", async () => {
+    const yaml = configWith("  probe:\n    read_only: true\n");
+    const err = await parseConfig(yaml, "t.yaml").then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    expect(err, "a read_only role with no tools was accepted").not.toBeNull();
+    for (const tool of ["bash", "write", "edit"]) {
+      expect(String(err?.message), `the message does not name ${tool}`).toContain(`"${tool}"`);
+    }
+  });
+
+  test("a worker override that re-adds write to a read_only role is rejected by worker id", async () => {
+    const yaml = configWith(
+      "  probe:\n    read_only: true\n    tools: [read, grep, find, ls]\n",
+      "    tools: [read, write]\n",
+    );
+    await expect(parseConfig(yaml, "t.yaml")).rejects.toThrow(/w-probe/);
+  });
+
   test("a worker resolving to read_only with bash is rejected by worker id", async () => {
     const yaml = configWith(
       "  probe:\n    tools: [read, grep, find, ls]\n",

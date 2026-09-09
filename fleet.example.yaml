@@ -541,6 +541,17 @@ roles:
     # are the operator's checkout at /workspace — mounted `:ro`, so the grant
     # would buy nothing it could use and would widen the writer set for no
     # capability.
+    # AND THE WITHDRAWAL IS NOW AN INVARIANT, NOT A VALUE. Everything above
+    # argues why this role holds no writer; `read_only: true` is what makes the
+    # argument enforceable. `effectiveToolGrant` resolves an OMITTED `tools:` to
+    # every Pi builtin, so deleting the line below would silently hand back
+    # `write`, `edit` and `bash` at once and reverse task 7.1 by an edit that
+    # looks like tidying. With this flag set, that deletion is a parse error
+    # naming the three tools it would have restored, and so is adding any one of
+    # them back by hand. The flag has no runtime effect of its own -- nothing
+    # reads it at `up` -- which is the point: it is a declaration of intent whose
+    # only job is to arm ISC-59's check in `config/schema.ts`.
+    read_only: true
     tools: [read, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/reviewer.md

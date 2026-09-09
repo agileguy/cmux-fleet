@@ -136,6 +136,29 @@ export function effectiveToolGrant(
   return declared ?? PI_BUILTIN_TOOLS;
 }
 
+/**
+ * The builtins that can put a byte on disk.
+ *
+ * ISC-59's guard asked only about `bash`, on the reasoning that "a shell can
+ * write" — true, and true of the two tools whose entire purpose is writing.
+ * A role declaring `read_only: true` while holding `write` is the same
+ * violation stated more directly, and it went unreported for as long as the
+ * check named one member of the set instead of the set.
+ *
+ * This is what makes a withdrawn grant an INVARIANT rather than a value.
+ * `effectiveToolGrant` resolves an omitted `tools:` to every builtin, so
+ * deleting the line from a `read_only` role silently restores `write`, `edit`
+ * and `bash` at once — which is exactly how a narrowing gets reversed by an
+ * edit that looks like tidying. With `read_only: true` declared, that deletion
+ * is now a parse error naming the tools it would have handed back.
+ */
+const WRITE_CAPABLE_TOOLS = ["bash", "write", "edit"] as const;
+
+/** Which write-capable builtins a resolved grant holds, in a stable order. */
+function writeCapableIn(tools: readonly ToolName[]): readonly ToolName[] {
+  return WRITE_CAPABLE_TOOLS.filter((t) => tools.includes(t));
+}
+
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 
@@ -1685,14 +1708,16 @@ export const FleetConfigSchema = z
     for (const [name, role] of Object.entries(cfg.roles)) {
       const readOnly = role.read_only ?? cfg.defaults.read_only ?? false;
       const tools = effectiveToolGrant(role.tools ?? defaultTools);
-      if (readOnly && tools.includes("bash")) {
+      const offending = writeCapableIn(tools);
+      if (readOnly && offending.length > 0) {
+        const named = offending.map((t) => `"${t}"`).join(", ");
         ctx.addIssue({
           code: "custom",
           path: ["roles", name, "tools"],
           message:
             (role.tools ?? defaultTools) === undefined
-              ? `role "${name}" is read_only: true with no explicit tools — Pi then grants every builtin, "bash" included; declare a tools list without "bash"`
-              : `role "${name}" is read_only: true but its tools include "bash" — a shell can write; drop one`,
+              ? `role "${name}" is read_only: true with no explicit tools — Pi then grants every builtin, ${named} among them; declare a tools list without them`
+              : `role "${name}" is read_only: true but its tools include ${named} — each of those can put a byte on disk; drop them or drop read_only`,
         });
       }
     }
@@ -1702,14 +1727,16 @@ export const FleetConfigSchema = z
       const readOnly = w.read_only ?? role.read_only ?? cfg.defaults.read_only ?? false;
       const declared = w.tools ?? role.tools ?? defaultTools;
       const tools = effectiveToolGrant(declared);
-      if (readOnly && tools.includes("bash")) {
+      const offending = writeCapableIn(tools);
+      if (readOnly && offending.length > 0) {
+        const named = offending.map((t) => `"${t}"`).join(", ");
         ctx.addIssue({
           code: "custom",
           path: ["workers", i, "tools"],
           message:
             declared === undefined
-              ? `worker "${w.id}" resolves to read_only: true with no explicit tools — Pi then grants every builtin, "bash" included; declare a tools list without "bash"`
-              : `worker "${w.id}" resolves to read_only: true with "bash" in its tools — a shell can write; drop one`,
+              ? `worker "${w.id}" resolves to read_only: true with no explicit tools — Pi then grants every builtin, ${named} among them; declare a tools list without them`
+              : `worker "${w.id}" resolves to read_only: true with ${named} in its tools — each of those can put a byte on disk; drop them or drop read_only`,
         });
       }
     });

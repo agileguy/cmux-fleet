@@ -51,6 +51,7 @@ import { existsSync, readFileSync } from "node:fs";
  * widen a literal list — the argument `role-docs.ts` makes for paths, applied to
  * tools.
  */
+import { parseConfig } from "../../src/config/load.ts";
 import { PI_ALL_TOOLS } from "../../src/config/schema.ts";
 import {
   MAX_REPLY_ARTIFACT_BYTES,
@@ -441,6 +442,42 @@ describe("the reviewer's grant is what the document says it is", () => {
       "read",
       "submit_report",
     ]);
+  });
+
+  /**
+   * THE WITHDRAWAL IS AN INVARIANT, NOT A VALUE — and until 2026-09-08 it was a
+   * value, which is what the architecture lens said on T-rv-155.
+   *
+   * Every probe above reads the grant the document currently spells. None of
+   * them says what happens if the `tools:` line is DELETED, and the answer was:
+   * `effectiveToolGrant` resolves an omitted list to every Pi builtin, so the
+   * role silently regains `write`, `edit` and `bash` at once and task 7.1
+   * reverses by an edit that looks like tidying. The value tests all stayed
+   * green in that world, because there is no value left for them to disagree
+   * with — they assert about a list that is gone.
+   *
+   * So this one deletes the line and asserts the DOCUMENT IS REFUSED. It is
+   * armed by `read_only: true` on the role, which has no runtime effect at all
+   * and exists solely to make ISC-59's check apply here.
+   *
+   * Note what makes this reddenable rather than decorative: remove `read_only`
+   * from `fleet.example.yaml` and this test fails, because the deletion becomes
+   * legal again. It is pinned to the mechanism, not to the spelling.
+   */
+  test("deleting the tools line is refused rather than silently re-granting write", async () => {
+    const line = "    tools: [read, grep, find, ls, submit_report]";
+    expect(EXAMPLE.split("\n").filter((l) => l === line), "the reviewer's grant line moved").toHaveLength(1);
+    const without = EXAMPLE.split("\n")
+      .filter((l) => l !== line)
+      .join("\n");
+    const err = await parseConfig(without, `${ROOT}fleet.example.yaml`).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    expect(err, "the reviewer's tools line can be deleted without refusal").not.toBeNull();
+    for (const tool of ["bash", "write", "edit"]) {
+      expect(String(err?.message), `the refusal does not name ${tool}`).toContain(`"${tool}"`);
+    }
   });
 
   /**
