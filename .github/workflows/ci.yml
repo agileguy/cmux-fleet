@@ -1217,6 +1217,24 @@ jobs:
     # way that skipping individual probes inside it would not be: nothing here
     # claims to have run.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # ONE ASSIGNMENT FOR THE WHOLE JOB, and that is the point rather than tidiness.
+    # ISC-290 pins the count of `PIFLEET_OMLX_MODEL:` assignments in this file and
+    # says why a step-level pin is the defect: *"the loaded model can drift from
+    # the graded one."* It drifted. Until 2026-09-09 the warmup step below carried
+    # `GLM-4.5-Air-MLX-4bit` HARDCODED IN ITS REQUEST BODY while the probe step
+    # named gemma, so the job loaded ~58 GB of a model nothing here probes and
+    # gemma then would not fit beside it on the operator's shared oMLX:
+    #
+    #   507 Cannot load gemma-4-26b-a4b-it-bf16: projected memory 109.28GB would
+    #   exceed the metal_cap memory ceiling 107.52GB (current: 58.81GB, ...)
+    #
+    # A live triage seat took that 507 twenty-one seconds after the push that
+    # started this job (`T-sweep-16-slice1`, `failed / transcript_stop_error`,
+    # zero tool calls). Hoisting the value here is what makes the warmup and the
+    # probes structurally incapable of naming different models — inheritance,
+    # not two lines that agree today.
+    env:
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -1299,17 +1317,48 @@ jobs:
         # the job. If the warmup cannot reach the server the probes below will
         # say so with a real diagnosis, and a red warmup step would just be a
         # second, worse-worded copy of that message.
+        #
+        # [CHANGED 2026-09-09] WARMS `gemma-4-26b-a4b-it-bf16`, THE MODEL THE
+        # PROBES BELOW ACTUALLY USE — and it is named by the same variable they
+        # are, so the two cannot drift apart again.
+        #
+        # It warmed `GLM-4.5-Air-MLX-4bit` until today, and that was a live
+        # incident rather than waste. This job is a TENANT on the operator's own
+        # oMLX, which the live triage console runs on at the same time. GLM Air
+        # is ~58 GB resident; gemma is ~50 GB; the Metal ceiling on that host was
+        # 107.52 GB. So this step loaded a model nothing here probes, and the
+        # probe's own model then would not fit beside it:
+        #
+        #   507 Cannot load gemma-4-26b-a4b-it-bf16: projected memory 109.28GB
+        #   would exceed the metal_cap memory ceiling 107.52GB
+        #   (current: 58.81GB, model: 50.47GB)
+        #
+        # A live seat took that 507 twenty-one seconds after the push that
+        # triggered this job: `T-sweep-16-slice1` settled `failed /
+        # transcript_stop_error` with ZERO tool calls and the sweep lost every
+        # service in its slice.
+        #
+        # ISC-1116 moved `PIFLEET_OMLX_MODEL` to the fleet's model and left this
+        # line behind, so the job named one model and loaded two. That is the
+        # residue worth naming: an invariant stated as "CI names the model the
+        # fleet runs" is not enforced by pinning the variable the probes read —
+        # anything that can issue a completion can load weights, and a warmup is
+        # exactly that.
+        #
+        # GLM Air was also already DEAD WEIGHT here: the 2026-08-29 table below
+        # records it 0/5 unparseable, it is no longer on `fleet.example.yaml`'s
+        # `models_allowlist`, and nothing in this job probes it.
         env:
           OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
         run: |
           set -u
-          echo "warming GLM-4.5-Air-MLX-4bit (untimed, ungraded)"
+          echo "warming ${PIFLEET_OMLX_MODEL:?} (untimed, ungraded)"
           start=$(date +%s)
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 300 \
             http://127.0.0.1:8000/v1/chat/completions \
             -H "Authorization: Bearer $OMLX_API_KEY" \
             -H 'Content-Type: application/json' \
-            -d '{"model":"GLM-4.5-Air-MLX-4bit","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+            -d "{\"model\":\"${PIFLEET_OMLX_MODEL:?}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
             || true)
           echo "warmup HTTP $code after $(( $(date +%s) - start ))s"
       - name: The live-oMLX probes, RUN rather than accounted for
@@ -1352,16 +1401,31 @@ jobs:
           # re-run as a suspected flake — which is what an intermittent-looking
           # deterministic failure costs when nobody reads the body.
           #
-          # `Qwen3.5-35B-A3B-8bit` is chosen over the other passing candidate
-          # because the `container-live` job below already names it, so the two
-          # jobs share one cold load instead of paying for two. The GPU cost in
-          # the paragraph above is the reason that tie-breaker matters.
-          #
           # This does NOT mean the fleet cannot use reasoning models. It means
           # the probe cannot currently READ one, which is a real limitation of
           # `model-probe.ts` and is filed separately rather than papered over
           # by this line.
-          PIFLEET_OMLX_MODEL: Qwen3.5-35B-A3B-8bit
+          #
+          # [CHANGED 2026-09-09] `gemma-4-26b-a4b-it-bf16`, and the reason is
+          # that CI should probe the model the FLEET ACTUALLY RUNS. Both live
+          # triage seats are on it (`fleet.yaml`), and SRD §11 Q8's tool-argument
+          # ceilings were measured against it — so every bound this repository
+          # ships for that wire is derived from a model CI was not exercising.
+          # `Qwen3.5-35B-A3B-8bit` is served by nothing in the fleet.
+          #
+          # MEASURED BEFORE SWITCHING, because the note above this line is the
+          # record of what guessing costs: five consecutive tools-bearing calls
+          # against the live endpoint, same shape as the 2026-08-29 table —
+          #
+          #   gemma-4-26b-a4b-it-bf16            5/5   native tool_calls
+          #
+          # It is also verified served: `model-probe.ts:187` fails outright on a
+          # name the server does not list, so a typo here is a red job and not a
+          # silent fallback.
+          #
+          # [MOVED 2026-09-09] The assignment itself now lives at JOB level — see
+          # the job header. The warmup step needs the same value and used to
+          # hardcode a different one; inheriting is what stops the two drifting.
           # Same eighteen the `test` job collects. Unchanged here on purpose:
           # if this number and that one ever disagree, one of the two jobs has
           # stopped seeing the file.
@@ -1436,7 +1500,19 @@ jobs:
       # container, the chain settled `success` 7 runs out of 7, 12.3s to 15.8s
       # each, 42 assertions every time. The probe was never flaky; it was being
       # pointed at a model that could not do the task.
-      PIFLEET_OMLX_MODEL: Qwen3.5-35B-A3B-8bit
+      #
+      # [CHANGED 2026-09-09] `gemma-4-26b-a4b-it-bf16`, matching `omlx-live` so
+      # the two jobs still share one cold load, and matching the model both live
+      # triage seats run. It answers the single-call probe 5/5 (see that job).
+      #
+      # **THE 7/7 ABOVE IS NOT A CLAIM ABOUT THIS MODEL.** The paragraph it sits
+      # in is the record of a model that passed the single-call probe and could
+      # not complete the multi-turn chain, and gemma has been measured on the
+      # single call only. That is the weaker claim this file already warns
+      # about, made deliberately and left visible rather than dressed up: the
+      # chain measurement for gemma is what THIS JOB is now for, and if the
+      # chain goes intermittently red the diagnosis is written directly above.
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

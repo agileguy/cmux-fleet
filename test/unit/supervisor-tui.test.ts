@@ -154,7 +154,7 @@ describe("discoverSessionPath", () => {
     const dir = await sessions();
     const path = join(dir, "2026-08-31T10-00-00-000Z_eng-1.jsonl");
     await writeFile(path, "");
-    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path, matches: 1 });
+    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path, matches: 1, adopted: false });
   });
 
   /**
@@ -168,7 +168,18 @@ describe("discoverSessionPath", () => {
     const dir = await sessions();
     await writeFile(join(dir, "2026-08-31T10-00-00-000Z_eng-2.jsonl"), "");
     await writeFile(join(dir, "2026-08-31T10-00-00-000Z_eng-11.jsonl"), "");
-    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path: null, matches: 0 });
+    expect(await discoverSessionPath(dir, "eng-1")).toEqual({
+      path: null,
+      matches: 0,
+      adopted: false,
+    });
+    // And the sole-worker signal does NOT loosen it: these files are named for
+    // OTHER workers, so they are claimed and never adoptable.
+    expect(await discoverSessionPath(dir, "eng-1", ["eng-1"])).toEqual({
+      path: null,
+      matches: 0,
+      adopted: false,
+    });
   });
 
   /**
@@ -188,7 +199,11 @@ describe("discoverSessionPath", () => {
   test("a bare `_eng-1.jsonl` with no timestamp is not a candidate", async () => {
     const dir = await sessions();
     await writeFile(join(dir, "_eng-1.jsonl"), "");
-    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path: null, matches: 0 });
+    expect(await discoverSessionPath(dir, "eng-1")).toEqual({
+      path: null,
+      matches: 0,
+      adopted: false,
+    });
   });
 
   /**
@@ -204,7 +219,7 @@ describe("discoverSessionPath", () => {
     await writeFile(newer, "");
     await utimes(older, new Date(1_000_000), new Date(1_000_000));
     await utimes(newer, new Date(2_000_000), new Date(2_000_000));
-    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path: newer, matches: 2 });
+    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path: newer, matches: 2, adopted: false });
   });
 
   /**
@@ -214,10 +229,15 @@ describe("discoverSessionPath", () => {
    */
   test("an empty or missing directory is null, not a throw", async () => {
     const dir = await sessions();
-    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path: null, matches: 0 });
+    expect(await discoverSessionPath(dir, "eng-1")).toEqual({
+      path: null,
+      matches: 0,
+      adopted: false,
+    });
     expect(await discoverSessionPath(join(dir, "nope"), "eng-1")).toEqual({
       path: null,
       matches: 0,
+      adopted: false,
     });
   });
 
@@ -225,8 +245,137 @@ describe("discoverSessionPath", () => {
     const dir = await sessions();
     await mkdir(join(dir, "deep"), { recursive: true });
     await writeFile(join(dir, "deep", "2026-08-31T10-00-00-000Z_eng-1.jsonl"), "");
-    expect(await discoverSessionPath(dir, "eng-1")).toEqual({ path: null, matches: 0 });
+    expect(await discoverSessionPath(dir, "eng-1")).toEqual({
+      path: null,
+      matches: 0,
+      adopted: false,
+    });
   });
+
+  /**
+   * ADOPTING THE SESSION A `/new` LEFT BEHIND — the defect measured on
+   * 2026-09-08/09 and the reason `adopted` exists.
+   *
+   * `resetPaneSession` types `/new` at an idle pane so the next task starts
+   * clean. Pi obeys and names the new session by its OWN generated id, so the
+   * seat's second transcript is `<stamp>_01a08415-….jsonl`. `--session-id`
+   * covers the first session only and `/session` reports rather than sets, so
+   * nothing can re-assert the name from outside.
+   *
+   * What that cost, before this: `tri-1` ran sweep 5 in its named session, was
+   * reset, ran sweep 6 in a UUID one — and every host surface kept reading the
+   * first file. `status` showed a seat frozen at the reset instant, the triage
+   * actor's join waited 780 s for a task record "under tri-1" and failed the
+   * pass, and the envelope carried `"worker": "01a08415-…"`. Eight runs hold
+   * the same pair of files, one of them having skipped 28 consecutive ticks
+   * over 7.7 hours. The work ran; only the attribution was lost.
+   */
+  describe("a session renamed by /new", () => {
+    const sessions = async (): Promise<string> => {
+      const dir = await mkdtemp(join(tmpdir(), "pifleet-adopt-"));
+      await mkdir(join(dir, "sessions"), { recursive: true });
+      return join(dir, "sessions");
+    };
+
+    /** The pair the live run actually held, with the reset one newer. */
+    async function resetPair(dir: string): Promise<{ named: string; uuid: string }> {
+      const named = join(dir, "2026-09-09T02-51-28-676Z_tri-1.jsonl");
+      const uuid = join(dir, "2026-09-09T02-53-01-482Z_01a08415-44aa-7645-b3d1-e1ab590e5126.jsonl");
+      await writeFile(named, "");
+      await writeFile(uuid, "");
+      await utimes(named, new Date(1_000_000), new Date(1_000_000));
+      await utimes(uuid, new Date(2_000_000), new Date(2_000_000));
+      return { named, uuid };
+    }
+
+    test("is adopted when the run holds this worker and no other", async () => {
+      const dir = await sessions();
+      const { uuid } = await resetPair(dir);
+      const found = await discoverSessionPath(dir, "tri-1", ["tri-1"]);
+      expect(found.path).toBe(uuid);
+      expect(found.adopted).toBe(true);
+      // `matches` still counts NAMED matches only — an adopted file never
+      // claimed to be this worker's, and the count is the ambiguity diagnostic
+      // for the ones that did.
+      expect(found.matches).toBe(1);
+    });
+
+    /**
+     * THE REGRESSION THIS REPAIRS, asserted as the old behaviour rather than
+     * described. Without the sole-worker signal the answer is the stale file,
+     * which is precisely what every host surface was reading for 7.7 hours.
+     */
+    test("is NOT adopted when the caller cannot say the worker is alone", async () => {
+      const dir = await sessions();
+      const { named } = await resetPair(dir);
+      const found = await discoverSessionPath(dir, "tri-1");
+      expect(found.path).toBe(named);
+      expect(found.adopted).toBe(false);
+    });
+
+    /**
+     * The containment property, at the one place the new code could break it.
+     * Two seats in one run that both reset produce two unclaimed files and
+     * nothing in either name says which is which — so adoption is withheld and
+     * the matched path stands. A stale path is a bug; handing one seat another
+     * seat's transcript is a lie, and this is the direction it must fail.
+     */
+    test("is NOT adopted when the run holds a sibling", async () => {
+      const dir = await sessions();
+      const { named } = await resetPair(dir);
+      const found = await discoverSessionPath(dir, "tri-1", ["tri-1", "obs-t1"]);
+      expect(found.path).toBe(named);
+      expect(found.adopted).toBe(false);
+    });
+
+    /** A sibling's NAMED transcript is claimed, and is never a candidate. */
+    test("another worker's named session is not adoptable even when alone", async () => {
+      const dir = await sessions();
+      const mine = join(dir, "2026-09-09T02-51-28-676Z_tri-1.jsonl");
+      const theirs = join(dir, "2026-09-09T02-53-01-482Z_obs-t1.jsonl");
+      await writeFile(mine, "");
+      await writeFile(theirs, "");
+      await utimes(mine, new Date(1_000_000), new Date(1_000_000));
+      await utimes(theirs, new Date(2_000_000), new Date(2_000_000));
+      // `obs-t1` is not in the list, so by elimination it looks unclaimed — and
+      // it is still refused, because it carries a worker-id suffix of its own.
+      const found = await discoverSessionPath(dir, "tri-1", ["tri-1"]);
+      expect(found.path).toBe(mine);
+      expect(found.adopted).toBe(false);
+    });
+
+    /**
+     * The seat that has been reset TWICE — `2026-09-08T04-27-29Z-9a03` holds
+     * `obs-t1` plus two UUID sessions. The newest is the live one.
+     */
+    test("with two resets the newest adopted session wins", async () => {
+      const dir = await sessions();
+      const named = join(dir, "2026-09-08T04-27-29Z_obs-t1.jsonl");
+      const first = join(dir, "2026-09-08T04-30-00Z_01a07f48-68b3-74a2-b160-39cf6e3385f3.jsonl");
+      const second = join(dir, "2026-09-08T04-40-00Z_01a07f4e-59e6-7cc1-b6af-b79e43658fa1.jsonl");
+      for (const f of [named, first, second]) await writeFile(f, "");
+      await utimes(named, new Date(1_000_000), new Date(1_000_000));
+      await utimes(first, new Date(2_000_000), new Date(2_000_000));
+      await utimes(second, new Date(3_000_000), new Date(3_000_000));
+      const found = await discoverSessionPath(dir, "obs-t1", ["obs-t1"]);
+      expect(found.path).toBe(second);
+      expect(found.adopted).toBe(true);
+    });
+
+    /**
+     * ANTI: adoption must not fire before a reset has happened. A worker whose
+     * only transcript is its own named one keeps it and reports `adopted:
+     * false`, so the flag means what the event log will say it means.
+     */
+    test("the ordinary single-session case is a MATCH, not an adoption", async () => {
+      const dir = await sessions();
+      const named = join(dir, "2026-09-09T02-51-28-676Z_tri-1.jsonl");
+      await writeFile(named, "");
+      const found = await discoverSessionPath(dir, "tri-1", ["tri-1"]);
+      expect(found).toEqual({ path: named, matches: 1, adopted: false });
+    });
+  });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -692,13 +841,55 @@ describe("the supervisor branches on pane_mode", () => {
   });
 
   test("the turn is read from entries sliced at the epoch's baseline", () => {
+    // The slice is bound once and shared, rather than spelled at each reader:
+    // two readers of one epoch that computed their own window could drift to
+    // two different windows, and only one of them would be the epoch.
     expect(SUPERVISOR).toMatch(
-      /classifyTuiTurn\(tuiReader\.entries\.slice\(tuiBaselineCount\)\)/,
+      /const sinceDispatch = tuiReader\.entries\.slice\(tuiBaselineCount\);/,
     );
+    expect(SUPERVISOR).toMatch(/classifyTuiTurn\(sinceDispatch\)/);
     // Not the whole file. A tui session is long-lived and a person may have
     // driven turns through the pane before any dispatch; folding over
     // everything would settle epoch 1 on a turn that predates it.
     expect(SUPERVISOR).not.toMatch(/classifyTuiTurn\(tuiReader\.entries\)/);
+  });
+
+  /**
+   * ISC-1126, stated in the file it constrains.
+   *
+   * `tui-transcript-activity.test.ts` is the behavioural half and is what
+   * actually proves the wiring — it drives a real supervisor and reddens when
+   * the check is moved. It also takes 60 seconds to do it. This states the
+   * ordering property in the fast suite, on the same argument the
+   * transcript-activity shape test above makes for itself: a future reordering
+   * should be red before anyone waits a minute to find out.
+   *
+   * The ordering is the whole fix. A seat stuck in a tool loop is mid-tool-call
+   * on every poll, so `classifyTuiTurn` answers `in_flight` for ever and the
+   * `phase !== "ended"` return fires every time — anything below it is
+   * unreachable for this failure by construction.
+   */
+  test("the tool-loop check runs BEFORE the ended gate, not after it", () => {
+    const loop = /const transcriptPoll[\s\S]*?\}, TUI_POLL_MS\);/.exec(SUPERVISOR);
+    expect(loop, "the transcript poll could not be located").not.toBeNull();
+    const body = loop![0];
+
+    const check = body.indexOf("readToolLoop(sinceDispatch)");
+    const gate = body.indexOf('if (reading.phase !== "ended")');
+    expect(check, "the tool-loop check is not in the transcript poll").toBeGreaterThan(-1);
+    expect(gate, "the ended gate could not be located").toBeGreaterThan(-1);
+    expect(
+      check,
+      "the tool-loop check sits BELOW the `phase !== ended` early return, where a " +
+        "looping seat can never reach it — the detector is dead code there (ISC-1126)",
+    ).toBeLessThan(gate);
+  });
+
+  test("the loop detector reads the epoch's slice, not the whole transcript", () => {
+    // Folding the whole file would join the tail of a previous turn's repeats to
+    // the head of this one's and manufacture a streak neither had.
+    expect(SUPERVISOR).toMatch(/readToolLoop\(sinceDispatch\)/);
+    expect(SUPERVISOR).not.toMatch(/readToolLoop\(tuiReader\.entries\)/);
   });
 
   /**

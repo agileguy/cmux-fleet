@@ -136,6 +136,39 @@ export function effectiveToolGrant(
   return declared ?? PI_BUILTIN_TOOLS;
 }
 
+/**
+ * The builtins that can put a byte on disk.
+ *
+ * ISC-59's guard asked only about `bash`, on the reasoning that "a shell can
+ * write" — true, and true of the two tools whose entire purpose is writing.
+ * A role declaring `read_only: true` while holding `write` is the same
+ * violation stated more directly, and it went unreported for as long as the
+ * check named one member of the set instead of the set.
+ *
+ * This is what makes a withdrawn grant an INVARIANT rather than a value.
+ * `effectiveToolGrant` resolves an omitted `tools:` to every builtin, so
+ * deleting the line from a `read_only` role silently restores `write`, `edit`
+ * and `bash` at once — which is exactly how a narrowing gets reversed by an
+ * edit that looks like tidying. With `read_only: true` declared, that deletion
+ * is now a parse error naming the tools it would have handed back.
+ */
+/**
+ * EXPORTED for task 7.4's criterion, and the export is the point rather than a
+ * convenience. That criterion asserts an ABSENCE — "a bash-less role's resolved
+ * tools contain no writing verb but `submit_report`" — and an absence is only
+ * as good as the set it is asserted over. A test that wrote its own
+ * `["write", "edit"]` beside this one would keep passing on the day a fourth
+ * writer is added here, reporting a narrowing it no longer checks. One
+ * definition, two readers: the guard below refuses a document, and the
+ * criterion refuses a fleet composition.
+ */
+export const WRITE_CAPABLE_TOOLS = ["bash", "write", "edit"] as const;
+
+/** Which write-capable builtins a resolved grant holds, in a stable order. */
+export function writeCapableIn(tools: readonly ToolName[]): readonly ToolName[] {
+  return WRITE_CAPABLE_TOOLS.filter((t) => tools.includes(t));
+}
+
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 
@@ -899,7 +932,23 @@ export const ProviderSchema = z
      * a field-level refinement cannot see its sibling.
      */
     relay_upstream: shortStr.nullable().default(null),
-    /** Empty means "no allowlist", exactly as the flat key does. */
+    /**
+     * Empty means "no allowlist", exactly as the flat key does.
+     *
+     * An entry may be bare (`gpt-oss`) or provider-prefixed (`ollama/gpt-oss`),
+     * because `assertModelAllowed` decomposes each one with the same
+     * `decomposeModel` a `model:` goes through. Bare means THIS block's
+     * provider. **A prefix naming a DIFFERENT provider constrains nothing
+     * here** — the gate is over a (provider, model) pair, and an entry about
+     * another endpoint is a statement about a different pair, so it matches
+     * nothing rather than authorizing its bare model name. It did authorize it
+     * until 2026-09-08; see the filter in `assertModelAllowed`.
+     *
+     * The type stays `z.array(shortStr)` rather than growing a refinement that
+     * refuses a foreign prefix: a field-level refinement cannot see which
+     * provider block it is in, which is the same limit `relay_upstream`
+     * documents two fields above.
+     */
     models_allowlist: z.array(shortStr).max(64).default([]),
     /**
      * Each model's REAL context window, by model id. Absent means the worker
@@ -1188,6 +1237,12 @@ const LlmObject = z
     api_key_env: apiKeyEnvName("llm.api_key_env").default("OMLX_API_KEY"),
     model: z.string().min(1).max(256),
     thinking: ThinkingLevelSchema.optional(),
+    /**
+     * The flat spelling, with the same grammar the per-provider field
+     * documents: bare entries mean `llm.provider`'s models, a prefix naming
+     * that provider is the same statement written out, and a prefix naming
+     * another provider matches nothing.
+     */
     models_allowlist: z.array(shortStr).max(64).default([]),
     require_native_tool_calls: z.boolean().default(true),
     /**
@@ -1663,14 +1718,16 @@ export const FleetConfigSchema = z
     for (const [name, role] of Object.entries(cfg.roles)) {
       const readOnly = role.read_only ?? cfg.defaults.read_only ?? false;
       const tools = effectiveToolGrant(role.tools ?? defaultTools);
-      if (readOnly && tools.includes("bash")) {
+      const offending = writeCapableIn(tools);
+      if (readOnly && offending.length > 0) {
+        const named = offending.map((t) => `"${t}"`).join(", ");
         ctx.addIssue({
           code: "custom",
           path: ["roles", name, "tools"],
           message:
             (role.tools ?? defaultTools) === undefined
-              ? `role "${name}" is read_only: true with no explicit tools — Pi then grants every builtin, "bash" included; declare a tools list without "bash"`
-              : `role "${name}" is read_only: true but its tools include "bash" — a shell can write; drop one`,
+              ? `role "${name}" is read_only: true with no explicit tools — Pi then grants every builtin, ${named} among them; declare a tools list without them`
+              : `role "${name}" is read_only: true but its tools include ${named} — each of those can put a byte on disk; drop them or drop read_only`,
         });
       }
     }
@@ -1680,14 +1737,16 @@ export const FleetConfigSchema = z
       const readOnly = w.read_only ?? role.read_only ?? cfg.defaults.read_only ?? false;
       const declared = w.tools ?? role.tools ?? defaultTools;
       const tools = effectiveToolGrant(declared);
-      if (readOnly && tools.includes("bash")) {
+      const offending = writeCapableIn(tools);
+      if (readOnly && offending.length > 0) {
+        const named = offending.map((t) => `"${t}"`).join(", ");
         ctx.addIssue({
           code: "custom",
           path: ["workers", i, "tools"],
           message:
             declared === undefined
-              ? `worker "${w.id}" resolves to read_only: true with no explicit tools — Pi then grants every builtin, "bash" included; declare a tools list without "bash"`
-              : `worker "${w.id}" resolves to read_only: true with "bash" in its tools — a shell can write; drop one`,
+              ? `worker "${w.id}" resolves to read_only: true with no explicit tools — Pi then grants every builtin, ${named} among them; declare a tools list without them`
+              : `worker "${w.id}" resolves to read_only: true with ${named} in its tools — each of those can put a byte on disk; drop them or drop read_only`,
         });
       }
     });
@@ -1944,10 +2003,16 @@ export function observerTuiEpochWarning(workerIds: readonly string[]): string | 
  * the operator should DO about the line, and the two answers are opposite.
  * `fleet.yaml:542` gives the observer `read, write, bash, grep, find, ls`:
  * dropping `write` there removes a tool and not a capability, because
- * `cat > /outbox/...` is two seconds of shell (§6.8). `triage`, `collator` and
- * `reviewer` hold `[read, write, grep, find, ls]` with no `bash` anywhere
- * (`fleet.yaml:695`, `:726`, `:839`), and there `write` IS the capability —
- * it is the whole of what §6.3's layer 1 takes away. One sentence sent to both
+ * `cat > /outbox/...` is two seconds of shell (§6.8). `collator` and `triage`
+ * hold `[read, write, grep, find, ls]` with no `bash` anywhere
+ * (`fleet.yaml:726`, `:839`), and there `write` IS the capability — it is the
+ * whole of what §6.3's layer 1 takes away.
+ *
+ * `reviewer` WAS the third of those and is no longer, because §13 task 7.1
+ * withdrew its `write` — it is the first role Phase B narrowed, and this
+ * sentence is the one place in the source that named the set by hand and so is
+ * the one place a narrowing can leave stale. Whichever role 7.3 and 7.5 take
+ * next, this list shrinks again; nothing computes it, and nothing grades it. One sentence sent to both
  * seats is a sentence that asks a bash holder to act on something it cannot
  * change, which is how `observerTuiEpochWarning`'s own narrowing describes a
  * warning turning into noise and taking the rest of them with it.

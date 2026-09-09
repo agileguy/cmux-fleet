@@ -46,7 +46,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 import register, {
   artifactPathProblem,
@@ -176,6 +176,23 @@ function fixture(policy: string | null = `${TASK_ID}\n${EPOCH}\n`): Fixture {
     repliesPolicyPath,
     mounts,
   };
+}
+
+/**
+ * Create a file a fixture is about to DECLARE, and return its path.
+ *
+ * `submitReport` refuses an `artifacts` entry naming a file that is not there.
+ * Three tests in this file declared `patch.diff` and never wrote it, and passed
+ * for as long as nothing asked — which is the same shape as the loss that put
+ * the check in: `rev-lang-1` declared `files/review.md`, wrote nothing, and its
+ * envelope was accepted and collated with the review simply gone. None of the
+ * three meant to assert that a claim about a missing file is allowed; they meant
+ * to assert delivery, containment and log shape, and each still does.
+ */
+function declaredFile(path: string): string {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "--- a/x\n+++ b/x\n");
+  return path;
 }
 
 /**
@@ -790,7 +807,7 @@ describe("submitReport — the delivery", () => {
   test("an artifact inside the container workdir is delivered, not refused", () => {
     const f = fixture();
     const out = submitReport(
-      { ...minimal, artifacts: [{ kind: "diff", path: join(f.roots.workdir ?? "", "patch.diff") }] },
+      { ...minimal, artifacts: [{ kind: "diff", path: declaredFile(join(f.roots.workdir ?? "", "patch.diff")) }] },
       WORKER,
       f.roots,
     );
@@ -847,7 +864,7 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
    * A call carrying BOTH a valid `report` and an inadmissible artifact must
    * write neither. An implementation that wrote the report file first and
    * validated artifacts second would leave a file in `files/` that no envelope
-   * declares — which is `roles/reviewer.md:47-52`'s undeclared-artifact
+   * declares — which is `roles/reviewer.md:53-58`'s undeclared-artifact
    * discrepancy, produced by the very tool that exists to make it impossible.
    */
   test("a refused call carrying a valid report writes no report file either", () => {
@@ -864,6 +881,66 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
       ),
     ).toThrow(/outside/);
     expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The T-rv-155 loss, as a test.
+   *
+   * `rev-lang-1` submitted a review whose envelope declared `files/review.md`
+   * and whose outbox held `result.json` and no `files/` directory at all. The
+   * collator recorded the lens as `reported: true`, then had to note that the
+   * artifact "was not harvested", and eleven findings survived only as the one
+   * paragraph the envelope's summary happened to carry. Every check this tool
+   * ran had passed: the path is well shaped, inside the task outbox, under the
+   * cap. Shape was the only question anyone was asking.
+   */
+  test("an artifact naming a file that was never written", () => {
+    expectRefusal(
+      { ...minimal, artifacts: [{ kind: "file", path: "files/review.md" }] },
+      /does not exist/,
+    );
+  });
+
+  /** The same question on the OTHER branch `artifactPathProblem` admits. */
+  test("a missing artifact inside the container workdir is refused too", () => {
+    const f = fixture();
+    expect(() =>
+      submitReport(
+        { ...minimal, artifacts: [{ kind: "diff", path: join(f.roots.workdir ?? "", "gone.diff") }] },
+        WORKER,
+        f.roots,
+      ),
+    ).toThrow(/does not exist/);
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The exemption, pinned so it cannot be simplified away.
+   *
+   * Phase 1 reads before phase 2 writes, so the report file this very call is
+   * about to create does not exist when the artifact loop runs. A caller that
+   * passes `report` AND redundantly declares its file is making a claim that IS
+   * true by the time the envelope lands, and refusing it would punish a call
+   * that did everything right. The cheapest way to satisfy the two tests above
+   * is a blanket `existsSync` over every claim, and that breaks exactly here —
+   * which is why this one success assertion sits in a describe block full of
+   * refusals rather than beside the other delivery tests.
+   */
+  test("the report file this call is about to write is not refused as missing", () => {
+    const f = fixture();
+    const out = submitReport(
+      {
+        ...minimal,
+        report: { filename: "review.md", content: "# a review\n" },
+        artifacts: [{ kind: "file", path: "files/review.md" }],
+      },
+      WORKER,
+      f.roots,
+    );
+    expect(existsSync(out.path)).toBe(true);
+    expect(existsSync(join(f.taskDir, "files", "review.md"))).toBe(true);
     rmSync(f.dir, { recursive: true, force: true });
   });
 });
@@ -965,7 +1042,7 @@ describe("registration", () => {
     };
     const result = await tool!.execute(
       "call-1",
-      { ...minimal, artifacts: [{ kind: "diff", path: join(f.roots.workdir ?? "", "patch.diff") }] },
+      { ...minimal, artifacts: [{ kind: "diff", path: declaredFile(join(f.roots.workdir ?? "", "patch.diff")) }] },
       undefined,
       undefined,
       ctx,
@@ -1150,6 +1227,7 @@ describe("layer 4 — the pifleet.submit/v1 session entry", () => {
    */
   test("artifact_files carries the declared claims and the report the tool appended", async () => {
     const f = fixture();
+    declaredFile(join(f.taskDir, "files", "patch.diff"));
     const data = await deliverAndRead(f, {
       ...minimal,
       artifacts: [{ kind: "diff", path: "files/patch.diff" }],

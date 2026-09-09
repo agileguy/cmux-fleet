@@ -45,10 +45,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { WorkerLaunchSchema, type WorkerState } from "../../src/contracts.ts";
-import { runPaths, workerPaths, type WorkerPaths } from "../../src/run/paths.ts";
-import { readWorkerState } from "../../src/run/state.ts";
+import {
+  runPaths,
+  taskRecordPath,
+  workerPaths,
+  type RunPaths,
+  type WorkerPaths,
+} from "../../src/run/paths.ts";
+import { readTaskRecord, readWorkerState } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
-import { processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { TaskEnvelopeSchema } from "../../src/contracts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterAll(async () => {
@@ -93,6 +101,7 @@ function entry(n: number): string {
 
 interface Rig {
   wp: WorkerPaths;
+  run: RunPaths;
   sessionPath: string;
   pid: number;
   pgid: number;
@@ -153,6 +162,7 @@ async function bootTuiSupervisor(): Promise<Rig> {
 
   return {
     wp,
+    run,
     // The name `discoverSessionPath` matches on: `<ISO>_<worker>.jsonl`, flat.
     sessionPath: join(run.sessionsDir, `2026-09-01T06-00-09-284Z_${WORKER}.jsonl`),
     pid,
@@ -309,5 +319,387 @@ describe("a tui supervisor with no session file says so rather than staying sile
      * one waits twice and has no deliberate inter-write pause.
      */
     40_000,
+  );
+});
+
+/**
+ * The `/new` rename, driven through a real supervisor — SRD-WORKER-DISPATCH
+ * ISC-1112.
+ *
+ * `resetPaneSession` types `/new` at an idle `tui` pane so the next task starts
+ * on an empty session. Pi obeys, and names the new session after its OWN
+ * generated id — `--session-id` covers the first session only, and `/session`
+ * reports rather than sets. So the seat's transcript MOVES, to a filename
+ * `discoverSessionPath` was never going to match.
+ *
+ * **What that cost, measured on 2026-09-08/09 rather than reasoned about.**
+ * `tri-1` completed sweep 5 in its worker-named session, was reset, and
+ * completed sweep 6 in a UUID-named one. Every host surface went on reading the
+ * first file: `status` reported the seat frozen at the reset instant, the
+ * triage actor's join waited 780 s for a task record "under tri-1" and failed a
+ * pass the seat had in fact delivered, and the envelope landed carrying
+ * `"worker": "01a08415-…"`. Eight runs hold the same orphaned pair, one of them
+ * having skipped 28 consecutive ticks across 7.7 hours. The work ran and
+ * delivered through `submit_report` every time; only the attribution was lost.
+ *
+ * ## Why this is an integration test and not another unit assertion
+ *
+ * `supervisor-tui.test.ts` pins `discoverSessionPath` — that the search CAN
+ * adopt, and the two conditions under which it refuses. That is the half a pure
+ * function can answer. It cannot answer the half that actually bit: the
+ * supervisor called the search **once**, while `session_path` was null, and
+ * never looked again. A search that adopts perfectly, called once at start-up,
+ * reproduces the entire defect with every unit test green — so the criterion
+ * has to be "a running supervisor notices", and only a running supervisor can
+ * be asked.
+ *
+ * Needs no Docker, for the reason the ISC-492 block above gives: the rig's
+ * `docker` is a shell stub, so this runs in CI's ordinary integration step
+ * rather than behind the container gate.
+ */
+describe("a tui supervisor follows its seat through a /new (ISC-1112)", () => {
+  test(
+    "a Pi-generated session replaces the worker-named one mid-run",
+    async () => {
+      const rig = await bootTuiSupervisor();
+      expect(await processStartTime(rig.pid)).not.toBeNull();
+
+      // Phase 1: the ordinary life of a tui seat. The worker-named session
+      // appears and is found by NAME, which is the pre-existing behaviour and
+      // the baseline everything below is a change from.
+      await writeFile(rig.sessionPath, entry(1) + entry(2));
+      const before = await waitFor<WorkerState>(
+        () => readWorkerState(rig.wp),
+        (s) => (s.transcript_activity?.entries ?? 0) >= 2,
+        20_000,
+      );
+      expect(before, "the supervisor never found the worker-named session").not.toBeNull();
+      expect(before!.session_path).toBe(rig.sessionPath);
+      expect(before!.transcript_activity!.entries).toBe(2);
+
+      /*
+       * Phase 2: the reset. Pi's new session is a SEPARATE file with a
+       * generated id, and the old one simply stops growing — it is not deleted,
+       * which is exactly why the stale path went unnoticed for hours. The
+       * fixture reproduces that: the first file is left in place, intact.
+       *
+       * Three entries rather than a continuation of the first file's two,
+       * because the count is what proves WHICH file is being read. A supervisor
+       * still on the old path reports 2 for ever; one that followed reports 3,
+       * and no arithmetic on the old file produces 3.
+       */
+      const renamed = join(
+        rig.wp.dir,
+        "..",
+        "..",
+        "sessions",
+        "2026-09-01T06-05-00-000Z_01a08415-44aa-7645-b3d1-e1ab590e5126.jsonl",
+      );
+      await writeFile(renamed, entry(1) + entry(2) + entry(3));
+
+      const after = await waitFor<WorkerState>(
+        () => readWorkerState(rig.wp),
+        (s) => s.session_path !== null && s.session_path.includes("01a08415"),
+        30_000,
+      );
+      expect(
+        after,
+        "the supervisor never adopted the renamed session — it is still reading the file " +
+          "the seat stopped writing to, which is the defect this closes",
+      ).not.toBeNull();
+
+      // The path moved…
+      expect(after!.session_path).toBe(renamed);
+      expect(after!.session_path).not.toBe(rig.sessionPath);
+
+      // …and the READING moved with it, which is the half that matters. A
+      // recorded path nothing polls is a cosmetic fix.
+      const read = await waitFor<WorkerState>(
+        () => readWorkerState(rig.wp),
+        (s) => (s.transcript_activity?.entries ?? 0) >= 3,
+        20_000,
+      );
+      expect(read, "the path was adopted but its entries were never counted").not.toBeNull();
+      expect(read!.transcript_activity!.entries).toBe(3);
+
+      // Still an attended seat with no epoch. Asserted because a fix that made
+      // this worker look busy would satisfy everything above and break `wait`,
+      // `report` and the ledger, all of which route on `phase`.
+      expect(read!.phase).toBe("idle");
+      expect(read!.epoch).toBe(0);
+    },
+    /**
+     * A hand-picked literal under the same standing ISC-274 exception the block
+     * above takes, and for the same reason.
+     *
+     * This test spawns twice — the supervisor, and the `ps` behind
+     * `processStartTime` — so `cliBudget(2)` would apply. **That value does not
+     * govern here.** Nearly all of the duration is three `waitFor` windows
+     * totalling 70_000 ms, and they are that wide because the supervisor polls
+     * at `TUI_POLL_MS` while only re-running the session search every
+     * `SESSION_REDISCOVER_MS` — so the adoption is up to five seconds behind
+     * the write on an idle machine and further behind on a loaded one. A
+     * ceiling derived from spawn count could land BELOW those windows, and bun
+     * would then kill the test while it is still legitimately waiting, naming
+     * the timeout instead of the session path that never moved. 90_000 is the
+     * three windows plus room for a cold supervisor start.
+     */
+    90_000,
+  );
+});
+
+/**
+ * ISC-1117 — the baseline is an INDEX, and adoption moves the file under it.
+ *
+ * ISC-1112 taught the supervisor to follow a seat through the `/new` its own
+ * settle types. It did not teach `tuiBaselineCount` to follow, and that count is
+ * an offset into whichever transcript was current when the epoch went live. Move
+ * the file and the offset addresses the wrong place; make the new file shorter
+ * than the offset and it addresses nothing at all — `classifyTuiTurn` reads an
+ * empty window, answers `awaiting_start` for ever, and the epoch runs to its
+ * deadline while the finished turn sits on disk.
+ *
+ * Measured on run `2026-09-09T05-21-27Z-6767`, both directions in one file:
+ * sweep 11 took `entries_before: 10` against an eleven-entry transcript, was
+ * pointed at a four-entry one seven seconds later, and burned 25 minutes to
+ * `deadline_exceeded`; sweep 12 took its baseline against the file it then read
+ * and settled in 22 seconds. The turns were indistinguishable.
+ *
+ * **The deadline is the thing NOT being waited for here.** A test that waited
+ * out a real `deadline_exceeded` would take longer than the suite allows and
+ * would prove the timeout works rather than that the re-base does. What is
+ * asserted instead is the positive: the epoch reaches a terminal verdict from a
+ * turn written entirely into the SECOND transcript. Under the defect no record
+ * appears at all within the budget, which is the failure this reddens on.
+ */
+describe("a baseline re-bases when the transcript moves under it (ISC-1117)", () => {
+  /** A terminating assistant entry — `stopReason: "stop"` ends the turn. */
+  function endsTurn(n: number): string {
+    return `${JSON.stringify({
+      type: "message",
+      id: `x${n}`,
+      parentId: `x${n - 1}`,
+      message: { role: "assistant", content: "done", stopReason: "stop" },
+    })}\n`;
+  }
+  function turnEntry(n: number, role: string): string {
+    return `${JSON.stringify({
+      type: "message",
+      id: `x${n}`,
+      parentId: n === 1 ? null : `x${n - 1}`,
+      message: { role, content: `t${n}` },
+    })}\n`;
+  }
+
+  test(
+    "a turn written wholly into the adopted session still settles",
+    async () => {
+      const rig = await bootTuiSupervisor();
+
+      /*
+       * A LONG first transcript, and the length is the point: it is what makes
+       * the stale index out-of-range on the short file that replaces it, which
+       * is the shape that reads NOTHING rather than merely reading the wrong
+       * offset. Eight entries against the three the second file opens with.
+       */
+      let first = "";
+      for (let n = 1; n <= 8; n++) first += entry(n);
+      await writeFile(rig.sessionPath, first);
+      const found = await waitFor(
+        () => readWorkerState(rig.wp),
+        (s: WorkerState) => s.session_path === rig.sessionPath,
+        30_000,
+      );
+      expect(found?.session_path, "the first session was never discovered").toBe(rig.sessionPath);
+
+      // Stage an epoch. The baseline is taken on the poll after this, against
+      // the EIGHT-entry file above — exactly as sweep 11's was.
+      const reply = await controlCall(rig.run, WORKER, {
+        cmd: "stage",
+        envelope: TaskEnvelopeSchema.parse({
+          schema: "pifleet.task/v1",
+          task_id: "T-REBASE",
+          run_id: RUN_ID,
+          epoch: 0,
+          attempt: 1,
+          worker: WORKER,
+          dispatched_at: new Date().toISOString(),
+          title: "rebase",
+          brief: "do the thing",
+          repo: "unset",
+          host_workdir: "unset",
+          container_workdir: "/workspace",
+          branch: `fleet/${RUN_ID}/${WORKER}`,
+          base_ref: "0".repeat(40),
+          outbox: "/outbox/T-REBASE",
+          // Long enough that a `timed_out` cannot be what makes this pass: the
+          // record this test waits for has to come from the turn being READ.
+          deadline_s: 900,
+        }),
+        attempt_id: "att-rebase",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"], "the stage was refused").toBe(true);
+
+      // Let the baseline land on the first file before the switch, so this
+      // reproduces the ordering rather than dodging it.
+      await new Promise((r) => setTimeout(r, 1_500));
+
+      /*
+       * The `/new`: a Pi-generated session id, which is the only shape
+       * `discoverSessionPath` will adopt (ISC-1112), carrying the WHOLE turn.
+       */
+      const adopted = join(
+        rig.run.sessionsDir,
+        "2026-09-01T06-30-00-000Z_01a08467-0ebe-711a-9a53-e1ab590e5126.jsonl",
+      );
+      await writeFile(adopted, turnEntry(1, "user") + turnEntry(2, "assistant") + endsTurn(3));
+
+      const record = await waitFor(
+        () => readTaskRecord(taskRecordPath(rig.wp, "T-REBASE")),
+        () => true,
+        60_000,
+      );
+      expect(
+        record,
+        "no task record — the epoch never read the turn in the session it had moved to",
+      ).not.toBeNull();
+      // The verdict comes from `stopReason: "stop"`, so it is evidence the
+      // classifier ran over the NEW file's entries and not merely that some
+      // terminal state was reached.
+      expect(record?.reason).toBe("transcript_quiesced");
+      expect(record?.verdict).toBe("success");
+    },
+    // One gate at 30 s, a 1.5 s settle for the baseline, one at 60 s, plus the
+    // supervisor launch. No CLI subprocess and no container: compared against
+    // cliBudget(2) and taken as the larger of the two.
+    Math.max(cliBudget(2), 120_000),
+  );
+});
+
+/**
+ * ISC-1126 — a seat stuck in a tool loop settles as a LOOP, not as a deadline.
+ *
+ * ## Why this test exists at this layer and not in the unit suite
+ *
+ * `test/unit/tool-loop.test.ts` grades the fold thoroughly and would stay
+ * entirely green with the supervisor's call to it deleted — which is the exact
+ * way a complete, well-argued, five-green-tests module has shipped unreached in
+ * this repo before. So the wiring is graded here, by driving a real supervisor
+ * and reading the real task record it writes.
+ *
+ * ## The placement this reddens on, which is the whole defect
+ *
+ * A looping seat's last assistant message is mid-tool-call on every poll, so
+ * `classifyTuiTurn` answers `in_flight` for ever and the settle chain's opening
+ * `if (reading.phase !== "ended") return` fires every time. **A detector wired
+ * anywhere below that line is unreachable.** The fixture below is exactly that
+ * shape — it never ends a turn — so under any such placement no task record
+ * appears at all and this goes red on the `waitFor` rather than on a value.
+ *
+ * The deadline is 900 s and is deliberately NOT what is being waited for: a
+ * `timed_out` cannot be what makes this pass, so the record arriving inside the
+ * budget is evidence the loop itself settled the epoch. That is the same
+ * construction ISC-1117's test uses, for the same reason.
+ *
+ * Measured origin: `T-sweep-15-slice1` ran one `kubectl … | grep alert-processor`
+ * 111 times consecutively and `T-sweep-18-slice1` ran one 108 times, every call
+ * succeeding, both settling on the 480 s child deadline with no artifact.
+ */
+describe("a tui seat stuck in a tool loop is diagnosed as one (ISC-1126)", () => {
+  /**
+   * One assistant entry calling the same command, left mid-tool-call.
+   *
+   * `stopReason: "toolUse"` is what makes this transcript permanently
+   * `in_flight`, which is both the real shape and the thing that makes the
+   * placement of the check load-bearing.
+   */
+  function loopCall(n: number, command: string): string {
+    return `${JSON.stringify({
+      type: "message",
+      id: `L${n}`,
+      parentId: n === 1 ? null : `L${n - 1}`,
+      message: {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [{ type: "toolCall", id: `call_${n}`, name: "bash", arguments: { command } }],
+      },
+    })}\n`;
+  }
+
+  test(
+    "an epoch whose seat repeats one call settles failed:transcript_tool_loop",
+    async () => {
+      const rig = await bootTuiSupervisor();
+
+      await writeFile(rig.sessionPath, entry(1) + entry(2));
+      const found = await waitFor(
+        () => readWorkerState(rig.wp),
+        (s: WorkerState) => s.session_path === rig.sessionPath,
+        30_000,
+      );
+      expect(found?.session_path, "the session was never discovered").toBe(rig.sessionPath);
+
+      const reply = await controlCall(rig.run, WORKER, {
+        cmd: "stage",
+        envelope: TaskEnvelopeSchema.parse({
+          schema: "pifleet.task/v1",
+          task_id: "T-LOOP",
+          run_id: RUN_ID,
+          epoch: 0,
+          attempt: 1,
+          worker: WORKER,
+          dispatched_at: new Date().toISOString(),
+          title: "loop",
+          brief: "identify the workload yourself",
+          repo: "unset",
+          host_workdir: "unset",
+          container_workdir: "/workspace",
+          branch: `fleet/${RUN_ID}/${WORKER}`,
+          base_ref: "0".repeat(40),
+          outbox: "/outbox/T-LOOP",
+          // Fifteen minutes. A `timed_out` verdict cannot be what makes this
+          // pass, so a record inside the budget came from the loop check.
+          deadline_s: 900,
+        }),
+        attempt_id: "att-loop",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"], "the stage was refused").toBe(true);
+
+      // Let the baseline land on the two-entry file before the loop is written,
+      // so every repeated call below is inside the epoch's own slice.
+      await new Promise((r) => setTimeout(r, 1_500));
+
+      /*
+       * Comfortably over `TOOL_LOOP_THRESHOLD` and far under what the real
+       * seats produced. Written in one append because the detector reads a
+       * fold, not a rate — and one write is one poll's worth of growth, which
+       * is the harder case for a check that must not need several polls to
+       * accumulate.
+       */
+      let loop = "";
+      for (let n = 1; n <= 30; n++) {
+        loop += loopCall(n, "kubectl get pods -n aodapnc-alerts-notifier-dev | grep alert-processor");
+      }
+      await appendFile(rig.sessionPath, loop);
+
+      const record = await waitFor(
+        () => readTaskRecord(taskRecordPath(rig.wp, "T-LOOP")),
+        () => true,
+        60_000,
+      );
+      expect(
+        record,
+        "no task record — the epoch is still in flight, which is what a detector " +
+          "wired BELOW the `phase !== ended` early return produces: the looping seat " +
+          "never reaches it, and the run burns its whole deadline (ISC-1126)",
+      ).not.toBeNull();
+      expect(record?.reason).toBe("transcript_tool_loop");
+      expect(record?.verdict).toBe("failed");
+    },
+    // One 30 s gate, a 1.5 s baseline settle, one 60 s gate, plus a cold
+    // supervisor start. No CLI subprocess and no container.
+    Math.max(cliBudget(2), 120_000),
   );
 });

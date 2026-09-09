@@ -200,7 +200,7 @@ whether or not this extension is ever built.
 | **C** | **The supervisor never opens an outbox before settling, and its one substantive success-downgrade is unreachable for exactly the roles that matter.** `src/supervisor/index.ts:1261-1263` is the RPC quiesce chain's `else`: `verdict = "success"; reason = "quiesced";`. The TUI path is the same shape at `:2299-2325` with `transcript_quiesced`. The ISC-299 downgrade (`:1035-1053`) requires `treeHash !== null && settledBaseline !== null`, and a `workspace: none` role has no worktree — it logs `quiesce_sample_skipped` (`:1105-1110`) and yields `treeHash = null`. **Observer, triage, collator, reviewer, verifier and ticketing are therefore all outside it by construction**, and they are the six roles whose entire deliverable is a written file. The other guard, the prose detector (`prose-detector.ts:97`, `NO_TOOL_CALLS_REASON`), asks whether tools were called — and `roles/observer.md:42-46` records an observer that made **150 `kubectl` calls** and wrote nothing. | Yes | §2.5, §6.3 |
 | **D** | **Dispatch state already exists as a host-written, worker-unwritable file, and its docblock is this design's argument in advance.** `/policy/task` (`src/run/task-policy.ts:47`) is two lines — task id, epoch — rewritten by the supervisor at every dispatch with the chmod-truncate-chmod recipe (`:73-79`, `:33-41`). Its header (`:11-28`) rejects `PIFLEET_TASK_ID` on two grounds that apply verbatim to a prompt-recited task id: *"It is fixed at launch and the value is not"* and *"The worker controls it… a process that can `export PIFLEET_TASK_ID` can forge the provenance on its own audit rows."* **A task id parsed out of the model's own prompt is worse than an env var on the second ground**, because the model is the thing being audited. §6.4 reads the file instead. Verified live: `/policy/task` in `…-4b57-tri-1` is 9 bytes, mode `0444`, owner `pi` — `<none>\n0\n`, an idle worker. | Yes | §2.4, §6.4 |
 | **E** | **`/replies` accumulates across sweeps, so a tool that enumerates it is a freshness bug.** `workerRepliesDir(run.root, worker)` (`src/run/paths.ts:490-492`) is one directory per worker per **run**, and the triage console is one long-lived run publishing `<childTaskId>.json` per sweep (`triage-envelope.ts:1115-1124`). Sweep 5's collator would see sweeps 1-5. This is why `get_replies` cannot be `readdir` — and why `src/run/replies.ts:24-30`'s existing refusal of *"a `/replies` the collator enumerates"* is right for a second reason its author did not need: *"A listing hands the worker a directory to walk and re-introduces exactly the discoverability the outbox contract denies in the other direction."* | Yes | §2.4, §6.2, §7.4 |
-| **F** | **The obligation prose is ~40-70% of every role file, and it is the half written in capitals.** `roles/triage.md` is 573 lines of which roughly 70% is mechanics — the `triage.json` field-rule block alone is `:325-457`. `roles/reviewer.md` spends 62 of 162 lines (38%) on the envelope, across four consecutive sections. `roles/observer.md` gives `:10-64` and `:138-147` to *where and when to write* against `:66-136` for *what to look at*. The sentence *"An envelope you never wrote does not fail your task; it removes you from the grading"* appears in six files in six paraphrases (`skills/pifleet-worker/SKILL.md:170-171`, `roles/observer.md:145-147`, `roles/tester.md:19-21`, `roles/verifier.md:16-17`, `roles/reviewer.md:130-131`, `roles/collator.md:422-423`). **Every one of those paragraphs exists because the mechanism it describes failed once.** | Yes | §2.6, §8 |
+| **F** | **The obligation prose is ~40-70% of every role file, and it is the half written in capitals.** `roles/triage.md` is 573 lines of which roughly 70% is mechanics — the `triage.json` field-rule block alone is `:325-457`. `roles/reviewer.md` spends 62 of 168 lines (38%) on the envelope, across four consecutive sections. `roles/observer.md` gives `:10-64` and `:138-147` to *where and when to write* against `:66-136` for *what to look at*. The sentence *"An envelope you never wrote does not fail your task; it removes you from the grading"* appears in six files in six paraphrases (`skills/pifleet-worker/SKILL.md:170-171`, `roles/observer.md:145-147`, `roles/tester.md:19-21`, `roles/verifier.md:16-17`, `roles/reviewer.md:136-137`, `roles/collator.md:422-423`). **Every one of those paragraphs exists because the mechanism it describes failed once.** | Yes | §2.6, §8 |
 | **G** | **`SweepJoin.claimedSuccess` is a typed field no consumer reads.** Added this session (`efaf63a`), declared at `src/run/triage-pass.ts:254`, populated at `src/run/triage-envelope.ts:1142`, and its whole effect is a `console.error` at `:1143-1149`. `completeSweep` (`triage-pass.ts:942-1022`) reads `join.artifacts.length` and `join.blocked.length` and nothing else. An exhaustive grep finds it in two source files and three test files and nowhere in the incident machine, the verdict mapping or the notifier. **The commission calls it "a diagnosis, not a prevention" and that is exactly right — it is currently a diagnosis printed to a stream.** | Yes | §1.3, §12 |
 | **H** | **`roles/observer.md` asserts a host-side clamp that does not exist for it.** `:140-141` and `skills/observer-ops/SKILL.md:28-32` both claim a run producing only the `.md` half *"clamps to `failed`"*. `grep -rn "observer" src/harvest/` returns zero. The clamp that exists is `ticket-ops`': `TICKET_OPS_ARTIFACT_NAME` (`src/harvest/reconcile.ts:175`), the orphaned-document scan (`:745-765`), the ceiling (`:202-204`). **This is a role prompt describing a mechanism that is not there** — the same class of defect the commission warns about in this document's own commission, found in the file this design is meant to shrink. Recorded here because it is a live bug independent of this SRD, and because it is the strongest single argument for §8: prose that asserts mechanics drifts from the mechanics. | Yes | §2.6, §8, §11 Q7 |
 
@@ -753,7 +753,7 @@ parameters: Type.Object({
 envelope by adding `schema`, `task_id`, `epoch` and `worker` **from host-written state, never from
 parameters**; writes `/outbox/<task-id>/result.json` atomically; and, when `report` is present,
 writes `/outbox/<task-id>/files/<filename>` first and appends a matching entry to `artifacts` so the
-declare-what-you-wrote rule (`roles/reviewer.md:47-52`) cannot be forgotten. Returns
+declare-what-you-wrote rule (`roles/reviewer.md:53-58`) cannot be forgotten. Returns
 `{ content: [{ type: "text", text: "Report delivered: <n> bytes at <path>." }], details: { path, bytes, status }, terminate: true }`
 and calls `pi.appendEntry("pifleet.submit/v1", …)` with **§7.1's eight fields** — the five above
 plus `schema`, `worker` and `artifact_files`.
@@ -1071,7 +1071,7 @@ design attacks with its three weakest layers.**
 **Two consequences of the removals that must be checked rather than assumed.** First, a reviewer
 without `write` cannot produce `review.md` by hand — hence `submit_report`'s `report` parameter
 (§6.2.1), which writes the long document and declares it in one call, absorbing the whole of
-`roles/reviewer.md:39-138`. Second, an `edit` grant becomes meaningless for those roles, which is
+`roles/reviewer.md:45-144`. Second, an `edit` grant becomes meaningless for those roles, which is
 already true and already argued at `fleet.yaml:682-686`.
 
 ### 6.9 The other two consoles, and `development`
@@ -1225,7 +1225,7 @@ drifted from the mechanism they describe.
 | File | Comes out | Stays |
 |---|---|---|
 | `skills/pifleet-worker/SKILL.md` | `:152-157` (the one-line/escaping rule — a tool takes structured arguments), `:203-215` (the epoch paragraph — §6.4), the pretty-printed example at `:179-198`, and most of `:200-224`'s field rules | `:131-142` (**"Your report is a claim, not a verdict"** — this is judgement and is the most load-bearing paragraph in the bundle), `:170-177` (why silence costs you the grading), `:228-236` (which status *means* what — the enum constrains the spelling, not the choice) |
-| `roles/reviewer.md` | `:39-138` — all four sections, ~62 lines. The `report` parameter absorbs them | `:9-38`, `:139-162` — what a review is for |
+| `roles/reviewer.md` | `:45-144` — all four sections, ~62 lines. The `report` parameter absorbs them | `:15-44`, `:145-168` — what a review is for |
 | `roles/observer.md` | `:138-142` (filenames and directory), most of `:26-34` (the tool-permission disambiguation, which exists because `write`'s role was ambiguous) | `:39-58` — **the write-before-you-run-out-of-turn budget stays**, because it is a *judgement about pacing* that no schema expresses, and because §6.8 says layer 1 does not reach this role |
 | `roles/triage.md` | `:325-457` — the 133-line `triage.json` field-rule block, the largest single mechanics block in the repository. `:282-291` (reply paths). `:246-257` (envelope mechanics) | `:66-87`, `:293-323`, `:459-533` — what to do with what you read, and the notification boundary |
 | `roles/collator.md` | `:170-254` (reply reading), `:255-346` (the `collation.json` schema) | `:9-26`, `:35-108`, `:392-421` |
@@ -1390,7 +1390,7 @@ unrepresentable. §6.9.
 | **Q5** | **Can models find the task id in the brief reliably enough that `get_task` stays refused?** D5's third ground | Read `pifleet.submit/v1` entries after a week and compare `task_id` against `/policy/task` — they cannot disagree by construction, so the real probe is whether models *ask* for it, visible as `read /policy/task` calls in transcripts | **Nothing.** It reopens D5 or confirms it |
 | **Q6** | **Should `/policy/replies` be one file or should the replies be inlined into it?** Inlining would make `get_replies` a single read and remove `/replies` from the worker's path vocabulary entirely — but reply payloads are capped at 256 KiB (`src/run/relay.ts:270`) and a policy file that large is a different object from the 9-byte `/policy/task` | Measure a real collation's total reply bytes across a day of sweeps. **Not blocking** — §7.4's shape works either way, and the tool's signature does not change | **Nothing.** It is an implementation shape |
 | **Q7** | **`roles/observer.md:140-141` asserts a `.md`-only clamp that `src/harvest/` does not implement for `observer` (Finding H). Should the clamp be built, or the sentence deleted?** They are different products: a clamp makes a half-written artifact pair `failed`; deleting the sentence makes it `success` with a missing file | **Not this document's to take** — it is SRD-OBSERVER-001's. Recorded here because it was found while reading for §8, because it is live today, and because it is the exact failure mode this document exists to argue against: prose asserting a mechanism the code does not have | **Nothing here.** §8's row for `roles/observer.md` does not touch `:140-141` either way |
-| **Q8** | **Does the `report` parameter's `content` field hit a provider-side argument-size limit?** `skills/pifleet-worker/SKILL.md:152-157` records a measured failure — *"Past a certain length that write fails with `arguments must be valid JSON, got parse error`"* — for the `write` tool. **A tool call is a tool call**, so `report.content` carrying an 8709-byte review (`roles/reviewer.md:120-126`'s measured case) may hit the same wall | Call `submit_report` with a 4 KB, 16 KB and 64 KB `report.content` against each model. **Must be run before Phase B narrows `reviewer`**, because a reviewer without `write` and with a size-capped tool has no route at all | **§8.1 Phase B for `reviewer`.** If it fails, `report` needs chunking or `reviewer` keeps `write` |
+| **Q8** | **Does the `report` parameter's `content` field hit a provider-side argument-size limit?** `skills/pifleet-worker/SKILL.md:152-157` records a measured failure — *"Past a certain length that write fails with `arguments must be valid JSON, got parse error`"* — for the `write` tool. **A tool call is a tool call**, so `report.content` carrying an 8709-byte review (`roles/reviewer.md:126-132`'s measured case) may hit the same wall | Call `submit_report` with a 4 KB, 16 KB and 64 KB `report.content` against each model. **Must be run before Phase B narrows `reviewer`**, because a reviewer without `write` and with a size-capped tool has no route at all | **§8.1 Phase B for `reviewer`.** If it fails, `report` needs chunking or `reviewer` keeps `write` |
 | **Q9** | **Should `truncation-recovery.ts` and this extension share a file after all?** They are separate today for good reasons (§6.1), but both now sit in the tool path and a `tool_result` middleware that rewrites a `submit_report` result is a real interaction nobody has thought about | Read `truncation-recovery.ts`'s handler against a `submit_report` result shape. **Cheap, and it should be done in Phase 2 rather than deferred** | **Nothing.** It is a correctness check, not a design fork |
 
 ### MEASURED — Phase 0, 2026-09-08
@@ -1474,10 +1474,50 @@ untruncated on the way in: deepseek quoted the 16 KB tail (`...3f0.`) and the 64
    against an oMLX endpoint measured healthy and answering a fresh completion in 0.81s throughout.
 
 **What this decides.** Phase 7 for `reviewer` is CLEARED at the size that matters:
-`roles/reviewer.md:120-126`'s measured 8709-byte review is inside the 16 KB that all three reviewer
+`roles/reviewer.md:126-132`'s measured 8709-byte review is inside the 16 KB that all three reviewer
 models passed byte-exact, with margin. **Phase 7 for `triage` and `observer` is NOT cleared**, because
 their model truncates silently above 4 KB — those roles need either a chunked `report` or a size the
 role brief actually bounds.
+
+**Q8 follow-up — a census of what these roles ACTUALLY report, 2026-09-08.** The block above measures
+what the WIRE carries. It does not say what any role needs it to carry, and "NOT cleared" above rests
+on a limit with no demand next to it. So every envelope this fleet has ever harvested was measured:
+all 283 `result.json` files under `~/.pifleet/runs/*/outbox/<worker>/<task>/`, summing every string
+byte in each envelope — the payload a `submit_report` call would have had to carry to deliver that
+same report.
+
+| Role | Worker(s) | n | p50 | **max** | 4 KB floor | 16 KB ceiling |
+|---|---|---|---|---|---|---|
+| `triage` (collating seat) | `tri-1` | 95 | 142 | **519** | 7.9× under | — |
+| `triage` (observer seats) | `obs-t1`, `obs-t3` | 24 | 296 | **1 472** | 2.8× under | — |
+| `collator` | `col-1` | 41 | 480 | **964** | 4.2× under | — |
+| `reviewer` | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | 56 | 1 539 | **13 965** | — | 1.17× under |
+| `observer` | `obs-1` | **1** | 2 255 | **2 255** | 1.8× under | — |
+
+**This census is plane-independent, and that is why it is quoted here.** It reads envelopes the
+harvester already wrote; it says nothing about `rpc` versus `tui` because the size of a report does
+not depend on how the report was delivered. The Q8 probe above IS plane-bound — it was run through
+`report` on the `rpc` path — and the two are only usable together: the probe gives the ceiling, this
+gives the demand.
+
+**What it changes.**
+
+- **7.3 (`triage`) is CLEARED**, on 119 real envelopes across the three seats that have produced any. The largest report this
+  console has ever produced is 1 472 bytes, a factor of 2.8 inside the size at which its model was
+  measured to truncate silently. This is the *"a size the role brief actually bounds"* arm above —
+  with the correction that the brief does not currently bound anything, the OBSERVED size does, and
+  an observed maximum is not a bound. 7.3 therefore carries a probe asserting the bound rather than
+  resting on this table.
+- **7.5 (`observer`) stays BLOCKED, and for a different reason than the one above.** Not because
+  2 255 bytes is close to 4 096, but because **n = 1**. One envelope is an anecdote. `observer`'s work
+  is ad-hoc cloud inquiry whose output is bounded by the size of whatever log excerpt the question
+  drags in, which is the one shape in this fleet with no natural ceiling — so it is exactly the role
+  whose maximum cannot be inferred from its median. It needs its own sample before its `write` comes
+  out.
+- **`reviewer`'s margin is thinner than §11 states.** The paragraph above cites
+  `roles/reviewer.md:126-132`'s 8 709 bytes as the size that matters. The real maximum across 56
+  reviewer envelopes is **13 965** — still inside 16 384, but by 15% rather than by half. The
+  decision does not change; the margin quoted for it should.
 
 **Failure mode 9.4 is confirmed and its detection column is wrong.** 9.4 is *"a worker needs to write
 and cannot"*, detected as *"the model narrates the problem and settles"* — and a size-capped tool is
@@ -1911,13 +1951,48 @@ where `get_replies` first meets a model.
 **One role per commit, one console cycle between commits, bash-less roles only.**
 
 - **7.1** `reviewer`: remove `write`. **Gated on Q8** (failure mode 9.4). Touches: `fleet.yaml`
-  (operator), `fleet.example.yaml`.
+  (operator), `fleet.example.yaml`, and — after the first cycle measured why — `roles/reviewer.md:1-11`.
   *Acceptance: one full review console run producing three lens reports through `report`.*
-- **7.2** `collator`: remove `write`. Touches: same. *Acceptance: one collation.*
-- **7.3** `triage`: remove `write`. Touches: same. *Acceptance: **three consecutive sweeps**, because
-  this console runs unattended and one is not evidence.*
+
+  **First cycle: 2 of 3, and the missing third is the phase order's own cost (T-rv-152, 2026-09-08).**
+  The grant change landed alone, exactly as §8.1's prose-last order intends, so `roles/reviewer.md`
+  still opened *"You have read, write, grep, find, ls and submit_report"*. `rev-arch-1` and
+  `rev-lang-1` read the config, found no `write`, and delivered 2 091 and 5 691 bytes through
+  `submit_report`. **`rev-ctx-1` believed the briefing**: it composed its entire review into a
+  13 933-byte `write` call, received `Tool write not found`, and every turn after that ended
+  `stopReason: error` — three retries of *"Stream ended without finish_reason"*, then nothing. Layer 3
+  nagged and it could not answer; layer 4 recorded `pifleet.no_submit/v1` with
+  `tool_calls: 11, nagged: true`. The console collated two lenses and named the third as a gap.
+
+  Two things this settles. **The diagnostic layers work** — the gap was recorded, attributed and
+  reported rather than settling green, which is §6.3's whole purpose and the first time all four
+  layers have been exercised by a real failure. And **§8.1's prose-last argument was right about the
+  wrong sentences.** Its property — *"restoring `write` to one `tools:` line would restore a coherent
+  worker"* — is real, but it was bought at one lens in three for the length of Phase B, and the
+  transcript shows the model reasoning correctly from a false premise rather than misbehaving. The
+  sentence that states the grant therefore moves with the grant; §8.1's mechanics still do not.
+  (Honest limit: the stream errors began immediately after the refused call and every turn before it
+  succeeded, but that correlation does not establish that the refusal caused them. The finding does
+  not rest on it — composing a review into a tool the role does not hold is a wasted epoch either
+  way.)
+- **7.2** `collator`: remove `write`. **Touches: `fleet.yaml` (operator) ONLY — there is no
+  `collator` in `fleet.example.yaml`.** The example's `roles:` block is
+  `sre observer verifier engineer reviewer tester ticketing triage`; the role exists solely in the
+  operator's gitignored file, so this task produces NO TRACKED DIFF and is not dispatchable, on
+  ISC-93's reasoning and for the same mechanical reason as 6.1. It is an operator edit whose only
+  evidence is the live cycle. *Acceptance: one collation.*
+- **7.3** `triage`: remove `write`. **Gated on Q8, and the gate is now CLEARED** — §11's census
+  measured 119 harvested envelopes from this console at a maximum of 1 472 bytes, 2.8× inside the
+  4 KB at which its model truncates silently. Touches: `fleet.yaml` (operator), `fleet.example.yaml`.
+  *Acceptance: **three consecutive sweeps**, because this console runs unattended and one is not
+  evidence — plus a probe asserting the size bound, because what the census establishes is an
+  OBSERVED maximum and the clearance above is only sound if something keeps it true.*
 - **7.4** The resolved-tools criterion for all three. Touches: `test/unit/config.test.ts`, `ISA.md`.
-- **7.5** `observer`: remove `write`, keep `bash`. Touches: same.
+- **7.5** `observer`: remove `write`, keep `bash`. **BLOCKED, and not on the size limit** —
+  §11's census found exactly ONE harvested `observer` envelope, which is an anecdote rather than a
+  distribution, and this is the one role whose output is bounded by whatever log excerpt the question
+  drags in. It needs its own sample before its `write` comes out. Touches: `fleet.yaml` (operator),
+  `fleet.example.yaml`.
   *Acceptance: three sweeps. **§6.8 is explicit that this is not layer 1** — it is proposed for the
   smaller reason and must be judged against `roles/observer.md:19-22`'s recorded misreading, not
   against a claim of prevention.*
@@ -1926,7 +2001,11 @@ where `get_replies` first meets a model.
 
 **One file per commit, and only for a role that has completed Phase 7.**
 
-- **8.1** `roles/reviewer.md`: delete `:39-138`. Touches: `roles/reviewer.md`.
+- **8.1** `roles/reviewer.md`: delete `:45-144`. Touches: `roles/reviewer.md`.
+  **`:1-11` are NOT in this range any more — they came forward into 7.1**, because a sentence that
+  STATES THE GRANT is not the same kind of prose as the mechanics this phase defers, and leaving it
+  false was measured to cost a lens (see 7.1's result). The rollback boundary is correspondingly one
+  config line plus one prose line, and the two must move together.
 - **8.2** `roles/collator.md`: delete `:170-254`, `:255-346`. Touches: `roles/collator.md`.
 - **8.3** `roles/triage.md`: delete `:325-457`, `:282-291`, `:246-257`. **And fix the
   three-observer/one-observer contradiction (§2.6) in the same commit**, because the surviving prose
@@ -1990,7 +2069,7 @@ where `get_replies` first meets a model.
   tool lists this design edits, and the three comments that argue the capability discipline §4.5
   rests on.
 - `roles/observer.md:10-64`, `:138-147`; `roles/triage.md:13-30`, `:88-110`, `:237-257`, `:266-323`,
-  `:325-457`; `roles/collator.md:109-114`, `:153-183`, `:422-423`; `roles/reviewer.md:39-138`;
+  `:325-457`; `roles/collator.md:109-114`, `:153-183`, `:422-423`; `roles/reviewer.md:45-144`;
   `skills/pifleet-worker/SKILL.md:131-236`.
 - Commits `efaf63a`, `8096fc4`, `e5d5751`, `5dbdafe` — the four host-side fixes, and the primary
   record of defect 5's forty-five passes.

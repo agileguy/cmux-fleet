@@ -408,11 +408,20 @@ export async function writeDispatchPolicy(
  *
  * Called by `materialize.ts` before `docker run` — the bind-mount source must
  * exist first, or Docker creates a DIRECTORY at the host path and the drop can
- * never have content — and again whenever a staged task settles, so an idle
+ * never have content — and again by the supervisor's `settle`, so an idle
  * worker's drop does not still name the last brief it was given. That second
- * use is `writeTaskPolicy(…, null, 0)`'s at settle, for the same reason: a
- * stale policy file reads as authoritative and is wrong, which is worse than
- * one that admits it has nothing.
+ * use sits beside `writeTaskPolicy(…, null, 0)` for a related reason (a stale
+ * policy file reads as authoritative and is wrong) and for a stronger one of
+ * its own.
+ *
+ * **The second call is not hygiene. It disarms a trigger.** This docblock
+ * asserted the settle-time clear for months while `grep` found exactly one
+ * production caller — `materialize.ts`, at `up` — and the gap is what ISC-1114
+ * is: an armed drop outlives its epoch, `dispatch-trigger.ts` dedups in
+ * per-SESSION closure state, and the `/new` that `resetPaneSession` types
+ * therefore re-fires the task that just settled, into an epoch nobody is
+ * waiting on. A comment describing a call site that does not exist is worse
+ * than no comment, because it stops the next reader looking.
  */
 export async function clearDispatchPolicy(file: string): Promise<void> {
   await writeDispatchPolicy(file, null, "");

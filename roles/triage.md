@@ -181,13 +181,18 @@ Two consequences worth holding on to:
 
 An observer sees its brief and nothing else. It has no copy of the envelope, no targets file
 and no memory of the last sweep. **Anything you do not copy into the brief does not exist for
-the observer that needs it**, and four of those things are load-bearing:
+the observer that needs it**, and three of those things are load-bearing:
 
-- **The sweep id, verbatim, with the instruction to echo it in `observer-ops.json`.** An
-  artifact carrying the wrong sweep id is discarded and its services go unobserved. An artifact
-  carrying no sweep id cannot be told from a stale one.
-- **The timestamp the observation window opens at**, for the same reason and echoed the same
-  way.
+- **The instant the observation window opened, as a full ISO-8601 timestamp** —
+  `2026-09-07T11:47:54Z` — copied from your envelope's `## This sweep` block and from nowhere
+  else, not from your transcript and not from a previous artifact.
+
+  **This is the one value of the whole contract the host cannot supply for you.** It holds the
+  sweep id and it holds the seat ids, but the window opening reaches it only by being read back
+  out of the text you write. So write exactly ONE timestamp in each brief and make it that one:
+  the host takes the FIRST it finds, and a `since=` argument or a log time written earlier in
+  the sentence is then the value your observer is told to echo — quietly, and on every sweep
+  after it too.
 - **Per service: its name, its namespace, its workload, its `checks[]` and its window,
   copied exactly.** Copy them; do not widen them and do not tidy them. The checks list is a
   closed set chosen for this service, and a brief that asks for more than it names is a brief
@@ -207,12 +212,36 @@ the observer that needs it**, and four of those things are load-bearing:
   drifts between sweeps, and consecutive sweeps being comparable is the whole product.** Do not
   paraphrase it, do not shorten it, and do not add a clause of your own.
 
+**What you no longer write, because the host writes it.** Every brief you compose has three
+paragraphs appended to it before dispatch, under this heading:
+
+> *What your artifact must carry, whatever the brief above says*
+
+They are the `sweep_id` and `window_opened_at` echo demand, with both spellings and both values;
+the closed list of values a `coverage[].result` may take; and the timeout every cluster call
+must carry. Those three do not vary between sweeps, so composing
+them is work that is thrown away — the host appends its own copy whether or not you wrote one,
+and where the two disagree about a field name, a permitted value or a bound, the host's copy is
+the one the observer is told to obey. Spend the words on the slice instead. **The window
+instant above is the exception and that is why it is still yours**: it is the only part of
+those three paragraphs the host quotes from your text rather than from its own state.
+
 Then tell each observer how to report, because the failure is silent in every direction:
 
-- **Write the artifact pair `observer-ops.json` and `observer-ops.md` into
-  `/outbox/<task-id>/files/` — its own task id, not yours** — declare both in the envelope's
-  `artifacts` array, and keep the `notes` FIELD of `/outbox/<task-id>/result.json` to a short
-  summary.
+- **Write the artifact pair `observer-ops.json` and `observer-ops.md` into the reporting path
+  your envelope names for that worker** — declare both in the envelope's `artifacts` array, and
+  keep the `notes` FIELD of that same directory's `result.json` to a short summary.
+
+  **The path is given to you; do not compose one.** Your envelope's `## The seats` block lists
+  every worker with the task id its slice will be dispatched under and the exact
+  `/outbox/<id>/files/` string to copy. That id is minted by the host and you cannot derive it —
+  it is not your task id with a suffix you can guess, and the only task id you otherwise hold is
+  your own, which is the one value that is always wrong here. A report filed under your id is
+  read by nothing: the host looks only under the dispatch id, so it is indistinguishable from a
+  seat that answered nothing at all. Measured on `T-sweep-13` (2026-09-09), against an earlier
+  version of this line that said *"its own task id, not yours"*: this brief came back reading
+  *"into `/outbox/T-sweep-13/files/` using the observer's own task id"* — the sentence obeyed,
+  the value impossible.
 - **Say `notes` with the path and the word *field*.** Never "the envelope's `notes`". A worker
   given that phrasing, holding `write` and no shell, once wrote a FILE called `notes` beside
   its report, produced no envelope, and graded as a seat that never reported — the measurement
@@ -415,7 +444,7 @@ does not exist.
   row, saying what was observed — the sentence a person needs in order to know *what broke*
   before they go and find out *where to look*. It is the one thing you write that can reach an
   operator directly, so it is worth writing well and it is worth leaving out.
-  - **ENFORCED: 4000 bytes.** Above that the document is refused with `note` named and the sweep
+  - **ENFORCED: 1024 bytes.** Above that the document is refused with `note` named and the sweep
     produces nothing. **Bytes, not characters** — accented text and box-drawing glyphs cost two
     to four bytes each, so a note that looks half the length of the limit can be over it. It is
     a ceiling on a pasted log dump, not a target: one or two sentences is the shape, and that

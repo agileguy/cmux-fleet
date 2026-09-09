@@ -228,6 +228,26 @@ export interface RelayDispatch extends RelayTaskRef {
   readonly brief: string;
 }
 
+/**
+ * What `sendTask` receives: a caller's dispatch plus the bound the TRANSPORT
+ * derived for it (ISC-1118).
+ *
+ * `deadlineS` is deliberately NOT on {@link RelayDispatch}. A caller composing a
+ * dispatch has no business choosing how long the child may run — it does not
+ * know the join's bound, and making it pass one is how the two came to disagree
+ * in the first place. `consoleTransport` owns `deadlineMs`, so it owns the
+ * derivation, and every caller gets the ordering without being able to break it.
+ *
+ * Host-side and never from a request document: D11 refuses both spellings of
+ * `deadline_s` in a dispatch request because *"a request that could set it can
+ * pin three of the largest models in the catalogue open against the operator's
+ * API key"*. That is a rule about a model-authored request. This is the console
+ * choosing a bound for a child it is about to wait on.
+ */
+export interface RelaySend extends RelayDispatch {
+  readonly deadlineS: number;
+}
+
 /** What a settled child turned out to be. */
 /**
  * THE PER-ARTIFACT CAP — the most any one artifact may contribute to a reply.
@@ -2054,7 +2074,7 @@ export interface RelayEffects {
    * decision — and choosing the plane is not this module's to make. See
    * `consoleTransport`'s `dispatch` for what that cost.
    */
-  sendTask(run: RunPaths, worker: string, dispatch: RelayDispatch): Promise<RelaySendOutcome>;
+  sendTask(run: RunPaths, worker: string, dispatch: RelaySend): Promise<RelaySendOutcome>;
   /**
    * How a prompt would reach this worker, asked BEFORE anything is sent.
    *
@@ -2191,6 +2211,65 @@ export const RELAY_SETTLE_POLL_MS = 100;
  * itself buys is that the actor gets to the harvest at all.
  */
 export const RELAY_SETTLE_DEADLINE_MS = 1_800_000;
+
+/**
+ * How far INSIDE the join's bound the child's own deadline sits (ISC-1118).
+ *
+ * The docblock above states the property this protects and states it as a
+ * warning: *"1800 > 1500, so the child settles `timed_out` on its own clock
+ * first and the join observes a real record. **If either number moves, that
+ * ordering is the property to re-check.**"* One moved and nobody re-checked.
+ *
+ * The triage console passes `deadlineMs: sweep_deadline_s * 1000` — §7.8's
+ * `cadence_s − reserve_s`, 780 s on a 900 s cadence — while the envelope still
+ * carried `dispatch.ts`'s 1500 s default for a task naming none. 780 < 1500
+ * inverts the ordering: the join gives up TWELVE MINUTES before the child can
+ * possibly settle, so any turn that reaches the supervisor's deadline fails its
+ * pass by construction. Measured on run `2026-09-09T05-21-27Z-6767`, sweep 11:
+ * the join stopped at 780 s, `deadline_exceeded` fired at 1500 s, and the task
+ * record appeared into a pass that had already been declared failed.
+ *
+ * So the child's bound is now DERIVED from the join's rather than defaulted
+ * beside it, and the ordering holds for every caller by construction instead of
+ * by two constants agreeing. 300 s is the margin the review console already ran
+ * — `1_800_000 − 300_000 = 1_500_000` is exactly its previous envelope value, so
+ * that console's behaviour is unchanged to the second, and the triage console
+ * gets `780 − 300 = 480 s`, comfortably inside a cadence whose sweeps settle in
+ * about twenty.
+ */
+export const RELAY_CHILD_DEADLINE_MARGIN_MS = 300_000;
+
+/**
+ * The child's `deadline_s` for a join bounded at `settleDeadlineMs`.
+ *
+ * THROWS rather than clamping when the margin does not fit. A bound at or below
+ * the margin cannot produce an ordering at all, and the two ways to paper over
+ * it are both worse than a refusal: a floor would hand the child a deadline
+ * longer than the join and re-create ISC-1118 silently, and a zero would settle
+ * every task `timed_out` the instant it started. A console configured that
+ * tightly is misconfigured, and the message says so at the moment it is built.
+ */
+export function childDeadlineS(settleDeadlineMs: number): number {
+  /*
+   * Guarded on the DERIVED SECONDS, not on the millisecond remainder, and the
+   * difference is not pedantic: `settleDeadlineMs` of 300_001 leaves 1 ms, which
+   * floors to a `deadline_s` of ZERO — a task that times out the instant it
+   * starts, which is one of the two outcomes the docblock above rejects. The
+   * first version of this function checked `ms <= 0` and shipped that hole; the
+   * range case in `collator-relay-adapter.test.ts` found it, which is why that
+   * test walks a spread of bounds instead of checking the two shipped consoles.
+   */
+  const seconds = Math.floor((settleDeadlineMs - RELAY_CHILD_DEADLINE_MARGIN_MS) / 1_000);
+  if (seconds < 1) {
+    throw new RangeError(
+      `a settle bound of ${settleDeadlineMs} ms leaves no room for a child deadline inside it ` +
+        `(margin ${RELAY_CHILD_DEADLINE_MARGIN_MS} ms, derived ${seconds}s). The child would ` +
+        `outlive the join that waits for it, or expire the moment it starts — which is ` +
+        `ISC-1118: raise the console's cadence, or lower its reserve_s.`,
+    );
+  }
+  return seconds;
+}
 
 /**
  * A dispatch that did not land — and it exists because ONE of the two ways to
@@ -2480,7 +2559,14 @@ export function consoleTransport(
 
       let outcome: RelaySendOutcome;
       try {
-        outcome = await effects.sendTask(run, d.worker, d);
+        /*
+         * The derivation happens HERE, at the one place that knows the join's
+         * bound, so `childDeadlineS` cannot be skipped by a caller (ISC-1118).
+         */
+        outcome = await effects.sendTask(run, d.worker, {
+          ...d,
+          deadlineS: childDeadlineS(deadlineMs),
+        });
       } catch (err) {
         // Shape one: it threw. An unreachable supervisor, a launch record that
         // names neither plane, a terminal that has gone — from the join's point
@@ -3232,11 +3318,14 @@ export const productionRelayEffects: RelayEffects = {
       run,
       worker,
       taskId: d.taskId,
-      // Title and brief ONLY. Every other field is host-side, and `deadline_s`
-      // especially so: D11 refuses both spellings of it in the request document
-      // because "a request that could set it can pin three of the largest
-      // models in the catalogue open against the operator's API key".
-      partial: { title: d.title, brief: d.brief },
+      // Title, brief, and the deadline the CONSOLE chose. Every other field is
+      // host-side, and `deadline_s` especially so: D11 refuses both spellings of
+      // it in the request document because "a request that could set it can pin
+      // three of the largest models in the catalogue open against the operator's
+      // API key" — a rule about a model-authored request, not about the host
+      // deciding how long it is prepared to wait. `dispatch.ts`'s 1500 s default
+      // is what this replaces, and leaving it in place is ISC-1118.
+      partial: { title: d.title, brief: d.brief, deadline_s: d.deadlineS },
       attemptId: relayAttemptId(worker, d),
       requestedEpoch: null,
       ledger: new m.ledger.LedgerWriter(run, `relay-${process.pid}`),

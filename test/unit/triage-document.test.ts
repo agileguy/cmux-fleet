@@ -58,6 +58,8 @@ import {
   parseTriageDocument,
   type TriageDocumentContext,
   type TriageDocumentRead,
+  TRIAGE_DOCUMENT_MAX_BYTES,
+  TriageDocumentSchema,
 } from "../../src/run/triage-document.ts";
 import {
   COVERAGE_RESULTS,
@@ -248,6 +250,140 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
     const got = parseTriageDocument("{ services: [", CTX);
     if (got.kind !== "refused") throw new Error(`expected a refusal, got ${got.kind}`);
     expect(got.code).toBe("not_json");
+  });
+
+  /**
+   * SRD-WORKER-DISPATCH-EXTENSION §13 task 7.3's second acceptance arm — *"a
+   * probe asserting the size bound, because what the census establishes is an
+   * OBSERVED maximum and the clearance above is only sound if something keeps
+   * it true."*
+   *
+   * THE GAP THESE FOUR TESTS EXIST FOR. Every field on this document was already
+   * bounded before task 7.3 — `services` at 64 rows, `note` at 4 000 bytes,
+   * every loose string at 4 096 — and the document was still unbounded, because
+   * **per-field bounds do not compose into a document bound**. The first test
+   * measures the distance: a document in which not one field exceeds its own
+   * limit is about sixty times the size the wire was measured to carry. That is
+   * the difference between "bounded" and "bounded by something that matters",
+   * and it is why 7.3 could not rest on the census.
+   */
+  describe("the document-wide byte cap (§13 task 7.3)", () => {
+    /** A row at its own field limits: a maximal `note` and nothing over any bound. */
+    function fatRow(i: number): Json {
+      return goodRow({
+        service: `service-${i}`,
+        note: "x".repeat(TRIAGE_NOTE_MAX_BYTES),
+      });
+    }
+
+    test("a document breaking no field bound is still over the cap", () => {
+      const fat = goodDocument({
+        services: Array.from({ length: MAX_SERVICES_PER_ENVIRONMENT }, (_, i) => fatRow(i)),
+      });
+      const text = JSON.stringify(fat);
+
+      // The premise, asserted before the conclusion rests on it: this document
+      // is legal under every per-field rule, so what refuses it below can only
+      // be the document-wide cap. Ask the schema directly and it parses clean.
+      const withoutCap = TriageDocumentSchema.safeParse(fat);
+      expect(withoutCap.success, "the fixture breaks a FIELD bound and proves nothing").toBe(true);
+
+      /*
+       * THE RESIDUAL GAP, and it is deliberately small now.
+       *
+       * Before task 7.3 this fixture was ~60x the cap, because 64 rows x 4 000
+       * bytes of `note` is 256 000. The retune to 8 and 1 024 closes most of
+       * that, and what is left cannot be closed by any choice of three numbers:
+       * 8 maximal notes are 8 192 bytes and will not fit in 4 096 whatever the
+       * ceilings are. So the claim this test makes is the narrow, permanent
+       * one — per-field bounds do not compose into a document bound, and the
+       * document cap is therefore doing work no field bound does.
+       */
+      expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(TRIAGE_DOCUMENT_MAX_BYTES);
+
+      const got = parseTriageDocument(text, CTX);
+      if (got.kind !== "refused") throw new Error(`expected a refusal, got ${got.kind}`);
+      expect(got.code).toBe("too_large");
+      // Not the schema arm — that is the arm that was already there and that
+      // this fixture was just shown to satisfy.
+      expect(got.code).not.toBe("schema");
+    });
+
+    /**
+     * BOTH SIDES OF THE BOUNDARY, in one test, because either alone is
+     * satisfied by a cap in the wrong place. "One byte over refuses" passes for
+     * a cap of zero; "exactly at the cap parses" passes for a cap of infinity.
+     */
+    test("exactly at the cap parses, and one byte over refuses", () => {
+      /*
+       * Padded through `selector` rather than `note`, and the choice matters:
+       * `note` is bounded at 1 024 bytes, so padding with it cannot reach a
+       * 4 096-byte document at all and the "at the cap" arm would be asserting
+       * the NOTE bound while claiming to assert the document one. `selector` is
+       * a plain bounded string with room to spare.
+       */
+      const base = goodDocument({ services: [goodRow({ selector: "" })] });
+      const overhead = Buffer.byteLength(JSON.stringify(base), "utf8");
+      const room = TRIAGE_DOCUMENT_MAX_BYTES - overhead;
+      expect(room, "the empty document already exceeds the cap").toBeGreaterThan(0);
+
+      const atCapText = JSON.stringify(
+        goodDocument({ services: [goodRow({ selector: "x".repeat(room) })] }),
+      );
+      expect(Buffer.byteLength(atCapText, "utf8")).toBe(TRIAGE_DOCUMENT_MAX_BYTES);
+      // The positive half. Without it, everything below passes for a cap of zero.
+      expect(parseTriageDocument(atCapText, CTX).kind).toBe("ok");
+
+      const overText = JSON.stringify(
+        goodDocument({ services: [goodRow({ selector: "x".repeat(room + 1) })] }),
+      );
+      expect(Buffer.byteLength(overText, "utf8")).toBe(TRIAGE_DOCUMENT_MAX_BYTES + 1);
+      const over = parseTriageDocument(overText, CTX);
+      if (over.kind !== "refused") throw new Error(`expected a refusal, got ${over.kind}`);
+      expect(over.code).toBe("too_large");
+      expect(over.reason).toContain(String(TRIAGE_DOCUMENT_MAX_BYTES));
+    });
+
+    /**
+     * THE ORDERING, and it is the whole reason the check sits before the parser.
+     *
+     * A document that did not survive the wire arrives as invalid JSON, so a
+     * size check placed after `JSON.parse` would answer `not_json` for the one
+     * case it was built to name — reporting the symptom and hiding the cause.
+     * An oversize blob that is ALSO unparseable must therefore say `too_large`.
+     */
+    test("too_large beats not_json — the cause, not the symptom", () => {
+      const truncated = `{"schema":"${TRIAGE_DOCUMENT_SCHEMA}","services":[{"note":"${"x".repeat(
+        TRIAGE_DOCUMENT_MAX_BYTES,
+      )}`;
+      // Genuinely both faults at once, or the ordering is not being tested.
+      expect(Buffer.byteLength(truncated, "utf8")).toBeGreaterThan(TRIAGE_DOCUMENT_MAX_BYTES);
+      expect(() => JSON.parse(truncated)).toThrow();
+
+      const got = parseTriageDocument(truncated, CTX);
+      if (got.kind !== "refused") throw new Error(`expected a refusal, got ${got.kind}`);
+      expect(got.code).toBe("too_large");
+    });
+
+    /**
+     * The census's headroom, pinned rather than remembered.
+     *
+     * §11 measured 119 harvested envelopes from this console's three producing
+     * seats at a maximum of 1 472 bytes. That number is what task 7.3's
+     * clearance rests on, and a cap set below it would refuse collations this
+     * console has genuinely produced — turning a size bound into an outage. It
+     * is asserted here so that lowering the cap has to argue with the evidence.
+     */
+    test("the largest collation this console has produced is inside the cap", () => {
+      // MEASURED on this machine 2026-09-08 across the 20 `triage.json` files
+      // this console has harvested, not quoted from §11. The census's 1 472 is
+      // the summed STRING bytes of an envelope, which is a different and
+      // smaller measurement than the serialised document that must now cross
+      // as a tool argument — the largest of those is 1 863 bytes, and every
+      // one of the 20 carries exactly 3 services or none.
+      const OBSERVED_MAX_BYTES = 1863;
+      expect(TRIAGE_DOCUMENT_MAX_BYTES).toBeGreaterThan(OBSERVED_MAX_BYTES);
+    });
   });
 
   /**

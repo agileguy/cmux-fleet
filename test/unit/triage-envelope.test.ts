@@ -45,6 +45,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { OUTBOX_FILES_DIR } from "../../src/harvest/outbox.ts";
+import { COVERAGE_RESULTS, OBSERVER_ASSESSMENTS } from "../../src/run/triage-verdict.ts";
 import {
   runPaths,
   taskRecordPath,
@@ -61,6 +62,7 @@ import {
   collationTaskId,
   sweepTaskId,
 } from "../../src/run/task-ids.ts";
+import { DISPATCH_REQUEST_FILE } from "../../src/run/dispatch-request.ts";
 import { TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
 import type { TriageDocument } from "../../src/run/triage-verdict.ts";
 import type { TriageService } from "../../src/run/triage-targets.ts";
@@ -88,7 +90,13 @@ import {
   type SweepEnvelopeInput,
   type SweepProducerDeps,
   normalizeSliceReportingPath,
-  ensureFreshnessEcho,
+  CLUSTER_CALL_TIMEOUT_S,
+  BOUNDED_CALLS_DEMAND,
+  COVERAGE_VOCABULARY_DEMAND,
+  OBSERVER_CONTRACT_HEADING,
+  composeObserverBrief,
+  freshnessEchoDemand,
+  readWindowInstant,
 } from "../../src/run/triage-envelope.ts";
 import {
   consoleTransport,
@@ -1441,48 +1449,45 @@ describe("normalizeSliceReportingPath", () => {
  * correct artifacts and every one was discarded for want of two strings, because
  * the collator carried the VALUES into the brief and dropped the INSTRUCTION.
  */
-describe("ensureFreshnessEcho", () => {
+describe("freshnessEchoDemand (ISC-1119, authored under ISC-1136)", () => {
   const WINDOW = "2026-09-08T01:21:10.427Z";
   const REAL_BRIEF =
     `Sweep T-sweep-1. Observation window opens ${WINDOW}. Check \`grafana\` in namespace ` +
     "`aodapnc-grafana-dev`. Both files, every time.";
 
-  test("appends the demand, quoting the sweep id and the window read from the brief", () => {
-    const r = ensureFreshnessEcho(REAL_BRIEF, "T-sweep-1");
-    expect(r.appended).toBe(true);
-    expect(r.window).toBe(WINDOW);
-    expect(r.brief).toContain('`sweep_id` exactly "T-sweep-1"');
-    expect(r.brief).toContain(`\`window_opened_at\` exactly "${WINDOW}"`);
-    expect(r.brief.startsWith("Sweep T-sweep-1.")).toBe(true);
-  });
-
-  test("a brief already naming both fields is returned unchanged", () => {
-    const already = `${REAL_BRIEF} Echo sweep_id and window_opened_at in the json.`;
-    const r = ensureFreshnessEcho(already, "T-sweep-1");
-    expect(r.appended).toBe(false);
-    expect(r.brief).toBe(already);
+  test("names both fields in their exact spellings, quoting the sweep id and the window", () => {
+    const demand = freshnessEchoDemand("T-sweep-1", WINDOW);
+    expect(demand).toContain('`sweep_id` exactly "T-sweep-1"');
+    expect(demand).toContain(`\`window_opened_at\` exactly "${WINDOW}"`);
   });
 
   /**
-   * The host must not mint a second spelling of the instant. If the collator dropped
-   * it, `window` is null and the demand names the brief rather than a value.
+   * The host must not mint a second spelling of the instant. If the collator
+   * dropped it, the demand names the brief rather than a value — see
+   * `readWindowInstant` for why the host cannot supply one.
    */
-  test("no instant in the brief means window null and no invented value", () => {
-    const r = ensureFreshnessEcho("Sweep T-sweep-9. Check grafana.", "T-sweep-9");
-    expect(r.appended).toBe(true);
-    expect(r.window).toBeNull();
-    expect(r.brief).toContain('`sweep_id` exactly "T-sweep-9"');
-    expect(r.brief).not.toMatch(/window_opened_at` exactly "/);
+  test("a null window produces no invented value", () => {
+    const demand = freshnessEchoDemand("T-sweep-9", null);
+    expect(demand).toContain('`sweep_id` exactly "T-sweep-9"');
+    expect(demand).not.toMatch(/window_opened_at` exactly "/);
+    expect(demand).toContain("as this brief states the observation window opening");
   });
 
-  test("the appended demand survives path normalization order", () => {
-    const norm = normalizeSliceReportingPath(
-      `${REAL_BRIEF} Write into /outbox/T-sweep-1/files/.`,
-      "T-sweep-1-slice1",
-    );
-    const r = ensureFreshnessEcho(norm.brief, "T-sweep-1");
-    expect(r.brief).toContain("/outbox/T-sweep-1-slice1/files/");
-    expect(r.brief).toContain('`sweep_id` exactly "T-sweep-1"');
+  /**
+   * **THE CONSEQUENCE CLAUSE, and it is the half that does the work.** A demand
+   * naming two fields and not what happens without them is a formatting note; the
+   * measured failure was five correct artifacts discarded whole.
+   */
+  test("it says what an artifact missing either one costs", () => {
+    const demand = freshnessEchoDemand("T-sweep-1", WINDOW);
+    expect(demand).toContain("discarded whole");
+    expect(demand).toContain("recorded as unobserved");
+    expect(demand).toContain("copied from this brief and from nowhere else");
+  });
+
+  test("readWindowInstant finds the instant in the collator's own prose", () => {
+    expect(readWindowInstant(REAL_BRIEF)).toBe(WINDOW);
+    expect(readWindowInstant("Sweep T-sweep-9. Check grafana.")).toBeNull();
   });
 });
 
@@ -1712,5 +1717,475 @@ describe("§7.4: the published set and the declared set are one set", () => {
     const asPort: PortEntry = fromRelay;
     const backAgain: PublishedReply = asPort;
     expect(backAgain).toEqual(fromRelay);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-1119 / ISC-1120 — the envelope carries what the role file demands back
+// ---------------------------------------------------------------------------
+
+/**
+ * **The collator can only compose from its envelope, so an envelope that omits a
+ * value is an envelope that forbids compliance.**
+ *
+ * Both host repairs of the time — the freshness echo and
+ * `normalizeSliceReportingPath` — fired on every sweep this console has ever run
+ * (22 and 30 times in `~/.pifleet/triage-relay.log`), and both logged the
+ * collator as the faulting party. Measured against `T-sweep-13`'s live request
+ * rather than against those log lines, the collator was obeying both sentences
+ * exactly: *"Echo sweep id T-sweep-13 and window … in `observer-ops.json`"* and
+ * *"into `/outbox/T-sweep-13/files/` using the observer's own task id"*. What it
+ * lacked was the two SPELLINGS the host greps for, and a slice id that is
+ * `childTaskId` over a host constant it has never been shown.
+ *
+ * These tests pin the envelope as SUFFICIENT — the property that was missing.
+ *
+ * **ISC-1136 narrowed what "sufficient" has to mean, and did not retire it.** The
+ * host now AUTHORS the observer's reporting contract, so the envelope no longer
+ * has to make the collator capable of relaying it. Two things still travel only
+ * through this document and are still asserted below: the seat ids, which
+ * `composeObserverBrief` can repair but cannot invent, and the window instant,
+ * which it reads back out of the collator's own text and cannot mint.
+ */
+describe("the sweep envelope carries what the collator is asked to emit", () => {
+  test("it names both freshness field names in their exact spellings (ISC-1119)", () => {
+    const { brief } = renderSweepEnvelope(envelopeInput());
+    expect(brief).toContain("`sweep_id`");
+    expect(brief).toContain("`window_opened_at`");
+  });
+
+  test("it names each seat's dispatch id and reporting path (ISC-1120)", () => {
+    const sweepId = sweepTaskId(41);
+    const { brief } = renderSweepEnvelope(envelopeInput({ sweepId }));
+    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+      const child = childTaskId(sweepId, seat.aspect);
+      expect(brief).toContain(seat.worker);
+      expect(brief).toContain(child);
+      expect(brief).toContain(`/outbox/${child}/files/`);
+    }
+  });
+
+  /**
+   * The id the collator holds is the one that is always wrong, so the envelope
+   * has to say so in the same breath as it hands over the right one — otherwise
+   * the nearest value in context wins, which is exactly what `T-sweep-13` did.
+   */
+  test("it says the collator's own id is not the reporting id", () => {
+    const sweepId = sweepTaskId(41);
+    const { brief } = renderSweepEnvelope(envelopeInput({ sweepId }));
+    expect(brief).toContain("Never your own task id");
+    expect(brief).toContain(sweepId);
+  });
+
+  /**
+   * **The acceptance, and the only test here that could not have been written
+   * before the fix.** A brief copied from the envelope must need NO repair — which
+   * after ISC-1136 means exactly one repair, `normalizeSliceReportingPath`, because
+   * the other three stopped being conditional and became authored text.
+   *
+   * The judgement must also survive into the composed brief unaltered. A composer
+   * that rewrote the collator's words would satisfy every contract assertion in
+   * this file while discarding the sweep's actual content.
+   */
+  test("a brief copied from the envelope is carried verbatim, repairing nothing", () => {
+    const sweepId = sweepTaskId(41);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    const child = childTaskId(sweepId, seat.aspect);
+    const window = "2026-09-06T12:00:00.000Z";
+    const judgement =
+      `Sweep ${sweepId}. Observation window opens ${window}. Check \`grafana\`. ` +
+      `Write both files into /outbox/${child}/files/.`;
+
+    const composed = composeObserverBrief({ judgement, sweepId, childTaskId: child });
+    expect(composed.rewrote).toEqual([]);
+    expect(composed.window).toBe(window);
+    expect(composed.brief.startsWith(judgement)).toBe(true);
+  });
+
+  /**
+   * The seats are a parameter so this can render a console that does not exist,
+   * proving the block is derived from the roster rather than from `slice1` being
+   * hard-coded somewhere in the prose.
+   */
+  test("the seat block follows the roster it is given, not a constant", () => {
+    const sweepId = sweepTaskId(41);
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({
+        sweepId,
+        seats: [
+          { worker: "obs-t1", aspect: "slice1" },
+          { worker: "obs-t2", aspect: "slice2" },
+        ],
+      }),
+    );
+    expect(brief).toContain(`/outbox/${sweepId}-slice2/files/`);
+    expect(brief).toContain("obs-t2");
+  });
+});
+
+/**
+ * ISC-1131 — the third repair, and the sweep that earned it.
+ *
+ * `T-sweep-22`, 2026-09-09: the observer wrote `"result": "healthy"` into every
+ * `coverage` entry, the collation was refused whole on six copies of one schema
+ * error, and all three services were recorded unobserved. The brief it had named
+ * `assessment` and its four values and named `coverage[].result` with none, so a
+ * model holding one enum completed the only pattern in front of it.
+ *
+ * The intermittency is what makes this the host's problem: sweeps 19 and 21
+ * produced `answered` from this same code and the same envelope. There is no
+ * wording left to sharpen — see `ensureCoverageVocabulary`.
+ */
+describe("COVERAGE_VOCABULARY_DEMAND (ISC-1131, authored under ISC-1136)", () => {
+  test("names every member of the closed domain", () => {
+    for (const v of COVERAGE_RESULTS) expect(COVERAGE_VOCABULARY_DEMAND).toContain(`"${v}"`);
+  });
+
+  test("says what the field means, because the wrong answer was a plausible one", () => {
+    // `healthy` is not a typo — it is the neighbouring enum. A demand that only
+    // listed values would leave the same confusion one step further on.
+    expect(COVERAGE_VOCABULARY_DEMAND).toContain("whether the CHANNEL ANSWERED YOU");
+    expect(COVERAGE_VOCABULARY_DEMAND).toContain('"healthy" is not a coverage result');
+  });
+
+  /**
+   * The vocabulary is IMPORTED, not restated — so this test is what makes that
+   * claim falsifiable rather than a comment. Add a fifth member to
+   * `COVERAGE_RESULTS` and the demand must grow it with no edit here; a
+   * hand-written copy of the list would fail.
+   */
+  test("every member of COVERAGE_RESULTS reaches the demand, by construction", () => {
+    for (const v of COVERAGE_RESULTS) expect(COVERAGE_VOCABULARY_DEMAND).toContain(`"${v}"`);
+    // And nothing from the neighbouring enum leaks in, which is the confusion
+    // this whole demand exists to end.
+    for (const a of OBSERVER_ASSESSMENTS) {
+      if ((COVERAGE_RESULTS as readonly string[]).includes(a)) continue;
+      expect(COVERAGE_VOCABULARY_DEMAND).not.toContain(`"${a}" is a coverage result`);
+    }
+  });
+
+  /**
+   * **THE ENUM IS NOT SPELLED TWICE IN THIS MODULE, and after ISC-1136 that is a
+   * property of the whole file rather than of one repair.**
+   *
+   * `renderSweepEnvelope` used to carry its own hand-typed
+   * `answered/unreachable/forbidden/not_attempted` in the collator's brief — the
+   * second copy of an enum whose second copy in an ARTIFACT was the bug
+   * (`ISC-869`: *"an assertion that two copies agree is a third copy"*). The host
+   * now appends the domain to every dispatched brief, so the envelope states it
+   * nowhere and the module has exactly one spelling: the import.
+   *
+   * This asserts the absence rather than restating the members, because a test
+   * that re-typed them would be the third copy it is checking for.
+   *
+   * **`not_attempted` survives on purpose and the assertion is exact rather than
+   * empty.** The envelope still tells the collator that a `healthy` whose every
+   * channel is `not_attempted` is downgraded — that is a GATE the collator must
+   * understand to avoid upgrading such a row, and naming one member inside a rule
+   * about that member is not a restatement of the domain. Pinning the set to
+   * exactly that one member is what makes a re-added vocabulary red; a
+   * `toEqual([])` would have had to launder the gate away to pass.
+   */
+  test("the collator's own envelope no longer restates the domain", () => {
+    const { brief } = renderSweepEnvelope(envelopeInput());
+    const spelled = COVERAGE_RESULTS.filter((r) => brief.includes(r));
+    expect(
+      spelled,
+      "renderSweepEnvelope names COVERAGE_RESULTS members beyond the one its downgrade gate " +
+        "is about; the host appends the domain to every dispatched brief now, so a vocabulary " +
+        "here is a second spelling of the enum the observer is graded against",
+    ).toEqual(["not_attempted"]);
+  });
+});
+
+/**
+ * The composer at its REAL call site (ISC-1131, ISC-1134, recomposed by ISC-1136).
+ *
+ * ## Why this test exists, and what was missing before it
+ *
+ * The four repairs this replaced each had a thorough block of unit tests, and
+ * every one of them called the function directly. **Not one of them proved that
+ * `dispatchObserver` called it.** Checked while adding the third: the only test
+ * that drove `dispatchObserver` was the refusal path, which dispatches nothing —
+ * so all three call sites were uncovered, and deleting any one line from the
+ * dispatch path left this whole file green.
+ *
+ * That is the failure `ISC-1104` names, and it is the reason a change to the
+ * DIVISION OF LABOUR — which is what ISC-1136 is — must be probed here rather than
+ * at `composeObserverBrief`'s own signature. A composer with five green tests and
+ * no caller is this repo's recorded failure mode, not a hypothetical one. The
+ * probe is the brief the port ACTUALLY RECEIVES: it cannot pass unless the
+ * composer ran on the real path.
+ *
+ * ## The fixture is deliberately broken in all four ways at once
+ *
+ * A collator judgement that names the wrong outbox id, omits the freshness
+ * fields, omits the coverage domain AND bounds nothing — not a contrived
+ * combination but the union of four separately measured sweeps, and the exact
+ * shape the collator produced on sweeps 26 through 29. After ISC-1136 three of
+ * those four are no longer even possible to get wrong: the host writes them. The
+ * fixture keeps them because the assertion is about what the OBSERVER receives,
+ * and that is unchanged by whose job it became.
+ */
+describe("dispatchObserver dispatches the COMPOSED brief (ISC-1131, ISC-1134, ISC-1136)", () => {
+  test("the brief the dispatch port receives is the composed one, not the one the collator wrote", async () => {
+    const run = await seedRun("2026-09-09T00-00-31Z-1131");
+    const sweepId = sweepTaskId(22);
+    const seat = TRIAGE_CONSOLE_ASPECTS[0]!;
+    const childId = `${sweepId}-${seat.aspect}`;
+
+    // The collator's fan-out request, broken in all three ways.
+    const dir = join(workerOutboxDir(run.root, TRIAGE_COLLATOR), sweepId);
+    await mkdir(dir, { recursive: true });
+    const collatorBrief =
+      `Sweep ${sweepId}. Observation window opens 2026-09-09T14:34:38.315Z. Check ` +
+      "`grafana` in namespace `aodapnc-grafana-dev` (checks: [rollout, logs], window: 300s). " +
+      `Report an assessment of healthy, degraded, unhealthy or indeterminate. Write both files ` +
+      `into /outbox/${sweepId}/files/.`;
+    await writeFile(
+      join(dir, DISPATCH_REQUEST_FILE),
+      JSON.stringify({
+        schema: "pifleet.dispatchrequest/v1",
+        parent_task_id: sweepId,
+        requests: [
+          {
+            worker: seat.worker,
+            title: "Health sweep",
+            brief: collatorBrief,
+            // §7.3 requires it: the host validates the partition against the
+            // targets file before dispatching, and this is the only
+            // machine-readable statement of what a request covers.
+            services: ["grafana"],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const { sent, producers } = producerFixture(run);
+    await producers.dispatchObserver(sweepId, {
+      worker: seat.worker,
+      services: ["grafana"],
+    });
+
+    expect(sent, "dispatchObserver sent nothing").toHaveLength(1);
+    const brief = sent[0]!.brief;
+
+    // Repaired — the reporting path is the child's, not the sweep's. This is the
+    // one contribution of the collator's that is WRONG rather than absent, and
+    // the only one `composeObserverBrief` still corrects rather than authors.
+    expect(
+      brief,
+      "normalizeSliceReportingPath did not run on the dispatch path (ISC-1120)",
+    ).toContain(`/outbox/${childId}/files/`);
+    expect(brief).not.toContain(`/outbox/${sweepId}/files/`);
+
+    // Authored — the freshness fields, by their exact spellings.
+    expect(brief, "the freshness demand did not reach the observer (ISC-1119)").toContain(
+      "sweep_id",
+    );
+    expect(brief).toContain("window_opened_at");
+
+    // Authored — the coverage domain, every member of it.
+    for (const v of COVERAGE_RESULTS) {
+      expect(
+        brief,
+        `the coverage domain did not reach the dispatch path — "${v}" never reached ` +
+          `the observer, which is how T-sweep-22 lost all three services (ISC-1131)`,
+      ).toContain(`"${v}"`);
+    }
+
+    // Authored — the cluster calls are bounded, in the spelling verbgate accepts.
+    expect(
+      brief,
+      "the call bound did not reach the dispatch path — an unreachable cluster " +
+        "costs the whole 480s deadline and produces no artifact (ISC-1134)",
+    ).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+
+    // And the collator's own words survive: a composer that REPLACED the brief
+    // would satisfy every assertion above while discarding the sweep's content.
+    expect(brief).toContain("aodapnc-grafana-dev");
+    expect(brief.startsWith(`Sweep ${sweepId}.`)).toBe(true);
+
+    /*
+     * **THE WIRING ASSERTION, and it is deliberately an equality.**
+     *
+     * Every assertion above is satisfied by ANY code path that produces those
+     * strings — including four inline repairs at the call site, which is what was
+     * there before. This one is not: it says the port received exactly what
+     * `composeObserverBrief` returns for this judgement, so the composer is the
+     * thing on the dispatch path rather than a well-tested module beside it. Swap
+     * `composed.brief` for `item.brief` at the call site, or reinstate the
+     * repairs inline, and this reddens.
+     */
+    expect(
+      brief,
+      "the dispatch port did not receive composeObserverBrief's output — the composer is " +
+        "not on the dispatch path (ISC-1104's shape: five green tests, no caller)",
+    ).toBe(
+      composeObserverBrief({ judgement: collatorBrief, sweepId, childTaskId: childId }).brief,
+    );
+
+    // The seam between the collator's words and the host's is marked, so an
+    // observer can tell which half it may not argue with.
+    expect(brief).toContain(OBSERVER_CONTRACT_HEADING);
+    expect(brief.indexOf(OBSERVER_CONTRACT_HEADING)).toBeGreaterThan(
+      brief.indexOf("aodapnc-grafana-dev"),
+    );
+  });
+});
+
+/**
+ * `composeObserverBrief` on its own — the division ISC-1136 makes.
+ *
+ * These call the composer directly and therefore cannot prove it is WIRED; the
+ * describe above is what does that. What they pin is the division itself, which
+ * the wiring test cannot state: which half of the brief the host owns, which half
+ * the collator owns, and what happens to each when the other is missing.
+ */
+describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)", () => {
+  const SWEEP = "T-sweep-31";
+  const CHILD = "T-sweep-31-slice1";
+  const WINDOW = "2026-09-09T14:34:38.315Z";
+
+  /**
+   * **THE POINT OF THE WHOLE CHANGE.** The collator contributes a judgement and
+   * nothing else — no field spellings, no domain, no bound — and the observer
+   * still receives the complete contract. Before ISC-1136 this input produced a
+   * brief with three sentences missing and three warnings in the log.
+   */
+  test("a judgement carrying NONE of the contract still produces the whole contract", () => {
+    const { brief } = composeObserverBrief({
+      judgement: `Sweep ${SWEEP}. Window opens ${WINDOW}. Look at grafana.`,
+      sweepId: SWEEP,
+      childTaskId: CHILD,
+    });
+    expect(brief).toContain(freshnessEchoDemand(SWEEP, WINDOW));
+    expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
+    expect(brief).toContain(BOUNDED_CALLS_DEMAND);
+  });
+
+  /**
+   * **THE ASYMMETRIC CASE, and it is what separates authoring from repairing.**
+   *
+   * A judgement that ALREADY names part of the contract used to make the repairs
+   * stand down — `ensureCoverageVocabulary` returned early on a brief containing
+   * all four members, `ensureBoundedCalls` on any `--request-timeout`. An author
+   * has no such branch: the host's sentence is present whatever the collator
+   * wrote, so a collator that half-remembered the domain can no longer suppress
+   * the closed statement of it.
+   */
+  test("a judgement that already states part of the contract does NOT suppress the host's", () => {
+    const { brief } = composeObserverBrief({
+      judgement:
+        `Sweep ${SWEEP}. Window opens ${WINDOW}. Use answered when a channel replies, and ` +
+        `pass --request-timeout=5s on everything.`,
+      sweepId: SWEEP,
+      childTaskId: CHILD,
+    });
+    expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
+    expect(brief).toContain(BOUNDED_CALLS_DEMAND);
+    // The collator's weaker bound survives above the host's — it is judgement,
+    // and the heading says which of the two the observer must obey.
+    expect(brief).toContain("--request-timeout=5s");
+    expect(brief.indexOf("--request-timeout=5s")).toBeLessThan(
+      brief.indexOf(OBSERVER_CONTRACT_HEADING),
+    );
+  });
+
+  /** Judgement first, contract second — the old call site's own argument, kept. */
+  test("the collator's judgement leads and the host's block follows it", () => {
+    const judgement = `Sweep ${SWEEP}. Window opens ${WINDOW}. Look at grafana.`;
+    const { brief } = composeObserverBrief({ judgement, sweepId: SWEEP, childTaskId: CHILD });
+    expect(brief.startsWith(judgement)).toBe(true);
+    expect(brief.indexOf(OBSERVER_CONTRACT_HEADING)).toBeGreaterThan(0);
+  });
+
+  /**
+   * The WRONGNESS repair, which authoring cannot replace: writing the correct
+   * path does not delete an incorrect one already in the collator's prose, and an
+   * observer handed both has to choose. `T-sweep-1` is the record of which.
+   */
+  test("a wrong outbox id is rewritten and reported, not merely out-written", () => {
+    const r = composeObserverBrief({
+      judgement: `Sweep ${SWEEP}. Write both files into /outbox/${SWEEP}/files/.`,
+      sweepId: SWEEP,
+      childTaskId: CHILD,
+    });
+    expect(r.rewrote).toEqual([SWEEP]);
+    expect(r.brief).toContain(`/outbox/${CHILD}/files/`);
+    expect(r.brief).not.toContain(`/outbox/${SWEEP}/files/`);
+  });
+
+  /**
+   * The window instant is the ONE part of the contract the host cannot mint —
+   * `dispatchObserver` does not hold `dispatched_at`. A judgement that drops it
+   * degrades the demand rather than inventing a second spelling of the quantity
+   * §7.4's freshness check compares against.
+   */
+  test("a judgement naming no instant degrades the demand instead of inventing one", () => {
+    const r = composeObserverBrief({
+      judgement: `Sweep ${SWEEP}. Look at grafana.`,
+      sweepId: SWEEP,
+      childTaskId: CHILD,
+    });
+    expect(r.window).toBeNull();
+    expect(r.brief).toContain('`sweep_id` exactly "T-sweep-31"');
+    expect(r.brief).not.toMatch(/window_opened_at` exactly "/);
+  });
+});
+
+/**
+ * ISC-1134 — bounding the observer's cluster calls.
+ *
+ * Measured 2026-09-09 with `utun9` carrying zero routes: each `kubectl` spent
+ * ~3 minutes retrying an unreachable API server before failing on a client-side
+ * rate limiter, and two consecutive sweeps hit the 480 s child deadline with no
+ * artifact. `unreachable` has always been in `COVERAGE_RESULTS`; nothing told the
+ * observer how to REACH it, because an unbounded call does not fail, it hangs.
+ */
+describe("BOUNDED_CALLS_DEMAND (ISC-1134, authored under ISC-1136)", () => {
+  test("states the bound, at the constant's value", () => {
+    expect(BOUNDED_CALLS_DEMAND).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+  });
+
+  /**
+   * THE SPELLING TEST, and it is the reason this repair is not one line.
+   *
+   * `kubectl --request-timeout=30s get ns` is refused by the container's
+   * verbgate as `kubectl (flags-before-verb) not authorized`; the same flag
+   * AFTER the verb runs. Both were tried against the live worker. An instruction
+   * the sandbox refuses is worse than none — it spends the model's turn on a
+   * call that cannot run — so the brief must show the legal form and say which
+   * it is.
+   */
+  test("shows the flag AFTER the verb, which is the only form verbgate accepts", () => {
+    // The worked example must be legal…
+    expect(BOUNDED_CALLS_DEMAND).toContain(
+      `kubectl get pods -n <ns> --request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`,
+    );
+    // …and must never demonstrate the refused form.
+    expect(BOUNDED_CALLS_DEMAND).not.toContain(`kubectl --request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+    expect(BOUNDED_CALLS_DEMAND).toContain("AFTER the verb");
+  });
+
+  test("ties a timed-out call to the coverage result it must produce", () => {
+    // A bound that does not say what to REPORT leaves the observer with a failed
+    // command and no vocabulary for it — which is the ISC-1131 shape again.
+    expect(BOUNDED_CALLS_DEMAND).toContain('"unreachable"');
+    expect(BOUNDED_CALLS_DEMAND).toContain("Do not retry it");
+  });
+
+  /**
+   * The bound is derived from the deadline it protects. Ten-ish calls at the
+   * timeout must leave the seat room to write the artifact inside 480 s — a
+   * bound that consumes the deadline reinstates the exact failure.
+   */
+  test("the timeout leaves an unreachable sweep time to report", () => {
+    const CHILD_DEADLINE_S = 480;
+    const CALLS_PER_SWEEP = 10;
+    expect(CLUSTER_CALL_TIMEOUT_S * CALLS_PER_SWEEP).toBeLessThan(CHILD_DEADLINE_S);
+    // And not so tight it refuses a slow-but-working API.
+    expect(CLUSTER_CALL_TIMEOUT_S).toBeGreaterThanOrEqual(20);
   });
 });

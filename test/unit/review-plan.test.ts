@@ -273,34 +273,60 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
     expect(angles.size).toBe(reviewers.length);
   });
 
-  it("gives every review seat write, and none of them bash or edit", () => {
+  it("leaves the collator its write, takes the reviewers', and gives none of them bash or edit", () => {
     /*
-     * REWRITTEN 2026-09-04, and the old assertion is recorded rather than
-     * quietly relaxed. It required every reviewer to hold no `write`, which was
-     * true of the config and made the console unable to function: nothing
-     * host-side writes `result.json` (`harvest/outbox.ts` only reads it), so a
-     * reviewer with no writer tool could not report at all — every lens missing,
-     * `relay.ts` answering `not_collated`, no collation ever dispatched, and the
-     * fan-out task settling `success` with the review showing green. The owner
-     * granted `write`, outbox-only, on the collator's precedent.
+     * THE REVIEWER ARM HAS BEEN BOTH WAYS ROUND AND BOTH VERSIONS WERE RIGHT AT
+     * THE TIME. Recorded in order, because the next person to read a reviewer
+     * with no writer tool needs to know which of the two states this is.
      *
-     * The line §12.1 actually draws is BASH, not writing: a shell is what turns a
-     * read-only reviewer into a worker that can `cd /`, reach a socket or
-     * `git push`. Write-to-outbox is how every other worker in this fleet
-     * reports, into a worker-scoped mount that is already the untrusted-content
-     * boundary. `edit` stays withheld because it would buy nothing — the only
-     * files a reviewer sees besides its outbox are the `:ro` checkout.
+     * 1. **Originally: no `write`, and it broke the console.** Nothing host-side
+     *    writes `result.json` (`harvest/outbox.ts` only reads it), so a reviewer
+     *    with no writer tool could not report at all — every lens missing,
+     *    `relay.ts` answering `not_collated`, no collation ever dispatched, and
+     *    the fan-out task settling `success` with the review showing green.
+     * 2. **2026-09-04: `write` granted**, outbox-only, on the collator's
+     *    precedent. That is the version this assertion replaces.
+     * 3. **2026-09-08 — SRD-WORKER-DISPATCH-EXTENSION task 7.1, Phase B: `write`
+     *    withdrawn**, and the state is NOT a return to 1. `submit_report` writes
+     *    `/outbox/<task-id>/result.json` and, through its `report` parameter, the
+     *    long review beside it — the extension's own file access, not the
+     *    model's grant. The capability survives; the general verb does not.
      *
-     * So the three members are asserted SEPARATELY. A single "the tools changed"
-     * check would be satisfied by adding `bash`, which is the one thing this
-     * block exists to refuse.
+     * So the probe asserts `submit_report` in the same breath as the missing
+     * `write`. A bare `not.toContain("write")` is green on state 1, which is the
+     * failure with the worst signature in this file's history: three empty
+     * lenses and every status green.
+     *
+     * **`col-1` IS UNCHANGED AND THAT IS DELIBERATE.** The collator's withdrawal
+     * is task 7.2 and Phase B narrows one role per commit — reviewer, then
+     * collator, then triage — with a console cycle between them, so a run where
+     * exactly one of the four seats has been narrowed is the intended
+     * intermediate state rather than a drift.
+     *
+     * The line §12.1 actually draws is BASH, and none of the above moves it: a
+     * shell is what turns a read-only reviewer into a worker that can `cd /`,
+     * reach a socket or `git push`. `edit` stays withheld because it would buy
+     * nothing — the only files a reviewer sees besides its outbox are the `:ro`
+     * checkout.
+     *
+     * The members are asserted SEPARATELY for the reason the 2026-09-04 version
+     * gave: a single "the tools changed" check would be satisfied by adding
+     * `bash`, which is the one thing this block exists to refuse.
+     *
+     * **THIS BLOCK READS THE OPERATOR'S LIVE `fleet.yaml`, so it is also the
+     * tripwire for 7.1's other half.** Task 7.1 touches two files and only one of
+     * them is tracked; `fleet.yaml` is gitignored and is edited by hand. Until
+     * that edit is made this assertion is RED on the operator's machine and
+     * SKIPPED in CI, which is the correct way round: the machine that runs the
+     * console is the machine that must notice the console has not been narrowed.
      */
     const col = resolveWorker(loaded(), "col-1");
     expect(col.tools).toContain("write");
     expect(col.tools).not.toContain("bash");
     for (const id of reviewers) {
       const tools = resolveWorker(loaded(), id).tools;
-      expect(tools, `${id} cannot write its result envelope`).toContain("write");
+      expect(tools, `${id} still holds the tool submit_report replaced`).not.toContain("write");
+      expect(tools, `${id} has no way to report at all`).toContain("submit_report");
       expect(tools, `${id} must never hold a shell`).not.toContain("bash");
       expect(tools, `${id} has a read-only checkout; edit buys nothing`).not.toContain("edit");
     }

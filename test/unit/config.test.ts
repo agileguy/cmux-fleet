@@ -29,6 +29,9 @@ import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed, tuiWorkerIds } from "../../src/cli/commands/up.ts";
+import { buildProgram, exitCodeForError } from "../../src/cli/index.ts";
+import { register as registerConfigCommand } from "../../src/cli/commands/config.ts";
+import { cliBudget } from "../support/budget.ts";
 import { DEFAULT_DEVELOPMENT_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import { REVIEW_CONSOLE_ROSTER } from "../../src/run/dispatch-request.ts";
 import {
@@ -49,6 +52,8 @@ import {
   submitReportWriteWarning,
   submitReportWriteWorkers,
   workersMissingKubeconfig,
+  writeCapableIn,
+  type ToolName,
 } from "../../src/config/schema.ts";
 import { omlxRelayTarget } from "../../src/security/relay.ts";
 import { EXIT } from "../../src/contracts.ts";
@@ -81,7 +86,16 @@ const TRIAGE_SEATS = ["tri-1", "obs-t1"] as const;
  * cluster endpoints from a live environment, 288 sweeps a day) may not leave
  * the machine, and nothing reduces a transcript after it has been sent.
  */
-const TRIAGE_MODEL = "gpt-oss-20b-MXFP4-Q8";
+/*
+ * [CHANGED 2026-09-09] `gpt-oss-20b-MXFP4-Q8` -> `gemma-4-26b-a4b-it-bf16`.
+ *
+ * The privacy argument above is unchanged and is why this is still a LOCAL
+ * model. What changed is which one: the operator's `fleet.yaml` moved every
+ * oMLX worker to bf16 on 2026-09-07, SRD §11 Q8's tool-argument ceilings were
+ * measured on this model, and CI now generates against it too — see ISC-1116 at
+ * the foot of this file for why those three have to be the same string.
+ */
+const TRIAGE_MODEL = "gemma-4-26b-a4b-it-bf16";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -359,7 +373,7 @@ describe("worked example", () => {
  *
  * THE TRAP THIS BLOCK IS WRITTEN AGAINST, named because falling into it makes
  * the whole block worthless: a criterion that only asserts "the four seats
- * resolve to `gpt-oss-20b-MXFP4-Q8`" passes just as happily if someone deletes
+ * resolve to `gemma-4-26b-a4b-it-bf16`" passes just as happily if someone deletes
  * the seats entirely, and an absence asserted over a filtered set is satisfied
  * by an empty set. So every assertion here is made against `TRIAGE_SEATS` —
  * a list this file NAMES — and the seats' presence is checked before their
@@ -395,7 +409,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
     });
   }
 
-  test("all four resolve to the local 20b on omlx (D1, arm 3)", async () => {
+  test("all four resolve to the one local model on omlx (D1, arm 3)", async () => {
     // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
     // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
     // of them pass while checking nothing.
@@ -410,20 +424,43 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
     );
   });
 
-  test("the seats STATE that model — they do not inherit it from the fleet default", async () => {
+  /**
+   * **This replaces a non-degeneracy guard that the file outgrew, and it is a
+   * STRONGER assertion rather than a relaxed one (ISC-1116).**
+   *
+   * What stood here asserted that `llm.model` was NOT the triage model, and that
+   * some other worker ran something else — anti-vacuity for the set comparison
+   * above, so "the seats resolve to X" could not be true merely because
+   * everything did. That premise was a property of a file with three local
+   * models in it, and on 2026-09-09 the file stopped having them: every role
+   * moved to `gemma-4-26b-a4b-it-bf16`, because a second local model in the
+   * tracked example is the same collision ISC-1116 closed in CI — a cold load
+   * beside the resident weights, which is what returned `stop_reason: "error"`
+   * on a live seat mid-sweep.
+   *
+   * So the anti-vacuity moves to where the risk actually is. "The seats differ
+   * from the default" was a PROXY for "the example does not stand up two sets of
+   * weights"; this asserts the thing itself, and it fails on the drift the proxy
+   * would have missed — a fourth role quietly acquiring its own local model
+   * while the triage seats stay put.
+   */
+  test("the example names EXACTLY ONE local model, fleet-wide (ISC-1116)", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-    // The degenerate reading of the test above, closed. If `llm.model` were the
-    // 20b, all four seats would resolve to it with `roles.triage.model` and the
-    // three worker overrides deleted, and that set assertion would still be
-    // green — a decision inferred from silence. It is not the fleet default.
-    expect(loaded.config.llm.model).not.toBe(TRIAGE_MODEL);
-    // The same distinction from the other side: this fleet is not uniformly on
-    // one model, so "resolves to the 20b" is a property of these four seats and
-    // not of every worker in the file.
-    const seatIds = new Set<string>(TRIAGE_SEATS);
-    const others = resolveAllWorkers(loaded).filter((w) => !seatIds.has(w.id));
-    expect(others.length).toBeGreaterThan(0);
-    expect(others.some((w) => w.model !== TRIAGE_MODEL)).toBe(true);
+    const workers = resolveAllWorkers(loaded);
+    // Anti-vacuity on the walk itself: an empty fleet satisfies "one model".
+    expect(workers.length).toBeGreaterThan(1);
+
+    const local = workers.filter((w) => w.provider === "omlx");
+    expect(local.length).toBeGreaterThan(1);
+    expect([...new Set(local.map((w) => w.model))]).toEqual([TRIAGE_MODEL]);
+
+    // The default is part of the surface: a role added tomorrow with no
+    // `model:` inherits it, so a default off this model reintroduces the second
+    // set of weights through the one line nobody edits.
+    expect(loaded.config.llm.model).toBe(TRIAGE_MODEL);
+    // And the allowlist is the ceiling `up` checks, so a stale entry there is a
+    // standing permission for exactly what this test forbids.
+    expect(loaded.config.llm.models_allowlist).toEqual([TRIAGE_MODEL]);
   });
 
   /**
@@ -444,25 +481,26 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
    * is wrong. That is the only shape of role-level drift between the two files
    * this suite can see, and it can see it only in this direction.
    */
-  test("the three observers carry an explicit model:, and tri-1 deliberately does not", async () => {
+  test("no seat carries a worker-level model: — §6.11's rule, now unqualified", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-    const observerRoleModel = loaded.config.roles["observer"]?.model;
-    expect(observerRoleModel).toBeDefined();
-    expect(observerRoleModel).not.toBe(TRIAGE_MODEL);
 
+    // The override this test used to REQUIRE on obs-t1 is gone, and the
+    // paragraph above is why: it existed only because `observer` named a
+    // different local model, and it does not any more. That deletion was this
+    // test's own prescription — "the fix is to DELETE the three overrides, not
+    // to loosen the test" — followed rather than argued with.
+    const observerRoleModel = loaded.config.roles["observer"]?.model;
+    expect(observerRoleModel).toBe(TRIAGE_MODEL);
+    expect(loaded.config.roles["triage"]?.model).toBe(TRIAGE_MODEL);
+
+    // §6.11 unqualified: the seats INHERIT. Set-shaped over the WHOLE worker
+    // list so the copied-line defect — an override arriving on `obs-1` or
+    // `tst-2` — fails here too, which is the half that still has teeth now that
+    // the expected set is empty.
     const stated = loaded.config.workers
       .filter((w) => w.model !== undefined)
       .map((w) => `${w.id}=${w.model}`);
-    // Set-shaped again, and over the WHOLE worker list rather than over the
-    // three ids: an override that appears on a fourth worker — the copied-line
-    // defect, arriving on `obs-1` or `tst-2` — fails here too.
-    expect(stated).toEqual(["obs-t1"].map((id) => `${id}=${TRIAGE_MODEL}`));
-
-    // `tri-1` is the mirror and the reason the list above has three entries and
-    // not four: the `triage` role declares the model itself, so §6.1's "no
-    // override" rule holds for that seat in BOTH files. A test demanding an
-    // override on all four would assert the correction's exception as the rule.
-    expect(loaded.config.roles["triage"]?.model).toBe(TRIAGE_MODEL);
+    expect(stated).toEqual([]);
   });
 
   /**
@@ -470,7 +508,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
    * pins, which was MEASURED rather than imagined.
    *
    * `config validate` stops at `resolveAllWorkers` and never calls
-   * `assertModelAllowed`. So before `gpt-oss-20b-MXFP4-Q8` was added to this
+   * `assertModelAllowed`. So before the triage model was added to this
    * file's `llm.models_allowlist`, the example validated CLEAN and `up` then
    * refused all four seats with `ModelNotAllowedError` — the operator told the
    * file was fine and then having it rejected, which is exactly what
@@ -482,31 +520,65 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
    * cannot leave the repository holding a broken example.
    */
   describe("the allowlist entry is what admits the seats, not the model string", () => {
-    /** The loaded example with exactly `entry` removed from `models_allowlist`. */
-    function withoutAllowlistEntry(loaded: LoadedConfig, entry: string): LoadedConfig {
+    /**
+     * The loaded example with `entry` SUBSTITUTED for another name, rather than
+     * removed.
+     *
+     * **Removal stopped being a valid mutation when the example went uniform,
+     * and the reason is a real hazard rather than a test detail.** The allowlist
+     * now holds exactly one entry, and `assertModelAllowed`'s own docblock is
+     * explicit: *"A declared provider with an empty `models_allowlist`
+     * constrains nothing."* So deleting the entry does not refuse the fleet — it
+     * DISARMS THE GATE, and the old assertion here failed with "Received
+     * function did not throw" rather than with a refusal. A one-line allowlist
+     * is one deletion away from off.
+     *
+     * Substituting keeps the gate armed and tests what it is for: that it
+     * discriminates on the NAME. That is the property `up` relies on.
+     */
+    function withAllowlistRepointed(loaded: LoadedConfig, entry: string): LoadedConfig {
       const allowlist = loaded.config.llm.models_allowlist;
-      // A mutation that removes nothing proves nothing. If the entry is
-      // renamed, or moves into a `providers.<name>.models_allowlist` block,
-      // this says so — rather than reporting a green "all four refused" off a
-      // config that was never actually changed.
+      // A mutation that changes nothing proves nothing. If the entry is renamed,
+      // or moves into a `providers.<name>.models_allowlist` block, this says so.
       expect(allowlist, `"${entry}" is not on llm.models_allowlist to begin with`).toContain(entry);
+      const repointed = allowlist.map((m) => (m === entry ? "some-other-model-nobody-runs" : m));
+      // The gate must still be ARMED after the mutation, or the test below is
+      // measuring absence rather than refusal — which is exactly the trap the
+      // removal-shaped mutation fell into.
+      expect(repointed.length).toBeGreaterThan(0);
       return {
         ...loaded,
-        config: {
-          ...loaded.config,
-          llm: { ...loaded.config.llm, models_allowlist: allowlist.filter((m) => m !== entry) },
-        },
+        config: { ...loaded.config, llm: { ...loaded.config.llm, models_allowlist: repointed } },
       };
     }
+
+    /**
+     * The hazard the substitution above sidesteps, asserted so it is a KNOWN
+     * property of a one-model fleet rather than a surprise the next reader meets
+     * as a green test that proves nothing.
+     */
+    test("an EMPTY allowlist disarms the gate — one entry is one deletion from off", async () => {
+      const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+      expect(loaded.config.llm.models_allowlist).toHaveLength(1);
+      const emptied: LoadedConfig = {
+        ...loaded,
+        config: { ...loaded.config, llm: { ...loaded.config.llm, models_allowlist: [] } },
+      };
+      // Not a refusal. Nothing throws, and every worker is admitted.
+      expect(() => assertModelsAllowed(emptied, TRIAGE_SEATS)).not.toThrow();
+      for (const w of resolveAllWorkers(emptied)) {
+        expect(() => assertModelAllowed(emptied, w)).not.toThrow();
+      }
+    });
 
     test("unmutated, all four are admitted — the gate is not refusing everything", async () => {
       const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
       expect(() => assertModelsAllowed(loaded, TRIAGE_SEATS)).not.toThrow();
     });
 
-    test("strip the entry and EXACTLY the four seats are refused", async () => {
+    test("strip the entry and the WHOLE fleet is refused", async () => {
       const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-      const mutated = withoutAllowlistEntry(loaded, TRIAGE_MODEL);
+      const mutated = withAllowlistRepointed(loaded, TRIAGE_MODEL);
 
       const errors = new Map<string, unknown>();
       for (const w of resolveAllWorkers(mutated)) {
@@ -517,12 +589,19 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
         }
       }
 
-      // Set equality over the WHOLE fleet, which is both halves at once.
-      // "All four throw" alone is satisfied by a mutation that emptied the list
-      // and refused every worker in the file; "someone still passes" alone is
-      // satisfied by a mutation that hit the wrong seat. Only the set says the
-      // removal is about THIS entry and reaches PRECISELY these seats.
-      expect([...errors.keys()].sort()).toEqual([...TRIAGE_SEATS].sort());
+      // This used to read "EXACTLY the four seats are refused", and the set
+      // equality was doing real work: the fleet ran three local models, so a
+      // removal that reached every worker meant the mutation had emptied the
+      // list rather than removed one entry. On 2026-09-09 the example went
+      // uniform (ISC-1116) and the honest expectation is now the whole fleet.
+      //
+      // The anti-vacuity that assertion carried moves rather than evaporates:
+      // `withoutAllowlistEntry` already refuses to run if the entry is not on
+      // the list, and the fleet is asserted non-trivial here, so "everything
+      // throws" cannot be satisfied by an empty roster or a no-op mutation.
+      const all = resolveAllWorkers(mutated).map((w) => w.id);
+      expect(all.length).toBeGreaterThan(1);
+      expect([...errors.keys()].sort()).toEqual([...all].sort());
 
       for (const id of TRIAGE_SEATS) {
         const err = errors.get(id);
@@ -536,7 +615,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
 
     test("`up` is where it lands, and `config validate` never sees it", async () => {
       const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-      const mutated = withoutAllowlistEntry(loaded, TRIAGE_MODEL);
+      const mutated = withAllowlistRepointed(loaded, TRIAGE_MODEL);
       // `up`'s own gate, not only the per-worker assertion underneath it.
       expect(() => assertModelsAllowed(mutated, TRIAGE_SEATS)).toThrow(ModelNotAllowedError);
       // The measured gap, asserted so it stops being folklore: the same mutated
@@ -1555,6 +1634,129 @@ describe("models_allowlist is enforced (ISC-190)", () => {
     }
   }
 
+  /** Resolve `w1` under a PROVIDER MAP, returning the assertion's outcome. */
+  async function checkProvider(
+    allowlist: string[],
+    workerModel: string,
+  ): Promise<Error | null> {
+    const doc = docWithProviders(
+      {
+        omlx: providerBlock({ models_allowlist: allowlist }),
+        "ollama-cloud": providerBlock({ hosted: true, base_url: "https://ollama.invalid/v1" }),
+      },
+      { provider: "omlx" },
+    );
+    doc["roles"] = { eng: { model: workerModel } };
+    const loaded = await writeAndLoad(doc);
+    try {
+      assertModelAllowed(loaded, resolveWorker(loaded, "w1"));
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  }
+
+  /**
+   * The gate is over a (provider, model) PAIR, and it was over half of one.
+   *
+   * `assertModelAllowed`'s own docblock says carrying a verdict across providers
+   * "is not a widening of the rule, it is a different rule" — and then the
+   * comparison decomposed each entry and kept `.model`, discarding the provider
+   * it had just parsed. So an entry naming a foreign provider authorized its
+   * bare model name here. Raised independently by the architecture and language
+   * lenses on T-rv-155.
+   *
+   * `ollama-cloud` is declared in the map, so this is not a refusal about an
+   * unknown provider leaking in from somewhere: it is a fully legal entry about
+   * a DIFFERENT endpoint, which is exactly the case that must not carry.
+   */
+  test("an allowlist entry naming another provider does not authorize this one", async () => {
+    const err = await checkProvider(["ollama-cloud/Qwen3"], "Qwen3");
+    expect(err, "a foreign-provider entry admitted this provider's model").not.toBeNull();
+    expect(String(err?.message)).toContain("Qwen3");
+  });
+
+  /**
+   * Anti-vacuity, and the reason this is a filter rather than a refusal.
+   *
+   * The cheapest way to pass the test above is to refuse every prefixed entry,
+   * or to compare the raw strings — both of which break the two spellings an
+   * operator actually writes. A bare entry means THIS provider's model, and a
+   * prefix naming this provider is the same statement written out.
+   */
+  test("a bare entry and a same-provider prefix both still authorize", async () => {
+    expect(await checkProvider(["Qwen3"], "Qwen3"), "a bare entry stopped working").toBeNull();
+    expect(
+      await checkProvider(["omlx/Qwen3"], "Qwen3"),
+      "a prefix naming this provider stopped working",
+    ).toBeNull();
+  });
+
+  /**
+   * A SLASH IS NOT ALWAYS A PROVIDER PREFIX, and the first version of the
+   * provider filter forgot it.
+   *
+   * `mlx-community/Qwen3.5-35B-A3B-4bit` is one model id in the standard
+   * MLX/HuggingFace repo-id form; `mlx-community` is an org, not an endpoint.
+   * Filtering on the decomposed provider refused it, which is the case
+   * `doctor-allowlist.test.ts` names "THE case that was broken" — broken a
+   * second time by the fix for a different defect, and caught only because
+   * that file already pinned it.
+   *
+   * Pinned HERE as well, from the allowlist ENTRY side rather than the
+   * `model:` side, because that is the position the filter reads and the one
+   * the other file does not exercise.
+   */
+  test("a repo-id entry whose prefix is not a declared provider still authorizes", async () => {
+    expect(
+      await checkProvider(["mlx-community/Qwen3"], "Qwen3"),
+      "a HuggingFace repo-id entry was read as a foreign provider",
+    ).toBeNull();
+  });
+
+  /**
+   * `config validate` MAKES THIS REFUSAL TOO, and until 2026-09-08 it did not.
+   *
+   * The command's own docblock promises that "what passes here is exactly what
+   * `up` will accept", on the reasoning that a `validate` printing `ok:` for a
+   * config `up` then refuses "is worse than not having the command, because the
+   * operator has been told the file is fine". `resolveAllWorkers` was the merge
+   * half of that promise; the allowlist was the half nobody wired.
+   *
+   * MEASURED, and the symptom is why this is a test and not a note. `gemma4:31b`
+   * was given to a reviewer seat with its `context_windows` entry and without
+   * its `models_allowlist` line. `config validate` printed `ok:` and listed the
+   * worker. The console script reported the pane respawned. `up` refused INSIDE
+   * that pane, where nothing was reading, and the only visible symptom was
+   * `status --all` showing eleven workers where there had been twelve — a seat
+   * simply absent, with the reason on a surface already scrolled past.
+   *
+   * Run through `buildProgram` rather than by calling `assertModelAllowed`
+   * again: the function was already correct and already covered, and what broke
+   * was that nothing in this command CALLED it. A test that calls it directly
+   * would have stayed green through the entire defect.
+   */
+  test("config validate refuses it too, not just up", async () => {
+    const doc = baseDoc();
+    doc["llm"] = { model: "DefaultModel", models_allowlist: ["Allowed-A"] };
+    doc["roles"] = { eng: { model: "Sneaky-C" } };
+    const dir = await tempDir();
+    const path = join(dir, "fleet.yaml");
+    await writeFile(path, stringify(doc));
+
+    const program = buildProgram();
+    registerConfigCommand(program);
+    let thrown: unknown = null;
+    try {
+      await program.parseAsync(["config", "validate", "--config", path], { from: "user" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown, "config validate accepted a model up would refuse").not.toBeNull();
+    expect(String((thrown as Error).message)).toContain("models_allowlist");
+    expect(exitCodeForError(thrown)).toBe(EXIT.USAGE);
+  }, cliBudget(1));
+
   test("a model absent from a non-empty allowlist is refused", async () => {
     const err = await check(["Allowed-A", "Allowed-B"], "Sneaky-C");
     expect(err).toBeInstanceOf(ModelNotAllowedError);
@@ -2355,6 +2557,205 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
   });
 });
 
+/**
+ * SRD-WORKER-DISPATCH-EXTENSION §13 task 7.4 — layer 1 stated as a criterion,
+ * and §6.3 is explicit that it is the only one of the four layers that can be
+ * asserted statically at all.
+ *
+ * ## The property, and why `bash` is the selector rather than an afterthought
+ *
+ * *"A bash-less role's resolved tools contain no writing verb but
+ * `submit_report`."* The describe ABOVE pins Phase A, where holding both routes
+ * merely warns. This is Phase B: for a role that has actually been narrowed,
+ * the same shape is a fact the suite refuses to let go of.
+ *
+ * §6.8 is the reason the rule is conditioned on the shell instead of being
+ * stated over every role. Removing `write` from a role that holds `bash` takes
+ * away a tool and not a capability — `cat > /outbox/…` is still right there —
+ * so asserting this of `sre`, `observer` or `ticketing` would be asserting
+ * something both false and undesirable.
+ *
+ * ## What this can reach, and what it provably cannot
+ *
+ * §13's probe reads *"`resolveWorker` for `triage`, `collator`, `reviewer`"*,
+ * and exactly ONE of those three is reachable that way from a tracked file:
+ *
+ * - **`triage`** has a role and a seat (`tri-1`), so it resolves. It is also
+ *   the one still holding `write`, because task 7.3 has not landed.
+ * - **`reviewer`** has a role and **no seat** — the `review` console's four
+ *   workers are declared only in the operator's gitignored `fleet.yaml`. The
+ *   ROLE arm below is its whole coverage, and the worker arm structurally
+ *   cannot provide any.
+ * - **`collator`** is in neither. Task 7.2 says so in as many words and is
+ *   marked as producing no tracked diff for precisely this reason. Nothing here
+ *   can assert a thing about it; the last test is what makes its ARRIVAL a
+ *   failure rather than a silence.
+ *
+ * A block written against the worker arm alone would therefore be one third of
+ * itself while reading as the whole criterion — which is the ISC-572 shape, and
+ * the reason both arms are here.
+ */
+describe("Phase B: a bash-less role holds no writer but submit_report (§13 task 7.4)", () => {
+  /**
+   * The bash-less roles that hold a writer, and which writers. **A tripwire,
+   * not an allowance:** the test below asserts each exemption is still TRUE, so
+   * the commit that narrows one of these turns this file red and cannot be
+   * finished without deleting its entry — at which point the general assertion
+   * above starts covering it with nobody having to remember that it should.
+   *
+   * THE MECHANISM HAS NOW WORKED IN BOTH DIRECTIONS IN ONE DAY, which is worth
+   * recording because the second direction is the one nobody designs for.
+   * Task 7.3 removed `triage`'s `write`, this file went red exactly as
+   * intended, and the entry was deleted. Three sweeps later the grant came
+   * back — `submit_report` writes the ENVELOPE and this role's actual product
+   * is a second file, `/outbox/<task-id>/dispatch-request.json`, which the tool
+   * has no route for — and the entry is back with it.
+   *
+   * So the exemption below is not "not yet narrowed". It is **narrowed, tried,
+   * and reverted for a stated reason**, and the distinction is the whole value
+   * of writing it down: the next person to read §13 task 7.3 will find a task
+   * marked CLEARED whose acceptance cannot be met, and this is where they learn
+   * why without re-running it.
+   */
+  const HOLDS_A_WRITER: Readonly<Record<string, readonly ToolName[]>> = {
+    // Reverted 2026-09-09. Narrowed, `tri-1` composed a correct fan-out and got
+    // `Tool write not found` three times; sweeps 5 and 6 settled `success`
+    // having dispatched nothing at all. Restoring the invariant needs a
+    // `dispatch_request` tool, not a config edit.
+    triage: ["write"],
+  };
+
+  async function example(): Promise<LoadedConfig> {
+    return await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+  }
+
+  type Cfg = LoadedConfig["config"];
+
+  /**
+   * A ROLE's resolved grant: `defaults ← role`, then `exclude_tools` subtracted.
+   *
+   * `exclude_tools` is a real subtraction Pi applies at the argv (`render.ts`),
+   * so a declared-then-excluded `write` is not a grant and must not read as
+   * one — the same correction the Phase A block above makes for its warning.
+   */
+  function roleGrant(cfg: Cfg, name: string): readonly ToolName[] {
+    const role = cfg.roles[name];
+    if (role === undefined) {
+      throw new Error(
+        `fleet.example.yaml declares no role "${name}" — it is GONE, not merely retooled. ` +
+          `It holds: ${Object.keys(cfg.roles).join(", ")}`,
+      );
+    }
+    const declared = role.tools ?? cfg.defaults?.tools;
+    const excluded = role.exclude_tools ?? cfg.defaults?.exclude_tools ?? [];
+    return effectiveToolGrant(declared).filter((t) => !excluded.includes(t));
+  }
+
+  /** The same, for a worker that has been through the full three-level resolve. */
+  function workerGrant(w: ResolvedWorker): readonly ToolName[] {
+    const excluded = w.excludeTools ?? [];
+    return effectiveToolGrant(w.tools).filter((t) => !excluded.includes(t));
+  }
+
+  function bashLessRoles(cfg: Cfg): string[] {
+    return Object.keys(cfg.roles)
+      .filter((r) => !roleGrant(cfg, r).includes("bash"))
+      .sort();
+  }
+
+  /**
+   * THE ANTI-VACUITY THIS BLOCK RESTS ON, and it closes a specific hole rather
+   * than a general one.
+   *
+   * Every assertion below is made over a FILTERED set, and a filter that
+   * narrows to nothing satisfies an absence for free. The hole is not
+   * hypothetical here: `effectiveToolGrant` resolves an OMITTED `tools:` to
+   * every Pi builtin — `bash` included — so deleting one line from
+   * `reviewer` would drop it out of the bash-less set entirely and take its
+   * coverage with it, while looking like tidying. Naming the set is what turns
+   * that into a failure. (ISC-59's `read_only: true` makes the same deletion a
+   * parse error; two independent refusals, because this one is the one that
+   * survives the flag being removed too.)
+   */
+  test("the example ships exactly two bash-less roles, and they are Phase 7's", async () => {
+    const { config } = await example();
+    expect(bashLessRoles(config)).toEqual(["reviewer", "triage"]);
+  });
+
+  test("a narrowed bash-less role holds no writer, and holds submit_report instead", async () => {
+    const { config } = await example();
+    const narrowed = bashLessRoles(config).filter((r) => !(r in HOLDS_A_WRITER));
+    // By NAME, or every loop below is free.
+    expect(narrowed).toEqual(["reviewer"]);
+
+    for (const r of narrowed) {
+      const grant = roleGrant(config, r);
+      // Against schema.ts's own writer set, not a second copy written here: a
+      // fourth writer added there must widen this criterion, not slip past it.
+      expect(writeCapableIn(grant), `role "${r}" resolves a write-capable tool`).toEqual([]);
+      // The "but submit_report" half, and it is load-bearing rather than
+      // decorative. A bash-less role with no writer AND no submit_report cannot
+      // produce result.json at all — outbox.ts only ever reads it — which is
+      // the exact state that emptied a whole review console and is why `write`
+      // was granted here in the first place. Take one away, the other must be
+      // there.
+      expect(grant, `role "${r}" has no route to write its envelope`).toContain("submit_report");
+    }
+  });
+
+  test("a bash-less role that holds a writer holds EXACTLY the ones exempted", async () => {
+    const { config } = await example();
+    // The map is not empty, or this test is a no-op that reads like a guard.
+    expect(Object.keys(HOLDS_A_WRITER)).toEqual(["triage"]);
+
+    for (const [r, writers] of Object.entries(HOLDS_A_WRITER)) {
+      // An exemption for a role holding a shell would be excusing a rule that
+      // never applied to it — §6.8 conditions the whole property on bash.
+      expect(bashLessRoles(config), `"${r}" is exempted but is not bash-less`).toContain(r);
+      expect(
+        writeCapableIn(roleGrant(config, r)),
+        `"${r}" no longer holds ${writers.join(", ")}. If that is deliberate, DELETE its ` +
+          `HOLDS_A_WRITER entry and let the criterion above cover it — but read that entry ` +
+          `first: this exact narrowing was tried on 2026-09-09 and reverted, because ` +
+          `submit_report writes the envelope and this role's product is dispatch-request.json`,
+      ).toEqual([...writers]);
+    }
+  });
+
+  test("through resolveWorker, every bash-less SEAT obeys the same rule", async () => {
+    const loaded = await example();
+    const seats = resolveAllWorkers(loaded).filter((w) => !workerGrant(w).includes("bash"));
+
+    // By NAME, for `seatsOf`'s reason above: a seat deleted and a seat retooled
+    // want different edits, and an emptied filter reports neither.
+    expect(seats.map((w) => w.id).sort()).toEqual(["tri-1"]);
+
+    for (const w of seats) {
+      const exempt = HOLDS_A_WRITER[w.role] ?? [];
+      expect(writeCapableIn(workerGrant(w)), `seat "${w.id}" (role ${w.role})`).toEqual([...exempt]);
+      expect(workerGrant(w), `seat "${w.id}" has no route to write its envelope`).toContain(
+        "submit_report",
+      );
+    }
+  });
+
+  /**
+   * `collator`'s absence, asserted so that its arrival is a failure.
+   *
+   * This is the one arm of §13's probe that no tracked file can satisfy, and
+   * the honest thing to do with an unreachable criterion is to make the day it
+   * becomes reachable loud. If a `collator` role or seat is ever added to the
+   * example, this goes red and whoever added it has to bring it under the
+   * assertions above — rather than the criterion silently continuing to cover
+   * two roles out of three while claiming three.
+   */
+  test("collator is in neither the example's roles nor its seats — and arriving must fail", async () => {
+    const { config } = await example();
+    expect(Object.keys(config.roles)).not.toContain("collator");
+    expect(config.workers.map((w) => w.role)).not.toContain("collator");
+  });
+});
+
 describe("theme resolves three-level and warns on a name the image lacks", () => {
   test("a worker override beats the role, which beats defaults", async () => {
     const doc = baseDoc();
@@ -3117,5 +3518,147 @@ describe("ISC-529: a configured identity that is the operator's own is not silen
     // nobody. Asserted so a future default that drops .invalid fails here.
     expect(DEFAULT_GIT_IDENTITY.email.endsWith("@pifleet.invalid")).toBe(true);
     expect(operatorIdentityWarning(DEFAULT_GIT_IDENTITY.email, "dan@example.com")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-1116 — CI must not add a SECOND resident model to the fleet's oMLX
+// ---------------------------------------------------------------------------
+
+/**
+ * **The maintainer's oMLX is a shared, capped machine, and CI is a tenant on
+ * it.**
+ *
+ * `ci.yml`'s `omlx-live` and `container-live` jobs generate against the real
+ * server the live fleet is running on. When they name a model the fleet is NOT
+ * already running, the server cold-loads a second set of weights beside the
+ * warm one, and a 24 GiB cap does not fit two.
+ *
+ * That is not a hypothetical. `ci.yml` already carries the note — auto-selection
+ * once "cold-loaded a 35B into a 24GB cap and SIGABRT'd the maintainer's oMLX,
+ * taking every other tenant's warm model with it" — and the rule it produced
+ * was *name the model, never infer it*. **Naming was not enough.** On
+ * 2026-09-09, with CI pinned to `Qwen3.5-35B-A3B-8bit` and the fleet on
+ * `gemma-4-26b-a4b-it-bf16`, a `container-live` run loaded the 35B while the
+ * triage console was mid-sweep; `obs-t1` returned `stop_reason: "error"` and
+ * `T-sweep-10-slice1` settled `failed`. A deliberately named model collides
+ * exactly as hard as an inferred one — the old guard constrained WHO chose, and
+ * the thing that matters is WHICH.
+ *
+ * So the invariant is not "a model is named", it is **"the model named is one
+ * the fleet already has resident"**, and the only tracked statement of what the
+ * fleet runs is this file. Reading it through `resolveWorker` rather than
+ * grepping the YAML is deliberate: a seat-level `model:` override is exactly how
+ * `obs-t1` is declared, and a grep for `model:` cannot see which line wins.
+ *
+ * **This guard cannot prove the server's memory is safe** — it proves CI and the
+ * tracked fleet name one model. That is the whole of what a unit test can hold,
+ * and it is the half that drifted.
+ */
+describe("CI generates against the model the fleet already runs (ISC-1116)", () => {
+  const CI_YML = "​.github/workflows/ci.yml".replace("​", "");
+
+  /** Every `PIFLEET_OMLX_MODEL:` ASSIGNMENT in the workflow, in file order. */
+  async function ciModels(): Promise<readonly string[]> {
+    const src = await readFile(join(REPO_ROOT, CI_YML), "utf8");
+    return [...src.matchAll(/^\s+PIFLEET_OMLX_MODEL:[ \t]+(\S+)\s*$/gm)].map((m) => m[1]!);
+  }
+
+  /** What the tracked example resolves the triage console's seats to. */
+  async function seatModels(): Promise<readonly string[]> {
+    const cfg = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    return ["tri-1", "obs-t1"].map((id) => resolveWorker(cfg, id).model);
+  }
+
+  /**
+   * Asserted first and separately: if the console's own two seats disagree the
+   * comparison below has no single answer to make, and the failure an operator
+   * needs to read is "the console runs two models", not "CI disagrees with one
+   * of them".
+   */
+  test("the triage console's seats resolve to ONE local model", async () => {
+    const seats = await seatModels();
+    expect(new Set(seats).size, `the triage seats run ${seats.join(" and ")}`).toBe(1);
+  });
+
+  /**
+   * **ISC-1124: the ASSIGNMENT is not the only way CI loads weights.**
+   *
+   * The guard below reads `PIFLEET_OMLX_MODEL:` assignments, and that is where
+   * ISC-1116 stopped. It is not sufficient, and the gap was live for a month:
+   * `omlx-live`'s warmup step issued a completion with a model name written
+   * INTO THE REQUEST BODY — `GLM-4.5-Air-MLX-4bit`, ~58 GB — so the job named
+   * gemma in its environment and loaded two models on the operator's server.
+   *
+   * The cost was not CI's. That server is shared with the live triage console,
+   * and gemma then would not fit beside GLM Air under a 107.52 GB Metal
+   * ceiling: `T-sweep-16-slice1` settled `failed / transcript_stop_error` with
+   * ZERO tool calls, twenty-one seconds after the push that started the job.
+   *
+   * So the invariant is not "the pinned variable names the fleet's model" but
+   * **"no model this workflow can load is any other model"** — and anything
+   * that can issue a completion can load weights. This walks every
+   * non-comment line for a model-shaped name and refuses one that is not the
+   * fleet's, which is the check that would have caught the warmup.
+   */
+  test("no ACTIVE line of the workflow names any other model (ISC-1124)", async () => {
+    const src = await readFile(join(REPO_ROOT, CI_YML), "utf8");
+    const [expected] = await seatModels();
+    // Comments are the file's memory — the 0/5 table, the supersession notes —
+    // and stripping them is what makes this assertion about behaviour.
+    const active = src
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    // Anti-vacuity: if the strip ever removes everything, an empty haystack
+    // satisfies "no other model" while checking nothing.
+    expect(active).toContain("PIFLEET_OMLX_MODEL");
+    expect(active).toContain(expected!);
+
+    // Model-shaped: a vendor-ish name carrying a quantisation or size token.
+    // Deliberately broad — this should trip on a name nobody anticipated.
+    const OTHERS =
+      /\b(?:GLM-[\w.]+-Air[\w-]*|Qwen[\w.]*-\d+B[\w-]*|gpt-oss-[\w-]+|Llama-[\w.]+-\d+B[\w-]*|gemma-[\w.]+-(?!26b-a4b-it-bf16)[\w-]+)\b/g;
+    const found = [...new Set([...active.matchAll(OTHERS)].map((m) => m[0]))];
+    expect(
+      found,
+      `ci.yml can load ${found.join(", ")} beside ${expected}. That server is shared with ` +
+        `the live console: a second resident model is what made T-sweep-16-slice1 fail with a 507.`,
+    ).toEqual([]);
+  });
+
+  test("both CI jobs name that model, and no other", async () => {
+    const models = await ciModels();
+    // TWO assignments, one per job, both at JOB level — and the count is the
+    // guard rather than trivia. ISC-290 pins it and states the defect a third
+    // would mean: a step-level pin can drift from the graded one. It HAD
+    // drifted, invisibly, because the drift was a hardcoded model in the
+    // warmup's request body rather than a second assignment (ISC-1124). The
+    // warmup now INHERITS the job-level value, which is what makes the two
+    // structurally incapable of disagreeing.
+    //
+    // The count is ISC-290's criterion and is asserted there; repeated here so
+    // a zero-match regex fails loudly instead of making the comparison below
+    // vacuously true.
+    expect(models, "no PIFLEET_OMLX_MODEL assignments found — has the key moved?").toHaveLength(2);
+
+    const seats = await seatModels();
+    // Non-null after the sibling test above, but asserted rather than `!`-ed:
+    // an empty seat list would otherwise make the loop below compare against
+    // `undefined` and pass by never running.
+    const seat = seats[0];
+    // A THROW rather than `expect(...).toBeDefined()`, and rather than `!`.
+    // `toBeDefined` does not narrow for the compiler, and `!` would assert the
+    // narrowing instead of checking it — an empty seat list would then make the
+    // loop below compare against `undefined` and pass by never running.
+    if (seat === undefined) throw new Error("the example declares no triage seats");
+    for (const m of models) {
+      expect(
+        m,
+        `ci.yml generates against "${m}" while the tracked fleet runs "${seat}". CI would ` +
+          `cold-load a SECOND model beside the fleet's warm one, and the shared oMLX cap does ` +
+          `not fit two — this is the collision that failed T-sweep-10-slice1 (ISC-1116).`,
+      ).toBe(seat);
+    }
   });
 });

@@ -143,6 +143,12 @@ function harness(): Harness {
       trace.push(`writeProvenance(${String(task_id)},${epoch})`);
       provenance.push({ task_id, epoch });
     },
+    // ISC-1115 — traced rather than counted, because what has to be true of the
+    // release is an ORDER: the drop is disarmed while the epoch is being torn
+    // down, not left for whatever runs next.
+    clearDispatchDrop: async () => {
+      trace.push("clearDispatchDrop");
+    },
     ledgerAppend: async (event, fields) => {
       trace.push(`ledger:${event}`);
       ledger.push({
@@ -374,6 +380,64 @@ describe("unstage — releases a staged epoch without settling it (§9 Q8)", () 
     // The parked deadline dies with the epoch, or the NEXT stage's first
     // growth would arm the cancelled task's number.
     expect(h.disarms).toBe(1);
+  });
+
+  /**
+   * ── THE FOURTH CONSEQUENCE, and the only one that is not a stale reading ──
+   *
+   * `/policy/dispatch` is what `docker/pi-extensions/dispatch-trigger.ts` polls.
+   * It fires on a `staged: true` header and dedups in `lastFired` — closure
+   * state belonging to one Pi session, which does not survive a `/new`. So an
+   * armed drop outliving its epoch is a LOADED TRIGGER, and the next session to
+   * start pulls it: the operator's cancellation runs anyway, in a turn nobody
+   * asked for and no epoch is waiting on.
+   *
+   * ISC-1114 is the same mechanism reached through `settle`, and it cost the
+   * live triage console a sweep before anyone noticed, because a re-fired task
+   * produces correct-looking work and no error at all. `handleUnstage`'s
+   * docblock listed three durable consequences and this was the missing fourth.
+   *
+   * Ordered against `writeProvenance` for the reason the sibling test above
+   * gives: what has to be true is that the disarm happens while the epoch is
+   * being torn down, not left for whatever runs next.
+   */
+  test("the dispatch drop is disarmed as part of the release", async () => {
+    const h = harness();
+    await handleStage(h.deps, envelope("T-001"), "a1", null);
+    h.trace.length = 0;
+
+    await handleUnstage(h.deps, "T-001", "a1");
+    expect(
+      h.trace,
+      "the release left `/policy/dispatch` armed — the next session re-runs the cancelled task",
+    ).toContain("clearDispatchDrop");
+    expect(h.trace.indexOf("writeProvenance(null,0)")).toBeLessThan(
+      h.trace.indexOf("clearDispatchDrop"),
+    );
+    expect(h.trace.indexOf("clearDispatchDrop")).toBeLessThan(h.trace.indexOf("flushState"));
+  });
+
+  /**
+   * A drop that will not clear must not take the release with it.
+   *
+   * By the time this runs the fence has already been mutated, so throwing would
+   * leave a released epoch the caller believes is still live — and the refusal
+   * the operator is waiting on would never be returned. The failure is logged
+   * instead, because "still armed" and "disarmed" producing identical output is
+   * exactly how ISC-1114 survived behind a docblock claiming the opposite.
+   */
+  test("a drop that refuses to clear is logged, and the release still succeeds", async () => {
+    const h = harness();
+    await handleStage(h.deps, envelope("T-001"), "a1", null);
+    h.deps.clearDispatchDrop = async () => {
+      throw new Error("EACCES: the drop is 0444 and the widen failed");
+    };
+
+    const released = await handleUnstage(h.deps, "T-001", "a1");
+    expect(released.ok, "a failed disarm undid the release").toBe(true);
+    const logged = h.events.find((e) => e["type"] === "dispatch_drop_clear_failed");
+    expect(logged, "the failed disarm left no trace an operator could find").toBeDefined();
+    expect(String(logged?.["detail"])).toContain("EACCES");
   });
 
   /**

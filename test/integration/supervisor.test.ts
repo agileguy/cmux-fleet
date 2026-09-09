@@ -49,6 +49,11 @@ import { abortWedged, eventSilenceMs } from "../../src/run/stall-io.ts";
 import { identityAlive, processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 import { EXPORT_MARKER } from "../fixtures/export-marker.ts";
+import {
+  splitDispatchPolicy,
+  writeDispatchPolicy,
+} from "../../src/run/dispatch-policy.ts";
+import { TASK_POLICY_NONE } from "../../src/run/task-policy.ts";
 import { cliBudget, gateBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
@@ -3188,5 +3193,156 @@ describe("ISC-141: a stale agent_start before the ack cannot open the epoch's wi
     // No CLI and no container, so neither cliBudget nor containerBudget
     // describes this test's cost (ISC-273).
     gateBudget([20_000, 20_000, 20_000, 5_000]),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ISC-1114 — the reset race: a settled epoch must not leave a loaded trigger
+// ---------------------------------------------------------------------------
+
+/**
+ * **The drop is a TRIGGER, and a settle has to unload it.**
+ *
+ * `docker/pi-extensions/dispatch-trigger.ts` polls `/policy/dispatch` and sends
+ * the worker a turn whenever it reads a `staged: true` header it has not already
+ * fired for. Its dedup — `lastFired` — is closure state belonging to one Pi
+ * session, and a session does not survive `/new`. The triage console types `/new`
+ * at every settle (`resetPaneSession`, for §6.6 freshness), so a drop still armed
+ * at that moment is pulled by the session the reset creates.
+ *
+ * Measured on the live console, run `2026-09-09T04-21-26Z-20f5`, on every sweep
+ * it ran: `settled T-sweep-8` at 04:22:21.567, a new session at 04:22:21.630, the
+ * auto-trigger firing again at 04:22:22.673, and the seat writing a correct
+ * `dispatch-request.json` at 04:22:38 into an epoch whose pass had closed
+ * seventeen seconds earlier. No error anywhere; the fan-out simply went unread
+ * and no observer was ever dispatched.
+ *
+ * This is the behavioural half. The ORDERING half — that the drop goes idle
+ * before the task record that releases `awaitSettled` — is not observable from
+ * out here once both writes have landed, and is pinned structurally in
+ * `test/unit/dispatch-policy.test.ts`.
+ */
+describe("a settled epoch leaves the drop disarmed (ISC-1114)", () => {
+  test(
+    "the header reads staged:false once the task record exists",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("dropclear");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.tasksDir, { recursive: true });
+      await mkdir(run.sessionsDir, { recursive: true });
+
+      /*
+       * ARMED THE WAY THE HOST ARMS IT. `sendTaskEnvelope` writes this drop on
+       * the staged route; the control-socket `dispatch` verb used below does
+       * not, because staging is a host-side concern. Rendering it here with the
+       * production writer is what makes the assertion about the SUPERVISOR's
+       * behaviour rather than about a fixture: if `writeDispatchPolicy` ever
+       * stops producing a `staged: true` header, the pre-check two lines down
+       * fails and says so instead of letting this test pass vacuously.
+       */
+      await writeDispatchPolicy(
+        wp.dispatchPolicy,
+        {
+          task_id: "T-DROP-1",
+          run_id: runId,
+          worker: "eng-1",
+          epoch: 1,
+          attempt: 1,
+          outbox: "/outbox/T-DROP-1",
+          dispatched_at: new Date().toISOString(),
+        },
+        "do the integration thing",
+      );
+      const armed = splitDispatchPolicy(await readFile(wp.dispatchPolicy, "utf8"));
+      expect(armed.identity.staged, "the fixture never armed the drop").toBe(true);
+      expect(armed.prompt).toContain("do the integration thing");
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+        logPath: wp.supervisorLog,
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-DROP-1"),
+        attempt_id: "att-T-DROP-1",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      /*
+       * A ONE-SIDED LATCH, and it is a bonus rather than the proof.
+       *
+       * If the clear moved after the record write there would be a window in
+       * which the record exists and the drop is still armed — the exact state
+       * that lets a `/new` re-fire. A tight sample can CATCH that window but
+       * cannot be relied on to hit it, so this latch only ever adds a failure:
+       * it never turns green code red, and its silence is not evidence of
+       * correct ordering. That is the structural test's job.
+       */
+      let sawRecordWhileArmed: string | null = null;
+      const settled = await waitFor(async () => {
+        const record = await readTaskRecord(taskRecordPath(wp, "T-DROP-1"));
+        if (record === null) return false;
+        const now = splitDispatchPolicy(await readFile(wp.dispatchPolicy, "utf8"));
+        if (now.identity.staged && sawRecordWhileArmed === null) {
+          sawRecordWhileArmed = now.identity.task_id;
+        }
+        return true;
+      }, 20_000);
+      expect(settled, "the task never settled").toBe(true);
+      expect(
+        sawRecordWhileArmed,
+        "the task record became visible while the drop was still armed — `awaitSettled` " +
+          "returns on that record, so the console's `/new` can land on a loaded trigger",
+      ).toBeNull();
+
+      /**
+       * THE assertion. `staged: false` is the idle arm of the header, and it is
+       * the exact byte `readStagedHeader` inside the container refuses to fire
+       * on (`if (header.schema !== SCHEMA || header.staged !== true) return null`).
+       * Asserted through `splitDispatchPolicy` rather than by string-matching the
+       * file, so the shape the extension parses is the shape this reads.
+       */
+      const after = splitDispatchPolicy(await readFile(wp.dispatchPolicy, "utf8"));
+      expect(
+        after.identity.staged,
+        "the drop is still armed after settle — the next `/new` re-runs this task",
+      ).toBe(false);
+
+      /*
+       * And the brief goes with it — but this is a CURRENCY check, not a second
+       * probe of settle, and saying so is the point of the comment.
+       *
+       * `renderDispatchPolicy`'s idle arm hard-codes `<none>` and ignores its
+       * `prompt` argument entirely, so "disarmed header over a live brief" is
+       * unreachable through `clearDispatchPolicy` no matter what settle does.
+       * Measured: a mutation that made the clear preserve the previous prompt
+       * left this test GREEN, because the renderer discarded it anyway. An
+       * assertion phrased as `not.toContain(brief)` therefore reddens for
+       * nothing and would have read as coverage it does not have.
+       *
+       * What it is worth pinning is the pairing itself, against the constant
+       * both halves share: if the idle arm ever starts carrying a body, the
+       * worker at `/policy/dispatch` can read the last task's text after being
+       * told to go and read it, and that is the half-disarm this names.
+       */
+      expect(after.prompt).toBe(`${TASK_POLICY_NONE}\n`);
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    // Three gates: idle (20 s), the settle wait (20 s), shutdown (5 s). No CLI
+    // and no container, so neither cliBudget nor containerBudget describes this
+    // test's cost (ISC-273) — the same reasoning as the ISC-141 block above.
+    gateBudget([20_000, 20_000, 5_000]),
   );
 });

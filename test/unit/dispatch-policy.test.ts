@@ -454,3 +454,61 @@ describe("materialize establishes the drop before the container starts", () => {
     expect(refuse).toBeLessThan(write);
   });
 });
+
+/**
+ * ISC-1114 — THE RESET RACE, pinned where it can only be broken deliberately.
+ *
+ * The behavioural half lives in `test/integration/supervisor.test.ts` ("a
+ * settled epoch leaves the drop disarmed"): it boots a real supervisor, settles
+ * a real task and reads the drop. What that test CANNOT see is the order of two
+ * writes it only ever observes after both have happened — and the order is the
+ * whole property.
+ *
+ * The console types `/new` only after `awaitSettled` returns, and `awaitSettled`
+ * returns on the existence of the task record. So "record exists" must imply
+ * "drop is idle". Clear after the record and that implication is false for a
+ * window of one file write — which is the same window, in the same direction,
+ * as the bug being fixed, just narrower. Narrower is not fixed.
+ *
+ * Structural for `materializeWorkerInputs`' reason one describe up: no unit test
+ * can schedule a `/new` against a settle. What IS observable is that the clear
+ * precedes the record write in the one function that performs both.
+ */
+describe("the supervisor disarms the drop BEFORE the record that unblocks the reset (ISC-1114)", () => {
+  test("clearDispatchPolicy precedes writeTaskRecord inside settle", async () => {
+    const src = await readFile("src/supervisor/index.ts", "utf8");
+    /*
+     * Scoped to `settle`, not to the file. `writeTaskRecord` is imported at the
+     * top and the drop is also cleared at `up`; a whole-file `indexOf` would
+     * compare an import line against a call in another function and pass for
+     * reasons that have nothing to do with this ordering.
+     */
+    const from = src.indexOf("const settle = async (verdict: Verdict, reason: string)");
+    expect(from, "settle() has been renamed — re-anchor this guard").toBeGreaterThan(-1);
+    const body = src.slice(from);
+
+    const clear = body.indexOf("await clearDispatchPolicy(wp.dispatchPolicy);");
+    const record = body.indexOf("await writeTaskRecord(taskRecordPath(wp, settled.task_id)");
+    expect(clear, "settle() no longer disarms the drop — ISC-1114 is back").toBeGreaterThan(-1);
+    expect(record, "settle() no longer writes a task record").toBeGreaterThan(-1);
+    expect(
+      clear,
+      "the drop is cleared AFTER the record that releases `awaitSettled`, so a `/new` can " +
+        "land on a still-armed trigger and re-run the task that just settled",
+    ).toBeLessThan(record);
+  });
+
+  /**
+   * The failure must be VISIBLE, and this is the direction that is easy to lose.
+   *
+   * A settle may not be blocked by a file write, so the clear is wrapped. A bare
+   * `catch {}` would then make "the trigger is still armed" and "the trigger was
+   * disarmed" produce byte-identical output — an absence of evidence read as
+   * evidence, which is precisely how this defect survived: a docblock asserted
+   * the call site and nothing anywhere disagreed with it.
+   */
+  test("a clear that throws is logged rather than swallowed", async () => {
+    const src = await readFile("src/supervisor/index.ts", "utf8");
+    expect(src).toContain('type: "dispatch_drop_clear_failed"');
+  });
+});

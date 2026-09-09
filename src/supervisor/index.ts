@@ -32,7 +32,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -51,6 +51,7 @@ import { CompletionTracker } from "../rpc/completion.ts";
 import { EpochManager, type CancelDecision, type DispatchDecision } from "../rpc/epoch.ts";
 import { isInsideRunTree, runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
 import { writeTaskPolicy } from "../run/task-policy.ts";
+import { clearDispatchPolicy } from "../run/dispatch-policy.ts";
 import {
   initialWorkerState,
   readFence,
@@ -78,6 +79,7 @@ import {
 } from "./prose-detector.ts";
 import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 import {
+  SESSION_REDISCOVER_MS,
   TUI_POLL_MS,
   TUI_QUIET_MS,
   quietWindowMsFor,
@@ -87,6 +89,7 @@ import {
   discoverSessionPath,
   verdictForStopReason,
 } from "./tui.ts";
+import { TOOL_LOOP_REASON, isToolLoop, readToolLoop } from "./tool-loop.ts";
 import { TranscriptReader } from "../harvest/transcript.ts";
 
 /** Event types that end or could end a turn — logged when attributed prior. */
@@ -1052,6 +1055,55 @@ async function main(): Promise<void> {
       });
     }
 
+    /**
+     * ── DISARM THE DROP, AND DO IT BEFORE THE RECORD IS VISIBLE (ISC-1114) ──
+     *
+     * `/policy/dispatch` is the ONLY thing the auto-trigger extension can see.
+     * It fires on `(task_id, epoch)` and dedups on that pair — but `lastFired`
+     * is closure state belonging to one Pi session, and a session does not
+     * survive `/new`. So a drop still reading `staged: true` after its epoch
+     * closed is not stale cosmetics: it is a LOADED TRIGGER, and the next
+     * session start pulls it.
+     *
+     * That is the reset race, measured on the live triage console
+     * (run `2026-09-09T04-21-26Z-20f5`, every sweep of it):
+     *
+     *   04:22:21.559  tui_turn_ended  T-sweep-8  stop_reason=error -> failed
+     *   04:22:21.567  settled         T-sweep-8            <- pass gives up
+     *   04:22:21.630  a NEW session   (the `/new` this settle authorised)
+     *   04:22:22.673  auto-trigger fires AGAIN for T-sweep-8
+     *   04:22:38      the seat writes dispatch-request.json into a dead epoch
+     *
+     * The work was correct and complete and nobody read it, because the pass
+     * that would have read it had closed seventeen seconds earlier. Sweep 9
+     * did it too, and would have gone on doing it every cadence forever.
+     *
+     * **The ordering is the fix, not an optimisation.** `resetPaneSession` is
+     * typed by the console only after `awaitSettled` returns, and `awaitSettled`
+     * returns on the existence of the record written immediately below. Clearing
+     * after that write leaves a window — short, real, and the same shape as the
+     * one being closed. Clearing before it makes "the record exists" imply "the
+     * drop is idle", which is the property the reset needs and the property
+     * `test/unit/dispatch-policy.test.ts` pins by source order.
+     *
+     * Best-effort, because a settle must not be blocked by a file write: the
+     * epoch is over either way and a task that cannot be recorded is a worse
+     * failure than a trigger that stays armed. A failure is LOGGED rather than
+     * swallowed — the re-fire hazard is back when this line does not run, and
+     * an operator reading `events.jsonl` after a duplicated turn needs to find
+     * that here rather than deduce it.
+     */
+    try {
+      await clearDispatchPolicy(wp.dispatchPolicy);
+    } catch (err) {
+      logEvent({
+        type: "dispatch_drop_clear_failed",
+        task_id: settled.task_id,
+        epoch: settled.epoch,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     await writeTaskRecord(taskRecordPath(wp, settled.task_id), {
       schema: "pifleet.taskrecord/v1",
       task_id: settled.task_id,
@@ -1913,6 +1965,18 @@ async function main(): Promise<void> {
   let tuiBaselineEpoch: number | null = null;
   let tuiBaselineCount = 0;
   /**
+   * WHICH TRANSCRIPT `tuiBaselineCount` COUNTS INTO (ISC-1117).
+   *
+   * The baseline is an INDEX, and an index is meaningless without the file it
+   * indexes. Keyed on the epoch alone it survives a session switch it cannot
+   * survive: `slice(10)` against a transcript that has just been replaced reads
+   * from the wrong offset of the wrong file, and when the new file is shorter
+   * than the index it reads NOTHING — `classifyTuiTurn` sees an empty window,
+   * answers `awaiting_start` for ever, and the epoch runs to its deadline with
+   * the turn long since finished on disk.
+   */
+  let tuiBaselinePath: string | null = null;
+  /**
    * How long the reading has been `ended`, or null whenever it is not.
    *
    * A `Stopwatch` and not a `Date.now()` subtraction (ISC-155). The quiet
@@ -1928,6 +1992,43 @@ async function main(): Promise<void> {
   let tuiLastCount = 0;
   /** Re-entrancy guard: the poll body awaits, the interval does not wait. */
   let tuiPolling = false;
+  /**
+   * When the session search last ran, so re-discovery is bounded.
+   *
+   * The search used to run only while `session_path` was null — find it once,
+   * keep it for ever. That is correct for a session a worker keeps, and it is
+   * exactly wrong for one it is told to replace: `resetPaneSession` types
+   * `/new` at an idle pane, Pi starts a session named for its own generated id,
+   * and this loop went on polling the previous file until the run ended.
+   * Measured on 2026-09-08/09 — a triage seat that had completed a sweep, been
+   * reset, and completed another, while `status` reported it frozen at the
+   * reset instant and the console's actor failed the pass it had in fact
+   * delivered.
+   *
+   * Re-running on every poll would readdir the run's session directory twice a
+   * second for the life of the worker to catch an event that happens between
+   * tasks, so it is throttled instead. A reset session is therefore noticed up
+   * to `SESSION_REDISCOVER_MS` late, and the entries written in that window are
+   * read the moment it is adopted, because `TranscriptReader` starts from the
+   * top of a new path.
+   *
+   * **This paragraph used to end "the cost of the throttle is bounded and
+   * uninteresting", and that was false — see ISC-1117.** The entries are read,
+   * and then discarded: `tuiBaselineCount` was an index into the file being
+   * replaced, so `slice(baseline)` on the new one read from the wrong offset
+   * and, when the new file was shorter than the index, read nothing at all. The
+   * window is small and what falls into it is a whole task. The baseline is now
+   * a `(path, index)` pair and re-bases when the path moves; the throttle is
+   * genuinely uninteresting only because of that.
+   *
+   * A `Stopwatch` and not two `Date.now()` reads, on ISC-155's rule that wall
+   * clock may LABEL a record and must never be subtracted to decide anything.
+   * `clock.test.ts` greps this file for exactly that and caught the first
+   * version of this throttle. The rule earns its keep here specifically: a
+   * suspended laptop is an ordinary event on the machine this fleet runs on,
+   * and it would make a wall-clock interval jump hours in one poll.
+   */
+  const tuiDiscoveryAge = new Stopwatch();
 
   /**
    * Poll the session transcript, and settle the live epoch off it.
@@ -1978,9 +2079,53 @@ async function main(): Promise<void> {
         tuiPolling = true;
         void (async () => {
           try {
-            if (state.session_path === null) {
-              const found = await discoverSessionPath(run.sessionsDir, argv.workerId);
-              if (found.path === null) {
+            if (
+              state.session_path === null ||
+              tuiDiscoveryAge.elapsedMs() >= SESSION_REDISCOVER_MS
+            ) {
+              tuiDiscoveryAge.restart();
+              /*
+               * THE ROSTER IS WHAT AUTHORISES ADOPTION, and it is read here
+               * rather than cached at start-up because `workers/` is the run's
+               * own record and a supervisor outlives edits to it.
+               *
+               * `discoverSessionPath` adopts a Pi-generated session only when
+               * the caller can say this worker is the run's only one. Handing
+               * it the roster is that statement; failing to read it is not an
+               * error, it is the ordinary "cannot say", and the search then
+               * falls back to the matched path exactly as before.
+               */
+              let roster: string[] = [];
+              try {
+                roster = await readdir(run.workersDir);
+              } catch {
+                roster = [];
+              }
+              const found = await discoverSessionPath(run.sessionsDir, argv.workerId, roster);
+              /*
+               * A search that found nothing NEW leaves the recorded path alone.
+               *
+               * Two shapes reach here and neither is a change: the throttle
+               * fired and the same file is still the answer, or the directory
+               * momentarily produced nothing while a path is already held. The
+               * first is the common case by far and must not write an event or
+               * flush state twice a second; the second must not un-record a
+               * session over a transient readdir.
+               */
+              if (found.path !== null && found.path === state.session_path) {
+                // UNCHANGED — the common case by far once a path is held, and
+                // it must not write an event or flush state twice a second.
+                //
+                // `found.path !== null` is load-bearing rather than defensive:
+                // both sides are null before the first session file exists, and
+                // an equality test alone would swallow that case into "nothing
+                // changed" and never reach ISC-492's branch below. Measured —
+                // the first version of this chain did exactly that and turned
+                // `tui-transcript-activity.test.ts` red.
+              } else if (found.path === null && state.session_path !== null) {
+                // A transient readdir that produced nothing must not UN-record
+                // a session already held. Keep it and try again next window.
+              } else if (found.path === null) {
                 /**
                  * WATCHING, AND HAVE SEEN NOTHING — written here rather than
                  * returned past (ISC-492).
@@ -2018,7 +2163,7 @@ async function main(): Promise<void> {
                   void flushState();
                 }
                 return;
-              }
+              } else {
               /**
                * The path, and ONLY the path.
                *
@@ -2048,9 +2193,18 @@ async function main(): Promise<void> {
                 type: "tui_session_path_discovered",
                 path: found.path,
                 matches: found.matches,
+                ...(found.adopted ? { adopted: true } : {}),
               });
               void flushState();
+              }
             }
+            /*
+             * Unreachable by the branches above — every path that leaves
+             * `session_path` null returns — and asserted rather than cast,
+             * because re-discovery made the reasoning long enough to be worth
+             * the compiler checking it instead of a reader.
+             */
+            if (state.session_path === null) return;
             if (tuiReader === null || tuiReader.path !== state.session_path) {
               tuiReader = new TranscriptReader(state.session_path);
               tuiLastCount = 0;
@@ -2141,15 +2295,65 @@ async function main(): Promise<void> {
               tuiQuiet = null;
               return;
             }
-            if (tuiBaselineEpoch !== live.epoch) {
+            /**
+             * ── RE-BASE WHEN THE TRANSCRIPT MOVES UNDER A LIVE EPOCH (ISC-1117) ──
+             *
+             * Two conditions, not one. A new epoch needs a baseline; so does the
+             * SAME epoch whose session file has been replaced beneath it, and the
+             * second was missing.
+             *
+             * How it happens is ordinary, not exotic: `resetPaneSession` types
+             * `/new` at every settle, so a new session appears between sweeps, and
+             * session re-discovery is throttled to `SESSION_REDISCOVER_MS`. A
+             * stage landing inside that window takes its baseline against the
+             * OUTGOING file and is then pointed at the incoming one.
+             *
+             * Measured on run `2026-09-09T05-21-27Z-6767`, and both directions
+             * appear in the same events file:
+             *
+             *   05:38:38  tui_turn_baseline  T-sweep-11  entries_before: 10
+             *             ...taken on `..._tri-1.jsonl`, which had 11 entries
+             *   05:38:45  tui_session_path_discovered -> `..._01a0849e-….jsonl`
+             *             ...a file four entries long
+             *   06:03:45  deadline_exceeded            <- 25 minutes
+             *
+             *   06:06:38  tui_turn_baseline  T-sweep-12  entries_before: 11
+             *             ...taken on the file it then read
+             *   06:07:00  tui_turn_ended               <- 22 seconds, success
+             *
+             * The turn itself was fine both times. `tri-1` had written its
+             * fan-out and its result within twenty seconds of each trigger.
+             *
+             * **The re-base is to ZERO, and that is not a shortcut.** An adopted
+             * session is one `discoverSessionPath` accepted, which requires a
+             * Pi-generated name and a sole-worker roster (ISC-1112) — such a file
+             * is created by the `/new` this console types at the PREVIOUS settle,
+             * so every entry in it postdates that settle and belongs to the live
+             * epoch. Re-basing to `count` instead would discard exactly the
+             * entries the switch was late for, which is this same defect with a
+             * smaller window.
+             */
+            const transcriptMoved =
+              tuiBaselinePath !== null && tuiBaselinePath !== state.session_path;
+            if (tuiBaselineEpoch !== live.epoch || transcriptMoved) {
+              const newEpoch = tuiBaselineEpoch !== live.epoch;
               tuiBaselineEpoch = live.epoch;
-              tuiBaselineCount = count;
+              tuiBaselinePath = state.session_path;
+              tuiBaselineCount = newEpoch ? count : 0;
               tuiQuiet = null;
               logEvent({
                 type: "tui_turn_baseline",
                 epoch: live.epoch,
                 task_id: live.task_id,
-                entries_before: count,
+                entries_before: tuiBaselineCount,
+                ...(newEpoch
+                  ? {}
+                  : {
+                      rebased_onto: state.session_path,
+                      detail:
+                        "the session file was replaced under a live epoch; the previous " +
+                        "baseline indexed a transcript this worker no longer reads (ISC-1117)",
+                    }),
               });
               return;
             }
@@ -2259,7 +2463,48 @@ async function main(): Promise<void> {
               });
             }
 
-            const reading = classifyTuiTurn(tuiReader.entries.slice(tuiBaselineCount));
+            const sinceDispatch = tuiReader.entries.slice(tuiBaselineCount);
+
+            /**
+             * ISC-1126, and it is ABOVE the `ended` gate rather than beside the
+             * verdict chain below, which is the only placement that works.
+             *
+             * A seat stuck in a tool loop is mid-tool-call on every poll, so
+             * `classifyTuiTurn` answers `in_flight` for ever and the next four
+             * lines return. Everything after them — the quiet window, the
+             * precedence chain, `settle` — is unreachable for this failure by
+             * construction. That is why no guard this fleet already owned could
+             * see it, and a detector wired one block lower would have been
+             * complete, tested and dead.
+             *
+             * It settles `failed` rather than asking the agent to stop: the rpc
+             * path's escalation writes to a control channel a `tui` seat does
+             * not have, and an epoch whose seat has stopped being able to stop
+             * has not succeeded on any reading. The measured alternative is the
+             * one this replaces — 480 s to `deadline_exceeded_no_terminal_event`
+             * with no artifact, a diagnosis that names the clock instead of the
+             * cause.
+             */
+            const loop = readToolLoop(sinceDispatch);
+            if (isToolLoop(loop)) {
+              logEvent({
+                type: "tui_tool_loop_detected",
+                epoch: live.epoch,
+                task_id: live.task_id,
+                streak: loop.streak,
+                call: loop.call,
+                detail:
+                  `the seat repeated one tool call ${loop.streak} times in a row without ` +
+                  `varying it; settling ${TOOL_LOOP_REASON} rather than letting the epoch ` +
+                  `run to a deadline that would name the clock instead of the cause ` +
+                  `(ISC-1126)`,
+              });
+              tuiQuiet = null;
+              await settle("failed", TOOL_LOOP_REASON);
+              return;
+            }
+
+            const reading = classifyTuiTurn(sinceDispatch);
             if (reading.phase !== "ended") {
               tuiQuiet = null;
               return;
@@ -2358,6 +2603,7 @@ async function main(): Promise<void> {
       persistFence,
       flushState,
       writeProvenance: (taskId, epoch) => writeTaskPolicy(wp.taskPolicy, taskId, epoch),
+      clearDispatchDrop: () => clearDispatchPolicy(wp.dispatchPolicy),
       ledgerAppend: (event, fields) => ledger.append(event, fields),
       logEvent,
       armDeadlineOnTrigger: (ms) => {
@@ -3070,6 +3316,19 @@ export interface StageDeps {
    * being able to assert.
    */
   writeProvenance: (taskId: string | null, epoch: number) => Promise<void>;
+  /**
+   * `/policy/dispatch` — put the drop back to its idle arm (ISC-1115).
+   *
+   * The fourth durable consequence of a release, and the one `handleUnstage`'s
+   * own list of three walked past. It is NOT the cosmetic sibling of
+   * `writeProvenance`: the drop is what `dispatch-trigger.ts` polls, and a
+   * `staged: true` header outliving its epoch is a loaded trigger that the next
+   * Pi session pulls — ISC-1114's mechanism, reached through the other verb that
+   * ends an epoch. `settle` calls `clearDispatchPolicy` directly; this route is
+   * a `StageDeps` member for `writeProvenance`'s stated reason, so a probe can
+   * assert the release actually disarms rather than inferring it.
+   */
+  clearDispatchDrop: () => Promise<void>;
   ledgerAppend: (
     event: string,
     fields: {
@@ -3235,7 +3494,7 @@ export async function handleStage(
  * `unstage` — release a staged epoch that was never triggered (§9 Q8).
  *
  * `EpochManager.cancel` holds every refusal; this function's own job is the
- * three durable consequences of a successful one, and each is here for a
+ * four durable consequences of a successful one, and each is here for a
  * failure it prevents:
  *
  *   1. **Persist the fence.** The release is a fence mutation like any other.
@@ -3248,7 +3507,14 @@ export async function handleStage(
  *      the cancelled task's id on disk is worse here than after a settle,
  *      because the operator is sitting at that terminal and will keep typing —
  *      every gated verb they run would be stamped with a task that never ran.
- *   3. **Reset `state`.** `phase`/`task_id`/`epoch` are what `status` prints;
+ *   3. **Disarm `/policy/dispatch`.** The one the original three missed, and
+ *      the only one whose cost is not a stale reading: the drop is a TRIGGER
+ *      (`docker/pi-extensions/dispatch-trigger.ts` polls it), its dedup lives
+ *      in per-session closure state, and an armed header outliving its epoch is
+ *      pulled by the next session that starts. Leaving it re-runs a task the
+ *      operator explicitly cancelled — see ISC-1114 for the same mechanism
+ *      reached through `settle`.
+ *   4. **Reset `state`.** `phase`/`task_id`/`epoch` are what `status` prints;
  *      a released worker that still reports `busy` under the cancelled task is
  *      a fleet that looks occupied and is not.
  *
@@ -3268,6 +3534,23 @@ export async function handleUnstage(
 
   await deps.persistFence();
   await deps.writeProvenance(null, 0);
+  /*
+   * Best-effort for `settle`'s reason: a release that has already mutated the
+   * fence must not be undone by a file write, and the refusal an operator is
+   * waiting on must still be returned. Logged rather than swallowed, because
+   * "the trigger is still armed" and "the trigger was disarmed" must not
+   * produce identical output — that equivalence is what let ISC-1114 run for
+   * months behind a docblock asserting the opposite.
+   */
+  try {
+    await deps.clearDispatchDrop();
+  } catch (err) {
+    deps.logEvent({
+      type: "dispatch_drop_clear_failed",
+      task_id: taskId,
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
   deps.disarmStagedDeadline();
   deps.state.epoch = 0;
   deps.state.task_id = null;

@@ -89,7 +89,12 @@ import { replyMountPath } from "./replies.ts";
  * answer this console keeps having to refuse.
  */
 import type { DeclaredReply } from "./replies-policy.ts";
-import { childTaskId, collationTaskId, TRIAGE_CONSOLE_ASPECTS } from "./task-ids.ts";
+import {
+  type AspectSeat,
+  childTaskId,
+  collationTaskId,
+  TRIAGE_CONSOLE_ASPECTS,
+} from "./task-ids.ts";
 import { TRIAGE_COLLATOR } from "./triage-actor.ts";
 import {
   parseTriageDocument,
@@ -175,12 +180,39 @@ export function triageDocumentPath(run: RunPaths, collateTaskId: string): string
  * pattern is `renderCollationEnvelope`'s: the host writes the reporting path it
  * will later read, rather than asking for it back.
  *
+ * **Why they did not hold is sharper than "a model forgot", and it took reading
+ * the artifact to see it (ISC-1120).** `T-sweep-13`'s live request:
+ * *"Write both `observer-ops.json` and `observer-ops.md` into
+ * `/outbox/T-sweep-13/files/` using the observer's own task id."* The collator
+ * reproduced `roles/triage.md:212`'s own phrase — *"its own task id, not yours"* —
+ * and then filled the path with the only id it holds. **It obeyed the sentence and
+ * could not obey the value.** `T-sweep-13-slice1` is `childTaskId(sweepId,
+ * aspect)` over `TRIAGE_CONSOLE_ASPECTS`, a host constant the collator has never
+ * been shown; at the moment it composes the fan-out it possesses exactly one task
+ * id, and it is the one the instruction forbids. No count of emphatic lines closes
+ * a gap that is missing DATA rather than missing attention — which is why the two
+ * that were tried read, in hindsight, like the same line twice.
+ *
+ * `renderSweepEnvelope` now carries a `## The seats` block naming each seat's
+ * dispatch id and reporting path, so the instruction and the datum arrive
+ * together. This function stays: it is the last place that can act, and a
+ * substitution it reports is now a real fault rather than a foregone one.
+ *
  * Rewrites rather than refuses, deliberately, and it is the one judgement here
  * worth revisiting: refusing would match this file's preference for a loud stop
  * over a quiet repair, but it would also stop every sweep until a model changes
  * its mind, and the console's job is to watch the environment rather than to
  * hold it hostage to its own collator. The substitution is reported by the caller
  * so it is repaired AND visible, never silently.
+ *
+ * **THE ONE REPAIR THAT SURVIVED ISC-1136, and the reason is a distinction worth
+ * keeping.** Its three siblings compensated for an ABSENCE — a sentence the
+ * collator failed to write — and {@link composeObserverBrief} now writes those
+ * itself, so there is nothing left for them to check. This one corrects a
+ * WRONGNESS. Authoring the correct outbox path does not delete an incorrect one
+ * already sitting in the collator's prose, and an observer handed both has to
+ * choose between them; `T-sweep-1` is the record of which it chooses. So this
+ * still runs, on the collator's contribution, before that contribution is carried.
  *
  * Returns the brief unchanged when it names no outbox path, or already names the
  * right one.
@@ -202,9 +234,17 @@ export function normalizeSliceReportingPath(
 }
 
 /**
- * Guarantee the slice brief carries §7.4's freshness-echo INSTRUCTION.
+ * §7.4's freshness-echo INSTRUCTION, in the words that were argued for it.
  *
- * **This appends a demand, never an answer, and the distinction is the whole
+ * **This was `ensureFreshnessEcho`, a conditional repair, and it is now an
+ * unconditional author (ISC-1136).** Nothing about the sentence changed; what
+ * changed is that the host no longer asks whether the collator remembered it.
+ * The old shape read the brief, found the two spellings absent, appended them and
+ * warned — a check whose "already present" arm was reached on no measured sweep.
+ * A guard that only passes when its claim is trivially true is worse than none,
+ * because a green run asserts the sentence was read.
+ *
+ * **This states a demand, never an answer, and the distinction is the whole
  * design.** `sweepIdEcho`'s comparand is the host's own minted id precisely so a
  * value the artifact supplied cannot be compared to itself — the same argument
  * `windowEcho` makes about `dispatched_at`. So the host must never write
@@ -214,7 +254,9 @@ export function normalizeSliceReportingPath(
  * rather than `stale`: *"a contract violation by a worker that may never have
  * been told, which is a different thing to go and fix."*
  *
- * It had never been told. Measured 2026-09-08: `roles/triage.md:186` instructs the
+ * It had never been told. Measured 2026-09-08, against the role file as it read
+ * THEN — the bullet ISC-1136 has since removed, because this function now authors
+ * the demand instead of checking for it. `roles/triage.md` instructed the
  * collator to carry "the sweep id, verbatim, with the instruction to echo it in
  * `observer-ops.json`", and across five sweeps the collator carried the VALUE
  * ("Sweep T-sweep-1. Observation window opens ...") and dropped the INSTRUCTION
@@ -224,39 +266,303 @@ export function normalizeSliceReportingPath(
  * answered. Nothing in the observer's output looked wrong, because nothing in it
  * was.
  *
+ * **"Dropped the INSTRUCTION" was wrong, and the correction is the whole of
+ * ISC-1119.** Re-measured 2026-09-09 against the artifact rather than against this
+ * warning's own wording — `T-sweep-13`'s request, live on the console:
+ * *"Echo sweep id T-sweep-13 and window 2026-09-09T12:12:44.316Z in
+ * `observer-ops.json`."* The instruction is THERE, and it is a faithful rendering
+ * of what that bullet asked for. What is absent is the two SPELLINGS.
+ * The check below greps for `sweep_id` and `window_opened_at`; the collator wrote
+ * English, because English is what it was given — neither the role file nor
+ * `renderSweepEnvelope` had ever named a field. So this function's `appended`
+ * warning has been telling the operator that a compliant worker was
+ * non-compliant, 22 times in the log it writes to.
+ *
+ * **The upstream fix was made and it did not hold, which is the evidence for
+ * authoring rather than checking.** `renderSweepEnvelope` names both fields in the
+ * collator's own brief — the only document the collator composes from — and the
+ * repair still fired on every sweep after it. The remaining sentence, *"this
+ * should now fire on a genuine regression and not once per sweep"*, was a
+ * prediction, and it was falsified before it was a week old.
+ *
  * Both values are already present in the brief as prose, so this adds no
  * information the observer did not have; it adds the sentence that says what to do
  * with them. The observer still has to copy them, and a replayed artifact still
  * fails the comparison.
- *
- * Returns the brief unchanged when it already names both fields.
  */
-export function ensureFreshnessEcho(
-  brief: string,
-  sweepId: string,
-): { readonly brief: string; readonly appended: boolean; readonly window: string | null } {
-  /*
-   * The window instant is READ OUT OF THE BRIEF rather than passed in, and that is
-   * not a convenience. `dispatchObserver` does not hold `dispatched_at`, and the
-   * host minting a second instant here would put a value in front of the observer
-   * that `windowEcho` never compared against — a third spelling of the same
-   * quantity, which §7.4 spends a whole field's justification avoiding. If the
-   * collator dropped the instant from the brief, the host genuinely cannot supply
-   * it, and `window: null` says so instead of inventing one.
-   */
-  const window = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/.exec(brief)?.[1] ?? null;
-  if (brief.includes("sweep_id") && brief.includes("window_opened_at")) {
-    return { brief, appended: false, window };
-  }
+export function freshnessEchoDemand(sweepId: string, window: string | null): string {
   const windowClause =
     window === null
       ? "`window_opened_at` exactly as this brief states the observation window opening"
       : `\`window_opened_at\` exactly "${window}"`;
-  const demand =
-    ` Echo \`sweep_id\` exactly "${sweepId}" and ${windowClause} as top-level fields of ` +
+  return (
+    `Echo \`sweep_id\` exactly "${sweepId}" and ${windowClause} as top-level fields of ` +
     `\`observer-ops.json\`, copied from this brief and from nowhere else. An artifact ` +
-    `missing either is discarded whole and every service in it is recorded as unobserved.`;
-  return { brief: `${brief.trimEnd()}${demand}`, appended: true, window };
+    `missing either is discarded whole and every service in it is recorded as unobserved.`
+  );
+}
+
+/**
+ * The observation-window instant, READ OUT OF THE COLLATOR'S JUDGEMENT rather
+ * than passed in, and that is not a convenience.
+ *
+ * `dispatchObserver` does not hold `dispatched_at` — `openSweep` does, and the two
+ * are separate members of `SweepProducers` with no value passed between them. The
+ * host minting a second instant here would put a value in front of the observer
+ * that `windowEcho` never compared against: a third spelling of the same quantity,
+ * which §7.4 spends a whole field's justification avoiding.
+ *
+ * **So this is the one thing in the invariant block the host genuinely cannot
+ * author, and it is why `renderSweepEnvelope` still demands the collator copy the
+ * instant into every brief it writes.** If the collator dropped it, `null` says so
+ * instead of inventing one, and {@link freshnessEchoDemand} degrades to naming the
+ * brief rather than a value.
+ */
+export function readWindowInstant(brief: string): string | null {
+  return /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/.exec(brief)?.[1] ?? null;
+}
+
+/**
+ * The coverage-result domain, in the words that were argued for it (ISC-1131).
+ *
+ * **This was `ensureCoverageVocabulary`, a conditional repair, and it is now an
+ * unconditional author (ISC-1136).** It is the repair whose record made the case:
+ * the collator dropped this domain from the child brief on sweeps 22, 26, 27, 28
+ * AND 29 while its own brief named `answered` seven times. A predicate that never
+ * once took its other branch is not a guard, it is a sentence the host was going
+ * to write anyway with a condition in front of it.
+ *
+ * ## The measurement
+ *
+ * `T-sweep-22`, 2026-09-09, run by hand. The collator's collation was refused
+ * whole and all three services were recorded unobserved, on six copies of one
+ * error:
+ *
+ *     services.N.coverage.M.result: Invalid option:
+ *       expected one of "answered"|"unreachable"|"forbidden"|"not_attempted"
+ *
+ * The observer had written `"result": "healthy"` — a member of
+ * `OBSERVER_ASSESSMENTS`, in a field whose domain is `COVERAGE_RESULTS`. It did
+ * the work correctly otherwise: both channels checked on all three services, a
+ * real selector, a real window, real evidence refs. It got one vocabulary wrong
+ * and lost the entire sweep.
+ *
+ * ## Why it reached for the wrong one, which is the part that generalises
+ *
+ * The brief it was handed named `assessment` and its four values, and named
+ * `coverage[].result` with NO values at all. A model holding one enum and a
+ * field that needs one it was never given will reuse the enum it has. The
+ * observer was not being careless; it was completing the only pattern in front
+ * of it.
+ *
+ * ## Why the fix is here and not in the envelope or the skill
+ *
+ * Both of those were already correct. `renderSweepEnvelope` names `answered`
+ * seven times in the collator's own 5,472-character brief, and
+ * `skills/observer-ops/SKILL.md` carries the full row shape (ISC-1125). The
+ * collator READ the vocabulary and did not COPY it into the child brief it
+ * composed — which is [[ISC-1119]]'s shape exactly, one level down.
+ *
+ * **And it is intermittent, which is what settles the argument.** Sweeps 19 and
+ * 21 produced `answered` correctly from this same code and this same envelope;
+ * sweep 22 did not. So there is no upstream wording left to sharpen: the
+ * instruction is present, it is read, and it is obeyed on some passes and not
+ * others. [[ISC-1121]] is the recorded precedent for what happens next if this
+ * were answered with more prose — a bound that reached the brief, was ignored,
+ * and taught that a prompt cannot make a model deterministic. The host is the
+ * last place that can act, and unlike a sentence it cannot forget.
+ *
+ * ## The vocabulary is IMPORTED, not restated
+ *
+ * From `COVERAGE_RESULTS`, the same constant `evidenceGaps` grades against and
+ * the schema validates with. A repair that spelled its own copy would be a third
+ * spelling of the enum whose second spelling is the bug — and the ISA's own
+ * ISC-869 records the rule: *"an assertion that two copies agree is a third
+ * copy."* Add a fifth member to `COVERAGE_RESULTS` and this sentence grows it
+ * with no edit here.
+ *
+ * ## ALL FOUR, not just one
+ *
+ * A brief carrying `answered` alone is the condition that produced this defect,
+ * not a brief that has escaped it: a partial enum is precisely what invites a
+ * model to invent the rest of it. The old repair fired unless the observer could
+ * see the closed set; authoring it states the closed set unconditionally, which
+ * is the same property with nothing left to get wrong.
+ */
+export const COVERAGE_VOCABULARY_DEMAND: string = ((): string => {
+  const values = COVERAGE_RESULTS.map((r) => `"${r}"`).join(", ");
+  return (
+    `Every \`result\` inside \`coverage\` must be exactly one of ${values} — that field records ` +
+    `whether the CHANNEL ANSWERED YOU, not whether the service is well. It never carries an ` +
+    `assessment word: "healthy" is not a coverage result, and an artifact using one is refused ` +
+    `whole and every service in it is recorded unobserved.`
+  );
+})();
+
+/**
+ * How long one cluster call may take before the observer stops waiting for it
+ * (ISC-1134).
+ *
+ * **Derived from the deadline it protects, not chosen.** The child deadline is
+ * 480 s (`childDeadlineS`: a 780 s settle bound less the 300 s margin). A sweep
+ * of three services across two channels is on the order of ten cluster calls,
+ * so a bound of 30 s costs a fully unreachable environment about five minutes of
+ * its eight and still leaves the seat time to write the artifact saying so.
+ * Raising it much past 45 s reinstates the failure — the calls alone consume the
+ * deadline; dropping it much below 20 s starts refusing a slow-but-working API.
+ */
+export const CLUSTER_CALL_TIMEOUT_S = 30;
+
+/**
+ * The call bound, and the one demand that turns a correct answer into a timely
+ * one (ISC-1134).
+ *
+ * **This was `ensureBoundedCalls`, the fourth conditional repair, and its own
+ * docblock is what argued this file into ISC-1136.** It named the alternative —
+ * *"the host composing the invariant half of every child brief and letting the
+ * collator contribute only the per-sweep judgement"* — and declined it as *"a
+ * change to §6.3's division of labour rather than a fix"*. That was the right call
+ * for a latency patch and the wrong place to leave it. The change is taken now, on
+ * its own, and this text is what survives of the repair.
+ *
+ * ## What went wrong, and what did NOT
+ *
+ * 2026-09-09, `utun9` carrying zero routes: every `kubectl` the observer issued
+ * spent about three minutes retrying an unreachable API server before failing on
+ * a client-side rate limiter, and two consecutive sweeps hit the 480 s deadline
+ * with no artifact at all.
+ *
+ * **The console was not wrong about the environment for one second of that.**
+ * Every service record read `firing`, `reason: coverage` — *"I could not tell"* —
+ * and `_console/sweep_produced_nothing` fired. Nothing was reported healthy.
+ * That is SRD-TRIAGE-CONSOLE's central distinction holding under exactly the
+ * condition it was written for, and it is why this is a LATENCY fix and not a
+ * correctness one: the console reached the right answer, it just paid eight
+ * minutes a sweep to get there and produced no artifact an operator could read.
+ *
+ * `COVERAGE_RESULTS` has carried `unreachable` since the beginning. What was
+ * missing is any instruction on how to REACH it: an unbounded call does not fail,
+ * it hangs, and a channel that hangs is never reported as anything.
+ *
+ * ## The spelling is load-bearing, and the obvious one is refused
+ *
+ * `kubectl --request-timeout=30s get ns` is rejected by the container's verbgate
+ * as `kubectl (flags-before-verb) not authorized`; `kubectl get ns
+ * --request-timeout=30s` runs. Both were tried against the live worker before
+ * this text was written, because an instruction the sandbox refuses is worse
+ * than no instruction — it spends the model's turn on a call that cannot run.
+ * The brief therefore shows the legal form as a literal example.
+ *
+ * ## Why the HOST states it rather than the envelope asking the collator to
+ *
+ * `renderSweepEnvelope` is the collator's brief, and the collator used to compose
+ * the observer's brief from it. Measured on sweeps 26, 27, 28 and 29: it dropped
+ * the coverage vocabulary from that child brief **every time**, though its own
+ * brief named it seven times. Anything that must reach the observer cannot be
+ * routed through a composer with that record — which is the sentence that stopped
+ * being an argument for a fourth patch and became an argument for the composition
+ * change instead.
+ *
+ * ## The spelling is the reason this is a constant and not a sentence anyone
+ * ## retypes
+ *
+ * `--request-timeout` appears twice below and `CLUSTER_CALL_TIMEOUT_S` supplies
+ * the value both times, so raising the bound cannot leave the worked example
+ * quoting the old one.
+ */
+export const BOUNDED_CALLS_DEMAND: string =
+  `Bound every cluster call: pass \`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s\` AFTER the ` +
+  `verb, as in \`kubectl get pods -n <ns> --request-timeout=${CLUSTER_CALL_TIMEOUT_S}s\` — before ` +
+  `the verb it is refused and nothing runs. A call that times out is not a failure to report ` +
+  `later: it is this channel's answer NOW, and its \`result\` is "unreachable". Do not retry it ` +
+  `and do not wait longer. An environment you cannot reach must produce an artifact saying so ` +
+  `inside your deadline; an artifact that never arrives tells the operator nothing at all.`;
+
+/**
+ * The heading that marks where the collator stops speaking and the host starts.
+ *
+ * The four repairs used to append their sentences onto the end of whatever
+ * paragraph the collator had written, so an observer read one undifferentiated
+ * wall in which the host's non-negotiable field spellings and the collator's
+ * per-sweep guesses had exactly the same standing. They do not have the same
+ * standing, and now the document says which is which.
+ */
+export const OBSERVER_CONTRACT_HEADING =
+  "## What your artifact must carry, whatever the brief above says";
+
+/**
+ * The observer's brief: the host's invariant contract, plus the collator's
+ * per-sweep judgement, and nothing else (ISC-1136).
+ *
+ * ## The division, which is the whole of this function
+ *
+ * §6.3 gave the collator the composition of every child brief, and four separate
+ * measurements said it cannot do that job: [[ISC-1120]] the reporting path,
+ * [[ISC-1119]] the freshness fields, [[ISC-1131]] the coverage vocabulary,
+ * [[ISC-1134]] the call bound. Each was answered with a host repair that read the
+ * collator's text, found the sentence missing and appended it — and each of those
+ * repairs fired on every sweep it ever ran on. Four patches on one document is one
+ * fact stated four times, and the fact is that the collator is unreliable at
+ * composing a brief ([[ISC-1135]]).
+ *
+ * So the host AUTHORS what does not change between sweeps and the collator
+ * contributes only what does: which services this slice holds, what to look at,
+ * what the last sweep said. That is the judgement §6.3 actually wants from it.
+ *
+ * ## Three of the four stopped being repairs; the fourth could not
+ *
+ * {@link freshnessEchoDemand}, {@link COVERAGE_VOCABULARY_DEMAND} and
+ * {@link BOUNDED_CALLS_DEMAND} each compensated for an ABSENCE, and an absence is
+ * exactly what authoring removes — the host writes the sentence instead of asking
+ * whether somebody else did.
+ *
+ * {@link normalizeSliceReportingPath} is different in kind and STAYS A REPAIR.
+ * It corrects a WRONGNESS: the collator asserts an outbox path that is actively
+ * wrong, and authoring the right path does not delete a wrong one already sitting
+ * in the collator's prose. An observer handed both would have to choose, and
+ * `T-sweep-1` is the record of which one it chooses. So the judgement is
+ * normalised before it is carried, and the substitution is still reported.
+ *
+ * ## Judgement FIRST, contract SECOND
+ *
+ * Kept from the old call site's own argument for applying `ensureBoundedCalls`
+ * last: *"the observer reads a brief top-down and the per-sweep judgement should
+ * not be buried under two paragraphs of host boilerplate."* The contract is what
+ * the observer checks its output against at the end; the judgement is what it acts
+ * on at the start. Ordering them the other way would put four paragraphs of
+ * invariant text in front of the one paragraph that differs between sweeps.
+ */
+export function composeObserverBrief(input: {
+  /** The collator's per-sweep contribution — its `brief` from the fan-out request. */
+  readonly judgement: string;
+  readonly sweepId: string;
+  /** The id the slice is DISPATCHED under, which is the only id the host reads back. */
+  readonly childTaskId: string;
+}): {
+  readonly brief: string;
+  /** Outbox ids the collator named that were not the child's. Empty is the good case. */
+  readonly rewrote: readonly string[];
+  /** The window instant found in the judgement, or `null` if it named none. */
+  readonly window: string | null;
+} {
+  const reporting = normalizeSliceReportingPath(input.judgement, input.childTaskId);
+  const window = readWindowInstant(reporting.brief);
+  const brief = [
+    reporting.brief.trimEnd(),
+    "",
+    OBSERVER_CONTRACT_HEADING,
+    "",
+    "These three paragraphs are written by the host on every dispatch, not by the collator",
+    "whose brief you just read. Where they and anything above disagree about a field name, a",
+    "value it may take, or a bound on a call, these win.",
+    "",
+    freshnessEchoDemand(input.sweepId, window),
+    "",
+    COVERAGE_VOCABULARY_DEMAND,
+    "",
+    BOUNDED_CALLS_DEMAND,
+  ].join("\n");
+  return { brief, rewrote: reporting.rewrote, window };
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +948,13 @@ export interface SweepEnvelopeInput {
   readonly previousDocument: TriageDocument | null;
   /** Defaults to {@link TRIAGE_VERDICT_RULE}. Audited like everything else. */
   readonly verdictRule?: string;
+  /**
+   * The seats this sweep will fan out to, and the ONE input added because the
+   * collator cannot derive it — see the `## The seats` block in the rendered
+   * brief. Defaults to {@link TRIAGE_CONSOLE_ASPECTS}; a parameter only so a test
+   * can render a two-seat console without editing a host constant.
+   */
+  readonly seats?: readonly AspectSeat[];
 }
 
 /** A `dispatchrequest`-shaped pair. `roles/collator.md:81-91`'s two prose fields. */
@@ -707,13 +1020,41 @@ function serviceBlock(service: TriageService, defaultWindowS: number): string {
    * the expensive one: a service whose workload nobody identified comes back
    * `indeterminate`, three sweeps of that is a coverage incident, and the operator
    * is sent to a cluster over a field that was simply left empty on purpose.
+   *
+   * **THE SEARCH IS BOUNDED, and it is bounded because an unbounded one was
+   * measured (ISC-1121).** "Identify it yourself" is an open-ended sub-goal, and
+   * this is the only field in the envelope that sets one. On `T-sweep-15-slice1`
+   * (2026-09-09) `obs-t1` ran `kubectl get pods -n aodapnc-alerts-notifier-dev |
+   * grep alert-processor` **113 times in seven minutes** — and the command
+   * SUCCEEDED every time, returning two `alert-processor` pods `1/1 Running`. It
+   * was not retrying a failure; it had the answer on the first call and could not
+   * stop asking. The epoch ended `timed_out / deadline_exceeded_no_terminal_event`
+   * with no artifact, and the service went unobserved.
+   *
+   * So the bound is on the SEARCH rather than on the answer: three commands, and
+   * an explicit "if you have the answer, you are done looking", because the
+   * observed failure was re-asking a question already answered rather than asking
+   * too many different ones. The deadline caught it — ISC-1118's 480 s did
+   * exactly its job — but a deadline is a floor for the whole pass, not a bound on
+   * one field, and paying 480 s to end a loop that produced nothing costs the
+   * sweep every other service in the slice.
+   *
+   * **Why it had never fired before:** the collator had been SUMMARISING this
+   * field ("workload NOT DECLARED") rather than copying it, which
+   * `roles/triage.md:196` forbids and which happened to withhold the open-ended
+   * instruction. Sweeps 13 and 14 carried the summary; sweep 15 — the first on the
+   * envelope that demands literal copying (ISC-1119/1120) — carried it verbatim,
+   * and the hazard arrived with the compliance. A prompt that starts being obeyed
+   * is a prompt whose contents start mattering.
    */
   const workload =
     service.workload ??
     "NOT DECLARED — identify the workload behind this service yourself, from the " +
       "namespace and the service name, and NAME what you identified in your report. " +
       "If you cannot identify exactly one, say so and report indeterminate rather " +
-      "than guessing.";
+      "than guessing. Identify it in AT MOST THREE commands, and never re-run a " +
+      "command that already returned output — if you have the answer, you are done " +
+      "looking; if three did not settle it, that IS the indeterminate case.";
   return [
     `- service: ${service.name}`,
     `  namespace: ${service.namespace}`,
@@ -742,6 +1083,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
   const declared = input.services.map((s) => s.name);
   const carried = projectPreviousState(input.previousDocument, declared);
   const rule = input.verdictRule ?? TRIAGE_VERDICT_RULE;
+  const seats = input.seats ?? TRIAGE_CONSOLE_ASPECTS;
 
   const title = `${input.environment}: health sweep ${input.sweepId}`;
 
@@ -772,6 +1114,48 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     `produces, and into every brief you write. Copy them from here and from nowhere else — not`,
     `from your transcript and not from a previous artifact. The host compares what it minted`,
     `against what comes back, and an artifact echoing the previous sweep's id is discarded.`,
+    "",
+    `**The two field names are \`sweep_id\` and \`window_opened_at\`, spelled exactly that way.**`,
+    `Your own \`${TRIAGE_DOCUMENT_FILE}\` carries \`sweep_id\`, copied from the row above.`,
+    "",
+    `**You do not have to tell your observers to echo those two fields, and you should not spend`,
+    `your brief trying.** The host appends the observer's reporting contract to every brief you`,
+    `send — those two spellings, the closed domain \`coverage[].result\` draws from, and the bound`,
+    `every cluster call must carry. It is appended after your words, under its own heading, on`,
+    `every dispatch and whatever you wrote.`,
+    "",
+    `The window INSTANT is the one part of that contract the host cannot supply: it holds the`,
+    `sweep id and the seat ids, and it reads the instant back out of the brief you wrote. So the`,
+    `copy demanded above is not optional — a brief that drops the instant produces an observer`,
+    `told to echo a window nobody named.`,
+    "",
+    "## What every row must carry, or its `healthy` is not believed",
+    "",
+    `Every brief you write must tell its observer that each row of \`observer-ops.json\` carries`,
+    `\`coverage\` (a list of \`{channel, result}\`), \`selector\` (the one it actually matched on),`,
+    `\`window\`, and \`evidence_ref\` (a list naming what it read). Name all four, spelled exactly`,
+    `that way. You do not need to state the domain \`result\` draws from; the host appends it.`,
+    "",
+    `These are GATES, not decoration. The host downgrades a \`healthy\` whose \`coverage\` is`,
+    `empty — or whose every channel is \`not_attempted\` — or which names no selector, no window,`,
+    `or no evidence, to \`indeterminate\`. Three of those on one service opens an incident and`,
+    `sends a person to a cluster. An observer that was never asked for these fields writes a`,
+    `report that cannot be believed, however carefully it looked.`,
+    "",
+    "## The seats, and the task id each one's slice is dispatched under",
+    "",
+    `You do not choose these ids and you cannot derive them — they are minted here, and this is`,
+    `the only place you will see them. When you write a request for a worker below, name that`,
+    `worker's outbox path in its brief, exactly as spelled here:`,
+    "",
+    ...seats.map(
+      (s) => `- ${s.worker}: task id \`${childTaskId(input.sweepId, s.aspect)}\`, ` +
+        `reporting path \`/outbox/${childTaskId(input.sweepId, s.aspect)}/files/\``,
+    ),
+    "",
+    `Never your own task id. An artifact written under \`${input.sweepId}\` is read by nothing:`,
+    `the host looks only under the id the slice was dispatched with, so a report filed at your`,
+    `id is indistinguishable from a seat that reported nothing at all.`,
     "",
     "## The services, and the bounds each one was given",
     "",
@@ -854,6 +1238,15 @@ export function renderCollationEnvelope(input: {
     `Carry each observer's own \`assessment\` word through unchanged. Do not upgrade a row whose`,
     `coverage is empty, and do not decide whether anything should be notified — that decision`,
     `belongs to the host, which can see across sweeps and you cannot.`,
+    "",
+    `Every row of \`${TRIAGE_DOCUMENT_FILE}\` carries \`service\`, \`assessment\`, \`coverage\`,`,
+    `\`selector\`, \`window\` and \`evidence_ref\`, copied from the observer's row and NOT`,
+    `reconstructed. Copy \`coverage\` as the list of \`{channel, result}\` objects it already is.`,
+    `A row you write without them is a row the host cannot believe: it downgrades an`,
+    `unevidenced \`healthy\` to \`indeterminate\`, and three of those opens an incident. If an`,
+    `observer gave you no evidence for a service, carry the empty value through rather than`,
+    `inventing one — that is a true report about a report, and it is what \`unaccounted\` and the`,
+    `downgrade are both for.`,
   ].join("\n");
 
   const issues = envelopeIssues(`${title}\n${brief}`, null);
@@ -1219,33 +1612,55 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
     }
     const childId = childTaskId(sweepId, seat.aspect);
     /*
-     * The collator names the reporting directory in prose and has named the
-     * WRONG one — see `normalizeSliceReportingPath`. The host holds the right id
-     * on the line above and is the last place that can still act on it.
+     * §6.3 step 5, as ISC-1136 divides it: `item.brief` is the collator's
+     * per-sweep JUDGEMENT and nothing more, and the host composes the invariant
+     * half around it. This replaced four sequential repairs on one document —
+     * see `composeObserverBrief` for why three of them became authored text and
+     * why the reporting-path one could not.
      */
-    const reporting = normalizeSliceReportingPath(item.brief, childId);
-    const freshness = ensureFreshnessEcho(reporting.brief, sweepId);
-    if (freshness.appended) {
-      console.warn(
-        `triage: ${assignment.worker}'s brief for ${sweepId} carried no freshness-echo ` +
-          `instruction; appended one. roles/triage.md:186 asks the collator for it, and an ` +
-          `artifact without sweep_id/window_opened_at is discarded whole (sweepIdEcho -> absent).`,
-      );
-    }
-    if (reporting.rewrote.length > 0) {
+    const composed = composeObserverBrief({
+      judgement: item.brief,
+      sweepId,
+      childTaskId: childId,
+    });
+    /*
+     * The ONE warning left, and it survives because its repair does. The other
+     * three announced that the collator had omitted a sentence the host was
+     * about to write regardless, on every sweep — an operator line that carried
+     * no decision. A wrong outbox id still does: it means the collator asserted
+     * a path, and something the host cannot see told it that path.
+     */
+    if (composed.rewrote.length > 0) {
       console.warn(
         `triage: ${assignment.worker}'s brief for ${sweepId} named outbox ` +
-          `${reporting.rewrote.map((id) => `/outbox/${id}/files/`).join(", ")}; rewritten to ` +
+          `${composed.rewrote.map((id) => `/outbox/${id}/files/`).join(", ")}; rewritten to ` +
           `/outbox/${childId}/files/, the id it is dispatched under and the only one ` +
-          `observerArtifactPath reads. The collator is not copying its slice ids ` +
-          `(roles/triage.md:212).`,
+          `observerArtifactPath reads. The sweep envelope names this exact path in its ` +
+          `"## The seats" block, so the collator had it and did not copy it ` +
+          `(roles/triage.md:212). Before ISC-1120 the id was never handed over at all, and ` +
+          `this line blamed the collator for not knowing it.`,
+      );
+    }
+    /*
+     * §7.4's instant is the one field of the contract the host cannot mint — see
+     * `readWindowInstant`. A judgement that named none produces a weaker demand,
+     * so it is worth an operator's attention rather than silent degradation.
+     */
+    if (composed.window === null) {
+      console.warn(
+        `triage: ${assignment.worker}'s brief for ${sweepId} names no observation-window ` +
+          `instant, so the host cannot quote one in the freshness demand — it holds the sweep ` +
+          `id and the seat ids, and reads the instant back out of the collator's own text ` +
+          `(readWindowInstant). renderSweepEnvelope states the instant and requires it copied ` +
+          `into every brief; windowEcho will compare whatever the observer writes against a ` +
+          `value this dispatch could not name.`,
       );
     }
     const outcome = await deps.dispatch({
       taskId: childId,
       worker: assignment.worker,
       title: item.title,
-      brief: freshness.brief,
+      brief: composed.brief,
     });
     if (outcome.kind !== "accepted") {
       throw new SweepEnvelopeError(

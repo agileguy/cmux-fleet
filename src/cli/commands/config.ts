@@ -6,6 +6,7 @@ import {
   ConfigValidationError,
   expandPath,
   loadConfig,
+  assertModelAllowed,
   resolveAllWorkers,
 } from "../../config/load.ts";
 import {
@@ -100,10 +101,40 @@ export function register(program: Command): void {
          *
          * `resolveAllWorkers` is the merge and nothing else: no Docker, no
          * network, no filesystem beyond the briefing paths already resolved
-         * during the parse. It is the same function `up` calls first, so what
-         * passes here is exactly what `up` will accept.
+         * during the parse. It is the same function `up` calls first.
+         *
+         * The agreement is ONE-WAY, and the earlier wording here ("what passes
+         * here is exactly what `up` will accept") claimed two. This command
+         * resolves EVERY worker; `up --workers <subset>` resolves only the ones
+         * named. So `validate` can refuse a config that a sufficiently narrow
+         * `up` would have accepted — it sees a bad worker the subset excludes.
+         * That is the safe direction and is deliberate: a whole-file verdict is
+         * the useful one for a command whose entire job is to answer "is this
+         * file fine". What it must never do is the converse, print `ok:` for a
+         * config any `up` then refuses, and that is what the two calls below
+         * are here to prevent.
          */
-        resolveAllWorkers(loaded);
+        const resolved = resolveAllWorkers(loaded);
+        /*
+         * THE ALLOWLIST, in the same pass and for the block above's own reason.
+         *
+         * `resolveAllWorkers` is the merge; `assertModelAllowed` is the other
+         * refusal `up` makes before it starts anything, and leaving it out broke
+         * the promise two paragraphs up. Measured 2026-09-08: `gemma4:31b` was
+         * given to `rev-ctx-1` with its `context_windows` entry but WITHOUT its
+         * `models_allowlist` line. `config validate` printed `ok:` and listed
+         * the worker; `scripts/review --restart` reported the pane respawned;
+         * `up` then refused INSIDE that pane, where nothing was reading. The
+         * only visible symptom was `status --all` showing eleven workers where
+         * there had been twelve — a seat that is simply absent, with the reason
+         * on a surface the operator had already looked away from.
+         *
+         * It costs nothing this command was not already paying: the allowlist
+         * is in the document, the worker is resolved one line up, and neither
+         * side touches the network. The probe those entries RECORD is another
+         * matter and stays `doctor`'s.
+         */
+        for (const w of resolved) assertModelAllowed(loaded, w);
         /*
          * The other two contracts, in the same pass and against the SAME
          * document that was just merged: the kubeconfig this fence reads is

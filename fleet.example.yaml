@@ -153,12 +153,9 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
   #     allow:
   #       - {host: 192.168.86.49, port: 8000}
   api_key_env: OMLX_API_KEY  # self-hosted server credential, injected by the supervisor
-  model: Qwen3-Coder-30B-A3B-Instruct-4bit
+  model: gemma-4-26b-a4b-it-bf16
   thinking: medium
   models_allowlist:          # checked against GET /v1/models at `up`
-    - Qwen3-Coder-30B-A3B-Instruct-4bit
-    - Qwen3.5-35B-A3B-8bit
-    - GLM-4.5-Air-MLX-4bit
     # The `triage` console's four seats, all LOCAL — see the role below.
     #
     # THIS LINE IS NOT HYGIENE, IT IS THE DIFFERENCE BETWEEN A CONFIG THAT
@@ -169,7 +166,15 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
     # with ModelNotAllowedError: the operator has been told
     # the file is fine and then had it rejected, which is precisely the failure
     # `src/cli/commands/config.ts` argues against in its own words.
-    - gpt-oss-20b-MXFP4-Q8
+    # [SUPERSEDED 2026-09-09] `gemma-4-26b-a4b-it-bf16` — the model the triage
+    # seats moved to, and the whole reason this comment block exists: the
+    # allowlist gates the ROLE, `config validate` does not read it, so a seat
+    # model changed WITHOUT its entry validates clean and is then refused at
+    # `up` with ModelNotAllowedError. That is exactly what happened while making
+    # this change: `config validate CLI (ISC-58) > exits 0 on the shipped
+    # example` went red the moment the seats moved and this line had not. The
+    # guard did its job; the note above predicted the shape precisely.
+    - gemma-4-26b-a4b-it-bf16
   require_native_tool_calls: true   # `up` probes each model — see §5.9
   #
   # PER-MODEL CONTEXT WINDOWS live on a PROVIDER block, so they appear under
@@ -431,7 +436,7 @@ defaults:
 roles:
   # ---- SRE / cloud-ops: the primary role set ----
   sre:                                    # diagnoses AND remediates
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: base                       # gcloud/kubectl/helm are in every image
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -442,7 +447,7 @@ roles:
                                            # `investigator` in this same change (D2);
                                            # deploy watches AND ad-hoc service inquiries,
                                            # one skill bundle, `mode` picks the shape
-    model: Qwen3.5-35B-A3B-8bit
+    model: gemma-4-26b-a4b-it-bf16
     thinking: high                        # reconciling four disagreeing channels is the job
     toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
     tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox artifact only
@@ -462,7 +467,7 @@ roles:
                                            # this config would otherwise trip (SRD §6.2, §7.5)
     append_system_prompt_file: ./roles/observer.md
   verifier:                               # confirms a remediation actually worked
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: base
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -472,46 +477,92 @@ roles:
 
   # ---- code roles: available, secondary ----
   engineer:
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: node
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/engineer.md
   reviewer:
-    model: Qwen3.5-35B-A3B-8bit
+    model: gemma-4-26b-a4b-it-bf16
     thinking: high
     toolchain: base
-    # READ PLUS WRITE, and NO bash, NO edit.
+    # READ PLUS `submit_report`, and NO write, NO bash, NO edit.
     #
-    # THE GRANT WAS MISSING AND THE ROLE COULD NOT REPORT. `config/schema.ts`
-    # makes {write, edit, bash} the writer set, and `reviewer` was the only role
-    # in this file holding none of them. Nothing host-side writes `result.json`
-    # — `harvest/outbox.ts` only reads it — so a reviewer could not write its
-    # envelope at all: `outbox.kind` is `missing`, `claimed` is null, every lens
-    # reports nothing, `relay.ts` answers `not_collated`, and NO COLLATION IS
-    # EVER DISPATCHED, while the fan-out task settles `success` and `report`
-    # shows the review green. The console could not have worked.
+    # `write` WAS HELD HERE AND IS NOW WITHDRAWN — SRD-WORKER-DISPATCH-EXTENSION
+    # task 7.1, Phase B. The argument that bought it is kept rather than deleted,
+    # because a role with no member of the writer set looks like an oversight,
+    # and this one was: the grant was missing once, cost a whole console, and was
+    # added deliberately. It comes out for a reason, not by tidying.
     #
-    # WHY THIS IS NOT THE THING §12.1 REFUSES. §12.1's argument is about `bash`
-    # specifically: a shell is what turns a "read-only" reviewer into a worker
-    # that can `cd /`, reach a socket, or `git push`. Write-to-outbox buys none
-    # of that. `/outbox` is a worker-scoped bind mount holding only what this
-    # worker produces, nothing reads it but the harvester, and it is already the
-    # untrusted-content boundary — which is how EVERY other worker in this fleet
-    # reports. `observer` carries `write` on this exact justification, and so
-    # does `collator` below.
+    # WHAT THE GRANT WAS FOR. `config/schema.ts` makes {write, edit, bash} the
+    # writer set, and `reviewer` once held none of them. Nothing host-side writes
+    # `result.json` — `harvest/outbox.ts` only reads it — so a reviewer could not
+    # write its envelope at all: `outbox.kind` is `missing`, `claimed` is null,
+    # every lens reports nothing, `relay.ts` answers `not_collated`, and NO
+    # COLLATION IS EVER DISPATCHED, while the fan-out task settles `success` and
+    # `report` shows the review green. The console could not have worked, so
+    # `write` was granted, outbox-only.
     #
-    # NO `edit`, deliberately. `edit` is for changing files that already exist,
-    # and the only files a reviewer can see besides its own outbox are the
-    # operator's checkout at /workspace — mounted `:ro`, so the grant would buy
-    # nothing it could use and would widen the writer set for no capability.
-    # NO `bash`, unchanged: §12.1 stands where its argument applies.
-    tools: [read, write, grep, find, ls, submit_report]
+    # WHY THAT REASON IS RETIRED. `submit_report`
+    # (`docker/pi-extensions/report-tools.ts`) writes
+    # `/outbox/<task-id>/result.json` itself, and its `report` parameter writes
+    # the long review into `/outbox/<task-id>/files/` beside it and appends the
+    # matching `artifacts` entry. Both writes are the EXTENSION's file access,
+    # not the model's tool grant, and `schema`, `task_id`, `epoch` and `worker`
+    # are composed from host-written state rather than copied by the model. Every
+    # byte `write` used to carry has a route that does not depend on the model
+    # spelling a path or an id correctly. Phase A opened that route beside
+    # `write`; this is Phase B closing the old one.
+    #
+    # AND CLOSING IT BUYS SOMETHING, which is why the tool is removed rather than
+    # left as a harmless duplicate. `submit_report` refuses a bad `status` in
+    # typebox BEFORE `execute` — in front of the model, with `isError: true`,
+    # while it still has turn budget — and a `status` enum violation is exactly
+    # what cost `rev-lang-1` its lens. A hand-written `result.json` meets no
+    # schema until the harvester parses it on the host minutes later, and it
+    # leaves no trace in the extension at all: `report-tools.ts` has to stat the
+    # envelope on disk at `agent_end` precisely because a `write` past the tool
+    # is invisible to it. While the role holds `write`, the refusal is advice.
+    # Without it, it is the only way through.
+    #
+    # SIZE WAS THE GATE, AND IT IS CLEARED FOR THIS ROLE ONLY. Passing a review
+    # as a tool ARGUMENT is only safe if the model carries it intact: SRD §11
+    # measured all three reviewer models passing 16 384 bytes byte-exact, and a
+    # census of 56 harvested reviewer envelopes puts the real maximum at 13 965 —
+    # inside, but by 15% rather than by half, which is the margin and not a
+    # comfort. `observer` is NOT cleared on the same evidence (n = 1) and keeps
+    # its `write`.
+    #
+    # NO `bash`, and this refusal is untouched by any of the above. §12.1's
+    # argument was never about writing: a shell is what turns a "read-only"
+    # reviewer into a worker that can `cd /`, reach a socket, or `git push`.
+    # §6.8 turns it the other way round, too — it is the ABSENCE of bash here
+    # that makes withdrawing `write` mean anything, because a role holding a
+    # shell can `cat > /outbox/...` and the removal would take a tool without
+    # taking a capability.
+    #
+    # NO `edit`, deliberately and for its own reason. `edit` changes files that
+    # already exist, and the only files a reviewer can see besides its own outbox
+    # are the operator's checkout at /workspace — mounted `:ro`, so the grant
+    # would buy nothing it could use and would widen the writer set for no
+    # capability.
+    # AND THE WITHDRAWAL IS NOW AN INVARIANT, NOT A VALUE. Everything above
+    # argues why this role holds no writer; `read_only: true` is what makes the
+    # argument enforceable. `effectiveToolGrant` resolves an OMITTED `tools:` to
+    # every Pi builtin, so deleting the line below would silently hand back
+    # `write`, `edit` and `bash` at once and reverse task 7.1 by an edit that
+    # looks like tidying. With this flag set, that deletion is a parse error
+    # naming the three tools it would have restored, and so is adding any one of
+    # them back by hand. The flag has no runtime effect of its own -- nothing
+    # reads it at `up` -- which is the point: it is a declaration of intent whose
+    # only job is to arm ISC-59's check in `config/schema.ts`.
+    read_only: true
+    tools: [read, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/reviewer.md
     isolation: shared-ro
   tester:
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     toolchain: python
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -519,7 +570,7 @@ roles:
 
   # ---- ticketing: holds a write credential for a system OUTSIDE the fleet ----
   ticketing:
-    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    model: gemma-4-26b-a4b-it-bf16
     # `base` is deliberate and sufficient. The worker talks to the ticket API as
     # plain REST with `curl` and parses with `jq`, both of which are in every
     # image (`docker/Dockerfile:25`). There is NO vendor CLI and there is not
@@ -587,25 +638,98 @@ roles:
     # 120B. The failure will not look like a model failure — it will look like a
     # noisy console. If that is what a day-long run shows, THIS is the first
     # decision to re-examine, not the last.
-    model: gpt-oss-20b-MXFP4-Q8
+    #
+    # [SUPERSEDED 2026-09-09] `gemma-4-26b-a4b-it-bf16`, and the paragraph above
+    # is kept because its reasoning still holds — this is a change of model, not
+    # a change of mind about size. Two things forced it:
+    #
+    #   1. The operator's own `fleet.yaml` moved every oMLX worker to bf16 on
+    #      2026-09-07, so the live triage seats have been on gemma since, and
+    #      this file was describing a fleet that no longer existed (ISC-1110).
+    #   2. SRD §11 Q8's tool-argument ceilings were MEASURED on this model. The
+    #      caps this repository ships for that wire came from it, and naming a
+    #      different one here made those bounds unattributable.
+    #
+    # It is also the model CI now probes, and that is not a coincidence — see
+    # `ci.yml`'s `PIFLEET_OMLX_MODEL` and ISC-1116: a CI job that cold-loads a
+    # model the fleet is NOT running adds a second resident model to a capped
+    # oMLX and starves the live seats. This line is the anchor that guard reads.
+    model: gemma-4-26b-a4b-it-bf16
     thinking: high                        # reconciling three reports that disagree IS the job
     toolchain: base                       # it reads artifacts; there is nothing to build
     # `reviewer`'s grant above, copied deliberately — the same set the `review`
     # console's `collator` carries in the operator's own `fleet.yaml`, which is
     # where the shape was argued. Note what is NOT here.
     #
-    # `write` is the outbox artifact and nothing else, on exactly the argument
-    # `reviewer` above sets out: /outbox is a worker-scoped bind mount, only the
-    # harvester reads it, and it is already the untrusted-content boundary.
+    # `write` WAS HELD HERE AND IS NOW WITHDRAWN — SRD-WORKER-DISPATCH-EXTENSION
+    # task 7.3, Phase B, one console behind `reviewer`'s 7.1. The argument that
+    # bought it is kept rather than deleted, for 7.1's reason: a role with no
+    # member of the writer set looks like an oversight, and this one is not.
+    #
+    # WHAT THE GRANT WAS FOR. `write` was the outbox artifact and nothing else:
+    # /outbox is a worker-scoped bind mount, only the harvester reads it, and it
+    # is already the untrusted-content boundary. `submit_report` now writes
+    # `/outbox/<task-id>/result.json` itself and its `report` parameter writes
+    # the collation into `files/` beside it, so every byte `write` carried has a
+    # route that does not depend on the model spelling a path correctly.
+    #
+    # WHY THIS ROLE WAITED, AND WHAT CLEARED IT. §11's Q8 measured a local model
+    # delivering 39% of an 8 KB tool argument with `isError` false and a GREEN
+    # epoch — the worst shape in the document, because nothing downstream can
+    # detect it. Passing the collation as an ARGUMENT is only safe if the model
+    # carries it intact, so this role kept `write` while `reviewer` lost it. The
+    # gate is now closed from the other side: `TRIAGE_DOCUMENT_MAX_BYTES` bounds
+    # the document at 4 096 bytes and REFUSES above it, and
+    # `MAX_SERVICES_PER_ENVIRONMENT` and `TRIAGE_NOTE_MAX_BYTES` came down to 8
+    # and 1 024 so that bound is reachable rather than nominal. An observed
+    # maximum is not a bound; that cap is.
     #
     # NO `bash`, and here that is the load-bearing omission rather than an
     # inherited habit. This role's entire output is a request for something ELSE
     # to act on — a fan-out to three observers, and a notification that wakes a
     # human. A shell is exactly what turns a request-WRITING worker into a
-    # DISPATCHING one, and an agent may not dispatch.
+    # DISPATCHING one, and an agent may not dispatch. It is also what makes the
+    # withdrawal above mean anything: §6.8 is explicit that a role holding a
+    # shell can `cat > /outbox/...`, so removing `write` there would take a tool
+    # without taking a capability.
     #
     # NO `edit`, for `reviewer`'s reason: nothing it can see is writable except
     # its own outbox, so the grant would widen the writer set and buy nothing.
+    #
+    # AND THEN IT WAS PUT BACK, 2026-09-09, the same day — because task 7.3 was
+    # WRONG about this role and the console proved it within three sweeps.
+    #
+    # THIS ROLE WRITES TWO FILES AND `submit_report` CARRIES ONE. The envelope
+    # is `result.json` and the tool writes it. The FAN-OUT is
+    # `/outbox/<task-id>/dispatch-request.json` — this role's actual product,
+    # the thing the host reads to dispatch the observers, instructed at
+    # `roles/triage.md:129` — and `submit_report` has no route for it whatever.
+    # Narrowed, `tri-1` composed a correct fan-out naming obs-t1 and three
+    # services, called `write`, and got `Tool write not found`. Three times, on
+    # one sweep. The console dispatched nothing for three consecutive sweeps.
+    #
+    # AND THE FAILURE WAS NOT EVEN LOUD. Sweeps 5 and 6 settled
+    # `status: success` carrying the summary "Dispatched sweep to obs-t1", with
+    # no request file written anywhere. Only sweep 7 reported `failed` and named
+    # the tool. A narrowing whose observable is a green sweep that did nothing
+    # is worse than the grant it removed.
+    #
+    # WHAT §6.8 GOT RIGHT AND WHAT IT MISSED. Its argument — that a bash-less
+    # role's only writing verb should be `submit_report` — holds wherever the
+    # role's whole output IS its envelope, which is `reviewer` (task 7.1, three
+    # lens reports through the tool across two console cycles). It does not hold
+    # here, and 7.3's own text walked past the reason while stating it: "this
+    # role's entire output is a request for something ELSE to act on". That
+    # request is a FILE, and the model has to write it.
+    #
+    # `read_only:` therefore cannot be set on this role, and that is the honest
+    # state rather than an oversight. What restores the invariant is a
+    # `dispatch_request` extension tool that carries the fan-out the way
+    # `submit_report` carries the envelope — host-composed ids, schema refused
+    # in front of the model. Until that exists, this line is the console.
+    #
+    # TRIAGE_DOCUMENT_MAX_BYTES survives all of this: it bounds the collation
+    # document and never depended on which tool wrote it.
     tools: [read, write, grep, find, ls, submit_report]
     # `pifleet-worker` alone. There is deliberately NO `triage` bundle: a name
     # with no directory under skills/ is a refusal at `up`, not a silently
@@ -747,19 +871,19 @@ workers:
   # strongest thing this design has going for it. One seat per environment, so
   # the sweep fans out in parallel instead of one worker walking a list.
   #
-  # THE `model:` OVERRIDE, AND WHY IT IS HERE WHEN THE DESIGN SAYS IT SHOULD NOT
-  # BE. SRD-TRIAGE-CONSOLE §6.11 says these three take the `observer` role's
-  # model unchanged, with a worker-level override "only if §0.2 arm 1 or 2 is
-  # taken" — and arm 3 was taken. That sentence is written against the
-  # operator's own untracked `fleet.yaml`, where `observer` IS
-  # `gpt-oss-20b-MXFP4-Q8` by the 2026-09-03 decision, so inheriting there
-  # delivers exactly what the owner ruled. IN THIS FILE the same role carries
-  # `Qwen3.5-35B-A3B-8bit`, so inheriting here would deliver something else.
+  # THE `model:` OVERRIDE IS GONE, AND ITS OWN TEST IS WHAT REMOVED IT.
+  # SRD-TRIAGE-CONSOLE §6.11 says these seats take the `observer` role's model
+  # unchanged, with a worker-level override "only if §0.2 arm 1 or 2 is taken".
+  # The override existed because IN THIS FILE `observer` named a different local
+  # model from `triage`, so inheriting would have delivered something other than
+  # what the console runs.
   #
-  # Both models are local, so arm 3's privacy property — nothing an observer
-  # reads leaves the machine — holds either way, and this override buys none of
-  # it. What it buys is that the tracked example SHOWS the decision instead of a
-  # model that merely shares its posture: the 2026-09-06 ruling was that all
-  # four seats run gpt-oss-20b. Read as a reversal of §6.11 this looks wrong; it
-  # is the same outcome reached from a file whose `observer` role differs.
-  - {id: obs-t1, role: observer, model: gpt-oss-20b-MXFP4-Q8}
+  # [SUPERSEDED 2026-09-09] That premise is gone: every role in this file now
+  # names `gemma-4-26b-a4b-it-bf16`, so inheritance delivers the decision
+  # directly and the override only re-stated it. `config.test.ts` predicted this
+  # exact move in its own words — "IF THIS FAILS BECAUSE THE EXAMPLE'S
+  # `observer` ROLE BECAME [the triage model], the fix is to DELETE the three
+  # overrides, not to loosen the test" — and that is what happened: the guard
+  # went red the moment the roles converged, and the file yielded to it rather
+  # than the other way round.
+  - {id: obs-t1, role: observer}

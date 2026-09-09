@@ -269,12 +269,156 @@ function trailerBlockOf(body: string): string {
   return paras.length === 0 ? "" : (paras[paras.length - 1] ?? "");
 }
 
+/**
+ * Whether a line is FOOTER-SHAPED — a git trailer, or one of the two footer
+ * forms that are not trailers but are still unmistakably footers.
+ *
+ * This is the discriminator that lets the substring arm leave the LAST
+ * paragraph without becoming a whole-body grep, which `ATTRIBUTION_LINE`'s
+ * docblock explains at length is not available: c7f9b87 discusses all four
+ * forbidden substrings in its prose and a whole-body scan reddens on it.
+ *
+ * Prose does not survive this. c7f9b87's mention sits in a hard-wrapped
+ * sentence whose first line begins "and a PR-body string for", and although a
+ * LATER line of that same wrap begins "Generated with", `trailerBlocksOf`
+ * requires EVERY line of a paragraph to be footer-shaped before it grades it.
+ * One line of ordinary prose disqualifies the paragraph, which is exactly the
+ * property that makes this safe to run outside the trailer block.
+ */
+function isFooterLine(line: string): boolean {
+  const t = line.trim();
+  if (t.length === 0) return false;
+  if (/^[A-Za-z][A-Za-z0-9-]*:[ \t]/.test(t)) return true;
+  if (t.startsWith("\u{1F916}")) return true;
+  return /^Generated with\b/i.test(t);
+}
+
+/**
+ * Every paragraph the substring arm grades: the last one, plus any EARLIER
+ * paragraph that is entirely footer-shaped.
+ *
+ * ## The fail-open this closes
+ *
+ * `trailerBlockOf` alone graded only the last paragraph, so an attribution
+ * footer with anything appended after it was invisible to the substring arm:
+ *
+ *     Did the work.
+ *
+ *     Generated with Claude Code
+ *
+ *     Also fixed the thing.
+ *
+ * `ATTRIBUTION_LINE` does not save this. That arm carries only the two trailer
+ * keys and the EMOJI-prefixed footer, deliberately — its own docblock records
+ * that making the emoji optional reddens c7f9b87 on a line break. So the
+ * plainest generated-by footer there is, in any position but last, was graded
+ * clean by both arms at once. Raised by the language lens on T-rv-155.
+ *
+ * A footer is a footer wherever it sits; what makes the last paragraph special
+ * is only that it is where footers USUALLY sit. Asking the shape question
+ * instead of the position question covers both.
+ */
+function trailerBlocksOf(body: string): string[] {
+  const paras = body
+    .trim()
+    .split(/\n\s*\n/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+  if (paras.length === 0) return [];
+  const blocks = [paras[paras.length - 1]!];
+  for (const para of paras.slice(0, -1)) {
+    if (para.split("\n").every(isFooterLine)) blocks.push(para);
+  }
+  return blocks;
+}
+
 /** Both arms. Returns the reasons, empty when clean. */
+/**
+ * The addresses a co-author trailer may name and still be dropped before the
+ * base branch's tip is graded.
+ *
+ * **An allowlist of PEOPLE, not a denylist of vendors, and the direction is the
+ * whole point.** The first version of this narrowing enumerated AI vendors
+ * (`claude|anthropic|openai|copilot|gpt|[bot]`) and kept only the lines that
+ * matched, which fails OPEN: every model this fleet actually runs —
+ * `deepseek-v4-pro`, `qwen3.5:397b`, `glm-5.3`, `gemma-4-26b` — is absent from
+ * that list, so a commit authored under `user.name = "Qwen"` and squash-merged
+ * would have been dropped as a person and graded clean. Two reviewers found
+ * that independently and both proposed this inversion.
+ *
+ * Listing humans instead fails CLOSED. A co-author this file does not recognise
+ * survives into `liveAttributionHits` and reddens the base arm, so the failure
+ * mode is a false positive on a new human contributor — visible, one line to
+ * fix, and the direction every other assertion in this file already takes.
+ *
+ * It also retires the drift problem: there is no second definition of "what
+ * counts as an AI" here to fall out of step with `FORBIDDEN_PATTERNS`.
+ *
+ * ## Why the NAME is checked too, and what that costs
+ *
+ * An address-only allowlist fails open, which is the second version of this
+ * narrowing to do so. Both consensus lenses on T-rv-155 built the same case:
+ *
+ *     Co-authored-by: Claude <the.daddy.magoo@gmail.com>
+ *
+ * The address is the operator's, so the line was dropped whole and the NAME was
+ * never examined — the guard's entire subject, discarded because the envelope
+ * around it was trusted. A trailer is a claim about a person, and a person is
+ * both halves; matching one and ignoring the other grades the half that cannot
+ * lie and throws away the half that can.
+ *
+ * The cost is the property the previous version advertised: a human genuinely
+ * named Claude, committing from a listed address, now reddens this guard. That
+ * is a false POSITIVE — visible, one line to fix, and the direction every other
+ * assertion in this file already takes — where the alternative is a false
+ * negative on the exact string this repository's rules exist to keep out.
+ *
+ * These are the name/address halves git has actually recorded for this
+ * repository's author: the local identity commits are made under, and the
+ * account GitHub attributes a squash to.
+ */
+const HUMAN_CO_AUTHOR_NAMES: ReadonlySet<string> = new Set(["agileguy"]);
+const HUMAN_CO_AUTHORS: ReadonlySet<string> = new Set([
+  "the.daddy.magoo@gmail.com",
+  "agile.guy@hotmail.com",
+]);
+
+/**
+ * `body` with recognised-human co-author trailers removed and everything else
+ * intact — including a co-author line this file does not recognise, which is
+ * exactly the line the caller needs to see.
+ *
+ * Lifted to module scope so the narrowing has fixture tests of its own: the arm
+ * that uses it runs ONLY on the base branch, so on every branch where somebody
+ * might edit it, it is code no assertion touches.
+ */
+export function withoutKnownHumanCoAuthors(body: string): string {
+  return body
+    .split("\n")
+    .filter((line) => {
+      /*
+       * Anchored at BOTH ends. Without the `$`, a line whose trailer is
+       * followed by more text — `Co-authored-by: agileguy <…> 🤖 Generated
+       * with Claude Code` — was dropped entire, taking the appended footer
+       * with it. The same lens raised that alongside the name hole; they are
+       * one defect seen from two sides, which is that this filter was deciding
+       * what to discard from a PREFIX of the line rather than from the line.
+       */
+      const m = /^[ \t]*co-authored-by:([^<]*)<([^>]+)>[ \t]*$/i.exec(line);
+      if (m === null) return true;
+      const named = HUMAN_CO_AUTHOR_NAMES.has(m[1]!.trim().toLowerCase());
+      const addressed = HUMAN_CO_AUTHORS.has(m[2]!.trim().toLowerCase());
+      return !(named && addressed);
+    })
+    .join("\n");
+}
+
 function liveAttributionHits(body: string): string[] {
   const hits: string[] = [];
-  const trailer = trailerBlockOf(body);
-  for (const p of FORBIDDEN_PATTERNS) {
-    if (trailer.includes(p)) hits.push(`trailer block contains "${p}"`);
+  for (const block of trailerBlocksOf(body)) {
+    for (const p of FORBIDDEN_PATTERNS) {
+      if (block.includes(p)) hits.push(`a trailer block contains "${p}"`);
+    }
   }
   if (ATTRIBUTION_LINE.test(body)) hits.push("a line begins with an attribution form");
   return hits;
@@ -389,12 +533,42 @@ describe("ISC-530 (live): this branch's own commits carry no attribution", () =>
     expect(liveAttributionHits(wrapped)).toEqual([]);
   });
 
-  test("the line arm catches an attribution that is not the last paragraph", () => {
+  test("both arms catch an attribution that is not the last paragraph", () => {
     const body =
       "A real subject\n\nA body.\n\nCo-Authored-By: Someone <x@example.com>\n\n" +
       "A later paragraph appended after the footer.";
     expect(trailerBlockOf(body)).not.toContain("Co-Authored-By");
-    expect(liveAttributionHits(body)).toEqual(["a line begins with an attribution form"]);
+    const hits = liveAttributionHits(body);
+    /*
+     * Asserted as two independent memberships rather than one `toEqual` on the
+     * array. The `toEqual` this replaced pinned the exact hit list, so it read
+     * as "the line arm catches this" and ALSO, silently, as "the substring arm
+     * does not" — and the second half went red the moment the substring arm was
+     * fixed to reach a footer-shaped paragraph that is not last. A test whose
+     * failure means "the guard improved" is a test that has to be re-read every
+     * time, so each arm now gets its own reddenable assertion.
+     */
+    expect(hits).toContain("a line begins with an attribution form");
+    expect(hits).toContain('a trailer block contains "Co-Authored-By"');
+  });
+
+  /**
+   * The fail-open the language lens found on T-rv-155: a footer with anything
+   * after it, in the one form neither arm reached.
+   *
+   * `Generated with Claude Code` carries no trailer key and no robot emoji, so
+   * `ATTRIBUTION_LINE` does not match it in any position — by design, per its
+   * docblock. The substring arm graded only the last paragraph. Put the footer
+   * anywhere but last and both arms passed it.
+   */
+  test("a bare generated-by footer is caught even with a paragraph after it", () => {
+    const body =
+      "A real subject\n\nA body.\n\nGenerated with Claude Code\n\n" +
+      "A later paragraph appended after the footer.";
+    expect(trailerBlockOf(body)).not.toContain("Generated with");
+    const hits = liveAttributionHits(body);
+    expect(hits).toContain('a trailer block contains "Generated with"');
+    expect(hits).toContain('a trailer block contains "Claude"');
   });
 
   test("a mention in prose is not an attribution", () => {
@@ -412,7 +586,195 @@ describe("ISC-530 (live): this branch's own commits carry no attribution", () =>
     expect(attributionHitsInText(body)).toContain("Co-Authored-By");
   });
 
-  test("the range resolves and is non-empty, so a green result is not an empty set", async () => {
-    expect((await integrationBranchMessages()).length).toBeGreaterThan(0);
+  /**
+   * THE PREMISE, AND THE ONE CASE WHERE AN EMPTY RANGE IS THE TRUTH.
+   *
+   * The check above is vacuously green on an empty range — the empty set has no
+   * offenders — so something has to assert that it actually scanned commits.
+   * The first version asserted that unconditionally, and **it made `main`
+   * permanently red**: on the base branch `main..HEAD` is empty BY DEFINITION,
+   * so every push to `main` from 2026-09-06 onward failed this line while every
+   * other job passed. That is worse than a missing check. A branch that is always
+   * red teaches a reader to ignore its colour, and a real failure on `main` would
+   * then look exactly like the noise.
+   *
+   * **The fix is not to loosen the assertion** — that would delete the premise
+   * and restore the vacuous green this test exists to refuse. It is to say which
+   * of the two empty ranges we are looking at, and they are distinguishable by
+   * one comparison: standing ON the base, `HEAD` and the base ref are the same
+   * commit. Empty with `HEAD` BEHIND the base is a stale checkout or a
+   * misresolved base and still fails, loudly, which is the case worth keeping.
+   *
+   * **And on the base branch it now grades something rather than nothing**,
+   * which NARROWS a hole this file had either way. A squash-merge writes a NEW
+   * commit whose message is the PR title and body — text no branch run ever saw,
+   * because it did not exist while the branch was being graded. If that message
+   * carried an attribution, the branch was green, `main` scanned an empty range,
+   * and nothing anywhere looked at the one commit that has it. So the base-branch
+   * arm reads the tip's own message through the same live matcher.
+   *
+   * **Narrows, not closes, and the residue is named rather than left to be
+   * found.** This reads `log -1`: ONE commit. GitHub fires one push event per
+   * push, not per commit, so k commits pushed straight to `main` in one push are
+   * graded at the tip and the other k−1 are graded by nothing anywhere. Closing
+   * that needs a remembered last-seen tip, which a fresh CI checkout cannot
+   * supply without new state this file does not own. The ordinary path — a
+   * branch, a PR, a squash — has k = 1 and is covered.
+   */
+  /**
+   * The narrowing's own fixture, because the arm that uses it runs ONLY on the
+   * base branch — on every branch where somebody might edit it, it is dead code
+   * that no assertion touches. The one failure it must never produce is dropping
+   * a line that names an AI, so that direction is asserted first.
+   */
+  describe("withoutKnownHumanCoAuthors keeps everything it does not recognise", () => {
+    const KNOWN = "Co-authored-by: agileguy <the.daddy.magoo@gmail.com>";
+
+    test("a recognised human leaves nothing to grade", () => {
+      const graded = withoutKnownHumanCoAuthors(`Squashed thing (#1)\n\n${KNOWN}`);
+      expect(graded).not.toContain("agileguy");
+      expect(liveAttributionHits(graded)).toEqual([]);
+    });
+
+    /**
+     * THE CASE THE VENDOR LIST GOT WRONG, and the reason this is an allowlist.
+     * Every one of these is a model this fleet runs today, and every one of them
+     * passed the enumeration that preceded this — see `HUMAN_CO_AUTHORS`.
+     */
+    test("an unrecognised co-author survives and reddens, whoever it names", () => {
+      for (const who of [
+        "Claude Opus 5 <noreply@anthropic.com>",
+        "Qwen <qwen@example.invalid>",
+        "deepseek-v4-pro <ds@example.invalid>",
+        "glm-5.3 <glm@example.invalid>",
+        "gemma <g@example.invalid>",
+        "Some New Model Nobody Listed <x@example.invalid>",
+      ]) {
+        const graded = withoutKnownHumanCoAuthors(`Squashed thing (#1)\n\n${KNOWN}\nCo-authored-by: ${who}`);
+        expect(graded, `${who} was dropped as a person`).toContain(who.split(" <")[0]!);
+        expect(
+          liveAttributionHits(graded),
+          `${who} survived the filter but produced no hit`,
+        ).not.toEqual([]);
+      }
+    });
+
+    test("every other attribution form is untouched by the filter", () => {
+      for (const line of [
+        "Claude-Session: https://example.invalid/x",
+        "🤖 Generated with [a tool](https://example.invalid)",
+        "This patch was AI-generated.",
+      ]) {
+        const graded = withoutKnownHumanCoAuthors(`Squashed thing (#1)\n\n${KNOWN}\n${line}`);
+        expect(graded, `the filter removed ${JSON.stringify(line)}`).toContain(line);
+      }
+    });
+
+    /** A malformed trailer has no address to recognise, so it fails closed. */
+    test("a co-author line with no address is kept", () => {
+      expect(withoutKnownHumanCoAuthors("x\n\nCo-authored-by: nobody")).toContain("nobody");
+    });
+
+    /**
+     * THE CASE THE ADDRESS-ONLY ALLOWLIST GOT WRONG — the second fail-open in
+     * this narrowing, found by both consensus lenses on T-rv-155.
+     *
+     * The address is the operator's own, and that was the entire test: the line
+     * was dropped whole and the name was never read. The guard's whole subject
+     * rode in on a trusted envelope. Note this is not a hypothetical spelling —
+     * it is the exact trailer this repository's rules forbid, wearing the exact
+     * address its own history records.
+     */
+    test("an AI name behind a trusted address survives and reddens", () => {
+      for (const who of [
+        "Claude <the.daddy.magoo@gmail.com>",
+        "Claude Opus 5 <agile.guy@hotmail.com>",
+      ]) {
+        const graded = withoutKnownHumanCoAuthors(`Squashed thing (#1)\n\n${KNOWN}\nCo-authored-by: ${who}`);
+        expect(graded, `${who} was dropped on the strength of its address`).toContain("Claude");
+        expect(liveAttributionHits(graded), `${who} survived but produced no hit`).not.toEqual([]);
+      }
+    });
+
+    /**
+     * The other half of the same defect: the filter decided what to discard
+     * from a PREFIX of the line, so anything appended after a recognised
+     * trailer went with it. Both ends are anchored now.
+     */
+    test("text appended after a recognised trailer is not dropped with it", () => {
+      const line = `${KNOWN} \u{1F916} Generated with Claude Code`;
+      const graded = withoutKnownHumanCoAuthors(`Squashed thing (#1)\n\n${line}`);
+      expect(graded).toContain("Generated with");
+      expect(liveAttributionHits(graded)).not.toEqual([]);
+    });
+  });
+
+  test("the range is empty only when HEAD is the base, and the base's own tip is graded", async () => {
+    const base = await resolveBaseRef();
+    const baseSha = (await git(["rev-parse", `${base}^{commit}`])).out.trim();
+    const headSha = (await git(["rev-parse", "HEAD^{commit}"])).out.trim();
+    const n = (await integrationBranchMessages()).length;
+
+    if (headSha !== "" && headSha === baseSha) {
+      expect(n, `HEAD is ${base}, so ${base}..HEAD must be empty`).toBe(0);
+      /*
+       * THE EXIT CODE IS CHECKED, unlike the first version of this line. Every
+       * other git call in this file checks it; this one discarded it, and a
+       * failed `log` returns an empty string whose hit list is `[]` — so a tip
+       * this checkout could not read graded as CLEAN. That was the one seam in a
+       * premise check that fails closed everywhere else.
+       */
+      const tipRead = await git(["log", "-1", "--format=%B"]);
+      if (tipRead.code !== 0) {
+        throw new Error(
+          `git log -1 failed on the base branch, so its tip could not be graded: ${tipRead.err.trim()}`,
+        );
+      }
+      const tip = tipRead.out;
+      /*
+       * ONE NARROWING, AND ONLY ON THIS ARM: a co-author trailer that names no AI.
+       *
+       * `FORBIDDEN_PATTERNS` refuses EVERY `Co-Authored-By`, not only Claude's,
+       * because "no co-author trailers at all" is a rule a branch author can
+       * follow and cannot evade by renaming. That rule is ours to keep while we
+       * are writing commits, and the arm above keeps it.
+       *
+       * **The base branch's tip is not written by us.** GitHub's squash-merge
+       * composes it and appends `Co-authored-by:` for the squashed commits'
+       * author, which is how this arm failed on its first run against `main`
+       * (`8f8f134`: `Co-authored-by: agileguy <the.daddy.magoo@gmail.com>`).
+       * Refusing that would make the base arm permanently red and recreate the
+       * exact disease this test was just fixed for, one layer down.
+       *
+       * A first attempt compared the trailer against the merge commit's own
+       * `%ae`/`%ce` and did not work, for a reason worth recording: GitHub sets
+       * the squash's author to the PR author's ACCOUNT email
+       * (`agile.guy@hotmail.com`), its committer to `noreply@github.com`, and
+       * the co-author to the local git identity the branch committed under
+       * (`the.daddy.magoo@gmail.com`). Three different addresses for one person,
+       * none derivable from the others, and the squashed commits that carried
+       * the third are gone from this history.
+       *
+       * So the narrowing is by SUBJECT rather than by identity, which is also
+       * what the governing rule actually says: the prohibition is on attributing
+       * the work to an AI. A co-author line naming a human is dropped; one
+       * naming Claude, Anthropic, Copilot or a `[bot]` account is not, and every
+       * other pattern — `Claude` anywhere in the trailer block, `Claude-Session:`,
+       * the 🤖 footer, `AI-generated` — still fires untouched.
+       */
+      const graded = withoutKnownHumanCoAuthors(tip);
+      expect(
+        liveAttributionHits(graded),
+        "the tip of the base branch carries an attribution — a squash-merge writes its own " +
+          "message, so this is the one commit no branch run could have graded",
+      ).toEqual([]);
+      return;
+    }
+    expect(
+      n,
+      `${base}..HEAD is empty while HEAD (${headSha.slice(0, 8)}) is not ${base} ` +
+        `(${baseSha.slice(0, 8)}) — the base resolved wrongly or this checkout is behind it, ` +
+        "so a green result above would mean nothing was scanned",
+    ).toBeGreaterThan(0);
   });
 });

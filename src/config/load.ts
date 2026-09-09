@@ -874,7 +874,57 @@ export function assertModelAllowed(loaded: LoadedConfig, worker: ResolvedWorker)
    * through the same helper, which is what keeps its verdict and this refusal
    * from disagreeing.
    */
-  const permitted = allowlist.map((e) => decomposeModel(e, fallback, undefined, isTagStyle).model);
+  /*
+   * BOTH HALVES OF THE PAIR, which this function's own docblock has always
+   * claimed and this line did not do. It kept `.model` and threw `.provider`
+   * away, so an entry naming a DIFFERENT provider still authorized its bare
+   * model name here: `models_allowlist: ["ollama/Qwen3"]` inside
+   * `providers.omlx` admitted omlx's `Qwen3`, which is precisely the
+   * "carrying the verdict across providers" the paragraph above calls a
+   * different rule rather than a widening of this one. Raised by two lenses
+   * independently on T-rv-155.
+   *
+   * Filtering rather than refusing: an entry naming a foreign provider is not
+   * a malformed document, it is a statement about a different (provider,
+   * model) pair. It constrains nothing here, which is the same thing an
+   * unrelated model name in the list does, and it stays legible in `doctor`
+   * output as an entry that matched nothing.
+   *
+   * The provider half also decides tag-style decomposition — `decomposeModel`
+   * asks `isTagStyleProvider(provider)` with the DECOMPOSED provider — so a
+   * foreign prefix was not only carrying the verdict across, it was choosing
+   * the wrong grammar to carry it with.
+   */
+  /*
+   * A SLASH IS ONLY A PROVIDER PREFIX WHEN THE PREFIX NAMES A DECLARED
+   * PROVIDER. `decomposeModel` cannot make that distinction — it splits on the
+   * first slash unconditionally, which is right for a `model:` and wrong here.
+   *
+   * `mlx-community/Qwen3.5-35B-A3B-4bit` is ONE model id, the standard
+   * MLX/HuggingFace repo-id form, and `mlx-community` is an org rather than an
+   * endpoint. Filtering on the decomposed provider alone refused it against a
+   * bare allowlist entry naming the same model — the exact case
+   * `doctor-allowlist.test.ts` calls "THE case that was broken", broken again
+   * by the first version of this filter.
+   *
+   * So the check is scoped to entries that carry an explicit prefix naming a
+   * provider the document actually declares. Everything else is a model id with
+   * a slash in it and is compared the way it always was. A config with no
+   * provider map therefore behaves exactly as it did before this filter
+   * existed, which is the whole of the surface the finding was ever about:
+   * `providers.omlx.models_allowlist: ["ollama-cloud/Qwen3"]`, where both names
+   * are real endpoints and carrying the verdict between them is the defect.
+   */
+  const declaredProviders = new Set(Object.keys(llm.providers ?? {}));
+  const permitted = allowlist
+    .filter((e) => {
+      const slash = e.indexOf("/");
+      if (slash <= 0) return true;
+      const prefix = e.slice(0, slash);
+      if (!declaredProviders.has(prefix)) return true;
+      return prefix === worker.provider;
+    })
+    .map((e) => decomposeModel(e, fallback, undefined, isTagStyle).model);
   if (permitted.includes(worker.model)) return;
   throw new ModelNotAllowedError(worker.id, worker.model, allowlist);
 }

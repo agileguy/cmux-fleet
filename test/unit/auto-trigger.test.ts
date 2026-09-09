@@ -238,6 +238,41 @@ describe("dedup fires once per allocation", () => {
     // Pi's signature rather than a choice this extension makes.
     expect(code(EXTENSION_SRC)).not.toContain('deliverAs: "steer"');
   });
+
+  /**
+   * ── AND THE DEDUP DIES WITH THE SESSION (ISC-1114) ──────────────────────
+   *
+   * `lastFired` is declared inside the default export, so it is per-INSTANCE,
+   * and a Pi session that ends takes it with it. Measured on the live triage
+   * console: a `/new` produced a session whose extension fired again for a task
+   * that had already settled, and the seat re-did the work into a dead epoch.
+   *
+   * That is not a defect in this file — the scope is right. `session_shutdown`
+   * only clears the timer, and it must: `task_id` alone would refuse a
+   * legitimate re-stage, so the memory that survives has to be the DROP, not the
+   * reader. **The consequence is that this extension cannot be the thing that
+   * stops a re-fire, and therefore the host must disarm the drop at settle** —
+   * `src/supervisor/index.ts`'s `clearDispatchPolicy`, pinned for order in
+   * `test/unit/dispatch-policy.test.ts`.
+   *
+   * Pinned here so the next reader who finds that clear cannot conclude it is
+   * redundant: this test is what says the in-container half does not cover it.
+   */
+  test("lastFired is per-session state, which is why the HOST must disarm the drop", () => {
+    const body = code(EXTENSION_SRC);
+    const exported = body.indexOf("export default function");
+    expect(exported, "the extension no longer has a default export").toBeGreaterThan(-1);
+    // Declared after the export opens => it is re-created per instantiation.
+    expect(
+      body.indexOf("let lastFired"),
+      "`lastFired` moved to module scope — re-check ISC-1114 before relying on it",
+    ).toBeGreaterThan(exported);
+    // And shutdown drops the timer ONLY. Nothing in this file remembers across
+    // a session, which is the fact the host clear exists to compensate for.
+    const shutdown = body.indexOf('pi.on("session_shutdown"');
+    expect(shutdown).toBeGreaterThan(-1);
+    expect(body.slice(shutdown)).not.toContain("lastFired");
+  });
 });
 
 describe("the two copies of the trigger text stay equal", () => {

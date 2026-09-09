@@ -40,6 +40,7 @@ import {
   TRIAGE_DOCUMENT_SCHEMA,
   parseTriageDocument,
 } from "../../src/run/triage-document.ts";
+import { OBSERVER_CONTRACT_HEADING } from "../../src/run/triage-envelope.ts";
 import { TRIAGE_NOTE_MAX_BYTES } from "../../src/run/triage-verdict.ts";
 
 const ROLE = readFileSync(join(import.meta.dir, "..", "..", "roles", "triage.md"), "utf8");
@@ -269,5 +270,56 @@ describe("the document teaches `note`, and teaches it the way the host enforces 
   test("the no-severity rule is restated for prose, where a schema cannot enforce it", () => {
     expect(ROLE).toContain("The `note` field does not reopen this");
     expect(ROLE).toContain("**`note` is now that place, so");
+  });
+});
+
+/**
+ * The turn-one brief section, after ISC-1136 moved the invariant half of the
+ * observer contract from the collator's prose into `composeObserverBrief`.
+ *
+ * **Why these are checkable when the rest of the file's judgement is not.** Each
+ * one is a claim this document makes ABOUT THE HOST — that three named paragraphs
+ * arrive appended, under a heading it quotes, carrying things the collator
+ * therefore need not write. A model reads that and stops writing them. If the
+ * host's side moves and this document does not, the collator obeys a promise
+ * nobody is keeping, and `roles/` is read by a container and never by `tsc`.
+ */
+describe("what the host authors, the collator is no longer told to write (ISC-1136)", () => {
+  /**
+   * The heading is the load-bearing half of the promise: it is how a model
+   * reading only this file recognises the appended block as the host's rather
+   * than as prose it forgot writing. Quoted here without the `##` because the
+   * document quotes it as a phrase mid-sentence.
+   */
+  test("the heading this document quotes is the heading the host actually writes", () => {
+    expect(ROLE).toContain(OBSERVER_CONTRACT_HEADING.replace(/^#+ /, ""));
+  });
+
+  /**
+   * The two bullets ISC-1136 removed. They asked the collator to spell field
+   * names and restate a closed vocabulary that `freshnessEchoDemand` and
+   * `COVERAGE_VOCABULARY_DEMAND` now write on every dispatch — so a brief
+   * carrying them spends its words twice and, worse, offers the observer a second
+   * spelling to choose from. Asserted as absences because that is the direction
+   * the regression comes from: this text was here for weeks and reads as correct.
+   */
+  test("the brief-composition section no longer demands the echo instruction", () => {
+    expect(ROLE).not.toContain(
+      "The two field names `sweep_id` and `window_opened_at`, spelled exactly that way",
+    );
+    expect(ROLE).not.toContain("**Write the field names, not a description of them.**");
+  });
+
+  /**
+   * And what the collator still owes, which is exactly one thing:
+   * `readWindowInstant` quotes the window opening out of the collator's own text
+   * rather than out of host state, so this bullet is the only reason the freshness
+   * demand can name a value at all. The first-match hazard is named with it —
+   * the regex takes the earliest ISO instant in the brief, so a second timestamp
+   * written above it silently becomes the contract.
+   */
+  test("the window instant is still demanded, with the first-match hazard named", () => {
+    expect(ROLE).toContain("The instant the observation window opened");
+    expect(ROLE).toContain("the host takes the FIRST it finds");
   });
 });

@@ -300,7 +300,17 @@ const TriageRowSchema = z
 const notReachable = (message: string) => z.never({ error: message }).optional();
 
 /** `triage.json` as it arrives — §7.5, minus the two fields the HOST supplies. */
-const TriageDocumentSchema = z
+/**
+ * EXPORTED so task 7.3's probe can establish its own premise.
+ *
+ * That probe's first test refuses a document for being over
+ * {@link TRIAGE_DOCUMENT_MAX_BYTES}, and the claim it is making — that the
+ * per-field bounds do not compose into a document bound — is only true if the
+ * fixture satisfies every one of those fields. Without a way to ask the schema
+ * directly, a fixture that broke some unrelated field bound would refuse for
+ * the wrong reason and read as proof.
+ */
+export const TriageDocumentSchema = z
   .object({
     schema: z.literal(TRIAGE_DOCUMENT_SCHEMA, {
       error:
@@ -323,8 +333,61 @@ const TriageDocumentSchema = z
   })
   .strict();
 
+/**
+ * The whole document's byte cap — SRD-WORKER-DISPATCH-EXTENSION §13 task 7.3.
+ *
+ * ## Why a document-wide cap when every field is already bounded
+ *
+ * Because per-field bounds do not compose into a document bound, and when this
+ * cap was written they missed by a factor of about sixty: `services` admitted
+ * 64 rows and each row's `note` admitted 4 000 bytes, which is 256 000 bytes
+ * before any other field is counted — from a schema every one of whose fields
+ * was individually "bounded", and with a single row permitted to be very nearly
+ * the whole cap below on its own.
+ *
+ * Task 7.3 therefore moved BOTH of those to sizes this cap can hold —
+ * {@link MAX_SERVICES_PER_ENVIRONMENT} is 8 and {@link TRIAGE_NOTE_MAX_BYTES}
+ * is 1 024 — so that every bound is reachable rather than nominal. They remain
+ * un-composable at their extremes, which is inherent: 8 maximal notes cannot
+ * fit in 4 096 and no choice of three numbers makes them. What changed is that
+ * each bound can now be hit by a document this parser accepts, instead of
+ * describing a document it would always refuse.
+ *
+ * ## Why 4 096, and the one thing this number is NOT
+ *
+ * §11's Q8 probe measured a local model accepting a 4 KB tool argument intact
+ * and **silently delivering 39% of an 8 KB one** — `isError` false, epoch
+ * `success`, 3 219 bytes of 8 192 arrived. That is the worst failure shape in
+ * the whole document: a green sweep carrying a fraction of its content, which
+ * nothing downstream can detect. Phase B removes this role's `write`, so
+ * `submit_report` becomes its only route and the report becomes a tool
+ * ARGUMENT — which is what puts this console on the wrong side of that number
+ * and is why the cap arrives in the same task as the withdrawal.
+ *
+ * §11's census of 119 real envelopes from this console's three producing seats
+ * puts the observed maximum at 1 472 bytes, so this is 2.8x the largest
+ * collation this console has ever written.
+ *
+ * **The number is measured on the model these seats actually run, and checking
+ * that took reading the operator's file rather than the tracked one.** The
+ * measurement above is `gemma-4-26b-a4b-it-bf16`, and the live `fleet.yaml`
+ * puts `tri-1` and `obs-t1` on exactly that model — *"ALL omlx workers on bf16,
+ * 2026-09-07 by operator"*. So the cap is sized to the wire this console has.
+ *
+ * `fleet.example.yaml` is the one that disagrees: it still names
+ * `gpt-oss-20b-MXFP4-Q8` for these seats, which appears nowhere in Q8's table
+ * and has never been size-probed. A fleet stood up from the tracked example is
+ * therefore on an UNMEASURED model behind a cap derived from a different one —
+ * conservative if that model is at least as good, unknown if it is not. See
+ * ISC-1110; it is a gap in the evidence, not in the cap.
+ *
+ * A refusal is the right side to err on either way: it is loud, it is
+ * recoverable, and it is the opposite of the silent short read it prevents.
+ */
+export const TRIAGE_DOCUMENT_MAX_BYTES = 4096;
+
 /** Why a `triage.json` was refused, as a value rather than as prose. */
-export type TriageDocumentRefusal = "not_json" | "not_an_object" | "schema";
+export type TriageDocumentRefusal = "too_large" | "not_json" | "not_an_object" | "schema";
 
 /**
  * What is wrong at one place, in this module's vocabulary rather than in zod's.
@@ -404,15 +467,39 @@ export interface TriageDocumentContext {
  * throw. The caller here is the actor, and a value is what a polling actor can
  * log, count and carry into the next sweep.
  *
- * The three checks are ORDERED and the order is what makes each refusal reachable
- * by exactly one fault: bytes that are not JSON never reach the object check, and
- * a value that is not an object never reaches the schema, so no fixture has to be
- * wrong in two ways to exercise the third code.
+ * The four checks are ORDERED and the order is what makes each refusal reachable
+ * by exactly one fault: a document over the byte cap never reaches the parser,
+ * bytes that are not JSON never reach the object check, and a value that is not
+ * an object never reaches the schema, so no fixture has to be wrong in two ways
+ * to exercise the fourth code.
  */
 export function parseTriageDocument(
   text: string,
   ctx: TriageDocumentContext,
 ): TriageDocumentRead {
+  /*
+   * FIRST, and before `JSON.parse`, for the reason the ordering note above
+   * gives. A document over the cap is a document that could not have crossed
+   * the wire whole, so reporting it as `not_json` — which is what a truncated
+   * one arrives as — would name the symptom and hide the cause. Measured in
+   * BYTES rather than code units because the cap is about what a tool argument
+   * carries, which is `collationCeiling`'s reason in `collation.ts` for the
+   * same choice.
+   */
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > TRIAGE_DOCUMENT_MAX_BYTES) {
+    return {
+      kind: "refused",
+      code: "too_large",
+      reason:
+        `${ctx.path} is ${bytes} bytes and this document is bounded at ` +
+        `${TRIAGE_DOCUMENT_MAX_BYTES}. Above roughly this size the model these seats run was ` +
+        `measured delivering a SHORT report with no error and a green epoch, so a document ` +
+        `this large is refused loudly rather than acted on partially.`,
+      issues: [],
+    };
+  }
+
   let raw: unknown;
   try {
     raw = JSON.parse(text) as unknown;
