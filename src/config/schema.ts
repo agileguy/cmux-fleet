@@ -152,10 +152,20 @@ export function effectiveToolGrant(
  * edit that looks like tidying. With `read_only: true` declared, that deletion
  * is now a parse error naming the tools it would have handed back.
  */
-const WRITE_CAPABLE_TOOLS = ["bash", "write", "edit"] as const;
+/**
+ * EXPORTED for task 7.4's criterion, and the export is the point rather than a
+ * convenience. That criterion asserts an ABSENCE — "a bash-less role's resolved
+ * tools contain no writing verb but `submit_report`" — and an absence is only
+ * as good as the set it is asserted over. A test that wrote its own
+ * `["write", "edit"]` beside this one would keep passing on the day a fourth
+ * writer is added here, reporting a narrowing it no longer checks. One
+ * definition, two readers: the guard below refuses a document, and the
+ * criterion refuses a fleet composition.
+ */
+export const WRITE_CAPABLE_TOOLS = ["bash", "write", "edit"] as const;
 
 /** Which write-capable builtins a resolved grant holds, in a stable order. */
-function writeCapableIn(tools: readonly ToolName[]): readonly ToolName[] {
+export function writeCapableIn(tools: readonly ToolName[]): readonly ToolName[] {
   return WRITE_CAPABLE_TOOLS.filter((t) => tools.includes(t));
 }
 

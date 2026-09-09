@@ -52,6 +52,8 @@ import {
   submitReportWriteWarning,
   submitReportWriteWorkers,
   workersMissingKubeconfig,
+  writeCapableIn,
+  type ToolName,
 } from "../../src/config/schema.ts";
 import { omlxRelayTarget } from "../../src/security/relay.ts";
 import { EXIT } from "../../src/contracts.ts";
@@ -2478,6 +2480,195 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
     expect(effectiveToolGrant(undefined)).toContain("write");
     expect(effectiveToolGrant(undefined)).not.toContain("submit_report");
     expect(submitReportWriteWorkers(loaded.config)).toEqual([]);
+  });
+});
+
+/**
+ * SRD-WORKER-DISPATCH-EXTENSION §13 task 7.4 — layer 1 stated as a criterion,
+ * and §6.3 is explicit that it is the only one of the four layers that can be
+ * asserted statically at all.
+ *
+ * ## The property, and why `bash` is the selector rather than an afterthought
+ *
+ * *"A bash-less role's resolved tools contain no writing verb but
+ * `submit_report`."* The describe ABOVE pins Phase A, where holding both routes
+ * merely warns. This is Phase B: for a role that has actually been narrowed,
+ * the same shape is a fact the suite refuses to let go of.
+ *
+ * §6.8 is the reason the rule is conditioned on the shell instead of being
+ * stated over every role. Removing `write` from a role that holds `bash` takes
+ * away a tool and not a capability — `cat > /outbox/…` is still right there —
+ * so asserting this of `sre`, `observer` or `ticketing` would be asserting
+ * something both false and undesirable.
+ *
+ * ## What this can reach, and what it provably cannot
+ *
+ * §13's probe reads *"`resolveWorker` for `triage`, `collator`, `reviewer`"*,
+ * and exactly ONE of those three is reachable that way from a tracked file:
+ *
+ * - **`triage`** has a role and a seat (`tri-1`), so it resolves. It is also
+ *   the one still holding `write`, because task 7.3 has not landed.
+ * - **`reviewer`** has a role and **no seat** — the `review` console's four
+ *   workers are declared only in the operator's gitignored `fleet.yaml`. The
+ *   ROLE arm below is its whole coverage, and the worker arm structurally
+ *   cannot provide any.
+ * - **`collator`** is in neither. Task 7.2 says so in as many words and is
+ *   marked as producing no tracked diff for precisely this reason. Nothing here
+ *   can assert a thing about it; the last test is what makes its ARRIVAL a
+ *   failure rather than a silence.
+ *
+ * A block written against the worker arm alone would therefore be one third of
+ * itself while reading as the whole criterion — which is the ISC-572 shape, and
+ * the reason both arms are here.
+ */
+describe("Phase B: a bash-less role holds no writer but submit_report (§13 task 7.4)", () => {
+  /**
+   * The bash-less roles Phase 7 has NOT yet narrowed, and the writers each one
+   * still holds. **This map is a tripwire, not an allowance.**
+   *
+   * The test that reads it asserts the exemption is still TRUE — that `triage`
+   * really does still hold exactly `write` — so the commit that lands task 7.3
+   * turns this file RED and cannot be finished without deleting the entry. At
+   * that moment the general assertion above it starts covering `triage`, with
+   * nobody having to remember that it should.
+   *
+   * A plain skip-list would do the opposite: it would go quiet on exactly the
+   * day the thing it excuses stops being true, and the narrowing would land
+   * uncovered with a green suite.
+   */
+  const NOT_YET_NARROWED: Readonly<Record<string, readonly ToolName[]>> = {
+    // §13 task 7.3 — the size gate is CLEARED (§11's census: 119 envelopes,
+    // max 1 472 bytes against a 4 KB truncation floor) and the change is not
+    // landed. Its acceptance is three consecutive sweeps, not a config edit.
+    triage: ["write"],
+  };
+
+  async function example(): Promise<LoadedConfig> {
+    return await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+  }
+
+  type Cfg = LoadedConfig["config"];
+
+  /**
+   * A ROLE's resolved grant: `defaults ← role`, then `exclude_tools` subtracted.
+   *
+   * `exclude_tools` is a real subtraction Pi applies at the argv (`render.ts`),
+   * so a declared-then-excluded `write` is not a grant and must not read as
+   * one — the same correction the Phase A block above makes for its warning.
+   */
+  function roleGrant(cfg: Cfg, name: string): readonly ToolName[] {
+    const role = cfg.roles[name];
+    if (role === undefined) {
+      throw new Error(
+        `fleet.example.yaml declares no role "${name}" — it is GONE, not merely retooled. ` +
+          `It holds: ${Object.keys(cfg.roles).join(", ")}`,
+      );
+    }
+    const declared = role.tools ?? cfg.defaults?.tools;
+    const excluded = role.exclude_tools ?? cfg.defaults?.exclude_tools ?? [];
+    return effectiveToolGrant(declared).filter((t) => !excluded.includes(t));
+  }
+
+  /** The same, for a worker that has been through the full three-level resolve. */
+  function workerGrant(w: ResolvedWorker): readonly ToolName[] {
+    const excluded = w.excludeTools ?? [];
+    return effectiveToolGrant(w.tools).filter((t) => !excluded.includes(t));
+  }
+
+  function bashLessRoles(cfg: Cfg): string[] {
+    return Object.keys(cfg.roles)
+      .filter((r) => !roleGrant(cfg, r).includes("bash"))
+      .sort();
+  }
+
+  /**
+   * THE ANTI-VACUITY THIS BLOCK RESTS ON, and it closes a specific hole rather
+   * than a general one.
+   *
+   * Every assertion below is made over a FILTERED set, and a filter that
+   * narrows to nothing satisfies an absence for free. The hole is not
+   * hypothetical here: `effectiveToolGrant` resolves an OMITTED `tools:` to
+   * every Pi builtin — `bash` included — so deleting one line from
+   * `reviewer` would drop it out of the bash-less set entirely and take its
+   * coverage with it, while looking like tidying. Naming the set is what turns
+   * that into a failure. (ISC-59's `read_only: true` makes the same deletion a
+   * parse error; two independent refusals, because this one is the one that
+   * survives the flag being removed too.)
+   */
+  test("the example ships exactly two bash-less roles, and they are Phase 7's", async () => {
+    const { config } = await example();
+    expect(bashLessRoles(config)).toEqual(["reviewer", "triage"]);
+  });
+
+  test("a narrowed bash-less role holds no writer, and holds submit_report instead", async () => {
+    const { config } = await example();
+    const narrowed = bashLessRoles(config).filter((r) => !(r in NOT_YET_NARROWED));
+    // The filter has to have LEFT something, or every loop below is free.
+    expect(narrowed).toEqual(["reviewer"]);
+
+    for (const r of narrowed) {
+      const grant = roleGrant(config, r);
+      // Against schema.ts's own writer set, not a second copy written here: a
+      // fourth writer added there must widen this criterion, not slip past it.
+      expect(writeCapableIn(grant), `role "${r}" resolves a write-capable tool`).toEqual([]);
+      // The "but submit_report" half, and it is load-bearing rather than
+      // decorative. A bash-less role with no writer AND no submit_report cannot
+      // produce result.json at all — outbox.ts only ever reads it — which is
+      // the exact state that emptied a whole review console and is why `write`
+      // was granted here in the first place. Take one away, the other must be
+      // there.
+      expect(grant, `role "${r}" has no route to write its envelope`).toContain("submit_report");
+    }
+  });
+
+  test("a role still awaiting its Phase 7 task holds EXACTLY the writers exempted", async () => {
+    const { config } = await example();
+    // The map is not empty, or this test is a no-op that reads like a guard.
+    expect(Object.keys(NOT_YET_NARROWED)).toEqual(["triage"]);
+
+    for (const [r, writers] of Object.entries(NOT_YET_NARROWED)) {
+      // An exemption for a role that holds a shell would be excusing a rule
+      // that never applied to it.
+      expect(bashLessRoles(config), `"${r}" is exempted but is not bash-less`).toContain(r);
+      expect(
+        writeCapableIn(roleGrant(config, r)),
+        `"${r}" no longer holds ${writers.join(", ")} — task 7.3 has landed, so DELETE its ` +
+          `NOT_YET_NARROWED entry and let the criterion above cover it`,
+      ).toEqual([...writers]);
+    }
+  });
+
+  test("through resolveWorker, every bash-less SEAT obeys the same rule", async () => {
+    const loaded = await example();
+    const seats = resolveAllWorkers(loaded).filter((w) => !workerGrant(w).includes("bash"));
+
+    // By NAME, for `seatsOf`'s reason above: a seat deleted and a seat retooled
+    // want different edits, and an emptied filter reports neither.
+    expect(seats.map((w) => w.id).sort()).toEqual(["tri-1"]);
+
+    for (const w of seats) {
+      const exempt = NOT_YET_NARROWED[w.role] ?? [];
+      expect(writeCapableIn(workerGrant(w)), `seat "${w.id}" (role ${w.role})`).toEqual([...exempt]);
+      expect(workerGrant(w), `seat "${w.id}" has no route to write its envelope`).toContain(
+        "submit_report",
+      );
+    }
+  });
+
+  /**
+   * `collator`'s absence, asserted so that its arrival is a failure.
+   *
+   * This is the one arm of §13's probe that no tracked file can satisfy, and
+   * the honest thing to do with an unreachable criterion is to make the day it
+   * becomes reachable loud. If a `collator` role or seat is ever added to the
+   * example, this goes red and whoever added it has to bring it under the
+   * assertions above — rather than the criterion silently continuing to cover
+   * two roles out of three while claiming three.
+   */
+  test("collator is in neither the example's roles nor its seats — and arriving must fail", async () => {
+    const { config } = await example();
+    expect(Object.keys(config.roles)).not.toContain("collator");
+    expect(config.workers.map((w) => w.role)).not.toContain("collator");
   });
 });
 

@@ -239,7 +239,7 @@ harvest sweep's needle set without `secret_names` claiming it was ever granted, 
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
 **One `[ ]` criterion is open: ISC-824.** The `[ ]` count had been zero since ISC-572 closed on 2026-09-06, and ISC-824 opened later the same day rather than being closed on arrival. It is the residue of a design change ruled in *after* the task that would have carried it had already shipped: §6.8a's console-health `kind` set grew a seventh member, `inference_unreachable`, and nothing computes it — the enum, its observation and its anti-twin all landed and are green, and an `endpoint_down` sweep still composes nothing in production. It is filed `[ ]` rather than `[~]` on purpose: `[~]` means the behaviour is built and the evidence is thin, and here the behaviour is not built. Task 5.4e carries it.
-Twenty-five are graded `[~]`
+Twenty-six are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard — with one departure worth stating plainly, because it is the only
 criterion so far to have made the round trip:
