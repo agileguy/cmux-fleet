@@ -269,6 +269,69 @@ function trailerBlockOf(body: string): string {
   return paras.length === 0 ? "" : (paras[paras.length - 1] ?? "");
 }
 
+/**
+ * Whether a line is FOOTER-SHAPED — a git trailer, or one of the two footer
+ * forms that are not trailers but are still unmistakably footers.
+ *
+ * This is the discriminator that lets the substring arm leave the LAST
+ * paragraph without becoming a whole-body grep, which `ATTRIBUTION_LINE`'s
+ * docblock explains at length is not available: c7f9b87 discusses all four
+ * forbidden substrings in its prose and a whole-body scan reddens on it.
+ *
+ * Prose does not survive this. c7f9b87's mention sits in a hard-wrapped
+ * sentence whose first line begins "and a PR-body string for", and although a
+ * LATER line of that same wrap begins "Generated with", `trailerBlocksOf`
+ * requires EVERY line of a paragraph to be footer-shaped before it grades it.
+ * One line of ordinary prose disqualifies the paragraph, which is exactly the
+ * property that makes this safe to run outside the trailer block.
+ */
+function isFooterLine(line: string): boolean {
+  const t = line.trim();
+  if (t.length === 0) return false;
+  if (/^[A-Za-z][A-Za-z0-9-]*:[ \t]/.test(t)) return true;
+  if (t.startsWith("\u{1F916}")) return true;
+  return /^Generated with\b/i.test(t);
+}
+
+/**
+ * Every paragraph the substring arm grades: the last one, plus any EARLIER
+ * paragraph that is entirely footer-shaped.
+ *
+ * ## The fail-open this closes
+ *
+ * `trailerBlockOf` alone graded only the last paragraph, so an attribution
+ * footer with anything appended after it was invisible to the substring arm:
+ *
+ *     Did the work.
+ *
+ *     Generated with Claude Code
+ *
+ *     Also fixed the thing.
+ *
+ * `ATTRIBUTION_LINE` does not save this. That arm carries only the two trailer
+ * keys and the EMOJI-prefixed footer, deliberately — its own docblock records
+ * that making the emoji optional reddens c7f9b87 on a line break. So the
+ * plainest generated-by footer there is, in any position but last, was graded
+ * clean by both arms at once. Raised by the language lens on T-rv-155.
+ *
+ * A footer is a footer wherever it sits; what makes the last paragraph special
+ * is only that it is where footers USUALLY sit. Asking the shape question
+ * instead of the position question covers both.
+ */
+function trailerBlocksOf(body: string): string[] {
+  const paras = body
+    .trim()
+    .split(/\n\s*\n/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+  if (paras.length === 0) return [];
+  const blocks = [paras[paras.length - 1]!];
+  for (const para of paras.slice(0, -1)) {
+    if (para.split("\n").every(isFooterLine)) blocks.push(para);
+  }
+  return blocks;
+}
+
 /** Both arms. Returns the reasons, empty when clean. */
 /**
  * The addresses a co-author trailer may name and still be dropped before the
@@ -288,15 +351,33 @@ function trailerBlockOf(body: string): string {
  * mode is a false positive on a new human contributor — visible, one line to
  * fix, and the direction every other assertion in this file already takes.
  *
- * It also retires two problems at once. There is no second definition of "what
- * counts as an AI" to drift out of step with `FORBIDDEN_PATTERNS`, and a HUMAN
- * named Claude is judged by their address rather than by their name, so the
- * guard cannot go permanently red over somebody's given name.
+ * It also retires the drift problem: there is no second definition of "what
+ * counts as an AI" here to fall out of step with `FORBIDDEN_PATTERNS`.
  *
- * These are the addresses git has actually recorded as this repository's author
- * in its own history — the local identity commits are made under, and the
- * account address GitHub attributes a squash to.
+ * ## Why the NAME is checked too, and what that costs
+ *
+ * An address-only allowlist fails open, which is the second version of this
+ * narrowing to do so. Both consensus lenses on T-rv-155 built the same case:
+ *
+ *     Co-authored-by: Claude <the.daddy.magoo@gmail.com>
+ *
+ * The address is the operator's, so the line was dropped whole and the NAME was
+ * never examined — the guard's entire subject, discarded because the envelope
+ * around it was trusted. A trailer is a claim about a person, and a person is
+ * both halves; matching one and ignoring the other grades the half that cannot
+ * lie and throws away the half that can.
+ *
+ * The cost is the property the previous version advertised: a human genuinely
+ * named Claude, committing from a listed address, now reddens this guard. That
+ * is a false POSITIVE — visible, one line to fix, and the direction every other
+ * assertion in this file already takes — where the alternative is a false
+ * negative on the exact string this repository's rules exist to keep out.
+ *
+ * These are the name/address halves git has actually recorded for this
+ * repository's author: the local identity commits are made under, and the
+ * account GitHub attributes a squash to.
  */
+const HUMAN_CO_AUTHOR_NAMES: ReadonlySet<string> = new Set(["agileguy"]);
 const HUMAN_CO_AUTHORS: ReadonlySet<string> = new Set([
   "the.daddy.magoo@gmail.com",
   "agile.guy@hotmail.com",
@@ -315,17 +396,29 @@ export function withoutKnownHumanCoAuthors(body: string): string {
   return body
     .split("\n")
     .filter((line) => {
-      const m = /^[ \t]*co-authored-by:[^<]*<([^>]+)>/i.exec(line);
-      return m === null || !HUMAN_CO_AUTHORS.has(m[1]!.trim().toLowerCase());
+      /*
+       * Anchored at BOTH ends. Without the `$`, a line whose trailer is
+       * followed by more text — `Co-authored-by: agileguy <…> 🤖 Generated
+       * with Claude Code` — was dropped entire, taking the appended footer
+       * with it. The same lens raised that alongside the name hole; they are
+       * one defect seen from two sides, which is that this filter was deciding
+       * what to discard from a PREFIX of the line rather than from the line.
+       */
+      const m = /^[ \t]*co-authored-by:([^<]*)<([^>]+)>[ \t]*$/i.exec(line);
+      if (m === null) return true;
+      const named = HUMAN_CO_AUTHOR_NAMES.has(m[1]!.trim().toLowerCase());
+      const addressed = HUMAN_CO_AUTHORS.has(m[2]!.trim().toLowerCase());
+      return !(named && addressed);
     })
     .join("\n");
 }
 
 function liveAttributionHits(body: string): string[] {
   const hits: string[] = [];
-  const trailer = trailerBlockOf(body);
-  for (const p of FORBIDDEN_PATTERNS) {
-    if (trailer.includes(p)) hits.push(`trailer block contains "${p}"`);
+  for (const block of trailerBlocksOf(body)) {
+    for (const p of FORBIDDEN_PATTERNS) {
+      if (block.includes(p)) hits.push(`a trailer block contains "${p}"`);
+    }
   }
   if (ATTRIBUTION_LINE.test(body)) hits.push("a line begins with an attribution form");
   return hits;
@@ -440,12 +533,42 @@ describe("ISC-530 (live): this branch's own commits carry no attribution", () =>
     expect(liveAttributionHits(wrapped)).toEqual([]);
   });
 
-  test("the line arm catches an attribution that is not the last paragraph", () => {
+  test("both arms catch an attribution that is not the last paragraph", () => {
     const body =
       "A real subject\n\nA body.\n\nCo-Authored-By: Someone <x@example.com>\n\n" +
       "A later paragraph appended after the footer.";
     expect(trailerBlockOf(body)).not.toContain("Co-Authored-By");
-    expect(liveAttributionHits(body)).toEqual(["a line begins with an attribution form"]);
+    const hits = liveAttributionHits(body);
+    /*
+     * Asserted as two independent memberships rather than one `toEqual` on the
+     * array. The `toEqual` this replaced pinned the exact hit list, so it read
+     * as "the line arm catches this" and ALSO, silently, as "the substring arm
+     * does not" — and the second half went red the moment the substring arm was
+     * fixed to reach a footer-shaped paragraph that is not last. A test whose
+     * failure means "the guard improved" is a test that has to be re-read every
+     * time, so each arm now gets its own reddenable assertion.
+     */
+    expect(hits).toContain("a line begins with an attribution form");
+    expect(hits).toContain('a trailer block contains "Co-Authored-By"');
+  });
+
+  /**
+   * The fail-open the language lens found on T-rv-155: a footer with anything
+   * after it, in the one form neither arm reached.
+   *
+   * `Generated with Claude Code` carries no trailer key and no robot emoji, so
+   * `ATTRIBUTION_LINE` does not match it in any position — by design, per its
+   * docblock. The substring arm graded only the last paragraph. Put the footer
+   * anywhere but last and both arms passed it.
+   */
+  test("a bare generated-by footer is caught even with a paragraph after it", () => {
+    const body =
+      "A real subject\n\nA body.\n\nGenerated with Claude Code\n\n" +
+      "A later paragraph appended after the footer.";
+    expect(trailerBlockOf(body)).not.toContain("Generated with");
+    const hits = liveAttributionHits(body);
+    expect(hits).toContain('a trailer block contains "Generated with"');
+    expect(hits).toContain('a trailer block contains "Claude"');
   });
 
   test("a mention in prose is not an attribution", () => {
@@ -550,6 +673,39 @@ describe("ISC-530 (live): this branch's own commits carry no attribution", () =>
     /** A malformed trailer has no address to recognise, so it fails closed. */
     test("a co-author line with no address is kept", () => {
       expect(withoutKnownHumanCoAuthors("x\n\nCo-authored-by: nobody")).toContain("nobody");
+    });
+
+    /**
+     * THE CASE THE ADDRESS-ONLY ALLOWLIST GOT WRONG — the second fail-open in
+     * this narrowing, found by both consensus lenses on T-rv-155.
+     *
+     * The address is the operator's own, and that was the entire test: the line
+     * was dropped whole and the name was never read. The guard's whole subject
+     * rode in on a trusted envelope. Note this is not a hypothetical spelling —
+     * it is the exact trailer this repository's rules forbid, wearing the exact
+     * address its own history records.
+     */
+    test("an AI name behind a trusted address survives and reddens", () => {
+      for (const who of [
+        "Claude <the.daddy.magoo@gmail.com>",
+        "Claude Opus 5 <agile.guy@hotmail.com>",
+      ]) {
+        const graded = withoutKnownHumanCoAuthors(`Squashed thing (#1)\n\n${KNOWN}\nCo-authored-by: ${who}`);
+        expect(graded, `${who} was dropped on the strength of its address`).toContain("Claude");
+        expect(liveAttributionHits(graded), `${who} survived but produced no hit`).not.toEqual([]);
+      }
+    });
+
+    /**
+     * The other half of the same defect: the filter decided what to discard
+     * from a PREFIX of the line, so anything appended after a recognised
+     * trailer went with it. Both ends are anchored now.
+     */
+    test("text appended after a recognised trailer is not dropped with it", () => {
+      const line = `${KNOWN} \u{1F916} Generated with Claude Code`;
+      const graded = withoutKnownHumanCoAuthors(`Squashed thing (#1)\n\n${line}`);
+      expect(graded).toContain("Generated with");
+      expect(liveAttributionHits(graded)).not.toEqual([]);
     });
   });
 
