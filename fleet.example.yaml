@@ -169,7 +169,15 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
     # with ModelNotAllowedError: the operator has been told
     # the file is fine and then had it rejected, which is precisely the failure
     # `src/cli/commands/config.ts` argues against in its own words.
-    - gpt-oss-20b-MXFP4-Q8
+    # [SUPERSEDED 2026-09-09] `gemma-4-26b-a4b-it-bf16` — the model the triage
+    # seats moved to, and the whole reason this comment block exists: the
+    # allowlist gates the ROLE, `config validate` does not read it, so a seat
+    # model changed WITHOUT its entry validates clean and is then refused at
+    # `up` with ModelNotAllowedError. That is exactly what happened while making
+    # this change: `config validate CLI (ISC-58) > exits 0 on the shipped
+    # example` went red the moment the seats moved and this line had not. The
+    # guard did its job; the note above predicted the shape precisely.
+    - gemma-4-26b-a4b-it-bf16
   require_native_tool_calls: true   # `up` probes each model — see §5.9
   #
   # PER-MODEL CONTEXT WINDOWS live on a PROVIDER block, so they appear under
@@ -633,7 +641,23 @@ roles:
     # 120B. The failure will not look like a model failure — it will look like a
     # noisy console. If that is what a day-long run shows, THIS is the first
     # decision to re-examine, not the last.
-    model: gpt-oss-20b-MXFP4-Q8
+    #
+    # [SUPERSEDED 2026-09-09] `gemma-4-26b-a4b-it-bf16`, and the paragraph above
+    # is kept because its reasoning still holds — this is a change of model, not
+    # a change of mind about size. Two things forced it:
+    #
+    #   1. The operator's own `fleet.yaml` moved every oMLX worker to bf16 on
+    #      2026-09-07, so the live triage seats have been on gemma since, and
+    #      this file was describing a fleet that no longer existed (ISC-1110).
+    #   2. SRD §11 Q8's tool-argument ceilings were MEASURED on this model. The
+    #      caps this repository ships for that wire came from it, and naming a
+    #      different one here made those bounds unattributable.
+    #
+    # It is also the model CI now probes, and that is not a coincidence — see
+    # `ci.yml`'s `PIFLEET_OMLX_MODEL` and ISC-1116: a CI job that cold-loads a
+    # model the fleet is NOT running adds a second resident model to a capped
+    # oMLX and starves the live seats. This line is the anchor that guard reads.
+    model: gemma-4-26b-a4b-it-bf16
     thinking: high                        # reconciling three reports that disagree IS the job
     toolchain: base                       # it reads artifacts; there is nothing to build
     # `reviewer`'s grant above, copied deliberately — the same set the `review`
@@ -865,4 +889,11 @@ workers:
   # model that merely shares its posture: the 2026-09-06 ruling was that all
   # four seats run gpt-oss-20b. Read as a reversal of §6.11 this looks wrong; it
   # is the same outcome reached from a file whose `observer` role differs.
-  - {id: obs-t1, role: observer, model: gpt-oss-20b-MXFP4-Q8}
+  #
+  # [SUPERSEDED 2026-09-09] The override stays and its REASON is unchanged — the
+  # `observer` role above is still `Qwen3.5-35B-A3B-8bit`, so inheriting here
+  # would still deliver something other than what the triage console runs. Only
+  # the model moved, to match `triage` above and the live fleet: all triage-
+  # console seats on one local model, which is what keeps a single copy of the
+  # weights resident (ISC-1116).
+  - {id: obs-t1, role: observer, model: gemma-4-26b-a4b-it-bf16}

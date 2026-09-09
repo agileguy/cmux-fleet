@@ -86,7 +86,16 @@ const TRIAGE_SEATS = ["tri-1", "obs-t1"] as const;
  * cluster endpoints from a live environment, 288 sweeps a day) may not leave
  * the machine, and nothing reduces a transcript after it has been sent.
  */
-const TRIAGE_MODEL = "gpt-oss-20b-MXFP4-Q8";
+/*
+ * [CHANGED 2026-09-09] `gpt-oss-20b-MXFP4-Q8` -> `gemma-4-26b-a4b-it-bf16`.
+ *
+ * The privacy argument above is unchanged and is why this is still a LOCAL
+ * model. What changed is which one: the operator's `fleet.yaml` moved every
+ * oMLX worker to bf16 on 2026-09-07, SRD §11 Q8's tool-argument ceilings were
+ * measured on this model, and CI now generates against it too — see ISC-1116 at
+ * the foot of this file for why those three have to be the same string.
+ */
+const TRIAGE_MODEL = "gemma-4-26b-a4b-it-bf16";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -364,7 +373,7 @@ describe("worked example", () => {
  *
  * THE TRAP THIS BLOCK IS WRITTEN AGAINST, named because falling into it makes
  * the whole block worthless: a criterion that only asserts "the four seats
- * resolve to `gpt-oss-20b-MXFP4-Q8`" passes just as happily if someone deletes
+ * resolve to `gemma-4-26b-a4b-it-bf16`" passes just as happily if someone deletes
  * the seats entirely, and an absence asserted over a filtered set is satisfied
  * by an empty set. So every assertion here is made against `TRIAGE_SEATS` —
  * a list this file NAMES — and the seats' presence is checked before their
@@ -400,7 +409,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
     });
   }
 
-  test("all four resolve to the local 20b on omlx (D1, arm 3)", async () => {
+  test("all four resolve to the one local model on omlx (D1, arm 3)", async () => {
     // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
     // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
     // of them pass while checking nothing.
@@ -475,7 +484,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
    * pins, which was MEASURED rather than imagined.
    *
    * `config validate` stops at `resolveAllWorkers` and never calls
-   * `assertModelAllowed`. So before `gpt-oss-20b-MXFP4-Q8` was added to this
+   * `assertModelAllowed`. So before the triage model was added to this
    * file's `llm.models_allowlist`, the example validated CLEAN and `up` then
    * refused all four seats with `ModelNotAllowedError` — the operator told the
    * file was fine and then having it rejected, which is exactly what
@@ -3444,5 +3453,94 @@ describe("ISC-529: a configured identity that is the operator's own is not silen
     // nobody. Asserted so a future default that drops .invalid fails here.
     expect(DEFAULT_GIT_IDENTITY.email.endsWith("@pifleet.invalid")).toBe(true);
     expect(operatorIdentityWarning(DEFAULT_GIT_IDENTITY.email, "dan@example.com")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-1116 — CI must not add a SECOND resident model to the fleet's oMLX
+// ---------------------------------------------------------------------------
+
+/**
+ * **The maintainer's oMLX is a shared, capped machine, and CI is a tenant on
+ * it.**
+ *
+ * `ci.yml`'s `omlx-live` and `container-live` jobs generate against the real
+ * server the live fleet is running on. When they name a model the fleet is NOT
+ * already running, the server cold-loads a second set of weights beside the
+ * warm one, and a 24 GiB cap does not fit two.
+ *
+ * That is not a hypothetical. `ci.yml` already carries the note — auto-selection
+ * once "cold-loaded a 35B into a 24GB cap and SIGABRT'd the maintainer's oMLX,
+ * taking every other tenant's warm model with it" — and the rule it produced
+ * was *name the model, never infer it*. **Naming was not enough.** On
+ * 2026-09-09, with CI pinned to `Qwen3.5-35B-A3B-8bit` and the fleet on
+ * `gemma-4-26b-a4b-it-bf16`, a `container-live` run loaded the 35B while the
+ * triage console was mid-sweep; `obs-t1` returned `stop_reason: "error"` and
+ * `T-sweep-10-slice1` settled `failed`. A deliberately named model collides
+ * exactly as hard as an inferred one — the old guard constrained WHO chose, and
+ * the thing that matters is WHICH.
+ *
+ * So the invariant is not "a model is named", it is **"the model named is one
+ * the fleet already has resident"**, and the only tracked statement of what the
+ * fleet runs is this file. Reading it through `resolveWorker` rather than
+ * grepping the YAML is deliberate: a seat-level `model:` override is exactly how
+ * `obs-t1` is declared, and a grep for `model:` cannot see which line wins.
+ *
+ * **This guard cannot prove the server's memory is safe** — it proves CI and the
+ * tracked fleet name one model. That is the whole of what a unit test can hold,
+ * and it is the half that drifted.
+ */
+describe("CI generates against the model the fleet already runs (ISC-1116)", () => {
+  const CI_YML = "​.github/workflows/ci.yml".replace("​", "");
+
+  /** Every `PIFLEET_OMLX_MODEL:` ASSIGNMENT in the workflow, in file order. */
+  async function ciModels(): Promise<readonly string[]> {
+    const src = await readFile(join(REPO_ROOT, CI_YML), "utf8");
+    return [...src.matchAll(/^\s+PIFLEET_OMLX_MODEL:[ \t]+(\S+)\s*$/gm)].map((m) => m[1]!);
+  }
+
+  /** What the tracked example resolves the triage console's seats to. */
+  async function seatModels(): Promise<readonly string[]> {
+    const cfg = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    return ["tri-1", "obs-t1"].map((id) => resolveWorker(cfg, id).model);
+  }
+
+  /**
+   * Asserted first and separately: if the console's own two seats disagree the
+   * comparison below has no single answer to make, and the failure an operator
+   * needs to read is "the console runs two models", not "CI disagrees with one
+   * of them".
+   */
+  test("the triage console's seats resolve to ONE local model", async () => {
+    const seats = await seatModels();
+    expect(new Set(seats).size, `the triage seats run ${seats.join(" and ")}`).toBe(1);
+  });
+
+  test("both CI jobs name that model, and no other", async () => {
+    const models = await ciModels();
+    // Two assignments — `omlx-live`'s step-level pin and `container-live`'s
+    // job-level one. The count is ISC-290's criterion and is asserted there;
+    // repeated here only so a zero-match regex fails loudly instead of making
+    // the comparison below vacuously true.
+    expect(models, "no PIFLEET_OMLX_MODEL assignments found — has the key moved?").toHaveLength(2);
+
+    const seats = await seatModels();
+    // Non-null after the sibling test above, but asserted rather than `!`-ed:
+    // an empty seat list would otherwise make the loop below compare against
+    // `undefined` and pass by never running.
+    const seat = seats[0];
+    // A THROW rather than `expect(...).toBeDefined()`, and rather than `!`.
+    // `toBeDefined` does not narrow for the compiler, and `!` would assert the
+    // narrowing instead of checking it — an empty seat list would then make the
+    // loop below compare against `undefined` and pass by never running.
+    if (seat === undefined) throw new Error("the example declares no triage seats");
+    for (const m of models) {
+      expect(
+        m,
+        `ci.yml generates against "${m}" while the tracked fleet runs "${seat}". CI would ` +
+          `cold-load a SECOND model beside the fleet's warm one, and the shared oMLX cap does ` +
+          `not fit two — this is the collision that failed T-sweep-10-slice1 (ISC-1116).`,
+      ).toBe(seat);
+    }
   });
 });
