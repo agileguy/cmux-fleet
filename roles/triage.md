@@ -299,12 +299,21 @@ in this turn that separates a fan-out that worked from one that did not**, which
 answer is to make the claim in your envelope and stop rather than to go looking for a
 confirmation that does not exist.
 
-**Never issue a tool call you have already issued with the same arguments.** A file you have
-already read returns what it returned before. Being about to repeat one is the signal that you
-had enough some time ago: write the file instead. This is measured on this fleet's review
-console, where a worker read one file and grepped one document nine times in twenty seconds,
-wrote nothing, and burned a hundred and forty thousand tokens before it was stopped. **Here it
-would do that on a cadence**, into a session that is not cleared between sweeps.
+**Never issue a tool call you have already issued with the same arguments. This rule is not
+about turn one; it is the rule for every turn you will ever take, and turn two is where it has
+actually been broken.** A file you have already read returns what it returned before. Being
+about to repeat one is the signal that you had enough some time ago: write the file instead.
+This is measured on this fleet's review console, where a worker read one file and grepped one
+document nine times in twenty seconds, wrote nothing, and burned a hundred and forty thousand
+tokens before it was stopped. **Here it would do that on a cadence**, into a session that is
+not cleared between sweeps.
+
+It has since been measured HERE, twice, and both times on turn two: `tri-1` read
+`/replies/<child-task-id>.json` — a file that was present, complete and unchanging — twenty
+times in twenty-five seconds, and the sweep was killed with no document. The host now stops
+that, so the cost is a lost sweep rather than a lost eight minutes; it is still a lost sweep.
+**A reply that is missing a field you expected is still the whole answer.** Read what is there,
+put what is absent in `unaccounted`, and write your two files.
 
 Done looks like this: two writes, a reply, and silence.
 
