@@ -27,8 +27,11 @@
  * judgement in the rest of the file is not checkable and is not checked.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { dispatchRequest, type DispatchRequestParams } from "../../docker/pi-extensions/report-tools.ts";
 
 import {
   DISPATCH_REQUEST_FILE,
@@ -51,25 +54,59 @@ function jsonBlocks(): string[] {
 }
 
 /**
- * The example's own `parent_task_id`, read out of the document rather than
- * restated here.
+ * A `/policy/task` and an outbox, so the real tool can be driven.
  *
- * `parseDispatchRequest` requires the body's `parent_task_id` to equal the
- * directory it was written into, so a test spelling its own id would pass while
- * the document drifted — the exact class of failure this file exists for.
+ * `declaredParentTaskId` used to live here, reading the id out of the example
+ * because `parseDispatchRequest` compares it against the directory the file sits
+ * in — and a test that spelled its own id would pass while the document drifted.
+ * That hazard is now the tool's to carry rather than the example's: the id comes
+ * from host state on both sides of the comparison, so there is no longer a value
+ * in the document that a test could get wrong on its behalf.
  */
-function declaredParentTaskId(body: string): string {
-  const parsed = JSON.parse(body) as { parent_task_id?: unknown };
-  if (typeof parsed.parent_task_id !== "string") {
-    throw new Error("the example carries no parent_task_id; the document is broken, not this test");
-  }
-  return parsed.parent_task_id;
+const EXAMPLE_TASK_ID = "T-sweep-41";
+
+function policyFixture(worker: string): { dir: string; mounts: { policyPath: string; outboxRoot: string; repliesPolicyPath: string; repliesRoot: string } } {
+  const dir = mkdtempSync(join(tmpdir(), "pifleet-triage-role-"));
+  const policyPath = join(dir, "policy-task");
+  writeFileSync(policyPath, `${EXAMPLE_TASK_ID}\n1\n`);
+  const outboxRoot = join(dir, "outbox");
+  mkdirSync(outboxRoot, { recursive: true });
+  const repliesRoot = join(dir, "replies");
+  mkdirSync(repliesRoot, { recursive: true });
+  void worker;
+  return {
+    dir,
+    mounts: { policyPath, outboxRoot, repliesPolicyPath: join(dir, "policy-replies"), repliesRoot },
+  };
+}
+
+/**
+ * ## The example stopped being a document and became an ARGUMENT (task 7.3)
+ *
+ * `dispatch_request` composes `schema` and `parent_task_id` from `/policy/task`,
+ * so the role's example must NOT carry them — a model that copied them would be
+ * refused by `additionalProperties: false`. Grading it therefore cannot mean
+ * "parse this block as a document" any more.
+ *
+ * **It means something stronger instead**: drive the REAL tool with the block,
+ * and parse what the tool wrote with the REAL host parser. The old test proved
+ * the example was a well-formed document. This proves the example, passed to
+ * the tool the role now names, produces a document the host accepts — which is
+ * the property the old one was standing in for.
+ */
+function fanoutExample(): DispatchRequestParams {
+  const block = jsonBlocks().find((b) => b.includes('"requests"'))!;
+  return JSON.parse(block) as DispatchRequestParams;
 }
 
 describe("the fan-out example is a document the real parser accepts", () => {
-  test("there is exactly one fan-out example to grade", () => {
-    const withSchema = jsonBlocks().filter((b) => b.includes(DISPATCH_REQUEST_SCHEMA));
-    expect(withSchema).toHaveLength(1);
+  test("there is exactly one fan-out example, and it carries no host-composed field", () => {
+    const blocks = jsonBlocks().filter((b) => b.includes('"requests"'));
+    expect(blocks).toHaveLength(1);
+    // The anti-criterion for this whole rewrite: putting either field back into
+    // the example reddens here, because a model copying it would be refused.
+    expect(blocks[0]).not.toContain(DISPATCH_REQUEST_SCHEMA);
+    expect(blocks[0]).not.toContain("parent_task_id");
   });
 
   /**
@@ -77,12 +114,15 @@ describe("the fan-out example is a document the real parser accepts", () => {
    * because a model copies its shape confidently.
    */
   test("it parses under the TRIAGE roster, which is the one that requires services", () => {
-    const body = jsonBlocks().find((b) => b.includes(DISPATCH_REQUEST_SCHEMA))!;
+    const f = policyFixture(TRIAGE_CONSOLE_ROSTER.collators[0]!);
+    const out = dispatchRequest(fanoutExample(), f.mounts);
+    const body = readFileSync(out.path, "utf8");
     const read = parseDispatchRequest(body, {
       sender: TRIAGE_CONSOLE_ROSTER.collators[0]!,
-      taskId: declaredParentTaskId(body),
+      taskId: out.taskId,
       roster: TRIAGE_CONSOLE_ROSTER,
     });
+    rmSync(f.dir, { recursive: true, force: true });
     if (read.kind !== "ok") {
       throw new Error(
         `roles/triage.md's example is refused ${read.kind === "refused" ? read.code : read.kind}: ` +
@@ -100,8 +140,7 @@ describe("the fan-out example is a document the real parser accepts", () => {
    * one line reddens.
    */
   test("every request in the example carries its own share", () => {
-    const body = jsonBlocks().find((b) => b.includes(DISPATCH_REQUEST_SCHEMA))!;
-    const parsed = JSON.parse(body) as { requests: { worker: string; services?: unknown }[] };
+    const parsed = fanoutExample() as { requests: { worker: string; services?: unknown }[] };
     for (const r of parsed.requests) {
       expect(Array.isArray(r.services)).toBe(true);
     }
@@ -115,8 +154,7 @@ describe("the fan-out example is a document the real parser accepts", () => {
    * `reverse` all survive, and this document is the thing a model copies.
    */
   test("the example's shares are disjoint and its union is asserted by name", () => {
-    const body = jsonBlocks().find((b) => b.includes(DISPATCH_REQUEST_SCHEMA))!;
-    const parsed = JSON.parse(body) as { requests: { services: string[] }[] };
+    const parsed = fanoutExample() as { requests: { services: string[] }[] };
     const union = parsed.requests.flatMap((r) => r.services);
     // ONE observer, so the example is one request naming the whole environment.
     // Disjointness is still asserted — it is now disjointness WITHIN the share,
@@ -145,22 +183,26 @@ describe("the fan-out example is a document the real parser accepts", () => {
  * raise a number.
  */
 describe("every fenced JSON example is a document some real parser accepts", () => {
-  const GRADED_TAGS = [DISPATCH_REQUEST_SCHEMA, TRIAGE_DOCUMENT_SCHEMA];
+  const GRADED_TAGS = [TRIAGE_DOCUMENT_SCHEMA];
 
-  test("there are exactly two, and every one of them declares a graded schema", () => {
+  test("there are exactly two, and every one of them is graded by a real parser", () => {
     const blocks = jsonBlocks();
     expect(blocks).toHaveLength(2);
 
-    const ungraded = blocks.filter((b) => !GRADED_TAGS.some((tag) => b.includes(tag)));
+    // ONE of the two no longer declares a schema and must not: it is
+    // `dispatch_request`'s arguments, and the tool composes the tag. It is
+    // graded by being DRIVEN, in the describe above, which is why the exemption
+    // is spelled as "carries requests[]" and not as "is allowed to be ungraded".
+    const graded = blocks.filter(
+      (b) => GRADED_TAGS.some((tag) => b.includes(tag)) || b.includes('"requests"'),
+    );
     expect(
-      ungraded.map((b) => b.slice(0, 80)),
-      "a fenced JSON example in roles/triage.md declares no schema this repository parses; " +
-        "grade it rather than widening this assertion",
+      blocks.filter((b) => !graded.includes(b)).map((b) => b.slice(0, 80)),
+      "a fenced JSON example in roles/triage.md is neither a graded schema nor the " +
+        "dispatch_request argument block; grade it rather than widening this assertion",
     ).toEqual([]);
 
-    // And each tag is used ONCE, so two blocks carrying the same tag — a copied
-    // example that drifted — is not mistaken for full coverage.
-    for (const tag of GRADED_TAGS) {
+    for (const tag of [...GRADED_TAGS, '"requests"']) {
       expect(blocks.filter((b) => b.includes(tag))).toHaveLength(1);
     }
   });

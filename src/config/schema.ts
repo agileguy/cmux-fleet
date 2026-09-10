@@ -89,7 +89,7 @@ export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find"
  * closed so that `submit_reprot` fails `config validate` naming the field,
  * instead of buying a worker nothing at all.
  */
-export const PI_EXTENSION_TOOLS = ["submit_report", "get_replies"] as const;
+export const PI_EXTENSION_TOOLS = ["submit_report", "dispatch_request", "get_replies"] as const;
 
 /**
  * The vocabulary `tools:` and `exclude_tools:` range over — and the whole of
