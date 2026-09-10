@@ -323,3 +323,47 @@ describe("what the host authors, the collator is no longer told to write (ISC-11
     expect(ROLE).toContain("the host takes the FIRST it finds");
   });
 });
+
+/**
+ * ISC-1147 — the anti-repeat rule is stated where the failure actually happens.
+ *
+ * The rule existed before this and did not hold, which is the point of pinning
+ * its PLACEMENT rather than its presence: it sat inside the turn-one block
+ * (`## YOU HAVE EXACTLY ONE OBSERVER` through `### Turn two`), wrapped in prose
+ * about a turn where `/replies` is empty by construction — and both measured
+ * loops are turn TWO, reading a reply that is present and complete.
+ *
+ * A prompt cannot bound a model that has stopped being able to stop; the host's
+ * `transcript_tool_loop` check is what actually ends these. This is the cheap
+ * half, and it is worth having because the rule was already written and was
+ * being read as scoped.
+ */
+describe("the anti-repeat rule is not scoped to one turn (ISC-1147)", () => {
+  /*
+   * Whitespace-normalised, because every one of these sentences is longer than
+   * the file's wrap column and a raw `toContain` is really an assertion about
+   * where the line happens to break. That has already cost this suite one false
+   * refusal (ISC-1141's blockquote), and the document's meaning does not depend
+   * on its reflow.
+   */
+  const FLAT = ROLE.replace(/\s+/g, " ");
+
+  test("the rule says outright which turn has broken it", () => {
+    expect(FLAT).toContain("it is the rule for every turn you will ever take");
+    expect(FLAT).toContain("turn two is where it has actually been broken");
+  });
+
+  test("the measured instance is named, not just the review console's", () => {
+    expect(FLAT).toContain("twenty times in twenty-five seconds");
+    expect(FLAT).toContain("/replies/<child-task-id>.json");
+  });
+
+  /**
+   * The specific shape both loops had: a reply with no `observations` key. The
+   * collator reads observations out of the harvest record's inlined artifact,
+   * not out of that field, so an absent one is not a reason to re-read.
+   */
+  test("a reply short of a field is named as still being the whole answer", () => {
+    expect(FLAT).toContain("A reply that is missing a field you expected is still the whole answer");
+  });
+});
