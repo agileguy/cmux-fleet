@@ -109,10 +109,18 @@ describe("readProseLoop — the fold", () => {
     expect(best).toBe(1);
   });
 
-  test("adjacent repeats count the same as scattered ones", () => {
-    const a = readProseLoop([prose({ type: "thinking", body: adjacent(LOOP_LINE, 40) })]);
+  /**
+   * The mirror of the case above, and the rule that keeps a table alive: a
+   * contiguous run counts ONCE. Four hundred identical rows are one act of
+   * writing a table; forty separated returns to the same sentence are forty
+   * decisions not to move on.
+   */
+  test("a contiguous run counts once, however long it is", () => {
+    const a = readProseLoop([prose({ type: "thinking", body: adjacent(LOOP_LINE, 400) })]);
+    expect(a.repeats).toBe(1);
+    expect(isProseLoop(a)).toBe(false);
+
     const b = readProseLoop([prose({ type: "thinking", body: nonAdjacent(LOOP_LINE, 40) })]);
-    expect(a.repeats).toBe(40);
     expect(b.repeats).toBe(40);
   });
 
@@ -167,9 +175,108 @@ describe("readProseLoop — the fold", () => {
 
   test("the reported line is truncated, so a 200 KB block cannot become a 200 KB event", () => {
     const long = `${"x".repeat(5000)}.`;
-    const reading = readProseLoop([prose({ type: "thinking", body: adjacent(long, 5) })]);
+    const reading = readProseLoop([prose({ type: "thinking", body: nonAdjacent(long, 5) })]);
+    expect(reading.repeats).toBe(5);
     expect(reading.line).not.toBeNull();
     expect(reading.line!.length).toBeLessThanOrEqual(120);
+  });
+});
+
+/**
+ * Every shape that tripped an earlier version of this detector, kept as
+ * regressions. A trip settles the epoch `failed`, so these are the cases where
+ * being wrong kills a seat that was working — the direction with no recovery.
+ *
+ * The first six are contiguous and are stopped by the run-collapse. The last
+ * four are NOT: each repeated unit appears once per element, separated by that
+ * element's other fields, exactly as a loop's repeats are separated. Only the
+ * sentence-end rule stops those, which is why both rules exist.
+ */
+describe("Anti: a seat writing structured output is not looping", () => {
+  const N = 200;
+  function once(body: string) {
+    return readProseLoop([prose({ type: "text", body })]);
+  }
+  const contiguous: Array<[string, string]> = [
+    ["a markdown table with a repeated data row", Array(N).fill("| ntfy | ntfy | Running |").join("\n")],
+    ["a table's separator rows", Array(N).fill("|------------|------------|").join("\n")],
+    ["quoted log lines, all identical", Array(N).fill('2026-09-10T04:00:00Z level=info msg="health ok"').join("\n")],
+    ["a checklist of identical items", Array(N).fill("- [ ] verify the rollout completed").join("\n")],
+    ["`kubectl get pods` rows", Array(N).fill("ntfy-7d9f8c9b4-abcde   1/1   Running   0   4d").join("\n")],
+    ["a diff's identical context lines", Array(N).fill("     const x = compute(value);").join("\n")],
+  ];
+  for (const [name, body] of contiguous) {
+    test(`${name} does not trip`, () => {
+      expect(isProseLoop(once(body))).toBe(false);
+    });
+  }
+
+  const structured: Array<[string, string]> = [
+    [
+      "`kubectl get pods -o json` — the field name recurs once per element",
+      `[\n${Array.from(
+        { length: 100 },
+        (_, i) =>
+          `  {\n    "name": "pod-${i}",\n    "restartPolicy": "Always",\n    "dnsPolicy": "ClusterFirst",\n    "uid": "${i}-aaaa"\n  },`,
+      ).join("\n")}\n]`,
+    ],
+    [
+      "a hundred-document helm render",
+      Array.from(
+        { length: 100 },
+        (_, i) => `---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: svc-${i}\nspec:\n  type: ClusterIP`,
+      ).join("\n"),
+    ],
+    [
+      "a hundred-file license-header diff",
+      Array.from(
+        { length: 100 },
+        (_, i) =>
+          `--- a/src/file${i}.ts\n+++ b/src/file${i}.ts\n@@ -1,2 +1,3 @@\n+// SPDX-License-Identifier: MIT\n import { thing } from "./thing${i}.ts";`,
+      ).join("\n"),
+    ],
+    [
+      "a hundred-item inventory the seat writes itself",
+      Array.from(
+        { length: 100 },
+        (_, i) => `pod-${i}\nStatus: healthy and ready\n- no findings this sweep`,
+      ).join("\n"),
+    ],
+  ];
+  for (const [name, body] of structured) {
+    test(`${name} does not trip, though its repeats are NOT adjacent`, () => {
+      const reading = once(body);
+      expect(reading.repeats).toBeLessThan(PROSE_LOOP_THRESHOLD);
+      expect(isProseLoop(reading)).toBe(false);
+    });
+  }
+
+  /**
+   * The negative control the six above are worthless without: the same
+   * non-adjacent shape, with units that ARE sentences, still trips. Without
+   * this a rule that counted nothing at all would pass every test here.
+   */
+  test("the control: real sentences in the same non-adjacent shape DO trip", () => {
+    const body = Array.from(
+      { length: 120 },
+      (_, i) => `Wait, I will write the files now.\nFiller ${i} about something else.`,
+    ).join("\n");
+    const reading = readProseLoop([prose({ type: "text", body })]);
+    expect(reading.repeats).toBe(120);
+    expect(isProseLoop(reading)).toBe(true);
+  });
+
+  test("a unit that does not end like a sentence is not counted at all", () => {
+    // Non-adjacent, 400 times, and nothing here terminates a sentence — so
+    // there is no population to count and the reading is empty rather than
+    // merely under the bound.
+    const body = Array.from(
+      { length: 400 },
+      (_, i) => `"restartPolicy": "Always",\n  "uid": "${i}-aaaa-bbbb",`,
+    ).join("\n");
+    const reading = readProseLoop([prose({ type: "text", body })]);
+    expect(reading.repeats).toBe(0);
+    expect(reading.line).toBeNull();
   });
 });
 

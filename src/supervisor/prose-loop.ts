@@ -58,6 +58,39 @@
  * is a run length; `repeats` here is a population count.** They are different
  * numbers answering different questions and neither threshold transfers.
  *
+ * ## One count per contiguous RUN — the rule that stops it killing a table
+ *
+ * The population count alone has a false positive, and it is the direction
+ * that cannot be recovered from: a trip settles the epoch `failed`, so a wrong
+ * trip kills a seat that was working. Probed against this exact function
+ * before it shipped, with 200-row inputs an observer plausibly writes:
+ *
+ * | input                                          | naive count | verdict |
+ * |------------------------------------------------|------------:|---------|
+ * | `kubectl get pods` output, identical rows      |         200 | TRIP    |
+ * | markdown table with a repeated data row        |         200 | TRIP    |
+ * | pretty-printed JSON, identical elements        |         200 | TRIP    |
+ * | unified diff, identical context lines          |         200 | TRIP    |
+ * | quoted log lines, all identical                |         200 | TRIP    |
+ * | a checklist of identical items                 |         200 | TRIP    |
+ *
+ * Seven of nine adversarial shapes tripped, and a triage observer pastes
+ * exactly this kind of output into its report. The 2,724-block sample did not
+ * show it because no seat has yet quoted a namespace with a hundred
+ * identically-formatted pods — an absence of evidence that would have become
+ * an incident the first time one did.
+ *
+ * The discriminator is ADJACENCY, and it falls out of the measurement above:
+ * a table's identical rows are contiguous, and a loop's repeats are not — the
+ * model writes the sentence, writes something else, and comes back to it. So
+ * a unit is counted once per contiguous run. The table collapses to 1. The
+ * loop is untouched, because its maximum consecutive run is already 1.
+ *
+ * **Re-measured over the same 2,724 blocks after the change: every count is
+ * identical**, loops and healthy alike, so this buys the whole false-positive
+ * class for nothing. It also makes the rule sayable in one sentence — *the
+ * seat kept coming BACK to it* — which the raw population count was not.
+ *
  * ## Why not a RATIO of repeats to units, which is the obvious refinement
  *
  * Because it is measurably worse. Ranked by ratio, the same 2,724 blocks give:
@@ -168,8 +201,13 @@ export const PROSE_UNIT_MIN_CHARS = 12;
 /** What a trip knows about itself, for the event record and the operator. */
 export interface ProseLoopReading {
   /**
-   * Occurrences of the most-repeated unit in the worst single block of this
-   * epoch. A population count, NOT a run length — see the header.
+   * How many separate times the seat came BACK to the most-repeated unit, in
+   * the worst single block of this epoch.
+   *
+   * A population count over contiguous runs: NOT a run length (that is
+   * `tool-loop.ts`'s `streak`, and it scores 1 on every measured instance of
+   * this failure) and not a raw occurrence count either (that kills a table).
+   * See the header for both halves.
    */
   readonly repeats: number;
   /**
@@ -190,6 +228,41 @@ export interface ProseLoopReading {
 const LINE_MAX_CHARS = 120;
 
 /**
+ * A unit must END like a sentence, and this is what makes the count a count of
+ * SENTENCES rather than of lines (ISC-1144.1).
+ *
+ * The splitter breaks on newlines as well as on sentence terminators, so
+ * without this every line-oriented artifact an agent types into its own prose
+ * becomes a unit. Probed against this function before it shipped, with inputs
+ * an observer plausibly writes — and every one of these tripped:
+ *
+ * | input, 100 items                        | repeated unit                          |
+ * |------------------------------------------|----------------------------------------|
+ * | `kubectl get pods -o json`               | `"restartPolicy": "Always",`           |
+ * | a 100-document helm render               | `apiVersion: apps/v1`                  |
+ * | a 100-file license-header diff           | `@@ -1,2 +1,3 @@`                      |
+ * | a 100-item inventory the seat writes     | `Status: healthy and ready`            |
+ *
+ * **Adjacency does not save these**, which is why this rule exists on top of
+ * the run-collapse: each of those units appears once per element, separated by
+ * the element's other fields, so the repeats are non-adjacent in exactly the
+ * way a loop's are. The run-collapse buys contiguous tables; this buys
+ * structured documents, and they are different populations.
+ *
+ * Every one of the five measured loop sentences ends in `.`; not one of the
+ * eleven measured false-positive shapes does — they end in `,`, `"`, `|`, a
+ * digit or a letter. The rule is therefore not a heuristic bolted on to dodge
+ * a test case, it is the definition of the thing being counted, and the
+ * splitter already encodes it in `(?<=[.!?])`.
+ *
+ * Trailing quotes and brackets are NOT tolerated after the terminator. A loop
+ * sentence ending `..."` would be skipped and the epoch would survive, which
+ * is the recoverable error; widening this to `[.!?]["')\]]*$` would readmit
+ * `"…passed.",` from a JSON document, which is not.
+ */
+const SENTENCE_END = /[.!?]$/;
+
+/**
  * Split prose into the units that get counted.
  *
  * Sentence terminators AND newlines, because the failure appears in both
@@ -208,7 +281,9 @@ function units(text: string): string[] {
   const out: string[] = [];
   for (const part of text.split(/(?<=[.!?])\s+|\n+/)) {
     const unit = part.trim();
-    if (unit.length >= PROSE_UNIT_MIN_CHARS) out.push(unit);
+    if (unit.length < PROSE_UNIT_MIN_CHARS) continue;
+    if (!SENTENCE_END.test(unit)) continue;
+    out.push(unit);
   }
   return out;
 }
@@ -249,7 +324,12 @@ export function readProseLoop(sinceDispatch: readonly TreeEntry[]): ProseLoopRea
     if (!isAssistantEntry(entry)) continue;
     for (const text of proseBlocks(entry)) {
       const counts = new Map<string, number>();
+      let previous: string | null = null;
       for (const unit of units(text)) {
+        // One count per contiguous RUN, not per occurrence. See the header:
+        // this is what separates a loop from a table.
+        if (unit === previous) continue;
+        previous = unit;
         const n = (counts.get(unit) ?? 0) + 1;
         counts.set(unit, n);
         if (n > best) {
