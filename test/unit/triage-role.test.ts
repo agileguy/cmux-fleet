@@ -409,3 +409,48 @@ describe("the anti-repeat rule is not scoped to one turn (ISC-1147)", () => {
     expect(FLAT).toContain("A reply that is missing a field you expected is still the whole answer");
   });
 });
+
+/**
+ * The refusal a write-less collator actually hit, on the first live sweep after
+ * task 7.3 narrowed the grant (2026-09-10, `T-sweep-77-collate`).
+ *
+ * `tri-1` composed a correct collation and declared `files/triage.json` in
+ * `artifacts` — the sequence it had held for its whole life, and the sequence it
+ * still composes into every OBSERVER brief it writes. With no `write` the file
+ * did not exist, so `artifactMissingProblem` refused, correctly and with the
+ * remedy in the message. The seat then sent the identical call twenty times in
+ * six minutes and `readToolLoop` killed the turn with no document.
+ *
+ * **The refusal text is quoted in the role on purpose**, so the model meets the
+ * same words in its briefing and in the tool result. These assertions run over a
+ * whitespace-normalised copy: every sentence here is longer than the file's wrap
+ * column, so a raw `toContain` would be an assertion about where a line breaks.
+ */
+describe("a write-less collator is told not to declare what it has not written (ISC-1151)", () => {
+  const FLAT = ROLE.replace(/\s+/g, " ");
+
+  test("the prohibition names artifacts, report, and the cost", () => {
+    expect(FLAT).toContain("DO NOT PUT YOUR OWN TWO DOCUMENTS IN `artifacts`");
+    expect(FLAT).toContain("`artifacts` declares files that ALREADY EXIST");
+    expect(FLAT).toContain("move the file from `artifacts` to `report` and call once more");
+  });
+
+  test("it quotes the refusal the seat will actually receive", () => {
+    // The exact string `submit_report` returns. If that message is reworded, the
+    // role stops matching the tool and this reddens — which is the point: a
+    // briefing that quotes a message it no longer sends is worse than one that
+    // quotes none, because the model waits for words that never arrive.
+    expect(FLAT).toContain(
+      "Declare a file only after writing it, or pass it as `report` and let this tool write and declare it for you.",
+    );
+  });
+
+  test("the observer's declare-rule is marked as the observer's, not the collator's", () => {
+    expect(FLAT).toContain("This sentence is what you tell the observer; it is not how YOU report.");
+    expect(FLAT).toContain("The observer holds `write` and declares what it wrote. You do not");
+  });
+
+  test("repeating a refused call is named as the failure, not the retry", () => {
+    expect(FLAT).toContain("If a call is refused, change what you send. Sending it again is the failure, not the retry.");
+  });
+});

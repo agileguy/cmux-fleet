@@ -234,7 +234,9 @@ Then tell each observer how to report, because the failure is silent in every di
 
 - **Write the artifact pair `observer-ops.json` and `observer-ops.md` into the reporting path
   your envelope names for that worker** — declare both in the envelope's `artifacts` array, and
-  keep the `notes` FIELD of that same directory's `result.json` to a short summary.
+  keep the `notes` FIELD of that same directory's `result.json` to a short summary. **This
+  sentence is what you tell the observer; it is not how YOU report.** The observer holds `write`
+  and declares what it wrote. You do not, and you deliver through `report` — see turn two.
 
   **The path is given to you; do not compose one.** Your envelope's `## The seats` block lists
   every worker with the task id its slice will be dispatched under and the exact
@@ -322,6 +324,19 @@ put what is absent in `unaccounted`, and deliver your two documents.
 `/outbox/<task-id>/files/` and declared in `artifacts` for you. There is no second call to put
 the second file on: delivering ends your turn. Naming one file twice is refused rather than
 overwritten, so the pair is two entries with two names.
+
+**DO NOT PUT YOUR OWN TWO DOCUMENTS IN `artifacts`. This is the one way to lose the sweep and
+it has been measured here.** `artifacts` declares files that ALREADY EXIST. You have no `write`,
+so a file you have not passed as `report` does not exist and cannot be declared — the call comes
+back `artifact \`triage.json\` does not exist. Declare a file only after writing it, or pass it as
+`report` and let this tool write and declare it for you.` On 2026-09-10 that refusal arrived
+twenty times in six minutes because the same call was repeated unchanged, and the host killed
+the turn with no document. **The message is the instruction: move the file from `artifacts` to
+`report` and call once more.** If a call is refused, change what you send. Sending it again is
+the failure, not the retry.
+
+The `artifacts` rule you compose into an OBSERVER's brief is that observer's rule, not yours —
+it holds `write` and you do not.
 
 Done looks like this: one delivery carrying two documents, and silence.
 
