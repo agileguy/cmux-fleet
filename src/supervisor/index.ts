@@ -89,6 +89,7 @@ import {
   discoverSessionPath,
   verdictForStopReason,
 } from "./tui.ts";
+import { PROSE_LOOP_REASON, isProseLoop, readProseLoop } from "./prose-loop.ts";
 import { TOOL_LOOP_REASON, isToolLoop, readToolLoop } from "./tool-loop.ts";
 import { TranscriptReader } from "../harvest/transcript.ts";
 
@@ -2504,6 +2505,41 @@ async function main(): Promise<void> {
               return;
             }
 
+            /**
+             * ISC-1144, and it is ABOVE the `ended` gate for the OPPOSITE
+             * reason its sibling above is.
+             *
+             * A tool-looping seat never reaches that gate. A prose-looping seat
+             * sails through it: the message it finally commits carries no
+             * `toolCall`, so `classifyTuiTurn` reads `ended`, the quiet window
+             * elapses, and the epoch settles `success` — on a turn whose whole
+             * output was one sentence written 1,709 times. Wired one block
+             * lower this check would still execute, and it would execute after
+             * a successful verdict had already been decided.
+             *
+             * It settles `failed` rather than asking the agent to stop, for
+             * `readToolLoop`'s reason: the rpc path's escalation writes to a
+             * control channel a `tui` seat does not have, and an epoch that
+             * produced nothing but repetition has not succeeded on any reading.
+             */
+            const prose = readProseLoop(sinceDispatch);
+            if (isProseLoop(prose)) {
+              logEvent({
+                type: "tui_prose_loop_detected",
+                epoch: live.epoch,
+                task_id: live.task_id,
+                repeats: prose.repeats,
+                line: prose.line,
+                detail:
+                  `the seat wrote one sentence ${prose.repeats} times inside a single ` +
+                  `message; settling ${PROSE_LOOP_REASON} rather than letting a turn that ` +
+                  `produced only repetition settle successfully (ISC-1144)`,
+              });
+              tuiQuiet = null;
+              await settle("failed", PROSE_LOOP_REASON);
+              return;
+            }
+
             const reading = classifyTuiTurn(sinceDispatch);
             if (reading.phase !== "ended") {
               tuiQuiet = null;
@@ -2530,12 +2566,21 @@ async function main(): Promise<void> {
              *
              * `maybeProbe` orders prose-trip, then `timed_out`, then `aborted`,
              * then `success`, and states the rule behind that ordering: a
-             * DIAGNOSIS outranks a DESCRIPTION of how the epoch ended. The
-             * prose detector cannot trip here — it is fed from RPC events — so
-             * its slot is taken by the one diagnosis this mode does have. A
-             * transcript whose last assistant message stopped on `error` says
-             * WHY the turn ended, where `timed_out` and `aborted` only say that
-             * the supervisor was waiting or had asked it to stop.
+             * DIAGNOSIS outranks a DESCRIPTION of how the epoch ended.
+             *
+             * `ProseTurnDetector` still cannot trip here — it is fed from RPC
+             * events this mode does not have — but this plane is no longer
+             * without a prose diagnosis: `readProseLoop` (ISC-1144) reads the
+             * same failure off the transcript, and it is checked ABOVE this
+             * chain precisely because everything below decides a verdict. A
+             * seat that wrote one sentence a thousand times arrives here with
+             * `stopReason: "endTurn"` and would otherwise be settled `success`
+             * by the last branch.
+             *
+             * Below that, the ordering is unchanged. A transcript whose last
+             * assistant message stopped on `error` says WHY the turn ended,
+             * where `timed_out` and `aborted` only say that the supervisor was
+             * waiting or had asked it to stop.
              *
              * Everything below `error` is the same chain in the same order, so
              * a task that hit its deadline reads `timed_out` in both modes.
