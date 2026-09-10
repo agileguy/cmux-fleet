@@ -99,7 +99,7 @@ import { ROOT } from "../support/role-docs.ts";
  * list is never empty in production — see the vacuous-completeness test for why
  * that matters here.
  */
-const DECLARED = ["alert-notifier", "prometheus", "grafana"] as const;
+const DECLARED = ["ntfy", "prometheus", "grafana"] as const;
 
 /** `TRIAGE_CONSOLE_ROSTER.reviewers`, spelled out so a roster edit is visible. */
 const OBS = ["obs-t1"] as const;
@@ -143,7 +143,7 @@ describe("the positive control — a partition that covers the environment exact
     const { dispatch, calls } = spy();
     // ONE observer, so the complete partition is one assignment covering the
     // whole environment.
-    const partition = [assign(OBS[0], "alert-notifier", "prometheus", "grafana")];
+    const partition = [assign(OBS[0], "ntfy", "prometheus", "grafana")];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
 
@@ -167,7 +167,7 @@ describe("the positive control — a partition that covers the environment exact
   test("a lopsided partition and an idle observer are both legal", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "ntfy", "prometheus"),
       assign(OBS[0], "grafana"),
       assign(OBS[0]),
     ];
@@ -224,7 +224,7 @@ describe("the positive control — a partition that covers the environment exact
     // prove that a failing slice does not prevent the OTHER seats being reached,
     // which is the whole reason the fan-out is concurrent. With one seat there is
     // no other to reach, so what survives here is only that the throw propagates.
-    const partition = [assign(OBS[0], "alert-notifier", "prometheus", "grafana")];
+    const partition = [assign(OBS[0], "ntfy", "prometheus", "grafana")];
 
     const dispatch = async (a: PartitionAssignment): Promise<string> => {
       calls.push(a.worker);
@@ -251,7 +251,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
    */
   test("two of three services is refused whole, and NOTHING is dispatched", async () => {
     const { dispatch, calls } = spy();
-    const partition = [assign(OBS[0], "alert-notifier"), assign(OBS[0], "prometheus")];
+    const partition = [assign(OBS[0], "ntfy"), assign(OBS[0], "prometheus")];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
 
@@ -289,7 +289,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_incomplete");
-    expect(outcome.missing).toEqual(["alert-notifier"]);
+    expect(outcome.missing).toEqual(["ntfy"]);
     expect(outcome.undeclared).toEqual(["ingest"]);
     expect(outcome.duplicated).toEqual([]);
     expect(calls).toEqual([]);
@@ -308,7 +308,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
   test("a full cover plus one invented service is still refused", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "alert-notifier", "ingest"),
+      assign(OBS[0], "ntfy", "ingest"),
       assign(OBS[0], "prometheus"),
       assign(OBS[0], "grafana"),
     ];
@@ -329,7 +329,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
-    expect(outcome.missing).toEqual(["alert-notifier", "grafana"]);
+    expect(outcome.missing).toEqual(["ntfy", "grafana"]);
   });
 
   /**
@@ -345,7 +345,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
   test("undeclared services are reported in the order the partition claims them", () => {
     const partition = [
       assign(OBS[0], "ingest", "routing"),
-      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "ntfy", "prometheus"),
       assign(OBS[0], "grafana"),
     ];
 
@@ -371,9 +371,9 @@ describe("the duplicate arm — a service appears in more than one request", () 
   test("a service claimed by two observers is partition_duplicate, and nothing is dispatched", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "ntfy", "prometheus"),
       assign(OBS[0], "grafana"),
-      assign(OBS[0], "alert-notifier"),
+      assign(OBS[0], "ntfy"),
     ];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
@@ -381,7 +381,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["alert-notifier"]);
+    expect(outcome.duplicated).toEqual(["ntfy"]);
     expect(outcome.missing).toEqual([]);
     expect(calls).toEqual([]);
   });
@@ -399,7 +399,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
   test("a service listed twice by the SAME observer is a duplicate too", async () => {
     const { dispatch, calls } = spy();
     const partition = [
-      assign(OBS[0], "alert-notifier", "alert-notifier"),
+      assign(OBS[0], "ntfy", "ntfy"),
       assign(OBS[0], "prometheus"),
       assign(OBS[0], "grafana"),
     ];
@@ -409,7 +409,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["alert-notifier"]);
+    expect(outcome.duplicated).toEqual(["ntfy"]);
     expect(calls).toEqual([]);
   });
 
@@ -428,8 +428,8 @@ describe("the duplicate arm — a service appears in more than one request", () 
    */
   test("duplicated services are reported in the order the partition claims them", () => {
     const partition = [
-      assign(OBS[0], "prometheus", "alert-notifier"),
-      assign(OBS[0], "alert-notifier", "prometheus"),
+      assign(OBS[0], "prometheus", "ntfy"),
+      assign(OBS[0], "ntfy", "prometheus"),
       assign(OBS[0], "grafana"),
     ];
 
@@ -438,7 +438,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["prometheus", "alert-notifier"]);
+    expect(outcome.duplicated).toEqual(["prometheus", "ntfy"]);
   });
 });
 
@@ -463,14 +463,14 @@ describe("precedence, when both faults hold at once", () => {
     const { dispatch, calls } = spy();
     // Both claims are on the one seat now — the duplicate still wins the code and
     // `missing` still names both gaps, which is what this test is about.
-    const partition = [assign(OBS[0], "alert-notifier"), assign(OBS[0], "alert-notifier")];
+    const partition = [assign(OBS[0], "ntfy"), assign(OBS[0], "ntfy")];
 
     const outcome = await dispatchPartition(DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["alert-notifier"]);
+    expect(outcome.duplicated).toEqual(["ntfy"]);
     expect(outcome.missing).toEqual(["prometheus", "grafana"]);
     expect(calls).toEqual([]);
   });
@@ -503,7 +503,7 @@ describe("what this check does NOT answer", () => {
    */
   test("a repeated worker is not this module's refusal", () => {
     const partition = [
-      assign(OBS[0], "alert-notifier"),
+      assign(OBS[0], "ntfy"),
       assign(OBS[0], "prometheus"),
       assign(OBS[0], "grafana"),
     ];
@@ -574,11 +574,11 @@ describe("the projection — a sweep's requests become the partition value", () 
     // The projection is verbatim: it neither de-duplicates nor drops. Asserted on
     // one seat now; it was three when the console had three observers.
     const projected = partitionFromRequests([
-      req(OBS[0], ["routing", "ingest", "alert-notifier", "alert-notifier"]),
+      req(OBS[0], ["routing", "ingest", "ntfy", "ntfy"]),
     ]);
 
     expect(projected).toEqual([
-      { worker: OBS[0], services: ["routing", "ingest", "alert-notifier", "alert-notifier"] },
+      { worker: OBS[0], services: ["routing", "ingest", "ntfy", "ntfy"] },
     ]);
   });
 
@@ -598,14 +598,14 @@ describe("the projection — a sweep's requests become the partition value", () 
       // COVERAGE DROPPED: the same service claimed by two DIFFERENT observers no
       // longer has a second observer to be claimed by.
       partitionFromRequests([
-        req(OBS[0], ["alert-notifier", "alert-notifier", "prometheus", "grafana"]),
+        req(OBS[0], ["ntfy", "ntfy", "prometheus", "grafana"]),
       ]),
     );
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_duplicate");
-    expect(outcome.duplicated).toEqual(["alert-notifier"]);
+    expect(outcome.duplicated).toEqual(["ntfy"]);
   });
 
   /**
@@ -643,7 +643,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
     const read = parseDispatchRequest(
       // ONE observer, so a complete partition is one request naming every
       // declared service. It was one service per seat when there were three.
-      fanOutBody(SWEEP, [req(OBS[0], ["alert-notifier", "prometheus", "grafana"])]),
+      fanOutBody(SWEEP, [req(OBS[0], ["ntfy", "prometheus", "grafana"])]),
       { sender: "tri-1", taskId: SWEEP, roster: TRIAGE_CONSOLE_ROSTER },
     );
 
@@ -659,7 +659,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
 
     expect(outcome.kind).toBe("dispatched");
     expect(calls.map((c) => c.worker)).toEqual([...OBS]);
-    expect(calls.map((c) => c.services)).toEqual([["alert-notifier", "prometheus", "grafana"]]);
+    expect(calls.map((c) => c.services)).toEqual([["ntfy", "prometheus", "grafana"]]);
   });
 
   /**
@@ -702,7 +702,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
     expect(outcome.code).toBe("partition_incomplete");
-    expect(outcome.missing).toEqual(["alert-notifier"]);
+    expect(outcome.missing).toEqual(["ntfy"]);
     expect(outcome.undeclared).toEqual(["ingest"]);
     expect(calls).toEqual([]);
   });
@@ -721,12 +721,24 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
    * reason: `fleet.yaml` is gitignored and `triage/targets.yaml` is not, so this
    * is the copy a clean checkout has.
    */
-  test("DECLARED is the cni-dev environment triage/targets.yaml actually declares", () => {
+  test("DECLARED is the environment triage/targets.yaml actually declares", () => {
     const path = `${ROOT}triage/targets.yaml`;
     const targets = parseTriageTargets(readFileSync(path, "utf8"), path);
-    const cniDev = targets.environments_unchecked_against_kubeconfig["cni-dev"];
+    const declared = targets.environments_unchecked_against_kubeconfig;
 
-    expect(cniDev).toBeDefined();
-    expect(cniDev!.services.map((s) => s.name)).toEqual([...DECLARED]);
+    /*
+     * The SOLE environment, read out of the file rather than named here.
+     *
+     * This pin used to spell `cni-dev`, and on 2026-09-10 the operator
+     * retargeted the console at an environment reachable without the corporate
+     * VPN — at which point the pin failed for the environment's NAME while the
+     * property it exists to protect was untouched. `soleEnvironment` refuses any
+     * count but one, so "the one this file declares" is well defined without
+     * naming it, and the fixtures below stay pinned to the real service list
+     * across a retarget instead of only across a rename.
+     */
+    const names = Object.keys(declared);
+    expect(names).toHaveLength(1);
+    expect(declared[names[0]!]!.services.map((s) => s.name)).toEqual([...DECLARED]);
   });
 });

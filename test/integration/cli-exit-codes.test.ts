@@ -522,7 +522,11 @@ describe("config validate — the triage pair", () => {
     const d = JSON.parse(r.stdout);
     expect(d.triage.targets_path).toBe(join(REPO_ROOT, "triage", "targets.yaml"));
     expect(d.triage.console_path).toBe(join(REPO_ROOT, "triage", "console.yaml"));
-    expect(d.triage.environments).toEqual(["cni-dev"]);
+    // The environment the OPERATOR currently declares, retargeted 2026-09-10 off
+    // a control plane that needs the corporate VPN. Asserted by value, like the
+    // 900/120 above and for the same recorded reason: this test states what the
+    // tracked file says, and a test is not a reason to give the file back.
+    expect(d.triage.environments).toEqual(["do-cluster"]);
     expect(d.triage.services).toBe(3);
     // The tracked file's own values, and the derivation between them:
     // `sweep_deadline_s` is `cadence_s - reserve_s` (§7.8 property 1) and is
@@ -583,18 +587,24 @@ describe("config validate — the triage pair", () => {
    * `kube_context` is a value the fence can actually admit, which is a different
    * claim and the one that decides whether task 3.6's worked example is a
    * working example or a shape. It is also what makes an edit to that line
-   * FAIL: change `cni-dev` in `triage/targets.yaml` to anything else and this
-   * test goes red, while every schema-level assertion elsewhere stays green.
+   * FAIL: change the `kube_context` in `triage/targets.yaml` to anything the
+   * fixture kubeconfig below does not carry and this test goes red, while every
+   * schema-level assertion elsewhere stays green. That happened on 2026-09-10,
+   * when the operator retargeted the console off a control plane needing the
+   * corporate VPN — the guard fired, and the fixture followed the file.
    *
    * The kubeconfig is written by the test rather than read from the host, so
    * this asserts nothing about the operator's own filtered copy — which is the
    * one thing on this path that is environment-specific, and the reason the
-   * tracked file names the LOGICAL token `cni-dev` rather than a cloud
-   * provider's generated context id (§0.3's disclosure boundary; §6.2 property
-   * 3).
+   * tracked file names a LOGICAL token rather than a cloud provider's generated
+   * context id (§0.3's disclosure boundary; §6.2 property 3).
    */
   test("the tracked triage/targets.yaml passes the fence against a kubeconfig carrying its context", async () => {
-    const dir = await rig({ contexts: ["cni-dev", "cni-verify"], targets: null, consoleYaml: null });
+    const dir = await rig({
+      contexts: ["do-cluster", "cni-verify"],
+      targets: null,
+      consoleYaml: null,
+    });
     try {
       for (const name of ["targets.yaml", "console.yaml"]) {
         await writeFile(
@@ -606,7 +616,7 @@ describe("config validate — the triage pair", () => {
       expect(r.code).toBe(EXIT.SUCCESS);
       const d = JSON.parse(r.stdout);
       expect(d.triage.fenced).toBe(true);
-      expect(d.triage.environments).toEqual(["cni-dev"]);
+      expect(d.triage.environments).toEqual(["do-cluster"]);
       expect(d.triage.services).toBe(3);
       // 900 - 120, off the tracked console.yaml copied in above — see the
       // previous test for why this is no longer §7.8's default of 240.
