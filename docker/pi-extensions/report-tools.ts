@@ -1981,9 +1981,21 @@ export function dispatchRequest(
       worker: item.worker,
       title: item.title,
       brief: item.brief,
-      // OMITTED rather than sent as null when absent: the host schema is
-      // `.strict()` and an empty list is a legal share ("an idle observer is
-      // not an error"), so the two must stay distinguishable.
+      /*
+       * OMITTED rather than sent as null when absent. The host schema is
+       * `.strict()` and an EMPTY list is a legal share — "an idle observer is
+       * not an error" — so absent and empty must stay distinguishable.
+       *
+       * **Honest limit: today this spread is belt-and-braces, not the
+       * mechanism.** `JSON.stringify` already drops a key whose value is
+       * `undefined`, so `services: item.services` emits byte-identical output
+       * and the mutation battery records that case as SURVIVED rather than
+       * pretending otherwise — it is an equivalent mutant, and no assertion
+       * over the written bytes can kill it. It is written this way because the
+       * property is about the DOCUMENT rather than about a serializer's
+       * behaviour, and the day these bytes are produced by anything else the
+       * spread is what keeps it true.
+       */
       ...(item.services === undefined ? {} : { services: item.services }),
     })),
   };
