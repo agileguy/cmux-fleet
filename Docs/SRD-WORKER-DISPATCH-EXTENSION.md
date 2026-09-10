@@ -2039,10 +2039,30 @@ where `get_replies` first meets a model.
   request written and no envelope. `PI_EXTENSION_TOOLS` gains it, so the registered set and the
   requestable vocabulary stay equal (§12's set-equality criterion).
 
-  **DONE 2026-09-10.** `write` withdrawn in both configs, `roles/triage.md` moved in the same
-  commit, all three images rebuilt, `tri-1` restarted onto
-  `0.79.6-base-1b6c4a15d1ac` and verified running `--tools read,grep,find,ls,submit_report,
-  dispatch_request`. Three consecutive sweeps are the remaining acceptance and are being taken.
+  **DONE AND ACCEPTED 2026-09-10** (PR #155, `1fb435c`). `write` withdrawn in both configs,
+  `roles/triage.md` moved in the same commit, all three images rebuilt, `tri-1` restarted onto
+  `0.79.6-base-8e90ff00f80e` and verified running `--tools read,grep,find,ls,submit_report,
+  dispatch_request` — read from `docker inspect`, not from the config meant to produce it.
+
+  **The acceptance is met on `T-sweep-79`, `T-sweep-80` and `T-sweep-81`** (14:54:10Z, 15:11:05Z,
+  15:28:30Z, each `skips=0`), each verified from its own artifacts: `dispatch-request.json` at the
+  TASK ROOT, both `triage.json` and `triage.md` declared in the envelope, three `healthy` services,
+  `unaccounted: []`. ISC-1154 closes on it.
+
+  **The window is 79-81 and NOT 78-80, and the difference is why this acceptance says CONSECUTIVE
+  rather than three.** `T-sweep-78` completed and the ids 78-79-80 run consecutively with none
+  skipped, which reads like the three. It is not: a `pass_failed` sits between 78 and 79 in the relay
+  log — the `worker_prose [monitoring]` refusal, a latent ISC-1142 gap on `coverage[].channel` that
+  the same PR fixes. Counting sweep ids instead of log lines would have closed this 34 minutes early
+  on a window with a failure inside it. `T-sweep-77`, lost to the collator's repeat loop, is the
+  other sweep excluded. **Both of those failures are what PR #155 fixes, which is exactly why neither
+  may also count as its evidence.**
+
+  The record above stated `0.79.6-base-1b6c4a15d1ac` until 2026-09-10 and the seat has never run it:
+  a comment-only edit under `docker/` re-tagged the image before the restart, and the tag written
+  here was the one that existed when the sentence was drafted. Both halves of §6.2's hash rule are in
+  that: `BUILD_CONTEXT_ASSETS` hashes CONTENT, so a comment moves the tag, and a tag recorded from
+  intent rather than from `docker inspect` is a claim, not a measurement.
 
   **One self-inflicted cost worth recording**: the sweep at 14:00:40 failed
   `roles.triage.tools.5: Invalid option` because the live config gained `dispatch_request` while an
