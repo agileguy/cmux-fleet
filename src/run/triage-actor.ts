@@ -761,15 +761,49 @@ export type TriageActorEvent =
 export const ACTOR_LOG_REASON_MAX_BYTES = 512;
 
 /**
+ * One free-text field, rendered so nothing inside it can end it (ISC-1145).
+ *
+ * `sanitizeToken` and quoting were BOTH already here and the pair was still
+ * insufficient, which is the interesting half. Sanitizing keeps
+ * `[\x20-\x7e]` — printable ASCII — and `"` is 0x22, squarely inside that
+ * range. So a `reason` carrying `" kind=pass_completed sweep=999 x="` closed
+ * the quoted field, opened two fields of the worker's choosing and reopened
+ * the quote, all without a single character the sanitizer objects to. The
+ * existing docblock argued the right way about the wrong character: *"quoting
+ * alone would leave a newline inside the quotes"* — and sanitizing alone
+ * leaves a QUOTE inside the quotes.
+ *
+ * **The backslash is escaped first and that ordering is load-bearing.**
+ * Escaping only `"` leaves a value ending in `\` able to escape the CLOSING
+ * quote, which forges a boundary by the opposite route — the field runs on
+ * into the rest of the line instead of ending early.
+ *
+ * Escape after truncation, so `ACTOR_LOG_REASON_MAX_BYTES` bounds the
+ * CONTENT rather than the rendering. The escape can at most double what
+ * survives it, so the line stays bounded, which is all the cap was ever for:
+ * *"a pointer rather than a copy"*.
+ *
+ * Used for every free-text field and not only `reason`, because `degraded=`
+ * and `seats=` were unquoted: `sanitizeToken` collapses whitespace but does
+ * not remove it, so one space in a seat id forged a field boundary in a line
+ * that never even had quotes to get past. One rule, one spelling — the
+ * alternative is a second free-text field arriving later and getting the
+ * weaker treatment because nobody remembered there were two.
+ */
+export function quotedField(key: string, raw: string): string {
+  const flattened = sanitizeToken(raw, ACTOR_LOG_REASON_MAX_BYTES);
+  const escaped = flattened.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `${key}="${escaped}"`;
+}
+
+/**
  * One event, one line. `key=value` throughout, on `deliveryLogLine`'s pattern.
  *
- * The free text is quoted AND sanitized: quoting alone would leave a newline
- * inside the quotes, which is a forged second record in a file whose whole
- * purpose is to be greppable after the fact.
+ * The free text is quoted AND sanitized AND escaped; see {@link quotedField}
+ * for why all three are needed and what each one alone still lets through.
  */
 export function actorLogLine(event: TriageActorEvent, at: number): string {
-  const reason = (raw: string): string =>
-    `reason="${sanitizeToken(raw, ACTOR_LOG_REASON_MAX_BYTES)}"`;
+  const reason = (raw: string): string => quotedField("reason", raw);
   const rest = ((): string => {
     switch (event.kind) {
       case "actor_started":
@@ -777,15 +811,15 @@ export function actorLogLine(event: TriageActorEvent, at: number): string {
       case "actor_unsupervised":
         return "ports=absent";
       /*
-       * The seat list goes through `sanitizeToken` for `sweep_withheld`'s reason
+       * The seat list goes through `quotedField` for `sweep_withheld`'s reason
        * one case below: the values are host-minted today and the log never
-       * shrinks, so the question is whether a newline has anywhere to sit.
+       * shrinks, so the question is whether a separator has anywhere to sit.
        */
       case "budget_halted":
         return (
           `run=${event.run_id} spent=${event.spent} ` +
           `ceiling=${event.ceiling ?? "unbounded"} ` +
-          `degraded=${sanitizeToken(event.degraded.join(","), ACTOR_LOG_REASON_MAX_BYTES)}`
+          `${quotedField("degraded", event.degraded.join(","))}`
         );
       case "pass_completed":
         return `sweep=${event.sweep_cursor} skips=${event.consecutive_skips}`;
@@ -803,14 +837,15 @@ export function actorLogLine(event: TriageActorEvent, at: number): string {
       case "seat_recycled":
         return `worker=${event.worker} sweep=${event.sweep_cursor}`;
       /*
-       * The seat list goes through `sanitizeToken` even though every value in it
+       * The seat list goes through `quotedField` even though every value in it
        * is host-minted from the roster. The log never shrinks, so the question
-       * is not whether today's ids are safe but whether a newline has anywhere
-       * to sit — and one inside a seat id would forge a second record in the one
-       * file an operator greps after a half-recycle.
+       * is not whether today's ids are safe but whether a separator has anywhere
+       * to sit — a newline forges a second record in the one file an operator
+       * greps after a half-recycle, and a space forges a second FIELD in it.
+       * Sanitizing alone stopped the first and not the second.
        */
       case "sweep_withheld":
-        return `seats=${sanitizeToken(event.seats.join(","), ACTOR_LOG_REASON_MAX_BYTES)}`;
+        return quotedField("seats", event.seats.join(","));
       case "actor_stopped":
         return `passes=${event.passes}`;
     }

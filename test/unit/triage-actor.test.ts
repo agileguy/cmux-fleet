@@ -56,6 +56,7 @@ import {
 } from "../../src/run/console-relay.ts";
 import { TRIAGE_CONSOLE_ROSTER } from "../../src/run/dispatch-request.ts";
 import {
+  ACTOR_LOG_REASON_MAX_BYTES,
   TRIAGE_ACTOR_EVENT_KINDS,
   TRIAGE_COLLATOR,
   TRIAGE_CONSOLE,
@@ -713,7 +714,7 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       "worker=obs-t2 sweep=96",
     );
     expect(actorLogLine({ kind: "sweep_withheld", seats: ["obs-t2", "obs-t3"] }, 0)).toContain(
-      "seats=obs-t2,obs-t3",
+      'seats="obs-t2,obs-t3"',
     );
     expect(actorLogLine({ kind: "actor_unsupervised" }, 0)).toContain("ports=absent");
     expect(
@@ -727,7 +728,7 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
         },
         0,
       ),
-    ).toContain("run=r-tri spent=6000001 ceiling=6000000 degraded=obs-t2");
+    ).toContain('run=r-tri spent=6000001 ceiling=6000000 degraded="obs-t2"');
     // An unbounded run says so rather than rendering `ceiling=null`, which reads
     // as a missing value in a grep rather than as the fact that nobody budgeted.
     expect(
@@ -750,6 +751,89 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
     ]) {
       expect(actorLogLine(e, 0).split("\n")).toHaveLength(1);
     }
+  });
+
+  /**
+   * ISC-1145 — the §7.7 log's field boundary, probed the way a reader meets it.
+   *
+   * `toContain` is the wrong assertion for this class: a forged field is
+   * something EXTRA in the line, and a substring check cannot see extra. So
+   * these parse the line back into fields and grade the key set, which is the
+   * only shape that goes red when a worker string invents `sweep=999`.
+   */
+  describe("no free-text field can forge another one", () => {
+    /**
+     * The `key=value` grammar an operator's grep assumes, as a parser:
+     * whitespace separates fields, `"` quotes a value, and inside quotes `\"`
+     * and `\\` are the two escapes. Returns the keys in order.
+     */
+    function fieldKeys(line: string): string[] {
+      const keys: string[] = [];
+      let i = 0;
+      while (i < line.length) {
+        while (i < line.length && line[i] === " ") i++;
+        const start = i;
+        while (i < line.length && line[i] !== "=" && line[i] !== " ") i++;
+        if (line[i] !== "=") {
+          // A bare token (the timestamp, `triage-actor`). Not a field.
+          continue;
+        }
+        keys.push(line.slice(start, i));
+        i++; // past the `=`
+        if (line[i] === '"') {
+          i++;
+          while (i < line.length && line[i] !== '"') i += line[i] === "\\" ? 2 : 1;
+          i++; // past the closing quote
+        } else {
+          while (i < line.length && line[i] !== " ") i++;
+        }
+      }
+      return keys;
+    }
+
+    test("the parser agrees with an ordinary line, or it proves nothing below", () => {
+      const line = actorLogLine({ kind: "console_gone", worker: "t", run_id: "r", passes: 2 }, 0);
+      expect(fieldKeys(line)).toEqual(["kind", "worker", "run", "passes"]);
+    });
+
+    test("a reason carrying a quote cannot open a field of its own", () => {
+      const attack = '" kind=pass_completed sweep=999 skips=0 x="';
+      const line = actorLogLine({ kind: "actor_refused", reason: attack }, 0);
+      expect(fieldKeys(line)).toEqual(["kind", "reason"]);
+      // The whole attack survives as CONTENT — it is escaped, not censored.
+      expect(line).toContain('\\" kind=pass_completed sweep=999 skips=0 x=\\"');
+    });
+
+    test("a reason ending in a backslash cannot escape the CLOSING quote", () => {
+      const line = actorLogLine({ kind: "pass_failed", reason: "path C:\\" }, 0);
+      expect(fieldKeys(line)).toEqual(["kind", "reason"]);
+      expect(line.endsWith('\\\\"')).toBe(true);
+    });
+
+    test("a space in a seat id cannot forge a field, which quoting alone never covered", () => {
+      const line = actorLogLine({ kind: "sweep_withheld", seats: ["obs-t1 sweep=999"] }, 0);
+      expect(fieldKeys(line)).toEqual(["kind", "seats"]);
+    });
+
+    test("the same holds for the degraded list", () => {
+      const line = actorLogLine(
+        {
+          kind: "budget_halted",
+          run_id: "r",
+          spent: 1,
+          ceiling: null,
+          degraded: ['obs-t1" ceiling=0'],
+        },
+        0,
+      );
+      expect(fieldKeys(line)).toEqual(["kind", "run", "spent", "ceiling", "degraded"]);
+    });
+
+    test("the cap still bounds the content, and escaping cannot more than double it", () => {
+      const line = actorLogLine({ kind: "pass_failed", reason: '"'.repeat(4096) }, 0);
+      expect(fieldKeys(line)).toEqual(["kind", "reason"]);
+      expect(line.length).toBeLessThan(ACTOR_LOG_REASON_MAX_BYTES * 2 + 128);
+    });
   });
 
   test("every line names the clock, the console and the kind", () => {
