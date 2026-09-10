@@ -486,6 +486,29 @@ export const SUBMIT_ENTRY_SCHEMA = "pifleet.submit/v1";
  */
 export const MAX_ENTRIES = 64;
 
+/**
+ * How many files one `submit_report` call may write into `files/`.
+ *
+ * **The demand this number answers is a PAIR, not a directory.** Three of this
+ * fleet's artifact contracts are two files — `observer-ops.{json,md}`,
+ * `ticket-ops.{json,md}`, and a review document beside its envelope — and a
+ * role that has lost `write` has no other route to the second one. `roles/
+ * triage.md` states the rule in the strongest form any of them use: *"Both
+ * files, every time. A run that writes only the `.md` clamps to `failed`."*
+ * Four leaves room for a contract that grows a third half; it does not leave
+ * room for a model to empty its workspace into a tool argument.
+ *
+ * **It is deliberately far below {@link MAX_ENTRIES}, and the two are not the
+ * same kind of cap.** That one bounds REFERENCES — a `blocker`, an `artifact`
+ * path — which cost a line each. This one bounds CONTENT, and every file
+ * counted here is bytes inside the same tool argument as all the others. SRD
+ * §11 Q8 measured `gemma` delivering 3 219 of 8 192 bytes with `isError` false
+ * and the epoch `success`; nothing at this layer can detect having crossed that
+ * floor (see the header), so the only lever here is to keep the number of
+ * things in one call small.
+ */
+export const MAX_REPORT_FILES = 4;
+
 /** `submit_report`'s arguments — `schema`, `task_id`, `epoch` and `worker` are absent and that is the point. */
 export interface SubmitReportParams {
   status: "success" | "partial" | "blocked" | "failed";
@@ -495,7 +518,7 @@ export interface SubmitReportParams {
   artifacts?: { kind: "file" | "diff" | "log" | "note"; path: string }[];
   acceptance?: { criterion: string; met: boolean; evidence?: string }[];
   commands_run?: { cmd: string; exit_code: number; excerpt?: string }[];
-  report?: { filename: string; content: string };
+  report?: { filename: string; content: string }[];
 }
 
 /**
@@ -565,14 +588,23 @@ export const SUBMIT_REPORT_PARAMETERS = {
       },
     },
     report: {
-      type: "object",
-      additionalProperties: false,
-      required: ["filename", "content"],
-      properties: {
-        filename: { type: "string", maxLength: 255 },
-        // No `maxLength`. See the header: §11 Q8's failures all happen before
-        // `execute` runs, so a number here would detect none of them.
-        content: { type: "string" },
+      type: "array",
+      // `minItems` and not "an empty array means no report". A model that sends
+      // `report: []` has decided it has files and then named none of them, and
+      // treating that as absence is the silent reading of a mistake the
+      // validator can name before `execute` runs.
+      minItems: 1,
+      maxItems: MAX_REPORT_FILES,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["filename", "content"],
+        properties: {
+          filename: { type: "string", maxLength: 255 },
+          // No `maxLength`. See the header: §11 Q8's failures all happen before
+          // `execute` runs, so a number here would detect none of them.
+          content: { type: "string" },
+        },
       },
     },
   },
@@ -817,10 +849,10 @@ export function artifactPathProblem(
 export function artifactMissingProblem(
   path: string,
   taskDir: string,
-  pendingReportPath: string | null,
+  pendingReportPaths: readonly string[],
 ): string | null {
   const resolved = isAbsolute(path) ? resolve(path) : resolve(taskDir, path);
-  if (pendingReportPath !== null && resolved === pendingReportPath) return null;
+  if (pendingReportPaths.includes(resolved)) return null;
   if (existsSync(resolved)) return null;
   return (
     `artifact \`${path}\` does not exist. Declare a file only after writing it, ` +
@@ -855,6 +887,12 @@ export function capProblem(params: SubmitReportParams): string | null {
     if (value !== undefined && value.length > MAX_ENTRIES) {
       return `\`${field}\` has ${value.length} entries; cap is ${MAX_ENTRIES}.`;
     }
+  }
+  // Checked HERE rather than beside the arrays above because it is a different
+  // bound in different units — see {@link MAX_REPORT_FILES}. Folding it into
+  // that loop would have made one message quote the wrong number.
+  if (params.report !== undefined && params.report.length > MAX_REPORT_FILES) {
+    return `\`report\` has ${params.report.length} files; cap is ${MAX_REPORT_FILES}.`;
   }
   return null;
 }
@@ -925,11 +963,11 @@ export function composeEnvelope(
   params: SubmitReportParams,
   live: LiveTask,
   worker: string,
-  reportArtifactPath: string | null,
+  reportArtifactPaths: readonly string[],
 ): ResultEnvelope {
   const artifacts = [...(params.artifacts ?? [])];
-  if (reportArtifactPath !== null) {
-    artifacts.push({ kind: "file", path: reportArtifactPath });
+  for (const path of reportArtifactPaths) {
+    artifacts.push({ kind: "file", path });
   }
   const envelope: ResultEnvelope = {
     schema: RESULT_SCHEMA,
@@ -975,8 +1013,8 @@ export interface SubmitOutcome {
   path: string;
   bytes: number;
   status: string;
-  /** The report file's container path, when one was written. */
-  reportPath: string | null;
+  /** Every report file's container path, in the order they were written. */
+  reportPaths: string[];
   /**
    * The live task it was delivered under, carried out rather than re-read.
    *
@@ -994,10 +1032,10 @@ export interface SubmitOutcome {
    * Every path the ENVELOPE's `artifacts[]` claims, verbatim and in its order.
    *
    * The envelope's and not the call's, because the two differ by exactly the
-   * file this tool wrote itself: `composeEnvelope` appends the `report` claim.
-   * That file is the one an operator hunting a half-delivered report is most
-   * likely to be looking for, so dropping it here would empty the field of its
-   * best case.
+   * files this tool wrote itself: `composeEnvelope` appends every `report`
+   * claim. Those are the files an operator hunting a half-delivered report is
+   * most likely to be looking for, so dropping them here would empty the field
+   * of its best case.
    *
    * Verbatim and not by basename. A basename reads well in a log and cannot be
    * resolved back to anything — `files/notes.md` and `/workspace/notes.md` are
@@ -1032,39 +1070,64 @@ export function submitReport(
   const cap = capProblem(params);
   if (cap !== null) refuse(cap);
 
-  if (params.report !== undefined) {
-    const problem = filenameProblem(params.report.filename);
+  const reportFiles = params.report ?? [];
+  const named = new Set<string>();
+  for (const file of reportFiles) {
+    const problem = filenameProblem(file.filename);
     if (problem !== null) refuse(problem);
+    /*
+     * TWO ENTRIES NAMING ONE FILE is the only new way to get this wrong, and it
+     * is worth refusing rather than tolerating.
+     *
+     * Both writes would succeed, the second landing on the first, and the
+     * envelope would CLAIM the name twice — so an operator reads a delivered
+     * report that names two artifacts, finds one file, and has no way to learn
+     * that the other half was overwritten rather than never composed. That is
+     * §11 Q8's worst shape (a green epoch carrying a fraction of its content)
+     * arriving from inside the call instead of off the wire, and unlike Q8's it
+     * is detectable right here.
+     */
+    if (named.has(file.filename)) {
+      refuse(`\`report\` names \`${file.filename}\` twice; each file is written once.`);
+    }
+    named.add(file.filename);
   }
 
-  // The path phase 2 is about to write, resolved now so the loop below can tell
+  // The paths phase 2 is about to write, resolved now so the loop below can tell
   // "you have not written this yet" from "you are never going to".
-  const pendingReportPath =
-    params.report === undefined ? null : resolve(filesDir, params.report.filename);
+  const pendingReportPaths = reportFiles.map((file) => resolve(filesDir, file.filename));
 
   for (const artifact of params.artifacts ?? []) {
     const problem = artifactPathProblem(artifact.path, taskDir, roots.workdir);
     if (problem !== null) refuse(problem);
-    const missing = artifactMissingProblem(artifact.path, taskDir, pendingReportPath);
+    const missing = artifactMissingProblem(artifact.path, taskDir, pendingReportPaths);
     if (missing !== null) refuse(missing);
   }
 
-  // ---- Phase 2: write. The report file first, the envelope second. --------
-  let reportPath: string | null = null;
-  let reportClaim: string | null = null;
-  if (params.report !== undefined) {
+  // ---- Phase 2: write. The report files first, the envelope second. -------
+  const reportPaths: string[] = [];
+  const reportClaims: string[] = [];
+  if (reportFiles.length > 0) {
     mkdirSync(filesDir, { recursive: true });
-    reportPath = join(filesDir, params.report.filename);
-    // The path WRITTEN and the path CLAIMED are deliberately different
-    // spellings of one location: the first is where this process puts the
-    // bytes, the second is what the envelope says about it. See
-    // `composeEnvelope` for why the claim is relative.
-    reportClaim = `${OUTBOX_FILES_DIR}/${params.report.filename}`;
-    writeAtomic(reportPath, params.report.content);
+    for (const file of reportFiles) {
+      const reportPath = join(filesDir, file.filename);
+      // The path WRITTEN and the path CLAIMED are deliberately different
+      // spellings of one location: the first is where this process puts the
+      // bytes, the second is what the envelope says about it. See
+      // `composeEnvelope` for why the claim is relative.
+      reportClaims.push(`${OUTBOX_FILES_DIR}/${file.filename}`);
+      writeAtomic(reportPath, file.content);
+      // APPENDED AFTER the write, so a throw on file 2 of 3 leaves this list
+      // naming the one file that actually landed. The envelope below is never
+      // reached in that case, which is the header's ordering property holding:
+      // a file with no envelope is a report that has not landed, and this list
+      // is what a caller would use to find it.
+      reportPaths.push(reportPath);
+    }
   }
 
   mkdirSync(taskDir, { recursive: true });
-  const envelope = composeEnvelope(params, live, worker, reportClaim);
+  const envelope = composeEnvelope(params, live, worker, reportClaims);
   // Pretty-printed: the harvester does not care and an operator reading a
   // failed task's outbox by hand does. Two spaces is what every other
   // JSON this repository writes for a human uses.
@@ -1075,7 +1138,7 @@ export function submitReport(
     path: envelopePath,
     bytes: Buffer.byteLength(bytes, "utf8"),
     status: params.status,
-    reportPath,
+    reportPaths,
     taskId: live.taskId,
     epoch: live.epoch,
     artifactFiles: (envelope.artifacts ?? []).map((a) => a.path),

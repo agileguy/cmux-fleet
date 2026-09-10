@@ -62,6 +62,7 @@ import register, {
   GET_REPLIES_PARAMETERS,
   getReplies,
   MAX_ENTRIES,
+  MAX_REPORT_FILES,
   NAG_TEXT,
   NO_REPLIES_DECLARED,
   NO_SUBMIT_ENTRY_SCHEMA,
@@ -626,13 +627,13 @@ describe("the schema", () => {
   });
 
   test("report.content carries no length cap — §11 Q8's failures precede execute", () => {
-    expect(SUBMIT_REPORT_PARAMETERS.properties.report.properties.content).toEqual({ type: "string" });
+    expect(SUBMIT_REPORT_PARAMETERS.properties.report.items.properties.content).toEqual({ type: "string" });
   });
 });
 
 describe("composeEnvelope", () => {
   test("the four host fields come from host state and the rest from the call", () => {
-    const env = composeEnvelope(minimal, { taskId: TASK_ID, epoch: EPOCH }, WORKER, null);
+    const env = composeEnvelope(minimal, { taskId: TASK_ID, epoch: EPOCH }, WORKER, []);
     expect(env.schema).toBe(RESULT_SCHEMA);
     expect(env.task_id).toBe(TASK_ID);
     expect(env.epoch).toBe(EPOCH);
@@ -642,7 +643,7 @@ describe("composeEnvelope", () => {
   });
 
   test("absent optional fields are omitted, not defaulted", () => {
-    const env = composeEnvelope(minimal, { taskId: TASK_ID, epoch: EPOCH }, WORKER, null);
+    const env = composeEnvelope(minimal, { taskId: TASK_ID, epoch: EPOCH }, WORKER, []);
     expect(Object.keys(env).sort()).toEqual(
       ["epoch", "schema", "status", "summary", "task_id", "worker"],
     );
@@ -653,7 +654,7 @@ describe("composeEnvelope", () => {
       { ...minimal, artifacts: [{ kind: "diff", path: "files/patch.diff" }] },
       { taskId: TASK_ID, epoch: EPOCH },
       WORKER,
-      "files/review.md",
+      ["files/review.md"],
     );
     expect(env.artifacts).toEqual([
       { kind: "diff", path: "files/patch.diff" },
@@ -689,12 +690,12 @@ describe("submitReport — the delivery", () => {
   test("the report file lands in files/ and declares itself in artifacts", () => {
     const f = fixture();
     const out = submitReport(
-      { ...minimal, report: { filename: "review.md", content: "# a review\n" } },
+      { ...minimal, report: [{ filename: "review.md", content: "# a review\n" }] },
       WORKER,
       f.roots,
     );
-    expect(out.reportPath).toBe(join(f.taskDir, "files", "review.md"));
-    expect(readFileSync(out.reportPath ?? "", "utf8")).toBe("# a review\n");
+    expect(out.reportPaths).toEqual([join(f.taskDir, "files", "review.md")]);
+    expect(readFileSync(out.reportPaths[0] ?? "", "utf8")).toBe("# a review\n");
     const env = JSON.parse(readFileSync(out.path, "utf8")) as { artifacts: unknown };
     // RELATIVE, and this assertion is the reason. An absolute `/outbox/...`
     // claim would be right only inside the image; `artifactClaimToHost`
@@ -756,7 +757,7 @@ describe("submitReport — the delivery", () => {
     writeFileSync(join(blocked, "occupied"), "x");
     expect(() =>
       submitReport(
-        { ...minimal, report: { filename: "review.md", content: "# a review\n" } },
+        { ...minimal, report: [{ filename: "review.md", content: "# a review\n" }] },
         WORKER,
         f.roots,
       ),
@@ -777,7 +778,7 @@ describe("submitReport — the delivery", () => {
 
   test("nothing is left behind — the atomic write's temp does not survive", () => {
     const f = fixture();
-    submitReport({ ...minimal, report: { filename: "review.md", content: "x" } }, WORKER, f.roots);
+    submitReport({ ...minimal, report: [{ filename: "review.md", content: "x" }] }, WORKER, f.roots);
     expect(listAll(f.outbox).filter((p) => p.includes(".tmp"))).toEqual([]);
     expect(listAll(f.outbox).sort()).toEqual(
       [TASK_ID, join(TASK_ID, "files"), join(TASK_ID, "files", "review.md"), join(TASK_ID, "result.json")].sort(),
@@ -832,15 +833,15 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
   });
 
   test("report.filename contains a slash", () => {
-    expectRefusal({ ...minimal, report: { filename: "files/r.md", content: "x" } }, /bare name/);
+    expectRefusal({ ...minimal, report: [{ filename: "files/r.md", content: "x" }] }, /bare name/);
   });
 
   test("report.filename contains ..", () => {
-    expectRefusal({ ...minimal, report: { filename: "../r.md", content: "x" } }, /bare name/);
+    expectRefusal({ ...minimal, report: [{ filename: "../r.md", content: "x" }] }, /bare name/);
   });
 
   test("report.filename starts with @", () => {
-    expectRefusal({ ...minimal, report: { filename: "@r.md", content: "x" } }, /@/);
+    expectRefusal({ ...minimal, report: [{ filename: "@r.md", content: "x" }] }, /@/);
   });
 
   test("an artifact path escapes the task outbox", () => {
@@ -873,7 +874,7 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
       submitReport(
         {
           ...minimal,
-          report: { filename: "review.md", content: "# a review\n" },
+          report: [{ filename: "review.md", content: "# a review\n" }],
           artifacts: [{ kind: "file", path: "/etc/passwd" }],
         },
         WORKER,
@@ -933,7 +934,7 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
     const out = submitReport(
       {
         ...minimal,
-        report: { filename: "review.md", content: "# a review\n" },
+        report: [{ filename: "review.md", content: "# a review\n" }],
         artifacts: [{ kind: "file", path: "files/review.md" }],
       },
       WORKER,
@@ -1231,7 +1232,7 @@ describe("layer 4 — the pifleet.submit/v1 session entry", () => {
     const data = await deliverAndRead(f, {
       ...minimal,
       artifacts: [{ kind: "diff", path: "files/patch.diff" }],
-      report: { filename: "review.md", content: "# a review\n" },
+      report: [{ filename: "review.md", content: "# a review\n" }],
     });
     expect(data["artifact_files"]).toEqual(["files/patch.diff", "files/review.md"]);
     rmSync(f.dir, { recursive: true, force: true });
@@ -1356,7 +1357,7 @@ describe("composeSubmitEntry", () => {
         path: "/outbox/T-x/result.json",
         bytes: 2841,
         status: "partial",
-        reportPath: null,
+        reportPaths: [],
         taskId: TASK_ID,
         epoch: EPOCH,
         artifactFiles: ["files/observer-ops.json", "files/observer-ops.md"],
@@ -1391,7 +1392,7 @@ describe("composeSubmitEntry", () => {
         path: "/outbox/T-x/result.json",
         bytes: 1,
         status: "success",
-        reportPath: null,
+        reportPaths: [],
         taskId: TASK_ID,
         epoch: EPOCH,
         artifactFiles: [],
@@ -3072,5 +3073,150 @@ describe("parseRepliesPolicy and declaredReplyFile", () => {
     // task id lives upstream in `replyFileName`, and a second copy here would
     // agree with it until the day one of the two was relaxed.
     expect(declaredReplyFile(`${REPLIES_ROOT}/a b.json`)).toBe("a b.json");
+  });
+});
+
+/**
+ * SRD-WORKER-DISPATCH-EXTENSION §13 task 7.3 — `report` carries a PAIR.
+ *
+ * ## Why this is a criterion and not a convenience
+ *
+ * Phase B removes `write` from a role, which makes `submit_report` that role's
+ * only route to the filesystem. Three of this fleet's artifact contracts are
+ * two files, and `roles/triage.md` states the strongest form of the rule:
+ * *"Both files, every time. A run that writes only the `.md` clamps to
+ * `failed`."* A single-file `report` and a `terminate: true` result together
+ * made that contract unreachable for a write-less role — the first call ends
+ * the turn, so the second file has no call to arrive on.
+ *
+ * **The old shape was not merely inconvenient, it was undetectably wrong.** The
+ * one test that looked like coverage — *"a second call in the same epoch
+ * overwrites and does not throw"* — calls `submitReport` twice from the test
+ * process, where no `terminate` exists and no model has to choose to emit a
+ * second call. It is a true statement about the function and says nothing about
+ * whether a seat can reach it, which is the distinction this repository has got
+ * wrong before by measuring on a plane the code does not run on.
+ */
+describe("a report is a list of files, because an artifact contract is a pair", () => {
+  test("both halves land in one call, and the envelope claims both in order", () => {
+    const f = fixture();
+    const out = submitReport(
+      {
+        ...minimal,
+        report: [
+          { filename: "observer-ops.json", content: '{"schema":"x"}\n' },
+          { filename: "observer-ops.md", content: "# ops\n" },
+        ],
+      },
+      WORKER,
+      f.roots,
+    );
+    expect(out.reportPaths).toEqual([
+      join(f.taskDir, "files", "observer-ops.json"),
+      join(f.taskDir, "files", "observer-ops.md"),
+    ]);
+    expect(readFileSync(out.reportPaths[0] ?? "", "utf8")).toBe('{"schema":"x"}\n');
+    expect(readFileSync(out.reportPaths[1] ?? "", "utf8")).toBe("# ops\n");
+    const env = JSON.parse(readFileSync(out.path, "utf8")) as { artifacts: unknown };
+    // ORDER IS THE ASSERTION, not just membership. `artifact_files` is what a
+    // host reader uses to find a half-delivered pair, and a set-comparison here
+    // would pass an implementation that wrote the two claims in the order it
+    // happened to iterate a Map.
+    expect(env.artifacts).toEqual([
+      { kind: "file", path: "files/observer-ops.json" },
+      { kind: "file", path: "files/observer-ops.md" },
+    ]);
+    expect(out.artifactFiles).toEqual(["files/observer-ops.json", "files/observer-ops.md"]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("one file still works, and is a one-element list rather than a special case", () => {
+    const f = fixture();
+    const out = submitReport(
+      { ...minimal, report: [{ filename: "review.md", content: "# a review\n" }] },
+      WORKER,
+      f.roots,
+    );
+    expect(out.reportPaths).toEqual([join(f.taskDir, "files", "review.md")]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("an artifact naming the SECOND pending file is accepted, not called missing", () => {
+    // The single-file version compared against one path, so this call would
+    // have been refused for naming a file that "does not exist" while sitting
+    // in the same argument as the content that creates it.
+    const f = fixture();
+    const out = submitReport(
+      {
+        ...minimal,
+        report: [
+          { filename: "observer-ops.json", content: "{}\n" },
+          { filename: "observer-ops.md", content: "# ops\n" },
+        ],
+        artifacts: [{ kind: "file", path: "files/observer-ops.md" }],
+      },
+      WORKER,
+      f.roots,
+    );
+    expect(existsSync(join(f.taskDir, "files", "observer-ops.md"))).toBe(true);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("the same filename twice is refused — the second would overwrite the first", () => {
+    expectRefusal(
+      {
+        ...minimal,
+        report: [
+          { filename: "observer-ops.md", content: "first" },
+          { filename: "observer-ops.md", content: "second" },
+        ],
+      },
+      /names `observer-ops\.md` twice/,
+    );
+  });
+
+  test("a bad filename in the SECOND entry is refused, so the loop reads them all", () => {
+    expectRefusal(
+      {
+        ...minimal,
+        report: [
+          { filename: "observer-ops.json", content: "{}" },
+          { filename: "files/observer-ops.md", content: "x" },
+        ],
+      },
+      /bare name/,
+    );
+  });
+
+  test("more files than the cap is refused, and the message quotes the file cap", () => {
+    const tooMany = Array.from({ length: MAX_REPORT_FILES + 1 }, (_v, i) => ({
+      filename: `r${i}.md`,
+      content: "x",
+    }));
+    expect(capProblem({ ...minimal, report: tooMany })).toBe(
+      `\`report\` has ${MAX_REPORT_FILES + 1} files; cap is ${MAX_REPORT_FILES}.`,
+    );
+    expectRefusal({ ...minimal, report: tooMany }, /cap is 4/);
+  });
+
+  test("the file cap is its own number and is far below the entry cap", () => {
+    // Asserted as a RELATION rather than as two literals, because the reason
+    // they differ is that one bounds references and the other bounds content.
+    // Two literals would go on agreeing with each other after someone raised
+    // MAX_REPORT_FILES to 64 for a reason that has nothing to do with bytes.
+    expect(MAX_REPORT_FILES).toBeLessThan(MAX_ENTRIES);
+    expect(capProblem({ ...minimal, report: [{ filename: "a.md", content: "x" }] })).toBeNull();
+  });
+
+  test("the schema declares an array that cannot be empty and cannot exceed the cap", () => {
+    const report = SUBMIT_REPORT_PARAMETERS.properties.report;
+    expect(report.type).toBe("array");
+    // `minItems: 1` and not "an empty list means no report": a model that sent
+    // `report: []` decided it had files and named none, and reading that as
+    // absence is the silent handling of a mistake the validator can name.
+    expect(report.minItems).toBe(1);
+    expect(report.maxItems).toBe(MAX_REPORT_FILES);
+    expect(report.items.required).toEqual(["filename", "content"]);
+    expect(report.items.additionalProperties).toBe(false);
   });
 });

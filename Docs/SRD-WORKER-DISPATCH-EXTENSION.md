@@ -742,18 +742,32 @@ parameters: Type.Object({
     exit_code: Type.Integer(),
     excerpt:   Type.Optional(Type.String({ maxLength: 20000 })),
   }), { maxItems: 64 })),
-  report: Type.Optional(Type.Object({
+  report: Type.Optional(Type.Array(Type.Object({
     filename: Type.String({ maxLength: 255 }),
     content:  Type.String(),
-  })),
+  }), { minItems: 1, maxItems: 4 })),
 }),
 ```
 
 **What it does.** Reads `/policy/task` for `task_id` and `epoch`; composes a `pifleet.result/v1`
 envelope by adding `schema`, `task_id`, `epoch` and `worker` **from host-written state, never from
 parameters**; writes `/outbox/<task-id>/result.json` atomically; and, when `report` is present,
-writes `/outbox/<task-id>/files/<filename>` first and appends a matching entry to `artifacts` so the
-declare-what-you-wrote rule (`roles/reviewer.md:53-58`) cannot be forgotten. Returns
+writes `/outbox/<task-id>/files/<filename>` for **each of its entries** first and appends a matching
+entry to `artifacts` for each, so the declare-what-you-wrote rule (`roles/reviewer.md:53-58`) cannot
+be forgotten.
+
+**`report` is a LIST and the cap is FOUR, which is not `maxItems: 64` and must not become it.**
+Three of this fleet's artifact contracts are two files, and a role that has lost `write` has no
+other route to the second — §7.1's own example entry already claims
+`["observer-ops.json", "observer-ops.md"]`, which the single-object shape could never have produced.
+The other `maxItems` on this schema bound REFERENCES, which cost a line each; this one bounds
+CONTENT, and every file it admits is bytes inside the same tool argument as all the others. §11 Q8
+measured `gemma` delivering 3 219 of 8 192 bytes with `isError` false and the epoch `success`, and
+nothing inside `execute` can detect having crossed that floor — so the only lever available here is
+to keep the number of things in one call small. **Two entries naming one file are REFUSED**, not
+overwritten: both writes would succeed, the second landing on the first, and the envelope would
+claim the name twice, so an operator would read a report naming two artifacts, find one file, and
+have no way to learn the other half was overwritten rather than never composed. Returns
 `{ content: [{ type: "text", text: "Report delivered: <n> bytes at <path>." }], details: { path, bytes, status }, terminate: true }`
 and calls `pi.appendEntry("pifleet.submit/v1", …)` with **§7.1's eight fields** — the five above
 plus `schema`, `worker` and `artifact_files`.
@@ -1098,7 +1112,7 @@ holds `bash` and `edit` for good reasons.
 | The extension file, one copy, in the image | Which tools are visible — `--tools`, §6.1 |
 | `submit_report`'s schema, refusals and envelope composition | Whether `write` is removed — §6.8, and only where `bash` is absent |
 | `/policy/task` reading and path derivation | Whether `get_replies` is granted — collator and triage only |
-| Layers 2, 3 and 4 | The `report` parameter's conventional filename — `review.md`, `observer-ops.md`, `triage.md` — which is **prose in the role file**, not a schema field, because it is a naming convention rather than a contract |
+| Layers 2, 3 and 4 | The `report` parameter's conventional filenames — `review.md`, `observer-ops.{json,md}`, `triage.json` — which are **prose in the role file**, not schema fields, because they are a naming convention rather than a contract |
 
 **One thing is deliberately NOT per-role: the envelope schema.** `pifleet.result/v1` is one contract
 (`src/contracts.ts:219-235`) and every role writes it. A per-role envelope would be four schemas
@@ -1987,6 +2001,26 @@ where `get_replies` first meets a model.
   *Acceptance: **three consecutive sweeps**, because this console runs unattended and one is not
   evidence — plus a probe asserting the size bound, because what the census establishes is an
   OBSERVED maximum and the clearance above is only sound if something keeps it true.*
+
+  **BLOCKED 2026-09-10 on a contract this document did not notice it had broken, and UNBLOCKED the
+  same day.** This role owes an artifact PAIR — `roles/triage.md`: *"Both files, every time. A run
+  that writes only the `.md` clamps to `failed`."* `submit_report`'s `report` parameter carried ONE
+  file and its result sets `terminate: true`, so a write-less seat had no second call to deliver the
+  second file on. §7.1's own example entry has claimed
+  `["observer-ops.json", "observer-ops.md"]` since this document was written; the schema underneath
+  it could not produce that.
+
+  **The test that looked like coverage was not.** `report-tools.test.ts`'s *"a second call in the
+  same epoch overwrites and does not throw"* calls `submitReport` twice from the test process, where
+  no `terminate` exists and no model has to choose to emit a second call. It is a true statement
+  about the function and says nothing about whether a seat can reach it — the same plane error §11
+  records elsewhere in this document.
+
+  **`report` is now a list** (§6.2, capped at 4, repeated filenames refused). The probe half of this
+  task was already done: `triage-document.ts`'s whole-document 4 096-byte cap,
+  `MAX_SERVICES_PER_ENVIRONMENT = 8` and `TRIAGE_NOTE_MAX_BYTES = 1 024` landed with it. What
+  remains is the grant itself, the role's own grant sentence in the SAME commit (7.1's measured
+  lesson), an image rebuild — the extension is baked `COPY --chmod=0444` — and the three sweeps.
 - **7.4** The resolved-tools criterion for all three. Touches: `test/unit/config.test.ts`, `ISA.md`.
 - **7.5** `observer`: remove `write`, keep `bash`. **BLOCKED, and not on the size limit** —
   §11's census found exactly ONE harvested `observer` envelope, which is an anecdote rather than a
