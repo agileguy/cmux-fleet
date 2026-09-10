@@ -730,7 +730,7 @@ roles:
     #
     # TRIAGE_DOCUMENT_MAX_BYTES survives all of this: it bounds the collation
     # document and never depended on which tool wrote it.
-    tools: [read, write, grep, find, ls, submit_report]
+    tools: [read, grep, find, ls, submit_report, dispatch_request]
     # `pifleet-worker` alone. There is deliberately NO `triage` bundle: a name
     # with no directory under skills/ is a refusal at `up`, not a silently
     # shorter bundle, and inventing one to make this line look complete is the

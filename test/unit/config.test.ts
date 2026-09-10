@@ -2617,13 +2617,23 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
    * marked CLEARED whose acceptance cannot be met, and this is where they learn
    * why without re-running it.
    */
-  const HOLDS_A_WRITER: Readonly<Record<string, readonly ToolName[]>> = {
-    // Reverted 2026-09-09. Narrowed, `tri-1` composed a correct fan-out and got
-    // `Tool write not found` three times; sweeps 5 and 6 settled `success`
-    // having dispatched nothing at all. Restoring the invariant needs a
-    // `dispatch_request` tool, not a config edit.
-    triage: ["write"],
-  };
+  /**
+   * EMPTY, as of 2026-09-10 — and empty is the state this table is FOR.
+   *
+   * It held one entry, `triage: ["write"]`, from the reversal on 2026-09-09:
+   * narrowed, `tri-1` composed a correct fan-out and got `Tool write not found`
+   * three times, and sweeps 5 and 6 settled `success` having dispatched nothing
+   * at all. That entry's own note said what would retire it — *"restoring the
+   * invariant needs a `dispatch_request` tool, not a config edit"* — and that
+   * tool now exists, so the entry is gone rather than amended.
+   *
+   * **An empty map does not make the tests below vacuous, and the assertion that
+   * it is empty is what says so.** The per-entry loop is then a loop over
+   * nothing, which is correct: every bash-less role is now covered by the
+   * STRONGER criterion above it. If an exemption ever returns, it returns with
+   * a comment naming the measurement that forced it, the way this one did.
+   */
+  const HOLDS_A_WRITER: Readonly<Record<string, readonly ToolName[]>> = {};
 
   async function example(): Promise<LoadedConfig> {
     return await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
@@ -2685,8 +2695,10 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
   test("a narrowed bash-less role holds no writer, and holds submit_report instead", async () => {
     const { config } = await example();
     const narrowed = bashLessRoles(config).filter((r) => !(r in HOLDS_A_WRITER));
-    // By NAME, or every loop below is free.
-    expect(narrowed).toEqual(["reviewer"]);
+    // By NAME, or every loop below is free. `triage` joined `reviewer` on
+    // 2026-09-10 (task 7.3) once `dispatch_request` gave it a route to the one
+    // file `submit_report` cannot reach — see HOLDS_A_WRITER, now empty.
+    expect(narrowed).toEqual(["reviewer", "triage"]);
 
     for (const r of narrowed) {
       const grant = roleGrant(config, r);
@@ -2705,8 +2717,11 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
 
   test("a bash-less role that holds a writer holds EXACTLY the ones exempted", async () => {
     const { config } = await example();
-    // The map is not empty, or this test is a no-op that reads like a guard.
-    expect(Object.keys(HOLDS_A_WRITER)).toEqual(["triage"]);
+    // ASSERTED BY VALUE, so the map's contents are a fact this suite states
+    // rather than a shape it tolerates. Empty means task 7.4 is closed for every
+    // bash-less role; a name appearing here again is a narrowing that was tried
+    // and reverted, and it must arrive with the measurement that reverted it.
+    expect(Object.keys(HOLDS_A_WRITER)).toEqual([]);
 
     for (const [r, writers] of Object.entries(HOLDS_A_WRITER)) {
       // An exemption for a role holding a shell would be excusing a rule that

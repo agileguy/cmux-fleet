@@ -46,7 +46,24 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
+
+/*
+ * The HOST side of every mirrored constant, imported under a `HOST_` prefix so
+ * the two names cannot be confused at a call site. `report-tools.ts` cannot
+ * import these — it is COPYied into the image and runs there — which is exactly
+ * why the comparison belongs in a test that can import both.
+ */
+import { SESSION_ID_RE } from "../../src/contracts.ts";
+import {
+  DISPATCH_REQUEST_FILE as HOST_DISPATCH_REQUEST_FILE,
+  DISPATCH_REQUEST_SCHEMA as HOST_DISPATCH_REQUEST_SCHEMA,
+  DispatchRequestSchema,
+  MAX_DISPATCH_ID_CHARS as HOST_MAX_DISPATCH_ID_CHARS,
+  MAX_DISPATCH_REQUEST_ITEMS as HOST_MAX_DISPATCH_REQUEST_ITEMS,
+  MAX_DISPATCH_SERVICES as HOST_MAX_DISPATCH_SERVICES,
+  MAX_DISPATCH_TEXT as HOST_MAX_DISPATCH_TEXT,
+} from "../../src/run/dispatch-request.ts";
 
 import register, {
   artifactPathProblem,
@@ -61,6 +78,15 @@ import register, {
   filenameProblem,
   GET_REPLIES_PARAMETERS,
   getReplies,
+  DISPATCH_ID_RE,
+  DISPATCH_REQUEST_NAME,
+  DISPATCH_REQUEST_PARAMETERS,
+  DISPATCH_REQUEST_SCHEMA,
+  dispatchRequest,
+  MAX_DISPATCH_ID_CHARS,
+  MAX_DISPATCH_REQUEST_ITEMS,
+  MAX_DISPATCH_SERVICES,
+  MAX_DISPATCH_TEXT,
   MAX_ENTRIES,
   MAX_REPORT_FILES,
   NAG_TEXT,
@@ -961,14 +987,47 @@ describe("registration", () => {
    * The names are asserted as a sorted set rather than in registration order,
    * for `byName`'s reason: the order is not a property this file means to fix.
    */
-  test("exactly submit_report and get_replies are registered", () => {
+  test("exactly submit_report, dispatch_request and get_replies are registered", () => {
     const { pi, tools } = stubPi();
     register(pi);
-    expect(tools.map((t) => t.name).sort()).toEqual(["get_replies", "submit_report"]);
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      "dispatch_request",
+      "get_replies",
+      "submit_report",
+    ]);
     expect(tools.find((t) => t.name === "submit_report")?.parameters).toBe(
       SUBMIT_REPORT_PARAMETERS,
     );
+    expect(tools.find((t) => t.name === "dispatch_request")?.parameters).toBe(
+      DISPATCH_REQUEST_PARAMETERS,
+    );
     expect(tools.find((t) => t.name === "get_replies")?.parameters).toBe(GET_REPLIES_PARAMETERS);
+  });
+
+  /**
+   * `dispatch_request` must NOT end the turn, and this is the assertion for it.
+   *
+   * `roles/triage.md` turn one is *"two writes, a reply, and silence"* — the
+   * fan-out and then the envelope. Layer 2 makes delivering the cheapest way to
+   * end a turn; ending it on the fan-out would settle the parent task with a
+   * request written and no envelope, and D5 settles the parent the moment that
+   * file appears. The absence is asserted rather than assumed, exactly as
+   * `get_replies`' is.
+   */
+  test("dispatch_request does not terminate the turn; submit_report does", async () => {
+    const f = fixture();
+    const { pi, tools } = stubPi();
+    register(pi, f.mounts);
+    const fanout = tools.find((t) => t.name === "dispatch_request");
+    const out = (await fanout?.execute?.(
+      "call-1",
+      { requests: [REQUEST] },
+      undefined,
+      undefined,
+      { cwd: f.roots.workdir ?? "", sessionManager: { getSessionId: () => WORKER } },
+    )) as { terminate?: boolean };
+    expect(out.terminate).toBeUndefined();
+    rmSync(f.dir, { recursive: true, force: true });
   });
 
   test("the default mounts are the real ones, so the image needs no caller to pass them", () => {
@@ -3218,5 +3277,158 @@ describe("a report is a list of files, because an artifact contract is a pair", 
     expect(report.maxItems).toBe(MAX_REPORT_FILES);
     expect(report.items.required).toEqual(["filename", "content"]);
     expect(report.items.additionalProperties).toBe(false);
+  });
+});
+
+/**
+ * SRD-WORKER-DISPATCH-EXTENSION task 7.3 — the write-free fan-out.
+ *
+ * ## The measurement this tool exists for
+ *
+ * `fleet.yaml`'s `triage` block records 7.3's first attempt and its reversal on
+ * 2026-09-09. Narrowed to no `write`, `tri-1` *"composed the fan-out correctly
+ * and was refused three times — `Tool write not found` — and the console
+ * dispatched nothing for three sweeps."* The outage was the lesser half:
+ * *"sweeps 5 and 6 settled `status: success` with the summary 'Dispatched sweep
+ * to obs-t1', having written no request at all."*
+ *
+ * ## Why `submit_report` could not have covered it
+ *
+ * Its `report` files land in `<task-dir>/files/`; the fan-out is read from
+ * `<task-dir>` itself. One directory level is the whole gap, and it is not
+ * closable by widening `report` — an entry that could name a parent directory
+ * would be a path where the contract says a bare name, which is the containment
+ * `filenameProblem` exists for.
+ */
+const REQUEST = { worker: "obs-t1", title: "Sweep slice 1", brief: "Look at ntfy." };
+
+describe("dispatch_request writes the fan-out a narrowed role cannot", () => {
+  test("the document is the host's shape, with schema and parent_task_id composed here", () => {
+    const f = fixture();
+    const out = dispatchRequest({ requests: [REQUEST] }, f.mounts);
+    expect(out.path).toBe(join(f.taskDir, DISPATCH_REQUEST_NAME));
+    // AT THE TASK ROOT, not under files/ — the one fact that made this a tool
+    // rather than another `report` entry.
+    expect(out.path).not.toContain(`${sep}files${sep}`);
+    const doc = JSON.parse(readFileSync(out.path, "utf8")) as Record<string, unknown>;
+    expect(doc["schema"]).toBe(DISPATCH_REQUEST_SCHEMA);
+    expect(doc["parent_task_id"]).toBe(TASK_ID);
+    expect(doc["requests"]).toEqual([REQUEST]);
+    expect(out.workers).toEqual(["obs-t1"]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("schema and parent_task_id are not parameters, so a model cannot set them", () => {
+    const props = Object.keys(DISPATCH_REQUEST_PARAMETERS.properties);
+    expect(props).toEqual(["requests"]);
+    expect(DISPATCH_REQUEST_PARAMETERS.additionalProperties).toBe(false);
+    expect(DISPATCH_REQUEST_PARAMETERS.properties.requests.items.additionalProperties).toBe(false);
+  });
+
+  test("an absent services list is OMITTED, not written as null", () => {
+    // The host schema is `.strict()` and an EMPTY list is a legal share — "an
+    // idle observer is not an error" — so absent and empty must stay
+    // distinguishable in the bytes.
+    const f = fixture();
+    const out = dispatchRequest(
+      { requests: [REQUEST, { ...REQUEST, worker: "obs-t2", services: [] }] },
+      f.mounts,
+    );
+    const raw = readFileSync(out.path, "utf8");
+    const doc = JSON.parse(raw) as { requests: Record<string, unknown>[] };
+    expect("services" in (doc.requests[0] ?? {})).toBe(false);
+    expect(doc.requests[1]?.["services"]).toEqual([]);
+    expect(raw).not.toContain("null");
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("an empty requests list is refused — a sweep that dispatched nobody", () => {
+    const f = fixture();
+    expect(() => dispatchRequest({ requests: [] }, f.mounts)).toThrow(/dispatched nobody/);
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("one worker named twice is refused, so the host refuses the entry not the sweep", () => {
+    const f = fixture();
+    expect(() =>
+      dispatchRequest({ requests: [REQUEST, { ...REQUEST, title: "again" }] }, f.mounts),
+    ).toThrow(/names `obs-t1` twice/);
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("a worker id that is a traversal is refused before anything is written", () => {
+    const f = fixture();
+    for (const worker of ["../../control-auth", "obs t1", "", "obs/t1", ".hidden"]) {
+      expect(() => dispatchRequest({ requests: [{ ...REQUEST, worker }] }, f.mounts)).toThrow(
+        /is not a worker id/,
+      );
+    }
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("a service name that is a traversal is refused before anything is written", () => {
+    const f = fixture();
+    expect(() =>
+      dispatchRequest({ requests: [{ ...REQUEST, services: ["../../secrets"] }] }, f.mounts),
+    ).toThrow(/is not a service\s+name/);
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("over-cap requests and services are refused, each naming its own bound", () => {
+    const f = fixture();
+    const tooMany = Array.from({ length: MAX_DISPATCH_REQUEST_ITEMS + 1 }, (_v, i) => ({
+      ...REQUEST,
+      worker: `obs-t${i}`,
+    }));
+    expect(() => dispatchRequest({ requests: tooMany }, f.mounts)).toThrow(
+      new RegExp(`cap is ${MAX_DISPATCH_REQUEST_ITEMS}`),
+    );
+    const wideShare = Array.from({ length: MAX_DISPATCH_SERVICES + 1 }, (_v, i) => `svc${i}`);
+    expect(() =>
+      dispatchRequest({ requests: [{ ...REQUEST, services: wideShare }] }, f.mounts),
+    ).toThrow(new RegExp(`cap is ${MAX_DISPATCH_SERVICES}`));
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The mirror assertions. This file is COPYied into the image and cannot import
+   * from `src/`, so every bound above is a re-spelling — and a re-spelling that
+   * nothing pins is a copy that drifts. Pinned HERE rather than trusted, because
+   * a bound that moves on the host without moving here produces a request the
+   * host then refuses, which is the exact failure this tool removes arriving one
+   * layer further in.
+   */
+  test("every mirrored constant equals the host module that reads the document", () => {
+    expect(DISPATCH_REQUEST_SCHEMA).toBe(HOST_DISPATCH_REQUEST_SCHEMA);
+    expect(DISPATCH_REQUEST_NAME).toBe(HOST_DISPATCH_REQUEST_FILE);
+    expect(MAX_DISPATCH_REQUEST_ITEMS).toBe(HOST_MAX_DISPATCH_REQUEST_ITEMS);
+    expect(MAX_DISPATCH_TEXT).toBe(HOST_MAX_DISPATCH_TEXT);
+    expect(MAX_DISPATCH_ID_CHARS).toBe(HOST_MAX_DISPATCH_ID_CHARS);
+    expect(MAX_DISPATCH_SERVICES).toBe(HOST_MAX_DISPATCH_SERVICES);
+    expect(DISPATCH_ID_RE.source).toBe(SESSION_ID_RE.source);
+  });
+
+  /**
+   * The document this tool writes is PARSED by the host's own parser, not merely
+   * shaped like it. A schema mirror that agrees on every constant and disagrees
+   * on a field name would pass every assertion above.
+   */
+  test("the host's own parser accepts what this tool writes", () => {
+    const f = fixture();
+    const out = dispatchRequest(
+      { requests: [REQUEST, { ...REQUEST, worker: "obs-t2", services: ["ntfy"] }] },
+      f.mounts,
+    );
+    const parsed = DispatchRequestSchema.safeParse(
+      JSON.parse(readFileSync(out.path, "utf8")) as unknown,
+    );
+    expect(parsed.error?.issues ?? []).toEqual([]);
+    expect(parsed.success).toBe(true);
+    rmSync(f.dir, { recursive: true, force: true });
   });
 });

@@ -337,6 +337,81 @@ describe("the prose audit exempts names the HOST declared, and only those", () =
     expect(envelopeIssues(text, doc, declared, declaredNamespaces)).toEqual([]);
   });
 
+  /**
+   * The same exemption on `coverage[].channel`, measured 2026-09-10 as
+   * `T-sweep-79`'s lost render.
+   *
+   * The previous sweep's collation carried `channel: "monitoring"` — a declared
+   * NAMESPACE where a channel name belongs — and the brief was refused
+   * `worker_prose [monitoring]`, because the host puts every declared namespace
+   * in every brief. The audit was matching the host's own vocabulary against
+   * itself. This is [[ISC-1142]]'s shape on the field [[ISC-1142]] did not
+   * widen, which its own entry warned about.
+   */
+  test("a declared NAMESPACE used as a coverage channel does not trip the audit", () => {
+    const ns = "aodapn-authz";
+    expect(declaredNamespaces).toContain(ns);
+    expect(ns.length).toBeGreaterThanOrEqual(MIN_PROSE_LENGTH);
+
+    const doc = {
+      ...PREVIOUS,
+      services: [
+        {
+          ...PREVIOUS.services[1]!,
+          selector: null,
+          note: null,
+          evidence_ref: [],
+          coverage: [{ channel: ns, result: "answered" }],
+        },
+      ],
+      unaccounted: [],
+    } as unknown as TriageDocument;
+    const text = `Check the services in namespace \`${ns}\`.`;
+    expect(envelopeIssues(text, doc, declared, declaredNamespaces)).toEqual([]);
+  });
+
+  test("a declared service NAME used as a coverage channel does not trip it either", () => {
+    const name = "authorization";
+    expect(declared).toContain(name);
+    const doc = {
+      ...PREVIOUS,
+      services: [
+        {
+          ...PREVIOUS.services[1]!,
+          selector: null,
+          note: null,
+          evidence_ref: [],
+          coverage: [{ channel: name, result: "answered" }],
+        },
+      ],
+      unaccounted: [],
+    } as unknown as TriageDocument;
+    expect(envelopeIssues(`Check \`${name}\`.`, doc, declared, declaredNamespaces)).toEqual([]);
+  });
+
+  /**
+   * The anti-criterion, and it is what stops the exemption from being a hole.
+   * MEMBERSHIP, never containment — a channel the collator COMPOSED out of a
+   * declared token is still the collator's own string.
+   */
+  test("a channel that merely CONTAINS a declared token is still caught", () => {
+    const doc = {
+      ...PREVIOUS,
+      services: [
+        {
+          ...PREVIOUS.services[1]!,
+          selector: null,
+          note: null,
+          evidence_ref: [],
+          coverage: [{ channel: "app=aodapn-authz", result: "answered" }],
+        },
+      ],
+      unaccounted: [],
+    } as unknown as TriageDocument;
+    const issues = envelopeIssues("Check app=aodapn-authz.", doc, declared, declaredNamespaces);
+    expect(issues.map((i) => i.forbidden)).toContain("worker_prose");
+  });
+
   test("a declared NAMESPACE used as a selector does not trip it either", () => {
     const ns = "aodapn-authz";
     expect(declaredNamespaces).toContain(ns);

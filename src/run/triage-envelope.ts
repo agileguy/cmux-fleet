@@ -797,7 +797,35 @@ function workerAuthoredStrings(
     // because it looks like coverage.
     keep(row.note ?? null);
     for (const ref of row.evidence_ref) keep(ref);
-    for (const entry of row.coverage) keep(entry.channel);
+    /*
+     * `channel` TAKES THE HOST-TOKEN EXEMPTION, for [[ISC-1142]]'s reason and
+     * because [[ISC-1142]]'s own entry predicted this: *"a fix written as a note
+     * about one field does not generalise itself to the next."* It was written
+     * about `selector` and this is the next.
+     *
+     * **Measured 2026-09-10, `T-sweep-79`.** The previous sweep's collation
+     * carried `coverage[].channel: "monitoring"` — a declared NAMESPACE where a
+     * channel name belongs — and the render was refused
+     * `worker_prose [monitoring]`. That string is in the brief because the HOST
+     * puts every declared namespace in every brief, so the audit was matching
+     * the host's own vocabulary against itself and the console lost a sweep to
+     * it, exactly as `cni-dev` lost three.
+     *
+     * **A channel carrying a namespace is still WRONG, and this is not the
+     * check that says so.** This audit's question is whether a previous
+     * worker's prose crossed into the next brief; a value that IS a declared
+     * token is a value the host handed the worker, and cannot be that. The
+     * content question — that `channel` should name a channel — belongs to the
+     * document schema, which today bounds it as a short string and nothing
+     * more. Answering it here would make one refusal mean two things.
+     *
+     * Membership, never containment: `app=monitoring` is a string the collator
+     * composed and stays caught.
+     */
+    for (const entry of row.coverage) {
+      if (hostTokens.has(entry.channel)) continue;
+      keep(entry.channel);
+    }
   }
   for (const name of document.unaccounted) {
     if (hostNames.has(name)) continue;

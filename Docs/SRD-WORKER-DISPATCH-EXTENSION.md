@@ -2018,10 +2018,41 @@ where `get_replies` first meets a model.
 
   **`report` is now a list** (§6.2, capped at 4, repeated filenames refused). The probe half of this
   task was already done: `triage-document.ts`'s whole-document 4 096-byte cap,
-  `MAX_SERVICES_PER_ENVIRONMENT = 8` and `TRIAGE_NOTE_MAX_BYTES = 1 024` landed with it. What
-  remains is the grant itself, the role's own grant sentence in the SAME commit (7.1's measured
-  lesson), an image rebuild — the extension is baked `COPY --chmod=0444` — and the three sweeps.
+  `MAX_SERVICES_PER_ENVIRONMENT = 8` and `TRIAGE_NOTE_MAX_BYTES = 1 024` landed with it.
+
+  **AND THAT WAS STILL NOT ENOUGH, which the first attempt had already proved and this document
+  had not recorded.** `fleet.yaml`'s `triage` block carried the finding: narrowed on 2026-09-09,
+  `tri-1` *"composed the fan-out correctly and was refused three times — `Tool write not found` —
+  and the console dispatched nothing for three sweeps"*, and *"sweeps 5 and 6 settled
+  `status: success` with the summary 'Dispatched sweep to obs-t1', having written no request at
+  all."* The pair was the smaller of two gaps. The FAN-OUT is the larger one:
+  `dispatchRequestPath` reads `<outbox>/<worker>/<task-id>/dispatch-request.json` — the TASK ROOT
+  — and `report` writes into `<task-dir>/files/`. **One directory level, and it is not closable by
+  widening `report`**: an entry that could name a parent directory would be a path where
+  `filenameProblem` requires a bare name, which is the containment that stops a worker writing
+  outside its own outbox.
+
+  **`dispatch_request` is what that note asked for** — *"until a `dispatch_request` tool exists to
+  carry it the way `submit_report` carries the envelope"*. It writes that one file, composes
+  `schema` and `parent_task_id` from `/policy/task`, and sets NO `terminate`: turn one is the
+  fan-out and then the envelope, and ending the turn on the fan-out would settle the parent with a
+  request written and no envelope. `PI_EXTENSION_TOOLS` gains it, so the registered set and the
+  requestable vocabulary stay equal (§12's set-equality criterion).
+
+  **DONE 2026-09-10.** `write` withdrawn in both configs, `roles/triage.md` moved in the same
+  commit, all three images rebuilt, `tri-1` restarted onto
+  `0.79.6-base-1b6c4a15d1ac` and verified running `--tools read,grep,find,ls,submit_report,
+  dispatch_request`. Three consecutive sweeps are the remaining acceptance and are being taken.
+
+  **One self-inflicted cost worth recording**: the sweep at 14:00:40 failed
+  `roles.triage.tools.5: Invalid option` because the live config gained `dispatch_request` while an
+  actor built from pre-change source was still running. Editing `fleet.yaml` and restarting the
+  actor are one operation, not two.
 - **7.4** The resolved-tools criterion for all three. Touches: `test/unit/config.test.ts`, `ISA.md`.
+  **DONE 2026-09-10 for `reviewer` and `triage`.** `HOLDS_A_WRITER` is now EMPTY and the suite
+  asserts that it is — the exemption table held `triage: ["write"]` from the 2026-09-09 reversal,
+  and that entry's own note named what would retire it. `collator` is not in
+  `fleet.example.yaml` (see 7.2), so it has no resolved grant this criterion can read.
 - **7.5** `observer`: remove `write`, keep `bash`. **BLOCKED, and not on the size limit** —
   §11's census found exactly ONE harvested `observer` envelope, which is an anecdote rather than a
   distribution, and this is the one role whose output is bounded by whatever log excerpt the question

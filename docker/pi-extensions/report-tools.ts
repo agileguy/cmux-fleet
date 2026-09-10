@@ -509,6 +509,40 @@ export const MAX_ENTRIES = 64;
  */
 export const MAX_REPORT_FILES = 4;
 
+/*
+ * ── `dispatch_request`'s mirrored constants ────────────────────────────────
+ *
+ * Every one of these is a re-spelling of a value in `src/run/dispatch-request.ts`,
+ * for the reason the mount paths above are re-spelled: this file is COPYied into
+ * the image and executed by Pi, and it cannot import from `src/`. The unit suite
+ * pins each to the module that reads the document, so a bound that moves on the
+ * host reddens here instead of producing a request the host then refuses — which
+ * is the failure this tool exists to remove, arriving one layer further in.
+ */
+
+/** Mirrors `DISPATCH_REQUEST_SCHEMA` (`src/run/dispatch-request.ts`). */
+export const DISPATCH_REQUEST_SCHEMA = "pifleet.dispatchrequest/v1";
+/** Mirrors `DISPATCH_REQUEST_FILE`. Written at the TASK ROOT, not under `files/`. */
+export const DISPATCH_REQUEST_NAME = "dispatch-request.json";
+/** Mirrors `MAX_DISPATCH_REQUEST_ITEMS`. */
+export const MAX_DISPATCH_REQUEST_ITEMS = 8;
+/** Mirrors `MAX_DISPATCH_TEXT`. */
+export const MAX_DISPATCH_TEXT = 32 * 1024;
+/** Mirrors `MAX_DISPATCH_ID_CHARS`. */
+export const MAX_DISPATCH_ID_CHARS = 64;
+/** Mirrors `MAX_DISPATCH_SERVICES`. */
+export const MAX_DISPATCH_SERVICES = 8;
+/**
+ * Mirrors `SESSION_ID_RE` (`src/contracts.ts`).
+ *
+ * A worker id and a service name both become host path segments — the first a
+ * directory under a run's outbox, the second an incident record under
+ * `~/.pifleet/triage/` — and both are written by a container. `isBareName`
+ * above is not enough for them: it refuses a traversal, this refuses everything
+ * that is not a name.
+ */
+export const DISPATCH_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
 /** `submit_report`'s arguments — `schema`, `task_id`, `epoch` and `worker` are absent and that is the point. */
 export interface SubmitReportParams {
   status: "success" | "partial" | "blocked" | "failed";
@@ -1798,6 +1832,202 @@ export const GET_REPLIES_PARAMETERS = {
 } as const;
 
 /**
+ * `dispatch_request`'s arguments — `schema` and `parent_task_id` are absent for
+ * `submit_report`'s reason, one document over.
+ */
+export interface DispatchRequestParams {
+  requests: { worker: string; title: string; brief: string; services?: string[] }[];
+}
+
+/** What a written fan-out was. */
+export interface DispatchRequestOutcome {
+  path: string;
+  bytes: number;
+  /** The workers the document asks for, in its order. */
+  workers: string[];
+  taskId: string;
+  epoch: number;
+}
+
+/**
+ * The parameter schema.
+ *
+ * **`schema` and `parent_task_id` are not parameters**, exactly as
+ * `submit_report` omits its four. `parent_task_id` is the one that matters: the
+ * host checks it against the DIRECTORY the file was found in and refuses a
+ * mismatch, so a model that could supply it could only ever get it right or be
+ * refused — a field with one correct value is a way to fail, not a choice. It
+ * is read from `/policy/task` here for the same reason the envelope's is.
+ */
+export const DISPATCH_REQUEST_PARAMETERS = {
+  type: "object",
+  additionalProperties: false,
+  required: ["requests"],
+  properties: {
+    requests: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_DISPATCH_REQUEST_ITEMS,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["worker", "title", "brief"],
+        properties: {
+          worker: { type: "string", maxLength: MAX_DISPATCH_ID_CHARS },
+          title: { type: "string", maxLength: MAX_DISPATCH_TEXT },
+          brief: { type: "string", maxLength: MAX_DISPATCH_TEXT },
+          services: {
+            type: "array",
+            maxItems: MAX_DISPATCH_SERVICES,
+            items: { type: "string", maxLength: MAX_DISPATCH_ID_CHARS },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+/**
+ * Write `/outbox/<task-id>/dispatch-request.json`.
+ *
+ * ## Why this tool exists at all, in one measurement
+ *
+ * `fleet.yaml`'s `triage` block records SRD task 7.3's first attempt and its
+ * reversal on 2026-09-09: narrowed to no `write`, `tri-1` *"composed the fan-out
+ * correctly and was refused three times — `Tool write not found` — and the
+ * console dispatched nothing for three sweeps."* And the outage was the lesser
+ * half: *"sweeps 5 and 6 settled `status: success` with the summary 'Dispatched
+ * sweep to obs-t1', having written no request at all."*
+ *
+ * `submit_report` could not cover it and still cannot: its `report` files land
+ * in `<task-dir>/files/`, and the fan-out is read from `<task-dir>` itself
+ * (`dispatchRequestPath`). One directory level is the whole of the gap, and it
+ * is not closable by widening `report` — a `report` entry that could write a
+ * parent directory would be a path where the contract says a bare name.
+ *
+ * ## The order is the same testable property `submit_report` has
+ *
+ * Validate everything, then write. Nothing below the phase marker can refuse,
+ * so a refusal never leaves a partial document for the host to read — and this
+ * document is read by a host that DISPATCHES on it.
+ */
+export function dispatchRequest(
+  params: DispatchRequestParams,
+  roots: MountRoots = DEFAULT_MOUNTS,
+): DispatchRequestOutcome {
+  // ---- Phase 1: refuse. Nothing below this comment writes anything. --------
+  const live = readTaskPolicy(roots.policyPath);
+  const { taskDir } = taskPaths(roots.outboxRoot, live.taskId);
+  const items = params.requests ?? [];
+
+  if (items.length === 0) {
+    refuse(
+      "`requests` is empty. This file is written only to ask for a fan-out, and the parent task " +
+        "settles the moment it is written — so an empty request is a sweep that reports success " +
+        "having dispatched nobody.",
+    );
+  }
+  if (items.length > MAX_DISPATCH_REQUEST_ITEMS) {
+    refuse(`\`requests\` has ${items.length} entries; cap is ${MAX_DISPATCH_REQUEST_ITEMS}.`);
+  }
+
+  const named = new Set<string>();
+  for (const item of items) {
+    if (!DISPATCH_ID_RE.test(item.worker) || item.worker.length > MAX_DISPATCH_ID_CHARS) {
+      refuse(
+        `\`worker\` \`${item.worker}\` is not a worker id. It must be letters, digits, ".", "_" ` +
+          `or "-", beginning and ending alphanumeric, and at most ${MAX_DISPATCH_ID_CHARS} ` +
+          `characters — it becomes a directory under the run's outbox on the host.`,
+      );
+    }
+    // EACH ENTRY NAMES A DISTINCT WORKER. The host refuses a duplicate too, but
+    // it refuses the whole document — so a fan-out that named one observer
+    // twice would cost the sweep rather than the entry, and the model would be
+    // told about a file it cannot see rather than about the argument it passed.
+    if (named.has(item.worker)) {
+      refuse(`\`requests\` names \`${item.worker}\` twice; each entry must name a distinct worker.`);
+    }
+    named.add(item.worker);
+    if (item.title.length > MAX_DISPATCH_TEXT) {
+      refuse(`\`title\` for \`${item.worker}\` is longer than ${MAX_DISPATCH_TEXT} characters.`);
+    }
+    if (item.brief.length > MAX_DISPATCH_TEXT) {
+      refuse(`\`brief\` for \`${item.worker}\` is longer than ${MAX_DISPATCH_TEXT} characters.`);
+    }
+    const services = item.services ?? [];
+    if (services.length > MAX_DISPATCH_SERVICES) {
+      refuse(
+        `\`services\` for \`${item.worker}\` holds ${services.length} entries; cap is ` +
+          `${MAX_DISPATCH_SERVICES}, which is more services than one environment may declare.`,
+      );
+    }
+    for (const service of services) {
+      if (!DISPATCH_ID_RE.test(service) || service.length > MAX_DISPATCH_ID_CHARS) {
+        refuse(
+          `\`services\` for \`${item.worker}\` holds \`${service}\`, which is not a service ` +
+            `name. It keys an incident record under ~/.pifleet/triage/ on the host, so it is ` +
+            `bounded like the path segment it becomes rather than like free text.`,
+        );
+      }
+    }
+  }
+
+  // ---- Phase 2: write. -----------------------------------------------------
+  mkdirSync(taskDir, { recursive: true });
+  const document = {
+    schema: DISPATCH_REQUEST_SCHEMA,
+    parent_task_id: live.taskId,
+    requests: items.map((item) => ({
+      worker: item.worker,
+      title: item.title,
+      brief: item.brief,
+      /*
+       * OMITTED rather than sent as null when absent. The host schema is
+       * `.strict()` and an EMPTY list is a legal share — "an idle observer is
+       * not an error" — so absent and empty must stay distinguishable.
+       *
+       * **Honest limit: today this spread is belt-and-braces, not the
+       * mechanism.** `JSON.stringify` already drops a key whose value is
+       * `undefined`, so `services: item.services` emits byte-identical output
+       * and the mutation battery records that case as SURVIVED rather than
+       * pretending otherwise — it is an equivalent mutant, and no assertion
+       * over the written bytes can kill it. It is written this way because the
+       * property is about the DOCUMENT rather than about a serializer's
+       * behaviour, and the day these bytes are produced by anything else the
+       * spread is what keeps it true.
+       */
+      ...(item.services === undefined ? {} : { services: item.services }),
+    })),
+  };
+  const bytes = `${JSON.stringify(document, null, 2)}\n`;
+  const path = join(taskDir, DISPATCH_REQUEST_NAME);
+  writeAtomic(path, bytes);
+
+  return {
+    path,
+    bytes: Buffer.byteLength(bytes, "utf8"),
+    workers: items.map((item) => item.worker),
+    taskId: live.taskId,
+    epoch: live.epoch,
+  };
+}
+
+/**
+ * What the model is told about `dispatch_request`.
+ *
+ * It says the file name, which looks redundant and is not: six role documents
+ * still instruct a model to WRITE that path by hand, and a model carrying that
+ * instruction needs to recognise that this tool is the same act rather than an
+ * additional one.
+ */
+export const DISPATCH_REQUEST_DESCRIPTION =
+  "Ask the host to dispatch workers for this task. This REPLACES writing " +
+  "`/outbox/<task-id>/dispatch-request.json` by hand — it writes exactly that file, and it is " +
+  "the only route to it. Do not pass schema or parent_task_id; they are read from host state. " +
+  "Each entry must name a distinct worker. Call it once, before you deliver your envelope; " +
+  "the host dispatches when your task settles.";
+
+/**
  * What the model is told about `get_replies`.
  *
  * Three sentences, and the second is the one that earns its tokens: it tells the
@@ -1826,11 +2056,13 @@ export const SUBMIT_REPORT_DESCRIPTION =
   "Deliver your result envelope for the task you were dispatched. This is the only " +
   "way to report; the host reads what it writes, not what you say in the transcript. " +
   "Do not pass schema, task_id, epoch or worker — they are read from host state and " +
-  "cannot be supplied. Pass `report` to attach one document (a review, a triage " +
-  "write-up); it is written into your outbox and declared in `artifacts` for you.";
+  "cannot be supplied. Pass `report` to attach documents (a review, a triage write-up " +
+  "and its .md); it is a LIST, each entry is written into your outbox and declared in " +
+  "`artifacts` for you, and naming one file twice is refused rather than overwritten.";
 
 /**
- * Register `submit_report` and `get_replies` — the whole of `PI_EXTENSION_TOOLS`.
+ * Register `submit_report`, `dispatch_request` and `get_replies` — the whole of
+ * `PI_EXTENSION_TOOLS`.
  *
  * **As of SRD phase 5 the registered set EQUALS that enum**, and
  * `test/integration/report-tools-image.test.ts` was tightened from a subset
@@ -1964,6 +2196,41 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
    *   document, so there is no field a worker id or a workdir would fill; a
    *   `getSessionId()` here would be a read with no reader.
    */
+  /*
+   * `dispatch_request` (SRD-WORKER-DISPATCH-EXTENSION task 7.3).
+   *
+   * **No `terminate`, and here that is a contract rather than a preference.**
+   * `roles/triage.md` turn one is *"two writes, a reply, and silence"* — the
+   * fan-out and then the envelope, in that order, with `submit_report` as the
+   * last tool call. Layer 2 makes delivering the cheapest way to end a turn;
+   * ending it HERE would settle the parent task with a request written and no
+   * envelope, which is the one ordering the host cannot read.
+   *
+   * **No `tracker.noteDelivery`.** Writing a fan-out is not delivering a
+   * report, and marking the epoch delivered would spend `submit_report`'s
+   * evidence on a request — the same reason `get_replies` does not.
+   */
+  pi.registerTool({
+    name: "dispatch_request",
+    label: "Dispatch request",
+    description: DISPATCH_REQUEST_DESCRIPTION,
+    parameters: DISPATCH_REQUEST_PARAMETERS,
+    async execute(_toolCallId, params: DispatchRequestParams, _signal, _onUpdate, _ctx) {
+      const outcome = dispatchRequest(params, mounts);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Fan-out written: ${outcome.workers.length} worker(s) — ` +
+              `${outcome.workers.join(", ")} — ${outcome.bytes} bytes at ${outcome.path}.`,
+          },
+        ],
+        details: { path: outcome.path, bytes: outcome.bytes, workers: outcome.workers },
+      };
+    },
+  });
+
   pi.registerTool({
     name: "get_replies",
     label: "Get replies",
