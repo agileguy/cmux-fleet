@@ -426,7 +426,7 @@ describe("the anti-repeat rule is not scoped to one turn (ISC-1147)", () => {
  * whitespace-normalised copy: every sentence here is longer than the file's wrap
  * column, so a raw `toContain` would be an assertion about where a line breaks.
  */
-describe("a write-less collator is told not to declare what it has not written (ISC-1151)", () => {
+describe("a write-less collator is told not to declare what it has not written (ISC-1152)", () => {
   const FLAT = ROLE.replace(/\s+/g, " ");
 
   test("the prohibition names artifacts, report, and the cost", () => {
