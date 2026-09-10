@@ -703,3 +703,102 @@ describe("a tui seat stuck in a tool loop is diagnosed as one (ISC-1126)", () =>
     Math.max(cliBudget(2), 120_000),
   );
 });
+
+describe("a tui seat that loops in PROSE is diagnosed, not congratulated (ISC-1144)", () => {
+  /**
+   * One assistant entry whose whole content is a single sentence written over
+   * and over, non-adjacently — the measured shape of this failure.
+   *
+   * `stopReason: "endTurn"` and NO tool call, which is the half that makes this
+   * different from its `transcript_tool_loop` sibling above. This transcript is
+   * `ended` the moment it lands, so the quiet window starts, and without the
+   * check the epoch settles **`success`** two seconds later on a turn that did
+   * nothing at all. The tool-loop probe proves a check can be unreachable; this
+   * one proves a check can be too late.
+   */
+  function proseLoopEntry(n: number, line: string, repeats: number): string {
+    const body: string[] = [];
+    for (let i = 0; i < repeats; i++) {
+      body.push(line);
+      body.push(`Filler sentence number ${i} about something else entirely.`);
+    }
+    return `${JSON.stringify({
+      type: "message",
+      id: `P${n}`,
+      parentId: n === 1 ? null : `P${n - 1}`,
+      message: {
+        role: "assistant",
+        stopReason: "endTurn",
+        content: [{ type: "thinking", thinking: body.join("\n") }],
+      },
+    })}\n`;
+  }
+
+  test(
+    "an epoch whose seat repeats one sentence settles failed:transcript_prose_loop",
+    async () => {
+      const rig = await bootTuiSupervisor();
+
+      await writeFile(rig.sessionPath, entry(1) + entry(2));
+      const found = await waitFor(
+        () => readWorkerState(rig.wp),
+        (s: WorkerState) => s.session_path === rig.sessionPath,
+        30_000,
+      );
+      expect(found?.session_path, "the session was never discovered").toBe(rig.sessionPath);
+
+      const reply = await controlCall(rig.run, WORKER, {
+        cmd: "stage",
+        envelope: TaskEnvelopeSchema.parse({
+          schema: "pifleet.task/v1",
+          task_id: "T-PROSE",
+          run_id: RUN_ID,
+          epoch: 0,
+          attempt: 1,
+          worker: WORKER,
+          dispatched_at: new Date().toISOString(),
+          title: "prose",
+          brief: "identify the workload yourself",
+          repo: "unset",
+          host_workdir: "unset",
+          container_workdir: "/workspace",
+          branch: `fleet/${RUN_ID}/${WORKER}`,
+          base_ref: "0".repeat(40),
+          outbox: "/outbox/T-PROSE",
+          // Fifteen minutes, for the tool-loop probe's reason: a `timed_out`
+          // verdict cannot be what makes this pass.
+          deadline_s: 900,
+        }),
+        attempt_id: "att-prose",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"], "the stage was refused").toBe(true);
+
+      // Let the baseline land on the two-entry file, so the looping block below
+      // is inside the epoch's own slice.
+      await new Promise((r) => setTimeout(r, 1_500));
+
+      // 120 repeats: over `PROSE_LOOP_THRESHOLD` (96) and far under the 729 of
+      // the mildest loop actually measured on this host.
+      await appendFile(
+        rig.sessionPath,
+        proseLoopEntry(1, "Wait, I will write the files now.", 120),
+      );
+
+      const record = await waitFor(
+        () => readTaskRecord(taskRecordPath(rig.wp, "T-PROSE")),
+        () => true,
+        60_000,
+      );
+      expect(record, "no task record at all — the epoch never settled").not.toBeNull();
+      expect(
+        record?.reason,
+        "a turn that wrote one sentence 120 times settled as something other than a " +
+          "prose loop; with the check removed this is a SUCCESSFUL quiesce, which is " +
+          "the whole defect (ISC-1144)",
+      ).toBe("transcript_prose_loop");
+      expect(record?.verdict).toBe("failed");
+    },
+    Math.max(cliBudget(2), 120_000),
+  );
+});
