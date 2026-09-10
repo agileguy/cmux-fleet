@@ -184,17 +184,23 @@ export const PROSE_LOOP_THRESHOLD = 96;
 /**
  * The shortest string that may count as a unit.
  *
- * Short fragments are what an honest writer repeats: ` ```typescript `, `}`,
- * `- [ ]`, `Wait.`. The measured healthy ceiling is set by exactly such a
- * string (` ```typescript `, 21 occurrences, 13 characters — just over this
- * bound and still far under the threshold), and dropping the bound to zero
- * would put table pipes and closing braces into the population where they would
- * dominate every count and mean nothing.
+ * Short fragments are what an honest writer repeats: `}`, `- [ ]`, `Wait.`,
+ * `Hmm.`. Dropping the bound to zero would put closing braces and one-word
+ * interjections into the population, where they would dominate every count and
+ * mean nothing.
+ *
+ * It does most of its work in company. `SENTENCE_END` already removes the
+ * syntax this was originally justified by — ` ```typescript ` was the second
+ * of the measured healthy peaks at 21, and it does not reach the population at
+ * all now — so what is left for this floor is the short SENTENCE: `Wait.`,
+ * `Hmm.`, `OK.`, which a working model emits freely and which would otherwise
+ * be counted. The ceiling under the final rule is `Actually, wait.` at 48, a
+ * real sentence 15 characters long, which is why the bound cannot rise much
+ * above twelve without becoming a bound on deliberation.
  *
  * Twelve rather than something larger because the shortest MEASURED loop
  * sentence is `Let me do it now.` at 17 characters, and a bound set close under
- * it would be a bound tuned to five samples. The floor exists to exclude
- * punctuation and syntax, not to exclude short sentences.
+ * it would be tuned to five samples.
  */
 export const PROSE_UNIT_MIN_CHARS = 12;
 
