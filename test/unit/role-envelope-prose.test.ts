@@ -50,9 +50,12 @@
  * routed its report through `submit_report` and the prose was updated to
  * match; `ticketing.md`, `tester.md` and `verifier.md` still read "you never
  * **wrote**"), the punctuation before "it removes" varies (`;` vs `,`), and
- * the clause after "the grading" differs every time. `observer.md` and
- * `ticketing.md` additionally wrap the sentence across a line break before
- * "your task". The one substring immune to all of that — verb-independent,
+ * the clause after "the grading" differs every time. `ticketing.md:135-136`
+ * additionally wraps the sentence across a line break before "your task",
+ * and is the ONLY one that does today. `observer.md` did too until `c887c7a`
+ * rewrapped that paragraph — which is exactly the point: the seam is not a
+ * property of the sentence, it moves whenever someone re-wraps a file.
+ * The one substring immune to all of that — verb-independent,
  * and sitting on one line in all four files today — is `removes you from the
  * grading`, so that is the anchor.
  *
@@ -61,7 +64,7 @@
  * opens the sentence mid-clause in lower case ("last: an envelope you never
  * wrote…"), and a future hard-wrap could still split "removes you" from "from
  * the grading" the way today's wrap already splits "does not fail" from "your
- * task" in two of these four files. `test/unit/observer-role.test.ts` collapses
+ * task" in one of these four files. `test/unit/observer-role.test.ts` collapses
  * whitespace into a `FLAT` constant for the identical reason; this does the
  * same so the two probes read the document the same way.
  *
@@ -76,7 +79,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
 import { loadConfig } from "../../src/config/load.ts";
-import { effectiveToolGrant, writeCapableIn, type ToolName } from "../../src/config/schema.ts";
+import { effectiveToolGrant, writeCapableIn, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
 import { ROOT } from "../support/role-docs.ts";
 
 /** See the file header for why this substring and not the full sentence. */
@@ -106,7 +109,7 @@ function pairingIsConsistent(prose: string, tools: readonly ToolName[]): boolean
   return !carriesParaphrase(prose) || canWriteEnvelope(tools);
 }
 
-type RolesMap = Awaited<ReturnType<typeof loadConfig>>["config"]["roles"];
+type RolesMap = FleetConfig["roles"];
 
 interface Evaluation {
   /** Role names where the paraphrase is carried with no write-capable verb. */

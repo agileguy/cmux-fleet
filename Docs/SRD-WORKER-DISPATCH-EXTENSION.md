@@ -2152,6 +2152,16 @@ recorded against their bullets below rather than closed by grading around them.
 
 **One file per commit, and only for a role that has completed Phase 7.**
 
+**Task 8.4 BREACHED that precondition knowingly, and the breach is recorded rather than waived.**
+`observer` has not completed Phase 7 — 7.5 is BLOCKED on a sample of one envelope — so by the rule
+above, `roles/observer.md` was not eligible for a prose task at all. What 8.4 removed was a sentence
+made false by Phase A (`submit_report` exists and observer holds it), not by Phase B (a narrowing that
+has not happened), which is why it was safe to do and why its scope collapsed to one sentence. The
+rule is still right: the first attempt at 8.4, following §13's stated ranges, would have deleted prose
+that is true precisely because 7.5 has not run. **A role mid-Phase-7 should be edited only where the
+edit is independent of the narrowing still outstanding**, and that condition wants stating in the rule
+rather than discovered per task.
+
 - **8.1** `roles/reviewer.md`: delete `:45-144`. Touches: `roles/reviewer.md`.
   **`:1-13` are NOT in this range any more — they came forward into 7.1**, because a sentence that
   STATES THE GRANT is not the same kind of prose as the mechanics this phase defers, and leaving it
@@ -2201,14 +2211,26 @@ recorded against their bullets below rather than closed by grading around them.
   skill describes — `result.json` written last"*. Observer holds `submit_report`, and the contract
   skill's routing table (added by `f06615f`) says a worker holding it — even one that also holds
   `write` — must CALL it and leave the hand-composed envelope alone. The replacement routes on the
-  grant and hands the artifact pair over through the same call's `report` argument, which
-  `report-tools.ts` writes into `/outbox/<task-id>/files/` and declares in `artifacts` itself, so
-  naming either file again claims it twice.
+  grant: the envelope goes through `submit_report`, while the `observer-ops.json`/`.md` pair stays on
+  `write` into `/outbox/<task-id>/files/` and is declared afterwards in `artifacts[]`.
 
-  **The edit was confined to a single hunk at `:144` on purpose.** This file is cited BY LINE in ten
-  places across four files (`test/unit/report-tools.test.ts:818`, `src/config/schema.ts:2097`,
-  `src/run/triage-envelope.ts:162`, and seven here). `git diff -U0` shows one hunk, `@@ -144,4 +144,9 @@`,
-  so nine of the ten are untouched by arithmetic; only §2.6's `:138-147` moved, and it is now
+  **That split is the CORRECTION, and the first attempt got it wrong. `8d58068` moved the artifact
+  pair onto `report` as well; `c887c7a` reverted that half after review.** The routing table compels
+  only the ENVELOPE — a holder of `submit_report` must call it rather than hand-compose
+  `result.json`. It says nothing about artifacts, and `skills/pifleet-worker/SKILL.md` explicitly
+  reserves `artifacts[]` for *"files you wrote yourself"*. Moving the pair too put it on a channel
+  §11 measured UNSAFE for this exact role: `report.content` carries no `maxLength`, `observer`'s
+  `gemma-4-26b-a4b-it-bf16` was measured delivering **3 219 of 8 192 bytes with `isError` false and
+  the epoch `success`**, and the harvested `observer` pairs on the operator's machine reach
+  **17 817 bytes, with 31 of 122 above 4 KB**. What that buys is a green epoch carrying a fraction of
+  an evidence ledger — the failure §6.9 exists to prevent, and one nothing downstream can detect.
+  **7.5 is BLOCKED precisely because this role's output has no measured ceiling: that is a reason to
+  leave `write` in place, not a gap to route around.**
+
+  **The edit was confined to a single hunk at `:144` on purpose.** This file is cited BY LINE in 14
+  places across five files (`test/unit/report-tools.test.ts:818`, `src/config/schema.ts:2097`,
+  `src/run/triage-envelope.ts:162`, and ten here, plus `test/unit/observer-role.test.ts:13`, which `8d58068` itself added). `git diff -U0` shows one hunk, `@@ -144,4 +144,9 @@`,
+  so thirteen of the fourteen are untouched by arithmetic (**this census read "ten across four" until review recounted it 2026-09-11: the SRD alone carries ten by-line citations, not seven, and `8d58068` added a fifth file. The safety argument is unchanged — every citation but one terminates at or below `:143` — but a wrong citation census is the worst possible place in this document to be approximate**); only §2.6's `:138-147` moved, and it is now
   `:138-152` above. *Probe: `bun test test/unit/observer-role.test.ts` — 6 pass, including a CONTROL
   asserting observer holds `submit_report` alongside a write-capable tool, so the routing argument
   cannot go vacuously green if the grant changes.*
@@ -2240,7 +2262,7 @@ recorded against their bullets below rather than closed by grading around them.
   after the subheading that scopes them. The second of those opens the very *"Write it as ONE LINE"*
   paragraph this bullet orders deleted, so performing the deletion reddens the probe that shipped
   with the fix. **This bullet is superseded, not outstanding.**
-- **8.6** Delete the six paraphrases of *"An envelope you never wrote…"* from the four roles where
+- **8.6** Delete the six paraphrases [**the counts in this headline are WRONG — see the correction below**] of *"An envelope you never wrote…"* from the four roles where
   layer 1 makes it false, and keep it where it remains true. Touches: `roles/*.md`.
   *Acceptance as written: the sentence survives exactly in `observer`, `engineer`, `tester`, `sre`,
   `ticketing` — the roles that can still fail to write one.*
@@ -2253,7 +2275,15 @@ recorded against their bullets below rather than closed by grading around them.
   What the clause was reaching for is a ONE-DIRECTIONAL invariant, and that invariant already holds:
   the paraphrase appears in `observer`, `ticketing`, `tester` and `verifier` — every one of which
   holds a write-capable verb and can therefore genuinely fail to write an envelope — and in none of
-  `reviewer`, `collator` or `triage`, which hold no writer and had theirs removed by 8.1-8.3.
+  `reviewer`, `collator` or `triage`, which hold no writer.
+
+  **Correction 2026-09-11, found by review: "had theirs removed by 8.1-8.3" was wrong for two of the
+  three, and it was asserted rather than run — the same unverified-provenance error this entry exists
+  to correct.** Measured with `git log --all -S`: `reviewer`'s was removed by `b94c58b` (task 8.1), as
+  claimed. **`collator`'s was removed by `d6e6364` — task 7.2, not 8.2**; `git show b24983e -- roles/collator.md`
+  removes zero occurrences. **`triage` never carried the sentence at all**, so nothing was removed from
+  it by any task. The partition below is unaffected — those three carry no paraphrase today, which is
+  what the invariant grades — but only one of the three absences is Phase 8's doing.
   `verifier` carries it and is absent from the clause's list, which is the same drafting error
   running the other way. **Nothing is left to delete; restating the invariant, and pinning it, is the
   deliverable.**
@@ -2269,7 +2299,7 @@ recorded against their bullets below rather than closed by grading around them.
   phrase; that limit is recorded rather than hidden, because no phrase-matched probe can close it.
 
   **PINNED 2026-09-11 (`099f9bd`), and the anchor it chose is better than the one this entry
-  proposed.** *Probe: `bun test test/unit/role-envelope-prose.test.ts` — 5 pass, asserting the
+  proposed.** *Probe: `bun test test/unit/role-envelope-prose.test.ts` — 4 pass in CI and 5 locally, asserting the
   one-directional implication `carries the paraphrase -> resolves a write-capable grant` across every
   role in `fleet.example.yaml`, with CONTROLS on BOTH halves — a non-empty carrier set and a
   non-empty write-less set — so a future narrowing that emptied either cannot go vacuously green.*
