@@ -144,9 +144,9 @@ on.
 Report as the `pifleet-worker` skill describes. You hold `submit_report` alongside `write`,
 and that combination has one route: call `submit_report` for your envelope. The hand-composed
 `result.json` route is for a role with no `submit_report` at all — yours to leave alone, not
-yours to take. Hand the `observer-ops.json`/`.md` pair over through that same call's `report`
-argument rather than through `write`: the tool writes both files into
-`/outbox/<task-id>/files/` and declares them in `artifacts` itself, so naming either one again
-in `artifacts[]` claims it twice. An envelope you never submitted does not fail your task; it
-removes you from the grading, and the harvest then reports your findings as unchecked, so the
-report you did write speaks for nothing in your absence.
+yours to take. The `observer-ops.json`/`.md` pair still goes through `write`, into
+`/outbox/<task-id>/files/`, exactly as the `observer-ops` skill describes — then name both
+files in `artifacts[]`, the slot `pifleet-worker` reserves for files you wrote yourself. An
+envelope you never submitted does not fail your task; it removes you from the grading, and the
+harvest then reports your findings as unchecked, so the report you did write speaks for nothing
+in your absence.

@@ -9,15 +9,25 @@
  * write-capable builtin AND `submit_report` at once. Reviewer and triage hold
  * `submit_report` with no write verb at all, so their prose could say "you
  * have no write tool, call it" and be unconditionally true; that argument does
- * not apply here, because observer's `write` is real and used for nothing
- * report-related (`skills/observer-ops/SKILL.md`, `roles/observer.md:26-34`).
+ * not apply here, because observer's `write` is real and does report-related
+ * work of its own: it is how the `observer-ops.json`/`.md` pair reaches the
+ * outbox (`skills/observer-ops/SKILL.md`, `roles/observer.md:26-34`,
+ * `:144-152`). `submit_report` is still the only route for the envelope
+ * itself.
  *
  * `skills/pifleet-worker/SKILL.md`'s routing table settles the "both" case
  * explicitly: *"Call `submit_report`. The hand-written envelope stays
- * physically possible and is not yours to write."* The sentence this task
- * replaces ordered exactly that hand-written envelope — `result.json`
+ * physically possible and is not yours to write."* The sentence task 8.4
+ * replaced ordered exactly that hand-written envelope — `result.json`
  * "written last" — which is the wrong route for this grant, not a stale
  * mechanic every role outgrew the same way.
+ *
+ * 8.4 went one step further and also moved the `observer-ops` PAIR onto that
+ * same `report` argument. That part was wrong: the pair is un-cleared for
+ * Phase 7 (SRD-WORKER-DISPATCH-EXTENSION.md §11 — this model truncates
+ * silently above 4KB, and harvested pairs on this fleet run up to 17.8KB), so
+ * it stays on `write`, declared afterward in `artifacts[]`. This file's tests
+ * below pin that correction, not 8.4's original routing.
  *
  * ## What is checkable here
  *
@@ -63,6 +73,13 @@ describe("observer's resolved grant is the one this file's routing argument assu
     const tools = effectiveToolGrant(role!.tools ?? config.defaults.tools);
     expect(tools).toContain("submit_report");
     expect(
+      tools,
+      "observer no longer holds `write` alongside submit_report — narrowing task 7.5 removes " +
+        "`write` but keeps `bash` (also write-capable per WRITE_CAPABLE_TOOLS), so the " +
+        "writeCapableIn() check below alone would stay green through exactly that narrowing " +
+        "while the prose \"You hold `submit_report` alongside `write`\" goes false",
+    ).toContain("write");
+    expect(
       writeCapableIn(tools).length,
       "observer no longer holds a write-capable tool alongside submit_report — the 'both' " +
         "routing case this file's prose argues from no longer applies to it",
@@ -92,18 +109,29 @@ describe("the file does not order a hand-written result.json (task 8.4)", () => 
   });
 
   /**
-   * The mechanism task 8.4's brief asked to get right: the pair reaches the
-   * outbox through `report` (which writes the files AND declares them), not
-   * through the `write` tool observer also holds — and declaring one of them
-   * again in `artifacts[]` is named as the double-claim it would produce.
+   * The mechanism this fix corrects: the observer-ops pair is un-cleared for
+   * Phase 7 (SRD §11 — the model truncates silently above 4KB, and harvested
+   * pairs on this fleet run up to 17.8KB) and so must NOT ride `report`. It
+   * still reaches the outbox through `write`, exactly as the `observer-ops`
+   * skill describes, and is then declared in `artifacts[]` — the slot
+   * `pifleet-worker` reserves for files the worker wrote itself.
    */
-  test("the observer-ops pair is handed over through `report`, not through `write`", () => {
-    expect(FLAT).toContain("through that same call's `report` argument rather than through `write`");
-    expect(FLAT).toContain("declares them in `artifacts` itself");
+  test("the observer-ops pair is handed over through `write`, not through `report`", () => {
+    // A longer contiguous anchor, not two independent substrings: the phrase
+    // "exactly as the `observer-ops` skill describes" also appears, unrelated,
+    // in the artifact-pair paragraph above line 144 (about the .json/.md pair
+    // itself) — pinning it alone would pass even if this paragraph's routing
+    // said something else entirely.
+    expect(FLAT).toContain(
+      "The `observer-ops.json`/`.md` pair still goes through `write`, into " +
+        "`/outbox/<task-id>/files/`, exactly as the `observer-ops` skill describes",
+    );
   });
 
-  test("declaring the report pair again in artifacts[] is named as claiming it twice", () => {
-    expect(FLAT).toContain("naming either one again in `artifacts[]` claims it twice");
+  test("the pair is declared in artifacts[] as files the observer wrote itself", () => {
+    expect(FLAT).toContain(
+      "then name both files in `artifacts[]`, the slot `pifleet-worker` reserves for files you wrote yourself",
+    );
   });
 });
 
