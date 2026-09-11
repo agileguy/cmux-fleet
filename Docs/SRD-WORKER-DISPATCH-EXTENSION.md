@@ -1989,12 +1989,33 @@ where `get_replies` first meets a model.
   succeeded, but that correlation does not establish that the refusal caused them. The finding does
   not rest on it — composing a review into a tool the role does not hold is a wasted epoch either
   way.)
-- **7.2** `collator`: remove `write`. **Touches: `fleet.yaml` (operator) ONLY — there is no
-  `collator` in `fleet.example.yaml`.** The example's `roles:` block is
-  `sre observer verifier engineer reviewer tester ticketing triage`; the role exists solely in the
-  operator's gitignored file, so this task produces NO TRACKED DIFF and is not dispatchable, on
-  ISC-93's reasoning and for the same mechanical reason as 6.1. It is an operator edit whose only
-  evidence is the live cycle. *Acceptance: one collation.*
+- **7.2** `collator`: remove `write`. Touches: `fleet.yaml` (operator), `roles/collator.md`,
+  `test/unit/collator-role.test.ts`. *Acceptance: one collation, from a `col-1` holding no `write`.*
+
+  **"NO TRACKED DIFF and not dispatchable" was true when written and is now WRONG, and the
+  sentence that made it wrong is 7.1's.** The original reasoning still holds for the half it was
+  about: there is no `collator` in `fleet.example.yaml` — its `roles:` block is
+  `sre observer verifier engineer reviewer tester ticketing triage` — so the config change really
+  does live only in the operator's gitignored file, exactly as 6.1's does. What that reasoning
+  missed is that the config is not the only thing a narrowing touches. **7.1 measured a role whose
+  prompt still claimed a grant the config had taken away, and it cost a lens**: `rev-ctx-1`
+  composed a 13 933-byte review into a `write` it no longer held, got `Tool write not found`, and
+  every turn after that ended `stopReason: error`. The conclusion recorded there — *"the sentence
+  that states the grant therefore moves with the grant"* — makes `roles/collator.md:5` part of THIS
+  task rather than part of 8.2. That file is tracked, so the task has a diff after all.
+
+  **And it needed both tools, not one.** The collator owes the same two things the triage collator
+  owes, for the same two structural reasons. Its fan-out was a hand-written
+  `/outbox/<task-id>/dispatch-request.json` at the TASK ROOT, which no `report` entry can name —
+  `dispatch_request` (§7.3) carries it. Its turn two owes a PAIR, `collation.json` and `review.md`,
+  and `submit_report` terminates the epoch, so there is no second call to deliver the second
+  document in — `report` as a list (§6.2) carries that. Neither tool was built for this role and
+  both were needed by it unchanged, which is the strongest evidence so far that these are contract
+  shapes rather than role quirks.
+
+  **DONE 2026-09-10 for the tracked half** (ISC-1156, ISC-1157, ISC-1158). The live cycle is
+  ISC-1159 and is graded `[~]` until it runs. §13 task 7.4's `HOLDS_A_WRITER` criterion is
+  unaffected: with no `collator` in the example there is no resolved grant for it to read.
 - **7.3** `triage`: remove `write`. **Gated on Q8, and the gate is now CLEARED** — §11's census
   measured 119 harvested envelopes from this console at a maximum of 1 472 bytes, 2.8× inside the
   4 KB at which its model truncates silently. Touches: `fleet.yaml` (operator), `fleet.example.yaml`.
