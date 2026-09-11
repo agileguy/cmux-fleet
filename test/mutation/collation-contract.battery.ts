@@ -541,12 +541,65 @@ const MUTATIONS: M[] = [
     replace: "File it wherever suits you.",
     expect: "red",
   },
+  /**
+   * RE-ANCHORED 2026-09-11, onto the ROUTE clause, after `a1ae886` rewrote the
+   * paragraph this quoted whole.
+   *
+   * ## Why the old anchor could not survive that commit
+   *
+   * It quoted all three wrapped lines verbatim, including where they wrap. The
+   * middle line was the sentence `a1ae886` had to change — the collator was
+   * ordering reviewers to declare the review in `artifacts`, which
+   * `roles/reviewer.md` now tells them not to do — so NO wording that fixes the
+   * contradiction leaves this matching. That is the rule stated 20 lines above
+   * being broken by the case directly under it: short fragments, chosen to
+   * survive a re-wrap rather than to quote a whole wrapped line.
+   *
+   * ## Why the ROUTE clause, and not the other three fragments measured
+   *
+   * All four occur exactly 1x in the current `roles/collator.md`. Only this one
+   * makes the case mutate what its `what:` says, MEASURED rather than reasoned:
+   *
+   * - `**Tell each reviewer to file its long review at` — the honest weakening,
+   *   mandatory to optional (*"A reviewer may, if it likes, file its long review
+   *   at ..."*), leaves all four suites GREEN: 195 pass. Every probe on this
+   *   paragraph reads further down the sentence. A case whose `expect: "red"`
+   *   depends on the `replace:` happening to delete some other probe's literal
+   *   is not measuring the document.
+   * - `Tell each reviewer to file its long review` — reddens, but only by
+   *   destroying `file its long review`, the marker `sliceFrom` scopes BOTH
+   *   collator probes with. The failure is *"roles/collator.md no longer
+   *   contains file its long review"*, a marker lookup, and it takes RV26's
+   *   guard down as collateral while the destination, the route and the
+   *   summary ceiling all survive verbatim in the mutated document. The case
+   *   would claim the split was dropped; the split would still be there.
+   * - `` `notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.** ``
+   *   — reddens, on *"the collator does not say `notes` is a field"*. That is
+   *   the notes-is-a-FIELD-not-a-PATH contract, which is a different claim, and
+   *   again the red is a property of the `replace:` dropping that literal
+   *   rather than of the summary half going.
+   *
+   * The ROUTE clause is the one fragment whose removal reddens the probe named
+   * for this case's own subject — *"the collator does not name the route that
+   * declares the review"*, inside *"the collator's copy instructs the same split
+   * the reviewer's does"*. `` `report` entry `` occurs ONCE in the whole
+   * document, so deleting it here is genuinely detectable; the destination path
+   * is stated twice (here and in the turn-two delivery section), so a case
+   * anchored on that would have been unfalsifiable.
+   *
+   * It is also the half the document itself nominates: **"The ROUTE is the half
+   * worth repeating", because it is the half still capable of going wrong: a
+   * review sent out by any other route has nothing appending anything for it.**
+   * The `replace:` is the brief that says exactly that — a destination with no
+   * route — rather than the long form's *"write a thorough review"*, which no
+   * longer fits the span being replaced.
+   */
   {
     id: "RV3",
-    what: "REVIEWER: the collator's copy of the split instruction is dropped",
+    what: "REVIEWER: the collator's copy of the split stops naming the route that files the review",
     file: ROLE,
-    find: "**Tell each reviewer to file its long review at `/outbox/<task-id>/files/review.md` — its own\ntask id, not yours — to declare that file in its envelope's `artifacts` array, and to keep the\n`notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.**",
-    replace: "**Tell each reviewer to write a thorough review.**",
+    find: "by passing it as the one `report` entry of its `submit_report` call",
+    replace: "by whatever route it likes",
     expect: "red",
   },
   /**
@@ -758,9 +811,41 @@ const MUTATIONS: M[] = [
     replace: "and 512 KiB across all of them",
     expect: "red",
   },
+  /**
+   * RELABELLED 2026-09-11. The anchor still matches 1x and the case still
+   * reddens; what had gone wrong is the `what:`, which is the harder half to
+   * notice because nothing goes red for it.
+   *
+   * It read *"the collator's brief stops REQUIRING the artifact declaration"*.
+   * Until `a1ae886` that was true: `roles/collator.md` ordered the collator to
+   * tell each reviewer *"to declare that file in its envelope's `artifacts`
+   * array"*, and this mutation removed the order. `a1ae886` INVERTED that
+   * sentence — the brief now says **"Do NOT tell it to declare that file in its
+   * envelope's `artifacts` array"** — so the identical anchor moved into the
+   * prohibition, and this mutation now removes a PROHIBITION. Measured: it
+   * reddens on *"the collator still orders the hand-declaration
+   * `roles/reviewer.md` tells reviewers not to make"*, the probe `a1ae886`
+   * flipped to assert the prohibition positively. Same red, opposite meaning.
+   *
+   * ## THIS IS THE SECOND TIME A TWIN WAS RE-POINTED ALONE
+   *
+   * RV25 is the collator-side twin of RV22, and that pairing is the whole point
+   * of both: two role documents that must say the same thing, with one case per
+   * end. Task 8.1 re-pointed RV22 from the claim to the route on the reviewer's
+   * side and did not reach RV25 — and the console then ran with two prompts
+   * issuing opposite instructions about the same field for a full round, with
+   * both ends green, because each probe only ever read its own end. That is the
+   * contradiction `a1ae886` cleaned up, and this stale label is the same miss
+   * wearing its other face: a document changed, its twin's case not re-read.
+   *
+   * **A battery has now been bitten by this shape twice.** When one end of a
+   * pinned pair is re-pointed, the other end's case is part of the change —
+   * re-read its `find:` AND its `what:`, because the anchor can keep matching
+   * through an inversion that makes the label a lie.
+   */
   {
     id: "RV25",
-    what: "SPLIT: the collator's brief stops requiring the artifact declaration",
+    what: "SPLIT: the collator's brief stops FORBIDDING the artifact declaration",
     file: ROLE,
     find: "to declare that file in its envelope's `artifacts` array",
     replace: "and nothing more",
