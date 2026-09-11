@@ -86,8 +86,87 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
- * A slice of a document taken AT a marker, where a missing marker is a NAMED
- * ERROR rather than a silently different slice.
+ * The one index at which `marker` occurs in `doc`, refusing ABSENCE and
+ * AMBIGUITY alike, and naming the document whichever of the two it caught.
+ *
+ * Both slicers below route through this, so neither can drift into holding half
+ * of the guard.
+ *
+ * ## The half the slicers refused from the start
+ *
+ * `indexOf` returns -1 for a heading that has moved, and a slice taken from or
+ * to -1 is not an error — it is a DIFFERENT slice that keeps passing. What each
+ * polarity does with that is on the two functions below; they have refused it
+ * since the commit that introduced them.
+ *
+ * ## The half they did not, which is this function's reason for existing
+ *
+ * A refusal on `-1` sees a marker that occurs ZERO times. It is blind to one
+ * that occurs TWICE, and `indexOf` silently takes the first — so every slice is
+ * right only for as long as nothing upstream acquires the same words. The
+ * damage wears the same two polarities as the missing marker and is harder to
+ * spot, because nothing is missing: a `toContain` fails naming a sentence that
+ * is still in the document, merely outside the re-anchored slice, and a
+ * `.not.toContain` passes on a slice that no longer covers the region it was
+ * written to watch.
+ *
+ * **This is the twin of a hole that was LIVE in the sibling file.** `between()`
+ * in `test/unit/collator-role.test.ts` carried exactly this gap, and `"Turn
+ * one"` occurred twice in `roles/collator.md` — the `### Turn one` heading and
+ * a body mention inside that same section — so five call sites were correct
+ * only by the accident of which occurrence came first. Rewording the heading
+ * would have re-anchored all five onto the body mention and thrown nothing.
+ *
+ * ## Here the gap was LATENT, and that is not a reason to leave it
+ *
+ * Every marker at every call site in this file was counted as a substring of
+ * the document it is used against before this guard went in. Five distinct
+ * (document, marker) pairs across nine call sites — `THE LONG REVIEW GOES IN A
+ * FILE` and `Quote file and line` in `roles/reviewer.md`, `file its long
+ * review` in `roles/collator.md`, `THE GAP THIS CONTRACT COULD NOT CLOSE` in
+ * `src/run/collation.ts`, and `**Which language that is` in
+ * `roles/review/implementation-language.md` — and all five occurred exactly
+ * once. No slice in this file is currently mis-scoped.
+ *
+ * That audit is a measurement of one moment, and it is the reason to close the
+ * hole rather than to file it: this is the file that scopes into FOUR
+ * documents, so it has four independent chances to acquire a duplicate, and
+ * when one does the change is in a role document — nowhere near this test's
+ * diff. The count above stops needing to be re-run by hand at the moment this
+ * guard exists, because a marker that goes non-unique now reddens the suite
+ * instead of quietly re-aiming a slice.
+ *
+ * ## The fix is a more specific MARKER, never a looser helper
+ *
+ * The refusal is deliberately not "take the first" or "take the outermost". A
+ * caller whose marker went ambiguous has lost the ability to say which region
+ * it meant, and no rule this function can apply recovers the intention — only
+ * the caller knows it. Adding a heading's `### ` prefix is usually the whole
+ * fix, and it stays unambiguous when the prose around it changes.
+ *
+ * Same refusal and deliberately the same error wording as `onlyIndexOf` in
+ * `test/unit/collator-role.test.ts`, so a grep finds both. The one difference
+ * is the arguments: that file slices only `roles/collator.md` and needs to name
+ * nothing, while this one takes the document and its name because it scopes
+ * into four different ones — two role documents, an aspect file and a source
+ * file — and an error that does not say WHICH is half a diagnosis.
+ */
+function onlyIndexOf(doc: string, name: string, marker: string): number {
+  const occurrences = doc.split(marker).length - 1;
+  if (occurrences === 0) throw new Error(`${name} no longer contains ${marker}`);
+  if (occurrences > 1) {
+    throw new Error(
+      `${name} contains ${marker} ${occurrences} times; a slice marker must be unique or the ` +
+        `slice is whichever one comes first. Make the marker more specific — a heading's ` +
+        `\`### \` prefix usually does it — rather than loosening this check.`,
+    );
+  }
+  return doc.indexOf(marker);
+}
+
+/**
+ * A slice of a document taken AT a marker, where a missing OR AMBIGUOUS marker
+ * is a NAMED ERROR rather than a silently different slice.
  *
  * This is the fail-open shape, and it was in this file eight times:
  *
@@ -105,19 +184,21 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
  *
  * The identical defect was found in `test/unit/collator-role.test.ts` on task
  * 7.2, by a reviewer, after a heading rename turned a scoped assertion into a
- * whole-file one. `between()` there is this same shape; these take the document
- * and its name as arguments because this file scopes into four different ones —
- * two role documents, an aspect file and a source file — and an error that does
- * not say WHICH is half a diagnosis.
+ * whole-file one. `between()` there is this same shape.
+ *
+ * The AMBIGUOUS marker is `onlyIndexOf`'s half and the argument for it is
+ * there. Worth saying here only that a tail slice re-anchored onto a later
+ * duplicate does not narrow to a wrong REGION — it narrows to the document's
+ * tail, and a `.not.toContain` passes just as unconditionally on a short tail
+ * as it does on the one character a missing marker leaves.
  */
 function sliceFrom(doc: string, name: string, marker: string): string {
-  const at = doc.indexOf(marker);
-  if (at < 0) throw new Error(`${name} no longer contains ${marker}`);
-  return doc.slice(at);
+  return doc.slice(onlyIndexOf(doc, name, marker));
 }
 
 /**
- * The head of a document, UP TO a marker, with the same refusal and one more.
+ * The head of a document, UP TO a marker, with the same two refusals and one
+ * more.
  *
  * A marker at index 0 yields the empty string, and every probe written against
  * a head slice asks whether something is ABSENT from it — `.test(opening)` is
@@ -125,10 +206,14 @@ function sliceFrom(doc: string, name: string, marker: string): string {
  * That is the same fail-open wearing the other polarity, so it throws too. This
  * preserves the `toBeGreaterThan(0)` the one call site already carried, as an
  * error that says what happened.
+ *
+ * The index-0 refusal survives the move to `onlyIndexOf` deliberately: that
+ * function is about WHICH occurrence, and a unique marker sitting at index 0 is
+ * a perfectly unambiguous one. It is this polarity, not the lookup, that cannot
+ * use it.
  */
 function sliceTo(doc: string, name: string, marker: string): string {
-  const at = doc.indexOf(marker);
-  if (at < 0) throw new Error(`${name} no longer contains ${marker}`);
+  const at = onlyIndexOf(doc, name, marker);
   if (at === 0) throw new Error(`${name} now OPENS with ${marker} — the slice before it is empty`);
   return doc.slice(0, at);
 }
