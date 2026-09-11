@@ -123,12 +123,53 @@ function unquote(literal: string): string {
   return out;
 }
 
-/** Every `find:` literal, with the constant naming the file it applies to. */
+/**
+ * Every `find:` literal, with the constant naming the file it applies to.
+ *
+ * ## WHAT THE GAP BETWEEN `file:` AND `find:` TOLERATES — read this before
+ * ## adding a comment to a mutation case
+ *
+ * **A comment above a `find:` is safe.** The gap accepts any run of whitespace,
+ * `//` line comments, `/* … *\/` block comments, and `what:` lines, in any
+ * order and any number. Annotate a case freely; the guard still sees it.
+ *
+ * It did not always. The gap used to be `\s*\n\s*(?:what: …)?`, which tolerated
+ * whitespace and one optional `what:` line and NOTHING else — so a case that
+ * explained itself in a comment above its own `find:` became invisible to this
+ * guard, silently, with no count anywhere that would show it. That is the worst
+ * shape a guard can fail in: it went on passing while watching fewer cases than
+ * it claimed. On the day it was found it was blind to four cases across three
+ * batteries — `collation-contract`'s `RV15` and `RV16` (both anchored on a
+ * string that had occurred 0 times in `fleet.example.yaml` since task 7.1, dead
+ * for days and reported by nobody), `collator-relay`'s `M13`, and
+ * `envelope-attribution`'s `E3`. `RV15`'s own comment records that this guard
+ * demanded the re-anchor it was hiding.
+ *
+ * ## Why the comment forms end at a newline rather than being skipped loosely
+ *
+ * `//[^\n]*\n` and `what: [^\n]*\n` require the newline, and a block comment is
+ * consumed whole. Without that, `[^\n]*` could give back characters until
+ * `find:` matched INSIDE a comment — and these batteries are prose-heavy enough
+ * to quote an old anchor in the comment explaining why it moved. Making the
+ * line forms consume to end-of-line removes that path entirely: a `find:` in a
+ * comment is never reachable as a property.
+ *
+ * ## Why it cannot reach a LATER case's `find:`
+ *
+ * Every alternative in the gap consumes at least one character and none of them
+ * matches `replace:`, `expect:`, `}` or `{`, so the gap cannot cross a case
+ * boundary: an entry with no `find:` of its own fails to match and is skipped
+ * rather than borrowing its neighbour's. The count assertion in "the batteries
+ * are found and their anchors are parsed" is what keeps that honest — it
+ * compares what this parser sees against what the batteries declare, so a
+ * future blind spot is a red test rather than a quiet subtraction.
+ */
 function anchors(source: string): Array<{ file: string; find: string }> {
   const out: Array<{ file: string; find: string }> = [];
-  // Entries are `file: CONST,` followed by `find: "…"` or `find:\n  "…" +\n …`.
+  // Entries are `file: CONST,` followed by `find: "…"` or `find:\n  "…" +\n …`,
+  // with whitespace / comments / `what:` lines allowed between the two.
   for (const m of source.matchAll(
-    /file: (\w+),\s*\n\s*(?:what: [^\n]*\n\s*)?find:\s*((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')(?:\s*\+\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))*)/g,
+    /file: (\w+),(?:\s|\/\/[^\n]*\n|\/\*(?:[^*]|\*(?!\/))*\*\/|what: [^\n]*\n)*find:\s*((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')(?:\s*\+\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))*)/g,
   )) {
     const parts = [...m[2]!.matchAll(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g)].map((p) =>
       unquote(p[0]!),
@@ -136,6 +177,22 @@ function anchors(source: string): Array<{ file: string; find: string }> {
     out.push({ file: m[1]!, find: parts.join("") });
   }
   return out;
+}
+
+/**
+ * How many entries DECLARE a `file:`, counted without the `find:` parser.
+ *
+ * The second opinion that makes the blind spot above expressible as a number.
+ * `anchors()` can only under-count — a case it cannot parse just vanishes — so
+ * a guard built only from `anchors()` can never notice it is watching less than
+ * it was. This counts the same entries by a different feature of the syntax,
+ * and the two disagreeing is the alarm.
+ *
+ * `file: string;` in the entry INTERFACE is not counted: the comma is required,
+ * and a type field ends in a semicolon.
+ */
+function declaredFileEntries(source: string): number {
+  return [...source.matchAll(/^[ \t]*file: \w+,/gm)].length;
 }
 
 const BATTERIES = batteryPaths();
@@ -237,7 +294,116 @@ describe("every mutation battery still anchors to the code it claims to mutate",
       expect(source, `${b} is listed by git but could not be read`).not.toBeNull();
       expect(pathConstants(source).size, `${b} binds no \${W} path constants`).toBeGreaterThan(0);
       expect(anchors(source).length, `${b} yielded no anchors`).toBeGreaterThan(5);
+      /**
+       * NOT VACUOUS *AND NOT PARTIAL*. The check above only says the parser saw
+       * SOMETHING; this says it saw EVERYTHING. A parser that quietly skips the
+       * cases it cannot spell still passes every assertion in this file, because
+       * a case it never yields is a case it never checks — which is exactly how
+       * two dead anchors in `collation-contract` survived days of green runs.
+       */
+      expect(
+        anchors(source).length,
+        `${b}: ${declaredFileEntries(source)} entries declare a \`file:\` but the parser sees ` +
+          `${anchors(source).length}. The difference is invisible cases — anchors nothing checks. ` +
+          `Widen the gap in anchors() to cover however they are now written.`,
+      ).toBe(declaredFileEntries(source));
     }
+  });
+
+  /**
+   * THE BLIND SPOT, PINNED TO A FIXTURE RATHER THAN TO THE LIVE BATTERIES.
+   *
+   * The count assertion above is the live measurement, and it is the one that
+   * would catch a regression today. It is not enough on its own: it only holds
+   * while the batteries happen to contain a commented case, so the day somebody
+   * tidies the last comment out of `test/mutation/`, the old narrow gap would
+   * pass again and the guard would go quietly blind a second time.
+   *
+   * This fixture never changes and therefore never stops testing. The expected
+   * list is exact — order, pairing and count — so it fails on an over-match as
+   * loudly as on an under-match.
+   */
+  test("anchors() sees a case whose file: and find: are separated by comments", () => {
+    const fixture = [
+      "  {",
+      '    id: "PLAIN",',
+      '    what: "no comment at all — the shape that always parsed",',
+      "    file: SRC,",
+      '    find: "plain",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "LINE",',
+      "    file: SRC,",
+      "    // A line comment saying why this anchor moved.",
+      '    find: "after-line-comment",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "BLOCK",',
+      "    file: SRC,",
+      "    /*",
+      "     * A block comment — the shape RV15 and RV16 shipped with, and the one",
+      "     * that hid them from this guard for days.",
+      "     */",
+      '    find: "after-block-comment",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "MIXED",',
+      "    file: SRC,",
+      "",
+      "    // A line comment, a blank line, a block comment and a what: line,",
+      "    /* in no particular order, */",
+      '    what: "a what: that FOLLOWS file: instead of preceding it",',
+      "    // and one more line comment for good measure.",
+      '    find: "after-everything",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "DECOY",',
+      "    file: SRC,",
+      '    // Task 7.1 moved this: the old anchor was find: "line-decoy".',
+      '    /* An earlier draft used find: "block-decoy" here. */',
+      '    find: "the-real-one",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "NOFIND",',
+      "    file: SRC,",
+      '    note: "a malformed entry that declares no find: of its own",',
+      "  },",
+      "  {",
+      '    id: "AFTER",',
+      "    file: OTHER,",
+      '    find: "belongs-to-AFTER",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+    ].join("\n");
+
+    expect(anchors(fixture)).toEqual([
+      { file: "SRC", find: "plain" },
+      { file: "SRC", find: "after-line-comment" },
+      { file: "SRC", find: "after-block-comment" },
+      { file: "SRC", find: "after-everything" },
+      // A `find:` quoted INSIDE a comment is text, not a property: the line and
+      // block forms are consumed to their close, so neither decoy is reachable.
+      { file: "SRC", find: "the-real-one" },
+      /*
+       * `NOFIND` yields nothing AND does not borrow `AFTER`'s anchor. This is
+       * the over-match half: a gap loose enough to skip a comment is loose
+       * enough to skip a whole entry, and then one case's `file:` pairs with a
+       * later case's `find:` — a wrong pairing checks the wrong file, which is
+       * worse than the blind spot it was widened to fix.
+       */
+      { file: "OTHER", find: "belongs-to-AFTER" },
+    ]);
   });
 
   for (const battery of BATTERIES) {
