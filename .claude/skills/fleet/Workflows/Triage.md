@@ -1,8 +1,9 @@
 # Triage
 
-The fourth console, and the only one with no keyboard. It sweeps an environment
-on a clock and tells the operator when something is wrong — or, just as often,
-when it **cannot tell**, which is the distinction the whole design turns on.
+The fourth console, and the only one that runs without being asked. It sweeps an
+environment on a clock and tells the operator when something is wrong — or, just
+as often, when it **cannot tell**, which is the distinction the whole design turns
+on.
 
 Design: `Docs/SRD-TRIAGE-CONSOLE.md`. What is actually proved about it: `ISA.md`.
 
@@ -27,19 +28,36 @@ design property with a test behind it.
 ## Starting it
 
 ```bash
-cd ~/repos/cmux-fleet && ./scripts/triage            # four panes, then the actor
+cd ~/repos/cmux-fleet && ./scripts/triage            # two panes, then the actor
 cd ~/repos/cmux-fleet && ./scripts/triage --no-actor # panes only, actor by hand
 cd ~/repos/cmux-fleet && ./scripts/triage --actor-stop
 ```
 
-Four seats: `tri-1` collates, `obs-t1`/`obs-t2`/`obs-t3` observe one share of the
-environment's services each. All four run a **local** `gpt-oss-20b-MXFP4-Q8` — an
-owner decision, recorded as D1, and it is about whether an observer's context may
-leave the machine rather than about speed.
+**Two seats**: `tri-1` composes the sweep request and collates the reply; `obs-t1`
+observes. **There is no partition to spread.** `roles/triage.md` tells the
+collator so in those words — one request, naming every declared service, because
+there is nobody to share the work with — and a `tri-1` that starts reasoning about
+which observer a service belongs to has imported a distinction from the review
+console. The slices are sequential by construction, not concurrent.
+
+**This line said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one share each"*
+until 2026-09-11.** `obs-t2` and `obs-t3` appear in neither `fleet.yaml` nor
+`fleet.example.yaml`, and in no roster in the source. The sentence rotted in place
+while the code and the role prompt moved — which is the standing warning about
+every count in this file: verify it against `DEFAULT_TRIAGE_WORKERS`
+(`src/backends/cmux/operations-plan.ts`) or a `workers:` block before repeating
+it.
+
+Both seats run a **local** `gemma-4-26b-a4b-it-bf16`. The model has moved twice —
+`gpt-oss-20b-MXFP4-Q8` under the 2026-09-03 decision, then a hosted trial on
+`obs-t1` that was taken and withdrawn on the same day — but D1 has not moved: it
+is about whether an observer's context may leave the machine, not about speed.
+`fleet.yaml` is gitignored, so **read the model out of it rather than out of
+here.**
 
 **On a fresh create the actor is deliberately not started**, the same as review:
-the four `up`s have not finished when the script returns, so there is no run to
-point an actor at. Run `./scripts/triage` again once the panes are up. It is
+the `up`s have not finished when the script returns, so there is no run to point
+an actor at. Run `./scripts/triage` again once the panes are up. It is
 idempotent.
 
 ---
@@ -90,7 +108,7 @@ an incident whose reason is `coverage`, not `unhealthy`. A console that reported
 silence as health would be worse than no console.
 
 **It will not notify twice about one incident.** A service down all day produces
-one `opened` plus its reminders at the re-notify floor — not 288 messages. A
+one `opened` plus its reminders at the re-notify floor — not 96 messages. A
 service flapping produces one message about the flapping.
 
 **It will not report a recovery it did not observe.** `unhealthy → indeterminate`
@@ -118,10 +136,19 @@ down because nobody could answer.
   is already serving this console. A lock left by a **dead** pid is taken over
   automatically, so the remedy after a crash is to run it again — not to delete a
   file.
-- **The console recycles itself.** Every `recycle_after_sweeps` sweeps it takes all
-  four seats down and back up, to stop a day's transcript accumulating into one
-  session. It does this between sweeps, never during one, and a recycle
-  interrupted half way is *finished* by the next boundary rather than restarted.
+- **The console does NOT currently recycle itself** — `triage/console.yaml` sets
+  `recycle_after_sweeps: 0`, and `0` disables it. The mechanism is real, and this
+  is what it does when enabled: every N sweeps it takes both seats down and back
+  up, to stop a day's transcript accumulating into one session, between sweeps and
+  never during one, and a recycle interrupted half way is *finished* by the next
+  boundary rather than restarted. It is off because the recycle is a **headless**
+  `up`, which creates no pane and so cannot bring a `tui` seat back — measured
+  2026-09-07, the console died at 15:57 that way. **`tui` seats and self-recycle
+  are mutually exclusive: if `recycle_after_sweeps` goes back above `0`, the seats
+  go back to `rpc` in the same edit.** Until then the job it did is done by hand
+  with `./scripts/triage --recreate`, and the cost of not doing it is real — the
+  collator keeps its session between dispatches, so a model holding several
+  previous sweeps answers from what it already has.
 - **A recycle moves the collator into a new run, and that is not the console
   going away.** The abandonment watch follows a run *this actor minted*; a `tri-1`
   that appears in a run somebody else minted still means the console it was
@@ -134,7 +161,7 @@ down because nobody could answer.
 ## Standing one up, from the first live run (2026-09-07)
 
 **`./scripts/triage` twice is not a workaround, it is the procedure.** The first
-call builds four panes and deliberately starts no actor; the four `up`s are still
+call builds both panes and deliberately starts no actor; the two `up`s are still
 running when it returns. The second call starts the actor. If the first says
 *"workspace … is already in place — selected it, changed nothing"* while
 `status --all` shows no `tri-1`, the workspace is a stale shell from an earlier
