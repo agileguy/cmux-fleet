@@ -262,6 +262,27 @@ the shared 65536 ceiling are all gone from the document, and RV2, RV24, RV27 and
 RV28 went with them. They are recorded below rather than deleted quietly, because
 a row that vanishes and a row that was never written read the same.
 
+**RE-ANCHORED AGAIN 2026-09-11, and RV3 has now rotted to 0x twice.** `a1ae886`
+rewrote the collator's split paragraph to close the contradiction recorded under
+this table, and RV3 quoted all three of that paragraph's wrapped lines verbatim —
+including where they wrap, and including the one sentence that commit had to
+change. No wording that fixes the contradiction leaves such an anchor matching, so
+`mutation-anchors.test.ts` was red for this battery from `a1ae886` until
+`16751a6`. Both rots have the same cause, and the battery states the rule against
+it in the comment block standing directly over the case that broke it: **anchor
+short fragments chosen to survive a re-wrap, never a whole wrapped line.** The
+replacement was chosen by
+MEASUREMENT rather than by reading — four fragments occur exactly 1x in the
+rewritten paragraph, and three of them are wrong: the opening clause's honest
+weakening (mandatory to optional) leaves all four suites GREEN at 195 pass;
+`Tell each reviewer to file its long review` reddens only by destroying the
+marker `sliceFrom` scopes BOTH collator probes with, taking RV26's guard down as
+collateral while the split it claims was dropped survives verbatim; and the
+`notes`-summary fragment reddens on the notes-is-a-FIELD-not-a-PATH contract,
+which is a different claim. **A case whose red is a property of what its
+`replace:` happens to delete, rather than of the thing its `what:` names, is not
+measuring the document.**
+
 **The reason the split works is not the obvious one, and RV4 pins the correction.**
 A file does NOT rescue a lens that did not report: `relay.ts` sets
 `succeeded: harvested.verdict === "success"`, and a lens that never called
@@ -276,13 +297,13 @@ envelopes.
 | # | Mutation | Catches |
 |---|---|---|
 | RV1 | The review's destination is unnamed — "file it wherever suits you" | The reviewer has nothing to write to, and the artifact half of the split evaporates while the summary half still reads as a complete instruction. |
-| RV3 | The collator's copy of the split instruction is dropped | The other end of the same guard. The collator repeats this in every brief, so its copy alone can re-create the defect on a fleet whose reviewer role is already fixed. |
+| RV3 | The collator's copy of the split stops naming the ROUTE that files the review | The other end of the same guard, narrowed to the half that can still go wrong. *"by passing it as the one `report` entry of its `submit_report` call"* becomes *"by whatever route it likes"* — a destination with no route — and it reddens on *"the collator does not name the route that declares the review"*, the probe named for this case's own subject. The ROUTE is the half worth repeating because a review sent out by any other route has nothing appending anything for it; the destination path is stated TWICE in the document, so a case anchored there would have been unfalsifiable, while `` `report` entry `` occurs once. The collator repeats this in every brief, so its copy alone can re-create the defect on a fleet whose reviewer role is already fixed. |
 | RV4 | The file is promised to rescue a lens that did not report | **The plausible lie**, and the one this change nearly shipped. *"It does not rescue the lens"* becomes *"It also rescues the lens"*: it reads as reassurance, it is false, and believing it puts the long review back in the envelope. |
 | RV21 | The envelope may hold the whole review again | The pre-fix contract restored in one clause. |
 | RV22 | The declaration is handed BACK to the model, which no longer writes one | **RE-POINTED FROM THE CLAIM TO THE ROUTE, task 8.1.** This used to mutate *"And DECLARE the file in the envelope's `artifacts` array"*, an instruction the reviewer no longer carries out — `composeEnvelope` appends every `report` file itself. What remains mutable is the sentence that says so, and a document that instead told the reviewer to declare by hand sends it back to writing a claim `artifactMissingProblem` refuses, or out by a route with nothing appending anything. |
 | RV23 | The stated per-file cap drifts from `MAX_REPLY_ARTIFACT_BYTES` | **SURVIVED ITS FIRST RUN.** The probe asserted `toContain("64 KiB")` over the whole section, and the section says the number twice — once as the cap, once as "64 KiB of prose is roughly ten thousand words". Mutating the cap left the second occurrence satisfying the match. The number is now pinned inside the clause that states it. |
 | RV23b | The stated per-reply cap drifts from `MAX_REPLY_INLINE_BYTES` | The other number, because a fix that reached only one of the two would look identical from here. |
-| RV25 | The collator's brief stops requiring the declaration | `roles/collator.md` still tells the collator to tell each reviewer to declare the file by hand. The row is live and its anchor matches — but see the note under this table, because the instruction it pins is the one RV22 now says the tool performs. |
+| RV25 | The collator's brief stops FORBIDDING the artifact declaration | **RELABELLED 2026-09-11.** Until `a1ae886` the brief ORDERED the hand-declaration and this mutation removed the order. That commit INVERTED the sentence — it now reads **"Do NOT tell it to declare that file in its envelope's `artifacts` array"** — so the identical `find:` moved inside the prohibition and the mutation now removes a PROHIBITION, reddening on *"the collator still orders the hand-declaration `roles/reviewer.md` tells reviewers not to make"*. Same red, opposite meaning. The anchor never stopped matching and the case never stopped reddening; only the label was wrong, which is the harder half to notice because **nothing goes red for a label.** |
 | RV26 | The collator's copy promises the file survives a broken envelope | RV4's other end. |
 | RV5 | The design note stops naming a recommendation | "Here are two options" leaves the decision to whoever is in a hurry. |
 | RV6 | The design note drops the recommendation's cost | Fix A is only correct WITH a byte cap; a recommendation with no cost is one nobody can weigh. |
@@ -314,14 +335,55 @@ contract is a worked `submit_report` ARGUMENT checked against
 `SUBMIT_REPORT_PARAMETERS` — an addition rather than a deletion, and one nobody
 has made.
 
-**RV22 and RV25 now pull against each other, and the battery cannot tell you
-which end is wrong.** `roles/reviewer.md` says `submit_report` declares the
-artifact for you; `roles/collator.md` still tells the collator to instruct each
-reviewer *"to declare that file in its envelope's `artifacts` array"* — the
-sentence task 8.1 deleted from the reviewer's side as redundant. Both anchors
-match, so both rows redden on mutation and neither reddens on the disagreement.
-Two prompts saying the same thing was this section's whole mitigation; two prompts
-saying different things is the failure it was built to prevent, and it is live.
+**RV22 AND RV25 PULLED AGAINST EACH OTHER, AND THE BATTERY COULD NOT TELL YOU
+WHICH END WAS WRONG. `a1ae886` CLOSED IT.** The record is kept rather than
+deleted, because this one shipped and ran. `roles/reviewer.md` said
+`submit_report` declares the artifact for you, while `roles/collator.md` went on
+telling the collator to instruct each reviewer *"to declare that file in its
+envelope's `artifacts` array"* — the sentence task 8.1 had deleted from the
+reviewer's side as redundant. Both anchors matched, so both rows reddened on
+mutation and **neither reddened on the disagreement**: each probe only ever read
+its own end, one requiring the reviewer to name the ROUTE and the other
+separately requiring the collator to require the DECLARATION. Two prompts saying
+the same thing was this section's whole mitigation; two prompts saying different
+things is the failure it was built to prevent, and the console ran a full round
+that way — **both ends green** — writing briefs that ordered reviewers to do what
+their own prompt tells them not to do.
+
+**How it was closed.** `a1ae886` inverted the collator's sentence to forbid the
+declaration in as many words, and INVERTED the coupled probe rather than dropping
+it. Dropping it would leave the collator free to re-acquire the order with nothing
+watching; `.not.toContain`-ing one phrasing is escaped by every rewording. The
+probe now asserts the prohibition POSITIVELY, so it reddens both when the sentence
+goes and when the "Do NOT" is quietly dropped from in front of it. The document
+also states what obeying the old order actually cost, MEASURED against
+`submitReport` rather than inferred: a redundant `files/review.md` claim is
+ACCEPTED — `artifactMissingProblem` exempts the one path phase 2 is about to
+write — and `composeEnvelope` then appends its own claim beside the model's, so
+the envelope declares the file TWICE; the bare `review.md` the model just passed
+to `report` is REFUSED, because report files land under `files/` and the claim
+resolves to a path that does not exist.
+
+**THE LESSON OUTLIVES THE FIX, AND THIS BATTERY HAS NOW PAID FOR IT TWICE.** RV25
+is RV22's collator-side twin, and that pairing is the whole point of both: two
+role documents that must say the same thing, with one case per end. Task 8.1
+re-pointed RV22 alone and never reached RV25 — that is what let the contradiction
+run. The stale RV25 LABEL corrected above is the identical miss wearing its other
+face: a document changed, its twin's case not re-read, and an anchor that kept
+matching straight through an inversion that made its label a lie. **When one end
+of a pinned pair is re-pointed, the other end's case is part of the change —
+re-read its `find:` AND its `what:`.** A dead anchor is caught for free by
+`mutation-anchors.test.ts`; a live anchor under a false label is caught by nobody.
+
+**A NOTED IMPRECISION IN RV25'S `replace:`, DELIBERATELY LEFT ALONE.** Substituted
+into the inverted sentence, *"and nothing more"* now yields **"Do NOT tell it and
+nothing more."** — prose no author would write, where before the inversion it read
+cleanly. The case is NOT broken: the anchor matches 1x, it reddens, and it reddens
+on the prohibition probe, which is the right reason. But the plausible regression
+here is *"Do NOT"* → *"Also"*, not a sentence that reads like a truncation, and a
+mutation nobody would ever write is a weaker test of a probe than one somebody
+might. Re-anchoring a working case was out of scope for the reconcile that found
+this; it is written down so the next person does not have to re-derive it.
 
 ### The denominator, the binding, and the survivors a review found
 
