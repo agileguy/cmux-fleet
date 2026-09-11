@@ -1,4 +1,4 @@
-import { MAX_TEXT, RESULT_ENVELOPE_NAME, ResultEnvelopeSchema } from "../../src/contracts.ts";
+import { RESULT_ENVELOPE_NAME } from "../../src/contracts.ts";
 /**
  * `roles/reviewer.md` says only things that are true, and the one instruction
  * holding the review console together is pinned at BOTH ends.
@@ -58,7 +58,6 @@ import {
   MAX_REPLY_INLINE_BYTES,
 } from "../../src/run/relay.ts";
 import { REPLIES_MOUNT } from "../../src/run/replies.ts";
-import { childTaskId } from "../../src/run/task-ids.ts";
 import {
   ROOT,
   exampleConfig,
@@ -122,6 +121,24 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
  * The file's survival is real but its beneficiary is a PERSON — the outbox is
  * inventoried whether or not an envelope parsed, which is the only reason the
  * first review above was recoverable at all.
+ *
+ * ## WHAT PHASE C TOOK OUT OF THIS BLOCK, and what it deliberately left
+ *
+ * SRD-WORKER-DISPATCH-EXTENSION task 8.1, 2026-09-10. Both losses above happened
+ * to a reviewer HAND-COMPOSING `result.json` with the `write` tool. It holds no
+ * `write`; `submit_report` serialises the envelope, writes it tmp-then-rename,
+ * and reads `schema`, `task_id`, `epoch` and `worker` off host state. A
+ * mis-escaped regex and a half-closed object are no longer states this role can
+ * reach, so the MECHANICS those two anecdotes taught came out of the role file
+ * along with the worked envelope, the `result.json` path, the declare-your-own-
+ * artifact instruction and the 65536-byte `notes` ceiling.
+ *
+ * **The history stays here** — this is the record of why the split exists, and a
+ * test file is where a superseded measurement belongs. What stays in the ROLE
+ * file is the judgement the losses bought: long review in a file, short summary
+ * in `notes`, worst first, and the correction that the file does not rescue a
+ * lens that did not report. The probes below are the ones that still pin a
+ * property the code holds.
  */
 describe("the review is a file, notes is a summary, and both ends say so", () => {
   test("the reviewer is told to file the long review AND to keep notes short", () => {
@@ -141,15 +158,36 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
   });
 
   /**
-   * The artifact has to be CLAIMED, not merely written. `reconcile.ts` grades an
-   * empty `artifacts` array against the files actually in the outbox — "the
-   * worker wrote an envelope and said it produced nothing, so every file in the
-   * outbox contradicts it" — so a review filed and not declared is a discrepancy
-   * on the reviewer's own record.
+   * RE-AIMED FROM THE CLAIM TO THE ROUTE (Phase C, task 8.1), because the claim
+   * stopped being the reviewer's to make.
+   *
+   * This used to require the words *"`artifacts` array"*: the artifact had to be
+   * CLAIMED and not merely written, because `reconcile.ts` grades an empty
+   * `artifacts` array against the files actually in the outbox and a review
+   * filed and not declared is a discrepancy on the reviewer's own record. The
+   * defect is real — `rev-lang-1` declared `files/review.md` and wrote no file,
+   * and nothing refused anything.
+   *
+   * `composeEnvelope` in `report-tools.ts` now appends every `report` file to
+   * `artifacts` itself, so a reviewer that delivers the review through `report`
+   * cannot fail to declare it, and one that hand-composes an `artifacts` entry
+   * for a file it did not write is refused by `artifactMissingProblem` before
+   * the envelope is opened. Instructing the model to declare the file is
+   * therefore telling it to do the tool's job.
+   *
+   * What is still the reviewer's to get wrong is the ROUTE: only `report` gets
+   * the declaration for free, so the probe pins the parameter and the sentence
+   * saying the tool declares it. A document that stopped naming `report` would
+   * send the review out by a route with nothing appending anything.
    */
-  test("the reviewer is told to DECLARE the review file in the envelope", () => {
+  test("the review is routed through `report`, which is what declares it", () => {
     const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(block).toContain("`artifacts` array");
+    expect(block, "the block never names the parameter that carries the review").toContain(
+      "`report` file",
+    );
+    expect(block, "the block does not say the tool makes the declaration").toContain(
+      "declares it for you",
+    );
   });
 
   /**
@@ -172,6 +210,28 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * where it is load-bearing — inside the clause that tells the reviewer what
    * the limit IS.
    */
+  /**
+   * THE `notes` CEILING CAME OUT (Phase C, task 8.1) and the two relay caps did
+   * not, and the difference is the whole reason this probe is worth keeping.
+   *
+   * The document used to state a third number — *"`notes` is bounded too, at the
+   * same 65536 bytes"* — and an asymmetry built on it: an over-cap artifact
+   * arrives truncated and is named, while an over-cap `notes` fails
+   * `ResultEnvelopeSchema` and takes the status, the summary, the blockers and
+   * the review with it. Both halves are now false for this role.
+   * `SUBMIT_REPORT_PARAMETERS` caps `notes` at 20000 and the refusal is a typebox
+   * validation error thrown in front of the model with its budget intact, which
+   * Q4 measured every model recovering from on the first retry. So the ceiling
+   * is not 65536, and passing it costs a retry rather than a lens.
+   *
+   * The two relay caps are the opposite case: `MAX_REPLY_ARTIFACT_BYTES` and
+   * `MAX_REPLY_INLINE_BYTES` are applied host-side when the artifact is copied
+   * into the collator's reply, nothing in front of the model enforces them —
+   * `report.content` deliberately carries no `maxLength` — and a review over
+   * them still arrives cut off. They stay in the document and stay derived from
+   * the code, so raising one in `relay.ts` cannot leave the prose confidently
+   * wrong.
+   */
   test("the caps the document states are the caps the code actually enforces", () => {
     const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
     expect(block, "the per-file cap is not the one relay.ts applies").toContain(
@@ -180,31 +240,8 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
     expect(block, "the per-reply cap is not the one relay.ts applies").toContain(
       `and ${MAX_REPLY_INLINE_BYTES / 1024} KiB across all of them`,
     );
-    expect(block, "the notes cap is not the one the envelope schema applies").toContain(
-      `at the same ${MAX_TEXT} bytes`,
-    );
     // The consequence, not just the number.
     expect(block).toContain("cut off");
-  });
-
-  /**
-   * THE ASYMMETRY, which is the whole argument and the one sentence a model
-   * under budget pressure would drop first.
-   *
-   * `MAX_TEXT` and `MAX_REPLY_ARTIFACT_BYTES` are the SAME 65536, so a document
-   * that stated both caps and stopped there would have given the reviewer no
-   * reason to prefer either channel. What separates them is what happens at the
-   * ceiling: an over-cap artifact arrives truncated and is NAMED in the
-   * collation brief, while an over-cap `notes` fails `ResultEnvelopeSchema` and
-   * takes the status, the summary, the blockers and the review with it.
-   */
-  test("the document states the ASYMMETRY, not merely the two caps", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(block, "the document does not say the two caps fail differently").toContain(
-      "Same ceiling, opposite failure",
-    );
-    // The premise that makes the asymmetry the point rather than a curiosity.
-    expect(MAX_TEXT).toBe(MAX_REPLY_ARTIFACT_BYTES);
   });
 
   /**
@@ -217,10 +254,17 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * Deleting that leaves the reviewer believing the artifact is a safety net it
    * is not, which is the more dangerous of the two errors.
    */
-  test("the document says plainly that the file does NOT rescue a broken envelope", () => {
+  test("the document says plainly that the file does NOT rescue a lens that did not report", () => {
     const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(block, "the document does not say a broken envelope loses the lens").toContain(
-      "It does\nnot rescue the lens",
+    /*
+     * MATCHED INSIDE ONE LINE. This pinned `"It does\nnot rescue the lens"` —
+     * the phrase as it happened to wrap — so a re-wrap that changed no word
+     * would have reddened it, which is the shape of probe that gets deleted by
+     * the first person it inconveniences. The same correction the
+     * `submit_report` bound probe below carries, for the same reason.
+     */
+    expect(block, "the document does not say a lens that did not report is lost").toContain(
+      "It does not rescue the lens",
     );
     expect(block, "the document does not name the mechanism").toContain(
       "no reply published for it",
@@ -228,37 +272,32 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
   });
 
   /**
-   * THE WORKED EXAMPLE IS PARSED, not eyeballed — `collator-role.test.ts`'s
-   * discipline applied to the other end. An example a model copies literally is
-   * the most load-bearing prose in the file, and one the real schema refuses
-   * teaches exactly the shape the harvester throws away.
+   * THE WORKED ENVELOPE IS GONE, AND SO IS THE PROBE THAT PARSED IT (Phase C,
+   * task 8.1) — recorded here rather than silently dropped, because a deleted
+   * probe is lost coverage whatever the reason for it.
+   *
+   * The document carried a `json` block spelling `pifleet.result/v1`, `task_id`,
+   * `epoch`, `worker`, `status`, `summary`, `notes` and `artifacts`, and a probe
+   * substituted the two id placeholders and parsed it through
+   * `ResultEnvelopeSchema`. The discipline was right: an example a model copies
+   * literally is the most load-bearing prose in a role file, and one the real
+   * schema refuses teaches exactly the shape the harvester throws away.
+   *
+   * It had to go because a model copying it now gets a refusal.
+   * `SUBMIT_REPORT_PARAMETERS` is `additionalProperties: false` and the first
+   * four of those fields are ABSENT from it by design — they are read from
+   * `/policy/task` and `ctx`, and `SUBMIT_REPORT_DESCRIPTION` spends a sentence
+   * telling the model not to pass them precisely because the role documents
+   * still instructed it to. The example was that instruction.
+   *
+   * **What is not replaced is the class of coverage.** Nothing now parses a
+   * worked example in this file against the shape the tool accepts, because
+   * there is no worked example. The honest replacement is a `submit_report`
+   * ARGUMENT example validated against `SUBMIT_REPORT_PARAMETERS`, which is
+   * exported and importable from `test/` for exactly this kind of use — that is
+   * a new example rather than a deletion, so it is not task 8.1's, and it is
+   * filed here as the gap it is.
    */
-  test("the example envelope validates, and declares the review as an artifact", () => {
-    const blocks = [...REVIEWER.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]!);
-    expect(blocks.length, "the document has no worked envelope").toBeGreaterThanOrEqual(1);
-    /*
-     * THE TWO ID PLACEHOLDERS ARE SUBSTITUTED, and only those two.
-     *
-     * `task_id` and `worker` are held to `SESSION_ID_RE`, which no angle-bracket
-     * placeholder can satisfy — so validating the block verbatim would fail on
-     * the document's own teaching device rather than on anything wrong with it.
-     * The substitutes are the REAL ids this seat uses, not filler, so the example
-     * is checked against values the fleet would actually produce. Everything else
-     * — schema tag, status, and the artifact claim this probe exists for — is
-     * validated exactly as written.
-     */
-    const filled = blocks[0]!
-      .replace("<your task id>", childTaskId("T", "lang"))
-      .replace("<your worker id>", "rev-lang-1");
-    const doc = JSON.parse(filled);
-    const r = ResultEnvelopeSchema.safeParse(doc);
-    expect(r.error?.message ?? "accepted").toBe("accepted");
-    const parsed = ResultEnvelopeSchema.parse(doc);
-    expect(
-      parsed.artifacts.map((a) => a.path),
-      "the worked envelope does not claim the review file",
-    ).toContain("/outbox/<task-id>/files/review.md");
-  });
 
   /**
    * The other end. Two prompts is the whole mitigation, so a probe that asserted
@@ -539,10 +578,10 @@ describe("the reviewer's grant is what the document says it is", () => {
    * ## Why the SENTENCE came forward and §8.1's mechanics did not
    *
    * Only the sentences stating WHAT THE GRANT IS move with the grant, because
-   * those are the ones a model acts on. `roles/reviewer.md:45-144` — the four
-   * envelope sections `submit_report` makes redundant — is task 8.1's and stays
-   * deferred; deleting it is a size decision that costs nothing when it is late.
-   * A false statement of the grant is not that kind of debt.
+   * those are the ones a model acts on. The four envelope sections
+   * `submit_report` makes redundant were task 8.1's and stayed deferred until
+   * 2026-09-10; deleting them is a size decision that costs nothing when it is
+   * late. A false statement of the grant is not that kind of debt.
    *
    * The rollback property survives, kept honestly rather than by leaving a
    * falsehood in place: the document now instructs a reader restoring `write` to

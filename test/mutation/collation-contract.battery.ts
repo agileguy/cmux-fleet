@@ -519,24 +519,26 @@ const MUTATIONS: M[] = [
   // already rotted to 0x against a partial fix and was reported on every run.
   //
   // Re-anchored to the INSTRUCTIONS rather than to their headings. A heading is
-  // reworded by anyone tightening prose; a destination path, a declaration
-  // requirement and the sentence stating why the two channels fail differently
-  // are things a reviewer executes, and changing any of them changes what the
-  // console does.
+  // reworded by anyone tightening prose; a destination path and a routing
+  // instruction are things a reviewer executes, and changing either of them
+  // changes what the console does.
+  //
+  // RE-ANCHORED AGAIN 2026-09-10 (SRD-WORKER-DISPATCH-EXTENSION task 8.1). The
+  // role file no longer tells the reviewer to write `result.json` by hand, so
+  // the anchors move onto the sentences that survived the Phase C deletion —
+  // shorter fragments, chosen to survive a re-wrap rather than to quote a whole
+  // wrapped line. RV2 and RV24 are GONE with the `notes` ceiling and the
+  // asymmetry built on it: `SUBMIT_REPORT_PARAMETERS` caps `notes` at 20000 and
+  // throws in front of the model, so the two channels no longer share a ceiling
+  // and the over-cap `notes` no longer destroys an envelope. RV27 and RV28 are
+  // GONE with the worked `json` envelope, which a model copying it would now
+  // have refused under `additionalProperties: false`.
   {
     id: "RV1",
     what: "REVIEWER: the review's destination is unnamed — 'file it somewhere'",
     file: REVIEWER,
-    find: "1. **`/outbox/<task-id>/files/review.md` — the whole review.**",
-    replace: "1. **The whole review, filed wherever suits you.**",
-    expect: "red",
-  },
-  {
-    id: "RV2",
-    what: "REVIEWER: the two caps stop failing differently — the reason for the split",
-    file: REVIEWER,
-    find: "**Same ceiling, opposite failure:**",
-    replace: "**Both are capped:**",
+    find: "It lands at `/outbox/<task-id>/files/review.md`.",
+    replace: "File it wherever suits you.",
     expect: "red",
   },
   {
@@ -558,12 +560,17 @@ const MUTATIONS: M[] = [
    * safety net and go back to writing long envelopes, which is the defect this
    * whole change removes — arriving by way of a sentence that reads like
    * reassurance.
+   *
+   * The lie survives Phase C in a narrower form: the model can no longer produce
+   * an unparseable envelope, but a lens that never called `submit_report`, or
+   * whose task settled anything other than `success`, still has no reply
+   * published — and the filed artifact still does not change that.
    */
   {
     id: "RV4",
-    what: "REVIEWER: the file is promised to rescue a broken envelope — the plausible lie",
+    what: "REVIEWER: the file is promised to rescue a lens that did not report — the plausible lie",
     file: REVIEWER,
-    find: "**It does\nnot rescue the lens.**",
+    find: "**It does not rescue the lens.**",
     replace: "**It also rescues the lens.**",
     expect: "red",
   },
@@ -679,20 +686,36 @@ const MUTATIONS: M[] = [
     replace: "with the whole review in `notes`: one line",
     expect: "red",
   },
+  /**
+   * RE-POINTED FROM THE CLAIM TO THE ROUTE, 2026-09-10 (task 8.1).
+   *
+   * This mutated *"And DECLARE the file in the envelope's `artifacts` array"*,
+   * an instruction the reviewer no longer carries out: `composeEnvelope` appends
+   * every `report` file to `artifacts` itself. What remains mutable is the
+   * sentence that says so — a document that instead told the reviewer to declare
+   * the file by hand sends it back to writing a claim `artifactMissingProblem`
+   * refuses, or out by a route with nothing appending anything.
+   */
   {
     id: "RV22",
-    what: "SPLIT: the review file need not be declared, so the harvest contradicts it",
+    what: "SPLIT: the declaration is handed back to the model, which no longer writes one",
     file: REVIEWER,
-    find: "**And DECLARE the file in the envelope's `artifacts` array**",
-    replace: "**The file needs no further mention**",
+    find: "`submit_report` declares it for you",
+    replace: "declare it yourself in the envelope's `artifacts` array",
     expect: "red",
   },
   /**
    * THE CAPS DRIFT FROM THE CODE. The document's numbers are asserted against
-   * `MAX_REPLY_ARTIFACT_BYTES`, `MAX_REPLY_INLINE_BYTES` and `MAX_TEXT` rather
-   * than as string literals, so a doc that states a cap the fleet does not
-   * enforce reddens. The previous probe hard-coded "64 KiB", which pinned the
-   * prose to itself and would have stayed green through exactly this edit.
+   * `MAX_REPLY_ARTIFACT_BYTES` and `MAX_REPLY_INLINE_BYTES` rather than as
+   * string literals, so a doc that states a cap the fleet does not enforce
+   * reddens. The previous probe hard-coded "64 KiB", which pinned the prose to
+   * itself and would have stayed green through exactly this edit.
+   *
+   * `MAX_TEXT` was the third number here and came out with RV24 on 2026-09-10:
+   * the binding ceiling on a reviewer's `notes` is `SUBMIT_REPORT_PARAMETERS`'
+   * 20000, checked in front of the model, not the envelope schema's 65536
+   * checked on the host. These two are still the host's, still applied where the
+   * model cannot see them, and still the only numbers in the section.
    */
   /**
    * RV23 SURVIVED ON ITS FIRST RUN, and the probe was the defect.
@@ -724,14 +747,6 @@ const MUTATIONS: M[] = [
     expect: "red",
   },
   {
-    id: "RV24",
-    what: "CAPS: the `notes` ceiling is dropped, so the two channels look unbounded",
-    file: REVIEWER,
-    find: "at the same 65536 bytes",
-    replace: "at some size or other",
-    expect: "red",
-  },
-  {
     id: "RV25",
     what: "SPLIT: the collator's brief stops requiring the artifact declaration",
     file: ROLE,
@@ -748,27 +763,23 @@ const MUTATIONS: M[] = [
     expect: "red",
   },
   /**
-   * THE WORKED ENVELOPE, which is the part of a prompt a model copies most
-   * literally. An example that the real schema refuses teaches the exact shape
-   * the harvester throws away — and this one is now parsed against
-   * `ResultEnvelopeSchema` rather than eyeballed.
+   * RV27 AND RV28 ARE GONE, 2026-09-10 (task 8.1), and this is the record of
+   * what went with them.
+   *
+   * They mutated the worked `json` envelope in `roles/reviewer.md` — the part of
+   * a prompt a model copies most literally — and `reviewer-role.test.ts` parsed
+   * that block through `ResultEnvelopeSchema` rather than eyeballing it. Phase C
+   * deleted the block: a reviewer holds no `write`, `submit_report` composes the
+   * envelope, and `schema`/`task_id`/`epoch`/`worker` are ABSENT from
+   * `SUBMIT_REPORT_PARAMETERS` under `additionalProperties: false`, so a model
+   * copying the example earns a validation error.
+   *
+   * **The coverage is not replaced.** No probe in this battery now mutates a
+   * worked example in that file, because it has none. The equivalent for the new
+   * contract is an example `submit_report` ARGUMENT checked against
+   * `SUBMIT_REPORT_PARAMETERS`; writing one is an addition rather than a
+   * deletion and was outside task 8.1.
    */
-  {
-    id: "RV27",
-    what: "EXAMPLE: the worked envelope stops claiming the review file",
-    file: REVIEWER,
-    find: '  "artifacts": [{"kind": "file", "path": "/outbox/<task-id>/files/review.md"}],\n',
-    replace: "",
-    expect: "red",
-  },
-  {
-    id: "RV28",
-    what: "EXAMPLE: the worked envelope carries a wire tag the schema refuses",
-    file: REVIEWER,
-    find: '  "schema": "pifleet.result/v1",',
-    replace: '  "schema": "pifleet.review/v1",',
-    expect: "red",
-  },
   // ── Turn one ENDS: the polling defect, measured on run 5. ────────────────
   /**
    * The collator wrote both files correctly and then spent its last twelve tool
