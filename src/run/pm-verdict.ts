@@ -228,7 +228,7 @@ function computeMissingLenses(coverage: JournalCoverage): MissingLens[] {
 
 /**
  * One line per missing lens, in the two shapes §9.4 requires — and only the
- * second names a path. `roles/collator.md:237-247` calls conflating the two
+ * second names a path. `roles/collator.md` calls conflating the two
  * "the specific falsehood this instruction exists to stop"; this is the
  * loop's own report making the same distinction, independently of the brief
  * `relay.ts` already writes to the collator before collation happens.

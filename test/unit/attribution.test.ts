@@ -3,7 +3,11 @@
  * generated document this system produces may carry an AI or assistant
  * attribution line.
  *
- * `roles/engineer.md:28` and `roles/collator.md:419` already INSTRUCT this.
+ * `roles/engineer.md` ("Never put \"AI\", \"LLM\", \"generated with\"") and
+ * `roles/collator.md` ("**Never add AI or Claude attribution**") already INSTRUCT this.
+ * Both are pinned by phrase rather than by line: this citation carried
+ * `roles/collator.md:419` until 2026-09-11, by which time the instruction had moved to
+ * :468 and nothing had noticed, because nothing in this repository validates a line range.
  * That is not a mechanism: a brief that says "don't" is exactly as effective
  * as a model that decides to anyway, and nothing short of grading the actual
  * output catches the difference. This file is the grading.
