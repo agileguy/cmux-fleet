@@ -1734,9 +1734,9 @@ than after, and §6.9 is a **consumer of its openness, not a closure of it** —
 | **3 — Layers 2 and 4** | `terminate: true`; both session entries | 2 | Fixtures assert both entry shapes; `tool_calls` is right |
 | **4 — Layer 3** | The bounded nag | 2, Q1 | One nag per epoch, constant text |
 | **5 — `/policy/replies` and `get_replies`** | The new contract, its writer, the tool | 2 | The declared-set criterion and the publish/declare set-equality criterion pass |
-| **6 — Phase A rollout** | Every role gains `submit_report`; nothing removed | 2, 3 | One review console cycle and one triage sweep deliver through the tool with `write` still present |
-| **7 — Phase B narrowing** | `write` removed, `reviewer` → `collator` → `triage` | 6, Q2, Q8 | Each role completes one full console cycle before the next is narrowed |
-| **8 — Phase C prose** | `roles/*.md` and the skill shrink | 7 | §8's table, one file per commit |
+| **6 — Phase A rollout** ⚠️ **6.1 and 6.2 DONE 2026-09-08; 6.3 NOT MET** | Every role gains `submit_report`; nothing removed | 2, 3 | One review console cycle and one triage sweep deliver through the tool with `write` still present. **ISC-1104 stands at `[~]`, and the re-run settles the second half and then some — all four review seats `success`, none timed out, 3 of 3 lenses collated against 1 of 3 before. The FIRST half is what cannot close: *"at least one `pifleet.submit/v1` per seat"* requires every model to choose the tool, and Q2's whole finding is that it need not while both routes are open — `rev-arch-1` chose `write` in both runs, which Phase A explicitly permits. That is a defect in the acceptance clause, not in the system, and it is unmeetable until Phase 7 removes the other route for that seat.** |
+| **7 — Phase B narrowing** ⚠️ **7.1-7.4 DONE 2026-09-10/11; 7.5 BLOCKED** | `write` removed, `reviewer` → `collator` → `triage` | 6, Q2, Q8 | Each role completes one full console cycle before the next is narrowed. **Accepted: 7.2 `collator` on ISC-1159 (run `2026-09-11T04-04-58Z-92e5`, task `T-rv-720`), 7.3 `triage` on ISC-1154 (sweeps 79-81, consecutive), 7.4's `HOLDS_A_WRITER` now EMPTY for `reviewer` and `triage`. 7.5 `observer` is BLOCKED and NOT on the size limit: §11's census found exactly ONE harvested `observer` envelope, which is an anecdote rather than a distribution, so its `write` stays until it has its own sample. That blockage is why task 8.4 found `observer`'s write-era prose still TRUE and deleted one sentence rather than the two ranges §13 named.** |
+| **8 — Phase C prose** ✅ **COMPLETE 2026-09-11** | `roles/*.md` and the skill shrink | 7 | §8's table, one file per commit. **8.1 `b94c58b`, 8.2 `b24983e`, 8.3 `fe0735e`, 8.4 `8d58068`, 8.6 `099f9bd`; 8.5 superseded by `f06615f`. Two of the six needed no code: 8.5 was already delivered as ROUTING rather than deletion and its deletion now reddens `worker-docs-currency.test.ts`'s `HAND_ORDERS` pin, and 8.6's acceptance clause named two files the sentence was never in, so the invariant it reached for already held and was pinned instead. 8.4 deleted ONE sentence rather than the two ranges this list named, because 7.5 is still BLOCKED and `observer` therefore still holds `write`.** |
 
 **Serialization:** 1 → 2 → 6 → 7 → 8. **Parallel after 2:** phases 3, 4 and 5 touch disjoint seams —
 two session entries, one nag, one host contract. Phase 0 is parallel with 1 and 2 and gates only 4
@@ -2053,7 +2053,8 @@ where `get_replies` first meets a model.
   shapes rather than role quirks.
 
   **DONE 2026-09-10 for the tracked half** (ISC-1156, ISC-1157, ISC-1158). The live cycle is
-  ISC-1159 and is graded `[~]` until it runs. §13 task 7.4's `HOLDS_A_WRITER` criterion is
+  ISC-1159, and it has since run — **`[x]` as of 2026-09-11 on run `2026-09-11T04-04-58Z-92e5`,
+  task `T-rv-720`, with `col-1` holding no `write`**. §13 task 7.4's `HOLDS_A_WRITER` criterion is
   unaffected: with no `collator` in the example there is no resolved grant for it to read.
 - **7.3** `triage`: remove `write`. **Gated on Q8, and the gate is now CLEARED** — §11's census
   measured 119 harvested envelopes from this console at a maximum of 1 472 bytes, 2.8× inside the
@@ -2142,7 +2143,12 @@ where `get_replies` first meets a model.
   smaller reason and must be judged against `roles/observer.md:19-22`'s recorded misreading, not
   against a claim of prevention.*
 
-### Phase 8 — Phase C prose
+### Phase 8 — Phase C prose ✅ COMPLETE 2026-09-11
+
+**Two of the six tasks needed no code.** 8.5 was already delivered by `f06615f` as routing rather
+than deletion, and performing its deletion now reddens a guard that shipped with that fix; 8.6's
+acceptance clause was unmeetable as written and the invariant it reached for already held. Both are
+recorded against their bullets below rather than closed by grading around them.
 
 **One file per commit, and only for a role that has completed Phase 7.**
 
@@ -2162,6 +2168,13 @@ where `get_replies` first meets a model.
   commit also retired a `65536` `notes` ceiling that this SRD never cited — the binding limit is
   `SUBMIT_REPORT_PARAMETERS`' 20000 — noted here so the next reader does not go looking for it.
 - **8.2** `roles/collator.md`: delete `:170-254`, `:255-346`. Touches: `roles/collator.md`.
+
+  **DONE 2026-09-11** (`b24983e`). The `notes`-as-a-filename anecdote and the JSON-escaping
+  paragraph are gone, both deleted as FALSE rather than as redundant: `notes` is a typed parameter
+  of `SUBMIT_REPORT_PARAMETERS`, and `submit_report` serialises the envelope, so no character of the
+  prose can reach it as syntax. The split's surviving justification was already stated in the next
+  paragraph and is kept. Recorded here 2026-09-11 because this bullet carried no result while 8.1
+  and 8.3 both did — the missing thing was the note, not the work.
 - **8.3** `roles/triage.md`: delete `:325-457`, `:282-291`, `:246-257`. **And fix the
   three-observer/one-observer contradiction (§2.6) in the same commit**, because the surviving prose
   must not carry it. Touches: `roles/triage.md`.
@@ -2174,6 +2187,35 @@ where `get_replies` first meets a model.
   they do not exist.
 - **8.4** `roles/observer.md`: delete `:138-142` and most of `:26-34`. **Keep `:39-58`** — the pacing
   budget is judgement. **Do not touch `:140-141`** — that is Q7's. Touches: `roles/observer.md`.
+
+  **DONE 2026-09-11 (`8d58068`), but NOT as this bullet specifies — the ranges it names are stale
+  and deleting them would have removed true prose.** `observer` holds
+  `[read, write, bash, grep, find, ls, submit_report]` in both configs and **has never been
+  narrowed**: task 7.5 is still BLOCKED for want of an envelope sample. So `:26-34` (*"Read-only
+  describes what you do to the ENVIRONMENT… it does not describe your outbox"*) and `:138-142` (write
+  the `observer-ops` pair) are both still TRUE, and this bullet was written against a narrowing that
+  has not happened. It also contradicted itself at the line numbers it gave: `:140-141`, which it
+  forbids touching as Q7's, sits *inside* the `:138-142` it orders deleted.
+
+  **What was actually false was one sentence**, the old `:144` — *"Report as the `pifleet-worker`
+  skill describes — `result.json` written last"*. Observer holds `submit_report`, and the contract
+  skill's routing table (added by `f06615f`) says a worker holding it — even one that also holds
+  `write` — must CALL it and leave the hand-composed envelope alone. The replacement routes on the
+  grant and hands the artifact pair over through the same call's `report` argument, which
+  `report-tools.ts` writes into `/outbox/<task-id>/files/` and declares in `artifacts` itself, so
+  naming either file again claims it twice.
+
+  **The edit was confined to a single hunk at `:144` on purpose.** This file is cited BY LINE in ten
+  places across four files (`test/unit/report-tools.test.ts:818`, `src/config/schema.ts:2097`,
+  `src/run/triage-envelope.ts:162`, and seven here). `git diff -U0` shows one hunk, `@@ -144,4 +144,9 @@`,
+  so nine of the ten are untouched by arithmetic; only §2.6's `:138-147` moved, and it is now
+  `:138-152` above. *Probe: `bun test test/unit/observer-role.test.ts` — 6 pass, including a CONTROL
+  asserting observer holds `submit_report` alongside a write-capable tool, so the routing argument
+  cannot go vacuously green if the grant changes.*
+
+  **One consequence for 8.6**: the replacement reworded the surviving consequence to *"An envelope you
+  never **submitted**"*. The sentence survives in substance, which is what 8.6 requires, but the verb
+  is no longer the one the other three files use.
 - **8.5** `skills/pifleet-worker/SKILL.md`: delete the *"Write it as ONE LINE"* rule and its bullets,
   the pretty-printed `json` example, and the mechanics under *"Field rules, each of which is checked"*.
   **Keep `:131-142`** — *"Your report is a claim, not a verdict"*. Touches:
@@ -2182,10 +2224,69 @@ where `get_replies` first meets a model.
   the sentences they open with rather than by number.
   *Acceptance: **this file is injected into every worker regardless of role** (its own frontmatter),
   so it may only lose text that is false or redundant for **all** of them.*
+
+  **DONE 2026-09-11 (`f06615f`), and executed as ROUTING rather than deletion — which is what the
+  acceptance above actually requires.** The hand-composition route is still TRUE for any role
+  without `submit_report`: a role that declares no `tools:` is granted Pi's builtins, and no builtin
+  is named `submit_report`. So the three passages named above are not *"false or redundant for all
+  of them"*, and deleting them would strand precisely the worker they are addressed to. `f06615f`
+  scopes them instead — a routing table on the tool grant, `### Calling submit_report`, and
+  `### Composing it by hand` — so a worker holding the tool is told to read past them rather than
+  being left to discover they do not apply.
+
+  **Further deletion is now REFUSED BY A GUARD that landed in this branch.**
+  `test/unit/worker-docs-currency.test.ts` pins `HAND_ORDERS` — *"Write `/outbox/<task-id>/result.json`
+  **atomically**"* and *"single string argument to your write tool"* — as PRESENT, and as positioned
+  after the subheading that scopes them. The second of those opens the very *"Write it as ONE LINE"*
+  paragraph this bullet orders deleted, so performing the deletion reddens the probe that shipped
+  with the fix. **This bullet is superseded, not outstanding.**
 - **8.6** Delete the six paraphrases of *"An envelope you never wrote…"* from the four roles where
   layer 1 makes it false, and keep it where it remains true. Touches: `roles/*.md`.
-  *Acceptance: the sentence survives exactly in `observer`, `engineer`, `tester`, `sre`, `ticketing`
-  — the roles that can still fail to write one.*
+  *Acceptance as written: the sentence survives exactly in `observer`, `engineer`, `tester`, `sre`,
+  `ticketing` — the roles that can still fail to write one.*
+
+  **THE ACCEPTANCE IS UNMEETABLE AS WRITTEN, AND THE TASK IS ALREADY SATISFIED. 2026-09-11.**
+  `engineer` and `sre` have never carried the sentence — `git log --all -S'An envelope you never
+  wrote' -- roles/engineer.md roles/sre.md` returns nothing — so *"survives exactly in"* names two
+  files it was never in, and no edit to `roles/*.md` can make the clause literally true.
+
+  What the clause was reaching for is a ONE-DIRECTIONAL invariant, and that invariant already holds:
+  the paraphrase appears in `observer`, `ticketing`, `tester` and `verifier` — every one of which
+  holds a write-capable verb and can therefore genuinely fail to write an envelope — and in none of
+  `reviewer`, `collator` or `triage`, which hold no writer and had theirs removed by 8.1-8.3.
+  `verifier` carries it and is absent from the clause's list, which is the same drafting error
+  running the other way. **Nothing is left to delete; restating the invariant, and pinning it, is the
+  deliverable.**
+
+  **Anchoring caveat, because the obvious grep gives a FALSE NEGATIVE and did so twice while this
+  entry was being written.** The sentence is not one literal string. Its verb varies — `observer`
+  reads *"never submitted"* since `8d58068`, the other three read *"never wrote"* — and these files
+  are hard-wrapped, so in `roles/tester.md:19-20` the phrase spans a newline (*"An envelope you ⏎
+  never wrote"*). A contiguous, case-sensitive match therefore reports `tester` as not carrying a
+  sentence it plainly carries. **Any probe of this invariant must flatten whitespace before matching,
+  accept both verbs, and ignore case** (`roles/verifier.md:16` opens the sentence lower-case). What
+  remains genuinely unguarded is a further rewording that keeps the meaning and shares no anchor
+  phrase; that limit is recorded rather than hidden, because no phrase-matched probe can close it.
+
+  **PINNED 2026-09-11 (`099f9bd`), and the anchor it chose is better than the one this entry
+  proposed.** *Probe: `bun test test/unit/role-envelope-prose.test.ts` — 5 pass, asserting the
+  one-directional implication `carries the paraphrase -> resolves a write-capable grant` across every
+  role in `fleet.example.yaml`, with CONTROLS on BOTH halves — a non-empty carrier set and a
+  non-empty write-less set — so a future narrowing that emptied either cannot go vacuously green.*
+  The anchor is `removes you from the grading` rather than either verb, which is what makes it
+  survive the `wrote`/`submitted` split 8.4 introduced, matched against whitespace-normalised,
+  lower-cased text. Its reddening is driven through RESOLUTION rather than by editing prose:
+  `reviewer`'s real write-less grant is paired with `observer.md`'s real carrying prose and the
+  checker must call that inconsistent, then the pairing is corrected and must pass — no `roles/*.md`
+  is mutated to prove it. `evaluateRoles` THROWS on a role whose doc is missing rather than skipping
+  it, so the probe cannot quietly cover less than it claims.
+
+  **What it does NOT close, stated so the next reader does not over-read it.** `collator` has no
+  block in `fleet.example.yaml`, so its GRANT is never resolved by the tracked probe; only the prose
+  half is checked unconditionally (it carries no paraphrase, satisfying the implication vacuously).
+  A `describe.skipIf` block re-runs the full nine-role check against the operator's own `fleet.yaml`,
+  which is gitignored — **so that block SKIPS in CI and is local-only evidence.** ISC-1161 therefore
+  stays `[~]`: nothing the repository ships grades the `collator`'s grant.
 
 ---
 
@@ -2234,7 +2335,8 @@ where `get_replies` first meets a model.
 - `fleet.yaml:39`, `:534`, `:682-686`, `:687`, `:713-718`, `:816-831` — `pi_version`, the four role
   tool lists this design edits, and the three comments that argue the capability discipline §4.5
   rests on.
-- `roles/observer.md:10-64`, `:138-147`; `roles/triage.md`'s opening protocol section and its
+- `roles/observer.md:10-64`, `:138-152` (was `:138-147` until `8d58068` — task 8.4 replaced four
+  lines with nine); `roles/triage.md`'s opening protocol section and its
   **"YOU HAVE EXACTLY ONE OBSERVER"** section — the two §2.6 records as having contradicted each
   other until `fe0735e` — plus `:237-257`, `:266-323`, `:325-457`; `roles/collator.md:109-114`,
   `:153-183`, `:422-423`; `skills/pifleet-worker/SKILL.md:131-293`.
