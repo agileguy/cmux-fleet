@@ -369,15 +369,53 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * see. The collator repeats this instruction in every brief it writes, so a
    * collator still telling reviewers to put the whole review in `notes` would
    * re-create the defect on a fleet whose reviewer role had already been fixed.
+   *
+   * ## THE `artifacts` ASSERTION IS INVERTED, and that inversion is the half of
+   * ## task 8.1 that did not land
+   *
+   * It used to require `` `artifacts` array `` — the collator had to ORDER the
+   * hand-declaration, for the reason the docblock on *"the review is routed
+   * through `report`"* above records. 8.1 relaxed that requirement on the
+   * reviewer's side and deleted the matching sentence from `roles/reviewer.md`.
+   * It did not reach `roles/collator.md`, which went on telling the collator to
+   * order every reviewer to do the thing the reviewer's own prompt now tells it
+   * NOT to do — a fleet whose two role documents issue opposite instructions
+   * about the same field. **Both ends stayed green through it**, because each
+   * probe only ever read its own end, which is the exact failure this describe
+   * block was written to refuse and did not.
+   *
+   * Keeping the probe and flipping its polarity is what stops it coming back.
+   * Dropping it leaves the collator free to re-acquire the order with nothing
+   * watching. Asserting the PROHIBITION **positively** — rather than
+   * `.not.toContain`-ing one phrasing of the order, which every rewording
+   * escapes — reddens both when the sentence goes and when the "Do NOT" is
+   * quietly dropped from in front of it.
+   *
+   * ## MEASURED against `submitReport`, not read off the prose
+   *
+   * The document now states what obeying the old order costs, so the statement
+   * had to be checked against the tool rather than against a reading of it:
+   *
+   * - `report` + a redundant `files/review.md` claim is **accepted** —
+   *   `artifactMissingProblem` exempts the one path phase 2 is about to write —
+   *   and `composeEnvelope` then appends its own claim beside the model's, so
+   *   the envelope declares the file TWICE.
+   * - `report` + the bare `review.md` the model just passed is **refused**:
+   *   report files land under `files/`, so the claim resolves to a path that
+   *   does not exist and the whole call is rejected before anything is written.
    */
   test("the collator's copy instructs the same split the reviewer's does", () => {
     const block = sliceFrom(COLLATOR, "roles/collator.md", "file its long review");
     expect(block, "the collator does not name the review's destination").toContain(
       "/outbox/<task-id>/files/review.md",
     );
-    expect(block, "the collator does not require the artifact to be declared").toContain(
-      "`artifacts` array",
+    expect(block, "the collator does not name the route that declares the review").toContain(
+      "`report` entry",
     );
+    expect(
+      block,
+      "the collator still orders the hand-declaration `roles/reviewer.md` tells reviewers not to make",
+    ).toContain("Do NOT tell it to declare that file in its envelope's `artifacts` array");
     expect(block).toContain("roles/reviewer.md");
     expect(block).toContain("Say it");
   });

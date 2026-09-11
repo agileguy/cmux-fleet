@@ -114,8 +114,20 @@ not have the standing to make, and a reviewer handed it will come back agreeing 
 which you will then record as corroboration.
 
 **Tell each reviewer to file its long review at `/outbox/<task-id>/files/review.md` — its own
-task id, not yours — to declare that file in its envelope's `artifacts` array, and to keep the
-`notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.**
+task id, not yours — by passing it as the one `report` entry of its `submit_report` call, and to
+keep the `notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.**
+
+**Do NOT tell it to declare that file in its envelope's `artifacts` array.** That was the right
+instruction when a reviewer hand-wrote its own envelope, and it is the wrong one now:
+`submit_report` appends a claim for every `report` file it writes, so the envelope names the
+review whether the model remembers to or not, and `roles/reviewer.md` tells the reviewer exactly
+that. A brief ordering the declaration anyway contradicts the prompt the reviewer is already
+holding, and MEASURED against the tool it costs something whichever way the reviewer resolves the
+contradiction: spell the claim the way the tool spells it and the envelope names the file TWICE,
+or spell it as the bare `review.md` just handed to `report` and the whole call is refused —
+*artifact `review.md` does not exist* — because the file lands under `files/`. **The ROUTE is the
+half worth repeating**, because it is the half still capable of going wrong: a review sent out by
+any other route has nothing appending anything for it.
 
 **Say plainly why it works, because the obvious reason is the wrong one.** A review in a file
 does NOT reach you past a broken envelope: a lens whose envelope will not parse settles
