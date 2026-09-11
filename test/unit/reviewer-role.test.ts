@@ -219,6 +219,62 @@ function sliceTo(doc: string, name: string, marker: string): string {
 }
 
 /**
+ * THE THREE REFUSALS ABOVE ACTUALLY REFUSE — pinned here, because until this
+ * block existed nothing committed said they did.
+ *
+ * ## Dormant by design, which is exactly why they needed writing down
+ *
+ * The docblocks above record an audit: five distinct (document, marker) pairs
+ * across nine call sites, every one of them occurring exactly once, and no head
+ * slice starting at index 0. That audit is the reason this file is currently
+ * correct, and it is also what makes all three refusals **unreachable from the
+ * happy path**. Measured before this block was written: deleting the
+ * `occurrences === 0` arm, deleting the `occurrences > 1` arm, or deleting
+ * `sliceTo`'s index-0 arm each left the suite at 84 pass / 0 fail.
+ *
+ * A guard proven only by perturbing a marker by hand leaves nothing behind. The
+ * audit above says the same thing about itself — *"that audit is a measurement
+ * of one moment"* — and answers it for the markers. These probes answer it for
+ * the guard: the arithmetic is asserted directly, so the refusals survive the
+ * next person who finds them fussy.
+ *
+ * ## Synthetic documents, not the live ones
+ *
+ * These helpers take the text they slice, so nothing here has to borrow a
+ * phrase from a role document and hope it keeps its multiplicity. The inputs
+ * below are three short strings chosen to sit exactly on each boundary, and
+ * they cannot drift, because no document is involved. That is the difference
+ * between this and the sibling block in `test/unit/collator-role.test.ts`, whose
+ * `onlyIndexOf` closes over its one document and can only vary the marker.
+ */
+describe("the slice helpers refuse the inputs they promise to refuse", () => {
+  test("an ABSENT marker is a NAMED error, not a silent -1", () => {
+    expect(() => onlyIndexOf("alpha\nbravo\n", "synthetic.md", "charlie")).toThrow(
+      /synthetic\.md no longer contains charlie/,
+    );
+  });
+
+  test("a NON-UNIQUE marker is an error, not silently the first occurrence", () => {
+    expect(() => onlyIndexOf("alpha bravo alpha", "synthetic.md", "alpha")).toThrow(
+      /synthetic\.md contains alpha 2 times; a slice marker must be unique/,
+    );
+  });
+
+  /**
+   * The polarity `sliceTo`'s docblock is about: a head slice of "" satisfies
+   * every `.test(opening)` and every `.not.toContain` written against it, so
+   * this arm is the one whose removal is completely silent. It is also the arm
+   * `onlyIndexOf` deliberately does NOT cover — a unique marker at index 0 is
+   * perfectly unambiguous, so only `sliceTo` can catch it.
+   */
+  test("sliceTo refuses a marker at index 0, where an empty head slice passes everything", () => {
+    expect(() => sliceTo("HEADING then the body", "synthetic.md", "HEADING")).toThrow(
+      /synthetic\.md now OPENS with HEADING/,
+    );
+  });
+});
+
+/**
  * THE REVIEW IS A FILE AND `notes` IS A SUMMARY OF IT — rewritten 2026-09-05,
  * and the instruction it replaces is recorded rather than quietly dropped.
  *

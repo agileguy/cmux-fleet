@@ -234,6 +234,71 @@ function sliceFrom(marker: string): string {
   return ROLE.slice(onlyIndexOf(marker));
 }
 
+/**
+ * THE SLICE GUARDS ACTUALLY REFUSE — pinned here, because until this block
+ * existed nothing committed said they did.
+ *
+ * ## Why these needed writing down, given that they are correct today
+ *
+ * Every marker at every call site in this file resolves uniquely against
+ * `roles/collator.md`, and every `between()` pair is in document order. That is
+ * not an accident, it is the point — and it is also what makes these refusals
+ * **dormant**: deleting the `occurrences === 0` arm, the `occurrences > 1` arm,
+ * or `between`'s ordering check leaves every other test in this file passing.
+ * Measured before this block was written: all three deletions gave 84 pass /
+ * 0 fail.
+ *
+ * They were correct because somebody perturbed a marker by hand once and
+ * watched what happened. A manual perturbation leaves nothing behind. The next
+ * person to decide this guard is fussy — and its own docblock anticipates that
+ * person, which is why it argues at length against "take the first" — gets a
+ * green suite for removing it. So the refusals are asserted directly, three
+ * cheap probes that stay true for as long as the functions do.
+ *
+ * ## Why the MARKERS are synthetic and the document is not
+ *
+ * `onlyIndexOf` here closes over `ROLE` by design — the sibling
+ * `test/unit/reviewer-role.test.ts` takes a document and a name because it
+ * scopes into four, and this one deliberately does not. So the synthetic half
+ * available here is the marker, not the text. That is enough: what is under
+ * test is the ARITHMETIC on the occurrence count, and a marker chosen for its
+ * multiplicity exercises it exactly as a synthetic document would.
+ *
+ * The non-unique marker is `"\n"` rather than a quoted phrase on purpose. A
+ * phrase that happens to occur twice today is one edit away from occurring
+ * once, and then this probe reddens for a reason that has nothing to do with
+ * the guard it is watching. A newline is non-unique by CONSTRUCTION in any
+ * document with more than one line, and the count is asserted below so the
+ * probe cannot go vacuous if that ever stops being true.
+ */
+describe("the slice helpers refuse the inputs they promise to refuse", () => {
+  test("an ABSENT marker is an error, not a silent -1", () => {
+    expect(() =>
+      onlyIndexOf("### A heading roles/collator.md has never carried"),
+    ).toThrow(/no longer contains/);
+  });
+
+  test("a NON-UNIQUE marker is an error, not silently the first occurrence", () => {
+    // Non-vacuous: the marker really does occur more than once, so the refusal
+    // below is the thing being observed rather than an accident of the fixture.
+    expect(ROLE.split("\n").length - 1, "roles/collator.md has more than one line").toBeGreaterThan(
+      1,
+    );
+    expect(() => onlyIndexOf("\n")).toThrow(/a slice marker must be unique/);
+  });
+
+  /**
+   * The pair is the one five call sites in this file already depend on, used
+   * BACKWARDS. Reusing markers the file is already coupled to means this probe
+   * adds no new coupling of its own: if `### Turn one` or `Turn two` is ever
+   * reworded, those five call sites fail first and for the right reason, and
+   * this test does not become an independent thing to remember to update.
+   */
+  test("between() refuses a slice whose end precedes its start", () => {
+    expect(() => between("Turn two", "### Turn one")).toThrow(/precedes/);
+  });
+});
+
 describe("the mechanism the document describes is the one that exists", () => {
   /**
    * The two paths the previous version invented. Asserted by ABSENCE, which is
