@@ -66,10 +66,12 @@ than adopted**.
 ## The review console has a fifth process
 
 Four panes are four workers and **none of them is the actor**. A collator cannot
-dispatch: all it can do is write `dispatch-request.json` into its outbox.
-Something host-side has to read that and perform the three dispatches, and that
-something is `pifleet relay`. Without it the console has four healthy workers and
-no way for a collator's request to become three reviews.
+dispatch: all it can do *toward a fan-out* is write `dispatch-request.json` into
+its outbox. (It is not otherwise mute — `col-1` holds `submit_report`, which is
+what produces the collation row of the table below.) Something host-side has to
+read that request and perform the three dispatches, and that something is
+`pifleet relay`. Without it the console has four healthy workers and no way for
+a collator's request to become three reviews.
 
 `./scripts/review` starts one, last, after the panes. What the relay then does is
 the whole review mechanism, and every file it writes is host-written — which is
@@ -107,12 +109,21 @@ says so and starts nothing; find out what that pid is, then remove the file.
 
 ## The triage console has an actor too — the third process behind its two panes
 
-Same shape as review, different reason. `tri-1` is a collator: it can write
-`dispatch-request.json` and nothing else. But where the review console's actor
-waits for an operator to ask for a review, **this one is also the clock** — it
-decides when a sweep happens, forever, without being asked. That is the whole
-difference, and it is why this console is the only one whose own modules are held
-read-only by a test that walks their import closure.
+Same shape as review, different reason. `tri-1` is a collator, and the thing a
+collator cannot do is **dispatch**: all it can do toward a sweep is write
+`dispatch-request.json` and let something host-side act on it. But where the
+review console's actor waits for an operator to ask for a review, **this one is
+also the clock** — it decides when a sweep happens, forever, without being asked.
+That is the whole difference, and it is why this console is the only one whose
+own modules are held read-only by a test that walks their import closure.
+
+**That is a limit on dispatching, not on writing, and this paragraph said `tri-1`
+could write `dispatch-request.json` *"and nothing else"* until 2026-09-11.** The
+`triage` role grants `submit_report` beside `dispatch_request` (its `tools:` line
+in `fleet.example.yaml`), and `roles/triage.md` spends a section telling `tri-1`
+to pass `triage.json` and `triage.md` as two entries of ONE `submit_report` call
+— which is how a sweep produces anything a person can read. Read a role's
+`tools:` list before describing any seat's reach from this file.
 
 The tick is `triage/console.yaml`'s `cadence_s`, and **it is 900 — a sweep every
 fifteen minutes, 96 a day**. This paragraph said *"every five minutes"* until
@@ -217,9 +228,10 @@ cd ~/repos/cmux-fleet && ./scripts/review --recreate
 ```
 
 `--recreate` **stops every run the old panes created** before building the new
-ones. That is a teardown of live agents — three bystanders for one wedged
-worker. Use it when the *set* of workers changes or the pane layout is wrong;
-use `--restart` for everything else.
+ones. That is a teardown of live agents — as many as three bystanders for one
+wedged worker on a four-pane console, and one on `triage`. Use it when the *set*
+of workers changes or the pane layout is wrong; use `--restart` for everything
+else.
 
 `development` and `review` are **four runs each**, because every pane is
 attended and `--attach-here` hands over the terminal of the process that runs it.

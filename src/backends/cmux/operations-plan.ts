@@ -982,7 +982,7 @@ export const TRIAGE_WORKSPACE = "triage";
  *
  * `tri-1` RECONCILES AND `obs-t1` OBSERVES, which is the review console's
  * collator/reviewer shape reappearing over a different role pair
- * (`fleet.example.yaml`'s `triage` role at `:752` and `observer` role at `:465`).
+ * (`fleet.example.yaml`'s `roles:` map — `triage:` at `:630`, `observer:` at `:457`).
  * That is not a coincidence and it is already load-bearing elsewhere:
  * `ConsoleRoster` (`src/run/dispatch-request.ts:322`) was written over the two
  * ROLES rather than over `col-1`, so `TRIAGE_CONSOLE_ROSTER` needed no schema
@@ -995,7 +995,7 @@ export const TRIAGE_WORKSPACE = "triage";
  * NEITHER SEAT IS ATTENDED, and that is the whole difference from `development`
  * and `review`. Both of those are four keyboards and therefore four runs; this
  * console is ONE run of `rpc` seats (`pifleet up --workers tri-1,obs-t1`,
- * spelled that way at `fleet.example.yaml:863`), because a console that
+ * spelled that way at `fleet.example.yaml:900`), because a console that
  * dispatches on a clock — 96 sweeps a day at `triage/console.yaml`'s
  * `cadence_s: 900`, 288 at the schema default of 300 — cannot afford a `tui`
  * seat: `tui` allocates no epoch, so without the `already_completed` fence a
@@ -1006,7 +1006,7 @@ export const TRIAGE_WORKSPACE = "triage";
  * **THAT PARAGRAPH IS ABOUT THE TRACKED EXAMPLE, AND THE LIVE FLEET DISAGREES
  * WITH IT. Checked 2026-09-11 and recorded here so the next reader does not
  * re-litigate it.** In `fleet.example.yaml` neither seat carries a worker-level
- * override (`tri-1` at `:868`, `obs-t1` at `:889`), so both resolve to
+ * override (`{id: tri-1,` at `:911`, `{id: obs-t1,` at `:939`), so both resolve to
  * `pane_mode: rpc` from their roles and the plan this file builds is genuinely
  * the unattended one described above. The operator's gitignored `fleet.yaml`
  * overrides both to `tui`, and the TRACKED `triage/console.yaml` says so in its
@@ -1026,13 +1026,13 @@ export const TRIAGE_WORKSPACE = "triage";
  *
  * THE COST, stated as its two siblings state theirs — and it is the one line
  * here that got CHEAPER rather than merely shorter. One run at
- * `run.max_concurrent: 4` (`fleet.example.yaml:82`) is an admission budget of
+ * `run.max_concurrent: 4` (`fleet.example.yaml:93`) is an admission budget of
  * four spent by two seats, so this console runs with slack where it was once
  * sized to fit exactly and none spare. The comment that raised that key
- * (`fleet.example.yaml:67-82`) still argues from a three-wide fan-out and is
- * stale in that respect; the VALUE is not wrong, it is merely no longer tight.
- * Do not lower it by reading this line: it bounds a RUN rather than the host,
- * and a hand-run `up` over a wider worker set is the same run.
+ * (`fleet.example.yaml:67-93`) argued from a three-wide fan-out and now says so
+ * itself, citing this paragraph back; the VALUE is not wrong, it is merely no
+ * longer tight. Do not lower it by reading this line: it bounds a RUN rather
+ * than the host, and a hand-run `up` over a wider worker set is the same run.
  */
 export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
 
@@ -1043,37 +1043,62 @@ export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
  *
  * ## A fraction moves the border BETWEEN ROWS, and this console has ONE ROW
  *
- * `applyTopFraction` addresses the BORDER BETWEEN THE ROWS
- * (`operations.ts:539-553` — a pane in the top row has no border above it and
- * cmux refuses `-U` there), so the only thing a fraction can express is "the top
- * row over the bottom one". Read that against the diagram above: `tri-1` and
- * `obs-t1` sit side by side in a SINGLE row, and the shared builder's `down`
- * entries begin at pane 3, which this console never reaches.
+ * `applyTopFraction` addresses the BORDER BETWEEN THE ROWS — `operations.ts:539-553`,
+ * the paragraph opening *"A RESIZE ADDRESSES A BORDER, NOT A PANE"*: a pane in the
+ * top row has no border above it and cmux refuses `-U` there. So the only thing a
+ * fraction can express is "the top row over the bottom one". Read that against the
+ * diagram above: `tri-1` and `obs-t1` sit side by side in a SINGLE row, and the
+ * shared builder's `down` entries begin at pane 3, which this console never reaches.
  *
  * So the preference somebody would reach for this constant to state — *give the
- * reconciler more room than the observer* — is not expressible; and it is worse
- * than inexpressible, because **a value here is INERT, provably rather than as a
- * matter of taste**. Both panes share one `y`, so `topY` selects both,
- * `topHeight` is the full container height, `growTop` is false for any fraction
- * below 1 (a fraction at 1 is caught one line earlier as already-correct), and
- * the row it then asks to move is `p.y !== topY` — the EMPTY SET
- * (`operations.ts:619-624`). Not one `resize-pane` is issued. `0.65` here would
- * not be a layout with a rationale, and not even a layout with a typo's shape;
- * it would be a number the resize path reads, selects nothing from, and discards
- * without a word.
+ * reconciler more room than the observer* — is not expressible. That much is
+ * structural. What a value here would DO if somebody wrote one anyway is a
+ * weaker claim, and this docblock used to overstate it: it said such a value was
+ * **"INERT, provably rather than as a matter of taste"**. It is not provable.
+ * The argument below is split into the half that holds unconditionally and the
+ * half that rests on a premise nothing in this repository asserts.
  *
- * **That is what makes `null` load-bearing rather than decorative here.**
- * `applyTopFraction` returns on `null` BEFORE it reads any geometry
- * (`operations.ts:592`), so `null` is the one value whose meaning does not
- * depend on a pane shape that can change underneath it — and the only way a
- * reader can tell "this console wants the halves `new-split` gave it" from "this
- * console asked for something the geometry silently threw away" is which of the
- * two the constant says.
+ * ### Unconditional: `null` is read before any geometry is
  *
- * This is a stronger statement than {@link REVIEW_TOP_FRACTION}'s *"there is
- * nothing to favour"*, and deliberately so: that argument concedes the day
- * somebody decides there IS something to favour, and on this console's shape
- * there is no such day, because there is nowhere for the favour to go.
+ * `applyTopFraction` returns on `null` BEFORE it reads a pane
+ * (`operations.ts:592`, `if (fraction === null) return;`), so `null` is the one
+ * value whose meaning does not depend on a pane shape that can change underneath
+ * it — and the only way a reader can tell "this console wants the halves
+ * `new-split` gave it" from "this console asked for something the geometry
+ * silently threw away" is which of the two the constant says. **That is what
+ * makes `null` load-bearing rather than decorative here**, and it is the half of
+ * the old argument that survives untouched.
+ *
+ * ### Conditional: the empty-set reading needs two numbers to agree
+ *
+ * Both panes share one `y`, so `topY` selects both, and the row `movingIds` then
+ * asks to move is `p.y !== topY` — the EMPTY SET — **whenever `growTop` is
+ * false** (`operations.ts:619-624`). That qualifier is the whole of it. `growTop`
+ * is `topTarget > topHeight`, and those two come off the SAME `list-panes`
+ * payload by DIFFERENT keys: `topHeight` is the largest `pixel_frame.height` in
+ * the top row, `topTarget` is `container_frame.height` times the fraction
+ * (`parsePaneGeometry`, `parse.ts:283-296`, reads each from its own key).
+ * **Nothing here asserts that a single row's pane height equals its container's**
+ * — no test, no invariant, no comment on the cmux side of the parse.
+ *
+ * If `container_frame` counts chrome the panes' `pixel_frame` does not, then some
+ * fraction below 1 makes `topTarget > topHeight`, `growTop` flips TRUE, and the
+ * row selected is `p.y === topY` — BOTH panes. A `resize-pane -D` is then issued
+ * for every pane whose delta clears the one-pixel guard, against a border a
+ * single-row console does not have; what cmux does with that is its business, and
+ * either outcome falsifies *"not one `resize-pane` is issued"*. A fraction ABOVE
+ * 1 takes that branch with no assumption about chrome at all.
+ *
+ * So `0.65` here would still not be a layout with a rationale — but for a better
+ * reason than "it would do nothing": it would be a number whose effect turns on a
+ * geometry relationship nothing pins down. That is a worse thing to write than an
+ * inert one, which is why the narrower claim argues for `null` at least as hard.
+ *
+ * The INEXPRESSIBILITY, which is the structural half, is a stronger statement
+ * than {@link REVIEW_TOP_FRACTION}'s *"there is nothing to favour"*, and
+ * deliberately so: that argument concedes the day somebody decides there IS
+ * something to favour, and on this console's shape there is no such day, because
+ * there is nowhere for the favour to go.
  *
  * ## What `OPERATIONS_TOP_FRACTION` exists for, which this console does not have
  *
