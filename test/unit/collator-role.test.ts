@@ -37,7 +37,11 @@
  *    example: a model copies its shape confidently.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { dispatchRequest, type DispatchRequestParams } from "../../docker/pi-extensions/report-tools.ts";
 
 import { StatusSchema } from "../../src/contracts.ts";
 import { findingLocationProblem } from "../../src/harvest/collation-census.ts";
@@ -50,8 +54,8 @@ import {
 import {
   DISPATCH_REQUEST_FILE,
   DISPATCH_REQUEST_SCHEMA,
-  DispatchRequestSchema,
   REVIEW_CONSOLE_ROSTER,
+  parseDispatchRequest,
 } from "../../src/run/dispatch-request.ts";
 import {
   COLLATION_ASPECT,
@@ -74,6 +78,43 @@ function jsonBlocks(): string[] {
   return [...ROLE.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]!);
 }
 
+/**
+ * Blocks are selected by CONTENT, never by index.
+ *
+ * They used to be `jsonBlocks()[0]` and `[1]`. Task 7.2 added a third example —
+ * the `submit_report` call that carries the pair — and every positional test
+ * silently re-aimed at the wrong document: eleven failed at once, none of them
+ * because the thing they were about had changed. Selecting on a field each block
+ * uniquely has makes a new example inert here instead of destructive.
+ */
+function blockWith(marker: string): string {
+  const found = jsonBlocks().filter((b) => b.includes(marker));
+  if (found.length !== 1) {
+    throw new Error(`expected exactly one JSON block containing ${marker}, found ${found.length}`);
+  }
+  return found[0]!;
+}
+
+const EXAMPLE_TASK_ID = "T-collate-fixture";
+
+function policyFixture(): { dir: string; mounts: { policyPath: string; outboxRoot: string; repliesPolicyPath: string; repliesRoot: string } } {
+  const dir = mkdtempSync(join(tmpdir(), "pifleet-collator-role-"));
+  const policyPath = join(dir, "policy-task");
+  writeFileSync(policyPath, `${EXAMPLE_TASK_ID}\n1\n`);
+  const outboxRoot = join(dir, "outbox");
+  mkdirSync(outboxRoot, { recursive: true });
+  const repliesRoot = join(dir, "replies");
+  mkdirSync(repliesRoot, { recursive: true });
+  return {
+    dir,
+    mounts: { policyPath, outboxRoot, repliesPolicyPath: join(dir, "policy-replies"), repliesRoot },
+  };
+}
+
+function fanoutExample(): DispatchRequestParams {
+  return JSON.parse(blockWith('"requests"')) as DispatchRequestParams;
+}
+
 describe("the mechanism the document describes is the one that exists", () => {
   /**
    * The two paths the previous version invented. Asserted by ABSENCE, which is
@@ -89,8 +130,16 @@ describe("the mechanism the document describes is the one that exists", () => {
     expect(ROLE).toContain(`/outbox/<task-id>/${DISPATCH_REQUEST_FILE}`);
   });
 
-  test("the dispatch request's wire tag matches the schema", () => {
-    expect(ROLE).toContain(DISPATCH_REQUEST_SCHEMA);
+  /**
+   * INVERTED by task 7.2, and the inversion is the point.
+   *
+   * The document used to spell the wire tag because the collator typed it into a
+   * file it wrote itself. `dispatch_request` composes it now, and a document that
+   * still showed it would teach a model to send a field `additionalProperties:
+   * false` refuses. So the assertion flips: naming the tag here is the defect.
+   */
+  test("the document does NOT spell the wire tag the tool composes", () => {
+    expect(ROLE).not.toContain(DISPATCH_REQUEST_SCHEMA);
   });
 
   test("the collation's wire tag matches the schema", () => {
@@ -282,26 +331,54 @@ describe("the ids the document tells the collator to name are the derived ones",
  * will judge the real thing.
  */
 describe("every worked example in the document validates", () => {
-  test("there are exactly two JSON examples, and both parse as JSON", () => {
+  test("every JSON example in the document parses as JSON", () => {
     const blocks = jsonBlocks();
-    expect(blocks).toHaveLength(2);
+    expect(blocks).toHaveLength(3);
     for (const b of blocks) expect(() => JSON.parse(b)).not.toThrow();
   });
 
-  test("the fan-out example is a legal dispatch request", () => {
-    const doc = JSON.parse(jsonBlocks()[0]!);
-    const r = DispatchRequestSchema.safeParse(doc);
-    expect(r.error?.message ?? "accepted").toBe("accepted");
+  /**
+   * The fan-out example is no longer graded as a DOCUMENT, because it is no
+   * longer one: `dispatch_request` composes `schema` and `parent_task_id` from
+   * `/policy/task`, and an example carrying either would be refused by
+   * `additionalProperties: false` in the hands of a model that copied it.
+   *
+   * So drive the REAL tool with the block and parse what it wrote with the REAL
+   * host parser. That is a stronger claim than the old one, not a weaker
+   * substitute: it says the example, passed to the tool this role now names,
+   * produces a file the host accepts.
+   */
+  test("the fan-out example carries no host-composed field", () => {
+    const block = blockWith('"requests"');
+    expect(block).not.toContain(DISPATCH_REQUEST_SCHEMA);
+    expect(block).not.toContain("parent_task_id");
+  });
+
+  test("the fan-out example, driven through the tool, is accepted by the host parser", () => {
+    const f = policyFixture();
+    const out = dispatchRequest(fanoutExample(), f.mounts);
+    const read = parseDispatchRequest(readFileSync(out.path, "utf8"), {
+      sender: REVIEW_CONSOLE_ROSTER.collators[0]!,
+      taskId: out.taskId,
+      roster: REVIEW_CONSOLE_ROSTER,
+    });
+    rmSync(f.dir, { recursive: true, force: true });
+    if (read.kind !== "ok") {
+      throw new Error(
+        `roles/collator.md's example is refused ${read.kind === "refused" ? read.code : read.kind}: ` +
+          `${read.kind === "refused" ? read.reason : ""}`,
+      );
+    }
+    expect(read.request.requests).toHaveLength(REVIEW_CONSOLE_ROSTER.reviewers.length);
   });
 
   test("the fan-out example names each reviewer exactly once", () => {
-    const doc = DispatchRequestSchema.parse(JSON.parse(jsonBlocks()[0]!));
-    const workers = doc.requests.map((r) => r.worker).sort();
+    const workers = fanoutExample().requests.map((r) => r.worker).sort();
     expect(workers).toEqual([...REVIEW_CONSOLE_ROSTER.reviewers].sort());
   });
 
   test("the collation example is a legal collation", () => {
-    const doc = JSON.parse(jsonBlocks()[1]!);
+    const doc = JSON.parse(blockWith('"finding_count"'));
     const r = CollationSchema.safeParse(doc);
     expect(r.error?.message ?? "accepted").toBe("accepted");
   });
@@ -313,7 +390,7 @@ describe("every worked example in the document validates", () => {
    * collator is most likely to omit — would never be demonstrated.
    */
   test("ASYMMETRIC: the collation example demonstrates a MISSING lens", () => {
-    const doc = CollationSchema.parse(JSON.parse(jsonBlocks()[1]!));
+    const doc = CollationSchema.parse(JSON.parse(blockWith('"finding_count"')));
     expect(doc.lenses.length).toBe(REVIEW_CONSOLE_ASPECTS.length);
     expect(doc.lenses.filter((l) => !l.reported)).toHaveLength(1);
     expect(doc.lenses.filter((l) => !l.reported)[0]!.note).toBeTruthy();
@@ -325,13 +402,13 @@ describe("every worked example in the document validates", () => {
    * which is the one thing the role file says is the worst available outcome.
    */
   test("ASYMMETRIC: the collation example demonstrates a CONTRADICTION", () => {
-    const doc = CollationSchema.parse(JSON.parse(jsonBlocks()[1]!));
+    const doc = CollationSchema.parse(JSON.parse(blockWith('"finding_count"')));
     expect(doc.findings.some((f) => f.disputed_by.length > 0)).toBe(true);
     expect(doc.findings.some((f) => f.raised_by.length > 1)).toBe(true);
   });
 
   test("the example's own finding_count agrees with its list", () => {
-    const doc = CollationSchema.parse(JSON.parse(jsonBlocks()[1]!));
+    const doc = CollationSchema.parse(JSON.parse(blockWith('"finding_count"')));
     expect(doc.finding_count).toBe(doc.findings.length);
   });
 });
