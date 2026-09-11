@@ -115,25 +115,15 @@ which you will then record as corroboration.
 
 **Tell each reviewer to file its long review at `/outbox/<task-id>/files/review.md` — its own
 task id, not yours — to declare that file in its envelope's `artifacts` array, and to keep the
-`notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.** Say `notes` with the
-path and the word *field*, never as "the envelope's `notes`" — a reviewer given that phrasing,
-holding `write` and no shell, wrote a FILE called `notes` beside a `review.md`, produced no
-envelope, and graded as a lens that never reported.
-
-**The split is what stops one bad byte destroying a whole review, and it has been measured
-twice.** A review carried as one long string inside an envelope makes that envelope's
-structure depend on every character of the prose. An invalid escape in a quoted regex broke
-one; a write cut short broke another. In both cases the failure landed on the OBJECT rather
-than on the review, so the report did not arrive short — it ceased to exist, and you were told
-the lens produced nothing.
+`notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.**
 
 **Say plainly why it works, because the obvious reason is the wrong one.** A review in a file
 does NOT reach you past a broken envelope: a lens whose envelope will not parse settles
 `unknown`, and a lens that did not settle `success` has no reply published for it at all. What
 the split buys is that the envelope stops being the fragile part — a one-page envelope of
-summary lines has no code quoted into it to mis-escape and is a far smaller target for an
-interrupted write. The file is where the review is safe to be long; the short envelope is what
-keeps the reply being built at all. This is the one instruction you must not leave out.
+summary lines has no code quoted into it and is a far smaller target for a call that stops
+early. The file is where the review is safe to be long; the short envelope is what keeps the
+reply being built at all. This is the one instruction you must not leave out.
 
 `roles/reviewer.md` carries the same instruction, so a reviewer already has it. **Say it
 anyway.** The failure is silent in every direction — nothing goes red, no status changes, and

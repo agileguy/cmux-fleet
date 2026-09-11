@@ -37,11 +37,15 @@
  *    example: a model copies its shape confidently.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { dispatchRequest, type DispatchRequestParams } from "../../docker/pi-extensions/report-tools.ts";
+import {
+  dispatchRequest,
+  submitReport,
+  type DispatchRequestParams,
+} from "../../docker/pi-extensions/report-tools.ts";
 
 import { StatusSchema } from "../../src/contracts.ts";
 import { findingLocationProblem } from "../../src/harvest/collation-census.ts";
@@ -451,6 +455,131 @@ describe("every worked example in the document validates", () => {
   test("the example's own finding_count agrees with its list", () => {
     const doc = CollationSchema.parse(JSON.parse(blockWith('"finding_count"')));
     expect(doc.finding_count).toBe(doc.findings.length);
+  });
+});
+
+/**
+ * THE SPLIT THE DOCUMENT INSTRUCTS IS THE ONE `submit_report` PERFORMS.
+ *
+ * ## What these replace, and why the replacement is executable
+ *
+ * Task 8.2 deleted three claims from the fan-out brief because `submit_report`
+ * had made them false, and a deletion justified by a mechanism is only as good
+ * as the evidence that the mechanism does what the deletion assumed. Each probe
+ * below DRIVES THE REAL TOOL and asserts the fact the deleted sentence used to
+ * assert in prose, so the justification lives in the suite rather than in a
+ * commit message:
+ *
+ *  - *"declare that file in its envelope's `artifacts` array"* — redundant
+ *    because `composeEnvelope` appends every `report` file itself.
+ *  - *"a reviewer … wrote a FILE called `notes`"* — unreachable because `notes`
+ *    is a typed parameter of a tool the role cannot bypass, not a path.
+ *  - *"An invalid escape in a quoted regex broke one"* — unreachable because the
+ *    tool serialises the envelope, so no character of the prose can reach the
+ *    JSON as syntax.
+ *
+ * **These are the arm the string probes above cannot be.** Everything else in
+ * this file quotes the document; a quotation cannot tell you whether the thing
+ * quoted is still true. Deleting a true sentence and deleting a false one look
+ * identical to a `toContain`, which is exactly how a Phase C cut goes wrong.
+ */
+describe("the mechanism that retired the deleted prose really does what it claimed", () => {
+  const REPORT_CONTENT = "# review\n\nfindings go here.\n";
+
+  function submitWithReport(params: {
+    notes?: string;
+    artifacts?: { kind: "file" | "diff" | "log" | "note"; path: string }[];
+  }) {
+    const f = policyFixture();
+    const out = submitReport(
+      {
+        status: "success",
+        summary: "a collated review",
+        ...params,
+        report: [{ filename: ARTIFACT_NAMES.prose, content: REPORT_CONTENT }],
+      },
+      "col-1",
+      { ...f.mounts, workdir: null },
+    );
+    const envelope = JSON.parse(readFileSync(out.path, "utf8"));
+    return { dir: f.dir, out, envelope };
+  }
+
+  /**
+   * THE DESTINATION, derived rather than retyped.
+   *
+   * The document names `/outbox/<task-id>/files/review.md` and the reviewer is
+   * told to file its long review there. That is now a claim about where
+   * `submit_report` puts a `report` entry, so it is checked by putting one there
+   * — with `<task-id>` substituted for the fixture's own id, which is the only
+   * part of the string that is not literal.
+   */
+  test("the path the document names is the path the tool writes a `report` file to", () => {
+    const { dir, out } = submitWithReport({});
+    expect(ROLE, "the document no longer names the review's destination").toContain(
+      `/outbox/<task-id>/files/${ARTIFACT_NAMES.prose}`,
+    );
+    expect(out.reportPaths).toHaveLength(1);
+    expect(
+      out.reportPaths[0]!.endsWith(`/${EXAMPLE_TASK_ID}/files/${ARTIFACT_NAMES.prose}`),
+      `the tool wrote ${out.reportPaths[0]}, which is not the shape the document promises`,
+    ).toBe(true);
+    expect(readFileSync(out.reportPaths[0]!, "utf8")).toBe(REPORT_CONTENT);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * THE REDUNDANCY, asserted on a call that declares NOTHING.
+   *
+   * `artifacts` is deliberately absent here. If the envelope still claims the
+   * review, the instruction to declare it by hand was work the tool was already
+   * doing — which is the whole justification for cutting it from the brief.
+   */
+  test("the tool declares the report file with no `artifacts` in the call", () => {
+    const { dir, envelope } = submitWithReport({});
+    const claimed = (envelope.artifacts ?? []).map((a: { path: string }) => a.path);
+    expect(claimed, "the envelope does not claim the file the tool just wrote").toContain(
+      `files/${ARTIFACT_NAMES.prose}`,
+    );
+    // ONCE, not twice. A collator that also declared it by hand would double the
+    // claim, and an operator reading two entries for one file cannot tell a
+    // duplicate from a second document that was overwritten.
+    expect(claimed.filter((p: string) => p === `files/${ARTIFACT_NAMES.prose}`)).toHaveLength(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * THE UNREACHABILITY, which is the deleted paragraph's own claim inverted.
+   *
+   * The document used to say an invalid escape in a quoted regex destroyed an
+   * envelope. That required a model composing JSON by hand with `write`. The
+   * role holds no `write` and `notes` is a string parameter, so the bytes below
+   * — a backslash escape that is invalid in JSON, quotes, a brace, a newline —
+   * must survive into the envelope as DATA and must not reach it as syntax.
+   *
+   * If this ever fails, the deleted paragraph was right and should come back.
+   */
+  test("prose in `notes` cannot break the envelope it rides in", () => {
+    const nasty = 'a regex like /\\w+"{2}/ and a stray \\ plus a brace } and a newline\nhere';
+    const { dir, out, envelope } = submitWithReport({ notes: nasty });
+    expect(envelope.notes, "`notes` did not survive serialisation byte-exact").toBe(nasty);
+    expect(envelope.schema).toBe("pifleet.result/v1");
+    expect(envelope.task_id).toBe(EXAMPLE_TASK_ID);
+    // And the file beside it is untouched by what the envelope carried.
+    expect(readFileSync(out.reportPaths[0]!, "utf8")).toBe(REPORT_CONTENT);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * `notes` IS NOT A PATH, which is what retires the `notes`-as-a-filename
+   * anecdote. The tool writes exactly two things — the report file and the
+   * envelope — and no argument to it can add a third called `notes`.
+   */
+  test("nothing named `notes` is ever written beside the review", () => {
+    const { dir, out } = submitWithReport({ notes: "a short summary" });
+    const filesDir = out.reportPaths[0]!.slice(0, out.reportPaths[0]!.lastIndexOf("/"));
+    expect(readdirSync(filesDir).sort()).toEqual([ARTIFACT_NAMES.prose]);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

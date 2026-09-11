@@ -660,21 +660,33 @@ const MUTATIONS: M[] = [
     replace: "Split any suffix off the path.",
     expect: "red",
   },
+  /**
+   * RE-ANCHORED 2026-09-11 (task 8.2), AND THE COMMENT MOVED OUT OF THE OBJECT.
+   *
+   * The anchor this replaces was `tools: [read, write, grep, find, ls]`, which
+   * task 7.1 narrowed to the grant below. It had matched NOTHING since — zero
+   * occurrences in `fleet.example.yaml`, so the replacer rewrote nothing, the
+   * suite passed on unmutated source, and the case reported GREEN-as-expected
+   * while proving that the file still contains a string it no longer contains.
+   *
+   * **It hid because this comment used to sit between `file:` and `find:`.**
+   * `mutation-anchors.test.ts` could not see a case shaped that way, so the one
+   * guard that exists to catch a dead anchor skipped the two cases that had
+   * one. The prose moves above the object for that reason, which is the shape
+   * every other case in this battery already uses.
+   *
+   * The three-line form is kept rather than reduced to the `tools:` line alone.
+   * That line is unique in both configs today — `triage` no longer copies the
+   * reviewer's grant byte for byte — but it was not unique when RV15 was first
+   * anchored, and re-narrowing to it would reintroduce the two-match hazard the
+   * moment another role's grant converges again.
+   */
   {
     id: "RV15",
     what: "GRANT: bash is granted to the reviewer in the TRACKED config",
     file: EXAMPLE,
-    /*
-     * ANCHORED THROUGH `./roles/reviewer.md` RATHER THAN ON THE `tools:` LINE
-     * ALONE, which is RV17's spelling arriving in the tracked file for the same
-     * reason it was needed in the live one. The triage console's `triage` role
-     * carries a byte-identical grant by deliberate copy, so the bare line now
-     * matches twice and a two-match anchor mutates whichever the replacer
-     * reaches first. `mutation-anchors.test.ts` caught it the day the role
-     * landed; this is the re-anchor it asked for.
-     */
-    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
-    replace: "    tools: [read, write, grep, find, ls, bash]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    find: "    tools: [read, grep, find, ls, submit_report]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    replace: "    tools: [read, grep, find, ls, submit_report, bash]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
   // ── The file/summary split, added 2026-09-05 with the contract it measures. ─
@@ -1067,21 +1079,51 @@ const MUTATIONS: M[] = [
     expect: "red",
   },
   // ── The grant, and the two halves independently pinned. ──────────────────
+  /**
+   * RV16 AND RV17 CHANGED THEIR MUTATION, not just their anchor — 2026-09-11.
+   *
+   * Both used to remove `write` from the reviewer's grant, on the premise that a
+   * reviewer without it *"cannot report"*. **Task 7.1 already removed `write`**,
+   * so that edit is now a no-op on a role that does not hold it: the string is
+   * absent, nothing is rewritten, and a case that cannot change the tree cannot
+   * redden. The premise died with the grant, and the anchor died with it.
+   *
+   * The live mutation is REMOVING `submit_report`, and it is the same claim
+   * pointed at the tool that took `write`'s place. `config/schema.ts` makes
+   * {write, edit, bash} the writer set and this role holds none of them; nothing
+   * host-side writes `result.json` (`harvest/outbox.ts` only reads it). So
+   * `submit_report` is the only verb that can put an envelope anywhere, and a
+   * reviewer stripped of it is state 1 of `review-plan.test.ts`'s three-state
+   * history exactly: every lens missing, `relay.ts` answering `not_collated`, no
+   * collation dispatched, and the fan-out task settling `success` with the review
+   * showing green. That is the worst signature in this console's history, which
+   * is why it is the one worth pinning.
+   *
+   * **The two halves are graded by DIFFERENT suites, and that is the point of
+   * keeping both.** RV16 mutates the TRACKED `fleet.example.yaml`, which
+   * `reviewer-role.test.ts` parses with `grantedTools` and CI therefore grades.
+   * RV17 mutates the operator's gitignored `fleet.yaml`, which only
+   * `review-plan.test.ts`'s `describe.skipIf(!HAVE_CONFIG)` block reads — it
+   * resolves the three `rev-*` seats through `resolveWorker`, and none of them
+   * declares its own `tools:`, so the role's grant is what they inherit. That
+   * block SKIPS on a machine without the file, which is why RV17 was invisible
+   * rather than merely dead: `atHead` returns null for an untracked target and
+   * the anchors guard skips it instead of reporting it. The battery copies the
+   * operator's `fleet.yaml` into the worktree, so it runs here.
+   */
   {
     id: "RV16",
-    what: "GRANT: `write` is removed from the TRACKED config — the role cannot report",
+    what: "GRANT: `submit_report` is removed from the TRACKED config — the role cannot report",
     file: EXAMPLE,
-    // Re-anchored with RV15, and for that entry's reason: `triage` copies this
-    // grant byte for byte, so the bare `tools:` line is no longer unique here.
-    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    find: "    tools: [read, grep, find, ls, submit_report]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     replace: "    tools: [read, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
   {
     id: "RV17",
-    what: "GRANT: the live config diverges from the tracked one",
+    what: "GRANT: `submit_report` is removed from the LIVE config — the role cannot report",
     file: FLEET,
-    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    find: "    tools: [read, grep, find, ls, submit_report]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     replace: "    tools: [read, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
