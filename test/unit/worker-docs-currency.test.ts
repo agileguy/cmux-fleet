@@ -34,6 +34,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { StatusSchema } from "../../src/contracts.ts";
+import { CONTRACT_SKILL, loadConfig } from "../../src/config/load.ts";
+import { effectiveToolGrant, writeCapableIn } from "../../src/config/schema.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const SKILL = readFileSync(`${ROOT}skills/pifleet-worker/SKILL.md`, "utf8");
@@ -289,5 +291,143 @@ describe("the worker is told about the paths it can clone from and into", () => 
     // SOMETHING testable. Stopping has to be the named action.
     expect(SKILL).toMatch(/stop and say so/);
     expect(SKILL).toMatch(/launched from the wrong directory/);
+  });
+});
+
+/**
+ * The result-writing instructions are ROUTED on the tool grant the worker holds.
+ *
+ * ## The defect, measured against the shipped config
+ *
+ * `SKILL.md` told every worker to write `/outbox/<task-id>/result.json` with a
+ * temp file and a rename, and that *"the file's whole content travels as a
+ * single string argument to your write tool"*. `reviewer` and `triage` are
+ * granted `read, grep, find, ls, submit_report` — no `write`, no `edit`, no
+ * `bash` — so both were being ordered, in the same context window that told
+ * them they hold no writer, to use a tool they do not have. `CONTRACT_SKILL` is
+ * re-injected post-merge and cannot be removed (`load.ts`), so the instruction
+ * reached them on every dispatch regardless of what their role declared.
+ *
+ * This is the shape phase 8 fixed one layer up. `roles/*.md` lost their
+ * hand-written-envelope prose because `submit_report` took the job and `write`
+ * was withdrawn — and the identical prose went on being injected from the one
+ * document no config can drop. `SUBMIT_REPORT_DESCRIPTION` counts *"the six
+ * role documents this tool is replacing"*; the skill was a seventh source that
+ * nothing counted and nothing checked.
+ *
+ * ## Why this is not a deletion guard
+ *
+ * The hand-composition route is REAL and must stay documented. A role that
+ * declares no `tools:` resolves through `effectiveToolGrant` to Pi's builtins,
+ * and no builtin is named `submit_report` — such a worker holds `write` and has
+ * no tool to call. Deleting the section would be a worse defect than the one it
+ * replaces, facing the other way, so the markers are asserted PRESENT before
+ * they are asserted SCOPED.
+ *
+ * ## What makes it reddenable
+ *
+ * The gate is a POSITION, not a phrase: each hand-composition order must fall
+ * after the `### Composing it by hand` heading, and the routing that names
+ * `submit_report` must come before it. Deleting the heading, moving the atomic
+ * order back to the top of the section, or reverting the file all redden —
+ * verified by mutation, not by reading.
+ */
+describe("the result-writing instructions are routed on the worker's tool grant", () => {
+  /** The `## Writing the result` section, to the next `##` heading (`###` does not match). */
+  const SECTION = (() => {
+    const start = SKILL.indexOf("## Writing the result");
+    expect(start, "the `## Writing the result` heading is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+    const rest = SKILL.slice(start + 1);
+    const end = rest.indexOf("\n## ");
+    return end === -1 ? rest : rest.slice(0, end);
+  })();
+
+  /**
+   * The orders that are only performable with a write verb. Pinned to the two
+   * the review named: the atomicity instruction, which is the tool's own job on
+   * the `submit_report` route (`writeAtomic` — temp file then `renameSync`), and
+   * the escaping warning, which cannot arise on that route at all because the
+   * tool serialises the envelope with `JSON.stringify`.
+   */
+  const HAND_ORDERS = [
+    "Write `/outbox/<task-id>/result.json` **atomically**",
+    "single string argument to your write tool",
+  ];
+
+  /** Roles whose resolved grant holds `submit_report` and no write-capable builtin. */
+  async function reportOnlyRoles(): Promise<string[]> {
+    const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
+    const out: string[] = [];
+    for (const [name, role] of Object.entries(config.roles)) {
+      // Resolved exactly as `schema.ts`'s own ISC-59 guard resolves it, so a
+      // role that omits `tools:` is read as Pi's builtins rather than as none.
+      const tools = effectiveToolGrant(role.tools ?? config.defaults.tools);
+      if (tools.includes("submit_report") && writeCapableIn(tools).length === 0) out.push(name);
+    }
+    return out;
+  }
+
+  test("this probe reads the document that is actually injected into every worker", () => {
+    // If the contract skill is renamed, this file stops being the one that
+    // reaches a worker and every assertion below becomes decorative.
+    expect(CONTRACT_SKILL).toBe("pifleet-worker");
+  });
+
+  test("no shipped role is ordered to write result.json with a write tool it does not hold", async () => {
+    const roles = await reportOnlyRoles();
+    // CONTROL: with no such role the assertion below proves nothing, and a
+    // green probe would be reporting a narrowing it no longer checks.
+    expect(
+      roles,
+      "no shipped role holds submit_report without a write verb — this probe is vacuous",
+    ).not.toEqual([]);
+
+    const scopedAt = SECTION.indexOf("### Composing it by hand");
+    expect(
+      scopedAt,
+      `the hand-composition subheading is gone, so its orders apply to every worker — ` +
+        `including ${roles.join(", ")}, which hold no write verb at all`,
+    ).toBeGreaterThanOrEqual(0);
+
+    for (const order of HAND_ORDERS) {
+      const at = SECTION.indexOf(order);
+      // PRESENT first. A role that declares no `tools:` gets Pi's builtins and
+      // no `submit_report`, so deleting this route strands that worker.
+      expect(at, `the hand-composition route is GONE: "${order}" is no longer in the section`).toBeGreaterThanOrEqual(0);
+      expect(
+        at,
+        `"${order}" sits ahead of "### Composing it by hand", so it reads as an order to ` +
+          `${roles.join(", ")} — none of which holds write, edit or bash`,
+      ).toBeGreaterThan(scopedAt);
+    }
+  });
+
+  test("the routing names `submit_report` before the first hand-composition order", () => {
+    const routedAt = SECTION.indexOf("submit_report");
+    const firstOrder = Math.min(
+      ...HAND_ORDERS.map((o) => SECTION.indexOf(o)).filter((i) => i >= 0),
+    );
+    expect(routedAt, "the section never mentions submit_report — nothing routes the reader").toBeGreaterThanOrEqual(0);
+    expect(
+      routedAt,
+      "the hand-composition order arrives before the reader is told the route may not be theirs",
+    ).toBeLessThan(firstOrder);
+  });
+
+  /**
+   * The doubling `composeEnvelope` produces, which is the failure a worker gets
+   * for obeying the OLD text correctly: every spelling that resolves to a
+   * `report` file is accepted — deliberately, so a correct call is not refused —
+   * and the auto-declaration is appended on top, so the envelope names the file
+   * twice. Measured against `composeEnvelope` before this was written.
+   */
+  test("the `submit_report` branch warns against declaring a `report` file twice", () => {
+    const branch = SECTION.slice(
+      SECTION.indexOf("### Calling `submit_report`"),
+      SECTION.indexOf("### Composing it by hand"),
+    );
+    expect(branch.length, "the `### Calling `submit_report`` branch is gone").toBeGreaterThan(0);
+    expect(branch).toContain("artifacts[]");
+    expect(branch).toMatch(/twice/);
   });
 });

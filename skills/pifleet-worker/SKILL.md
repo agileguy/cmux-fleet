@@ -143,6 +143,57 @@ honest `blocked`. There is no reward for optimism here, and there is a real cost
 
 ## Writing the result
 
+**Two routes exist, and the tools you hold decide which is yours — not preference, and not
+whichever this document spends more words on.** Check your tool list before reading further:
+each route's instructions are actively wrong for the other.
+
+| What you hold | Your route |
+|---|---|
+| `submit_report` | **Call it.** It composes and writes the envelope for you — *Calling `submit_report`*, next |
+| no `submit_report`, but `write`, `edit` or `bash` | **Compose the file yourself** — *Composing it by hand*, below |
+| both | **Call `submit_report`.** The hand-written envelope stays physically possible and is not yours to write |
+
+Most roles hold `submit_report`, and several hold **no writing verb at all**: a role granted
+`read, grep, find, ls, submit_report` cannot create a file by any means. For that worker every
+sentence below about writing a temp file, escaping a string, or declaring an artifact it wrote
+describes an action it cannot take. The hand-composition route is real all the same and stays
+documented — a role that declares no tool list is granted Pi's builtins, and no builtin is
+named `submit_report`.
+
+### Calling `submit_report`
+
+One call, and it is the whole of your reporting. Pass `status` and `summary`; pass `notes`,
+`blockers`, `acceptance` and `commands_run` when you have them.
+
+- **Do not pass `schema`, `task_id`, `epoch` or `worker`.** They are read from host state and
+  have no parameter. The schema is closed, so supplying one is a validation error naming the
+  field — not a value that quietly loses to the host's.
+- **Hand documents over through `report`, not by writing files.** It is a list of
+  `{filename, content}`; the tool writes each entry into `/outbox/<task-id>/files/` **and
+  declares it in `artifacts` for you**. One filename twice is refused, not overwritten.
+- **Do not also list a `report` file in `artifacts[]`.** That declaration is automatic, so a
+  hand-written claim is added *on top of* it and the envelope carries the file **twice**. Every
+  spelling that resolves to the file is accepted — `files/<name>`, `./files/<name>`, and the
+  absolute `/outbox/<task-id>/files/<name>` the example below shows — because refusing them
+  would refuse a call that did everything else right. Copy the absolute spelling out of that
+  example and the envelope names one file twice, in two different spellings. Any *other* path
+  is refused for not existing.
+- **`artifacts[]` is for files you wrote yourself**, and a claim naming a file that is not on
+  disk is refused. Holding no writing verb, `report` is the only way you can have one.
+- **Escaping and atomicity are not yours here.** The tool serialises the envelope and writes it
+  through a temp file and a rename. The ONE-LINE rule below is a property of hand-composed JSON
+  and not one the tool observes — it writes indented JSON deliberately, for whoever reads a
+  failed task's outbox by hand.
+
+Still true on this route: **structured output belongs in a `report` file, never quoted into a
+string field**, and **`notes` and `summary` are plain prose** — a sentence or two a person
+reads, not a serialised object.
+
+### Composing it by hand
+
+**This section is for a worker with no `submit_report`.** If you hold that tool, everything
+here describes a file you are not going to write.
+
 Write `/outbox/<task-id>/result.json` **atomically** — write a temp file, `fsync` it, rename
 it into place. A half-written envelope is **worse than a missing one**: unparseable JSON is
 *refused*, which records a discrepancy against you and caps the harvest at `partial`, whereas a
@@ -197,12 +248,18 @@ worth more than silence, and silence is precisely what an absent envelope is.
 }
 ```
 
-Field rules, each of which is checked:
+Field rules, each of which is checked. **The first four are fields only a hand-composed
+envelope carries** — `submit_report` supplies `task_id`, `epoch`, `schema` and `worker` from
+host state and has no parameter for `files_changed` or `commits`, so on that route these four
+are things to understand rather than things to write.
 
 - `task_id` must match the task you were given — see the section above on where to read it.
 - `epoch` must match too, and **it is delivered to you — read it, never guess it.** It is the
   `epoch:` line of the same fenced `## This task` block you read `task_id` from, and for a
-  **staged** task it is also on its own line in `/policy/dispatch`. Copy the number.
+  **staged** task it is also on its own line in `/policy/dispatch`. Copy the number — into a
+  hand-composed envelope. Read it either way, because it tells you which dispatch you are
+  answering, but on the `submit_report` route passing it is a validation error rather than a
+  value that reaches the file.
 
   **This bullet used to tell you to write `1`**, on the reasoning that the value was not
   delivered and that the first dispatch to a worker is epoch 1 anyway. Both halves have stopped
@@ -286,8 +343,10 @@ skipped by a worker that believed it had finished.
 2. **Every artifact is under `/outbox/<task-id>/files/`, at the exact filenames your role's
    skill names.** A file whose name a harvest check keys on is not optional because you also
    wrote a more readable version of it.
-3. **`result.json` exists at `/outbox/<task-id>/result.json`**, written atomically, listing
-   those artifacts in `artifacts[]`.
+3. **`result.json` exists at `/outbox/<task-id>/result.json`.** On the `submit_report` route
+   that means the call returned; the tool wrote the file, declared your `report` documents in
+   `artifacts[]`, and you did not declare them a second time. Composing by hand, it means you
+   wrote it atomically and listed those artifacts yourself.
 4. **Its `status` is the one you can defend**, not the one you would prefer.
 
 If you cannot complete check 1, do not proceed to check 2. Say so in your final message
