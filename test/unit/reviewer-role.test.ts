@@ -86,6 +86,54 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
+ * A slice of a document taken AT a marker, where a missing marker is a NAMED
+ * ERROR rather than a silently different slice.
+ *
+ * This is the fail-open shape, and it was in this file eight times:
+ *
+ * ```ts
+ * const block = DOC.slice(DOC.indexOf("a heading someone reworded"));
+ * expect(block.length, "the instruction is gone").toBeGreaterThan(0);
+ * ```
+ *
+ * `indexOf` returns -1 for a heading that has moved, and `slice(-1)` yields the
+ * LAST CHARACTER of the document. So `block.length` is 1, the sentinel written
+ * to catch exactly that condition PASSES, and every `toContain` below it then
+ * fails with a message naming the wrong thing — a heading rename reads as a
+ * missing sentence. A `.not.toContain` in that position passes outright and the
+ * probe goes quietly dark.
+ *
+ * The identical defect was found in `test/unit/collator-role.test.ts` on task
+ * 7.2, by a reviewer, after a heading rename turned a scoped assertion into a
+ * whole-file one. `between()` there is this same shape; these take the document
+ * and its name as arguments because this file scopes into four different ones —
+ * two role documents, an aspect file and a source file — and an error that does
+ * not say WHICH is half a diagnosis.
+ */
+function sliceFrom(doc: string, name: string, marker: string): string {
+  const at = doc.indexOf(marker);
+  if (at < 0) throw new Error(`${name} no longer contains ${marker}`);
+  return doc.slice(at);
+}
+
+/**
+ * The head of a document, UP TO a marker, with the same refusal and one more.
+ *
+ * A marker at index 0 yields the empty string, and every probe written against
+ * a head slice asks whether something is ABSENT from it — `.test(opening)` is
+ * `false` for "" whatever the pattern, so an empty head slice passes the lot.
+ * That is the same fail-open wearing the other polarity, so it throws too. This
+ * preserves the `toBeGreaterThan(0)` the one call site already carried, as an
+ * error that says what happened.
+ */
+function sliceTo(doc: string, name: string, marker: string): string {
+  const at = doc.indexOf(marker);
+  if (at < 0) throw new Error(`${name} no longer contains ${marker}`);
+  if (at === 0) throw new Error(`${name} now OPENS with ${marker} — the slice before it is empty`);
+  return doc.slice(0, at);
+}
+
+/**
  * THE REVIEW IS A FILE AND `notes` IS A SUMMARY OF IT — rewritten 2026-09-05,
  * and the instruction it replaces is recorded rather than quietly dropped.
  *
@@ -142,11 +190,7 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
  */
 describe("the review is a file, notes is a summary, and both ends say so", () => {
   test("the reviewer is told to file the long review AND to keep notes short", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(
-      block.length,
-      "roles/reviewer.md no longer carries the instruction in its own right",
-    ).toBeGreaterThan(0);
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
     // Both halves. A probe on either alone stays green through the other being
     // deleted, and either half alone re-creates one of the two measured losses.
     expect(block, "the review's destination is not named").toContain(
@@ -181,7 +225,7 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * send the review out by a route with nothing appending anything.
    */
   test("the review is routed through `report`, which is what declares it", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
     expect(block, "the block never names the parameter that carries the review").toContain(
       "`report` file",
     );
@@ -233,7 +277,7 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * wrong.
    */
   test("the caps the document states are the caps the code actually enforces", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
     expect(block, "the per-file cap is not the one relay.ts applies").toContain(
       `size cap: ${MAX_REPLY_ARTIFACT_BYTES / 1024} KiB per file`,
     );
@@ -255,7 +299,7 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * is not, which is the more dangerous of the two errors.
    */
   test("the document says plainly that the file does NOT rescue a lens that did not report", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
     /*
      * MATCHED INSIDE ONE LINE. This pinned `"It does\nnot rescue the lens"` —
      * the phrase as it happened to wrap — so a re-wrap that changed no word
@@ -327,8 +371,7 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * re-create the defect on a fleet whose reviewer role had already been fixed.
    */
   test("the collator's copy instructs the same split the reviewer's does", () => {
-    const block = COLLATOR.slice(COLLATOR.indexOf("file its long review"));
-    expect(block.length, "the collator no longer instructs the file split").toBeGreaterThan(0);
+    const block = sliceFrom(COLLATOR, "roles/collator.md", "file its long review");
     expect(block, "the collator does not name the review's destination").toContain(
       "/outbox/<task-id>/files/review.md",
     );
@@ -345,7 +388,7 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * broken envelope writes briefs that say so.
    */
   test("the collator's copy does not promise the file survives a broken envelope", () => {
-    const block = COLLATOR.slice(COLLATOR.indexOf("file its long review"));
+    const block = sliceFrom(COLLATOR, "roles/collator.md", "file its long review");
     expect(block, "the collator's brief does not name the mechanism").toContain(
       "no reply published for it at all",
     );
@@ -370,7 +413,13 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
   test("the design note records the gap as closed, and how", () => {
     const src = readFileSync(`${ROOT}src/run/collation.ts`, "utf8");
     expect(src).toContain("THE GAP THIS CONTRACT COULD NOT CLOSE — CLOSED");
-    const note = src.slice(src.indexOf("THE GAP THIS CONTRACT COULD NOT CLOSE"));
+    /*
+     * The `toContain` above happens to guard this `indexOf` today — its string
+     * is a SUPERSTRING of this marker, so it reddens first. That is a coupling
+     * nobody reading either line would notice, and shortening the assertion
+     * above would silently re-open the fail-open. The refusal belongs here.
+     */
+    const note = sliceFrom(src, "src/run/collation.ts", "THE GAP THIS CONTRACT COULD NOT CLOSE");
     // The decision, its shape, and the cost it carries.
     expect(note).toContain("Take A shipped");
     expect(note).toContain("inlined_artifacts");
@@ -834,9 +883,11 @@ describe("the language seat takes its angle from the repository, not from config
    * was written for, in the exact form the defect had.
    */
   test("the angle statement names no language, so no target is assumed", () => {
-    const cut = LANG!.indexOf("**Which language that is");
-    expect(cut, "the angle statement's boundary sentence is gone").toBeGreaterThan(0);
-    const opening = LANG!.slice(0, cut);
+    const opening = sliceTo(
+      LANG!,
+      "roles/review/implementation-language.md",
+      "**Which language that is",
+    );
     for (const named of ["TypeScript", "JavaScript", "Python", "Go", "Rust", "Java", "Kotlin"]) {
       expect(
         new RegExp(`\\b${named}\\b`, "i").test(opening),
@@ -954,7 +1005,7 @@ describe("the location a reviewer quotes is the one a collation can carry", () =
    * lets the census publish the two arms apart.
    */
   test("the reviewer is told to quote the container path", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("Quote file and line"));
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "Quote file and line");
     expect(block).toContain("/workspace/");
     expect(block).toContain("not** the repo-relative form");
     expect(block).toContain("bare number");
