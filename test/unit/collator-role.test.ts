@@ -125,8 +125,9 @@ function flat(text: string): string {
 }
 
 /**
- * A slice of the document between two sentinels, where a MISSING sentinel is an
- * error rather than a silently wider slice.
+ * The one index at which `marker` occurs, refusing ABSENCE and AMBIGUITY alike.
+ *
+ * ## The half `between()` closed, kept
  *
  * `indexOf` returns -1 for a heading that has moved, and `slice(start, -1)` then
  * runs to the end of the document — so a scoped assertion quietly becomes a
@@ -134,14 +135,57 @@ function flat(text: string): string {
  * and did exactly that to the `Field rules` slice; `rev-lang-1` found it on the
  * review cycle for the same commit.
  *
+ * ## The half it did not, which is this function's reason for existing
+ *
+ * A refusal on `-1` sees a marker that occurs ZERO times. It is blind to one
+ * that occurs TWICE, and `indexOf` silently takes the first — so every slice is
+ * right only for as long as nothing upstream acquires the same words.
+ *
+ * **Measured, live in this file.** `"Turn one"` occurred twice in
+ * `roles/collator.md`: the `### Turn one` heading and a body mention of "turn
+ * one" inside the turn-one section itself. Five call sites passed the bare
+ * `between("Turn one", "Turn two")` and all five were correct, by the accident
+ * of which occurrence came first. Reword the HEADING and nothing throws: the
+ * marker re-anchors onto the body mention a hundred lines down, every one of
+ * those slices silently narrows to a fraction of the section, and the `.not`
+ * assertions among them go green on a slice that no longer contains the text
+ * they are watching for. That is the same fail-open the docblock above
+ * describes, one level up — surviving inside the helper written to prevent it.
+ *
+ * ## The fix is a more specific MARKER, never a looser helper
+ *
+ * The refusal is deliberately not "take the first" or "take the outermost". A
+ * caller whose marker went ambiguous has lost the ability to say which region it
+ * meant, and there is no rule this function can apply that recovers the
+ * intention — only the caller knows it. `### Turn one` is what that looks like
+ * in practice: four characters, unambiguous, and it stays unambiguous when the
+ * prose around it changes. Same shape and same argument as `blockWith()` above,
+ * which has refused anything but exactly one match since task 7.2.
+ */
+function onlyIndexOf(marker: string): number {
+  const occurrences = ROLE.split(marker).length - 1;
+  if (occurrences === 0) throw new Error(`roles/collator.md no longer contains ${marker}`);
+  if (occurrences > 1) {
+    throw new Error(
+      `roles/collator.md contains ${marker} ${occurrences} times; a slice marker must be ` +
+        `unique or the slice is whichever one comes first. Make the marker more specific — a ` +
+        `heading's \`### \` prefix usually does it — rather than loosening this check.`,
+    );
+  }
+  return ROLE.indexOf(marker);
+}
+
+/**
+ * A slice of the document between two sentinels, where a missing OR AMBIGUOUS
+ * sentinel is an error rather than a silently different slice.
+ *
  * (This docblock had drifted onto `flat()` below it and described a function it
- * was not attached to. Moved back, unchanged.)
+ * was not attached to. Moved back, unchanged; the argument it carried now lives
+ * on `onlyIndexOf` above, which both slicers share.)
  */
 function between(startMarker: string, endMarker: string): string {
-  const start = ROLE.indexOf(startMarker);
-  const end = ROLE.indexOf(endMarker);
-  if (start < 0) throw new Error(`roles/collator.md no longer contains ${startMarker}`);
-  if (end < 0) throw new Error(`roles/collator.md no longer contains ${endMarker}`);
+  const start = onlyIndexOf(startMarker);
+  const end = onlyIndexOf(endMarker);
   if (end < start) throw new Error(`${endMarker} precedes ${startMarker} in roles/collator.md`);
   return ROLE.slice(start, end);
 }
@@ -177,11 +221,17 @@ function between(startMarker: string, endMarker: string): string {
  *
  * There is no `sliceTo` here: this file takes no head slices. Add it with the
  * index-0 refusal its counterpart carries if that ever changes.
+ *
+ * **The AMBIGUOUS marker goes through `onlyIndexOf` for the same reason.** A
+ * tail slice re-anchored onto a later duplicate of its own marker is strictly
+ * worse than the two-sentinel case: it does not narrow to a wrong region, it
+ * narrows to the document's tail, and the `.not.toContain` polarity this
+ * docblock is already about passes just as unconditionally on a short tail as
+ * on one character. Both slicers share the one guard so neither can drift into
+ * holding half of it.
  */
 function sliceFrom(marker: string): string {
-  const at = ROLE.indexOf(marker);
-  if (at < 0) throw new Error(`roles/collator.md no longer contains ${marker}`);
-  return ROLE.slice(at);
+  return ROLE.slice(onlyIndexOf(marker));
 }
 
 describe("the mechanism the document describes is the one that exists", () => {
@@ -382,14 +432,14 @@ describe("the ids the document tells the collator to name are the derived ones",
    * rather than wherever the string happens to occur.
    */
   test("the collation id appears in the turn-one instruction", () => {
-    const turnOne = between("Turn one", "Turn two");
+    const turnOne = between("### Turn one", "Turn two");
     expect(turnOne).toContain(collationTaskId(PARENT));
     expect(collationTaskId(PARENT)).toBe(`${PARENT}-${COLLATION_ASPECT}`);
   });
 
   /** The same scoping for the three child ids, for the same reason. */
   test("every child id appears in the turn-one instruction, not merely somewhere", () => {
-    const turnOne = between("Turn one", "Turn two");
+    const turnOne = between("### Turn one", "Turn two");
     for (const seat of REVIEW_CONSOLE_ASPECTS) {
       expect(turnOne, `turn one never names ${childTaskId(PARENT, seat.aspect)}`).toContain(
         childTaskId(PARENT, seat.aspect),
@@ -644,7 +694,7 @@ describe("the statuses the document instructs are ones the schema accepts", () =
    * by `min`.
    */
   test("turn one is instructed to claim success", () => {
-    const turnOne = between("Turn one", "Turn two");
+    const turnOne = between("### Turn one", "Turn two");
     expect(turnOne).toContain('`status: "success"`');
   });
 
@@ -763,7 +813,7 @@ describe("the house rule on attribution holds in the document itself", () => {
  *   and it is the arm a single grep for either sentence alone would miss.
  */
 describe("turn one scopes the change rather than reviewing it", () => {
-  const turnOne = (): string => between("Turn one", "Turn two");
+  const turnOne = (): string => between("### Turn one", "Turn two");
 
   test("turn one denies the collator standing to make findings", () => {
     expect(turnOne()).toContain("findings are not yours");
@@ -831,7 +881,7 @@ describe("turn one scopes the change rather than reviewing it", () => {
  * will be tempted to cut them.
  */
 describe("turn one tells the collator what DONE looks like, not just what not to do", () => {
-  const turnOne = (): string => between("Turn one", "Turn two");
+  const turnOne = (): string => between("### Turn one", "Turn two");
 
   test("the envelope is named as the last tool call of the turn", () => {
     expect(turnOne(), "turn one never says the envelope ends it").toContain("LAST TOOL CALL");
