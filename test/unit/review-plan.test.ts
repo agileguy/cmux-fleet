@@ -297,11 +297,18 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
      * failure with the worst signature in this file's history: three empty
      * lenses and every status green.
      *
-     * **`col-1` IS UNCHANGED AND THAT IS DELIBERATE.** The collator's withdrawal
-     * is task 7.2 and Phase B narrows one role per commit — reviewer, then
-     * collator, then triage — with a console cycle between them, so a run where
-     * exactly one of the four seats has been narrowed is the intended
-     * intermediate state rather than a drift.
+     * 4. **2026-09-10 — task 7.2: `col-1` narrowed too**, so all four seats are
+     *    now write-less and the intermediate state this block used to describe is
+     *    over. The collator needed one tool the reviewers do not:
+     *    `dispatch_request`, because its fan-out is a file at the TASK ROOT and
+     *    `report` writes one directory below it.
+     *
+     * **This assertion was RED on the operator's machine and it was supposed to
+     * be.** The paragraph it replaces said `col-1` is unchanged and deliberate,
+     * and that the block is the tripwire for a hand-edited gitignored file. Both
+     * were true and the tripwire worked exactly as written — the suite that
+     * caught the drift was this one, found by a review lens rather than by the
+     * author, who ran four collator suites and never thought to run this.
      *
      * The line §12.1 actually draws is BASH, and none of the above moves it: a
      * shell is what turns a read-only reviewer into a worker that can `cd /`,
@@ -321,7 +328,13 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
      * console is the machine that must notice the console has not been narrowed.
      */
     const col = resolveWorker(loaded(), "col-1");
-    expect(col.tools).toContain("write");
+    expect(col.tools, "the collator still holds the tool submit_report replaced").not.toContain(
+      "write",
+    );
+    expect(col.tools, "the collator has no way to report at all").toContain("submit_report");
+    expect(col.tools, "the collator has no way to reach the task root").toContain(
+      "dispatch_request",
+    );
     expect(col.tools).not.toContain("bash");
     for (const id of reviewers) {
       const tools = resolveWorker(loaded(), id).tools;

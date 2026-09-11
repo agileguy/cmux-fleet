@@ -37,7 +37,11 @@
  *    example: a model copies its shape confidently.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { dispatchRequest, type DispatchRequestParams } from "../../docker/pi-extensions/report-tools.ts";
 
 import { StatusSchema } from "../../src/contracts.ts";
 import { findingLocationProblem } from "../../src/harvest/collation-census.ts";
@@ -50,8 +54,8 @@ import {
 import {
   DISPATCH_REQUEST_FILE,
   DISPATCH_REQUEST_SCHEMA,
-  DispatchRequestSchema,
   REVIEW_CONSOLE_ROSTER,
+  parseDispatchRequest,
 } from "../../src/run/dispatch-request.ts";
 import {
   COLLATION_ASPECT,
@@ -74,6 +78,67 @@ function jsonBlocks(): string[] {
   return [...ROLE.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]!);
 }
 
+/**
+ * Blocks are selected by CONTENT, never by index.
+ *
+ * They used to be `jsonBlocks()[0]` and `[1]`. Task 7.2 added a third example —
+ * the `submit_report` call that carries the pair — and every positional test
+ * silently re-aimed at the wrong document: eleven failed at once, none of them
+ * because the thing they were about had changed. Selecting on a field each block
+ * uniquely has makes a new example inert here instead of destructive.
+ */
+function blockWith(marker: string): string {
+  const found = jsonBlocks().filter((b) => b.includes(marker));
+  if (found.length !== 1) {
+    throw new Error(`expected exactly one JSON block containing ${marker}, found ${found.length}`);
+  }
+  return found[0]!;
+}
+
+const EXAMPLE_TASK_ID = "T-collate-fixture";
+
+function policyFixture(): { dir: string; mounts: { policyPath: string; outboxRoot: string; repliesPolicyPath: string; repliesRoot: string } } {
+  const dir = mkdtempSync(join(tmpdir(), "pifleet-collator-role-"));
+  const policyPath = join(dir, "policy-task");
+  writeFileSync(policyPath, `${EXAMPLE_TASK_ID}\n1\n`);
+  const outboxRoot = join(dir, "outbox");
+  mkdirSync(outboxRoot, { recursive: true });
+  const repliesRoot = join(dir, "replies");
+  mkdirSync(repliesRoot, { recursive: true });
+  return {
+    dir,
+    mounts: { policyPath, outboxRoot, repliesPolicyPath: join(dir, "policy-replies"), repliesRoot },
+  };
+}
+
+function fanoutExample(): DispatchRequestParams {
+  return JSON.parse(blockWith('"requests"')) as DispatchRequestParams;
+}
+
+/**
+ * A slice of the document between two sentinels, where a MISSING sentinel is an
+ * error rather than a silently wider slice.
+ *
+ * `indexOf` returns -1 for a heading that has moved, and `slice(start, -1)` then
+ * runs to the end of the document — so a scoped assertion quietly becomes a
+ * whole-file one and keeps passing. Task 7.2 renamed the two artifact headings
+ * and did exactly that to the `Field rules` slice; `rev-lang-1` found it on the
+ * review cycle for the same commit.
+ */
+/** The document with every run of whitespace collapsed, for probes about MEANING. */
+function flat(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
+function between(startMarker: string, endMarker: string): string {
+  const start = ROLE.indexOf(startMarker);
+  const end = ROLE.indexOf(endMarker);
+  if (start < 0) throw new Error(`roles/collator.md no longer contains ${startMarker}`);
+  if (end < 0) throw new Error(`roles/collator.md no longer contains ${endMarker}`);
+  if (end < start) throw new Error(`${endMarker} precedes ${startMarker} in roles/collator.md`);
+  return ROLE.slice(start, end);
+}
+
 describe("the mechanism the document describes is the one that exists", () => {
   /**
    * The two paths the previous version invented. Asserted by ABSENCE, which is
@@ -89,8 +154,33 @@ describe("the mechanism the document describes is the one that exists", () => {
     expect(ROLE).toContain(`/outbox/<task-id>/${DISPATCH_REQUEST_FILE}`);
   });
 
-  test("the dispatch request's wire tag matches the schema", () => {
-    expect(ROLE).toContain(DISPATCH_REQUEST_SCHEMA);
+  /**
+   * INVERTED by task 7.2, and the inversion is the point.
+   *
+   * The document used to spell the wire tag because the collator typed it into a
+   * file it wrote itself. `dispatch_request` composes it now, and a document that
+   * still showed it would teach a model to send a field `additionalProperties:
+   * false` refuses. So the assertion flips: naming the tag here is the defect.
+   */
+  test("the document does NOT spell the wire tag the tool composes", () => {
+    expect(ROLE).not.toContain(DISPATCH_REQUEST_SCHEMA);
+  });
+
+  /**
+   * The POSITIVE TWIN, and the inversion above is incomplete without it.
+   *
+   * `not.toContain` pins an absence, and an absence is satisfied by a document
+   * that says nothing at all — delete the guidance and the assertion still
+   * passes while a model is left to guess whether the two fields are its job.
+   * Raised by `rev-lang-1` on 7.2's own review cycle, against the commit that
+   * wrote the inversion.
+   */
+  test("and it DOES tell the collator not to send the two fields", () => {
+    const f = flat(ROLE);
+    expect(f, "nothing tells the collator to omit the two host-composed fields").toContain(
+      "Do not send `schema` and do not send `parent_task_id`",
+    );
+    expect(f, "nothing says who composes them instead").toContain("The tool composes both");
   });
 
   test("the collation's wire tag matches the schema", () => {
@@ -180,7 +270,7 @@ describe("the document's account of a usable location matches the grader's", () 
   const WORKDIR = "/workspace";
 
   test("the rule is stated where the collator writes findings", () => {
-    const rules = ROLE.slice(ROLE.indexOf("Field rules"), ROLE.indexOf("### `/outbox/<task-id>/files/review.md`"));
+    const rules = between("Field rules", "### `review.md`");
     expect(rules, "nothing tells the collator `file` must be a path").toContain(
       "`file` MUST NAME A PATH",
     );
@@ -247,14 +337,14 @@ describe("the ids the document tells the collator to name are the derived ones",
    * rather than wherever the string happens to occur.
    */
   test("the collation id appears in the turn-one instruction", () => {
-    const turnOne = ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+    const turnOne = between("Turn one", "Turn two");
     expect(turnOne).toContain(collationTaskId(PARENT));
     expect(collationTaskId(PARENT)).toBe(`${PARENT}-${COLLATION_ASPECT}`);
   });
 
   /** The same scoping for the three child ids, for the same reason. */
   test("every child id appears in the turn-one instruction, not merely somewhere", () => {
-    const turnOne = ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+    const turnOne = between("Turn one", "Turn two");
     for (const seat of REVIEW_CONSOLE_ASPECTS) {
       expect(turnOne, `turn one never names ${childTaskId(PARENT, seat.aspect)}`).toContain(
         childTaskId(PARENT, seat.aspect),
@@ -282,26 +372,54 @@ describe("the ids the document tells the collator to name are the derived ones",
  * will judge the real thing.
  */
 describe("every worked example in the document validates", () => {
-  test("there are exactly two JSON examples, and both parse as JSON", () => {
+  test("every JSON example in the document parses as JSON", () => {
     const blocks = jsonBlocks();
-    expect(blocks).toHaveLength(2);
+    expect(blocks).toHaveLength(3);
     for (const b of blocks) expect(() => JSON.parse(b)).not.toThrow();
   });
 
-  test("the fan-out example is a legal dispatch request", () => {
-    const doc = JSON.parse(jsonBlocks()[0]!);
-    const r = DispatchRequestSchema.safeParse(doc);
-    expect(r.error?.message ?? "accepted").toBe("accepted");
+  /**
+   * The fan-out example is no longer graded as a DOCUMENT, because it is no
+   * longer one: `dispatch_request` composes `schema` and `parent_task_id` from
+   * `/policy/task`, and an example carrying either would be refused by
+   * `additionalProperties: false` in the hands of a model that copied it.
+   *
+   * So drive the REAL tool with the block and parse what it wrote with the REAL
+   * host parser. That is a stronger claim than the old one, not a weaker
+   * substitute: it says the example, passed to the tool this role now names,
+   * produces a file the host accepts.
+   */
+  test("the fan-out example carries no host-composed field", () => {
+    const block = blockWith('"requests"');
+    expect(block).not.toContain(DISPATCH_REQUEST_SCHEMA);
+    expect(block).not.toContain("parent_task_id");
+  });
+
+  test("the fan-out example, driven through the tool, is accepted by the host parser", () => {
+    const f = policyFixture();
+    const out = dispatchRequest(fanoutExample(), f.mounts);
+    const read = parseDispatchRequest(readFileSync(out.path, "utf8"), {
+      sender: REVIEW_CONSOLE_ROSTER.collators[0]!,
+      taskId: out.taskId,
+      roster: REVIEW_CONSOLE_ROSTER,
+    });
+    rmSync(f.dir, { recursive: true, force: true });
+    if (read.kind !== "ok") {
+      throw new Error(
+        `roles/collator.md's example is refused ${read.kind === "refused" ? read.code : read.kind}: ` +
+          `${read.kind === "refused" ? read.reason : ""}`,
+      );
+    }
+    expect(read.request.requests).toHaveLength(REVIEW_CONSOLE_ROSTER.reviewers.length);
   });
 
   test("the fan-out example names each reviewer exactly once", () => {
-    const doc = DispatchRequestSchema.parse(JSON.parse(jsonBlocks()[0]!));
-    const workers = doc.requests.map((r) => r.worker).sort();
+    const workers = fanoutExample().requests.map((r) => r.worker).sort();
     expect(workers).toEqual([...REVIEW_CONSOLE_ROSTER.reviewers].sort());
   });
 
   test("the collation example is a legal collation", () => {
-    const doc = JSON.parse(jsonBlocks()[1]!);
+    const doc = JSON.parse(blockWith('"finding_count"'));
     const r = CollationSchema.safeParse(doc);
     expect(r.error?.message ?? "accepted").toBe("accepted");
   });
@@ -313,7 +431,7 @@ describe("every worked example in the document validates", () => {
    * collator is most likely to omit — would never be demonstrated.
    */
   test("ASYMMETRIC: the collation example demonstrates a MISSING lens", () => {
-    const doc = CollationSchema.parse(JSON.parse(jsonBlocks()[1]!));
+    const doc = CollationSchema.parse(JSON.parse(blockWith('"finding_count"')));
     expect(doc.lenses.length).toBe(REVIEW_CONSOLE_ASPECTS.length);
     expect(doc.lenses.filter((l) => !l.reported)).toHaveLength(1);
     expect(doc.lenses.filter((l) => !l.reported)[0]!.note).toBeTruthy();
@@ -325,13 +443,13 @@ describe("every worked example in the document validates", () => {
    * which is the one thing the role file says is the worst available outcome.
    */
   test("ASYMMETRIC: the collation example demonstrates a CONTRADICTION", () => {
-    const doc = CollationSchema.parse(JSON.parse(jsonBlocks()[1]!));
+    const doc = CollationSchema.parse(JSON.parse(blockWith('"finding_count"')));
     expect(doc.findings.some((f) => f.disputed_by.length > 0)).toBe(true);
     expect(doc.findings.some((f) => f.raised_by.length > 1)).toBe(true);
   });
 
   test("the example's own finding_count agrees with its list", () => {
-    const doc = CollationSchema.parse(JSON.parse(jsonBlocks()[1]!));
+    const doc = CollationSchema.parse(JSON.parse(blockWith('"finding_count"')));
     expect(doc.finding_count).toBe(doc.findings.length);
   });
 });
@@ -356,7 +474,7 @@ describe("the statuses the document instructs are ones the schema accepts", () =
    * by `min`.
    */
   test("turn one is instructed to claim success", () => {
-    const turnOne = ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+    const turnOne = between("Turn one", "Turn two");
     expect(turnOne).toContain('`status: "success"`');
   });
 
@@ -459,7 +577,7 @@ describe("the house rule on attribution holds in the document itself", () => {
  *   and it is the arm a single grep for either sentence alone would miss.
  */
 describe("turn one scopes the change rather than reviewing it", () => {
-  const turnOne = (): string => ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+  const turnOne = (): string => between("Turn one", "Turn two");
 
   test("turn one denies the collator standing to make findings", () => {
     expect(turnOne()).toContain("findings are not yours");
@@ -527,7 +645,7 @@ describe("turn one scopes the change rather than reviewing it", () => {
  * will be tempted to cut them.
  */
 describe("turn one tells the collator what DONE looks like, not just what not to do", () => {
-  const turnOne = (): string => ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+  const turnOne = (): string => between("Turn one", "Turn two");
 
   test("the envelope is named as the last tool call of the turn", () => {
     expect(turnOne(), "turn one never says the envelope ends it").toContain("LAST TOOL CALL");
@@ -559,8 +677,12 @@ describe("turn one tells the collator what DONE looks like, not just what not to
    */
   test("it says why checking is uninformative, not merely that it is forbidden", () => {
     const t = turnOne();
-    expect(t, "turn one never says an empty reply mount is the correct state").toContain(
-      "empty is the\nCORRECT state",
+    // Matched on REFLOWED text. The literal used to carry the hard line break
+    // this document happened to have, so an unrelated rewrap -- which the file's
+    // own discipline invites -- reddened a probe about meaning. `rev-lang-1`
+    // raised it on the 7.2 cycle.
+    expect(flat(t), "turn one never says an empty reply mount is the correct state").toContain(
+      "empty is the CORRECT state",
     );
     expect(t, "turn one never says no observation distinguishes the two outcomes").toContain(
       "observation available in this turn that separates a fan-out that worked from one that did",

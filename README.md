@@ -238,8 +238,8 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-**One `[ ]` criterion is open: ISC-824.** The `[ ]` count had been zero since ISC-572 closed on 2026-09-06, and ISC-824 opened later the same day rather than being closed on arrival. It is the residue of a design change ruled in *after* the task that would have carried it had already shipped: §6.8a's console-health `kind` set grew a seventh member, `inference_unreachable`, and nothing computes it — the enum, its observation and its anti-twin all landed and are green, and an `endpoint_down` sweep still composes nothing in production. It is filed `[ ]` rather than `[~]` on purpose: `[~]` means the behaviour is built and the evidence is thin, and here the behaviour is not built. Task 5.4e carries it.
-Twenty-six are graded `[~]`
+**No criterion is `[ ]`.** ISC-824 was the last one and task 5.4e closed it on 2026-09-06, the day it opened. It is worth keeping the shape of it here, because the `[ ]` grade is rare and this is what earns it: §6.8a's console-health `kind` set grew a seventh member, `inference_unreachable`, *after* the task that would have carried it had already shipped — the enum, its observation and its anti-twin were all green while an `endpoint_down` sweep still composed nothing in production. It was filed `[ ]` rather than `[~]` on purpose. `[~]` means the behaviour is built and the evidence is thin; there the behaviour was not built, and no amount of evidence would have made it so.
+Twenty-seven are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard — with one departure worth stating plainly, because it is the only
 criterion so far to have made the round trip:

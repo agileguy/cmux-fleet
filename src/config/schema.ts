@@ -2003,16 +2003,23 @@ export function observerTuiEpochWarning(workerIds: readonly string[]): string | 
  * the operator should DO about the line, and the two answers are opposite.
  * `fleet.yaml:542` gives the observer `read, write, bash, grep, find, ls`:
  * dropping `write` there removes a tool and not a capability, because
- * `cat > /outbox/...` is two seconds of shell (§6.8). `collator` and `triage`
- * hold `[read, write, grep, find, ls]` with no `bash` anywhere
- * (`fleet.yaml:726`, `:839`), and there `write` IS the capability — it is the
- * whole of what §6.3's layer 1 takes away.
+ * `cat > /outbox/...` is two seconds of shell (§6.8). The bash-less roles are
+ * the opposite case: there `write` IS the capability, and it is the whole of
+ * what §6.3's layer 1 takes away.
  *
- * `reviewer` WAS the third of those and is no longer, because §13 task 7.1
- * withdrew its `write` — it is the first role Phase B narrowed, and this
- * sentence is the one place in the source that named the set by hand and so is
- * the one place a narrowing can leave stale. Whichever role 7.3 and 7.5 take
- * next, this list shrinks again; nothing computes it, and nothing grades it. One sentence sent to both
+ * **THE HAND-WRITTEN LIST THAT USED TO SIT HERE IS GONE, AND ITS OWN WARNING IS
+ * WHY.** It named `collator` and `triage` as the bash-less write holders and
+ * closed by saying it was "the one place in the source that named the set by
+ * hand and so is the one place a narrowing can leave stale". It then went stale
+ * exactly that way, twice: task 7.3 withdrew `triage`'s `write` and task 7.2
+ * withdrew the `collator`'s, and this sentence still named both until
+ * `rev-arch-1` found it on 7.2's own review cycle. The list is not restated in
+ * corrected form, because a corrected list is the same defect with a later date
+ * on it — `submitReportWriteWorkers` below COMPUTES the set from the config,
+ * and the computed set is the only one that cannot drift. §13 task 7.5 is the
+ * last narrowing outstanding and needs no edit here.
+ *
+ * One sentence sent to both
  * seats is a sentence that asks a bash holder to act on something it cannot
  * change, which is how `observerTuiEpochWarning`'s own narrowing describes a
  * warning turning into noise and taking the rest of them with it.
