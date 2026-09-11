@@ -119,6 +119,11 @@ function fanoutExample(): DispatchRequestParams {
   return JSON.parse(blockWith('"requests"')) as DispatchRequestParams;
 }
 
+/** The document with every run of whitespace collapsed, for probes about MEANING. */
+function flat(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
 /**
  * A slice of the document between two sentinels, where a MISSING sentinel is an
  * error rather than a silently wider slice.
@@ -128,12 +133,10 @@ function fanoutExample(): DispatchRequestParams {
  * whole-file one and keeps passing. Task 7.2 renamed the two artifact headings
  * and did exactly that to the `Field rules` slice; `rev-lang-1` found it on the
  * review cycle for the same commit.
+ *
+ * (This docblock had drifted onto `flat()` below it and described a function it
+ * was not attached to. Moved back, unchanged.)
  */
-/** The document with every run of whitespace collapsed, for probes about MEANING. */
-function flat(text: string): string {
-  return text.replace(/\s+/g, " ");
-}
-
 function between(startMarker: string, endMarker: string): string {
   const start = ROLE.indexOf(startMarker);
   const end = ROLE.indexOf(endMarker);
@@ -141,6 +144,44 @@ function between(startMarker: string, endMarker: string): string {
   if (end < 0) throw new Error(`roles/collator.md no longer contains ${endMarker}`);
   if (end < start) throw new Error(`${endMarker} precedes ${startMarker} in roles/collator.md`);
   return ROLE.slice(start, end);
+}
+
+/**
+ * The TAIL of the document from a sentinel, with the same refusal — the
+ * one-sentinel half of `between()`, which task 7.2 left unconverted.
+ *
+ * `between()` closed this for two-sentinel slices. Two one-sentinel slices were
+ * left on the raw `ROLE.slice(ROLE.indexOf(m))` form, and they are the more
+ * dangerous half, because what a missing marker does here depends entirely on
+ * the polarity of the assertion underneath it. `indexOf` returns -1, `slice(-1)`
+ * yields the document's LAST CHARACTER, and then:
+ *
+ * - a `toContain` fails, but names a missing SENTENCE when what actually
+ *   happened was a renamed HEADING — a true failure with a misleading cause; and
+ * - a `.not.toContain` PASSES UNCONDITIONALLY. Every substring is absent from a
+ *   one-character string.
+ *
+ * The second is the worst polarity this defect has, and it was live in this
+ * file: "the stop instruction is inside turn one" is a drift detector whose only
+ * assertion is a `.not.toContain`. Reword "Turn two" and it goes permanently,
+ * silently green while still claiming to watch for exactly the drift it can no
+ * longer see. A detector that cannot see is indistinguishable from one reporting
+ * nothing to see. Measured before this change: with the marker perturbed, that
+ * test reported `1 pass, 0 fail`.
+ *
+ * Same refusal as `sliceFrom` in `test/unit/reviewer-role.test.ts`, which took
+ * eight of these on the sibling commit — deliberately the same NAME so a grep
+ * finds both. That one carries a document and a name because it scopes into four
+ * documents; this one needs neither, because every slice here is of
+ * `roles/collator.md`.
+ *
+ * There is no `sliceTo` here: this file takes no head slices. Add it with the
+ * index-0 refusal its counterpart carries if that ever changes.
+ */
+function sliceFrom(marker: string): string {
+  const at = ROLE.indexOf(marker);
+  if (at < 0) throw new Error(`roles/collator.md no longer contains ${marker}`);
+  return ROLE.slice(at);
 }
 
 describe("the mechanism the document describes is the one that exists", () => {
@@ -622,10 +663,25 @@ describe("the statuses the document instructs are ones the schema accepts", () =
  * enforced.
  */
 describe("the document does not spell the structural check as acceptance", () => {
-  const GRADED = ROLE.slice(ROLE.indexOf("HOW THIS IS GRADED"));
+  /*
+   * LAZY, for the reason `turnOne` below is lazy. A `const` in a describe body
+   * evaluates at COLLECTION time, so a throwing helper there would abort the
+   * whole file — 47 tests reporting one error about a heading — instead of
+   * reddening the three tests that actually depend on the marker.
+   *
+   * SCOPE, recorded rather than narrowed: this runs to the END of the document,
+   * so it also covers `## THE PROPRIETARY-REMOTE CHECK IS NOT YOURS TO MAKE`,
+   * which follows the grading section. All four phrases the tests below look for
+   * are inside the grading section today (roles/collator.md:421-427), so the
+   * over-reach changes no result — but a future `accepted`/`verified`/`proven`
+   * landing in the proprietary-remote section would satisfy the third test from
+   * outside the section it names. Narrowing the slice would change what these
+   * assert, which this pass deliberately does not do.
+   */
+  const graded = (): string => sliceFrom("HOW THIS IS GRADED");
 
   test("it says plainly that this is not acceptance", () => {
-    expect(GRADED.includes("not acceptance"), "the grading section never says so").toBe(true);
+    expect(graded().includes("not acceptance"), "the grading section never says so").toBe(true);
   });
 
   test("it does not instruct the collator to write acceptance criteria", () => {
@@ -633,7 +689,7 @@ describe("the document does not spell the structural check as acceptance", () =>
       // Matched WITHOUT the leading "do not", which the document's own wrapping
       // splits across a newline. A probe pinned to a line break is a probe that
       // reddens on a reflow.
-      GRADED.includes("put acceptance commands on a review task"),
+      graded().includes("put acceptance commands on a review task"),
       "the grading section no longer refuses acceptance commands",
     ).toBe(true);
   });
@@ -645,8 +701,9 @@ describe("the document does not spell the structural check as acceptance", () =>
    * mistake.
    */
   test("it names the words the schema will refuse", () => {
+    const g = graded();
     for (const w of ["accepted", "verified", "proven"]) {
-      expect(GRADED.includes(w), `the grading section never names "${w}"`).toBe(true);
+      expect(g.includes(w), `the grading section never names "${w}"`).toBe(true);
     }
   });
 });
@@ -826,7 +883,10 @@ describe("turn one tells the collator what DONE looks like, not just what not to
    * there.
    */
   test("the stop instruction is inside turn one, where the collator will be reading", () => {
-    const turnTwo = ROLE.slice(ROLE.indexOf("Turn two"));
+    // `sliceFrom`, NOT `ROLE.slice(ROLE.indexOf(...))`. The assertion below is a
+    // `.not.toContain`, which is satisfied by the one-character slice a missing
+    // marker produces — so on the raw form this probe's failure mode was to pass.
+    const turnTwo = sliceFrom("Turn two");
     expect(turnTwo, "the stop instruction drifted out of turn one").not.toContain("LAST TOOL CALL");
   });
 });
