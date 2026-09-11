@@ -13,13 +13,14 @@
  * Today a worker composes `pifleet.result/v1` as TEXT and writes it with the
  * `write` tool. Four of its eleven fields are things the worker must copy
  * correctly from prose: `schema`, `task_id`, `epoch` and `worker`.
- * `skills/pifleet-worker/SKILL.md:203-215` spends thirteen lines — including a
- * recorded reversal of earlier guidance — instructing a model to *"copy the
- * `epoch:` number off your prompt"*, and `src/harvest/outbox.ts:721-724`
- * refuses envelopes whose `task_id` or `epoch` disagree with the location they
- * were found in. **Thirteen lines of prose and two host-side refusal codes
- * exist to protect two numbers this file can read out of a file the worker
- * cannot write** (`/policy/task`, `src/run/task-policy.ts`).
+ * `skills/pifleet-worker/SKILL.md`'s `epoch` field rule spends sixteen lines —
+ * including a recorded reversal of earlier guidance — telling a model the value
+ * is delivered to it and to *"never guess it"*, and
+ * `src/harvest/outbox.ts:721-724` refuses envelopes whose `task_id` or `epoch`
+ * disagree with the location they were found in. **Sixteen lines of prose and
+ * two host-side refusal codes exist to protect two numbers this file can read
+ * out of a file the worker cannot write** (`/policy/task`,
+ * `src/run/task-policy.ts`).
  *
  * So none of those four is a parameter. They are not "defaulted" or
  * "validated" — they are ABSENT from the schema, and §12's criterion for this

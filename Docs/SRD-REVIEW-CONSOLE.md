@@ -1175,7 +1175,8 @@ verdict:
 
 - the collator's artifact must carry a finding count and, for each finding, a file path and a line
   number that resolve inside `/workspace` — the same class of check `readResultEnvelope` already makes
-  on `artifacts[]` paths (`skills/pifleet-worker/SKILL.md:183-205`);
+  on `artifacts[]` paths — *"Every path in `artifacts[]` must resolve inside your outbox"*
+  (`skills/pifleet-worker/SKILL.md`'s field rules);
 - each finding carries which reviewers raised it, so `3/3` and `1/3` are visible in the record;
 - a collation with **zero** findings and `status: "success"` is `partial`, not `success` — "I found
   nothing" from three readers is a claim that needs a human, and it is the exact shape ISC-93 was
