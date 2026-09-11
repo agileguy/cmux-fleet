@@ -232,11 +232,11 @@
  * A declaration carrying `replies: []` is a turn-one dispatch, and the refusal
  * it produces says *"No replies were declared for this task"* — which is a
  * different sentence from *"the directory is empty"* and is the distinction
- * `roles/triage.md` and `roles/collator.md` each spend six lines of prose
- * establishing. A `readdir` cannot make that distinction at all: an empty
- * `/replies` on turn one and an empty `/replies` after a fan-out that silently
- * failed are the same bytes. The empty ARRAY is a value the host wrote on
- * purpose, and refusing on it is reporting that value rather than losing it.
+ * `roles/triage.md` and `roles/collator.md` each spend a bulleted pair of
+ * paragraphs establishing. A `readdir` cannot make that distinction at all: an
+ * empty `/replies` on turn one and an empty `/replies` after a fan-out that
+ * silently failed are the same bytes. The empty ARRAY is a value the host wrote
+ * on purpose, and refusing on it is reporting that value rather than losing it.
  *
  * **The freshness check is an equality against `/policy/task`, and it compares
  * two strings that are the same string by construction** (failure mode 9.6 —
@@ -972,13 +972,20 @@ export interface ResultEnvelope {
  * report" is one an operator reading the raw JSON should keep.
  *
  * When a `report` was written, its file is appended to `artifacts`, so the
- * declare-what-you-wrote rule (`roles/reviewer.md:53-58`) cannot be forgotten —
- * it is no longer something the model has to remember to do.
+ * declare-what-you-wrote rule cannot be forgotten — it is no longer something
+ * the model has to remember to do. That rule lives in the harvest rather than
+ * in any role document, and is enforced from both directions:
+ * `artifactMissingProblem` above refuses a claim with no file, and the harvest's
+ * reverse pass reports *"which the envelope does not claim"* for a file with no
+ * claim (`src/harvest/reconcile.ts`). Those two findings are what "forgotten"
+ * would cost, and neither moves when prose does.
  *
  * **The appended claim is RELATIVE — `files/<name>` — and not the absolute
- * `/outbox/<task-id>/files/<name>` that `roles/reviewer.md:120`'s example
- * shows.** Both are accepted; the relative one is chosen because it is the
- * only spelling that is true in more than one place. An absolute claim is a
+ * `/outbox/<task-id>/files/<name>` the container presents.** The choice is a
+ * real one rather than a forced one: `artifactClaimToHost` resolves an absolute
+ * claim through the mount table and a relative claim against the task outbox, so
+ * both spellings validate. The relative one is chosen because it is the only
+ * spelling that is true in more than one place. An absolute claim is a
  * statement about the container's filesystem, so composing one means either
  * hard-coding `/outbox` — a constant that is correct only inside the image,
  * written into a value every test would then have to special-case — or
@@ -2200,9 +2207,9 @@ export default function (pi: ExtensionAPI, mounts: MountRoots = DEFAULT_MOUNTS):
    * `dispatch_request` (SRD-WORKER-DISPATCH-EXTENSION task 7.3).
    *
    * **No `terminate`, and here that is a contract rather than a preference.**
-   * `roles/triage.md` turn one is *"two writes, a reply, and silence"* — the
-   * fan-out and then the envelope, in that order, with `submit_report` as the
-   * last tool call. Layer 2 makes delivering the cheapest way to end a turn;
+   * `roles/triage.md` closes turn one with *"Then stop. `submit_report` is the
+   * LAST TOOL CALL of turn one"* — the fan-out and then the envelope, in that
+   * order. Layer 2 makes delivering the cheapest way to end a turn;
    * ending it HERE would settle the parent task with a request written and no
    * envelope, which is the one ordering the host cannot read.
    *

@@ -891,8 +891,10 @@ describe("submitReport — every refusal throws AND writes nothing", () => {
    * A call carrying BOTH a valid `report` and an inadmissible artifact must
    * write neither. An implementation that wrote the report file first and
    * validated artifacts second would leave a file in `files/` that no envelope
-   * declares — which is `roles/reviewer.md:53-58`'s undeclared-artifact
-   * discrepancy, produced by the very tool that exists to make it impossible.
+   * declares — the undeclared-artifact discrepancy the harvest's reverse pass
+   * reports as *"which the envelope does not claim"*
+   * (`src/harvest/reconcile.ts`), produced by the very tool that exists to make
+   * it impossible.
    */
   test("a refused call carrying a valid report writes no report file either", () => {
     const f = fixture();
@@ -1007,12 +1009,12 @@ describe("registration", () => {
   /**
    * `dispatch_request` must NOT end the turn, and this is the assertion for it.
    *
-   * `roles/triage.md` turn one is *"two writes, a reply, and silence"* — the
-   * fan-out and then the envelope. Layer 2 makes delivering the cheapest way to
-   * end a turn; ending it on the fan-out would settle the parent task with a
-   * request written and no envelope, and D5 settles the parent the moment that
-   * file appears. The absence is asserted rather than assumed, exactly as
-   * `get_replies`' is.
+   * `roles/triage.md` closes turn one with *"Then stop. `submit_report` is the
+   * LAST TOOL CALL of turn one"* — the fan-out and then the envelope. Layer 2
+   * makes delivering the cheapest way to end a turn; ending it on the fan-out
+   * would settle the parent task with a request written and no envelope, and D5
+   * settles the parent the moment that file appears. The absence is asserted
+   * rather than assumed, exactly as `get_replies`' is.
    */
   test("dispatch_request does not terminate the turn; submit_report does", async () => {
     const f = fixture();
