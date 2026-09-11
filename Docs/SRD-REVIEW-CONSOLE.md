@@ -190,8 +190,11 @@ it changing.**
 
 **It converges on every decision §0.2 and §4.3 argue for, independently.** `REVIEW_TOP_FRACTION` is
 `null` (§6.1's equal panes by omission); the square-pane plan is extracted rather than copied (D3's
-second half); the collator is `tools: [read, write, grep, find, ls]` with the no-`bash` argument
-spelled out in the config itself; and `roles/collator.md` opens *"You cannot dispatch to the reviewers
+second half); the collator was `tools: [read, write, grep, find, ls]` with the no-`bash` argument
+spelled out in the config itself — **SUPERSEDED 2026-09-10 by
+SRD-WORKER-DISPATCH-EXTENSION task 7.2**, which withdrew the `write` and replaced it with
+`submit_report` and `dispatch_request`; the no-`bash` half of the argument is the half that
+survived, and it is still spelled out in the config; and `roles/collator.md` opens *"You cannot dispatch to the reviewers
 directly; the fleet does that for you"* — which is D1 and D12, reached without this document.
 **Convergence is evidence, not proof, and §4.3 remains the argument of record.**
 
@@ -727,6 +730,13 @@ capability reads it.
 
 **On the tool grant: one word.** The collator gets `write`, which `observer` already has for the same
 reason (`fleet.yaml:365`, *"write is for the outbox artifact only"*). It does not get `bash`.
+
+> **SUPERSEDED 2026-09-10 — SRD-WORKER-DISPATCH-EXTENSION task 7.2.** The `write` is gone. Both
+> things it was for are tools now: `dispatch_request` writes the fan-out at the task root, and
+> `submit_report`'s `report` list carries the turn-two pair. **The "one word" framing is what
+> aged worst here** — it read the grant as a single small concession, and a single small concession
+> is exactly what nothing ever revisits. What replaced it is two named capabilities with a schema
+> each. The no-`bash` half of this paragraph is unchanged and still correct.
 
 **On §5.9: a real amendment, and §4.4 is the argument.** That one is not free and should not be
 written as though it were.

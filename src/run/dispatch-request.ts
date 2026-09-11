@@ -1110,7 +1110,7 @@ function checkDepth(taskId: string): DispatchRequestRead | null {
     reason:
       `the request sits in the outbox directory for "${taskId}", which is a COLLATION task, and ` +
       `a fan-out may not be dispatched from one (SRD-REVIEW-CONSOLE D7, §6.6). A collation turn ` +
-      `is the one turn on which the collator holds every reviewer's report and its write grant ` +
+      `is the one turn on which the collator holds every reviewer's report and a way to fan out ` +
       `at the same time, so a request written from here can name the same three reviewers with ` +
       `one reviewer's findings in another's brief — which passes every other rule in this file ` +
       `and destroys the independence the console's consensus bands are arithmetic over. The ` +

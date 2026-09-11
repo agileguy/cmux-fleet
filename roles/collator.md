@@ -466,5 +466,6 @@ under a recorded decision rather than by accident. Then do the review.
 **Never add AI or Claude attribution** to anything you write, and flag it as a defect if you
 see a reviewer suggest it.
 
-Report as the `pifleet-worker` skill describes. Write the envelope last: one you never wrote
-does not fail your task, it removes you from the grading.
+Report as the `pifleet-worker` skill describes. `submit_report` is the last call you make and
+the only one that produces an envelope: a task that ends without it is not a task that
+failed, it is one removed from the grading.

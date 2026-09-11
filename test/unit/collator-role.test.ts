@@ -115,6 +115,30 @@ function fanoutExample(): DispatchRequestParams {
   return JSON.parse(blockWith('"requests"')) as DispatchRequestParams;
 }
 
+/**
+ * A slice of the document between two sentinels, where a MISSING sentinel is an
+ * error rather than a silently wider slice.
+ *
+ * `indexOf` returns -1 for a heading that has moved, and `slice(start, -1)` then
+ * runs to the end of the document — so a scoped assertion quietly becomes a
+ * whole-file one and keeps passing. Task 7.2 renamed the two artifact headings
+ * and did exactly that to the `Field rules` slice; `rev-lang-1` found it on the
+ * review cycle for the same commit.
+ */
+/** The document with every run of whitespace collapsed, for probes about MEANING. */
+function flat(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
+function between(startMarker: string, endMarker: string): string {
+  const start = ROLE.indexOf(startMarker);
+  const end = ROLE.indexOf(endMarker);
+  if (start < 0) throw new Error(`roles/collator.md no longer contains ${startMarker}`);
+  if (end < 0) throw new Error(`roles/collator.md no longer contains ${endMarker}`);
+  if (end < start) throw new Error(`${endMarker} precedes ${startMarker} in roles/collator.md`);
+  return ROLE.slice(start, end);
+}
+
 describe("the mechanism the document describes is the one that exists", () => {
   /**
    * The two paths the previous version invented. Asserted by ABSENCE, which is
@@ -140,6 +164,23 @@ describe("the mechanism the document describes is the one that exists", () => {
    */
   test("the document does NOT spell the wire tag the tool composes", () => {
     expect(ROLE).not.toContain(DISPATCH_REQUEST_SCHEMA);
+  });
+
+  /**
+   * The POSITIVE TWIN, and the inversion above is incomplete without it.
+   *
+   * `not.toContain` pins an absence, and an absence is satisfied by a document
+   * that says nothing at all — delete the guidance and the assertion still
+   * passes while a model is left to guess whether the two fields are its job.
+   * Raised by `rev-lang-1` on 7.2's own review cycle, against the commit that
+   * wrote the inversion.
+   */
+  test("and it DOES tell the collator not to send the two fields", () => {
+    const f = flat(ROLE);
+    expect(f, "nothing tells the collator to omit the two host-composed fields").toContain(
+      "Do not send `schema` and do not send `parent_task_id`",
+    );
+    expect(f, "nothing says who composes them instead").toContain("The tool composes both");
   });
 
   test("the collation's wire tag matches the schema", () => {
@@ -229,7 +270,7 @@ describe("the document's account of a usable location matches the grader's", () 
   const WORKDIR = "/workspace";
 
   test("the rule is stated where the collator writes findings", () => {
-    const rules = ROLE.slice(ROLE.indexOf("Field rules"), ROLE.indexOf("### `/outbox/<task-id>/files/review.md`"));
+    const rules = between("Field rules", "### `review.md`");
     expect(rules, "nothing tells the collator `file` must be a path").toContain(
       "`file` MUST NAME A PATH",
     );
@@ -296,14 +337,14 @@ describe("the ids the document tells the collator to name are the derived ones",
    * rather than wherever the string happens to occur.
    */
   test("the collation id appears in the turn-one instruction", () => {
-    const turnOne = ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+    const turnOne = between("Turn one", "Turn two");
     expect(turnOne).toContain(collationTaskId(PARENT));
     expect(collationTaskId(PARENT)).toBe(`${PARENT}-${COLLATION_ASPECT}`);
   });
 
   /** The same scoping for the three child ids, for the same reason. */
   test("every child id appears in the turn-one instruction, not merely somewhere", () => {
-    const turnOne = ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+    const turnOne = between("Turn one", "Turn two");
     for (const seat of REVIEW_CONSOLE_ASPECTS) {
       expect(turnOne, `turn one never names ${childTaskId(PARENT, seat.aspect)}`).toContain(
         childTaskId(PARENT, seat.aspect),
@@ -433,7 +474,7 @@ describe("the statuses the document instructs are ones the schema accepts", () =
    * by `min`.
    */
   test("turn one is instructed to claim success", () => {
-    const turnOne = ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+    const turnOne = between("Turn one", "Turn two");
     expect(turnOne).toContain('`status: "success"`');
   });
 
@@ -536,7 +577,7 @@ describe("the house rule on attribution holds in the document itself", () => {
  *   and it is the arm a single grep for either sentence alone would miss.
  */
 describe("turn one scopes the change rather than reviewing it", () => {
-  const turnOne = (): string => ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+  const turnOne = (): string => between("Turn one", "Turn two");
 
   test("turn one denies the collator standing to make findings", () => {
     expect(turnOne()).toContain("findings are not yours");
@@ -604,7 +645,7 @@ describe("turn one scopes the change rather than reviewing it", () => {
  * will be tempted to cut them.
  */
 describe("turn one tells the collator what DONE looks like, not just what not to do", () => {
-  const turnOne = (): string => ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+  const turnOne = (): string => between("Turn one", "Turn two");
 
   test("the envelope is named as the last tool call of the turn", () => {
     expect(turnOne(), "turn one never says the envelope ends it").toContain("LAST TOOL CALL");
@@ -636,8 +677,12 @@ describe("turn one tells the collator what DONE looks like, not just what not to
    */
   test("it says why checking is uninformative, not merely that it is forbidden", () => {
     const t = turnOne();
-    expect(t, "turn one never says an empty reply mount is the correct state").toContain(
-      "empty is the\nCORRECT state",
+    // Matched on REFLOWED text. The literal used to carry the hard line break
+    // this document happened to have, so an unrelated rewrap -- which the file's
+    // own discipline invites -- reddened a probe about meaning. `rev-lang-1`
+    // raised it on the 7.2 cycle.
+    expect(flat(t), "turn one never says an empty reply mount is the correct state").toContain(
+      "empty is the CORRECT state",
     );
     expect(t, "turn one never says no observation distinguishes the two outcomes").toContain(
       "observation available in this turn that separates a fan-out that worked from one that did",
