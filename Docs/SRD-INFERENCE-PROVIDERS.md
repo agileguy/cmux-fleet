@@ -1078,7 +1078,8 @@ observed in `free`. **34 GiB is available, and bf16 weights are 51.6 GB, so the 
 without reclaiming memory first** — and the reclaim is available at no real cost, because a 4B
 embedding model does not need 30 GB. Dropping embeddings to ~0.08 funds `rag-llm` at ~0.55.
 
-**Three properties of the running service are load-bearing and easy to destroy in a precision swap:**
+**Four properties of the running service are load-bearing and easy to destroy in a precision swap.**
+The fourth was not in this list until Phase 1 ran and measured the argv rather than describing it:
 
 - **`--served-model-name` carries THREE aliases** — `gemma-4-26b-a4b-it`, `gemma-4-26b-a4b-it-nvfp4`
   and `gemma-4-e4b-it-mxfp8` — and **LightRAG is configured against the third one**
@@ -1088,6 +1089,22 @@ embedding model does not need 30 GB. Dropping embeddings to ~0.08 funds `rag-llm
   bf16. They are not tuning flags; they select a kernel path.
 - **`--max-model-len 32768`**, which is *not* the 256,000 the `omlx` bf16 build reports. Declared
   wrongly, Pi registers its own 128,000 default and three-quarters of the window does not exist.
+- **`--kv-cache-dtype fp8`** — MEASURED 2026-09-12, and absent from every earlier draft of this
+  section. It is **not** NVFP4-specific: KV-cache dtype is independent of weight quantization, so it
+  survives the swap *by omission rather than by decision*, and that is exactly the hazard. At
+  `--max-model-len 32768` with `--max-num-seqs 8` the KV cache is a material share of the
+  reservation, so dropping it while "removing the quantization flags" would enlarge the cache
+  precisely when Phase 3's `0.08`/`0.55` split has no headroom to absorb it. **Keep it.**
+
+**And the containers are not run the way §6.9.1's prose implies.** Measured from the Phase 1 snapshot,
+not inferred: both run **`Runtime=runc` with `DeviceRequests: [["gpu"]]`** — that is `--gpus all`. The
+`nvidia` runtime is registered on the host and **unused by these two**, so reconstructing them "with the
+nvidia runtime" would change a configuration that has been serving for three weeks. They also carry
+`--ipc host`, `--restart unless-stopped`, `-p 127.0.0.1:8001:8000` (`:8002` for embeddings), and are
+attached to **two networks — `bridge` and `ragnet`**. `ragnet` is how `lightrag` resolves `rag-llm` by
+name, and `docker run` can only join one network at create: a rebuild that forgets the follow-up
+`docker network connect ragnet` leaves both containers healthy and the RAG stack unable to find its
+model. That is the quietest available failure in this whole plan.
 
 #### 6.9.3 Reachability — the LAN literal, not the tunnel
 
@@ -1812,7 +1829,22 @@ Proposed new criteria, by area:
 
 ---
 
-## 12. Implementation plan — eight phases, none of them yet run
+## 12. Implementation plan — eight phases; 1 done, 2 in flight, 0 deferred by the operator
+
+**STATUS 2026-09-12.** Phase 1 is **complete** — `~/pifleet-rollback/inspect-20260912T142351.json` on
+gabe, 34,143 bytes, both containers — and it earned its place immediately by measuring two things this
+document had wrong (§6.9.2's fourth property and the `runc`/`--gpus all` run shape). Phase 2 is
+**running** as a detached `gemma4-bf16-dl` container built from the vLLM image, which already carries
+`hf` 1.19.0, so nothing on gabe's system Python was touched. **Phase 0 is deferred by operator
+decision**, which costs only Phase 6's DNS record: the fleet dials the LAN literal under D18, so
+Phases 1-5 and 7 do not depend on it. The address is therefore still DHCP, and `gabe` currently
+resolves to the **Wi-Fi** NIC `192.168.86.213` while this plan pins the wired `192.168.86.199` — both
+answer, which is precisely the ambiguity Phase 0 exists to remove.
+
+**Preconditions verified rather than trusted, 2026-09-12:** HF `google/gemma-4-26B-A4B-it` returns
+**200** (the lowercase spelling 307-redirects, so this document's mixed case is correct and load-bearing);
+outbound **7844 is open** from gabe; `cloudflared` is **absent**; 8001 is bound **`127.0.0.1` only with
+no `--api-key`**, which is what makes Phase 5 the step that actually exposes the endpoint; 683 GB free.
 
 **Ordered by what can refuse the rest.** Phase 4 proves the tool-call gate before anything is exposed
 or configured, because a failure there refuses the provider outright (§6.9.4) and every later phase
