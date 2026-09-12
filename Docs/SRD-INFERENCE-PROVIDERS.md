@@ -1086,9 +1086,17 @@ The fourth was not in this list until Phase 1 ran and measured the argv rather t
   (`LLM_MODEL=gemma-4-e4b-it-mxfp8`). It is an alias, not a separate model. Dropping it breaks the RAG
   stack silently, and the name gives no hint that it resolves to a 26B.
 - **`--quantization modelopt` and `--moe-backend marlin` are NVFP4-specific** and must both go for
-  bf16. They are not tuning flags; they select a kernel path.
+  bf16. They are not tuning flags; they select a kernel path. **Independently confirmed from the
+  downloaded checkpoint 2026-09-12:** its `config.json` carries **no `quantization_config` at all**, so
+  dropping `--quantization` is *required* rather than merely tidy — left in place, vLLM would try to
+  apply a modelopt path to a checkpoint that declares no quantization.
 - **`--max-model-len 32768`**, which is *not* the 256,000 the `omlx` bf16 build reports. Declared
   wrongly, Pi registers its own 128,000 default and three-quarters of the window does not exist.
+  **A THIRD number, measured from the bf16 checkpoint itself 2026-09-12: `max_position_embeddings`
+  is 262,144.** So 32,768 is a deliberate 8x-down RESTRICTION, not a ceiling the weights impose. The
+  three figures — 32,768 served, 256,000 reported by omlx's build, 262,144 declared by this
+  checkpoint — read as a disagreement and are not one: only the first governs, because
+  §6.9.3's `context_windows` must state what THIS server was started with.
 - **`--kv-cache-dtype fp8`** — MEASURED 2026-09-12, and absent from every earlier draft of this
   section. It is **not** NVFP4-specific: KV-cache dtype is independent of weight quantization, so it
   survives the swap *by omission rather than by decision*, and that is exactly the hazard. At
@@ -1860,6 +1868,16 @@ would be wasted. Phases 0-2 are reversible; Phase 3 is the first that touches a 
 | 5 | **Expose to the LAN.** Rebind from `127.0.0.1:8001` to `192.168.86.199:8001`. The API key from Phase 3 is what makes this safe; without it the endpoint is open to the subnet. | yes | yes |
 | 6 | **Tunnel.** `cloudflared` on gabe (absent today; 7844 open there, blocked on the fleet host), named tunnel → `http://127.0.0.1:8001`, systemd unit, then the Phase 0 DNS record. | no | yes |
 | 7 | **Fleet config.** The §6.9.3 block plus its `egress.allow` entry, then assign roles deliberately. Under D7 nothing is created until a worker resolves to `gabe`. | yes | yes |
+
+**`--api-key` TAKES A LIST, which changes what Phase 5 can do.** Read from source 2026-09-12 —
+`vllm/entrypoints/openai/cli_args.py:265` declares `api_key: list[str] | None = None`, documented as
+*"the server will require ONE OF THESE KEYS to be presented in the header"*. The flag is repeatable,
+exactly like the `--middleware` field beside it. **This dissolves the either/or this plan posed.**
+LightRAG already sends `[REDACTED]` (`LLM_BINDING_API_KEY` and `OPENAI_API_KEY`, measured on the
+running container), so that value must keep working or the RAG stack breaks at the first query — but
+a SECOND, strong key can be passed in the same argv for the fleet and for `inference2`, and the weak
+one then never leaves the `ragnet` bridge. The recommendation to mint a fresh key *instead* was
+wrong on its own terms: it would have broken LightRAG. Passing both is strictly better than either.
 
 **Phase 5 has a security precondition that is easy to skip.** The running server has **no `--api-key`**
 today — it is reachable only because it is bound to loopback. Binding it to the LAN without the key
