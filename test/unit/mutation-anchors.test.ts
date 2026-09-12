@@ -218,14 +218,16 @@ function declaredFileEntries(source: string): number {
 }
 
 /**
- * How many entries DECLARE an `id:`, counted by a recogniser that shares NO
- * token with the other two.
+ * How many entries DECLARE an `id:`, counted by a recogniser that shares no
+ * field name and no terminator with the other two.
  *
- * `/^[ \t]*id: "/` has nothing in common with `file: \w+,` — different field
- * name, different terminator, no constant to spell — so all four spellings that
- * blind `anchors()` and `declaredFileEntries()` simultaneously are visible
- * here. That is what "a different feature of the syntax" was supposed to mean
- * and did not.
+ * `/^[ \t]*id: "/` differs from `declaredFileEntries`'s `/^[ \t]*file: \w+,/`
+ * in exactly those two places — different field name, different terminator,
+ * no constant to spell — while still sharing the `^[ \t]*` line anchor and the
+ * colon-space between field and value. That difference is enough: all four
+ * spellings that blind `anchors()` and `declaredFileEntries()` simultaneously
+ * are visible here. That is what "a different feature of the syntax" was
+ * supposed to mean and did not.
  *
  * Measured across every committed battery on the day this landed, all three
  * agree: 307 `file:` entries, 307 `id:` entries, 307 parsed anchors —
@@ -549,6 +551,63 @@ describe("every mutation battery still anchors to the code it claims to mutate",
       "COMPLETE and NO_FIND declare a canonically spelled `file:`; RESPELLED does not",
     ).toBe(2);
     expect(declaredIdEntries(fixture), "all three entries declare an `id:`").toBe(3);
+  });
+
+  /**
+   * THE TWO LIVE COMPARISONS ABOVE ARE THE WHOLE PIN FOR TWO DISTINCT DRIFT
+   * FAMILIES, AND NEITHER COMPARISON ITSELF WAS PINNED — ONLY ITS INPUTS WERE.
+   *
+   * The two fixture tests above pin the three COUNTERS against synthetic
+   * input. They say nothing about the two comparisons in "the batteries are
+   * found and their anchors are parsed" that actually consume those counters
+   * against real, committed battery source — and each comparison is the SOLE
+   * catcher of one drift family:
+   *
+   * - `anchors() === declaredFileEntries()` is the only thing that notices an
+   *   entry reflowed off line-start. `anchors()` has no `^` line anchor and
+   *   keeps counting it; `declaredFileEntries()` AND `declaredIdEntries()`
+   *   both require `^[ \t]*` and drop it TOGETHER, so the id-vs-file
+   *   comparison agrees with itself and sees nothing wrong.
+   * - `declaredIdEntries() === declaredFileEntries()` is the only thing that
+   *   notices a respelled `file:` (two spaces, no trailing comma, a dotted
+   *   constant). That respelling takes `anchors()` and `declaredFileEntries()`
+   *   to zero TOGETHER — they agree with each other falsely — and only the
+   *   `id:` count is untouched.
+   *
+   * A fixture proves the FUNCTIONS distinguish a drift. It cannot prove the
+   * LOOP still checks it: deleting the `expect()` wrapped around a perfectly
+   * correct function call leaves the function — and any fixture test that
+   * calls the function directly — completely undisturbed. Measured: deleting
+   * either live comparison from the loop below, or relaxing the anchors-vs-
+   * file one to `toBeGreaterThanOrEqual(0)`, left every OTHER test in this
+   * file green.
+   *
+   * So this reads the enforcement loop's own source instead, and confirms
+   * both comparisons are actually written there, exactly — closing the
+   * family this gap is about rather than pinning one more instance of it. Each
+   * pattern is anchored on its `expect(` and forbidden from crossing into a
+   * LATER `expect(` (the negative lookahead), so relaxing one comparison's
+   * matcher cannot be satisfied by finding the other comparison's ending
+   * further down the file.
+   */
+  test("the enforcement loop still makes BOTH live comparisons, exactly", async () => {
+    const self = await Bun.file(import.meta.path).text();
+
+    const anchorsVsFile =
+      /expect\(\s*anchors\(source\)\.length,(?:(?!expect\()[\s\S])*?\)\.toBe\(declaredFileEntries\(source\)\)/;
+    const idVsFile =
+      /expect\(\s*declaredIdEntries\(source\),(?:(?!expect\()[\s\S])*?\)\.toBe\(declaredFileEntries\(source\)\)/;
+
+    expect(
+      anchorsVsFile.test(self),
+      "anchors() is no longer compared, exactly, to declaredFileEntries() in the " +
+        "enforcement loop — a reflowed entry moving id:/file: off line-start would go uncaught",
+    ).toBe(true);
+    expect(
+      idVsFile.test(self),
+      "declaredIdEntries() is no longer compared, exactly, to declaredFileEntries() in " +
+        "the enforcement loop — a respelled file: would go uncaught",
+    ).toBe(true);
   });
 
   for (const battery of BATTERIES) {
