@@ -60,6 +60,22 @@
      "note": "edits fleet.yaml (UNTRACKED). providers: map exists at line 127 with omlx + ollama-cloud; gabe is a clean third entry. Second edit is the egress.allow {host: 192.168.86.199, port: 8001} entry."}
   ],
 
+  "PRE_EXISTING_FAULT_FOUND_2026_09_12": {
+    "what": "vllm-metrics-proxy has been serving /metrics/llm and /metrics/emb as dead since roughly 2026-08-15. NOT caused by this rollout -- recorded BEFORE Phase 3 so it cannot later read as collateral from the restart.",
+    "mechanism": "HostConfig.NetworkMode is `ragnet` but NetworkSettings.Networks is {} -- the container believes it is on ragnet and is attached to NOTHING. Docker's embedded DNS at 127.0.0.11 only exists for containers on a user-defined network, so with zero attachments the resolver is absent.",
+    "evidence": [
+      "docker inspect vllm-metrics-proxy .NetworkSettings.Networks -> {}",
+      "getent hosts rag-llm inside the container -> empty",
+      "GET /healthz -> 200 (pure nginx, no upstream needed); GET /metrics/llm -> 499",
+      "nginx error log: recv() failed (111: Connection refused) while resolving, resolver: 127.0.0.11:53",
+      "State.StartedAt 2026-08-15T22:51:04Z with RestartCount 0 -- dark for ~4 weeks"
+    ],
+    "irony_worth_keeping": "nginx.conf's own comment documents this exact class of failure already happening once: 'this stranded /metrics/llm after rag-llm was recreated, blanking every generation panel on the dashboard'. The fix built for it -- `resolver 127.0.0.11 valid=10s` plus variable proxy_pass, which re-resolves per request -- is correct and WOULD have survived Phase 3's recreation. It cannot fire because the container has no network to resolve on. The defence is sound; its precondition is missing.",
+    "consequence_for_phase_3": "NONE. Because the variable proxy_pass form re-resolves per request, recreating rag-llm does not strand this proxy. The metrics path is already down for an unrelated reason and Phase 3 neither worsens nor fixes it.",
+    "suggested_repair_NOT_YET_DONE": "docker network connect ragnet vllm-metrics-proxy -- one command, no restart, no downtime. Deliberately NOT run: it is outside the authorized phase set and touches a production container. Needs its own decision.",
+    "second_issue": "Its port binding is 100.126.91.107:9401 -- the Tailscale address. The fleet host is not on Tailscale, so even once repaired this endpoint is unreachable from the fleet."
+  },
+
   "verified_preconditions_2026_09_12": {
     "hf_repo": "google/gemma-4-26B-A4B-it -> 200 (lowercase 307-redirects; the mixed case is load-bearing)",
     "outbound_7844": "OPEN from gabe",
