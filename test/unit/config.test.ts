@@ -61,13 +61,13 @@ import { EXIT } from "../../src/contracts.ts";
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
 /**
- * The `triage` console's four seats, ENUMERATED once (SRD-TRIAGE-CONSOLE §6.1).
+ * The `triage` console's two seats, ENUMERATED once (SRD-TRIAGE-CONSOLE §6.1).
  *
  * Named as a set rather than derived from a filter, because every assertion
  * below is about this set EXISTING as well as about what it resolves to. A
  * probe written as "every worker whose pane_mode is rpc is on the 20b" is
  * satisfied by a file with no triage seats in it at all; a probe written
- * against these four ids is not. That is the whole difference between a
+ * against these two ids is not. That is the whole difference between a
  * criterion and a tautology here, and the seats are one careless YAML edit
  * from being deletable without a single test going red.
  *
@@ -195,9 +195,9 @@ describe("worked example", () => {
       "tst-1",
       "tst-2",
       "tick-1",
-      // The `triage` console's four seats (SRD-TRIAGE-CONSOLE §6.1). One run,
-      // four ids, and the three observers are the EXISTING observer role at a
-      // cadence rather than a fourth role — which is why they appear here and
+      // The `triage` console's two seats (SRD-TRIAGE-CONSOLE §6.1). One run,
+      // two ids, and the observer is the EXISTING observer role at a
+      // cadence rather than a second role — which is why it appears here and
       // nowhere in the roles assertion above.
       //
       // Spliced from `TRIAGE_SEATS` rather than re-typed, so this roster and
@@ -372,7 +372,7 @@ describe("worked example", () => {
  * §12's configuration block, §13 tasks 1.3 and 1.4).
  *
  * THE TRAP THIS BLOCK IS WRITTEN AGAINST, named because falling into it makes
- * the whole block worthless: a criterion that only asserts "the four seats
+ * the whole block worthless: a criterion that only asserts "the two seats
  * resolve to `gemma-4-26b-a4b-it-bf16`" passes just as happily if someone deletes
  * the seats entirely, and an absence asserted over a filtered set is satisfied
  * by an empty set. So every assertion here is made against `TRIAGE_SEATS` —
@@ -385,9 +385,9 @@ describe("worked example", () => {
  * which of those this block can see is the reason the override test below is
  * written the way it is.
  */
-describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
+describe("the triage console's two seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
   /**
-   * The example's four seats, resolved, in the order `TRIAGE_SEATS` names them.
+   * The example's two seats, resolved, in the order `TRIAGE_SEATS` names them.
    *
    * Throws BY NAME on a missing seat rather than yielding `undefined` into an
    * expectation, because the two defects want different edits: a seat resolving
@@ -409,7 +409,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
     });
   }
 
-  test("all four resolve to the one local model on omlx (D1, arm 3)", async () => {
+  test("both resolve to the one local model on omlx (D1, arm 3)", async () => {
     // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
     // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
     // of them pass while checking nothing.
@@ -571,7 +571,7 @@ describe("the triage console's four seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () 
       }
     });
 
-    test("unmutated, all four are admitted — the gate is not refusing everything", async () => {
+    test("unmutated, both are admitted — the gate is not refusing everything", async () => {
       const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
       expect(() => assertModelsAllowed(loaded, TRIAGE_SEATS)).not.toThrow();
     });

@@ -406,8 +406,9 @@ describe("no seat in this console has a keyboard — §2.3, §6.1", () => {
    * Probe: resolve all four workers through `resolveWorker` and assert `rpc`; a
    * `tui` seat fails."*
    *
-   * Against the TRACKED config, which declares all four seats (`fleet.example.yaml:744`)
-   * and says in its own comment why none of them carries an override.
+   * Against the TRACKED config, which declares both seats (`fleet.example.yaml`'s
+   * "TWO SEATS SPEND TWO" comment, beside the `tri-1` and `obs-t1` entries) and
+   * says in its own comment why neither carries an override.
    *
    * **The control is what makes this mean anything.** `obs-1` in the same file
    * IS `pane_mode: tui`, so a `resolveWorker` that answered `rpc` for everything
@@ -415,13 +416,13 @@ describe("no seat in this console has a keyboard — §2.3, §6.1", () => {
    * That is the degenerate-fixture failure this branch has recorded four times,
    * in its cheapest form: two sets that are equal in every fixture.
    */
-  test("all four resolve to rpc, and the same config still has a tui seat", async () => {
+  test("both resolve to rpc, and the same config still has a tui seat", async () => {
     const cfg = await loadConfig(join(REPO, CONFIG));
     for (const worker of DEFAULT_TRIAGE_WORKERS) {
       expect(resolveWorker(cfg, worker).paneMode, `${worker} has a keyboard`).toBe("rpc");
     }
     // The asymmetry: the resolver CAN say `tui`, and does, for a seat in this
-    // same file. Without this line the four assertions above are satisfied by a
+    // same file. Without this line the two assertions above are satisfied by a
     // resolver that lost the field.
     expect(resolveWorker(cfg, "obs-1").paneMode).toBe("tui");
   });
@@ -678,7 +679,7 @@ describe("--restart refuses before it destroys — ISC-572, on the fourth consol
 
       expect(r.code).not.toBe(0);
       expect(r.err).toContain("is not a pane this console plans");
-      // It names the four it DOES plan, so an operator is told what to type.
+      // It names the two it DOES plan, so an operator is told what to type.
       for (const worker of DEFAULT_TRIAGE_WORKERS) expect(r.err).toContain(worker);
       // Nothing was stopped, and that is asserted on the record AND on stderr:
       // a stop that happened would have printed its own line.
