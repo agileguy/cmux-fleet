@@ -411,13 +411,25 @@ llm:
       # is a PERMISSION, and permitting a stale alias invites a role to name it.
       models_allowlist:
         - gemma-4-26b-a4b-it
-      # What THIS server was started with (`--max-model-len 32768`), not what
-      # the weights can do. The checkpoint declares max_position_embeddings
-      # 262144 and omlx's bf16 build reports 256000; both are irrelevant here.
-      # Undeclared, Pi would register its own 128,000 default and three
-      # quarters of the window would not exist.
+      # What THIS server was started with (`--max-model-len 262144`), not what
+      # the weights can do — the two now agree, which they did not before
+      # 2026-09-12. Raised from 32768 that day; the checkpoint's
+      # max_position_embeddings IS 262144, so this is the ceiling rather than a
+      # round number near it. omlx's bf16 build reports 256000 for the same
+      # weights and is still irrelevant here: this value describes THIS server.
+      # Undeclared, Pi would register its own 128,000 default and half the
+      # window would not exist.
+      #
+      # IT COST NO MEMORY, which is the counter-intuitive half. `--max-model-len`
+      # bounds one sequence; `--gpu-memory-utilization 0.55` sizes the KV pool
+      # independently, and that stayed put (17.74 -> 17.3 GiB). MEASURED at boot:
+      # capacity went 894,632 -> 1,598,410 tokens and concurrency at full context
+      # is 6.10x. The naive prediction was 3.4x — dividing the OLD token figure by
+      # the new length — and it was wrong, because with 25 of 30 layers on a
+      # 1024-token sliding window vLLM sizes the full- and sliding-attention block
+      # pools separately, so the token figure is not invariant to this setting.
       context_windows:
-        gemma-4-26b-a4b-it: 32768
+        gemma-4-26b-a4b-it: 262144
       # NO `tag_style` — this is not a tag-style catalogue.
       # NO `probe_timeout_ms` — the fleet-wide 60s is right for a local server
       # that answered a tool-call probe in 2.45s under 8-way concurrency.
