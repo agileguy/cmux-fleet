@@ -333,14 +333,28 @@ describe("the worker is told about the paths it can clone from and into", () => 
  * verified by mutation, not by reading.
  */
 describe("the result-writing instructions are routed on the worker's tool grant", () => {
-  /** The `## Writing the result` section, to the next `##` heading (`###` does not match). */
-  const SECTION = (() => {
+  /**
+   * The `## Writing the result` section, to the next `##` heading (`###` does
+   * not match).
+   *
+   * A lazy getter, called from inside each test that needs it, rather than an
+   * IIFE evaluated once at describe-body time. `expect()` outside a `test()`
+   * throws during collection, not during a run — bun reports that as an
+   * unhandled error between tests, not a failing assertion, and every test in
+   * this block that never got to run is counted as neither pass nor fail. Worse,
+   * if that throw were ever swallowed instead, `start` becomes `-1` and
+   * `SKILL.slice(0)` silently WIDENS `SECTION` to the file's whole frontmatter
+   * preamble — containing neither subheading these tests check — rather than
+   * failing at all. Calling this inside each test makes the rot check a real,
+   * attributable assertion in that test, every time.
+   */
+  function getSection(): string {
     const start = SKILL.indexOf("## Writing the result");
     expect(start, "the `## Writing the result` heading is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
     const rest = SKILL.slice(start + 1);
     const end = rest.indexOf("\n## ");
     return end === -1 ? rest : rest.slice(0, end);
-  })();
+  }
 
   /**
    * The orders that are only performable with a write verb. Pinned to the two
@@ -374,6 +388,7 @@ describe("the result-writing instructions are routed on the worker's tool grant"
   });
 
   test("no shipped role is ordered to write result.json with a write tool it does not hold", async () => {
+    const SECTION = getSection();
     const roles = await reportOnlyRoles();
     // CONTROL: with no such role the assertion below proves nothing, and a
     // green probe would be reporting a narrowing it no longer checks.
@@ -403,10 +418,22 @@ describe("the result-writing instructions are routed on the worker's tool grant"
   });
 
   test("the routing names `submit_report` before the first hand-composition order", () => {
+    const SECTION = getSection();
+    const positions = HAND_ORDERS.map((o) => SECTION.indexOf(o));
+    // PRESENT first. `Math.min()` of an empty array is `Infinity`, which makes
+    // "routedAt < firstOrder" true for any routedAt at all — a probe that
+    // passes while checking nothing the moment both orders below are deleted.
+    // Asserting the full set of positions (not just "at least one found")
+    // means a PARTIAL deletion — one order gone, one still there — is caught
+    // too, and the message says which order went missing.
+    const missing = HAND_ORDERS.filter((_, i) => positions[i]! < 0);
+    expect(
+      missing,
+      `hand-composition order(s) went missing, so there is nothing left to route ahead of: ${missing.join(", ")}`,
+    ).toEqual([]);
+
     const routedAt = SECTION.indexOf("submit_report");
-    const firstOrder = Math.min(
-      ...HAND_ORDERS.map((o) => SECTION.indexOf(o)).filter((i) => i >= 0),
-    );
+    const firstOrder = Math.min(...positions);
     expect(routedAt, "the section never mentions submit_report — nothing routes the reader").toBeGreaterThanOrEqual(0);
     expect(
       routedAt,
@@ -422,6 +449,7 @@ describe("the result-writing instructions are routed on the worker's tool grant"
    * twice. Measured against `composeEnvelope` before this was written.
    */
   test("the `submit_report` branch warns against declaring a `report` file twice", () => {
+    const SECTION = getSection();
     const branch = SECTION.slice(
       SECTION.indexOf("### Calling `submit_report`"),
       SECTION.indexOf("### Composing it by hand"),
