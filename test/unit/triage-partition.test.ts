@@ -157,12 +157,12 @@ describe("the positive control — a partition that covers the environment exact
    * §6.5's `1 ≤ N < 3` row: *"An idle observer is not an error"* — the same
    * posture as SRD-FLEET-PM-001 D4, *"idle seats over a wrong answer"*.
    *
-   * Two observers covering three services is a legal partition, and a check that
-   * required one assignment per seat would refuse the ordinary small environment.
-   * Whether an observer with nothing to look at should be handed a request at all
-   * is the actor's question (§6.3 step 5), not this check's: an assignment
-   * claiming no services claims nothing, and claiming nothing cannot make a
-   * partition incomplete.
+   * Three assignments on the one observer, one of them idle, is a legal
+   * partition, and a check that required exactly one assignment per seat would
+   * refuse the ordinary small environment. Whether an observer with nothing to
+   * look at should be handed a request at all is the actor's question (§6.3
+   * step 5), not this check's: an assignment claiming no services claims
+   * nothing, and claiming nothing cannot make a partition incomplete.
    */
   test("a lopsided partition and an idle observer are both legal", async () => {
     const { dispatch, calls } = spy();
@@ -368,7 +368,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
    * DISTINCT members sees {mia, authorization, authentication} on both sides and
    * returns complete. The multiplicity is the only signal, and `mia` is named.
    */
-  test("a service claimed by two observers is partition_duplicate, and nothing is dispatched", async () => {
+  test("a service claimed twice is partition_duplicate, and nothing is dispatched", async () => {
     const { dispatch, calls } = spy();
     const partition = [
       assign(OBS[0], "ntfy", "prometheus"),
@@ -450,10 +450,10 @@ describe("precedence, when both faults hold at once", () => {
    * With width fixed at three (§6.5), an observer claiming a service that another
    * already claimed is an observer NOT claiming something else — which is the
    * reasoning `dispatch-request.test.ts` already records for `duplicate_target`:
-   * *"a partition that names one observer twice is a LOST SERVICE — the third
-   * observer is never asked."* Reporting `partition_incomplete` here would send
-   * the operator to look at `authorization` and `authentication`, neither of which
-   * is the mistake.
+   * *"a partition that names one observer twice is a LOST SERVICE — it was a
+   * third observer that went unasked back when this console still ran three."*
+   * Reporting `partition_incomplete` here would send the operator to look at
+   * `authorization` and `authentication`, neither of which is the mistake.
    *
    * **The precedence costs no information, and that is asserted rather than
    * claimed**: `missing` still names both dropped services on the refusal that
@@ -674,7 +674,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
    * halves are asserted by name.
    *
    * **And nothing is dispatched**, which §12 names as the load-bearing clause:
-   * a refusal that arrives after three observer passes have started against a
+   * a refusal that arrives after the observer pass has started against a
    * live control plane is worse than no check.
    */
   test("the asymmetric partition is refused after the parse, and nothing is dispatched", async () => {
