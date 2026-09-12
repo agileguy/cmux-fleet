@@ -1693,6 +1693,24 @@ where they went, and because "settled" should be auditable rather than a silent 
 
 None of these blocks the design. Where a section depends on one, it says so.
 
+**Q13 IS ANSWERED — PASS, 2026-09-12, and it was the one that could have refused the provider.**
+Eight concurrent tool calls at `--max-num-seqs 8`: **8 of 8 returned `finish_reason: tool_calls` with a
+non-empty `tool_calls[]`, and 8 of 8 carried the correct argument.** They were genuinely batched rather
+than queued — each request took ~2.45 s and the wall time was **2.51 s**, where serialised execution
+would have been ~19.6 s. **Neither named upstream defect manifested:** no `<pad>` tokens (#39392) and no
+raw delimiters leaking instead of parsing (#44522). The serial probe was also clean, and is reported
+second on purpose, because this question says in terms that a single serial pass is not evidence.
+**Phase 7 is unblocked.**
+
+**Q14 IS ANSWERED IN THE DIRECTION THAT DECIDES D17, AND IS PERMANENTLY HALF-UNMEASURABLE.** On bf16:
+**24.5 tok/s** at concurrency 1 (765 completion tokens in 31.25 s) and **49 tok/s aggregate** at
+concurrency 8. Against §6.9.1's cited 27.8 tok/s for a 30B-class MoE on this silicon, bf16 costs little,
+so **D17 stands and is not revisited.** It also vindicates refusing the dense 31B, which the bandwidth
+argument put near 4 tok/s — this is roughly six times that. **What cannot now be had:** this question's
+probe asks for the NVFP4 figure *before* the swap, and that measurement was never taken. NVFP4 is no
+longer serving, so the true before/after delta is unrecoverable without rolling back to take it. The
+number above is an absolute, not a difference, and it is recorded that way rather than dressed as one.
+
 | # | Question | Probe that settles it | Blocks |
 |---|---|---|---|
 | **Q4** | Does the alias loop `fleet.yaml` records actually occur when the relay resolves from its **uplink** network rather than the internal bridge? Docker's embedded DNS is per-network and the relay is attached to both; the measured loop had `base_url`'s host and `relay_upstream` identical. | Attach a splice container to both networks with the alias on the internal one only, dial the name, and compare against the recorded 10s hang | Nothing now. D9 resolves the name at `up` and stamps a literal, so the loop cannot arise. Answering it would only tell us whether D9's resolution step could later be *simplified* |
@@ -1701,8 +1719,7 @@ None of these blocks the design. Where a section depends on one, it says so.
 | **Q8** | The exact wording of the vendor's retention and training policy. §7.4 declines to quote it because it was retrieved through a summarising fetch. | Read the policy page directly and quote it, or decline to rely on it | §7.4's framing only. Nothing in §7.2 depends on it |
 | **Q10** | Is the catalogue stable enough to write a `models_allowlist` against? Vendor material cites model ids absent from today's catalogue, and 19 ids were observed on 2026-09-01. | `GET /v1/models` on a schedule and diff against the recorded 19 | Whether the allowlist is a durable config value or a recurring chore like the address pin |
 | **Q11** | Is the `/v1` surface at full parity with a local install's? One third-party report of a `500` on that path for vision models was surfaced and not read. | Exercise the paths the fleet actually uses beyond chat completions; treat the report as a signal to check, not a finding | Nothing known. Raised so parity is not assumed from a passing chat-completions probe |
-| **Q13** | **Does the `gemma4` tool-call parser hold under CONCURRENCY?** Two open upstream defects say it may not: vllm-project/vllm **#39392** (`<pad>` tokens emitted under concurrent requests) and **#44522** (raw `<&#124;"&#124;>` delimiters leaking into streaming responses instead of parsing to `tool_calls`). The fleet runs eight seats against `--max-num-seqs 8`, so the concurrent path is the only one that matters. **This is the question that can refuse the whole provider** — `require_native_tool_calls` is fleet-wide with no per-provider override (§6.9.4). | Drive `probeNativeToolCalls` at the configured concurrency, not serially, and assert `finish_reason: tool_calls` with a non-empty `tool_calls[]` on every response. A single serial pass is NOT evidence. | §12 Phase 4; blocks Phase 7 |
-| **Q14** | What does the NVFP4 → bf16 swap cost in tokens/sec? NVFP4 is the format this hardware accelerates natively, so the quality gain is paid for in throughput, and the size of that payment is unmeasured. | Measure tok/s at concurrency 1 and 8 on the NVFP4 build before the swap, and on bf16 after. | Nothing — but it decides whether D17 is revisited |
+| **Q14** | **PARTLY ANSWERED 2026-09-12 — kept open deliberately, because the remaining half is now unmeasurable.** What does the NVFP4 → bf16 swap cost in tokens/sec? The bf16 side is measured: 24.5 tok/s at concurrency 1, 49 tok/s aggregate at 8. The NVFP4 baseline this question exists to compare against was **never taken before the swap**, and NVFP4 is no longer serving. | The bf16 half is done. The NVFP4 half would require rolling the production server back to the NVFP4 build purely to take a comparison figure — not worth an outage. It stays open rather than being quietly closed, because the question asked for a **difference** and what exists is an **absolute**. | Nothing. D17 stands on the absolute figure alone |
 | **Q12** | What is the *distribution* behind §3.1's latencies? One sample per model, host-side and unqueued, established a bimodal shape; it did not establish that any single figure is stable. | Repeat the sweep n times, through the relay and from a container, and report spread rather than a point | D16's *numbers*, not its shape. D16 is deliberately written to the shape so a shifting figure does not invalidate it |
 
 ---
