@@ -356,9 +356,17 @@ describe("ISC-506: views 2-4 add no writer and no new subprocess argv", () => {
    * It was two until 2026-09-04. Removing the monitor's git region took
    * `read/git.ts` out of the import closure entirely — the monitor no longer
    * shells out to git at all, which is a strictly stronger version of the
-   * property this test exists to state. The module still exists for the
-   * operations console's `git-watch` pane; it is simply not reachable from
-   * here any more.
+   * property this test exists to state.
+   *
+   * The module did not survive the removal, and this comment said it had until
+   * 2026-09-11: `src/monitor/read/git.ts` was DELETED with the region, not kept
+   * for the operations console's `git-watch` pane — that pane went too, and the
+   * console's three panes are now `observer`, `monitor`, `ticketing`, in that
+   * order, which `operations-plan.test.ts` pins and ISC-488 certifies. The
+   * claim was wrong in the direction that matters, because it told a reader the
+   * careful argv builder was still somewhere to be found. It is ISC-1165 now,
+   * and ISC-486 — which certified the strip's five properties — is retired
+   * behind it.
    */
   test("only the one pinned monitor module spawns anything", () => {
     const spawning = [...CLOSURE]
