@@ -1854,17 +1854,29 @@ Proposed new criteria, by area:
 
 ---
 
-## 12. Implementation plan — eight phases; 1 done, 2 in flight, 0 deferred by the operator
+## 12. Implementation plan — seven of eight phases RUN; Phase 0 is the operator's
 
-**STATUS 2026-09-12.** Phase 1 is **complete** — `~/pifleet-rollback/inspect-20260912T142351.json` on
-gabe, 34,143 bytes, both containers — and it earned its place immediately by measuring two things this
-document had wrong (§6.9.2's fourth property and the `runc`/`--gpus all` run shape). Phase 2 is
-**running** as a detached `gemma4-bf16-dl` container built from the vLLM image, which already carries
-`hf` 1.19.0, so nothing on gabe's system Python was touched. **Phase 0 is deferred by operator
-decision**, which costs only Phase 6's DNS record: the fleet dials the LAN literal under D18, so
-Phases 1-5 and 7 do not depend on it. The address is therefore still DHCP, and `gabe` currently
-resolves to the **Wi-Fi** NIC `192.168.86.213` while this plan pins the wired `192.168.86.199` — both
-answer, which is precisely the ambiguity Phase 0 exists to remove.
+**STATUS 2026-09-12 — this section is now a record, not a plan.** Phases 1 through 7 have all been
+executed and verified. `gabe` serves **Gemma-4-26B-A4B at bf16** behind an API key, is reachable on the
+LAN, is declared in `fleet.yaml`, and is **dormant** — no worker resolves to it, so under D7 no network,
+relay or alias exists for it yet.
+
+| # | Outcome |
+|---|---|
+| 0 | **DEFERRED by the operator.** Costs only Phase 6's DNS record; the fleet dials the LAN under D18 |
+| 1 | **Done.** Snapshot at `~/pifleet-rollback/inspect-20260912T142351.json`, and it immediately caught two errors in this document — §6.9.2's missing fourth property and the `runc`/`--gpus all` run shape |
+| 2 | **Done.** 51.6 GB fetched *inside the vLLM image*, so gabe's system Python was never touched. Byte-verified against the index |
+| 3 | **Done.** bf16 at `0.55`, embeddings lowered to `0.08` first. All three aliases kept, key enforced, LightRAG never lost its model |
+| 4 | **PASS — the gate held.** Q13 clean at 8-way concurrency; Q14 measured at 24.5 tok/s |
+| 5 | **Done, with a correction.** Published on BOTH host IPs rather than rebinding, because rebinding would have deleted Phase 6's target |
+| 6 | **Built, publishing nothing.** Tunnel `inference2` healthy on 4 edge connections; no DNS record, so nothing resolves |
+| 7 | **Done.** Provider block and `egress.allow` entry written; `config validate` exits 0 post-merge |
+
+**What Phase 0 still costs, stated plainly.** The address is DHCP, and both `base_url` and the
+`egress.allow` entry pin `192.168.86.199` — a lease move breaks them *together*. `gabe` also resolves
+to the **Wi-Fi** NIC `192.168.86.213`, which is why this plan uses a literal and not a name. And
+`inference2.agileguy.ca` cannot serve until its CNAME is added in the dashboard, because the API token
+manages tunnels but is refused on DNS.
 
 **Preconditions verified rather than trusted, 2026-09-12:** HF `google/gemma-4-26B-A4B-it` returns
 **200** (the lowercase spelling 307-redirects, so this document's mixed case is correct and load-bearing);
@@ -1890,8 +1902,10 @@ would be wasted. Phases 0-2 are reversible; Phase 3 is the first that touches a 
 `vllm/entrypoints/openai/cli_args.py:265` declares `api_key: list[str] | None = None`, documented as
 *"the server will require ONE OF THESE KEYS to be presented in the header"*. The flag is repeatable,
 exactly like the `--middleware` field beside it. **This dissolves the either/or this plan posed.**
-LightRAG already sends `[REDACTED]` (`LLM_BINDING_API_KEY` and `OPENAI_API_KEY`, measured on the
-running container), so that value must keep working or the RAG stack breaks at the first query — but
+LightRAG already sends the same shared value `OMLX_API_KEY` carries — measured on the running
+container, where it appears as both `LLM_BINDING_API_KEY` and `OPENAI_API_KEY`, and deliberately not
+reproduced in this repository — so that value must keep working or the RAG stack breaks at the first
+query — but
 a SECOND, strong key can be passed in the same argv for the fleet and for `inference2`, and the weak
 one then never leaves the `ragnet` bridge. The recommendation to mint a fresh key *instead* was
 wrong on its own terms: it would have broken LightRAG. Passing both is strictly better than either.
@@ -1899,7 +1913,9 @@ wrong on its own terms: it would have broken LightRAG. Passing both is strictly 
 **Phase 5 has a security precondition that is easy to skip.** The running server has **no `--api-key`**
 today — it is reachable only because it is bound to loopback. Binding it to the LAN without the key
 added in Phase 3 publishes an unauthenticated inference endpoint to the subnet, and the tunnel in
-Phase 6 would publish it to the internet. The existing shared value `[REDACTED]` is guessable and is
+Phase 6 would publish it to the internet. The existing shared value — the one `OMLX_API_KEY` carries,
+named here rather than quoted, because `fleet.yaml` is gitignored precisely so operator credentials
+stay out of this repository and a document that IS tracked must not undo that — is guessable and is
 already an accepted risk for `inference.agileguy.ca` (`reference_inference_tunnel`); reusing it here
 extends that acceptance to a second endpoint rather than making a fresh decision, and should be
 chosen rather than defaulted into.
