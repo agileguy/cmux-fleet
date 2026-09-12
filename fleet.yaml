@@ -1,0 +1,1313 @@
+# pifleet configuration — the SRD §6.2 worked example.
+#
+# Merge is `defaults ← roles ← per-worker overrides`, shallow, with three
+# exceptions (SRD §6.1): arrays replace (but `pifleet-worker` is re-injected
+# into skills post-merge), a `:thinking` model suffix outranks any `thinking:`
+# key, and relative paths resolve against THIS FILE's directory.
+
+version: 2
+name: paisley-feature-fleet
+
+backend:
+  # kind: cmux               # cmux | tmux | headless — COMMENTED OUT ON PURPOSE
+  #
+  # An omitted `kind` means the CLI's own default applies, which is `headless`
+  # (`up.ts`'s DEFAULT_BACKEND): a backend that needs no terminal multiplexer
+  # and therefore runs on any host. Uncomment the line, or write `kind:
+  # headless` explicitly, only once you have decided which of the three this
+  # machine can actually present.
+  #
+  # WHY THIS LINE IS NOT SHIPPED LIVE, which is a compatibility fact and not a
+  # preference. `backend.kind` used to be parsed and read by NOTHING — `up`
+  # hardcoded its config term to null — so every operator who started from this
+  # file has been running headless no matter what this line said. The field is
+  # now binding, and a `fleet.yaml` derived from a shipped `kind: cmux` would
+  # therefore change meaning UNDER AN OPERATOR WHO CHANGED NOTHING: on a host
+  # with no cmux, `pifleet up` refuses with exit 3 and no fleet where it used
+  # to give a working headless run. Shipping the default commented out is what
+  # keeps a copy of this file behaving on the new build the way it behaved on
+  # the old one.
+  #
+  # The domain is still documented above, because that is the value this line
+  # always had. What it must not do is silently BIND one of the three.
+  workspace: pifleet         # matched on custom_title; recorded by id in registry.json
+  split: alternate           # alternate | columns | rows  (pifleet-side split sequence)
+  focus_on_dispatch: false
+
+docker:
+  image_prefix: pifleet/pi-worker
+  pi_version: "0.79.6"       # pinned; must match SRD §4.2's protocol contract
+  network: pifleet-egress
+  memory: 4g
+  cpus: 2
+  pids_limit: 512
+  read_only_root: true
+
+run:
+  root: ~/.pifleet/runs
+  # THE FLEET'S OWN REPOSITORY, so a task about pifleet can be dispatched to
+  # pifleet. It was `~/.pifleet/e2e-repo` — a two-file scratch seed (`add.js`,
+  # `README.md`) — and every engineer therefore mounted a `/workspace` with no
+  # product source in it. MEASURED: two engineers were dispatched a defect in
+  # `src/cli/commands/wait.ts`; neither could reach the file. One reported
+  # `blocked` correctly, the other wrote a 43-line replacement of a file it had
+  # never seen and graded itself green against it, which is the failure
+  # `roles/engineer.md` now names outright.
+  #
+  # `isolation: worktree` is what makes this safe to point here: each worker
+  # gets its own branch and worktree off this repo, never the checkout the
+  # operator is typing in.
+  repo: ~/repos/cmux-fleet
+  isolation: worktree        # worktree | shared-ro | none
+  branch_prefix: fleet
+  # THE OWNER'S Q1 DECISION, recorded 2026-09-04 and echoed exactly.
+  #
+  # rally-cli is the review console's integration target - "run real reviews of
+  # ~/repos/rally-cli through the live review console as often as needed" - and
+  # its remote is one of the three `sensitive-repo.ts` refuses by default. The
+  # decision to send it to three hosted vendors was made deliberately; this line
+  # is where it is written down instead of being implied by the fact that it kept
+  # working.
+  #
+  # It is a URL and not a `true` because the launch directory overrides
+  # `run.repo`: consent to rally-cli must not become consent to the next AppNeta
+  # or Broadcom repository someone happens to launch a console from. Those still
+  # refuse, and the refusal names this field.
+  hosted_repo_consent: https://github.com/dan-elliott-appneta/rally-cli.git
+  # RAISED to 4 for the triage console (SRD-TRIAGE-CONSOLE Q3/task 0.4). It
+  # bounds each RUN, not the host, and until the triage console existed every
+  # console in this fleet gave each worker its OWN run --- `agentPaneCommand`
+  # builds `up --workers <one worker>` and `operations-plan.ts:310` says it in
+  # as many words: "Each pane creates its own run". So this key had nothing to
+  # bind on, at any value. The triage console is the first run holding four
+  # seats, and three of them fan out at once; at 1 the sweep serialises and
+  # cannot fit a five-minute cadence.
+  #
+  # THE COST, which is the reason this is 4 and not higher: the bound that
+  # actually matters is oMLX throughput, and all four triage seats are LOCAL
+  # (D1 arm 3). Four concurrent local requests from this run is the ceiling
+  # this number sets, and it is set at the console's size deliberately --- a
+  # larger value would not make the sweep faster and would let some future
+  # multi-worker run outrun the server it shares.
+  max_concurrent: 4          # bounded by oMLX throughput, not pane count (§5.9)
+  budget:
+    tokens_ceiling: 6000000  # THE ceiling — local models have no price table
+    # Held up front per admission and reconciled at settle. NOTE the shape this
+    # gives a run: admission refuses once spent + reserve would overrun, so the
+    # last `per_task_reserve_tokens` of the ceiling is unreachable and a run
+    # that uses its whole budget ends on that refusal (exit 5, "budget refused
+    # admission"), not on a crossed ceiling.
+    per_task_reserve_tokens: 400000
+    per_task_timeout: 25m
+    run_timeout: 2h
+  timers:
+    ui_request_timeout: 5s
+    event_stall_warn: 3m
+    event_stall_kill: 25m
+    heartbeat_interval: 5s
+
+llm:
+  # PER-WORKER PROVIDERS, adopted 2026-09-03 (SRD-PROVIDERS-001, §5.9 amended).
+  #
+  # This block used to read "ALWAYS self-hosted oMLX, never a provider". That
+  # prohibition is now BOUNDED rather than repealed: oMLX remains the fleet
+  # default and serves every role that is not named below, and one hosted
+  # provider is legal for the three `development` console roles. See
+  # `Docs/SRD.md` §5.9's 2026-09-03 amendment for what that costs.
+  provider: omlx                    # the DEFAULT a worker gets with no prefix
+  model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
+  thinking: medium
+  require_native_tool_calls: true   # stays FLEET-wide: what the fleet tolerates
+  #
+  # The flat `base_url`/`relay_upstream`/`api_key_env`/`models_allowlist` keys
+  # are GONE, not merely unused. They mean "the block for llm.provider", so
+  # keeping them beside a `providers.omlx` entry is a refusal rather than a
+  # merge (ISC-403) — two spellings of one value that can silently disagree is
+  # what ISC-264 cost a rename to find.
+  providers:
+    omlx:
+      # `hosted` is REQUIRED and never inferred. The operator's tunnel is
+      # https:, publicly resolvable and on a public address, so every available
+      # inference would call it hosted — wrong in exactly the case §5.9's
+      # earlier amendment was written for.
+      hosted: false
+      base_url: https://inference.agileguy.ca/v1
+      # An IP LITERAL, never a hostname, and the reason is measured: the relay
+      # publishes `base_url`'s host as an alias on the bridge it is itself
+      # attached to, so it would resolve that name TO ITSELF. Measured
+      # 2026-08-30 — every forwarded connection looped into its own listener and
+      # the client hung for the full timeout with nothing in `docker logs`.
+      #
+      # THE COST: this pins a CDN anycast address Cloudflare does not contract
+      # to keep. If the fleet stops reaching the model, re-derive it and update
+      # BOTH this line and the `egress.allow` entry:
+      #   python3 -c "import socket;print(sorted({i[4][0] for i in socket.getaddrinfo('inference.agileguy.ca',443,socket.AF_INET)}))"
+      #   # 2026-08-30 -> ['104.21.70.27', '172.67.218.174']
+      relay_upstream: 104.21.70.27:443
+      api_key_env: OMLX_API_KEY     # self-hosted SERVER credential, not billing
+      # TWO MODELS, by owner decision 2026-09-03, superseding the 2026-08-30
+      # "Qwen3.5 exclusively" entry this replaces. The allowlist is still the
+      # ceiling `up` checks every role's `model:` against — the point of naming
+      # them was never the count, it is that a role reaching for anything not
+      # written here fails at `up` with the field and the file rather than at
+      # generation time.
+      #
+      # Both were confirmed served by the endpoint `base_url` names on
+      # 2026-09-03 (`GET /v1/models`), which is the check worth doing before
+      # widening this: the allowlist gates the ROLE, not the server, so a name
+      # added here that the server does not serve turns a config refusal into a
+      # model-not-found at the first dispatch.
+      models_allowlist:
+        - Qwen3.5-35B-A3B-8bit
+        - gpt-oss-20b-MXFP4-Q8
+        # The bf16 build, and every omlx seat's model. Tool-call probed through
+        # the tunnel before wiring: finish_reason: tool_calls with a proper
+        # payload on oMLX 0.6.4.
+        #
+        # REMOVED 2026-09-09 by operator: `gemma-4-26b-a4b-it-4bit`, which sat
+        # here allowed and unused after every seat moved to bf16 on 2026-09-07.
+        # The server still serves it, and an allowlist entry is a PERMISSION
+        # rather than a preference — ISC-1124's lesson is that anything able to
+        # issue a completion can load weights, and a second 26B cold-loading
+        # beside the live one is what starved a seat mid-sweep. An unused entry
+        # is the loaded gun, so it goes.
+        #
+        # The round trip that put it here is worth keeping even though the entry
+        # is gone: on oMLX 0.4.1 gemma returned an EMPTY BODY to any request
+        # carrying `tools`, §5.9's probe could not settle, and `up` refused the
+        # seat — which read as "gemma cannot serve native tool calls". It was the
+        # SERVER. Probe a model again after a server upgrade before concluding
+        # anything about the model.
+        - gemma-4-26b-a4b-it-bf16
+
+      # DECLARED FOR omlx AS OF 2026-09-07, which the block above says this
+      # provider deliberately does without — "its window is whatever the
+      # operator's own server was started with, and a guess here would be worse
+      # than the default it keeps".
+      #
+      # That reasoning holds for a value nobody knows. It does not hold for one
+      # the operator has just SET: gemma's context was raised to 256k on the
+      # server, and leaving this undeclared means Pi registers the model at its
+      # own 128,000 default — which is the exact failure the ollama-cloud block
+      # below records, where `rev-arch-1` auto-compacted at 152,447 tokens on a
+      # model with a million and then died mid-review. Half the window would be
+      # silently unusable.
+      #
+      # Re-measure when the server's launch flags change; the value is the
+      # server's, not ours.
+      context_windows:
+        # Same 256k the server reports for the bf16 build (GET /v1/models,
+        # 2026-09-07): max_model_len 256000. Undeclared, Pi would register it
+        # at its own 128,000 default and half the window would be unusable.
+        gemma-4-26b-a4b-it-bf16: 256000
+
+    ollama-cloud:
+      # HOSTED. A third party serves the model, and everything in an assigned
+      # worker's context — its transcript, its tool output, and the repository
+      # under /workspace as the agent reads it — is sent to them. SRD §5.9's
+      # 2026-09-03 amendment is where that is argued; it is not a config detail.
+      hosted: true
+      base_url: https://ollama.com/v1
+      # An IP LITERAL here too, DEPARTING FROM SRD-PROVIDERS §6.1's example,
+      # which writes `ollama.com:443`. A hostname is schema-legal when
+      # `hosted: true`, but the loop this file records above is a property of
+      # the RELAY, not of who owns the endpoint: the relay aliases `base_url`'s
+      # host on its own bridge, so `ollama.com` would resolve to the relay
+      # itself exactly as `inference.agileguy.ca` did. The measured precedent
+      # outranks the example.
+      #
+      #   python3 -c "import socket;print(sorted({i[4][0] for i in socket.getaddrinfo('ollama.com',443,socket.AF_INET)}))"
+      #   # 2026-09-03 -> ['34.36.133.15']
+      #
+      # THE COST is the same shape as oMLX's and larger: this is Google's global
+      # HTTPS load balancer, whose address the vendor does not contract to keep.
+      relay_upstream: 34.36.133.15:443
+      api_key_env: OLLAMA_API_KEY   # a BILLING credential — see §12.4
+      # THREE MODELS, and the allowlist is the ceiling `up` checks every role's
+      # `model:` against — so a role naming anything else fails at `up` with
+      # the field and the file rather than at generation time.
+      #
+      # NARROWED 5 -> 3 on 2026-09-04 BY OWNER DECISION, and the decision was
+      # revised once on the same day. Both are recorded, because an allowlist
+      # that changes twice without saying so reads as drift rather than as a
+      # choice:
+      #
+      #   first   `kimi-k3` is not to be used as a reviewer model. Seats went to
+      #           glm-5.3 (collator + rev-arch-1), gemma4:31b, gpt-oss:120b,
+      #           with every development seat on glm-5.3.
+      #   revised `deepseek-v4-pro:0813` takes the development console and the
+      #           collator, `qwen3.5:397b` returns to a reviewer seat, and
+      #           `glm-5.3` keeps one. `gemma4:31b` and `gpt-oss:120b` leave.
+      #
+      # `kimi-k3`'s exclusion is the one thing unchanged across both, so it is
+      # the one worth stating as a rule rather than a pick: it is not a reviewer
+      # model here. `kimi-k2.7-code`, `gemma4:31b` and `gpt-oss:120b` are named
+      # by no role now — they are still in the vendor's catalogue and still
+      # probe clean, and putting one back is a line here plus its
+      # `context_windows` entry below.
+      #
+      # THE DIVERSITY ARGUMENT SURVIVES BOTH REVISIONS, which is the part worth
+      # checking rather than assuming. The `review` console's product is three
+      # reviewers on three DIFFERENT vendors — three seats on one model is one
+      # reviewer with three transcripts, and a shared training blind spot is
+      # then invisible by construction. DeepSeek, Qwen and Zhipu are three
+      # corpora and three failure profiles. `test/unit/review-plan.test.ts`
+      # pins it, and `roles/collator.md`'s own table is pinned to this file by
+      # the same test — that table had gone stale in exactly this way once.
+      #
+      # Every entry is re-probed with the fleet's OWN `probeNativeToolCalls`
+      # against the OpenAI-compatible route, never taken from the vendor's
+      # `capabilities` array: that array is an attestation about the NATIVE
+      # route and says nothing about this path's response shape. Measured
+      # 2026-09-04, host-side — the container-side probe is the one `up` itself
+      # runs, and it runs it on every `up`:
+      #
+      #   deepseek-v4-pro:0813  ok  1165ms  collator, rev-arch-1, all 4 development seats
+      #   qwen3.5:397b          ok  1874ms  (no seat since 2026-09-08)
+      #   glm-5.3               ok  1454ms  rev-lang-1
+      #   glm-5.2               ok  1308ms  rev-ctx-1 from 2026-09-08; /api/show
+      #                                     attests tools + thinking, and the
+      #                                     latency here IS this table's probe,
+      #                                     re-run host-side the same day
+      #
+      # All three attest `thinking` as well as `tools` (`POST /api/show`), so
+      # none of them trips the capability exclusion recorded next.
+      #
+      # `glm-5.3` AND NOT `glm-5.3-flash`, which is also in the catalogue: the
+      # same trade `reviewer` makes naming deepseek's `pro` build over its
+      # `flash` one. A reviewer should think longer per token read rather than
+      # answer sooner.
+      #
+      # ONE MEASURED SPIKE, recorded because this probe is a HARD GATE. The
+      # first call to `glm-5.3` today took 26,148ms; five consecutive calls
+      # after it ran 1327-2099ms. Well inside `probe_timeout_ms` either way, but
+      # the shape to know is that a cold or queued first call at this vendor can
+      # cost 20x the warm one, and a `timeout` verdict refuses the WHOLE fleet
+      # rather than one worker. That is the argument for 90s below, restated
+      # with a number.
+      #
+      # THE TWO EXCLUSIONS, recorded so they are not re-litigated. Both were
+      # probed and both are in the catalogue:
+      #
+      #   mistral-large-3:675b  excluded on CAPABILITY — the vendor does not
+      #                         attest `thinking` for it (`POST /api/show`
+      #                         returns completion,tools,vision). A reviewer
+      #                         that cannot think is not a reviewer.
+      #   kimi-k2.6             excluded on LATENCY — 102,486ms, which is past
+      #                         `probe_timeout_ms` below. Naming it does not
+      #                         make one worker slow, it makes `up` REFUSE THE
+      #                         WHOLE FLEET with a `timeout` verdict against a
+      #                         model that is in fact answering correctly. This
+      #                         is exactly the case D16 says to solve with this
+      #                         allowlist rather than by widening the budget.
+      #
+      # `nemotron-3-ultra` (19,332ms here, 56.9s on 2026-09-01) is inside
+      # budget but ~20x the cheapest: the fallback if one of the three is
+      # withdrawn, not a pick.
+      models_allowlist:
+        - deepseek-v4-pro:0813
+        - qwen3.5:397b
+        - glm-5.3
+        # Returned to the allowlist 2026-09-08 with rev-ctx-1's seat. The
+        # comment above says putting one back is "a line here plus its
+        # context_windows entry below" -- it is BOTH, and the context_windows
+        # entry alone is the half that fails late: `config validate` passes, the
+        # pane respawns, and `up` refuses inside it, so the seat is simply
+        # absent from `status --all` with no error anywhere the operator is
+        # looking. `config validate` now catches exactly this (ISC-1108).
+        #
+        # `gemma4:31b` held this seat for ONE cycle (T-rv-154) and lost it. It
+        # delivered, which its predecessor did not, but its single finding gave
+        # three different line numbers for itself across two artifacts and
+        # quoted two lines of `src/config/render.ts` that are not at the lines
+        # it named. The staleness it reported was real; every number supporting
+        # it was invented. A cross-file lens that cannot carry a line number
+        # between two files is not doing this seat's job.
+        - glm-5.2
+      # Each model's REAL context window, measured against THIS provider on
+      # 2026-09-04. Without them Pi registers every model with its own default of
+      # 128,000, so `deepseek-v4-pro:0813` and `kimi-k3` ran at 12% of what this
+      # endpoint serves: `rev-arch-1` auto-compacted at 152,447 tokens on a model
+      # with a million and then died with "Cannot continue from message role:
+      # assistant", losing a review it had already finished.
+      #
+      # PER PROVIDER, and these are ollama-cloud's numbers. `omlx` deliberately
+      # has none: its window is whatever the operator's own server was started
+      # with, and a guess here would be worse than the default it keeps.
+      #
+      # Re-measure when a tag moves; the value is the provider's, not ours:
+      #   curl -s https://ollama.com/api/show -H "Authorization: Bearer $KEY" \
+      #     -d '{"model":"kimi-k3"}' | jq '.model_info | to_entries[]
+      #       | select(.key | endswith(".context_length"))'
+      context_windows:
+        deepseek-v4-pro:0813: 1048576
+        qwen3.5:397b: 262144
+        glm-5.3: 1048576
+        # 2026-09-08, GET /api/show: glm5.2.context_length 1048576 — the same
+        # window `glm-5.3` serves, and 4x what `gemma4:31b` had in this slot.
+        glm-5.2: 1048576
+      # Ollama's ENTIRE catalogue is tag-style — `gpt-oss:120b`, `qwen3.5:397b`
+      # — so `:thinking` suffix stripping must be off here or a tag that happens
+      # to be spelled like a thinking level is silently eaten and produces a
+      # model-not-found against a name the operator can see is correct (D12).
+      # The `thinking:` KEY still works; only the suffix is unavailable.
+      tag_style: true
+      # The fleet-wide 60s was sized against a cold 35B load on the operator's
+      # own hardware. Measured host-side and unqueued on 2026-09-01, this
+      # catalogue is bimodal: 17 models under 4.4s, then `mistral-large-3:675b`
+      # at 42.1s and `nemotron-3-ultra` at 56.9s. `gpt-oss:120b` is in the fast
+      # group, but the probe runs against whatever the allowlist names.
+      probe_timeout_ms: 90000
+
+    # THE THIRD PROVIDER, added 2026-09-12. SRD-INFERENCE-PROVIDERS §6.9.
+    #
+    # `hosted: false` and it is NOT a judgement call: gabe is the operator's own
+    # hardware on the operator's own LAN, the same class as `omlx` above and the
+    # third private shape §5.9 permits. Nothing in a worker's context reaches a
+    # third party through this provider.
+    gabe:
+      hosted: false
+      # THE LAN LITERAL, NOT THE TUNNEL, and the tunnel exists. D9 forbids a
+      # hostname `relay_upstream` on a `hosted: false` block, so routing the
+      # fleet through `inference2.agileguy.ca` would mean either lying about
+      # `hosted:` or pinning a Cloudflare anycast address and re-deriving it
+      # forever, the way `omlx` above has to. Neither is necessary: a Colima
+      # container on the fleet host reaches 192.168.86.199 directly — verified
+      # 2026-09-12 — so the fleet dials the LAN and keeps D9's stronger
+      # property intact. `inference2.agileguy.ca` is built and healthy, and is
+      # deliberately for CI and remote use rather than for this fleet (D18).
+      # A SYNTHETIC NAME, not a public one, and not an IP. The relay publishes
+      # `base_url`'s host as an alias on the worker bridge, so this name never
+      # resolves publicly and never needs to: the worker dials it, Docker's
+      # embedded DNS answers with the relay, and the relay forwards to
+      # `relay_upstream` below. An IP literal is refused here precisely because
+      # an address cannot be a network alias.
+      #
+      # WHY NOT `inference2.agileguy.ca`, the tunnel: MEASURED 2026-09-12, no
+      # container on this fleet host can verify TLS to the public internet —
+      # `inference.agileguy.ca` returns curl verify code 20 ("unable to get
+      # local issuer certificate") from the worker image itself, as does
+      # `www.cloudflare.com`. That is corporate TLS interception, and it breaks
+      # the tunnel route and oMLX's existing HTTPS route equally. Plain HTTP to
+      # the LAN needs no TLS and is the one path that works from here.
+      base_url: http://gabe.pifleet.internal:8001/v1
+      # The WIRED NIC. gabe also holds 192.168.86.213 on Wi-Fi and the hostname
+      # `gabe` resolves to THAT one, which is why this is a literal and not a
+      # name. Port 8001 is published on 127.0.0.1 and 192.168.86.199 only —
+      # .213 is deliberately unbound, so this address is the single LAN door.
+      #
+      # STILL DHCP as of 2026-09-12. The reservation on MAC 30:c5:99:3e:f1:aa
+      # is owed; until it exists a lease move breaks this line and the
+      # `egress.allow` entry below together.
+      relay_upstream: 192.168.86.199:8001
+      # REQUIRED and never inherited: `load.ts` refuses to fall back to
+      # `llm.api_key_env`, because that fallback is how a second provider
+      # silently acquires the first one's credential.
+      api_key_env: GABE_API_KEY
+      # ONE MODEL. The server serves three NAMES but they are aliases for one
+      # set of weights — `gemma-4-26b-a4b-it-nvfp4` is now a lie inherited from
+      # the NVFP4 build it replaced, and `gemma-4-e4b-it-mxfp8` is what
+      # LightRAG dials. Only the honest name is allowlisted: an allowlist entry
+      # is a PERMISSION, and permitting a stale alias invites a role to name it.
+      models_allowlist:
+        - gemma-4-26b-a4b-it
+      # What THIS server was started with (`--max-model-len 32768`), not what
+      # the weights can do. The checkpoint declares max_position_embeddings
+      # 262144 and omlx's bf16 build reports 256000; both are irrelevant here.
+      # Undeclared, Pi would register its own 128,000 default and three
+      # quarters of the window would not exist.
+      context_windows:
+        gemma-4-26b-a4b-it: 32768
+      # NO `tag_style` — this is not a tag-style catalogue.
+      # NO `probe_timeout_ms` — the fleet-wide 60s is right for a local server
+      # that answered a tool-call probe in 2.45s under 8-way concurrency.
+egress:
+  allow:
+    # gabe's relay target — REQUIRED by `llm.providers.gabe.relay_upstream`,
+    # and the second of the two places D9 makes the operator write it. Added
+    # 2026-09-12. An IP literal for the same reason the two provider entries
+    # below are: the relay aliases its upstream's host on the bridge it is
+    # itself attached to, so a name would resolve to the relay itself.
+    - {host: 192.168.86.199, port: 8001}         # gabe — SEE SRD-PROVIDERS §6.9
+    # The HOSTED provider's relay target — REQUIRED by
+    # `llm.providers.ollama-cloud.relay_upstream`, and the second of the two
+    # edits that decision deliberately takes. The relay is the single hole in
+    # a deny-all bridge carrying untrusted model output, so one YAML string
+    # must not be enough to point it anywhere. Re-derive with the snippet in
+    # the provider block if the vendor's LB address moves.
+    - {host: 34.36.133.15, port: 443}            # ollama.com — SEE §5.9
+    - {host: rally1.rallydev.com, port: 443}     # the ticket system — FLEET-WIDE, see roles/ticketing.md
+    # The PACKAGE REGISTRY, added 2026-09-03 so a worker with a real repository
+    # worktree can install what that repository declares. A git worktree
+    # carries no `node_modules` — it is gitignored — so `bun test` in a fresh
+    # one finds no dependencies, and both `bun install` and `npm install` then
+    # hung against the deny-all policy until the tool timeout. MEASURED: the
+    # container sat at 1.6% CPU with 34.9kB of network and 0B written, and
+    # `/workspace/node_modules` stayed empty.
+    #
+    # A HOSTNAME, not an IP literal, departing from the two provider entries
+    # above and following `rally1.rallydev.com`. Those two are literals because
+    # the RELAY aliases its upstream's hostname on the bridge it is itself
+    # attached to and would resolve the name to itself; that loop is a property
+    # of a relay upstream and this is not one. It is also the wrong shape here:
+    # `registry.npmjs.org` answers on twelve Cloudflare anycast addresses that
+    # rotate, so a literal would pin one of twelve and fail whenever DNS handed
+    # out another.
+    - {host: registry.npmjs.org, port: 443}      # npm/bun package registry
+    # THE PYTHON PACKAGE INDEX, added 2026-09-04 for the same reason as the npm
+    # entry one line up and with the same measurement behind it: a tester asked
+    # to run a cloned pytest project reported `ModuleNotFoundError: No module
+    # named 'pytest'`, because a checkout declares its dependencies and does not
+    # carry them.
+    #
+    # TWO HOSTS, NOT ONE, and this is the part that is easy to get wrong. `pypi.org`
+    # serves the index — the `/simple/` API that resolves a name to a list of
+    # files — and every actual wheel and sdist is served from
+    # `files.pythonhosted.org`. Allowing only the index produces a resolve that
+    # succeeds followed by a download that hangs against the deny-all policy,
+    # which reads as a slow network rather than as a missing permission.
+    #
+    # Hostnames, not IP literals, for the reason the npm entry records: both are
+    # Fastly-fronted anycast names whose addresses rotate, so a literal would pin
+    # one of many and fail whenever DNS handed out another.
+    - {host: pypi.org, port: 443}                # python package index (resolve)
+    - {host: files.pythonhosted.org, port: 443}  # python package files (download)
+    # THE PLAYWRIGHT BROWSER CDN, added 2026-09-05 by owner decision so the
+    # `tester` seats can run the SRD's Playwright suites. Same reason as the two
+    # registry entries above, and the same failure mode if it is missing: the npm
+    # package `@playwright/test` installs from registry.npmjs.org, but the browser
+    # BINARIES it drives are a separate download from this host, so a checkout
+    # resolves and installs cleanly and then hangs at the first `playwright
+    # install` or first test run against the deny-all policy — which reads as a
+    # slow browser launch rather than as a missing permission.
+    #
+    # A HOSTNAME, following `registry.npmjs.org` rather than the two provider IP
+    # literals: this is an anycast CDN, so a literal would pin one edge address
+    # and fail whenever DNS handed out another.
+    #
+    # SCOPE, STATED PLAINLY: `egress.allow` is FLEET-WIDE. There is no per-role
+    # allow list — `egress_access: true` buys a role the ROUTE and the
+    # destinations are these. So this entry is reachable by every role that has
+    # that key, which today is `observer`, `tester` and `engineer`, not testers
+    # alone.
+    - {host: cdn.playwright.dev, port: 443}     # playwright browser binaries
+    # The relay's dial target — REQUIRED by `llm.relay_upstream`, and the second
+    # of the two edits that decision deliberately takes: the relay is the single
+    # hole in a deny-all bridge, and one YAML string should not be enough to
+    # point it at an arbitrary machine on the LAN.
+    #
+    # Must be re-derived together with `llm.relay_upstream` if Cloudflare
+    # renumbers — the gate compares the dial target against THIS list, so a
+    # stale entry here refuses the fleet at `up` rather than misrouting it.
+    - {host: 104.21.70.27, port: 443}
+
+    # The do-cluster (DOKS) control plane, so `observer` can answer a question
+    # about a cluster rather than about its logs.
+    #
+    # A HOSTNAME RATHER THAN AN IP, because the rule is WHATEVER kubectl DIALS
+    # and not "always an IP". The CONNECT the proxy sees names whatever the
+    # kubeconfig's `server` holds, and a spelling here that does not match it
+    # would never match — the refusal then looks like an auth failure rather
+    # than an allowlist miss. DOKS carries
+    # `https://<cluster-uuid>.k8s.ondigitalocean.com`, so the hostname is what
+    # this must be; DO also renumbers behind that name, which is the second
+    # reason not to pin an address. Re-derived with:
+    #   kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
+    #
+    # WHAT THIS DOES AND DOES NOT GRANT. It opens one host:port through the
+    # CONNECT proxy; TLS is end to end, so the proxy sees a tunnel and not the
+    # traffic. What a worker may DO once connected is bounded elsewhere and more
+    # tightly: verbgate refuses every mutating verb without a task-scoped grant,
+    # cloud.kubeconfig names exactly one context, and the identity reached is
+    # NOT the cluster-admin token in the operator's own kubeconfig but the
+    # `pifleet/observer` ServiceAccount bound to the built-in `view` ClusterRole.
+    # Re-verified 2026-09-12 through that file — `auth whoami` returns
+    # `system:serviceaccount:pifleet:observer`; can-i list deployments yes,
+    # can-i get pods/log yes, can-i get secrets NO.
+    # This line is reachability, not authority.
+    - {host: ac8b9a1d-4b7a-417b-b38e-b62aab92ea3f.k8s.ondigitalocean.com, port: 443}
+
+cloud:
+  adc: false                  # inherit the launching Claude instance's Google identity
+  adc_mode: token            # token (1h, default) | file (refresh token — opt-in)
+  # Must belong to the ADC identity the fleet inherits. This was a personal
+  # project while ADC was a personal account; both moved together.
+  quota_project: svapngl-saas-gke1
+  impersonate_service_account: null    # strongly preferred where one exists
+  # A FILTERED copy holding exactly ONE context, not the host default.
+  # Regenerate with:
+  #   kubectl config view --minify --flatten --context=<ctx> > this-file
+  # then repoint the exec plugin's `command` at /usr/bin/gke-gcloud-auth-plugin,
+  # which is where the image keeps it (the host path is a Homebrew one).
+  # It embeds NO credential — the exec plugin mints a token from the ADC the
+  # supervisor injects at runtime, so this file is a SCOPE FENCE and not a
+  # secret: what it grants is the set of contexts it names, and nothing else.
+  kubeconfig: /Users/de895996/.pifleet/kubeconfig-do-cluster.yaml
+  token_refresh: 45m
+
+secrets:
+  env_allowlist:             # NEVER provider keys — see §12.4
+    - TICKET_API_TOKEN
+    # Delivered, not swept. A public endpoint appears in every command the
+    # ticket worker legitimately records, so sweeping for it refused every
+    # ticket-ops.json and clamped every verdict. See SRD §12.4's 2026-08-31
+    # erratum — this forfeits a check, it buys no privilege.
+    - name: TICKET_BASE_URL
+      credential: false
+    # The ticket CLI's scoping values. Not credentials; here because `secrets:`
+    # is the only per-worker delivery channel. Without them a query is not
+    # narrower, it is WORKSPACE-WIDE — measured 2026-09-01, an iteration summary
+    # asked without a project returned 49 projects and ~180 people.
+    - name: TICKET_WORKSPACE
+      credential: false
+    - name: TICKET_PROJECT
+      credential: false
+
+# Which changed files count as the EXAM rather than the answer (§8.2). A diff
+# touching one caps the verdict: a worker that can rewrite the suite cannot be
+# certified by it. Omit the key — as this example does — to get the harvester's
+# built-in defaults (test trees, package.json, Makefile, bunfig.toml, CI
+# definitions, lockfiles, …); set it only for a repo those globs miss.
+#
+# `patterns` REPLACES the defaults, it does not extend them, so a list here is
+# the WHOLE surface. `patterns: []` is rejected rather than treated as "match
+# nothing" — an empty list would switch the cap off and look like it said
+# nothing.
+#
+# Because it replaces, a narrow list can quietly stop the cap firing on files
+# the defaults would have caught: `patterns: [ci/**]` is the obvious thing to
+# write if CI is what you had in mind, and it drops `test/**` with it. That is
+# allowed — it may be exactly right for your repo — but the harvest records
+# what the narrowing cost in `harness.defaults_missed` and raises it as a
+# discrepancy, so it cannot happen without anyone noticing.
+#
+# This value is read when `pifleet up` CREATES a run and is stored in that
+# run's `run.json`. Editing it later does not change how an existing run is
+# graded, and `artifacts`/`report` never read this file from the current
+# directory — pass `--config` to grade against something other than what the
+# run recorded.
+#
+# harness:
+#   patterns: [test/**, ci/**, package.json, Makefile, bunfig.toml]
+
+defaults:
+  pane_mode: rpc
+  toolchain: base
+  cloud_access: false        # ADC is NOT granted unless a role opts in
+  # NOT widened. This was briefly set true fleet-wide while `llm.base_url`
+  # pointed at the public tunnel and the model lived past the PROXY; with the
+  # relay carrying model traffic again, only the ticketing role needs a route
+  # out, and it declares one itself. Recorded because reverting a widening
+  # silently is how one survives.
+  skills: [pifleet-worker]
+  exclude_tools: []
+  no_context_files: true     # repo AGENTS.md/CLAUDE.md is untrusted input
+
+# Every name in a `skills:` list is a BUNDLE NAME, copied at `up` from
+# <repo>/skills/<name>/ into the host directory mounted read-only at /skills.
+# A name with no directory there is a refusal, not a silently shorter bundle —
+# so this example lists only `pifleet-worker`, which is the one bundle that
+# exists. `sre`, `tdd` and `diagnose` were listed below before anything read
+# these lists; they are not authored yet, and inventing their content to make
+# the example parse would be worse than naming the gap.
+roles:
+  # ---- SRE / cloud-ops: the primary role set ----
+  sre:                                    # diagnoses AND remediates
+    model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
+    toolchain: base                       # gcloud/kubectl/helm are in every image
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
+    skills: [pifleet-worker]
+    cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
+    isolation: worktree                   # manifest/IaC edits land on a branch
+    append_system_prompt_file: ./roles/sre.md
+  observer:                               # read-only diagnostic role — REPLACES
+                                          # `investigator` (SRD-OBSERVER-001 D2).
+                                          # Deploy watches AND ad-hoc service
+                                          # inquiries; `mode` picks the shape.
+    model: gabe/gemma-4-26b-a4b-it        # MOVED TO gabe 2026-09-12 by operator decision.
+                                          # Same weights, different server: gabe serves
+                                          # Gemma-4-26B-A4B at bf16 on the operator's own GX10,
+                                          # reached over the LAN, where omlx served this family
+                                          # through the operator's public tunnel.
+                                          # STILL LOCAL in the sense D1 cares about, and more so
+                                          # than before: `hosted: false`, no third party, and the
+                                          # path is a LAN literal rather than a public hostname
+                                          # (SRD-INFERENCE-PROVIDERS §6.9.3, D18).
+                                          # WHAT DOES CHANGE, named rather than glossed: the
+                                          # request leaves this Mac. `base_url` is plain `http://`
+                                          # to 192.168.86.199, so an observer's context — and the
+                                          # shared key — cross ONE unencrypted hop on the
+                                          # operator's own subnet. That is the same residual
+                                          # ISC-259 records for the LAN oMLX shape, not a new one.
+                                          # Tool calls proved under CONCURRENCY, not serially:
+                                          # 8 requests at `--max-num-seqs 8` returned
+                                          # finish_reason `tool_calls` with correct arguments
+                                          # 8/8, in 2.51s wall (§9.2 Q13).
+                                          # The 2026-09-03 note still governs the thing that
+                                          # matters: NOT `ollama-cloud/gpt-oss:120b`, which is
+                                          # the same family served by a third party. An
+                                          # observer reads clusters and logs, so its context is
+                                          # the fleet's most sensitive and the one least worth
+                                          # sending out.
+    thinking: high                        # reconciling four disagreeing channels is the job
+    toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox artifact only
+    skills: [pifleet-worker, observer-ops]
+    cloud_access: true                    # ADC, read verbs only — the gate refuses every mutation
+    egress_access: true                   # a ROUTE to the proxy; destinations are egress.allow
+    # The six CI/dashboard secrets fleet.example.yaml declares are OMITTED here
+    # on purpose: no values for them exist on this machine, and a name in the
+    # role's `secrets:` that the environment cannot supply buys a warning at
+    # every `up` and nothing else. Add them here when the endpoints are real.
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    pane_mode: rpc                        # the ROLE stays rpc — tui allocates no epoch, so a
+                                          # re-dispatched watch pass would run twice. The console
+                                          # worker overrides this on itself, below.
+    append_system_prompt_file: ./roles/observer.md
+  verifier:                               # confirms a remediation actually worked
+    model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
+    toolchain: base
+    tools: [read, bash, grep, find, ls, submit_report]
+    skills: [pifleet-worker]
+    cloud_access: true
+    isolation: none
+    append_system_prompt_file: ./roles/verifier.md
+
+  # ---- code roles: available, secondary ----
+  engineer:
+    # HOSTED (SRD §5.9, amended 2026-09-03). This role's workers are the
+    # `development` console's seats, and their transcripts, tool output and
+    # the repository they read go to a third party. `ollama-cloud/` is an
+    # explicit prefix rather than a fleet-default change: every role that
+    # does not name it stays on the operator's own oMLX.
+    # DEEPSEEK V4 PRO, BY OWNER DECISION 2026-09-04 (revised the same day from
+    # glm-5.3): every seat in the `development` console runs one model.
+    #
+    # THAT IS THE OPPOSITE OF THE `review` CONSOLE'S RULE, and deliberately so.
+    # Those three seats cross-check each OTHER, so their independence is the
+    # product and a shared blind spot destroys it. These four do different JOBS
+    # in sequence — write, test, review, ticket — and nothing here is measured
+    # by agreeing with a sibling, so one model across them costs no signal and
+    # gives the operator one set of habits to learn instead of four.
+    #
+    # THE COST, stated: this gives up the code TUNING `kimi-k2.7-code` had, and
+    # that variant was chosen for this role precisely because it had it.
+    # `deepseek-v4-pro:0813` is a general build and the deepest single-thread
+    # reasoner in the allowlist. What it buys back is a 1,048,576 window against
+    # k2.7-code's 262,144 — 4x the room for the repository this role has to hold
+    # while it edits.
+    model: ollama-cloud/deepseek-v4-pro:0813
+    # HIGH, by owner decision 2026-09-05: every `development` console seat thinks
+    # at full effort, matching the `review` console rather than the fleet default
+    # of `medium` this role inherited by saying nothing.
+    #
+    # WORTH SAYING OUT LOUD NOW THAT IT MEANS SOMETHING. Until today this field
+    # reached no container at all — it was resolved, printed and dropped — so
+    # every seat in this file ran at Pi's own default whatever it said here.
+    # `PIFLEET_PI_THINKING` carries it and `docker/entrypoint.sh` writes both
+    # halves Pi needs: `defaultThinkingLevel` in settings.json, and `reasoning`
+    # on the model entry, without which `getSupportedThinkingLevels` returns
+    # `["off"]` and clamps the level away. Verified on a live session open.
+    thinking: high
+    toolchain: node
+    tools: [read, write, edit, bash, grep, find, ls, submit_report]
+    skills: [pifleet-worker]
+    # EGRESS, granted 2026-09-05 by owner decision for the md-editor SRD run.
+    # Phase 1's own merge point is `bun install && bun run typecheck && bun test
+    # && bun run lint`, and every Part A task is toolchain config, so an engineer
+    # that cannot reach the registry cannot check its own work. Deny-all does not
+    # fail an install, it HANGS it until the tool timeout — see the
+    # `registry.npmjs.org` entry in `egress.allow`, which is already present and
+    # needs no change. THE COST, stated: this role's containers now have a route
+    # to the proxy, so the destinations in `egress.allow` are reachable from a
+    # seat holding the repository under edit.
+    egress_access: true
+    append_system_prompt_file: ./roles/engineer.md
+  ticketing:
+    model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
+                                          # operator decision. Probed before wiring: it answers
+                                          # a `tools` request with a real tool_calls payload
+                                          # (finish_reason: tool_calls). gpt-oss-20b does too —
+                                          # what this buys is a 35B/A3B over a 20B on the
+                                          # reasoning the roles actually do.
+                                          # STILL LOCAL in the sense D1 cares about: the fleet's
+                                          # base_url is the operator's own tunnel either way, so
+                                          # no third party is added by this change.
+                                          # Supersedes the 2026-09-03 note, whose reason has not
+                                          # held since: it moved off the 35B because that was
+                                          # "only reachable through the tunnel" — but llm.base_url
+                                          # IS the tunnel, so gpt-oss-20b was reached that way
+                                          # too. The distinction it drew did not exist.
+    thinking: medium
+    toolchain: base                       # curl and ca-certificates are already in it
+    tools: [read, write, bash, grep, find, ls, submit_report]
+    skills: [pifleet-worker, ticket-ops]
+    append_system_prompt_file: ./roles/ticketing.md
+    cloud_access: false                   # no Google identity, ever
+    egress_access: true                   # a ROUTE to the proxy; destinations are egress.allow
+    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL, TICKET_WORKSPACE, TICKET_PROJECT]
+    isolation: none                       # its whole output is the artifact in its outbox
+  reviewer:
+    # HOSTED (SRD §5.9, amended 2026-09-03). This role's workers are the
+    # `development` console's seats, and their transcripts, tool output and
+    # the repository they read go to a third party. `ollama-cloud/` is an
+    # explicit prefix rather than a fleet-default change: every role that
+    # does not name it stays on the operator's own oMLX.
+    # DEEPSEEK V4 PRO, BY OWNER DECISION 2026-09-04 (revised the same day from
+    # glm-5.3): every seat in the `development` console runs one model.
+    #
+    # THAT IS THE OPPOSITE OF THE `review` CONSOLE'S RULE, and deliberately so.
+    # Those three seats cross-check each OTHER, so their independence is the
+    # product and a shared blind spot destroys it. These four do different JOBS
+    # in sequence — write, test, review, ticket — and nothing here is measured
+    # by agreeing with a sibling, so one model across them costs no signal and
+    # gives the operator one set of habits to learn instead of four.
+    #
+    # THIS DEFAULT NOW REACHES NO WORKER. The development console's review
+    # seat became `tst-2` (SRD-FLEET-PM-001 §6.1), and the `review` console's
+    # three reviewers each name their own model on the WORKER, because there
+    # the whole point is that they differ. The role and its default are kept
+    # deliberately rather than retired: `roles/reviewer.md` is still the
+    # system prompt all three review seats inherit, and a default that reaches
+    # nothing is what a fourth review seat would pick up. Read it as the
+    # fallback, not as a description of a live seat.
+    #
+    # It lands back on the `pro` build this role held before the console-wide
+    # change, and the original argument holds unchanged: review is the role that
+    # should think longest per token read, so capability over latency is the
+    # right way round here.
+    model: ollama-cloud/deepseek-v4-pro:0813
+    thinking: high
+    toolchain: base
+    # READ PLUS `submit_report`, and NO write, NO bash, NO edit.
+    #
+    # `write` WAS HELD HERE AND IS NOW WITHDRAWN — SRD-WORKER-DISPATCH-EXTENSION
+    # task 7.1, Phase B. The full argument, both halves of it, is in
+    # `fleet.example.yaml`'s `reviewer:` block: what the grant was for (nothing
+    # host-side writes `result.json`, so a reviewer without a writer tool
+    # reported nothing while every status stayed green), why that reason is
+    # retired (`submit_report` writes the envelope and the long review through
+    # the EXTENSION's file access, not the model's grant), and why closing the
+    # old route buys something rather than being tidying (a hand-written
+    # envelope meets no schema until the harvester parses it minutes later).
+    # This file is gitignored, so the example is the copy that survives; keep
+    # them agreeing.
+    #
+    # WHAT THIS COST WHEN IT WAS ONLY A CONFIG CHANGE, measured on the first
+    # cycle under the narrowed grant (2026-09-08, T-rv-152). `roles/reviewer.md`
+    # still opened with "You have read, write, …", because SRD §8.1 defers prose
+    # to Phase C. Two of the three lenses read this file, found no `write` and
+    # delivered through `submit_report`. The third believed the briefing,
+    # composed its whole review into a 13 933-byte `write` call, got
+    # `Tool write not found`, and never recovered — every later turn ended
+    # `stopReason: error`. Layer 3 nagged, layer 4 recorded `no_submit`, and the
+    # console produced two lens reports out of three. A briefing that names a
+    # tool the grant does not hold costs an epoch to discover, and here it cost
+    # a lens: the SENTENCE THAT STATES THE GRANT now moves with the grant, in
+    # the same commit, and only §8.1's mechanics stay deferred.
+    #
+    # NO `bash`, untouched by any of the above and load-bearing in both
+    # directions. §12.1's argument was never about writing — a shell is what
+    # turns a "read-only" reviewer into a worker that can `cd /`, reach a socket
+    # or `git push` — and §6.8 turns it the other way round: it is the ABSENCE
+    # of bash here that makes withdrawing `write` mean anything, because a role
+    # holding a shell can `cat > /outbox/...` and the removal would take a tool
+    # without taking a capability.
+    #
+    # NO `edit`, deliberately. `edit` changes files that already exist, and the
+    # only files a reviewer sees besides its own outbox are the operator's
+    # checkout at /workspace — mounted `:ro`, so the grant would buy nothing it
+    # could use and would widen the writer set for no capability.
+    # AND THE WITHDRAWAL IS NOW AN INVARIANT, NOT A VALUE. Everything above
+    # argues why this role holds no writer; `read_only: true` is what makes the
+    # argument enforceable. `effectiveToolGrant` resolves an OMITTED `tools:` to
+    # every Pi builtin, so deleting the line below would silently hand back
+    # `write`, `edit` and `bash` at once and reverse task 7.1 by an edit that
+    # looks like tidying. With this flag set, that deletion is a parse error
+    # naming the three tools it would have restored, and so is adding any one of
+    # them back by hand. The flag has no runtime effect of its own -- nothing
+    # reads it at `up` -- which is the point: it is a declaration of intent whose
+    # only job is to arm ISC-59's check in `config/schema.ts`.
+    read_only: true
+    tools: [read, grep, find, ls, submit_report]
+    skills: [pifleet-worker]
+    append_system_prompt_file: ./roles/reviewer.md
+    isolation: shared-ro
+  collator:
+    # HOSTED, like every `ollama-cloud/` role — see §5.9. The collator reads the
+    # target to WRITE THE BRIEFS, so its context carries the change too; three
+    # reviewers plus a collator is four copies of the diff leaving the machine,
+    # not three. `roles/collator.md` carries the matching refusal for Broadcom
+    # and AppNeta remotes, which the /CodeReviewer skill states as a rule and
+    # this fleet cannot enforce in config.
+    #
+    # DEEPSEEK V4 PRO, and deliberately the SAME model as `rev-arch-1`. The
+    # owner's 2026-09-04 revision returns this seat to the arrangement it was
+    # built with, so the original argument stands word for word: the collation
+    # job is holding three reports in mind and finding where two of them
+    # disagree, which is the same long-reasoning shape the architecture reviewer
+    # needs. Its 1,048,576-token window is joint-largest in the allowlist, which
+    # matters at this seat specifically — the collator carries the target AND
+    # three full reviews, so it runs closest to the ceiling of anything here.
+    # Sharing costs nothing in diversity, because the collator does not vote —
+    # it reports who said what.
+    model: ollama-cloud/deepseek-v4-pro:0813
+    thinking: high
+    toolchain: base
+    # `write` WITHDRAWN 2026-09-10, task 7.2. Both things the write was for are
+    # tools now: `dispatch_request` writes the fan-out plan to the task root —
+    # the one place `report` cannot reach — and `submit_report`'s `report` list
+    # carries the turn-two pair, `collation.json` and `review.md`, in the single
+    # call `terminate: true` leaves room for. Neither tool was built for this
+    # role; both were needed by it unchanged.
+    #
+    # The ORIGINAL note, kept because it is the argument for what is still
+    # absent: "Bash is what a worker would need to reach a sibling's control
+    # socket, and there is no such socket in this container to reach
+    # (`socketPath()` puts them on the HOST, under $TMPDIR) — so granting bash
+    # here would buy no capability and cost the §12.1 argument."
+    #
+    # AND THE WITHDRAWAL IS AN INVARIANT, NOT A VALUE — the same flag `reviewer`
+    # carries, for the same reason and after the same near-miss. Without it this
+    # role's write-lessness is one deleted line away from being undone:
+    # `effectiveToolGrant` resolves an OMITTED `tools:` to every Pi builtin, so
+    # the tidy-looking deletion hands back `write`, `edit` and `bash` at once.
+    # Raised by `rev-arch-1` on the task 7.2 review cycle, against the very
+    # commit that narrowed this role.
+    read_only: true
+    tools: [read, grep, find, ls, submit_report, dispatch_request]
+    skills: [pifleet-worker]
+    append_system_prompt_file: ./roles/collator.md
+    isolation: shared-ro
+  tester:
+    # HOSTED (SRD §5.9, amended 2026-09-03). This role's workers are the
+    # `development` console's seats, and their transcripts, tool output and
+    # the repository they read go to a third party. `ollama-cloud/` is an
+    # explicit prefix rather than a fleet-default change: every role that
+    # does not name it stays on the operator's own oMLX.
+    # DEEPSEEK V4 PRO, BY OWNER DECISION 2026-09-04 (revised the same day from
+    # glm-5.3): every seat in the `development` console runs one model.
+    #
+    # THAT IS THE OPPOSITE OF THE `review` CONSOLE'S RULE, and deliberately so.
+    # Those three seats cross-check each OTHER, so their independence is the
+    # product and a shared blind spot destroys it. These four do different JOBS
+    # in sequence — write, test, review, ticket — and nothing here is measured
+    # by agreeing with a sibling, so one model across them costs no signal and
+    # gives the operator one set of habits to learn instead of four.
+    #
+    # THE COST, stated: `gpt-oss:120b` held this seat for being the FASTEST on
+    # the probe — 582ms on the first pass, 1050ms re-measured — which is the
+    # right shape for a role that runs many short checks, and this role now runs
+    # the deepest reasoner instead. The trade is capability over latency, which
+    # is the RIGHT way round for `reviewer` and the wrong way round here; it is
+    # the price of the console being uniform, and it is a real price, not a
+    # rounding error.
+    model: ollama-cloud/deepseek-v4-pro:0813
+    # HIGH, by owner decision 2026-09-05, on the same sweep as `engineer`: every
+    # `development` console seat thinks at full effort.
+    #
+    # IT IS THE LEAST OBVIOUS OF THE FOUR AND STILL RIGHT. This role's own model
+    # note above argues that many short checks want latency over capability —
+    # which is an argument about the MODEL, not about how hard it thinks on the
+    # turns it does take. A test run that decides what a failure means is
+    # reasoning work; the fast path is not the one that matters here.
+    thinking: high
+    toolchain: python                     # SWITCHED 2026-09-04: rally-cli is a pytest project.
+                                          # COSTS THIS ROLE NOTHING. The note that used to sit
+                                          # here said it cost `bun`; that was true of the image
+                                          # layering before `2ccf851` and is false now.
+                                          # `docker/Dockerfile:145` is
+                                          # `FROM toolchain-node AS toolchain-python`, so python
+                                          # is a strict SUPERSET of node. Measured on
+                                          # pi-worker:0.79.6-python-c3a3a1fe1e2e (ISC-524):
+                                          # bun 1.3.12, node v24.20.0, Python 3.11.2, uv 0.12.9,
+                                          # ruff 0.16.6, mypy 2.3.1. Both testers can run this
+                                          # repository's own suite.
+    tools: [read, bash, grep, find, ls, submit_report]
+    skills: [pifleet-worker]
+    egress_access: true                   # THE ROUTE to the proxy, added 2026-09-03 alongside the
+                                          # registry entry in `egress.allow`. The allowlist says
+                                          # which hosts are reachable; this says this role may
+                                          # reach them. Without it `HTTPS_PROXY` is unset — the
+                                          # model still resolves, because that rides the relay's
+                                          # direct TCP target and not the proxy — so an install
+                                          # goes direct into a deny-all network and hangs until
+                                          # the tool timeout. MEASURED: `curl` to the registry
+                                          # from inside the container returned 000 in 0.00007s
+                                          # direct and 200 in 0.63s through
+                                          # `egress.pifleet.internal:3128`. Widens no
+                                          # destination; the allowlist is still the ceiling.
+    append_system_prompt_file: ./roles/tester.md
+
+  triage:
+    # LOCAL 20b, BY OWNER DECISION 2026-09-06 — SRD-TRIAGE-CONSOLE §0.2 arm 3,
+    # recorded as D1. The commission that opened that document asked for
+    # `ollama-cloud/gpt-oss:120b` on all four of this console's seats, which
+    # would have reversed the 2026-09-03 decision that put `observer` on this
+    # model. It was refused, and this line is the refusal.
+    #
+    # WHAT THE ARGUMENT TURNED ON, since a reader who finds only the outcome
+    # will read this as a performance choice: it is not about a model name, it
+    # is about whether an observer's context may leave the machine. This role
+    # reconciles three observers' reports, and an observer's report carries
+    # namespaces, workload names, pod names, restart counts, log excerpts and
+    # cluster endpoints from a LIVE environment — 288 sweeps a day — so it is
+    # the most sensitive context this fleet produces and the one least worth
+    # sending to a third party. There is no ceiling, timeout or scope that
+    # reduces a transcript after it has been sent.
+    #
+    # THE COST, stated rather than waved at (D1). Reconciliation is the one task
+    # here that most wants a bigger model, and a 20B will be worse at it than a
+    # 120B. The failure will not look like a model failure — it will look like a
+    # noisy console. If that is what a day-long run shows, THIS is the first
+    # decision to re-examine, not the last.
+    model: gabe/gemma-4-26b-a4b-it        # MOVED TO gabe 2026-09-12 by operator decision.
+                                          # D1 ABOVE IS UNCHANGED BY THIS, which is the point:
+                                          # the constraint was never a model name, it was
+                                          # whether this console's context may leave the
+                                          # machine. gabe is the operator's own GX10 on the
+                                          # operator's own LAN (`hosted: false`), so the
+                                          # namespaces, pod names, restart counts and log
+                                          # excerpts this role reconciles — 288 sweeps a day —
+                                          # still reach no third party.
+                                          # WHAT DOES CHANGE: they leave this Mac. `base_url`
+                                          # is plain `http://` to 192.168.86.199, so that
+                                          # context and the shared key cross ONE unencrypted
+                                          # hop on the operator's own subnet. Same residual
+                                          # ISC-259 already records for the LAN shape.
+                                          # AND THE COST D1 NAMED IS NOW SMALLER, not larger:
+                                          # D1 accepted that a 20B would be worse at
+                                          # reconciliation than a 120B. This is a 26B-A4B at
+                                          # bf16 rather than a quantized build, measured at
+                                          # 24.5 tok/s, so if the console is noisy that
+                                          # decision is still the first to re-examine — but
+                                          # it is no longer the same 20B being argued about.
+                                          # Tool calls proved under CONCURRENCY: 8/8 at
+                                          # `--max-num-seqs 8` (§9.2 Q13).
+    thinking: high                        # reconciling three reports that disagree IS the job
+    toolchain: base                       # it reads artifacts; there is nothing to build
+    # `reviewer`'s grant above, copied deliberately — the same set the `review`
+    # console's `collator` carries in the operator's own `fleet.yaml`, which is
+    # where the shape was argued. Note what is NOT here.
+    #
+    # `write` is the outbox artifact and nothing else, on exactly the argument
+    # `reviewer` above sets out: /outbox is a worker-scoped bind mount, only the
+    # harvester reads it, and it is already the untrusted-content boundary.
+    #
+    # NO `bash`, and here that is the load-bearing omission rather than an
+    # inherited habit. This role's entire output is a request for something ELSE
+    # to act on — a fan-out to three observers, and a notification that wakes a
+    # human. A shell is exactly what turns a request-WRITING worker into a
+    # DISPATCHING one, and an agent may not dispatch.
+    #
+    # NO `edit`, for `reviewer`'s reason: nothing it can see is writable except
+    # its own outbox, so the grant would widen the writer set and buy nothing.
+    # `write` WITHDRAWN 2026-09-10, task 7.3, on the second attempt. The first
+    # is kept below because it is the reason the second looks the way it does.
+    #
+    # WHAT 7.3 MISSED THE FIRST TIME (2026-09-09): this role writes TWO KINDS of
+    # file and `submit_report` covered one. Its envelope is `result.json`, which
+    # the tool writes. Its FAN-OUT is `/outbox/<task-id>/dispatch-request.json`,
+    # which the host reads to dispatch the observers — and which sits at the TASK
+    # ROOT, one level above the `files/` directory `report` writes into. Narrowed,
+    # `tri-1` composed the fan-out correctly and was refused three times —
+    # `Tool write not found` — and the console dispatched nothing for three
+    # sweeps.
+    #
+    # WORSE THAN THE OUTAGE: sweeps 5 and 6 settled `status: success` with the
+    # summary "Dispatched sweep to obs-t1", having written no request at all.
+    # Only sweep 7 said `failed` and named the missing tool. A narrowing that
+    # produces false successes is not a narrowing, it is a silent hole.
+    #
+    # WHAT CHANGED: `dispatch_request` now exists and is exactly what the note
+    # above asked for — it writes that one file, composing `schema` and
+    # `parent_task_id` from host state the way `submit_report` composes its four.
+    # And `report` became a LIST, so turn two's `triage.json` + `triage.md` pair
+    # lands in the one delivering call rather than needing a second that
+    # `terminate: true` makes unreachable. Between them the two tools cover every
+    # file this role owes, which is the condition the first attempt failed.
+    #
+    # `roles/triage.md` moves in the SAME commit as this line — 7.1 measured a
+    # lens lost to a role file that still claimed a withdrawn `write`.
+    tools: [read, grep, find, ls, submit_report, dispatch_request]
+    # `pifleet-worker` alone. There is deliberately NO `triage` bundle: a name
+    # with no directory under skills/ is a refusal at `up`, not a silently
+    # shorter bundle, and inventing one to make this line look complete is the
+    # thing the note above `roles:` refuses. The role's own instructions live in
+    # the briefing file at the bottom of this block.
+    skills: [pifleet-worker]
+    # NO `cloud_access` and NO `egress_access`, both left at the `defaults:`
+    # value of off, and that is a design property rather than an omission. The
+    # observers hold the cluster identity and reach the network; this seat reads
+    # what they wrote. Keeping the two apart is why the console can be given a
+    # clock without also being given a way to touch anything.
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    # THE CONSOLE'S DEFINING PROPERTY, restated here rather than inherited from
+    # `defaults:` so that a future edit has to argue with a comment. `tui`
+    # allocates no epoch, and this console dispatches 288 times a day: with no
+    # `already_completed` fence a re-dispatched sweep runs a second time. It is
+    # the first console in this fleet with no keyboard, which is the point — it
+    # is the first one that runs when nobody is watching.
+    pane_mode: rpc
+    append_system_prompt_file: ./roles/triage.md
+
+workers:
+  # 6 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
+  # admission control does the queuing against the single oMLX server.
+  - {id: sre-1,  role: sre}
+  - {id: sre-2,  role: sre}
+  # pane_mode: tui so the operations console's pane 1 IS Pi's interface
+  # rather than a log tail. scripts/operations reads this and passes
+  # up --attach-here. The override is on the WORKER, not the role: on
+  # the role it would put every observer on tui, and tui allocates no
+  # epoch, so a re-dispatched watch pass would run the same task twice.
+  # obs-1 is the seat a human occupies; obs-2 takes dispatched passes.
+  # Different palettes so the two attended panes are tellable apart at a
+  # glance (src/config/themes.ts). Pi ships only dark/light, and light paints
+  # light-mode ink onto a dark terminal — it sets no page background.
+  - {id: obs-1,  role: observer, pane_mode: tui, theme: catppuccin-mocha}
+  - {id: obs-2,  role: observer}
+  - {id: ver-1,  role: verifier}
+  # ---- the `development` console's four seats ----
+  #
+  # All four are pane_mode: tui, because that console is FOUR KEYBOARDS. Each
+  # attended pane runs its own `up` (--attach-here hands over the terminal of
+  # the process that runs it, and one process has one terminal), so this is
+  # four runs — `status --all` reports them together, `--recreate` tears them
+  # down, and `dispatch` refuses all four in favour of typing into the pane.
+  #
+  # A DISTINCT THEME EACH, and with four panes that is no longer decoration:
+  # two engineers running the same role differ in nothing else on screen, so
+  # the palette is the only thing that says which container a pane belongs to
+  # before you read the title. All four are DARK themes — a Pi theme sets no
+  # page background, so a light one (catppuccin-latte, gruvbox-light, the two
+  # solarized-lights) paints light-mode ink onto whatever the terminal already
+  # is. tick-1 takes that trade knowingly; these do not.
+  #
+  # THE THROUGHPUT COST, stated rather than discovered: these four plus the
+  # operations console's two are six Pi processes against one oMLX server, and
+  # run.max_concurrent bounds each RUN, not the host. Six panes generating at
+  # once is six concurrent requests.
+  - {id: eng-1,  role: engineer, pane_mode: tui, theme: tokyo-night}
+  - {id: eng-2,  role: engineer, pane_mode: tui, theme: gruvbox-dark}
+  # The `tester` role existed with no worker to run it; the development
+  # console is what it was waiting for.
+  - {id: tst-1,  role: tester,   pane_mode: tui, theme: everforest-dark}
+  # pane_mode: tui so the operations console's pane runs Pi's own interface
+  # rather than a rendered tail. Each attended pane runs its OWN `up`,
+  # because --attach-here hands over the terminal of the process that runs
+  # it and one process has one terminal — so two attended panes are two
+  # runs, which `status --all` reports and `--recreate` tears down.
+  - {id: tick-1, role: ticketing, pane_mode: tui, theme: catppuccin-latte}
+  # THE FOURTH SEAT IS A SECOND TESTER, NOT A REVIEWER (SRD-FLEET-PM-001 §6.1).
+  # This is not a rename and it is not free: `tester` is a `worktree` seat with
+  # `bash` and `egress_access`, where `reviewer` was `shared-ro` with neither.
+  # The console goes from three bash seats to four and from one egress seat to
+  # two, and that widening is the cost of the change rather than a side effect
+  # of it. What buys it back is that review moves to the `review` console,
+  # where three seats on three vendors read the integrated result instead of
+  # one seat reading a diff — so the console that writes code no longer grades
+  # its own work.
+  #
+  # The development console loses its in-loop review step as a consequence. A
+  # defect introduced in task 3 of a phase is not read by any reviewer until
+  # the end of that phase. That is stated here because it is the part of §6.1
+  # that a roster line does not show.
+  - {id: tst-2,  role: tester,    pane_mode: tui, theme: nord}
+  # ---- the `review` console's four seats ----
+  #
+  # A collator top-left and three reviewers, each on a DIFFERENT vendor. That
+  # diversity is the console's whole product: three seats on one model is one
+  # reviewer with three transcripts, and a shared training blind spot is then
+  # invisible by construction. The three models are argued and measured in
+  # `llm.providers.ollama-cloud.models_allowlist` above.
+  #
+  # ONE `reviewer` ROLE, three workers — not three roles. The shared review
+  # discipline (rank by consequence, give the failing case, quote file and line)
+  # lives once in `roles/reviewer.md`, and each worker adds only its ANGLE. That
+  # works because briefing fragments CONCATENATE across levels rather than
+  # overriding — `resolveWorker` collects defaults -> role -> worker, file
+  # before inline at each level — so a worker's `append_system_prompt_file` is
+  # additive to the role's. Three roles would be three copies of the discipline,
+  # and three copies is where the drift starts.
+  #
+  # THE THROUGHPUT COST, stated as the other consoles state theirs: these four
+  # take the fleet to TEN attended panes. Unlike the local-model seats these are
+  # hosted, so they do not queue behind oMLX — they queue behind the operator's
+  # ollama.com rate limit and they are BILLED. Four panes generating at once on
+  # `deepseek-v4-pro`, `qwen3.5:397b` and `glm-5.3` is not a free console to
+  # leave open.
+  - {id: col-1,      role: collator, pane_mode: tui, theme: tokyo-night}
+  # ARCHITECTURE + SECURITY on deepseek-v4-pro — the seat's original model,
+  # returned to it by the owner's 2026-09-04 revision. It is the deepest
+  # single-thread reasoner in the allowlist and this is the angle that must
+  # think longest per token read, which is the same argument `reviewer`'s own
+  # model line makes. Its 1,048,576 window is also what stops this seat
+  # repeating its own auto-compaction at 152,447 tokens, which is what happened
+  # here when the window was left at the agent's 128k default.
+  - {id: rev-arch-1, role: reviewer, pane_mode: tui, theme: gruvbox-dark,
+     model: ollama-cloud/deepseek-v4-pro:0813,
+     append_system_prompt_file: ./roles/review/architecture-security.md}
+  # CROSS-FILE CONTEXT on qwen3.5:397b — also the seat's original model, and
+  # back by the same 2026-09-04 revision. It is the LARGEST model available at
+  # 397B, and "hold the whole change and its neighbourhood in mind at once" is
+  # literally this angle's job. The size is the assignment, not a preference.
+  #
+  # ITS WINDOW IS THE SMALLEST OF THE THREE at 262,144, against 1,048,576 for
+  # the other two, and that is worth knowing at this seat rather than any other:
+  # this is the reviewer that reads WIDEST, and the console has been measured
+  # passing 262,144's neighbourhood — rev-arch-1 auto-compacted at 152,447
+  # tokens reviewing rally-cli on a bigger target than that. Parameters over
+  # window is a defensible trade here and it is a trade, not a free choice.
+  # MOVED OFF qwen3.5:397b TO gemma4:31b, owner decision 2026-09-08, after that
+  # model lost this seat's lens on two consecutive review cycles (T-rv-152 and
+  # T-rv-153). Both times the seat did the work and lost it at the very end:
+  # 42 tool calls, a complete review, then `submit_report` refused `No task is
+  # live` because the supervisor had already settled the epoch. The measured
+  # cause is a 32.1s gap between transcript entries against
+  # TUI_ERROR_GRACE_MS = 30_000 -- it missed by 1.8 seconds, and the next entry
+  # landed 1.8s AFTER the settle. Four of that transcript's 130 gaps exceeded
+  # 30s, so it is a tail this window sits inside rather than a broken model.
+  #
+  # A THIRD VENDOR RATHER THAN A SECOND SEAT ON ZHIPU, deliberately. glm-5.3
+  # was the obvious swap and was rejected for the property the console exists
+  # for: `review-plan.test.ts` pins three DIFFERENT vendors because "three seats
+  # on one model is one reviewer with three transcripts -- a shared training
+  # blind spot becomes invisible by construction, and independent agreement
+  # stops being independent". That signal is not decorative; two lenses agreeing
+  # independently is what caught the attribution guard's fail-open the same day.
+  # So DeepSeek, Zhipu and Google, and the pin stays green.
+  #
+  # THE RISK THIS TAKES ON, named because it is the worst failure shape in §11
+  # and nothing downstream detects it. Q8 measured `gemma-4-26b-a4b-it-bf16`
+  # SILENTLY TRUNCATING a tool argument: 3219 bytes of 8192 arrived, `isError`
+  # false, epoch `success` -- "a delivered report, a green epoch, and 39% of the
+  # content". This seat now has no `write`, so its whole review travels as a
+  # `submit_report` argument, and the reviewer census puts the real maximum at
+  # 13 965 bytes. THIS IS A DIFFERENT MODEL on a different provider -- 31b on
+  # ollama-cloud, not the local 26b -- so the measurement does not transfer, and
+  # it is a family resemblance rather than a finding. It has not been re-probed
+  # at 4/16/64 KB. Until it is, treat a suspiciously short review from this seat
+  # as truncation before treating it as brevity.
+  #
+  # Probed 2026-09-08 host-side against /api/show: capabilities
+  # [thinking, completion, tools], context_length 1048576.
+  #
+  # Third model in this seat in one evening. `qwen3.5:397b` lost it to a settle
+  # race 1.8s wide, `gemma4:31b` to fabricated citations; both are one-cycle
+  # judgements and so is this. Note what it costs: `rev-lang-1` runs `glm-5.3`,
+  # so two of the three lenses are now one vendor a minor apart, and the
+  # three-vendor argument for this console is weaker until a third is found.
+  - {id: rev-ctx-1,  role: reviewer, pane_mode: tui, theme: everforest-dark,
+     model: ollama-cloud/glm-5.2,
+     append_system_prompt_file: ./roles/review/cross-file-contracts.md}
+  # IMPLEMENTATION-LANGUAGE SPECIALIST on glm-5.3, owner-assigned 2026-09-04.
+  # `kimi-k3` held this seat and is REFUSED as a reviewer model by owner
+  # decision, so this is the seat that actually changed hands: the other two
+  # returned to their original models and this one took the new vendor. It is
+  # what keeps the console at three vendors — DeepSeek, Qwen, Zhipu — which is
+  # the property `test/unit/review-plan.test.ts` pins and the whole reason for
+  # three models rather than three seats on one.
+  #
+  # It carries a 1,048,576 window, so the tightest reader here is not the
+  # tightest window; that is `rev-ctx-1`, which reads widest. Noted because it
+  # is the reverse of how these two were paired in the first revision.
+  #
+  # THE ANGLE IS NO LONGER A LANGUAGE NAMED IN ADVANCE, and that is the fix.
+  # The aspect file was `typescript-language.md` while the console's actual
+  # target — `~/repos/rally-cli` — is a Python project, so the collator had
+  # been steering around the seat's own briefing inside every brief it wrote.
+  # This console reviews whatever repository it is launched from, so the seat
+  # now settles the language from the checkout and reads for the four defect
+  # classes in that language's spelling.
+  #
+  # `toolchain: node` REMOVED with it, so this worker falls back to `reviewer`'s
+  # `base`. Its stated justification was language-specific — "the angle is types
+  # as the typechecker actually checks them, and base carries no typechecker" —
+  # and that argument dies with the TypeScript angle. It was already paying
+  # nothing: this seat holds no bash, so it could never invoke a toolchain, and
+  # the comment conceded as much. Keeping it would now be actively wrong rather
+  # than merely inert — it pins a language-specific image onto the one seat
+  # whose whole job is to not assume the language, so a Python or Go target
+  # would get a Node image chosen before anyone looked at the repository.
+  - {id: rev-lang-1, role: reviewer, pane_mode: tui, theme: nord,
+     model: ollama-cloud/glm-5.3,
+     append_system_prompt_file: ./roles/review/implementation-language.md}
+
+  # ---- The triage console (SRD-TRIAGE-CONSOLE §6.1) — four rpc seats, one run ----
+  #
+  # NO `model:` OVERRIDE ON THE THREE OBSERVERS HERE, and the tracked
+  # `fleet.example.yaml` DOES carry one. That difference is deliberate and it is
+  # the whole of §6.11's correction: this file's `observer` role already IS
+  # `gpt-oss-20b-MXFP4-Q8` by the 2026-09-03 decision, so inheriting it delivers
+  # the owner's 2026-09-06 arm-3 ruling exactly. The example's `observer` is
+  # `Qwen3.5-35B-A3B-8bit`, so there the override is what pins the ruling. Same
+  # decision, two spellings, because the two files disagree about the role.
+  # rpc, NOT tui — the actor recycles this console itself (§6.6 layer 4) and a
+  # recycle is a headless `up`, which cannot recreate a pane. tui + recycle
+  # tears the seats down and cannot bring them back; measured 2026-09-07.
+  # BOTH seats on gemma-4-26b-a4b-it-bf16, and the second one is not scope creep.
+  # oMLX holds ~24GiB of weights; gemma is 15G and gpt-oss-20b is 11G, so the two
+  # cannot both stay resident. A console that alternates collator and observer
+  # every sweep would then swap a 15G model in and out on every dispatch. One
+  # model for both seats keeps it resident — and 26B instruction-tuned is the
+  # stronger of the two for the collator as well.
+  # Set per SEAT, not on the role: obs-1 on the operations console shares the
+  # observer role and is deliberately left on its own model.
+  # HISTORY, and it is kept because the conclusion it records was WRONG in a way
+  # worth not repeating. The 4-bit gemma was tried here 2026-09-07 and reverted:
+  # a request carrying `tools` returned an empty body, §5.9's native-tool-call
+  # probe could not settle, and `up` refused the seat — read at the time as "this
+  # model cannot serve tool calls". It was the SERVER: oMLX 0.4.1. On 0.6.4 the
+  # identical request answers `finish_reason: tool_calls` with a proper payload.
+  # The 4-bit was then re-added to the allowlist, sat unused once every seat moved
+  # to bf16, and was REMOVED 2026-09-09 — see the allowlist block for why an
+  # unused entry is not free. Probe a model again after a server upgrade before
+  # concluding anything about the model.
+  # pane_mode: tui on BOTH triage seats — the operator watches these panes, and a
+  # console nobody can see is a console nobody trusts.
+  #
+  # This works only with `recycle_after_sweeps: 0` in triage/console.yaml, and the
+  # reason is worth stating where the change is: §6.6 layer 4's recycle is a
+  # HEADLESS `up` ("no --attach-here, which is the whole reason this console can be
+  # recycled by a process with no terminal"). A headless run creates no pane, so a
+  # recycle takes a tui seat DOWN and cannot bring it back — measured 2026-09-07,
+  # the console died at 15:57 that way. tui and self-recycle are mutually
+  # exclusive; the recycle is the half that was given up, because its job
+  # (stopping a day's transcript accumulating) can be done by hand with
+  # `./scripts/triage --recreate` and being able to watch the seats cannot.
+  # MOVED TO gabe 2026-09-12. This WORKER-LEVEL `model:` is the line that binds —
+  # editing `roles.triage.model` alone changed nothing here, because a worker's
+  # own `model:` overrides its role's. The role default was moved too, and this
+  # is the one that actually reaches the seat.
+  - {id: tri-1,  role: triage,   model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: tokyo-night}
+  # HOSTED, by operator decision 2026-09-07, and it CROSSES D1 knowingly.
+  #
+  # D1 put observers on a local model because "an observer reads clusters and
+  # logs, so its context is the fleet's most sensitive and the one least worth
+  # sending out". That was the trial's knowing cost: namespaces, workload names,
+  # image tags and log excerpts would have reached a third party. It is MOOT as
+  # of the 2026-09-12 move below — gabe is `hosted: false` on the LAN, so this
+  # seat's cluster context does not leave the network at all.
+  #
+  # What bought the exception is three local models failing at the same step. On
+  # this seat gpt-oss-20b quit after one `ls`; gemma-4-26b made 150 kubectl calls
+  # and never wrote; Qwen3.5-35B-A3B-8bit DID write a real observer-ops.json once
+  # and then settled `no_tool_calls` the next run. Every host-side defect behind
+  # those was found and fixed first — the dispatch run, the join run, the false
+  # success, the prose audit, the deadline — so this is the remaining variable
+  # rather than the first thing reached for.
+  #
+  # Same family as the local 35B that succeeded, so the tool-call behaviour is
+  # known. SCOPED TO THIS SEAT: `obs-1` on the operations console shares the
+  # observer role and stays local, which is where D1 still holds unqualified.
+  # BACK TO LOCAL GEMMA 2026-09-07, retrying it on oMLX 0.6.4. The hosted trial
+  # above is withdrawn: D1 holds again, nothing of this cluster's context leaves.
+  #
+  # Worth retrying because the reason gemma was rejected may have been the SERVER,
+  # not the model. On 0.4.1 a request carrying `tools` returned an empty body and
+  # §5.9's probe could not settle; both machines are now on 0.6.4, so that is a
+  # different server answering the same question.
+  # MOVED TO gabe 2026-09-12, same reasoning as tri-1 above: the worker's own
+  # `model:` overrides the role's, so this line is what binds the seat to gabe.
+  - {id: obs-t1, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-dark}
