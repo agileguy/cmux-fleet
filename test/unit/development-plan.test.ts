@@ -123,7 +123,20 @@ describe("the development console is a 2x2 of agent panes", () => {
 
   it("sources ~/.env before `up`, so the model credential is there", () => {
     for (const pane of fourAttended()) {
-      expect(pane.command.startsWith("set -a;")).toBe(true);
+      /*
+       * THE CLAIM IS ORDERING — `~/.env` is sourced before `up` runs — and not
+       * that the preamble is the first thing in the string. `startsWith` was a
+       * proxy for the property and stopped being one on 2026-09-12, when
+       * `envPreamble` gained an `export PATH=…` ahead of its `set -a`
+       * (operations-plan.ts's fourth host fact: a cmux pane inherits launchd's
+       * four-entry PATH and can find neither bun nor docker).
+       *
+       * Asserted the same way `operations-plan.test.ts` asserts it, so the two
+       * consoles state one property in one form.
+       */
+      expect(pane.command).toContain("set -a;");
+      expect(pane.command).toContain(`[ -f "$HOME/.env" ]`);
+      expect(pane.command.indexOf("$HOME/.env")).toBeLessThan(pane.command.indexOf("'up'"));
     }
   });
 });
