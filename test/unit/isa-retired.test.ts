@@ -170,6 +170,17 @@ const NO_CLAIMS_BY_CONSTRUCTION = new Map<string, string>([
       "ISC-1053's, asserting the half that is still true.",
   ],
   [
+    "ISC-486",
+    "Its subject was the monitor's git STRIP, and the operator deleted the region on 2026-09-04: " +
+      "`src/monitor/read/git.ts` and `test/unit/monitor-git.test.ts` left the tree together, so " +
+      "there is no shipped code left for a claim to guard. It never had a registry claim to lose " +
+      "— no probe in `src test docker scripts` ever named ISC-486, which is its own finding and is " +
+      "recorded in ISC-1165. What replaced it is an ABSENCE, and absence is exactly what a registry " +
+      "claim evidences badly: `monitor-readonly.test.ts` pins the monitor's spawning modules to a " +
+      "NAMED literal, which fails by telling you which module returned, whereas a grep asserting " +
+      "`read/git.ts` is absent would go stale the day the path is reused for something unrelated.",
+  ],
+  [
     "ISC-1034",
     "Its subject was `actor_unbudgeted`, an EVENT whose whole purpose was to announce that §6.10's " +
       "producer was built and not yet wired — and whose retirement is the wire landing. The event, " +
@@ -209,7 +220,14 @@ describe("every retirement in ISA.md is a supersession (ISC-368)", () => {
    * without touching this file is not.
    */
   test("the retired set is exactly the criteria whose premises were superseded", () => {
-    expect(retiredIds(ISA)).toEqual(["ISC-307", "ISC-360", "ISC-608", "ISC-698", "ISC-1034"]);
+    expect(retiredIds(ISA)).toEqual([
+      "ISC-307",
+      "ISC-360",
+      "ISC-486",
+      "ISC-608",
+      "ISC-698",
+      "ISC-1034",
+    ]);
   });
 
   /**

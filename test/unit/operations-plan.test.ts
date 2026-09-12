@@ -501,11 +501,18 @@ describe("quoting", () => {
     // what "cannot break out" means. An absence assertion here would fail on
     // correct code and pass on a build that dropped the path entirely.
     /*
-     * Belt AND braces after the merge, because there are now TWO boundaries and
-     * only one of them is this quoting. The pane text is shell-injected, so the
-     * quoting above is what stops the injection there; the monitor then spawns
-     * git as ARGV with no shell at all (`read/git.ts`), so the same string
-     * cannot be re-interpreted one layer down. The old pane had only the first.
+     * THIS QUOTING IS THE ONLY BOUNDARY ON THIS SURFACE. The pane text is
+     * shell-injected, so the assertion above is what stops the injection.
+     *
+     * Corrected 2026-09-11. This comment claimed there were "TWO boundaries"
+     * because the monitor also spawned git as ARGV with no shell at all
+     * (`read/git.ts`), so the same string could not be re-interpreted one layer
+     * down. That second layer went out with the monitor's git region on
+     * 2026-09-04 — `read/git.ts` is deleted (ISC-1165) — and the comment
+     * outlived it by a week, describing a defence in depth this surface no
+     * longer has. A stale comment about a SECURITY boundary is worse than none:
+     * the next reader to widen what reaches this command would have budgeted
+     * for a backstop that is not there.
      */
   });
 
