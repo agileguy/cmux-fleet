@@ -42,7 +42,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { loadConfig } from "../../src/config/load.ts";
-import { effectiveToolGrant, writeCapableIn } from "../../src/config/schema.ts";
+import { writeCapableIn } from "../../src/config/schema.ts";
+import { roleGrant } from "../support/role-docs.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const ROLE = readFileSync(`${ROOT}roles/observer.md`, "utf8");
@@ -68,9 +69,11 @@ describe("observer's resolved grant is the one this file's routing argument assu
    */
   test("CONTROL: observer holds submit_report alongside a write-capable tool", async () => {
     const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
-    const role = config.roles["observer"];
-    expect(role, "fleet.example.yaml no longer declares an observer role — this probe has rotted").toBeDefined();
-    const tools = effectiveToolGrant(role!.tools ?? config.defaults.tools);
+    // `roleGrant` resolves `defaults ← role`, then subtracts `exclude_tools`
+    // (`render.ts`'s real `--exclude-tools` subtraction), and throws loudly if
+    // `fleet.example.yaml` no longer declares an observer role at all — this
+    // probe cannot check a role that is gone.
+    const tools = roleGrant(config, "observer");
     expect(tools).toContain("submit_report");
     expect(
       tools,

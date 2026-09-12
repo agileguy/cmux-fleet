@@ -35,7 +35,8 @@ import { readFileSync } from "node:fs";
 
 import { StatusSchema } from "../../src/contracts.ts";
 import { CONTRACT_SKILL, loadConfig } from "../../src/config/load.ts";
-import { effectiveToolGrant, writeCapableIn } from "../../src/config/schema.ts";
+import { writeCapableIn } from "../../src/config/schema.ts";
+import { roleGrant } from "../support/role-docs.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const SKILL = readFileSync(`${ROOT}skills/pifleet-worker/SKILL.md`, "utf8");
@@ -372,10 +373,12 @@ describe("the result-writing instructions are routed on the worker's tool grant"
   async function reportOnlyRoles(): Promise<string[]> {
     const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
     const out: string[] = [];
-    for (const [name, role] of Object.entries(config.roles)) {
-      // Resolved exactly as `schema.ts`'s own ISC-59 guard resolves it, so a
-      // role that omits `tools:` is read as Pi's builtins rather than as none.
-      const tools = effectiveToolGrant(role.tools ?? config.defaults.tools);
+    for (const name of Object.keys(config.roles)) {
+      // Resolved exactly as `schema.ts`'s own ISC-59 guard resolves it —
+      // `defaults ← role`, then `exclude_tools` subtracted — so a role that
+      // omits `tools:` is read as Pi's builtins rather than as none, and a
+      // role narrowed via `exclude_tools` is not missed here either.
+      const tools = roleGrant(config, name);
       if (tools.includes("submit_report") && writeCapableIn(tools).length === 0) out.push(name);
     }
     return out;

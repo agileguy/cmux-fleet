@@ -33,7 +33,7 @@
  * So the invariant below resolves every role against `fleet.example.yaml`,
  * matching `worker-docs-currency.test.ts`'s "the result-writing instructions
  * are routed on the worker's tool grant" block, which does the identical
- * `effectiveToolGrant`/`writeCapableIn` resolution for the same file and the
+ * `roleGrant`/`writeCapableIn` resolution for the same file and the
  * same reason. `collator` is the one role this cannot check by resolution — it
  * is checked directly for the prose half of the invariant only (see below) —
  * and, where the operator's own untracked `fleet.yaml` happens to be present
@@ -79,8 +79,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
 import { loadConfig } from "../../src/config/load.ts";
-import { effectiveToolGrant, writeCapableIn, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
-import { ROOT } from "../support/role-docs.ts";
+import { writeCapableIn, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
+import { ROOT, roleGrant } from "../support/role-docs.ts";
 
 /** See the file header for why this substring and not the full sentence. */
 const ANCHOR = "removes you from the grading";
@@ -109,8 +109,6 @@ function pairingIsConsistent(prose: string, tools: readonly ToolName[]): boolean
   return !carriesParaphrase(prose) || canWriteEnvelope(tools);
 }
 
-type RolesMap = FleetConfig["roles"];
-
 interface Evaluation {
   /** Role names where the paraphrase is carried with no write-capable verb. */
   violations: string[];
@@ -121,26 +119,27 @@ interface Evaluation {
 }
 
 /**
- * Resolves every role in `roles` (defaulting an omitted `tools:` the way
- * `effectiveToolGrant` — and ISC-59's own guard — resolve it: to Pi's
- * builtins, never to nothing) and grades the invariant against its
- * `roles/<name>.md`.
+ * Resolves every role in `cfg` (`defaults ← role`, then `exclude_tools`
+ * subtracted — `roleGrant`'s resolution, the same one ISC-59's own guard
+ * uses; an omitted `tools:` reads as Pi's builtins, never as nothing, and a
+ * role narrowed via `exclude_tools` is not missed) and grades the invariant
+ * against its `roles/<name>.md`.
  *
  * Throws rather than skipping when a role's doc file is missing: a role this
  * function cannot check is not a passing role, and a probe that skipped it
  * would report a narrowing it no longer covers.
  */
-function evaluateRoles(roles: RolesMap, defaultTools: readonly ToolName[] | undefined): Evaluation {
+function evaluateRoles(cfg: FleetConfig): Evaluation {
   const violations: string[] = [];
   const carriers: string[] = [];
   const writeless: string[] = [];
-  for (const [name, role] of Object.entries(roles)) {
+  for (const name of Object.keys(cfg.roles)) {
     const docPath = `${ROOT}roles/${name}.md`;
     if (!existsSync(docPath)) {
       throw new Error(`role "${name}" has no roles/${name}.md — the probe has rotted`);
     }
     const prose = readFileSync(docPath, "utf8");
-    const tools = effectiveToolGrant(role.tools ?? defaultTools);
+    const tools = roleGrant(cfg, name);
     if (carriesParaphrase(prose)) carriers.push(name);
     if (!canWriteEnvelope(tools)) writeless.push(name);
     if (!pairingIsConsistent(prose, tools)) violations.push(name);
@@ -151,7 +150,7 @@ function evaluateRoles(roles: RolesMap, defaultTools: readonly ToolName[] | unde
 describe("task 8.6 — the envelope-removes-you-from-grading paraphrase implies a write-capable grant", () => {
   test("every role resolvable from fleet.example.yaml satisfies the invariant", async () => {
     const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
-    const { violations, carriers, writeless } = evaluateRoles(config.roles, config.defaults.tools);
+    const { violations, carriers, writeless } = evaluateRoles(config);
 
     // CONTROLS: without at least one of each, the assertion below proves
     // nothing and a green probe would be reporting a partition it no longer
@@ -210,7 +209,7 @@ describe.skipIf(!HAVE_LIVE_CONFIG)(
         "fleet.yaml no longer declares a collator role — this block's extra coverage is gone",
       ).toContain("collator");
 
-      const { violations, carriers, writeless } = evaluateRoles(config.roles, config.defaults.tools);
+      const { violations, carriers, writeless } = evaluateRoles(config);
       expect(carriers, "no role's doc carries the paraphrase — this probe is vacuous").not.toEqual([]);
       expect(writeless, "no role resolved here holds zero write-capable verbs — this probe is vacuous").not.toEqual(
         [],
@@ -237,7 +236,7 @@ describe("the checker is reddenable, driven through resolution rather than throu
   test("pairing a write-less role's real grant with paraphrase-carrying prose is caught", async () => {
     const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
 
-    const reviewerTools = effectiveToolGrant(config.roles.reviewer?.tools ?? config.defaults.tools);
+    const reviewerTools = roleGrant(config, "reviewer");
     expect(canWriteEnvelope(reviewerTools), "reviewer is expected to hold no write-capable verb").toBe(false);
 
     const observerProse = readFileSync(`${ROOT}roles/observer.md`, "utf8");
@@ -249,7 +248,7 @@ describe("the checker is reddenable, driven through resolution rather than throu
 
   test("the same prose paired back with its own role's real grant passes", async () => {
     const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
-    const observerTools = effectiveToolGrant(config.roles.observer?.tools ?? config.defaults.tools);
+    const observerTools = roleGrant(config, "observer");
     const observerProse = readFileSync(`${ROOT}roles/observer.md`, "utf8");
 
     // THE GREEN CASE: the pairing corrected back to the real grant.
