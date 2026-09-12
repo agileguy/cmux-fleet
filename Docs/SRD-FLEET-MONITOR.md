@@ -1455,9 +1455,14 @@ Proposed new criteria, by area:
   what is present at each; a width at which the activity column disappears fails.*
 - Below the floor the monitor refuses with a sentence naming the required size. *Probe: render at
   one column below the floor and assert the refusal text, not a truncated frame.*
-- The git strip preserves the branch line, the short status, the commit list, `--no-pager`
+- ~~The git strip preserves the branch line, the short status, the commit list, `--no-pager`
   behaviour, and the watched directory. *Probe: assert all five against a fixture repository;
-  a missing `--branch` or a `cd` instead of `-C` fails.*
+  a missing `--branch` or a `cd` instead of `-C` fails.*~~ **BECAME ISC-486, WHICH IS RETIRED
+  (2026-09-11) BEHIND ISC-1165.** The hook was taken up, the criterion closed on all five
+  properties, and the strip was then withdrawn (§6.8) — so this line is struck as a hook that has
+  no subject left to become a criterion, not as one that was never picked up. **The hook below it
+  is NOT struck**, and the difference is the whole point: `watch(1)` and the pager are host facts,
+  which is why ISC-487 outlived the feature that happened to record them.
 - **Anti: `watch(1)` is not invoked and neither is a pager.** *Probe: assert the monitor spawns
   neither, which keeps `operations-plan.ts:47-50`'s measured host constraint alive after the panes
   it was written for have gone.*
