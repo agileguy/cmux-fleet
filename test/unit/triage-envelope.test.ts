@@ -1639,7 +1639,9 @@ describe("§13 task 3.4: claimedSuccess names §7.1/§7.2's entries and decides 
  * The slice brief's reporting path — the defect measured on `T-sweep-1`,
  * 2026-09-07.
  *
- * `roles/triage.md:212` forbids exactly this ("its own task id, not yours") and
+ * `roles/triage.md` forbade exactly this ("its own task id, not yours") — the
+ * wording measured at the time, since reworded away; the file now records the
+ * supersession rather than the instruction — and
  * the collator did it anyway; `observerArtifactPath` reads only the child id, so
  * the report landed where nothing looks and three services graded `coverage`
  * while the observer was writing correct artifacts. The host is the last holder

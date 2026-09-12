@@ -1534,7 +1534,7 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    * everything would satisfy all of them while being a console that sweeps
    * nothing 288 times a day. This is the test that fails on that.
    */
-  test("accepts tri-1's fan-out to its three observers", () => {
+  test("accepts tri-1's fan-out to its observer", () => {
     const read = parseDispatchRequest(
       triageFanOut(SWEEP, TRIAGE_CONSOLE_ROSTER.reviewers),
       triageCtx(SWEEP),
@@ -1552,9 +1552,9 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    *
    * The value of the refusal is `duplicate_target` and not a new code, which is
    * D5 arriving as behaviour: a partition that names one observer twice is a
-   * LOST SERVICE — the third observer is never asked — and the rule that catches
-   * it was written for the review console's consensus arithmetic and needed no
-   * amendment to catch this.
+   * LOST SERVICE — it was a third observer that went unasked back when this
+   * console still ran three — and the rule that catches it was written for the
+   * review console's consensus arithmetic and needed no amendment to catch this.
    */
   test("refuses a partition naming one observer twice, on the existing code", () => {
     const read = parseDispatchRequest(
@@ -1625,7 +1625,7 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    *
    * Without this the roster is a second, private spelling of the console's
    * membership. Rename a seat in `fleet.example.yaml` and not here and the
-   * console comes up with four healthy `rpc` workers while every sweep's
+   * console comes up with two healthy `rpc` workers while every sweep's
    * fan-out is refused as "outside the console" — a failure whose message
    * points at the roster rather than at the rename.
    *
@@ -1637,11 +1637,11 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    * **What this does NOT pin, so the silence is not read as coverage.**
    * `REVIEW_CONSOLE_ROSTER` is pinned to `DEFAULT_REVIEW_WORKERS` as a SET, in
    * both directions. This console has no worker-set export yet — the pane plan
-   * is Phase 4 — so a FIFTH seat added to the config and not to this roster
+   * is Phase 4 — so a THIRD seat added to the config and not to this roster
    * passes here. When `DEFAULT_TRIAGE_WORKERS` lands, this should become the
    * same set equality.
    */
-  test("names four seats the tracked example declares, by id and by role", async () => {
+  test("names both seats the tracked example declares, by id and by role", async () => {
     const path = `${ROOT}fleet.example.yaml`;
     const { config } = await parseConfig(exampleConfig(), path);
     const roles = new Map(config.workers.map((w) => [w.id, w.role]));
@@ -2029,10 +2029,11 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
    * §6.4's whole-file rule, on the new field: one entry short of a share poisons
    * the document rather than being dropped from it.
    *
-   * The other two entries are perfectly formed, so an implementation that
-   * filtered — turning a three-observer sweep into a two-observer one — is green
-   * on a bare `expect(refused)` and red here, because the refusal is asserted
-   * against the entry INDEX.
+   * With the console down to one observer, this file is a single entry, and
+   * that entry is the one missing its share — so this is also where the
+   * refusal must name the entry by INDEX (`request 1`) rather than merely
+   * report a refusal, because "which entry" is exactly what a silent filter
+   * would have discarded along with the entry itself.
    */
   test("one entry missing its share refuses the whole file, naming that entry", () => {
     const body = JSON.stringify({

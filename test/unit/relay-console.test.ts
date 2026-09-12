@@ -444,8 +444,8 @@ describe("the selected roster decides whether a request is acceptable", () => {
    * That comment used to say `sender_not_collator` was unreachable from this
    * pass. It is unreachable on the REVIEW console for a structural reason — D4
    * makes it four runs and the pass reads the collator's — and it is LIVE on the
-   * triage console, because D3 puts all four seats in one `rpc` run, so the
-   * observers share the collator's inbox. The widening the comment defended is
+   * triage console, because D3 puts both seats in one `rpc` run, so the
+   * observer shares the collator's inbox. The widening the comment defended is
    * what makes that refusal free, and this asserts the payoff rather than the
    * prose.
    */

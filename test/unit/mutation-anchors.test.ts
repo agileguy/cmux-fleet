@@ -123,12 +123,53 @@ function unquote(literal: string): string {
   return out;
 }
 
-/** Every `find:` literal, with the constant naming the file it applies to. */
+/**
+ * Every `find:` literal, with the constant naming the file it applies to.
+ *
+ * ## WHAT THE GAP BETWEEN `file:` AND `find:` TOLERATES — read this before
+ * ## adding a comment to a mutation case
+ *
+ * **A comment above a `find:` is safe.** The gap accepts any run of whitespace,
+ * `//` line comments, `/* … *\/` block comments, and `what:` lines, in any
+ * order and any number. Annotate a case freely; the guard still sees it.
+ *
+ * It did not always. The gap used to be `\s*\n\s*(?:what: …)?`, which tolerated
+ * whitespace and one optional `what:` line and NOTHING else — so a case that
+ * explained itself in a comment above its own `find:` became invisible to this
+ * guard, silently, with no count anywhere that would show it. That is the worst
+ * shape a guard can fail in: it went on passing while watching fewer cases than
+ * it claimed. On the day it was found it was blind to four cases across three
+ * batteries — `collation-contract`'s `RV15` and `RV16` (both anchored on a
+ * string that had occurred 0 times in `fleet.example.yaml` since task 7.1, dead
+ * for days and reported by nobody), `collator-relay`'s `M13`, and
+ * `envelope-attribution`'s `E3`. `RV15`'s own comment records that this guard
+ * demanded the re-anchor it was hiding.
+ *
+ * ## Why the comment forms end at a newline rather than being skipped loosely
+ *
+ * `//[^\n]*\n` and `what: [^\n]*\n` require the newline, and a block comment is
+ * consumed whole. Without that, `[^\n]*` could give back characters until
+ * `find:` matched INSIDE a comment — and these batteries are prose-heavy enough
+ * to quote an old anchor in the comment explaining why it moved. Making the
+ * line forms consume to end-of-line removes that path entirely: a `find:` in a
+ * comment is never reachable as a property.
+ *
+ * ## Why it cannot reach a LATER case's `find:`
+ *
+ * Every alternative in the gap consumes at least one character and none of them
+ * matches `replace:`, `expect:`, `}` or `{`, so the gap cannot cross a case
+ * boundary: an entry with no `find:` of its own fails to match and is skipped
+ * rather than borrowing its neighbour's. The count assertion in "the batteries
+ * are found and their anchors are parsed" is what keeps that honest — it
+ * compares what this parser sees against what the batteries declare, so a
+ * future blind spot is a red test rather than a quiet subtraction.
+ */
 function anchors(source: string): Array<{ file: string; find: string }> {
   const out: Array<{ file: string; find: string }> = [];
-  // Entries are `file: CONST,` followed by `find: "…"` or `find:\n  "…" +\n …`.
+  // Entries are `file: CONST,` followed by `find: "…"` or `find:\n  "…" +\n …`,
+  // with whitespace / comments / `what:` lines allowed between the two.
   for (const m of source.matchAll(
-    /file: (\w+),\s*\n\s*(?:what: [^\n]*\n\s*)?find:\s*((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')(?:\s*\+\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))*)/g,
+    /file: (\w+),(?:\s|\/\/[^\n]*\n|\/\*(?:[^*]|\*(?!\/))*\*\/|what: [^\n]*\n)*find:\s*((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')(?:\s*\+\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))*)/g,
   )) {
     const parts = [...m[2]!.matchAll(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g)].map((p) =>
       unquote(p[0]!),
@@ -136,6 +177,75 @@ function anchors(source: string): Array<{ file: string; find: string }> {
     out.push({ file: m[1]!, find: parts.join("") });
   }
   return out;
+}
+
+/**
+ * How many entries DECLARE a `file:`, counted without the `find:` parser.
+ *
+ * One of two second opinions that make the blind spot above expressible as a
+ * number. `anchors()` can only under-count — a case it cannot parse just
+ * vanishes — so a guard built only from `anchors()` can never notice it is
+ * watching less than it was.
+ *
+ * ## WHAT THIS IS INDEPENDENT OF, stated narrowly because the obvious claim is
+ * ## false and this comment used to make it
+ *
+ * It said this counted the entries *"by a different feature of the syntax"*.
+ * Measured against `anchors()`, the only thing the two do not share is the
+ * `^[ \t]*` line anchor: the literal `file:`, the single space, the `\w+` and
+ * the trailing comma are common to both. So there are spellings that are
+ * invisible to BOTH, and those then agree at 0 = 0 with nothing watching. Four
+ * were found by writing them out: `file:` placed last with no trailing comma,
+ * two spaces after the colon, no space after the colon, and a dotted constant
+ * (`file: paths.SRC`). Nothing in this repository enforces the spelling they
+ * both depend on — `lint` is `tsc --noEmit`, and there is no biome, prettier or
+ * dprint config anywhere in the tree.
+ *
+ * What it IS genuinely independent of is the GAP between `file:` and `find:` —
+ * the comment forms, the `what:` lines, the blank lines — and that gap is where
+ * the blind spot the header describes actually lived. Against the failure this
+ * file was written from, this counter is a real second opinion. Against a
+ * respelled `file:`, it is the same opinion twice.
+ *
+ * `declaredIdEntries()` below covers exactly the half this one cannot, and the
+ * THREE-WAY agreement is the alarm — not this counter alone.
+ *
+ * `file: string;` in the entry INTERFACE is not counted: the comma is required,
+ * and a type field ends in a semicolon.
+ */
+function declaredFileEntries(source: string): number {
+  return [...source.matchAll(/^[ \t]*file: \w+,/gm)].length;
+}
+
+/**
+ * How many entries DECLARE an `id:`, counted by a recogniser that shares no
+ * field name and no terminator with the other two.
+ *
+ * `/^[ \t]*id: "/` differs from `declaredFileEntries`'s `/^[ \t]*file: \w+,/`
+ * in exactly those two places — different field name, different terminator,
+ * no constant to spell — while still sharing the `^[ \t]*` line anchor and the
+ * colon-space between field and value. That difference is enough: all four
+ * spellings that blind `anchors()` and `declaredFileEntries()` simultaneously
+ * are visible here. That is what "a different feature of the syntax" was
+ * supposed to mean and did not.
+ *
+ * Measured across every committed battery on the day this landed, all three
+ * agree: 307 `file:` entries, 307 `id:` entries, 307 parsed anchors —
+ * `collation-contract` 116, `review-grading` 51, `collator-relay` 42,
+ * `wedged-seat` 38, `envelope-attribution` 26, `unrecognised-outbox` 22,
+ * `harvest-recovery` 12.
+ *
+ * ## The cost of the third counter, stated rather than discovered later
+ *
+ * An entry that drops its `id:` while keeping its `file:` reddens this guard,
+ * and that is a change to a battery's SHAPE rather than to its anchors. That is
+ * the intended trade: three numbers say WHICH field moved, where two could only
+ * say that something had. The fix in that case is to restore the `id:` — every
+ * battery entry has carried one since the first, and the `.mutations.md` tables
+ * beside them are keyed on it.
+ */
+function declaredIdEntries(source: string): number {
+  return [...source.matchAll(/^[ \t]*id: "/gm)].length;
 }
 
 const BATTERIES = batteryPaths();
@@ -237,7 +347,267 @@ describe("every mutation battery still anchors to the code it claims to mutate",
       expect(source, `${b} is listed by git but could not be read`).not.toBeNull();
       expect(pathConstants(source).size, `${b} binds no \${W} path constants`).toBeGreaterThan(0);
       expect(anchors(source).length, `${b} yielded no anchors`).toBeGreaterThan(5);
+      /**
+       * NOT VACUOUS *AND NOT PARTIAL*. The check above only says the parser saw
+       * SOMETHING; this says it saw EVERYTHING. A parser that quietly skips the
+       * cases it cannot spell still passes every assertion in this file, because
+       * a case it never yields is a case it never checks — which is exactly how
+       * two dead anchors in `collation-contract` survived days of green runs.
+       */
+      expect(
+        anchors(source).length,
+        `${b}: ${declaredFileEntries(source)} entries declare a \`file:\` but the parser sees ` +
+          `${anchors(source).length}. The difference is invisible cases — anchors nothing checks. ` +
+          `Widen the gap in anchors() to cover however they are now written.`,
+      ).toBe(declaredFileEntries(source));
+      /**
+       * THE THIRD OPINION, and the only one of the three that shares no syntax
+       * with the others. The assertion above compares two recognisers that
+       * differ by a line anchor and nothing else, so a battery that respells
+       * `file:` — two spaces, no space, no trailing comma, a dotted constant —
+       * takes BOTH of them to zero at once and they agree on it. This one is
+       * keyed on a different field entirely, so it still counts the entries
+       * that the other two have stopped being able to see.
+       */
+      expect(
+        declaredIdEntries(source),
+        `${b}: ${declaredIdEntries(source)} entries declare an \`id:\` but ` +
+          `${declaredFileEntries(source)} declare a \`file:\`. These two recognisers share no ` +
+          `tokens, so they disagree only when a field is renamed or respelled — and a respelled ` +
+          `\`file:\` is invisible to anchors() and to the \`file:\` counter alike, which is why ` +
+          `the assertion above cannot be the only one.`,
+      ).toBe(declaredFileEntries(source));
     }
+  });
+
+  /**
+   * THE BLIND SPOT, PINNED TO A FIXTURE RATHER THAN TO THE LIVE BATTERIES.
+   *
+   * The count assertion above is the live measurement, and it is the one that
+   * would catch a regression today. It is not enough on its own: it only holds
+   * while the batteries happen to contain a commented case, so the day somebody
+   * tidies the last comment out of `test/mutation/`, the old narrow gap would
+   * pass again and the guard would go quietly blind a second time.
+   *
+   * This fixture never changes and therefore never stops testing. The expected
+   * list is exact — order, pairing and count — so it fails on an over-match as
+   * loudly as on an under-match.
+   */
+  test("anchors() sees a case whose file: and find: are separated by comments", () => {
+    const fixture = [
+      "  {",
+      '    id: "PLAIN",',
+      '    what: "no comment at all — the shape that always parsed",',
+      "    file: SRC,",
+      '    find: "plain",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "LINE",',
+      "    file: SRC,",
+      "    // A line comment saying why this anchor moved.",
+      '    find: "after-line-comment",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "BLOCK",',
+      "    file: SRC,",
+      "    /*",
+      "     * A block comment — the shape RV15 and RV16 shipped with, and the one",
+      "     * that hid them from this guard for days.",
+      "     */",
+      '    find: "after-block-comment",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "MIXED",',
+      "    file: SRC,",
+      "",
+      "    // A line comment, a blank line, a block comment and a what: line,",
+      "    /* in no particular order, */",
+      '    what: "a what: that FOLLOWS file: instead of preceding it",',
+      "    // and one more line comment for good measure.",
+      '    find: "after-everything",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "DECOY",',
+      "    file: SRC,",
+      '    // Task 7.1 moved this: the old anchor was find: "line-decoy".',
+      '    /* An earlier draft used find: "block-decoy" here. */',
+      '    find: "the-real-one",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "NOFIND",',
+      "    file: SRC,",
+      '    note: "a malformed entry that declares no find: of its own",',
+      "  },",
+      "  {",
+      '    id: "AFTER",',
+      "    file: OTHER,",
+      '    find: "belongs-to-AFTER",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+    ].join("\n");
+
+    expect(anchors(fixture)).toEqual([
+      { file: "SRC", find: "plain" },
+      { file: "SRC", find: "after-line-comment" },
+      { file: "SRC", find: "after-block-comment" },
+      { file: "SRC", find: "after-everything" },
+      // A `find:` quoted INSIDE a comment is text, not a property: the line and
+      // block forms are consumed to their close, so neither decoy is reachable.
+      { file: "SRC", find: "the-real-one" },
+      /*
+       * `NOFIND` yields nothing AND does not borrow `AFTER`'s anchor. This is
+       * the over-match half: a gap loose enough to skip a comment is loose
+       * enough to skip a whole entry, and then one case's `file:` pairs with a
+       * later case's `find:` — a wrong pairing checks the wrong file, which is
+       * worse than the blind spot it was widened to fix.
+       */
+      { file: "OTHER", find: "belongs-to-AFTER" },
+    ]);
+
+    /**
+     * AND THE COUNTERS ARE PINNED TO THE SAME FIXTURE — the half that was
+     * missing, and its absence was this file's own thesis reproduced one level
+     * up inside the fix for it.
+     *
+     * The count assertion in the test above compares `anchors()` against
+     * `declaredFileEntries()`. Nothing pinned `declaredFileEntries()` itself,
+     * so it could be replaced by `return anchors(source).length` and the
+     * assertion became `x === x`: measured, that mutant left this file at
+     * 9 pass / 0 fail and `tsc --noEmit` at exit 0. A guard that goes on
+     * passing while watching nothing is exactly what the header calls the worst
+     * shape a guard can have.
+     *
+     * Seven entries declare a `file:` and seven declare an `id:`; six yield an
+     * anchor, because `NOFIND` is deliberately malformed. **The gap between 7
+     * and 6 is what does the work here** — a counter that degenerates into
+     * `anchors()` returns 6 where 7 is asserted and dies on the spot. The
+     * numbers are exact and free: this fixture never changes, so they never
+     * need revisiting.
+     */
+    expect(
+      declaredFileEntries(fixture),
+      "the `file:` counter no longer counts the fixture's seven file: entries",
+    ).toBe(7);
+    expect(
+      declaredIdEntries(fixture),
+      "the `id:` counter no longer counts the fixture's seven id: entries",
+    ).toBe(7);
+  });
+
+  /**
+   * NO COUNTER CAN QUIETLY BECOME ANOTHER COUNTER.
+   *
+   * The fixture above pins all three, but it pins `declaredFileEntries` and
+   * `declaredIdEntries` to the SAME number — so swapping one for the other
+   * passes it, and the degeneration just moves sideways instead of upward. This
+   * fixture is the one where all three disagree on purpose, which is the only
+   * arrangement in which each counter's number can only be produced by that
+   * counter.
+   *
+   * It doubles as the worked example of the blind spot `declaredFileEntries`'s
+   * docblock describes: `RESPELLED` is a perfectly ordinary entry with two
+   * spaces after its colon, and it is invisible to `anchors()` and to the
+   * `file:` counter alike. Only the `id:` count notices it exists at all. That
+   * is not a hypothetical about a formatter this repository might one day adopt
+   * — it is one keystroke.
+   */
+  test("the three counters are three counters, not one counter used three times", () => {
+    const fixture = [
+      "  {",
+      '    id: "COMPLETE",',
+      "    file: SRC,",
+      '    find: "yes",',
+      '    replace: "x",',
+      '    expect: "red",',
+      "  },",
+      "  {",
+      '    id: "NO_FIND",',
+      "    file: SRC,",
+      // The `file:` and `find:` inside this string are prose, not properties:
+      // the parser cannot cross a `note:` line to reach either.
+      '    note: "declares a file: but no find: of its own",',
+      "  },",
+      "  {",
+      '    id: "RESPELLED",',
+      "    file:  SRC,",
+      '    find: "invisible to two of the three",',
+      "  },",
+    ].join("\n");
+
+    expect(anchors(fixture).length, "only COMPLETE is parseable as an anchor").toBe(1);
+    expect(
+      declaredFileEntries(fixture),
+      "COMPLETE and NO_FIND declare a canonically spelled `file:`; RESPELLED does not",
+    ).toBe(2);
+    expect(declaredIdEntries(fixture), "all three entries declare an `id:`").toBe(3);
+  });
+
+  /**
+   * THE TWO LIVE COMPARISONS ABOVE ARE THE WHOLE PIN FOR TWO DISTINCT DRIFT
+   * FAMILIES, AND NEITHER COMPARISON ITSELF WAS PINNED — ONLY ITS INPUTS WERE.
+   *
+   * The two fixture tests above pin the three COUNTERS against synthetic
+   * input. They say nothing about the two comparisons in "the batteries are
+   * found and their anchors are parsed" that actually consume those counters
+   * against real, committed battery source — and each comparison is the SOLE
+   * catcher of one drift family:
+   *
+   * - `anchors() === declaredFileEntries()` is the only thing that notices an
+   *   entry reflowed off line-start. `anchors()` has no `^` line anchor and
+   *   keeps counting it; `declaredFileEntries()` AND `declaredIdEntries()`
+   *   both require `^[ \t]*` and drop it TOGETHER, so the id-vs-file
+   *   comparison agrees with itself and sees nothing wrong.
+   * - `declaredIdEntries() === declaredFileEntries()` is the only thing that
+   *   notices a respelled `file:` (two spaces, no trailing comma, a dotted
+   *   constant). That respelling takes `anchors()` and `declaredFileEntries()`
+   *   to zero TOGETHER — they agree with each other falsely — and only the
+   *   `id:` count is untouched.
+   *
+   * A fixture proves the FUNCTIONS distinguish a drift. It cannot prove the
+   * LOOP still checks it: deleting the `expect()` wrapped around a perfectly
+   * correct function call leaves the function — and any fixture test that
+   * calls the function directly — completely undisturbed. Measured: deleting
+   * either live comparison from the loop below, or relaxing the anchors-vs-
+   * file one to `toBeGreaterThanOrEqual(0)`, left every OTHER test in this
+   * file green.
+   *
+   * So this reads the enforcement loop's own source instead, and confirms
+   * both comparisons are actually written there, exactly — closing the
+   * family this gap is about rather than pinning one more instance of it. Each
+   * pattern is anchored on its `expect(` and forbidden from crossing into a
+   * LATER `expect(` (the negative lookahead), so relaxing one comparison's
+   * matcher cannot be satisfied by finding the other comparison's ending
+   * further down the file.
+   */
+  test("the enforcement loop still makes BOTH live comparisons, exactly", async () => {
+    const self = await Bun.file(import.meta.path).text();
+
+    const anchorsVsFile =
+      /expect\(\s*anchors\(source\)\.length,(?:(?!expect\()[\s\S])*?\)\.toBe\(declaredFileEntries\(source\)\)/;
+    const idVsFile =
+      /expect\(\s*declaredIdEntries\(source\),(?:(?!expect\()[\s\S])*?\)\.toBe\(declaredFileEntries\(source\)\)/;
+
+    expect(
+      anchorsVsFile.test(self),
+      "anchors() is no longer compared, exactly, to declaredFileEntries() in the " +
+        "enforcement loop — a reflowed entry moving id:/file: off line-start would go uncaught",
+    ).toBe(true);
+    expect(
+      idVsFile.test(self),
+      "declaredIdEntries() is no longer compared, exactly, to declaredFileEntries() in " +
+        "the enforcement loop — a respelled file: would go uncaught",
+    ).toBe(true);
   });
 
   for (const battery of BATTERIES) {

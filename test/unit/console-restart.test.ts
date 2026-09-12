@@ -600,7 +600,11 @@ describe("every console script hands its --restart ordering to the module", () =
    * ── §13 TASK 4.5a(b): TWO PROBES FOR ISC-572 ON TRIAGE, AND WHICH IS
    * LOAD-BEARING FOR WHAT ─────────────────────────────────────────────────────
    *
-   * §13:2938-2940: *"`test/unit/console-restart.test.ts:471` asserts ISC-572 for
+   * §13 task 4.5a(b) — pinned on the task label, not a line range, because
+   * `§13:2938-2940` rotted: that range now holds task 2.1 (`TRIAGE_CONSOLE_ROSTER`)
+   * and the quoted sentence moved to roughly `:3182-3184`. Found 2026-09-11 by the
+   * audit of the sibling citation in `fresh-dispatch.test.ts`, which had drifted the
+   * same way: *"`test/unit/console-restart.test.ts:471` asserts ISC-572 for
    * triage by reading source text, while `test/integration/triage-console.test.ts`
    * now EXECUTES it — keep both and say which is load-bearing."* Both run in CI
    * (`.github/workflows/ci.yml` runs `bun test test/unit` AND

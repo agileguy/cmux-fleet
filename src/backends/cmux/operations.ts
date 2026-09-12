@@ -77,11 +77,11 @@ import {
 /**
  * Everything that differs between one standing console and another.
  *
- * The BUILDER below is identical for both — create a workspace, consume its
+ * The BUILDER below is identical for all four — create a workspace, consume its
  * initial surface, split the rest off in the directions the plan names, rename,
  * respawn, focus pane 1. Only three things vary, and they are exactly these
- * three. Adding a fourth console is then a value in this file rather than a
- * second copy of `createWorkspace`, which is the copy that would drift: the
+ * three. Adding a console is then a value in this file rather than a second
+ * copy of `createWorkspace`, which is the copy that would drift: the
  * BUILD-FIRST-CLOSE-SECOND order below is a measured lesson, and a second
  * builder is a second place to get it backwards.
  */
@@ -124,7 +124,7 @@ export const OPERATIONS_SPEC: WorkspaceSpec = {
   topFraction: OPERATIONS_TOP_FRACTION,
 };
 
-/** The four-agent console: two engineers on top, tester and reviewer below. */
+/** The four-agent console: two engineers on top, two testers below. */
 export const DEVELOPMENT_SPEC: WorkspaceSpec = {
   name: DEVELOPMENT_WORKSPACE,
   panes: developmentPanes,
@@ -148,8 +148,8 @@ export const REVIEW_SPEC: WorkspaceSpec = {
 };
 
 /**
- * The scheduled triage console: a reconciler top-left, three observers around
- * it, and NOT ONE KEYBOARD between them.
+ * The scheduled triage console: a reconciler and ONE observer side by side in a
+ * single row — and, in the tracked `fleet.example.yaml`, no keyboard in either.
  *
  * The FOURTH value in this file and still not a fourth builder, which is the
  * whole of what {@link WorkspaceSpec} was written to buy and the whole of what
@@ -158,11 +158,11 @@ export const REVIEW_SPEC: WorkspaceSpec = {
  * that cost a destroyed console once — is stated in exactly one place and cannot
  * be got backwards a fourth time.
  *
- * `topFraction` is `null` here for an argument that is NOT `REVIEW_SPEC`'s. See
- * {@link TRIAGE_TOP_FRACTION}: a fraction moves the border between the two ROWS,
- * and this console's reconciler shares its row with one of its three observers,
- * so the preference somebody would reach for it to state cannot be stated at
- * all.
+ * `topFraction` is `null` here for an argument that is NOT `REVIEW_SPEC`'s, and
+ * {@link TRIAGE_TOP_FRACTION} is where it lives. `DEFAULT_TRIAGE_WORKERS` names
+ * TWO workers, so the shared builder's `down` entries — which begin at pane 3 —
+ * are never reached and THERE IS NO SECOND ROW. A fraction moves the border
+ * BETWEEN rows, so on one row there is no border for it to move.
  */
 export const TRIAGE_SPEC: WorkspaceSpec = {
   name: TRIAGE_WORKSPACE,
@@ -448,13 +448,13 @@ export async function findOperations(client: CmuxClient): Promise<string | null>
 }
 
 /**
- * Create the workspace and its three panes, in order.
+ * Create the workspace and the panes `spec` plans, in order.
  *
- * The first pane CONSUMES the surface `workspace create` opens with — leaving
- * it as a stray idle shell and splitting three more off it would give four
- * panes, one of them empty. Each later pane is split off the PREVIOUS one, in
- * the direction that pane's plan names; the directions are a property of the
- * layout and live in `operations-plan.ts`, not here.
+ * The first pane CONSUMES the surface `workspace create` opens with — leaving it
+ * as a stray idle shell and splitting one off it per planned pane would give one
+ * pane too many, the extra one empty. Each later pane is split off the PREVIOUS
+ * one, in the direction that pane's plan names; the directions are a property of
+ * the layout and live in `operations-plan.ts`, not here.
  */
 export async function createWorkspace(
   client: CmuxClient,
@@ -463,8 +463,8 @@ export async function createWorkspace(
 ): Promise<EnsureResult> {
   const panes = planPanes(spec, opts);
 
-  // `--cwd` is the INVOCATION directory: panes 2 and 3 are about where the
-  // operator is working, not about where this repository happens to live.
+  // `--cwd` is the INVOCATION directory: a console is about where the operator
+  // is working, not about where this repository happens to live.
   const created = parseWorkspaceCreate(
     await client.runOk(workspaceCreateArgv(spec.name, opts.watchDir)),
   );
@@ -842,10 +842,11 @@ export async function ensureReview(
  * is asking.
  *
  * One asymmetry pulls the other way and is recorded rather than acted on: this
- * is the console nobody watches. A `review` mis-adoption is four wrong panes in
- * front of a person; a `triage` mis-adoption is four wrong panes in a window
- * nobody opens. That raises the cost of being wrong here without raising the
- * evidence that it will happen, which is the trade this decision takes.
+ * is the console nobody is waiting on. A `review` mis-adoption is four wrong
+ * panes in front of a person who just asked for a review; a `triage`
+ * mis-adoption is TWO wrong panes under a clock that goes on sweeping. That
+ * raises the cost of being wrong here without raising the evidence that it will
+ * happen, which is the trade this decision takes.
  */
 export async function ensureTriage(
   client: CmuxClient,

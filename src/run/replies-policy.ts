@@ -54,7 +54,8 @@
  * `replies: []` on a turn-one dispatch is the point of the file existing at all.
  * It is what lets `get_replies` answer *"nothing was declared"* instead of
  * *"the directory is empty"* — a distinction `roles/triage.md` and
- * `roles/collator.md` each spend six lines of prose establishing, and one a
+ * `roles/collator.md` each spend a paragraph establishing — both opening
+ * *"So checking cannot tell you anything"* — and one a
  * `readdir` cannot make at all. So the file is written at every dispatch,
  * including the ones with nothing to declare, and it is never deleted.
  *

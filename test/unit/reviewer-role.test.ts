@@ -1,4 +1,4 @@
-import { MAX_TEXT, RESULT_ENVELOPE_NAME, ResultEnvelopeSchema } from "../../src/contracts.ts";
+import { RESULT_ENVELOPE_NAME } from "../../src/contracts.ts";
 /**
  * `roles/reviewer.md` says only things that are true, and the one instruction
  * holding the review console together is pinned at BOTH ends.
@@ -58,7 +58,6 @@ import {
   MAX_REPLY_INLINE_BYTES,
 } from "../../src/run/relay.ts";
 import { REPLIES_MOUNT } from "../../src/run/replies.ts";
-import { childTaskId } from "../../src/run/task-ids.ts";
 import {
   ROOT,
   exampleConfig,
@@ -85,6 +84,195 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
   ["roles/reviewer.md", REVIEWER],
   ...ASPECTS.map(([n, t]) => [`roles/review/${n}.md`, t] as const),
 ];
+
+/**
+ * The one index at which `marker` occurs in `doc`, refusing ABSENCE and
+ * AMBIGUITY alike, and naming the document whichever of the two it caught.
+ *
+ * Both slicers below route through this, so neither can drift into holding half
+ * of the guard.
+ *
+ * ## The half the slicers refused from the start
+ *
+ * `indexOf` returns -1 for a heading that has moved, and a slice taken from or
+ * to -1 is not an error — it is a DIFFERENT slice that keeps passing. What each
+ * polarity does with that is on the two functions below; they have refused it
+ * since the commit that introduced them.
+ *
+ * ## The half they did not, which is this function's reason for existing
+ *
+ * A refusal on `-1` sees a marker that occurs ZERO times. It is blind to one
+ * that occurs TWICE, and `indexOf` silently takes the first — so every slice is
+ * right only for as long as nothing upstream acquires the same words. The
+ * damage wears the same two polarities as the missing marker and is harder to
+ * spot, because nothing is missing: a `toContain` fails naming a sentence that
+ * is still in the document, merely outside the re-anchored slice, and a
+ * `.not.toContain` passes on a slice that no longer covers the region it was
+ * written to watch.
+ *
+ * **This is the twin of a hole that was LIVE in the sibling file.** `between()`
+ * in `test/unit/collator-role.test.ts` carried exactly this gap, and `"Turn
+ * one"` occurred twice in `roles/collator.md` — the `### Turn one` heading and
+ * a body mention inside that same section — so five call sites were correct
+ * only by the accident of which occurrence came first. Rewording the heading
+ * would have re-anchored all five onto the body mention and thrown nothing.
+ *
+ * ## Here the gap was LATENT, and that is not a reason to leave it
+ *
+ * Every marker at every call site in this file was counted as a substring of
+ * the document it is used against before this guard went in. Five distinct
+ * (document, marker) pairs across nine call sites — `THE LONG REVIEW GOES IN A
+ * FILE` and `Quote file and line` in `roles/reviewer.md`, `file its long
+ * review` in `roles/collator.md`, `THE GAP THIS CONTRACT COULD NOT CLOSE` in
+ * `src/run/collation.ts`, and `**Which language that is` in
+ * `roles/review/implementation-language.md` — and all five occurred exactly
+ * once. No slice in this file is currently mis-scoped.
+ *
+ * That audit is a measurement of one moment, and it is the reason to close the
+ * hole rather than to file it: this is the file that scopes into FOUR
+ * documents, so it has four independent chances to acquire a duplicate, and
+ * when one does the change is in a role document — nowhere near this test's
+ * diff. The count above stops needing to be re-run by hand at the moment this
+ * guard exists, because a marker that goes non-unique now reddens the suite
+ * instead of quietly re-aiming a slice.
+ *
+ * ## The fix is a more specific MARKER, never a looser helper
+ *
+ * The refusal is deliberately not "take the first" or "take the outermost". A
+ * caller whose marker went ambiguous has lost the ability to say which region
+ * it meant, and no rule this function can apply recovers the intention — only
+ * the caller knows it. Adding a heading's `### ` prefix is usually the whole
+ * fix, and it stays unambiguous when the prose around it changes.
+ *
+ * Same refusal and deliberately the same error wording as `onlyIndexOf` in
+ * `test/unit/collator-role.test.ts`, so a grep finds both. The one difference
+ * is the arguments: that file slices only `roles/collator.md` and needs to name
+ * nothing, while this one takes the document and its name because it scopes
+ * into four different ones — two role documents, an aspect file and a source
+ * file — and an error that does not say WHICH is half a diagnosis.
+ */
+function onlyIndexOf(doc: string, name: string, marker: string): number {
+  const occurrences = doc.split(marker).length - 1;
+  if (occurrences === 0) throw new Error(`${name} no longer contains ${marker}`);
+  if (occurrences > 1) {
+    throw new Error(
+      `${name} contains ${marker} ${occurrences} times; a slice marker must be unique or the ` +
+        `slice is whichever one comes first. Make the marker more specific — a heading's ` +
+        `\`### \` prefix usually does it — rather than loosening this check.`,
+    );
+  }
+  return doc.indexOf(marker);
+}
+
+/**
+ * A slice of a document taken AT a marker, where a missing OR AMBIGUOUS marker
+ * is a NAMED ERROR rather than a silently different slice.
+ *
+ * This is the fail-open shape, and it was in this file eight times:
+ *
+ * ```ts
+ * const block = DOC.slice(DOC.indexOf("a heading someone reworded"));
+ * expect(block.length, "the instruction is gone").toBeGreaterThan(0);
+ * ```
+ *
+ * `indexOf` returns -1 for a heading that has moved, and `slice(-1)` yields the
+ * LAST CHARACTER of the document. So `block.length` is 1, the sentinel written
+ * to catch exactly that condition PASSES, and every `toContain` below it then
+ * fails with a message naming the wrong thing — a heading rename reads as a
+ * missing sentence. A `.not.toContain` in that position passes outright and the
+ * probe goes quietly dark.
+ *
+ * The identical defect was found in `test/unit/collator-role.test.ts` on task
+ * 7.2, by a reviewer, after a heading rename turned a scoped assertion into a
+ * whole-file one. `between()` there is this same shape.
+ *
+ * The AMBIGUOUS marker is `onlyIndexOf`'s half and the argument for it is
+ * there. Worth saying here only that a tail slice re-anchored onto a later
+ * duplicate does not narrow to a wrong REGION — it narrows to the document's
+ * tail, and a `.not.toContain` passes just as unconditionally on a short tail
+ * as it does on the one character a missing marker leaves.
+ */
+function sliceFrom(doc: string, name: string, marker: string): string {
+  return doc.slice(onlyIndexOf(doc, name, marker));
+}
+
+/**
+ * The head of a document, UP TO a marker, with the same two refusals and one
+ * more.
+ *
+ * A marker at index 0 yields the empty string, and every probe written against
+ * a head slice asks whether something is ABSENT from it — `.test(opening)` is
+ * `false` for "" whatever the pattern, so an empty head slice passes the lot.
+ * That is the same fail-open wearing the other polarity, so it throws too. This
+ * preserves the `toBeGreaterThan(0)` the one call site already carried, as an
+ * error that says what happened.
+ *
+ * The index-0 refusal survives the move to `onlyIndexOf` deliberately: that
+ * function is about WHICH occurrence, and a unique marker sitting at index 0 is
+ * a perfectly unambiguous one. It is this polarity, not the lookup, that cannot
+ * use it.
+ */
+function sliceTo(doc: string, name: string, marker: string): string {
+  const at = onlyIndexOf(doc, name, marker);
+  if (at === 0) throw new Error(`${name} now OPENS with ${marker} — the slice before it is empty`);
+  return doc.slice(0, at);
+}
+
+/**
+ * THE THREE REFUSALS ABOVE ACTUALLY REFUSE — pinned here, because until this
+ * block existed nothing committed said they did.
+ *
+ * ## Dormant by design, which is exactly why they needed writing down
+ *
+ * The docblocks above record an audit: five distinct (document, marker) pairs
+ * across nine call sites, every one of them occurring exactly once, and no head
+ * slice starting at index 0. That audit is the reason this file is currently
+ * correct, and it is also what makes all three refusals **unreachable from the
+ * happy path**. Measured before this block was written: deleting the
+ * `occurrences === 0` arm, deleting the `occurrences > 1` arm, or deleting
+ * `sliceTo`'s index-0 arm each left the suite at 84 pass / 0 fail.
+ *
+ * A guard proven only by perturbing a marker by hand leaves nothing behind. The
+ * audit above says the same thing about itself — *"that audit is a measurement
+ * of one moment"* — and answers it for the markers. These probes answer it for
+ * the guard: the arithmetic is asserted directly, so the refusals survive the
+ * next person who finds them fussy.
+ *
+ * ## Synthetic documents, not the live ones
+ *
+ * These helpers take the text they slice, so nothing here has to borrow a
+ * phrase from a role document and hope it keeps its multiplicity. The inputs
+ * below are three short strings chosen to sit exactly on each boundary, and
+ * they cannot drift, because no document is involved. That is the difference
+ * between this and the sibling block in `test/unit/collator-role.test.ts`, whose
+ * `onlyIndexOf` closes over its one document and can only vary the marker.
+ */
+describe("the slice helpers refuse the inputs they promise to refuse", () => {
+  test("an ABSENT marker is a NAMED error, not a silent -1", () => {
+    expect(() => onlyIndexOf("alpha\nbravo\n", "synthetic.md", "charlie")).toThrow(
+      /synthetic\.md no longer contains charlie/,
+    );
+  });
+
+  test("a NON-UNIQUE marker is an error, not silently the first occurrence", () => {
+    expect(() => onlyIndexOf("alpha bravo alpha", "synthetic.md", "alpha")).toThrow(
+      /synthetic\.md contains alpha 2 times; a slice marker must be unique/,
+    );
+  });
+
+  /**
+   * The polarity `sliceTo`'s docblock is about: a head slice of "" satisfies
+   * every `.test(opening)` and every `.not.toContain` written against it, so
+   * this arm is the one whose removal is completely silent. It is also the arm
+   * `onlyIndexOf` deliberately does NOT cover — a unique marker at index 0 is
+   * perfectly unambiguous, so only `sliceTo` can catch it.
+   */
+  test("sliceTo refuses a marker at index 0, where an empty head slice passes everything", () => {
+    expect(() => sliceTo("HEADING then the body", "synthetic.md", "HEADING")).toThrow(
+      /synthetic\.md now OPENS with HEADING/,
+    );
+  });
+});
 
 /**
  * THE REVIEW IS A FILE AND `notes` IS A SUMMARY OF IT — rewritten 2026-09-05,
@@ -122,14 +310,28 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
  * The file's survival is real but its beneficiary is a PERSON — the outbox is
  * inventoried whether or not an envelope parsed, which is the only reason the
  * first review above was recoverable at all.
+ *
+ * ## WHAT PHASE C TOOK OUT OF THIS BLOCK, and what it deliberately left
+ *
+ * SRD-WORKER-DISPATCH-EXTENSION task 8.1, 2026-09-10. Both losses above happened
+ * to a reviewer HAND-COMPOSING `result.json` with the `write` tool. It holds no
+ * `write`; `submit_report` serialises the envelope, writes it tmp-then-rename,
+ * and reads `schema`, `task_id`, `epoch` and `worker` off host state. A
+ * mis-escaped regex and a half-closed object are no longer states this role can
+ * reach, so the MECHANICS those two anecdotes taught came out of the role file
+ * along with the worked envelope, the `result.json` path, the declare-your-own-
+ * artifact instruction and the 65536-byte `notes` ceiling.
+ *
+ * **The history stays here** — this is the record of why the split exists, and a
+ * test file is where a superseded measurement belongs. What stays in the ROLE
+ * file is the judgement the losses bought: long review in a file, short summary
+ * in `notes`, worst first, and the correction that the file does not rescue a
+ * lens that did not report. The probes below are the ones that still pin a
+ * property the code holds.
  */
 describe("the review is a file, notes is a summary, and both ends say so", () => {
   test("the reviewer is told to file the long review AND to keep notes short", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(
-      block.length,
-      "roles/reviewer.md no longer carries the instruction in its own right",
-    ).toBeGreaterThan(0);
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
     // Both halves. A probe on either alone stays green through the other being
     // deleted, and either half alone re-creates one of the two measured losses.
     expect(block, "the review's destination is not named").toContain(
@@ -141,15 +343,36 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
   });
 
   /**
-   * The artifact has to be CLAIMED, not merely written. `reconcile.ts` grades an
-   * empty `artifacts` array against the files actually in the outbox — "the
-   * worker wrote an envelope and said it produced nothing, so every file in the
-   * outbox contradicts it" — so a review filed and not declared is a discrepancy
-   * on the reviewer's own record.
+   * RE-AIMED FROM THE CLAIM TO THE ROUTE (Phase C, task 8.1), because the claim
+   * stopped being the reviewer's to make.
+   *
+   * This used to require the words *"`artifacts` array"*: the artifact had to be
+   * CLAIMED and not merely written, because `reconcile.ts` grades an empty
+   * `artifacts` array against the files actually in the outbox and a review
+   * filed and not declared is a discrepancy on the reviewer's own record. The
+   * defect is real — `rev-lang-1` declared `files/review.md` and wrote no file,
+   * and nothing refused anything.
+   *
+   * `composeEnvelope` in `report-tools.ts` now appends every `report` file to
+   * `artifacts` itself, so a reviewer that delivers the review through `report`
+   * cannot fail to declare it, and one that hand-composes an `artifacts` entry
+   * for a file it did not write is refused by `artifactMissingProblem` before
+   * the envelope is opened. Instructing the model to declare the file is
+   * therefore telling it to do the tool's job.
+   *
+   * What is still the reviewer's to get wrong is the ROUTE: only `report` gets
+   * the declaration for free, so the probe pins the parameter and the sentence
+   * saying the tool declares it. A document that stopped naming `report` would
+   * send the review out by a route with nothing appending anything.
    */
-  test("the reviewer is told to DECLARE the review file in the envelope", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(block).toContain("`artifacts` array");
+  test("the review is routed through `report`, which is what declares it", () => {
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
+    expect(block, "the block never names the parameter that carries the review").toContain(
+      "`report` file",
+    );
+    expect(block, "the block does not say the tool makes the declaration").toContain(
+      "declares it for you",
+    );
   });
 
   /**
@@ -172,39 +395,38 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * where it is load-bearing — inside the clause that tells the reviewer what
    * the limit IS.
    */
+  /**
+   * THE `notes` CEILING CAME OUT (Phase C, task 8.1) and the two relay caps did
+   * not, and the difference is the whole reason this probe is worth keeping.
+   *
+   * The document used to state a third number — *"`notes` is bounded too, at the
+   * same 65536 bytes"* — and an asymmetry built on it: an over-cap artifact
+   * arrives truncated and is named, while an over-cap `notes` fails
+   * `ResultEnvelopeSchema` and takes the status, the summary, the blockers and
+   * the review with it. Both halves are now false for this role.
+   * `SUBMIT_REPORT_PARAMETERS` caps `notes` at 20000 and the refusal is a typebox
+   * validation error thrown in front of the model with its budget intact, which
+   * Q4 measured every model recovering from on the first retry. So the ceiling
+   * is not 65536, and passing it costs a retry rather than a lens.
+   *
+   * The two relay caps are the opposite case: `MAX_REPLY_ARTIFACT_BYTES` and
+   * `MAX_REPLY_INLINE_BYTES` are applied host-side when the artifact is copied
+   * into the collator's reply, nothing in front of the model enforces them —
+   * `report.content` deliberately carries no `maxLength` — and a review over
+   * them still arrives cut off. They stay in the document and stay derived from
+   * the code, so raising one in `relay.ts` cannot leave the prose confidently
+   * wrong.
+   */
   test("the caps the document states are the caps the code actually enforces", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
     expect(block, "the per-file cap is not the one relay.ts applies").toContain(
       `size cap: ${MAX_REPLY_ARTIFACT_BYTES / 1024} KiB per file`,
     );
     expect(block, "the per-reply cap is not the one relay.ts applies").toContain(
       `and ${MAX_REPLY_INLINE_BYTES / 1024} KiB across all of them`,
     );
-    expect(block, "the notes cap is not the one the envelope schema applies").toContain(
-      `at the same ${MAX_TEXT} bytes`,
-    );
     // The consequence, not just the number.
     expect(block).toContain("cut off");
-  });
-
-  /**
-   * THE ASYMMETRY, which is the whole argument and the one sentence a model
-   * under budget pressure would drop first.
-   *
-   * `MAX_TEXT` and `MAX_REPLY_ARTIFACT_BYTES` are the SAME 65536, so a document
-   * that stated both caps and stopped there would have given the reviewer no
-   * reason to prefer either channel. What separates them is what happens at the
-   * ceiling: an over-cap artifact arrives truncated and is NAMED in the
-   * collation brief, while an over-cap `notes` fails `ResultEnvelopeSchema` and
-   * takes the status, the summary, the blockers and the review with it.
-   */
-  test("the document states the ASYMMETRY, not merely the two caps", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(block, "the document does not say the two caps fail differently").toContain(
-      "Same ceiling, opposite failure",
-    );
-    // The premise that makes the asymmetry the point rather than a curiosity.
-    expect(MAX_TEXT).toBe(MAX_REPLY_ARTIFACT_BYTES);
   });
 
   /**
@@ -217,10 +439,17 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * Deleting that leaves the reviewer believing the artifact is a safety net it
    * is not, which is the more dangerous of the two errors.
    */
-  test("the document says plainly that the file does NOT rescue a broken envelope", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
-    expect(block, "the document does not say a broken envelope loses the lens").toContain(
-      "It does\nnot rescue the lens",
+  test("the document says plainly that the file does NOT rescue a lens that did not report", () => {
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "THE LONG REVIEW GOES IN A FILE");
+    /*
+     * MATCHED INSIDE ONE LINE. This pinned `"It does\nnot rescue the lens"` —
+     * the phrase as it happened to wrap — so a re-wrap that changed no word
+     * would have reddened it, which is the shape of probe that gets deleted by
+     * the first person it inconveniences. The same correction the
+     * `submit_report` bound probe below carries, for the same reason.
+     */
+    expect(block, "the document does not say a lens that did not report is lost").toContain(
+      "It does not rescue the lens",
     );
     expect(block, "the document does not name the mechanism").toContain(
       "no reply published for it",
@@ -228,37 +457,32 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
   });
 
   /**
-   * THE WORKED EXAMPLE IS PARSED, not eyeballed — `collator-role.test.ts`'s
-   * discipline applied to the other end. An example a model copies literally is
-   * the most load-bearing prose in the file, and one the real schema refuses
-   * teaches exactly the shape the harvester throws away.
+   * THE WORKED ENVELOPE IS GONE, AND SO IS THE PROBE THAT PARSED IT (Phase C,
+   * task 8.1) — recorded here rather than silently dropped, because a deleted
+   * probe is lost coverage whatever the reason for it.
+   *
+   * The document carried a `json` block spelling `pifleet.result/v1`, `task_id`,
+   * `epoch`, `worker`, `status`, `summary`, `notes` and `artifacts`, and a probe
+   * substituted the two id placeholders and parsed it through
+   * `ResultEnvelopeSchema`. The discipline was right: an example a model copies
+   * literally is the most load-bearing prose in a role file, and one the real
+   * schema refuses teaches exactly the shape the harvester throws away.
+   *
+   * It had to go because a model copying it now gets a refusal.
+   * `SUBMIT_REPORT_PARAMETERS` is `additionalProperties: false` and the first
+   * four of those fields are ABSENT from it by design — they are read from
+   * `/policy/task` and `ctx`, and `SUBMIT_REPORT_DESCRIPTION` spends a sentence
+   * telling the model not to pass them precisely because the role documents
+   * still instructed it to. The example was that instruction.
+   *
+   * **What is not replaced is the class of coverage.** Nothing now parses a
+   * worked example in this file against the shape the tool accepts, because
+   * there is no worked example. The honest replacement is a `submit_report`
+   * ARGUMENT example validated against `SUBMIT_REPORT_PARAMETERS`, which is
+   * exported and importable from `test/` for exactly this kind of use — that is
+   * a new example rather than a deletion, so it is not task 8.1's, and it is
+   * filed here as the gap it is.
    */
-  test("the example envelope validates, and declares the review as an artifact", () => {
-    const blocks = [...REVIEWER.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]!);
-    expect(blocks.length, "the document has no worked envelope").toBeGreaterThanOrEqual(1);
-    /*
-     * THE TWO ID PLACEHOLDERS ARE SUBSTITUTED, and only those two.
-     *
-     * `task_id` and `worker` are held to `SESSION_ID_RE`, which no angle-bracket
-     * placeholder can satisfy — so validating the block verbatim would fail on
-     * the document's own teaching device rather than on anything wrong with it.
-     * The substitutes are the REAL ids this seat uses, not filler, so the example
-     * is checked against values the fleet would actually produce. Everything else
-     * — schema tag, status, and the artifact claim this probe exists for — is
-     * validated exactly as written.
-     */
-    const filled = blocks[0]!
-      .replace("<your task id>", childTaskId("T", "lang"))
-      .replace("<your worker id>", "rev-lang-1");
-    const doc = JSON.parse(filled);
-    const r = ResultEnvelopeSchema.safeParse(doc);
-    expect(r.error?.message ?? "accepted").toBe("accepted");
-    const parsed = ResultEnvelopeSchema.parse(doc);
-    expect(
-      parsed.artifacts.map((a) => a.path),
-      "the worked envelope does not claim the review file",
-    ).toContain("/outbox/<task-id>/files/review.md");
-  });
 
   /**
    * The other end. Two prompts is the whole mitigation, so a probe that asserted
@@ -286,16 +510,53 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * see. The collator repeats this instruction in every brief it writes, so a
    * collator still telling reviewers to put the whole review in `notes` would
    * re-create the defect on a fleet whose reviewer role had already been fixed.
+   *
+   * ## THE `artifacts` ASSERTION IS INVERTED, and that inversion is the half of
+   * ## task 8.1 that did not land
+   *
+   * It used to require `` `artifacts` array `` — the collator had to ORDER the
+   * hand-declaration, for the reason the docblock on *"the review is routed
+   * through `report`"* above records. 8.1 relaxed that requirement on the
+   * reviewer's side and deleted the matching sentence from `roles/reviewer.md`.
+   * It did not reach `roles/collator.md`, which went on telling the collator to
+   * order every reviewer to do the thing the reviewer's own prompt now tells it
+   * NOT to do — a fleet whose two role documents issue opposite instructions
+   * about the same field. **Both ends stayed green through it**, because each
+   * probe only ever read its own end, which is the exact failure this describe
+   * block was written to refuse and did not.
+   *
+   * Keeping the probe and flipping its polarity is what stops it coming back.
+   * Dropping it leaves the collator free to re-acquire the order with nothing
+   * watching. Asserting the PROHIBITION **positively** — rather than
+   * `.not.toContain`-ing one phrasing of the order, which every rewording
+   * escapes — reddens both when the sentence goes and when the "Do NOT" is
+   * quietly dropped from in front of it.
+   *
+   * ## MEASURED against `submitReport`, not read off the prose
+   *
+   * The document now states what obeying the old order costs, so the statement
+   * had to be checked against the tool rather than against a reading of it:
+   *
+   * - `report` + a redundant `files/review.md` claim is **accepted** —
+   *   `artifactMissingProblem` exempts the one path phase 2 is about to write —
+   *   and `composeEnvelope` then appends its own claim beside the model's, so
+   *   the envelope declares the file TWICE.
+   * - `report` + the bare `review.md` the model just passed is **refused**:
+   *   report files land under `files/`, so the claim resolves to a path that
+   *   does not exist and the whole call is rejected before anything is written.
    */
   test("the collator's copy instructs the same split the reviewer's does", () => {
-    const block = COLLATOR.slice(COLLATOR.indexOf("file its long review"));
-    expect(block.length, "the collator no longer instructs the file split").toBeGreaterThan(0);
+    const block = sliceFrom(COLLATOR, "roles/collator.md", "file its long review");
     expect(block, "the collator does not name the review's destination").toContain(
       "/outbox/<task-id>/files/review.md",
     );
-    expect(block, "the collator does not require the artifact to be declared").toContain(
-      "`artifacts` array",
+    expect(block, "the collator does not name the route that declares the review").toContain(
+      "`report` entry",
     );
+    expect(
+      block,
+      "the collator still orders the hand-declaration `roles/reviewer.md` tells reviewers not to make",
+    ).toContain("Do NOT tell it to declare that file in its envelope's `artifacts` array");
     expect(block).toContain("roles/reviewer.md");
     expect(block).toContain("Say it");
   });
@@ -306,7 +567,7 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
    * broken envelope writes briefs that say so.
    */
   test("the collator's copy does not promise the file survives a broken envelope", () => {
-    const block = COLLATOR.slice(COLLATOR.indexOf("file its long review"));
+    const block = sliceFrom(COLLATOR, "roles/collator.md", "file its long review");
     expect(block, "the collator's brief does not name the mechanism").toContain(
       "no reply published for it at all",
     );
@@ -331,7 +592,13 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
   test("the design note records the gap as closed, and how", () => {
     const src = readFileSync(`${ROOT}src/run/collation.ts`, "utf8");
     expect(src).toContain("THE GAP THIS CONTRACT COULD NOT CLOSE — CLOSED");
-    const note = src.slice(src.indexOf("THE GAP THIS CONTRACT COULD NOT CLOSE"));
+    /*
+     * The `toContain` above happens to guard this `indexOf` today — its string
+     * is a SUPERSTRING of this marker, so it reddens first. That is a coupling
+     * nobody reading either line would notice, and shortening the assertion
+     * above would silently re-open the fail-open. The refusal belongs here.
+     */
+    const note = sliceFrom(src, "src/run/collation.ts", "THE GAP THIS CONTRACT COULD NOT CLOSE");
     // The decision, its shape, and the cost it carries.
     expect(note).toContain("Take A shipped");
     expect(note).toContain("inlined_artifacts");
@@ -539,10 +806,10 @@ describe("the reviewer's grant is what the document says it is", () => {
    * ## Why the SENTENCE came forward and §8.1's mechanics did not
    *
    * Only the sentences stating WHAT THE GRANT IS move with the grant, because
-   * those are the ones a model acts on. `roles/reviewer.md:45-144` — the four
-   * envelope sections `submit_report` makes redundant — is task 8.1's and stays
-   * deferred; deleting it is a size decision that costs nothing when it is late.
-   * A false statement of the grant is not that kind of debt.
+   * those are the ones a model acts on. The four envelope sections
+   * `submit_report` makes redundant were task 8.1's and stayed deferred until
+   * 2026-09-10; deleting them is a size decision that costs nothing when it is
+   * late. A false statement of the grant is not that kind of debt.
    *
    * The rollback property survives, kept honestly rather than by leaving a
    * falsehood in place: the document now instructs a reader restoring `write` to
@@ -795,9 +1062,11 @@ describe("the language seat takes its angle from the repository, not from config
    * was written for, in the exact form the defect had.
    */
   test("the angle statement names no language, so no target is assumed", () => {
-    const cut = LANG!.indexOf("**Which language that is");
-    expect(cut, "the angle statement's boundary sentence is gone").toBeGreaterThan(0);
-    const opening = LANG!.slice(0, cut);
+    const opening = sliceTo(
+      LANG!,
+      "roles/review/implementation-language.md",
+      "**Which language that is",
+    );
     for (const named of ["TypeScript", "JavaScript", "Python", "Go", "Rust", "Java", "Kotlin"]) {
       expect(
         new RegExp(`\\b${named}\\b`, "i").test(opening),
@@ -915,7 +1184,7 @@ describe("the location a reviewer quotes is the one a collation can carry", () =
    * lets the census publish the two arms apart.
    */
   test("the reviewer is told to quote the container path", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("Quote file and line"));
+    const block = sliceFrom(REVIEWER, "roles/reviewer.md", "Quote file and line");
     expect(block).toContain("/workspace/");
     expect(block).toContain("not** the repo-relative form");
     expect(block).toContain("bare number");

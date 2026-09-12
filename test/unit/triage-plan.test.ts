@@ -1,5 +1,5 @@
 /**
- * The `triage` console's plan — a reconciler and three observers, and NOT ONE
+ * The `triage` console's plan — a reconciler and an observer, and NOT ONE
  * keyboard between them.
  *
  * ## What this file is for that `review-plan.test.ts` is not
@@ -9,12 +9,12 @@
  * THIS console's alone is everything the shared builder cannot see, and on this
  * console that list is different from `review`'s in one way that matters:
  *
- *  - **The four seats are `tri-1`, `obs-t1`, `obs-t2`, `obs-t3`.** Asserted by
- *    NAME and in ORDER, never as a count. "Four panes" passes on the wrong four,
- *    and the wrong four here is not hypothetical — the three square consoles are
+ *  - **The two seats are `tri-1`, `obs-t1`.** Asserted by
+ *    NAME and in ORDER, never as a count. "Two panes" passes on the wrong two,
+ *    and the wrong two here is not hypothetical — the three square consoles are
  *    one function call apart and differ only in the constant they name.
  *  - **The plan defaults to NO KEYBOARD.** `development` and `review` are four
- *    attended panes and therefore four runs; this console is one run of four
+ *    attended panes and therefore four runs; this console is one run of two
  *    `rpc` seats, because `tui` allocates no epoch and a console that dispatches
  *    288 times a day cannot afford a sweep that runs twice
  *    (SRD-TRIAGE-CONSOLE §2.3). `tuiWorkers` is a CALLER's argument, so the plan
@@ -104,20 +104,20 @@ describe("the triage console is a 2x2 of views with the reconciler in the landin
   });
 
   /**
-   * THE FOUR SEATS BY NAME, which is the assertion this file exists for.
+   * THE TWO SEATS BY NAME, which is the assertion this file exists for.
    *
    * Not a count, and not a length. Three consoles are built by one function from
-   * one constant each, so "four panes in a 2x2" is true of all three and pins
-   * none of them — a `triagePanes` that had been handed `DEFAULT_REVIEW_WORKERS`
-   * would satisfy every structural probe in this file and stand up the wrong
-   * fleet.
+   * one constant each, so a matching shape is true of more than one of them and
+   * pins none by itself — a `triagePanes` that had been handed
+   * `DEFAULT_REVIEW_WORKERS` would satisfy every structural probe in this file
+   * and stand up the wrong fleet.
    */
-  it("names one reconciler and three observers, in pane order", () => {
+  it("names the reconciler and the observer, in pane order", () => {
     expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "obs-t1"]);
   });
 
-  it("titles panes by WORKER ID — the four named seats, in order", () => {
-    // A role title would print `observer` on three of the four panes. The id is
+  it("titles panes by WORKER ID — the two named seats, in order", () => {
+    // A role title would print `observer` on one of the two panes. The id is
     // also what `dispatch --worker` takes, so the title is the argument.
     expect(unattended().map((p) => p.title)).toEqual(["tri-1", "obs-t1"]);
   });
@@ -149,10 +149,10 @@ describe("the triage console is a 2x2 of views with the reconciler in the landin
    * outright for a related reason.
    *
    * **The plan cannot ENFORCE this and the test does not claim it does.**
-   * `tuiWorkers` is the caller's, and the enforcement lives in the config (all
-   * four seats resolve to `pane_mode: rpc` from their roles) and in `up`'s own
+   * `tuiWorkers` is the caller's, and the enforcement lives in the config (both
+   * seats resolve to `pane_mode: rpc` from their roles) and in `up`'s own
    * one-tui-worker guard. What is asserted is the DEFAULT: ask for this console
-   * and name nobody, and you get four views.
+   * and name nobody, and you get two views.
    */
   it("gives no pane a keyboard when the caller names no tui workers", () => {
     for (const p of unattended()) {
@@ -312,18 +312,18 @@ describe("the triage plan IS the shared square builder, not a copy of it", () =>
  * `review-plan.test.ts` gates its equivalent block on `existsSync(fleet.yaml)`,
  * because none of `col-1`, `rev-arch-1`, `rev-ctx-1` or `rev-lang-1` is declared
  * in the tracked example and `fleet.yaml` is gitignored. **This console has the
- * opposite problem and therefore no gate at all**: all four triage seats ARE in
+ * opposite problem and therefore no gate at all**: both triage seats ARE in
  * `fleet.example.yaml`, so the pane plan can be checked against the config on
  * every clean checkout and in CI, with no skip and no machine dependency.
  *
  * Without this, `DEFAULT_TRIAGE_WORKERS` is a second spelling of the console's
- * membership and the two drift silently: the plan decides which four workers
- * `scripts/triage` STARTS, and the config decides which four exist. A seat
- * renamed in one and not the other is four panes whose `up` refuses on an
- * unknown worker — a failure that arrives four times over, in four panes nobody
+ * membership and the two drift silently: the plan decides which two workers
+ * `scripts/triage` STARTS, and the config decides which two exist. A seat
+ * renamed in one and not the other is two panes whose `up` refuses on an
+ * unknown worker — a failure that arrives twice over, in two panes nobody
  * is watching.
  */
-describe("the four seats the plan names are the four seats the tracked config declares", () => {
+describe("the seats the plan names are the seats the tracked config declares", () => {
   it("declares every seat, with the role the console's design assigns it", async () => {
     const { config } = await parseConfig(exampleConfig(), `${ROOT}fleet.example.yaml`);
     const roles = new Map(config.workers.map((w) => [w.id, w.role]));

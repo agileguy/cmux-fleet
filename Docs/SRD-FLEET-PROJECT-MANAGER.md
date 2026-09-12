@@ -180,8 +180,8 @@ to matter. They are stated up front because each changes what a section downstre
 | # | Finding | Reachable today? | § |
 |---|---|---|---|
 | **A** | **The integration mechanism already exists and is undocumented at the workflow level.** `up` registers `worker-<id>` as a git remote on the operator's own repository, pointing at that worker's clone (`worktree.ts:435`, `registerWorkerRemote` at `:465-470`), and `pifleet worktrees --json` reports each worker's branch, path, dirt and `commitsAhead` from the recorded `WorkerWorktree` (`cli/commands/worktrees.ts:33-45`). **Nothing in `~/.claude/skills/fleet/` mentions either.** The one line `Workflows/Observe.md:51-52` gives it — *"`worktrees` lists each worker's own git checkout"* — does not say the commits are fetchable. | Yes | §2.1, §6.2 |
-| **B** | **`/ProjectManager`'s "two engineers, one branch" is incoherent against `isolation: worktree` and would fail silently.** Each engineer writes `branch: "fleet/<run-id>/<worker-id>"` into its own envelope (`skills/pifleet-worker/SKILL.md:172`) regardless of what the brief said. A brief naming `phase-3-relay-actor` produces two workers that either ignore it or create that branch inside their own clone, where it is invisible to the other. Nothing goes red. | Yes | §1.2, §6.2 |
-| **C** | **A collated review is journalled, so a lens lost to a failed harvest never re-enters that collation.** This is ISC-517's hazard and it is the one a ProjectManager loop is most likely to mis-read, because a 2-of-3 collation is a valid `pifleet.collation/v1` document with a `reported: false` row in it and a `success` verdict on the collator's own task. `roles/collator.md:228-235` is explicit that the collator's status is *"about YOUR collation, never about how many lenses reported"*. **A loop that branches on the collator's verdict is therefore branching on the wrong number.** §7.5 makes coverage a separate gate. | Yes | §7.5, §9.4 |
+| **B** | **`/ProjectManager`'s "two engineers, one branch" is incoherent against `isolation: worktree` and would fail silently.** Each engineer writes `branch: "fleet/<run-id>/<worker-id>"` into its own envelope (the `"branch"` field of `skills/pifleet-worker/SKILL.md`'s envelope example) regardless of what the brief said. A brief naming `phase-3-relay-actor` produces two workers that either ignore it or create that branch inside their own clone, where it is invisible to the other. Nothing goes red. | Yes | §1.2, §6.2 |
+| **C** | **A collated review is journalled, so a lens lost to a failed harvest never re-enters that collation.** This is ISC-517's hazard and it is the one a ProjectManager loop is most likely to mis-read, because a 2-of-3 collation is a valid `pifleet.collation/v1` document with a `reported: false` row in it and a `success` verdict on the collator's own task. `roles/collator.md:248` is explicit that the collator's status is *"about YOUR collation, never about how many lenses reported"*. **A loop that branches on the collator's verdict is therefore branching on the wrong number.** §7.5 makes coverage a separate gate. | Yes | §7.5, §9.4 |
 | **D** | **`grep -rln rev-1 test/` returns SEVENTEEN files, of which SIX are functional and eleven are arbitrary fixture ids that must NOT be renamed.** *(v0.1 said "two real pins"; v0.3 said five test files. Both were undercounts, and this is the third round in which this number has grown — so the classification below is by MECHANISM rather than by count.)* **Hard-fail** — `config.test.ts:119` and `cli-exit-codes.test.ts:238` assert against the tracked `fleet.example.yaml`, and `operations-console.test.ts:112`/`:206` drive the real console scripts. **Stale-but-passing** — `development-plan.test.ts` asserts the roster literally, and `status-runs.test.ts:38` and `console-restart.test.ts` model the console with hand-written fixtures that keep passing while describing a console that no longer exists. **The eleven others define `rev-1` inline** and are unaffected; `up-wiring.test.ts:3743-3763` must be left alone deliberately, because its probe's whole value is that the worker id and the role differ. **`fleet.yaml` is gitignored (`.gitignore:9`)**, so the live seat change produces no diff and cannot be dispatched to a worker without tripping ISC-93. | Yes, on the first `bun test` after the rename | §6.1, §13 Phase 1 |
 | **E** | **There is already a `/ProjectManager` state file in this repository, and its shape has outgrown the skill that writes it.** `.claude/project-manager-state.json` on `feature/harvest-recovery` carries `branch_model: "long-lived"`, an `integration` block naming a console and a workspace id, an `answered_questions` map, per-phase commit lists, `out_of_band_commits`, and `pr_policy: "Do NOT open a PR"`. The skill's documented schema (`SKILL.md:240-252`) has none of those. **The skill is behind its own practice**, and §7.6 specifies the shape that practice already reached rather than the one the skill documents. | Observed | §2.7, §7.6 |
 
@@ -394,9 +394,10 @@ For in-process subagents this is coherent: they share one checkout, `git checkou
 and "commit to this branch" means what it says. **For the fleet every clause of it is wrong in a
 different way.** `{repo_path}` is a host path a container cannot open — the worker sees
 `/workspace`. `Branch: phase-{N}-{slug}` names a branch the worker will not be on and cannot
-usefully create, because `up` has already put it on `fleet/<run-id>/<worker-id>` and
-`skills/pifleet-worker/SKILL.md:172` has it report that branch in its envelope. And *"do not
-push"* is vacuous: an engineer worker has no egress to GitHub at all (§6.7).
+usefully create, because `up` has already put it on `fleet/<run-id>/<worker-id>` and the
+`"branch"` field of `skills/pifleet-worker/SKILL.md`'s envelope example has it report that
+branch in its envelope. And *"do not push"* is vacuous: an engineer worker has no egress to
+GitHub at all (§6.7).
 
 **The failure mode is silence, which is what makes it worth a finding.** Two engineers given
 that brief both report `success`, both have real commits, the harvest grades both against their
@@ -553,7 +554,7 @@ with the same repository. §0.5 correction 2 quotes the operator's own record of
 ### 2.5 The relay's fan-out, and the depth bound that stops a second generation
 
 The review console's shape is one parent task `T` producing four derived ids — `T-arch`,
-`T-context`, `T-lang` and `T-collate` (`roles/collator.md:136-139`) — in **two generations of
+`T-context`, `T-lang` and `T-collate` (`roles/collator.md:147`) — in **two generations of
 dispatch and exactly two collator turns**. Turn one writes
 `/outbox/<T>/dispatch-request.json` (`pifleet.dispatchrequest/v1`) and stops; the host
 dispatches three lenses, waits for all three, harvests each, publishes each as
@@ -1194,7 +1195,7 @@ a session that polls forever because the relay died is §9.3's failure with no t
    envelope, which claims `success` for having written a dispatch request. **The loop must read
    `T-review-p3-collate`, not `T-review-p3`.**
 2. **The collator's own verdict is about its collation, not about the code and not about coverage.**
-   `roles/collator.md:228-235`, and ISC-514 made coverage and verdict separate axes for exactly this
+   `roles/collator.md:248`, and ISC-514 made coverage and verdict separate axes for exactly this
    reason. §7.5 derives the loop's verdict from the collation's *contents*.
 3. **The relay must be running.** `scripts/review` starts it unless `--no-relay` is passed
    (`console-relay.ts:20-51`), and a console whose relay is dead has four healthy workers and no way
@@ -1261,7 +1262,8 @@ absent.
 
 **Re-dispatching a task id that already ran is the one thing this must not do**, and the reason is
 the epoch: an envelope whose `epoch` does not match is refused and the work harvests as though the
-container produced nothing (`skills/pifleet-worker/SKILL.md:184-196`). Step 3 is what prevents it.
+container produced nothing, with *"a stale-epoch discrepancy"* in its place
+(`skills/pifleet-worker/SKILL.md`'s `epoch` field rule). Step 3 is what prevents it.
 
 **One overstatement corrected.** v0.3 said flatly that *"a re-issued review fan-out is idempotent"*.
 That is true of the OUTCOME FILES on a journalled repeat — derived child ids rewrite the same replies
@@ -1420,7 +1422,7 @@ Phase 2's own code change, and §13 sequences both.
 operator by a hosted model is a provenance claim nobody made, and the integration merge on the host
 is where the operator's authorship legitimately enters. **And no commit message, code comment or PR
 body produced by this system carries an AI or assistant attribution line** — `roles/engineer.md:28`
-and `roles/collator.md:419` both already instruct it, and §13's checklist re-asserts it as a
+and `roles/collator.md:468` both already instruct it, and §13's checklist re-asserts it as a
 gradable property rather than an instruction.
 
 ### 6.9 Observability — how the calling session sees progress without polling blindly
@@ -1656,7 +1658,7 @@ not carry a verdict.** That is D8 of the review-console SRD, and it is why §7.5
 
 **`lenses[]` is the denominator and it is checked against the console's seats.** A row missing, a row
 too many, or a row whose `aspect` does not match its worker refuses the document
-(`roles/collator.md:302-312`). `reported` is **about what reached the collator**, not about what the
+(`roles/collator.md:351`). `reported` is **about what reached the collator**, not about what the
 reviewer did — a lens whose review was written and could not be read is `reported: false`.
 
 **The prose half is `review.md`** at the same `files/` path, and it is what a person reads. The loop
@@ -2233,7 +2235,7 @@ orchestrator's, and all twelve name the field.
 The relay counts coverage itself — `RelayOutcome.coverage` is `{reported, dispatched}`, *"Counted
 here rather than asked of the model, because the host is the only party that knows it"*
 (`relay.ts:791-804`) — and the collation brief names each missing lens with its reason. **Two
-reasons wear that label and they call for different actions**, and `roles/collator.md:237-247` is
+reasons wear that label and they call for different actions**, and `roles/collator.md:266` is
 explicit that conflating them is *"the specific falsehood this instruction exists to stop"*:
 
 | `MISSING ASPECT` reason | What happened | What to do |
@@ -2573,7 +2575,7 @@ Proposed new criteria, by area:
   one single-lens finding; assert both reach the fix brief and the consensus one is ranked first.*
 - **Anti: the loop never reads the collator's `status` as the review's verdict.** *Probe: a fixture
   whose collation is well-formed with zero findings and whose collator envelope claims `partial`;
-  assert APPROVED. `roles/collator.md:228-235` is the reason.*
+  assert APPROVED. `roles/collator.md:248` is the reason.*
 
 **Ids and refusals (D6)**
 - Every review parent id derives four children inside 64 characters. *Probe: for phases 1..99,
@@ -2651,7 +2653,7 @@ Proposed new criteria, by area:
 - **Anti: no commit message, code comment, PR body or generated document produced by this system
   contains an AI or assistant attribution.** *Probe: grep every commit on the integration branch and
   the PR body for `Co-Authored-By`, `Claude`, `AI-generated`, `Generated with`; any hit fails.
-  `roles/engineer.md:28` and `roles/collator.md:419` instruct it and an instruction is not a
+  `roles/engineer.md:28` and `roles/collator.md:468` instruct it and an instruction is not a
   mechanism.*
 - **Anti: no criterion in this block requires a real terminal, a real model, or the network.**
 

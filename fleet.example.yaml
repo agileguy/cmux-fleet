@@ -69,16 +69,27 @@ run:
   # console in this fleet gave each worker its OWN run --- `agentPaneCommand`
   # builds `up --workers <one worker>` and `operations-plan.ts:310` says it in
   # as many words: "Each pane creates its own run". So this key had nothing to
-  # bind on, at any value. The triage console is the first run holding four
-  # seats, and three of them fan out at once; at 1 the sweep serialises and
-  # cannot fit a five-minute cadence.
+  # bind on, at any value. The triage console is the first run holding MORE
+  # THAN ONE seat, which is what finally gave this key something to bind on.
+  #
+  # THE ARGUMENT THAT RAISED IT IS STALE AND THE VALUE IS NOT. That argument
+  # was a three-wide fan-out needing at least 3. The console is TWO seats —
+  # `tri-1` and `obs-t1` (`DEFAULT_TRIAGE_WORKERS`,
+  # `src/backends/cmux/operations-plan.ts`) — and the fan-out is one observer
+  # wide, so an admission budget of four is spent by two and this console now
+  # runs with SLACK where it was once sized to fit exactly.
+  # `operations-plan.ts:1027-1035` reaches the same reading and names this
+  # block as the stale one.
+  #
+  # DO NOT LOWER IT BY READING THAT. This bounds a RUN rather than the host,
+  # and a hand-run `up` over a wider worker set is the same run — the slack is
+  # the margin a widened roster spends instead of serialising.
   #
   # THE COST, which is the reason this is 4 and not higher: the bound that
-  # actually matters is oMLX throughput, and all four triage seats are LOCAL
+  # actually matters is oMLX throughput, and both triage seats are LOCAL
   # (D1 arm 3). Four concurrent local requests from this run is the ceiling
-  # this number sets, and it is set at the console's size deliberately --- a
-  # larger value would not make the sweep faster and would let some future
-  # multi-worker run outrun the server it shares.
+  # this number sets --- a larger value would not make the sweep faster and
+  # would let some future multi-worker run outrun the server it shares.
   max_concurrent: 4          # bounded by oMLX throughput, not pane count (§5.9)
   # The F39 RUNTIME detector (§5.9 detector 2). A worker completing this many
   # consecutive turns with ZERO tool calls is failed `no_tool_calls` rather than
@@ -156,7 +167,7 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
   model: gemma-4-26b-a4b-it-bf16
   thinking: medium
   models_allowlist:          # checked against GET /v1/models at `up`
-    # The `triage` console's four seats, all LOCAL — see the role below.
+    # The `triage` console's two seats, both LOCAL — see the role below.
     #
     # THIS LINE IS NOT HYGIENE, IT IS THE DIFFERENCE BETWEEN A CONFIG THAT
     # STARTS AND ONE THAT DOES NOT. The allowlist gates the ROLE, not the
@@ -619,17 +630,19 @@ roles:
   triage:
     # LOCAL 20b, BY OWNER DECISION 2026-09-06 — SRD-TRIAGE-CONSOLE §0.2 arm 3,
     # recorded as D1. The commission that opened that document asked for
-    # `ollama-cloud/gpt-oss:120b` on all four of this console's seats, which
+    # `ollama-cloud/gpt-oss:120b` on every one of this console's seats, which
     # would have reversed the 2026-09-03 decision that put `observer` on this
     # model. It was refused, and this line is the refusal.
     #
     # WHAT THE ARGUMENT TURNED ON, since a reader who finds only the outcome
     # will read this as a performance choice: it is not about a model name, it
     # is about whether an observer's context may leave the machine. This role
-    # reconciles three observers' reports, and an observer's report carries
+    # reconciles the observer's report, and an observer's report carries
     # namespaces, workload names, pod names, restart counts, log excerpts and
-    # cluster endpoints from a LIVE environment — 288 sweeps a day — so it is
-    # the most sensitive context this fleet produces and the one least worth
+    # cluster endpoints from a LIVE environment — 96 sweeps a day at the cadence
+    # the tracked `triage/console.yaml` ships (`cadence_s: 900`); 288 at the
+    # schema default of 300, which is the number this file used to quote — so it
+    # is the most sensitive context this fleet produces and the one least worth
     # sending to a third party. There is no ceiling, timeout or scope that
     # reduces a transcript after it has been sent.
     #
@@ -655,7 +668,7 @@ roles:
     # model the fleet is NOT running adds a second resident model to a capped
     # oMLX and starves the live seats. This line is the anchor that guard reads.
     model: gemma-4-26b-a4b-it-bf16
-    thinking: high                        # reconciling three reports that disagree IS the job
+    thinking: high                        # collating one observer's report into one document IS the job
     toolchain: base                       # it reads artifacts; there is nothing to build
     # `reviewer`'s grant above, copied deliberately — the same set the `review`
     # console's `collator` carries in the operator's own `fleet.yaml`, which is
@@ -686,8 +699,8 @@ roles:
     #
     # NO `bash`, and here that is the load-bearing omission rather than an
     # inherited habit. This role's entire output is a request for something ELSE
-    # to act on — a fan-out to three observers, and a notification that wakes a
-    # human. A shell is exactly what turns a request-WRITING worker into a
+    # to act on — a fan-out to the observer seat, and a notification that wakes
+    # a human. A shell is exactly what turns a request-WRITING worker into a
     # DISPATCHING one, and an agent may not dispatch. It is also what makes the
     # withdrawal above mean anything: §6.8 is explicit that a role holding a
     # shell can `cat > /outbox/...`, so removing `write` there would take a tool
@@ -743,12 +756,26 @@ roles:
     # what they wrote. Keeping the two apart is why the console can be given a
     # clock without also being given a way to touch anything.
     isolation: none                       # no repository; the outbox artifact is the whole output
-    # THE CONSOLE'S DEFINING PROPERTY, restated here rather than inherited from
-    # `defaults:` so that a future edit has to argue with a comment. `tui`
-    # allocates no epoch, and this console dispatches 288 times a day: with no
+    # THE CONSOLE'S DEFINING PROPERTY IN THIS FILE, restated here rather than
+    # inherited from `defaults:` so that a future edit has to argue with a
+    # comment. `tui` allocates no epoch, and this console dispatches 96 times a
+    # day at the cadence `triage/console.yaml` ships: with no
     # `already_completed` fence a re-dispatched sweep runs a second time. It is
     # the first console in this fleet with no keyboard, which is the point — it
     # is the first one that runs when nobody is watching.
+    #
+    # THE TWO TRACKED FILES DISAGREE ABOUT THIS, and the disagreement is
+    # RECORDED here rather than settled. THIS file declares `rpc` on both
+    # `triage` and `observer` and neither seat overrides it, so in the example
+    # the console is unattended. The tracked `triage/console.yaml` describes
+    # seats that are `pane_mode: tui` and pays the stated price for it —
+    # `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
+    # which takes a tui seat down and cannot bring it back. The operator's
+    # gitignored `fleet.yaml` overrides both seats to `tui` and agrees with
+    # `console.yaml`, not with this line. `operations-plan.ts:1006-1017` records
+    # the same split and says in as many words not to reconcile the plan against
+    # the live file. Which console this repository means to ship is a config
+    # decision for whoever owns these files; a comment cannot make it.
     pane_mode: rpc
     append_system_prompt_file: ./roles/triage.md
 
@@ -849,27 +876,50 @@ workers:
   # it and one process has one terminal — so two attended panes are two
   # runs, which `status --all` reports and `--recreate` tears down.
   - {id: tick-1, role: ticketing, pane_mode: tui, theme: catppuccin-latte}
-  # ---- the `triage` console's four seats ----
+  # ---- the `triage` console's two seats ----
   #
-  # NO KEYBOARD, AND NO THEME EITHER. All four resolve to `pane_mode: rpc` from
-  # their roles — `triage` and `observer` both declare it — so no override
-  # belongs here, and a theme would be decoration on a pane nobody types at.
-  # This console runs on a clock rather than on attention: a sweep every five
-  # minutes, 288 a day. `tui` allocates no epoch, and without that fence a
-  # re-dispatched sweep runs twice, which is the one thing a console nobody is
-  # watching cannot afford. The panes are VIEWS, not terminals.
+  # NO KEYBOARD IN THIS FILE, AND NO THEME EITHER. BOTH resolve to
+  # `pane_mode: rpc` from their roles — `triage` and `observer` both declare it
+  # — so no override belongs here, and a theme would be decoration on a pane
+  # nobody types at. Read the `triage` role's `pane_mode` note before relying on
+  # that: the tracked `triage/console.yaml` describes `tui` seats instead, and
+  # the two tracked files are an OPEN config decision, not one of them being
+  # wrong.
+  #
+  # This console runs on a clock rather than on attention. `tui` allocates no
+  # epoch, and without that fence a re-dispatched sweep runs twice, which is the
+  # one thing a console nobody is watching cannot afford. The panes are VIEWS,
+  # not terminals.
+  #
+  # THE CADENCE IS NOT SET HERE, and which number is right depends on which file
+  # you are reading. The schema default is `cadence_s: 300` — a sweep every five
+  # minutes, 288 a day. The tracked `triage/console.yaml` sets 900, so the
+  # SHIPPED console sweeps every fifteen minutes, 96 a day.
   #
   # ONE RUN, one run id, stable for the console's whole life:
   #   pifleet up --workers tri-1,obs-t1
-  # `run.max_concurrent` must be at least 3 or the three-way fan-out serialises
-  # and a five-minute cadence stops being one. It is 4 at :82, so this console
-  # fits with nothing to spare — a fourth environment is a `max_concurrent`
-  # decision before it is a worker line.
+  # TWO SEATS SPEND TWO of `run.max_concurrent`, which is 4 (the key itself is
+  # at :93; find it by NAME if that number has drifted) — so this console runs
+  # with SLACK rather than fitting exactly, and the note above that key has been
+  # corrected to say so.
+  #
+  # A SECOND ENVIRONMENT IS NEITHER A WORKER LINE NOR A `max_concurrent`
+  # DECISION. `soleEnvironment` (`src/cli/commands/triage.ts:915`) REFUSES a
+  # targets file declaring other than exactly one environment, so that refusal
+  # is the thing that has to be lifted first — a seat grown ahead of it would
+  # stand up a pane whose share of the sweep does not exist.
   - {id: tri-1,  role: triage}
-  # THREE OBSERVERS, ON THE ROLE THAT ALREADY EXISTS, doing the job it was
-  # written for, at a cadence — no new role, no widened grant, and that is the
-  # strongest thing this design has going for it. One seat per environment, so
-  # the sweep fans out in parallel instead of one worker walking a list.
+  # ONE OBSERVER, ON THE ROLE THAT ALREADY EXISTS, doing the job it was written
+  # for, at a cadence — no new role, no widened grant, and that is the strongest
+  # thing this design has going for it.
+  #
+  # ONE SEAT PER ENVIRONMENT is the design, and there is ONE seat because
+  # `soleEnvironment` admits exactly one environment (above) — the fan-out is
+  # therefore one observer wide, which `TRIAGE_CONSOLE_ROSTER.reviewers`
+  # (`src/run/dispatch-request.ts:425`) and `DEFAULT_TRIAGE_WORKERS` both say
+  # by enumeration. A sweep that fans out in PARALLEL rather than walking a
+  # list is what the shape buys the day that refusal is lifted; today it buys
+  # nothing, and saying so is cheaper than a reader discovering it.
   #
   # THE `model:` OVERRIDE IS GONE, AND ITS OWN TEST IS WHAT REMOVED IT.
   # SRD-TRIAGE-CONSOLE §6.11 says these seats take the `observer` role's model

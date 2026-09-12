@@ -928,7 +928,7 @@ export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
 }
 
 // ---------------------------------------------------------------------------
-// The `triage` console — a reconciler and three observers (SRD-TRIAGE-CONSOLE)
+// The `triage` console — a reconciler and one observer (SRD-TRIAGE-CONSOLE)
 // ---------------------------------------------------------------------------
 
 /**
@@ -943,56 +943,96 @@ export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
 export const TRIAGE_WORKSPACE = "triage";
 
 /**
- * The four workers the triage console stands up, in PANE ORDER.
+ * The two workers the triage console stands up, in PANE ORDER.
  *
  * ```
  * +---------------+---------------+
  * |     tri-1     |     obs-t1    |
  * +---------------+---------------+
- * |    obs-t2     |     obs-t3    |
- * +---------------+---------------+
  * ```
+ *
+ * ONE ROW OF TWO, AND NOT A SQUARE — which needs saying precisely because the
+ * builder is the square one. {@link agentSquarePanes} holds at most four and
+ * this console names two, so only the first entry of its split table is ever
+ * reached: `tri-1` takes the workspace's initial surface and `obs-t1` splits
+ * `right` off it. The table's `down` rows begin at pane 3, which this console
+ * does not have, so there is no second row at all — and
+ * {@link TRIAGE_TOP_FRACTION} below turns entirely on that.
  *
  * THE RECONCILER IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for
  * a weaker version of its reason. Pane 1 consumes the workspace's initial
  * surface and is where the operator lands. Nobody drives this console by typing
  * — see the fraction below — but somebody DEBUGS it, and `tri-1` is the seat
- * that holds the reconciliation the other three feed, so it is the pane worth
+ * that holds the reconciliation the observer feeds, so it is the pane worth
  * landing on when a sweep has said something surprising.
  *
- * `tri-1` RECONCILES AND THE THREE OBSERVERS FAN OUT, which is the review
- * console's collator/reviewer shape reappearing over a different role pair
- * (`fleet.example.yaml`'s `triage` role and three `observer` seats). That is not
- * a coincidence and it is already load-bearing elsewhere: `ConsoleRoster`
- * (`src/run/dispatch-request.ts:279`) was written over the two ROLES rather than
- * over `col-1`, so `TRIAGE_CONSOLE_ROSTER` needed no schema change, no new
- * refusal and no branch — SRD-TRIAGE-CONSOLE D5's bet, collected once already.
- * This constant is the same bet on the layout plane, and `triagePanes` below is
- * what it buys: three lines.
+ * ## WHY ONE OBSERVER — a refusal in code, not a fan-out someone forgot to build
  *
- * NONE OF THE FOUR IS ATTENDED, and that is the whole difference from
- * `development` and `review`. Both of those are four keyboards and therefore
- * four runs; this console is ONE run of four `rpc` seats
- * (`pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3`), because a console that
- * dispatches 288 times a day cannot afford a `tui` seat: `tui` allocates no
- * epoch, so without the `already_completed` fence a re-dispatched sweep runs
- * twice, `dispatch --auto` refuses a `tui` worker outright
- * (`pane_mode_tui_is_not_auto_schedulable`), and closing the pane stops the
- * worker. SRD-TRIAGE-CONSOLE §2.2, §2.3.
+ * The design is ONE OBSERVER SEAT PER ENVIRONMENT, and a sweep is exactly one
+ * environment: `soleEnvironment` (`src/cli/commands/triage.ts:915`) refuses a
+ * targets file declaring any other number, by name on both sides, quoting
+ * SRD-TRIAGE-CONSOLE §12 — *"one sweep is ONE environment, and that is a limit
+ * rather than a law"*. So the fan-out is one wide because the thing it fans out
+ * over is one wide. **A second observer seat is therefore not a worker line; it
+ * is that refusal being lifted first**, and a `DEFAULT_TRIAGE_WORKERS` grown
+ * ahead of it would stand up a pane whose share of the sweep does not exist.
+ * `triage/targets.yaml` ships one live environment (`do-cluster`) with `cni-dev`
+ * commented out beside it rather than deleted, which is what the limit looks
+ * like from the operator's side.
  *
- * **The plan cannot ENFORCE that, and the enforcement is not missing — it is
- * elsewhere, twice.** `tuiWorkers` is a caller's argument, so a driver that
- * passed these four would get four attended panes out of this function. What
- * stops it is the config (all four resolve to `pane_mode: rpc` from their roles,
- * with no worker-level override) and `up`'s own one-tui-worker guard. What this
- * plan owns is the DEFAULT: name no `tuiWorkers` and no pane carries
- * `--attach-here`, which is the opposite disposition from `scripts/review`.
+ * `tri-1` RECONCILES AND `obs-t1` OBSERVES, which is the review console's
+ * collator/reviewer shape reappearing over a different role pair
+ * (`fleet.example.yaml`'s `roles:` map — `triage:` at `:630`, `observer:` at `:457`).
+ * That is not a coincidence and it is already load-bearing elsewhere:
+ * `ConsoleRoster` (`src/run/dispatch-request.ts:322`) was written over the two
+ * ROLES rather than over `col-1`, so `TRIAGE_CONSOLE_ROSTER` needed no schema
+ * change, no new refusal and no branch — SRD-TRIAGE-CONSOLE D5's bet, collected
+ * once already. **The seat count moving is the bet paying a second time**: a
+ * roster spelled against three literal observer ids would have had to be
+ * re-derived when the console shipped at one, whereas a rule written over the
+ * ROLE says the same true thing at one seat and at three.
  *
- * THE COST, stated as its two siblings state theirs: one run at
- * `run.max_concurrent: 4` is four seats sharing one admission budget, so the
- * three-way fan-out has exactly enough room and none spare. A fourth environment
- * is a `max_concurrent` decision before it is a worker line
- * (`fleet.example.yaml:67-82`).
+ * NEITHER SEAT IS ATTENDED, and that is the whole difference from `development`
+ * and `review`. Both of those are four keyboards and therefore four runs; this
+ * console is ONE run of `rpc` seats (`pifleet up --workers tri-1,obs-t1`,
+ * spelled that way at `fleet.example.yaml:900`), because a console that
+ * dispatches on a clock — 96 sweeps a day at `triage/console.yaml`'s
+ * `cadence_s: 900`, 288 at the schema default of 300 — cannot afford a `tui`
+ * seat: `tui` allocates no epoch, so without the `already_completed` fence a
+ * re-dispatched sweep runs twice, `dispatch --auto` refuses a `tui` worker
+ * outright (`pane_mode_tui_is_not_auto_schedulable`), and closing the pane stops
+ * the worker. SRD-TRIAGE-CONSOLE §2.2, §2.3.
+ *
+ * **THAT PARAGRAPH IS ABOUT THE TRACKED EXAMPLE, AND THE LIVE FLEET DISAGREES
+ * WITH IT. Checked 2026-09-11 and recorded here so the next reader does not
+ * re-litigate it.** In `fleet.example.yaml` neither seat carries a worker-level
+ * override (`{id: tri-1,` at `:911`, `{id: obs-t1,` at `:939`), so both resolve to
+ * `pane_mode: rpc` from their roles and the plan this file builds is genuinely
+ * the unattended one described above. The operator's gitignored `fleet.yaml`
+ * overrides both to `tui`, and the TRACKED `triage/console.yaml` says so in its
+ * own words and pays the stated price — `recycle_after_sweeps: 0`, because
+ * §6.6's recycle is a headless `up` that takes a `tui` seat down and cannot
+ * bring it back. **Do not reconcile this docblock against the live file.** What
+ * this constant documents is the plan built from the tracked example; the
+ * divergence is a config decision, and it belongs to whoever owns that file.
+ *
+ * **The plan cannot ENFORCE any of it, and the enforcement is not missing — it
+ * is elsewhere, twice.** `tuiWorkers` is a caller's argument, so a driver that
+ * passed these two would get two attended panes out of this function. What stops
+ * it is the config (the example's roles, above) and `up`'s own one-tui-worker
+ * guard. What this plan owns is the DEFAULT: name no `tuiWorkers` and no pane
+ * carries `--attach-here`, which is the opposite disposition from
+ * `scripts/review`.
+ *
+ * THE COST, stated as its two siblings state theirs — and it is the one line
+ * here that got CHEAPER rather than merely shorter. One run at
+ * `run.max_concurrent: 4` (`fleet.example.yaml:93`) is an admission budget of
+ * four spent by two seats, so this console runs with slack where it was once
+ * sized to fit exactly and none spare. The comment that raised that key
+ * (`fleet.example.yaml:67-93`) argued from a three-wide fan-out and now says so
+ * itself, citing this paragraph back; the VALUE is not wrong, it is merely no
+ * longer tight. Do not lower it by reading this line: it bounds a RUN rather
+ * than the host, and a hand-run `up` over a wider worker set is the same run.
  */
 export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
 
@@ -1001,71 +1041,132 @@ export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
  * that gets there is not {@link REVIEW_TOP_FRACTION}'s, and copying it would
  * have hidden the reason this console is the clearest `null` of the four.
  *
- * ## A fraction moves a ROW, and this console's rows do not match its roles
+ * ## A fraction moves the border BETWEEN ROWS, and this console has ONE ROW
  *
- * `applyTopFraction` addresses the BORDER BETWEEN THE ROWS
- * (`operations.ts:494-542` — a pane in the top row has no border above it and
- * cmux refuses `-U` there), so the only thing a fraction can express is "the top
- * two panes over the bottom two". Read that against the square above: the top
- * row is `tri-1` AND `obs-t1`, the bottom row is `obs-t2` and `obs-t3`.
+ * `applyTopFraction` addresses the BORDER BETWEEN THE ROWS — `operations.ts:539-553`,
+ * the paragraph opening *"A RESIZE ADDRESSES A BORDER, NOT A PANE"*: a pane in the
+ * top row has no border above it and cmux refuses `-U` there. So the only thing a
+ * fraction can express is "the top row over the bottom one". Read that against the
+ * diagram above: `tri-1` and `obs-t1` sit side by side in a SINGLE row, and the
+ * shared builder's `down` entries begin at pane 3, which this console never reaches.
  *
  * So the preference somebody would reach for this constant to state — *give the
- * reconciler more room than the observers* — **is not expressible at all**. Any
- * value that grew `tri-1` would grow `obs-t1` by exactly as much and shrink
- * `obs-t2` and `obs-t3`, privileging one arbitrary observer over its two
- * identical siblings for a reason nobody could write down. `0.65` here would not
- * be a layout with a rationale; it would be a layout with a typo's shape.
+ * reconciler more room than the observer* — is not expressible. That much is
+ * structural. What a value here would DO if somebody wrote one anyway is a
+ * weaker claim, and this docblock used to overstate it: it said such a value was
+ * **"INERT, provably rather than as a matter of taste"**. It is not provable.
+ * The argument below is split into the half that holds unconditionally and the
+ * half that rests on a premise nothing in this repository asserts.
  *
- * This is a stronger statement than {@link REVIEW_TOP_FRACTION}'s *"there is
- * nothing to favour"*, and deliberately so: that argument concedes the day
- * somebody decides there IS something to favour, and this one does not.
+ * ### Unconditional: `null` is read before any geometry is
+ *
+ * `applyTopFraction` returns on `null` BEFORE it reads a pane
+ * (`operations.ts:592`, `if (fraction === null) return;`), so `null` is the one
+ * value whose meaning does not depend on a pane shape that can change underneath
+ * it — and the only way a reader can tell "this console wants the halves
+ * `new-split` gave it" from "this console asked for something the geometry
+ * silently threw away" is which of the two the constant says. **That is what
+ * makes `null` load-bearing rather than decorative here**, and it is the half of
+ * the old argument that survives untouched.
+ *
+ * ### Conditional: the empty-set reading needs two numbers to agree
+ *
+ * Both panes share one `y`, so `topY` selects both, and the row `movingIds` then
+ * asks to move is `p.y !== topY` — the EMPTY SET — **whenever `growTop` is
+ * false** (`operations.ts:619-624`). That qualifier is the whole of it. `growTop`
+ * is `topTarget > topHeight`, and those two come off the SAME `list-panes`
+ * payload by DIFFERENT keys: `topHeight` is the largest `pixel_frame.height` in
+ * the top row, `topTarget` is `container_frame.height` times the fraction
+ * (`parsePaneGeometry`, `parse.ts:283-296`, reads each from its own key).
+ * **Nothing here asserts that a single row's pane height equals its container's**
+ * — no test, no invariant, no comment on the cmux side of the parse.
+ *
+ * If `container_frame` counts chrome the panes' `pixel_frame` does not, then some
+ * fraction below 1 makes `topTarget > topHeight`, `growTop` flips TRUE, and the
+ * row selected is `p.y === topY` — BOTH panes. A `resize-pane -D` is then issued
+ * for every pane whose delta clears the one-pixel guard, against a border a
+ * single-row console does not have; what cmux does with that is its business, and
+ * either outcome falsifies *"not one `resize-pane` is issued"*. A fraction ABOVE
+ * 1 takes that branch with no assumption about chrome at all.
+ *
+ * So `0.65` here would still not be a layout with a rationale — but for a better
+ * reason than "it would do nothing": it would be a number whose effect turns on a
+ * geometry relationship nothing pins down. That is a worse thing to write than an
+ * inert one, which is why the narrower claim argues for `null` at least as hard.
+ *
+ * The INEXPRESSIBILITY, which is the structural half, is a stronger statement
+ * than {@link REVIEW_TOP_FRACTION}'s *"there is nothing to favour"*, and
+ * deliberately so: that argument concedes the day somebody decides there IS
+ * something to favour, and on this console's shape there is no such day, because
+ * there is nowhere for the favour to go.
  *
  * ## What `OPERATIONS_TOP_FRACTION` exists for, which this console does not have
  *
  * 0.65 corrects a console whose rows are UNLIKE — two agent panes over one
  * full-width monitor that says its piece in a handful of lines and repeats.
- * Every pane here is an agent's view, so the rows are alike and `new-split`'s
- * halves are already the answer. `null` skips the resize outright rather than
- * asking for a fraction of `1/2` and leaning on the sub-pixel guard to make it a
- * no-op: {@link DEVELOPMENT_TOP_FRACTION} records why a value that happens to
- * round to nothing must not stand in for a stated one.
+ * This console has no second row to be unlike the first, and both panes are an
+ * agent's view in any case, so `new-split`'s halves are already the answer.
+ * `null` skips the resize outright rather than asking for a fraction of `1/2`
+ * and leaning on the sub-pixel guard to make it a no-op:
+ * {@link DEVELOPMENT_TOP_FRACTION} records why a value that happens to round to
+ * nothing must not stand in for a stated one.
  *
  * ## And the reason that is this console's alone: nobody is watching
  *
  * Height is a claim about where an eye should go first, and on the ordinary path
- * there is no eye — this console runs on a clock, 288 sweeps a day, with no
- * keyboard in any seat. The moment it IS read is after something has already
- * gone wrong, and then the interesting pane is whichever one broke. A layout
- * that had pre-committed to an answer would be wrong three times in four.
+ * there is no eye — this console runs on a clock, with no keyboard in either
+ * seat. The moment it IS read is after something has already gone wrong, and
+ * then the interesting pane is whichever one broke. A layout that had
+ * pre-committed to an answer would be wrong half the time.
  *
  * ## WHEN THIS SHOULD BECOME A NUMBER, named so the next reader knows the trigger
  *
- * If the pane plan ever stops being four agent views — SRD-TRIAGE-CONSOLE §11
- * Q6 leaves open a `pifleet monitor` pane or a tail of the actor's log, and
- * either would make the bottom row a status readout rather than an agent. That
- * is precisely `OPERATIONS_TOP_FRACTION`'s situation, and at that point a
- * fraction stops being unexpressible and starts being required.
+ * **A THIRD PANE — which is a sharp trigger rather than a vague one, and the
+ * shrink to two seats is what sharpened it.** Pane 3 is the shared builder's
+ * first `down` entry, so whatever this console gains third is the thing that
+ * creates a second row and makes a fraction expressible for the first time.
+ * Two candidates are already on the table and they want opposite values: a
+ * second observer seat (which needs `soleEnvironment` lifted first — see
+ * {@link DEFAULT_TRIAGE_WORKERS}) would make the rows ALIKE and this `null`
+ * would survive on {@link REVIEW_TOP_FRACTION}'s weaker argument, whereas the
+ * non-agent pane SRD-TRIAGE-CONSOLE §11 Q6 leaves open — a `pifleet monitor`
+ * view, or a tail of the actor's log — would make the bottom row a status
+ * readout. That second case is precisely `OPERATIONS_TOP_FRACTION`'s situation,
+ * and at that point a fraction stops being inert and starts being required.
  */
 export const TRIAGE_TOP_FRACTION: number | null = null;
 
 /**
  * The triage console's panes, in creation order.
  *
- * The same 2x2 as {@link reviewPanes} and {@link developmentPanes}, built by the
- * same {@link agentSquarePanes} — only the default worker set and the name in a
- * refusal differ. **That this is three lines is the claim SRD-TRIAGE-CONSOLE D5
- * makes about the whole design**: a fourth console is a DATA addition. The
- * request plane collected that bet already (`TRIAGE_CONSOLE_ROSTER` added two
- * values and changed no logic); this is the layout plane collecting it, and the
- * split table — the part that actually breaks, because pane 4 must anchor on
+ * The same BUILDER as {@link reviewPanes} and {@link developmentPanes} — the
+ * shared {@link agentSquarePanes} — with only the default worker set and the
+ * name in a refusal differing. **Not the same SHAPE, and the distinction is the
+ * one this docblock exists to keep straight**: those two name four workers and
+ * get the full 2x2, this one names two and gets the square's first row. One
+ * table, read with a shorter list.
+ *
+ * **That this is three lines is the claim SRD-TRIAGE-CONSOLE D5 makes about the
+ * whole design**: a fourth console is a DATA addition. The request plane
+ * collected that bet already (`TRIAGE_CONSOLE_ROSTER` is a literal over the same
+ * two roles and changed no logic); this is the layout plane collecting it, and
+ * the split table — the part that actually breaks, because pane 4 must anchor on
  * pane 2 rather than on pane 3 — is read from one place for the third time
  * rather than copied for the second.
  *
- * `triage-plan.test.ts` pins that structurally rather than taking it on trust:
- * this plan's split table is compared against `reviewPanes`' at RUNTIME on one
- * shared worker set, so a copy made here would pass on the day it was written
- * and redden the moment `agentSquarePanes` moved — which is the only day the
- * difference between sharing and copying has ever cost anything.
+ * **The seat count MOVING is what proved the delegation was worth having, and
+ * that is no longer a forecast.** A hand copy of the square made here would have
+ * had to be edited when this console went from four seats to two; the delegation
+ * absorbed it in {@link DEFAULT_TRIAGE_WORKERS} and this function did not change
+ * at all.
+ *
+ * `triage-plan.test.ts` pins the sharing structurally rather than taking it on
+ * trust: this plan's split table is compared against `reviewPanes`' at RUNTIME
+ * on one shared FOUR-worker set — deliberately not the two consoles' defaults,
+ * which no longer agree even in length — so a copy made here would pass on the
+ * day it was written and redden the moment `agentSquarePanes` moved, which is
+ * the only day the difference between sharing and copying has ever cost
+ * anything.
  */
 export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
   return agentSquarePanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");

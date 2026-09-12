@@ -1,8 +1,10 @@
 # Collation contract and the review console's role documents — mutation table
 
-What `test/unit/collation.test.ts`, `test/unit/collator-role.test.ts` and
-`test/unit/reviewer-role.test.ts` actually catch in `src/run/collation.ts`,
-`roles/collator.md`, `roles/reviewer.md` and `roles/review/cross-file-contracts.md`,
+What `test/unit/collation.test.ts`, `test/unit/collator-role.test.ts`,
+`test/unit/reviewer-role.test.ts` and `test/unit/review-plan.test.ts` actually
+catch across the battery's seven mutable files — `src/run/collation.ts`,
+`roles/collator.md`, `roles/reviewer.md`, `roles/review/cross-file-contracts.md`,
+`roles/review/implementation-language.md`, `fleet.example.yaml` and `fleet.yaml` —
 and what they do not. Produced by
 `test/mutation/collation-contract.battery.ts`, which must be pointed at a
 throwaway `git worktree` — it rewrites source files in place, and a transient
@@ -11,12 +13,16 @@ tree.
 
 ```sh
 git worktree add /tmp/wt HEAD --detach
-ln -s "$PWD/node_modules" /tmp/wt/node_modules && cp fleet.yaml /tmp/wt/
+ln -s "$PWD/node_modules" /tmp/wt/node_modules
+cp fleet.yaml /tmp/wt/                  # gitignored: the worktree has no copy of its own
+# The rest carry UNCOMMITTED work only — `HEAD` already holds the tracked versions.
+cp fleet.example.yaml /tmp/wt/
 cp src/run/collation.ts /tmp/wt/src/run/
 cp test/unit/collation.test.ts test/unit/collator-role.test.ts \
-   test/unit/reviewer-role.test.ts /tmp/wt/test/unit/
+   test/unit/reviewer-role.test.ts test/unit/review-plan.test.ts /tmp/wt/test/unit/
 cp roles/collator.md roles/reviewer.md /tmp/wt/roles/
-cp roles/review/cross-file-contracts.md /tmp/wt/roles/review/
+cp roles/review/cross-file-contracts.md \
+   roles/review/implementation-language.md /tmp/wt/roles/review/
 bun run test/mutation/collation-contract.battery.ts /tmp/wt
 ```
 
@@ -26,9 +32,16 @@ ending in `/cmux-fleet`. **It measures the unmutated baseline first and refuses
 to run if it is not green** — a battery whose suite is already red reports every
 mutation as caught, which is the most flattering possible failure.
 
-Run of 2026-09-04: **BASELINE pass, 94 mutations, 0 unexpected, ALL FILES
-RESTORED OK.** Restore additionally verified out of band by `shasum -a 256` over
-all six mutable files against the live checkout, and by `git diff --stat`.
+Last recorded run, 2026-09-04: **BASELINE pass, 94 mutations, 0 unexpected, ALL
+FILES RESTORED OK.** Restore additionally verified out of band by `shasum -a 256`
+over the mutable files against the live checkout, and by `git diff --stat`.
+
+**That 94 is history and not the battery's size.** The battery declares **116
+cases** today — 101 expected red, 15 expected green — over the seven files above,
+and the set has both grown and shrunk since that run, so 94 is not a subset of it.
+The rows added since have not been run as a set. Every row below is reconciled
+against the battery's `find:` and `file:`; none of them is a claim that the
+mutation has been executed recently.
 
 **Anchor rot is now caught in CI without running this.** `test/unit/mutation-anchors.test.ts`
 reads every `find:` anchor in every battery from `HEAD` and asserts each occurs
@@ -37,6 +50,14 @@ half — "is this battery still about the code" — runs on every push. That clo
 the standing objection that a battery nobody runs is a table nobody can trust,
 and it is what caught eight stale anchors in this file after the role documents
 were rewritten under it.
+
+**It has two blind spots, and both have already hidden a dead case here.** It
+reads `HEAD`, so an UNTRACKED target returns null and is SKIPPED rather than
+reported — `fleet.yaml` is gitignored, which leaves R18, R19 and RV17 checked by
+nothing but this battery. And until `0ac906e` the guard could not see a case whose
+docblock sat between `file:` and `find:`, which is how RV15's anchor stayed dead
+through task 7.1 while reporting green-as-expected on every run: it matched
+nothing, so the replacer rewrote nothing, and an unmutated suite passed.
 
 **What each probe checks BY CONSTRUCTION and what it checks by rule**, because a
 table that overstates this is the same defect as a document that overstates a
@@ -51,16 +72,23 @@ path:
 | Tone, judgement, review advice | **Not checked**, deliberately — see U8/U9 | Everything |
 
 **Both configs are in the mutable set, and which one is which matters.**
-`fleet.example.yaml` is TRACKED and is what CI grades against, so the capability
-mutations (RV15, RV16) target it; `fleet.yaml` is gitignored, copied into the
-worktree, and carries only the divergence probe (RV17). A mutation in the
-gitignored file would prove nothing about a clean checkout, which is the same
-mistake as reading it in a test.
+`fleet.example.yaml` is TRACKED and is what CI grades against, so the two
+capability mutations on the tracked side (RV15, RV16) target it and
+`reviewer-role.test.ts` grades them through `grantedTools`. `fleet.yaml` is
+gitignored and copied into the worktree, and it carries THREE cases, not one:
+RV17, R18 and R19 — the seat configuration this console actually runs from, which
+the example declares none of. A mutation in the gitignored file proves nothing
+about a clean checkout, so those three are graded by a suite that says so:
+`review-plan.test.ts`'s `describe.skipIf(!HAVE_CONFIG)` block, which SKIPS on a
+machine without the file. The battery copies the operator's `fleet.yaml` in, so
+the block runs here and nowhere else.
 
-**The bash refusal and the write grant are pinned independently**, because a probe
-that merely noticed "the tools list changed" would be satisfied by either and
-RV15 would stop meaning what its name says. RV15 adds `bash`; RV16 removes
-`write`; both redden, from different assertions.
+**The two halves of the grant are pinned independently**, because a probe that
+merely noticed "the tools list changed" would be satisfied by either and RV15
+would stop meaning what its name says. RV15 ADDS `bash` to the tracked grant;
+RV16 REMOVES `submit_report` from it; both redden, from different assertions.
+RV17 is RV16's mutation against the live config, kept as a separate case rather
+than folded in because the suite that grades it is one that can skip.
 
 ## The role documents are source
 
@@ -74,8 +102,9 @@ re-applied.
 
 **`roles/reviewer.md`** opened with *"Review the diff against its stated intent.
 The task envelope says what the change was supposed to do."* **Both halves were
-false.** The reviewer is `tools: [read, grep, find, ls]` with no bash, so it
-cannot run `git diff`, and nothing in `render.ts`, `task-policy.ts` or
+false.** The reviewer is `tools: [read, grep, find, ls, submit_report]` — no
+`bash`, and no member of `config/schema.ts`'s `{write, edit, bash}` writer set —
+so it cannot run `git diff`, and nothing in `render.ts`, `task-policy.ts` or
 `dispatch-policy.ts` delivers one; and `renderPrompt` emits the title, the brief,
 the acceptance lines and four identity values — never the envelope. The trap that
 made the second claim look survivable is that `/policy/task` IS mounted and IS
@@ -216,36 +245,66 @@ survive half of it being deleted.
 
 **REWRITTEN 2026-09-05, because the contract changed.** The instruction is no
 longer "put the whole review in `notes`". It is a SPLIT: the long review goes to
-`/outbox/<task-id>/files/review.md` and is declared in the envelope's `artifacts`
-array, and `notes` carries a short summary. Two measured losses forced it, and
+`/outbox/<task-id>/files/review.md` as the call's one `report` file, and `notes`
+carries a short summary. Two measured losses forced it, and
 both had the review intact with the envelope destroyed around it — a 3906-byte
 envelope holding a mis-escaped regex (its `files/review.md` was on disk, 4849
 bytes, whole) and a 7099-byte envelope cut short mid-write (no artifact; nothing
-survived). RV1–RV4 were re-anchored onto the new instruction rather than repointed
-at the old sentence, and RV3's anchor had already rotted to 0x under a partial fix.
+survived). RV1, RV3 and RV4 were re-anchored onto the new instruction rather than
+repointed at the old sentence, and RV3's anchor had already rotted to 0x under a
+partial fix.
+
+**NARROWED AGAIN 2026-09-10 by task 8.1, which deleted the mechanics four of these
+rows were mutating.** The reviewer holds no `write`; `submit_report` composes the
+envelope, writes it tmp-then-rename, and appends every `report` file to
+`artifacts` itself. So the hand-written envelope, the hand-made declaration and
+the shared 65536 ceiling are all gone from the document, and RV2, RV24, RV27 and
+RV28 went with them. They are recorded below rather than deleted quietly, because
+a row that vanishes and a row that was never written read the same.
+
+**RE-ANCHORED AGAIN 2026-09-11, and RV3 has now rotted to 0x twice.** `a1ae886`
+rewrote the collator's split paragraph to close the contradiction recorded under
+this table, and RV3 quoted all three of that paragraph's wrapped lines verbatim —
+including where they wrap, and including the one sentence that commit had to
+change. No wording that fixes the contradiction leaves such an anchor matching, so
+`mutation-anchors.test.ts` was red for this battery from `a1ae886` until
+`16751a6`. Both rots have the same cause, and the battery states the rule against
+it in the comment block standing directly over the case that broke it: **anchor
+short fragments chosen to survive a re-wrap, never a whole wrapped line.** The
+replacement was chosen by
+MEASUREMENT rather than by reading — four fragments occur exactly 1x in the
+rewritten paragraph, and three of them are wrong: the opening clause's honest
+weakening (mandatory to optional) leaves all four suites GREEN at 195 pass;
+`Tell each reviewer to file its long review` reddens only by destroying the
+marker `sliceFrom` scopes BOTH collator probes with, taking RV26's guard down as
+collateral while the split it claims was dropped survives verbatim; and the
+`notes`-summary fragment reddens on the notes-is-a-FIELD-not-a-PATH contract,
+which is a different claim. **A case whose red is a property of what its
+`replace:` happens to delete, rather than of the thing its `what:` names, is not
+measuring the document.**
 
 **The reason the split works is not the obvious one, and RV4 pins the correction.**
-A file does NOT reach the collator past a broken envelope: `relay.ts` sets
-`succeeded: harvested.verdict === "success"`, an unparseable envelope settles
-`unknown`, and only surviving lenses have a reply published. What the split buys is
-that the envelope stops being the fragile part. A reviewer that believed otherwise
-would treat the artifact as a safety net and go back to writing long envelopes.
+A file does NOT rescue a lens that did not report: `relay.ts` sets
+`succeeded: harvested.verdict === "success"`, and a lens that never called
+`submit_report` — or whose task settled anything other than `success` — has no
+reply published for it at all, artifact or no artifact. The lie survives the tool
+in a narrower form than it had: the model can no longer produce an unparseable
+envelope, and the sentence that would reassure it is still false. What the split
+buys is that the envelope stops being the fragile part. A reviewer that believed
+otherwise would treat the artifact as a safety net and go back to writing long
+envelopes.
 
 | # | Mutation | Catches |
 |---|---|---|
 | RV1 | The review's destination is unnamed — "file it wherever suits you" | The reviewer has nothing to write to, and the artifact half of the split evaporates while the summary half still reads as a complete instruction. |
-| RV2 | The two caps stop failing differently | `MAX_TEXT` and `MAX_REPLY_ARTIFACT_BYTES` are the SAME 65536, so a document stating both caps and stopping there gives no reason to prefer either channel. The asymmetry — an over-cap artifact truncates and is NAMED, an over-cap `notes` fails the whole envelope — is the entire argument. |
-| RV3 | The collator's copy of the split instruction is dropped | The other end of the same guard. The collator repeats this in every brief, so its copy alone can re-create the defect on a fleet whose reviewer role is already fixed. |
-| RV4 | The file is promised to rescue a broken envelope | **The plausible lie**, and the one this change nearly shipped. It reads as reassurance, it is false, and believing it puts the long review back in the envelope. |
+| RV3 | The collator's copy of the split stops naming the ROUTE that files the review | The other end of the same guard, narrowed to the half that can still go wrong. *"by passing it as the one `report` entry of its `submit_report` call"* becomes *"by whatever route it likes"* — a destination with no route — and it reddens on *"the collator does not name the route that declares the review"*, the probe named for this case's own subject. The ROUTE is the half worth repeating because a review sent out by any other route has nothing appending anything for it; the destination path is stated TWICE in the document, so a case anchored there would have been unfalsifiable, while `` `report` entry `` occurs once. The collator repeats this in every brief, so its copy alone can re-create the defect on a fleet whose reviewer role is already fixed. |
+| RV4 | The file is promised to rescue a lens that did not report | **The plausible lie**, and the one this change nearly shipped. *"It does not rescue the lens"* becomes *"It also rescues the lens"*: it reads as reassurance, it is false, and believing it puts the long review back in the envelope. |
 | RV21 | The envelope may hold the whole review again | The pre-fix contract restored in one clause. |
-| RV22 | The review file need not be declared | `reconcile.ts` grades an empty `artifacts` array against the files actually in the outbox, so an undeclared review is a discrepancy on the reviewer's own record. |
+| RV22 | The declaration is handed BACK to the model, which no longer writes one | **RE-POINTED FROM THE CLAIM TO THE ROUTE, task 8.1.** This used to mutate *"And DECLARE the file in the envelope's `artifacts` array"*, an instruction the reviewer no longer carries out — `composeEnvelope` appends every `report` file itself. What remains mutable is the sentence that says so, and a document that instead told the reviewer to declare by hand sends it back to writing a claim `artifactMissingProblem` refuses, or out by a route with nothing appending anything. |
 | RV23 | The stated per-file cap drifts from `MAX_REPLY_ARTIFACT_BYTES` | **SURVIVED ITS FIRST RUN.** The probe asserted `toContain("64 KiB")` over the whole section, and the section says the number twice — once as the cap, once as "64 KiB of prose is roughly ten thousand words". Mutating the cap left the second occurrence satisfying the match. The number is now pinned inside the clause that states it. |
 | RV23b | The stated per-reply cap drifts from `MAX_REPLY_INLINE_BYTES` | The other number, because a fix that reached only one of the two would look identical from here. |
-| RV24 | The `notes` ceiling is dropped | Both channels then look unbounded, and the asymmetry has nothing to stand on. |
-| RV25 | The collator's brief stops requiring the declaration | RV22's other end. |
+| RV25 | The collator's brief stops FORBIDDING the artifact declaration | **RELABELLED 2026-09-11.** Until `a1ae886` the brief ORDERED the hand-declaration and this mutation removed the order. That commit INVERTED the sentence — it now reads **"Do NOT tell it to declare that file in its envelope's `artifacts` array"** — so the identical `find:` moved inside the prohibition and the mutation now removes a PROHIBITION, reddening on *"the collator still orders the hand-declaration `roles/reviewer.md` tells reviewers not to make"*. Same red, opposite meaning. The anchor never stopped matching and the case never stopped reddening; only the label was wrong, which is the harder half to notice because **nothing goes red for a label.** |
 | RV26 | The collator's copy promises the file survives a broken envelope | RV4's other end. |
-| RV27 | The worked envelope stops claiming the review file | The example is the part of a prompt a model copies most literally; one that writes an artifact and declares nothing teaches exactly the shape `reconcile.ts` flags. |
-| RV28 | The worked envelope carries a wire tag the schema refuses | The example is now PARSED against `ResultEnvelopeSchema` rather than eyeballed. |
 | RV5 | The design note stops naming a recommendation | "Here are two options" leaves the decision to whoever is in a hurry. |
 | RV6 | The design note drops the recommendation's cost | Fix A is only correct WITH a byte cap; a recommendation with no cost is one nobody can weigh. |
 | RV7 | The false diff premise restored in `roles/reviewer.md` | The defect this change repairs. |
@@ -256,7 +315,75 @@ would treat the artifact as a safety net and go back to writing long envelopes.
 | RV12 | A reviewer is pointed at a sibling's reply | §6.6's concurrency anti-criterion: a reviewer reading another's report before writing its own destroys the consensus arithmetic while looking like a better-informed review. |
 | RV13 | The location's spelling guidance is dropped | The collator has to guess at `file` and `line`, and a location it guesses wrong is one the collation drops. |
 | RV14 | The collator loses its instruction for a `path:line` it is handed | The other end of RV13: reviewers will still write `src/foo.ts:12`, and the collator has to split it rather than paste it into `file`. |
-| RV15 | `bash` is granted to the reviewer in `fleet.yaml` | The capability claim is checked against the GRANT. A role that gains bash makes "there is no diff" false, and the document would say it anyway. |
+| RV15 | `bash` is granted to the reviewer in the TRACKED `fleet.example.yaml` | The capability claim is checked against the GRANT. A role that gains bash makes "there is no diff" false, and the document would say it anyway. |
+
+**Removed by task 8.1, and what went with each.** A removed row is worth more
+written down than deleted: a table that silently drops a case reads, to the next
+person, exactly like a table that never covered it.
+
+| Gone | What it used to mutate | Why it cannot be re-anchored |
+|---|---|---|
+| RV2 | The two caps stop failing differently | The argument was that `MAX_TEXT` and `MAX_REPLY_ARTIFACT_BYTES` were the SAME 65536, so an over-cap artifact truncated and was NAMED while an over-cap `notes` destroyed the envelope. The binding ceiling on `notes` is now `SUBMIT_REPORT_PARAMETERS`' 20000, thrown in front of the model with its budget intact. The two channels no longer share a ceiling, the failure costs a retry rather than a lens, and the asymmetry the row pinned no longer exists. |
+| RV24 | The `notes` ceiling is dropped | Same deletion, other end. The document states no `notes` ceiling because the one that binds is not the host's to state. |
+| RV27 | The worked envelope stops claiming the review file | There is no worked `json` envelope left in `roles/reviewer.md`. Its first four fields — `schema`, `task_id`, `epoch`, `worker` — are ABSENT from `SUBMIT_REPORT_PARAMETERS` under `additionalProperties: false`, so a model copying the example earned a validation error. |
+| RV28 | The worked envelope carries a wire tag the schema refuses | Likewise. The probe parsed that block through `ResultEnvelopeSchema`; the block is gone. |
+
+**RV27 and RV28's coverage is NOT replaced, and that is a gap rather than a
+saving.** No probe in this battery now mutates a worked example in
+`roles/reviewer.md`, because the file has none. The equivalent under the new
+contract is a worked `submit_report` ARGUMENT checked against
+`SUBMIT_REPORT_PARAMETERS` — an addition rather than a deletion, and one nobody
+has made.
+
+**RV22 AND RV25 PULLED AGAINST EACH OTHER, AND THE BATTERY COULD NOT TELL YOU
+WHICH END WAS WRONG. `a1ae886` CLOSED IT.** The record is kept rather than
+deleted, because this one shipped and ran. `roles/reviewer.md` said
+`submit_report` declares the artifact for you, while `roles/collator.md` went on
+telling the collator to instruct each reviewer *"to declare that file in its
+envelope's `artifacts` array"* — the sentence task 8.1 had deleted from the
+reviewer's side as redundant. Both anchors matched, so both rows reddened on
+mutation and **neither reddened on the disagreement**: each probe only ever read
+its own end, one requiring the reviewer to name the ROUTE and the other
+separately requiring the collator to require the DECLARATION. Two prompts saying
+the same thing was this section's whole mitigation; two prompts saying different
+things is the failure it was built to prevent, and the console ran a full round
+that way — **both ends green** — writing briefs that ordered reviewers to do what
+their own prompt tells them not to do.
+
+**How it was closed.** `a1ae886` inverted the collator's sentence to forbid the
+declaration in as many words, and INVERTED the coupled probe rather than dropping
+it. Dropping it would leave the collator free to re-acquire the order with nothing
+watching; `.not.toContain`-ing one phrasing is escaped by every rewording. The
+probe now asserts the prohibition POSITIVELY, so it reddens both when the sentence
+goes and when the "Do NOT" is quietly dropped from in front of it. The document
+also states what obeying the old order actually cost, MEASURED against
+`submitReport` rather than inferred: a redundant `files/review.md` claim is
+ACCEPTED — `artifactMissingProblem` exempts the one path phase 2 is about to
+write — and `composeEnvelope` then appends its own claim beside the model's, so
+the envelope declares the file TWICE; the bare `review.md` the model just passed
+to `report` is REFUSED, because report files land under `files/` and the claim
+resolves to a path that does not exist.
+
+**THE LESSON OUTLIVES THE FIX, AND THIS BATTERY HAS NOW PAID FOR IT TWICE.** RV25
+is RV22's collator-side twin, and that pairing is the whole point of both: two
+role documents that must say the same thing, with one case per end. Task 8.1
+re-pointed RV22 alone and never reached RV25 — that is what let the contradiction
+run. The stale RV25 LABEL corrected above is the identical miss wearing its other
+face: a document changed, its twin's case not re-read, and an anchor that kept
+matching straight through an inversion that made its label a lie. **When one end
+of a pinned pair is re-pointed, the other end's case is part of the change —
+re-read its `find:` AND its `what:`.** A dead anchor is caught for free by
+`mutation-anchors.test.ts`; a live anchor under a false label is caught by nobody.
+
+**A NOTED IMPRECISION IN RV25'S `replace:`, DELIBERATELY LEFT ALONE.** Substituted
+into the inverted sentence, *"and nothing more"* now yields **"Do NOT tell it and
+nothing more."** — prose no author would write, where before the inversion it read
+cleanly. The case is NOT broken: the anchor matches 1x, it reddens, and it reddens
+on the prohibition probe, which is the right reason. But the plausible regression
+here is *"Do NOT"* → *"Also"*, not a sentence that reads like a truncation, and a
+mutation nobody would ever write is a weaker test of a probe than one somebody
+might. Re-anchoring a working case was out of scope for the reconcile that found
+this; it is written down so the next person does not have to re-derive it.
 
 ### The denominator, the binding, and the survivors a review found
 
@@ -279,12 +406,22 @@ was true and incomplete — a battery measures what someone thought to mutate.
 | H5 | The rank comparison is dropped from `capCollationVerdict` | **A failed review rescues itself.** A task clamped to `failed` by a malformed `ticket-ops.json` is lifted to `partial` by its own zero-finding collation. This is the "may only ever lower" property that the whole instrument rests on, and it was proved by argument until this row existed. |
 | H7 | The cap ignores the ceiling's no-op arm | When §6.8's rule is silent the ceiling returns the CLAIM, which would then be applied as a cap — the function doing `adjudicate`'s job a second time. Found by the battery; the fixture did not exist. |
 | H8 | A relative path is reported as the arm that can fail | `findingLocationArm` is the predicate the census needs to publish `located` split by arm; inverting it makes every location look checked. |
-| RV15 | `bash` granted in the TRACKED config | The capability claim, checked against the grant. |
-| RV16 | `write` removed from the TRACKED config | **The defect the owner's decision repaired.** Without it the reviewer cannot write `result.json`, every lens reports nothing, no collation is dispatched, and the fan-out task settles `success` with the review showing green. |
-| RV17 | The live config diverges from the tracked one | The console runs from `fleet.yaml`; CI grades `fleet.example.yaml`. A silent divergence is a console that behaves unlike the thing under test. |
+| RV15 | `bash` granted in the TRACKED config | The capability claim, checked against the grant. **The same case as the RV15 row in the reviewer section above** — repeated here so the grant's three probes read together, and not a second mutation. |
+| RV16 | `submit_report` removed from the TRACKED config | **The worst signature in this console's history.** `config/schema.ts` makes `{write, edit, bash}` the writer set and this role holds none of them; nothing host-side writes `result.json`, since `harvest/outbox.ts` only reads it. So `submit_report` is the only verb that can put an envelope anywhere, and a reviewer stripped of it is state 1 of `review-plan.test.ts`'s three-state history exactly: every lens missing, `relay.ts` answering `not_collated`, no collation dispatched, and the fan-out task settling `success` with the review showing green. |
+| RV17 | `submit_report` removed from the LIVE config | The same mutation, and it is kept as a second case because a DIFFERENT suite grades it. RV16 goes through `reviewer-role.test.ts`'s `grantedTools`, which CI runs. RV17 reaches only `review-plan.test.ts`'s `describe.skipIf(!HAVE_CONFIG)` block, which resolves the three `rev-*` seats through `resolveWorker` — none declares its own `tools:`, so the role's grant is what they inherit — and which SKIPS where `fleet.yaml` is absent. That skip is why RV17 was INVISIBLE rather than merely dead: `atHead` returns null for an untracked target, so the anchors guard passed over it instead of reporting it. |
 | RV18 | A fresh invented path under a real mount, in the reviewer document | **The first-segment hole.** `/policy/envelope.json` passed the old guard because `/policy` is a mount. |
 | RV19 | A fresh false capability claim in unseen wording | *"Start from the diff and work outwards."* The denylist it replaces held RV7's and RV9's own replacement strings — the probe and the mutation had been written to each other. |
 | RV20 | The same invented-path attack against the collator document | `/outbox/reports-v2/...`, which `/outbox` being a mount used to admit. |
+
+**RV16 AND RV17 CHANGED THEIR MUTATION, not just their anchor — 2026-09-11.** Both
+used to remove `write`, on the premise that a reviewer without it cannot report.
+**Task 7.1 had already removed `write`**, so that edit became a no-op on a role
+that does not hold it: the string is absent, nothing is rewritten, and a case that
+cannot change the tree cannot redden. The premise died with the grant and the
+anchor died with it. Removing `submit_report` is the same claim pointed at the
+tool that took `write`'s place. RV15's anchor was re-pointed at the same time and
+for the same reason — all three had been keyed to `tools: [read, write, grep,
+find, ls]`, a string that has occurred ZERO times in either config since task 7.1.
 
 ## Greens — and which kind of green each one is
 
@@ -296,6 +433,15 @@ Two different things look identical in a battery and must not be conflated.
 |---|---|
 | NC1 | Rename the local `reported` set in the cross-field pass (declaration + both `has` arms) |
 | NC2 | Rename `firstIssue` to `describeIssue` (declaration + its only call) |
+| NC3 | Reword the angle's closing advice in `implementation-language.md`, changing nothing checkable |
+| NC4 | Reword prose in the reviewer's caps section, leaving every number alone |
+
+**NC3 and NC4 guard the two probes that were just TIGHTENED, and that is what
+buys them their runtime.** RV23's fix pinned a number to the clause that states
+it; R14's went case-insensitive. The failure mode of that kind of repair is
+over-fitting — a probe so tight that ordinary rewording reddens it gets loosened
+again by the next person, and the coverage is lost for good. These two reword
+prose inside the exact sections those probes guard, and must stay GREEN.
 
 ### Semantic no-ops — the mutation genuinely changes nothing
 
@@ -314,11 +460,10 @@ Declared, not counted. These are real gaps.
 | U1 | The lens `note` loses its length bound | No fixture carries an over-long note. The field is free text copied from the collation brief, so the bound is hygiene rather than a property anything depends on. |
 | U2 | `findings[]` loses its cap (`MAX_COLLATION_FINDINGS`) | No fixture builds 201 findings. |
 | U3 | `lenses[]` loses its cap (`MAX_COLLATION_LENSES`) | Likewise, at 9. |
-| U4 | A task id may be 6400 characters | The id tests exercise the GRAMMAR (`SESSION_ID_RE`) and never the length, so `max(64)` is unasserted — and 64 is the number that makes an id a legal path segment. |
 | U5 | `statement` loses its length bound | No fixture carries a 4 KiB statement. |
 | U6 | A refusal loses the field-path prefix that says WHERE | `readCollation`'s `schema` refusal is asserted for `code` and for a reason longer than ten characters, never for naming the field. |
 | U7 | `disputed_by` loses its cap | Same shape as U2/U3. |
-| U10 | The historical "why both" paragraph in `roles/reviewer.md` | Deliberately unpinned. It explains a defect that is now FIXED, and a probe demanding it would freeze the document's account of its own past — the failure `371dc08` corrected when it deleted probes requiring the docs to say the contents "do not cross". What IS pinned is the current justification (RV4) and the current reason to prefer `notes` (RV2). |
+| U10 | The historical "why both" paragraph in `roles/reviewer.md` | Deliberately unpinned, and **the battery carries no U10 case** — unlike every other row here, there is nothing to mutate because nothing should hold it. It explains a defect that is now FIXED, and a probe demanding it would freeze the document's account of its own past — the failure `371dc08` corrected when it deleted probes requiring the docs to say the contents "do not cross". What IS pinned is the current justification (RV4), the instruction to keep `notes` short (RV21), and what the file route costs (RV23/RV23b). |
 | U8 | The whole `Give the failing case` instruction is deleted | **The reviewer role's JUDGEMENT content, and this is a boundary rather than an oversight.** These probes hold a document's CLAIMS ABOUT THE SYSTEM — its paths, its capabilities, its wire tags — because those are decidable against code. Whether "give the failing case" is good reviewing advice is not, and a probe pinning that sentence would be pinning a preference. |
 | U9 | The ranking instruction is inverted (a naming preference outranks a correctness bug) | Same boundary, and the sharper illustration: this is unambiguously WORSE advice and nothing catches it, because nothing can. It is here so the line is measured rather than described. |
 
@@ -372,14 +517,20 @@ inlines each artifact's contents into the reply under 64 KiB / 256 KiB caps, wit
 contention resolved by max-min fair allocation so that which half of a review
 survives is not a property of `readdir` order, and with `TRUNCATED` and
 `UNREADABLE` named separately in the brief because "arrived short" and "did not
-arrive" are different facts. RV1–RV4 now assert the surviving PROMPT-level
-belt-and-braces and its justification — `notes` remains the only uncapped channel
-— rather than a mitigation holding the feature up on its own.
+arrive" are different facts. RV1, RV3 and RV4 now assert the surviving
+PROMPT-level belt-and-braces and its justification, rather than a mitigation
+holding the feature up on its own. **`notes` is no longer the uncapped channel it
+was**, which is what took RV2 and RV24 out: `SUBMIT_REPORT_PARAMETERS` caps it at
+20000 and throws in front of the model with its budget intact, so passing the cap
+costs a retry rather than a lens.
 
 **Whether a model FOLLOWS any instruction in either document.** Unchanged and
 unclosable here. Every probe in this table reads text; none dispatches a worker.
 
-**Whether the reviewer can act on the write it was just granted.** The grant is
-asserted in config and the document is asserted against the grant, and no probe
-runs a container. `config validate` accepts it and the console has never been
-started with it.
+**Whether the reviewer can act on the grant it holds.** `write` came OUT at task
+7.1 and `submit_report` took its place, so the standing question is no longer
+whether the role can write its envelope by hand — it cannot, and must not — but
+whether the tool composes one correctly for a model that never sees the file. The
+grant is asserted in config member by member, and the document is asserted against
+the grant. Neither is a container: no probe here starts one, and nothing in this
+battery calls `submit_report`.

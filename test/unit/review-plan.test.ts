@@ -273,7 +273,7 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
     expect(angles.size).toBe(reviewers.length);
   });
 
-  it("leaves the collator its write, takes the reviewers', and gives none of them bash or edit", () => {
+  it("takes every seat's write, leaves each one submit_report, and gives none of them bash or edit", () => {
     /*
      * THE REVIEWER ARM HAS BEEN BOTH WAYS ROUND AND BOTH VERSIONS WERE RIGHT AT
      * THE TIME. Recorded in order, because the next person to read a reviewer

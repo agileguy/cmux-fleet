@@ -37,11 +37,15 @@
  *    example: a model copies its shape confidently.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { dispatchRequest, type DispatchRequestParams } from "../../docker/pi-extensions/report-tools.ts";
+import {
+  dispatchRequest,
+  submitReport,
+  type DispatchRequestParams,
+} from "../../docker/pi-extensions/report-tools.ts";
 
 import { StatusSchema } from "../../src/contracts.ts";
 import { findingLocationProblem } from "../../src/harvest/collation-census.ts";
@@ -115,29 +119,185 @@ function fanoutExample(): DispatchRequestParams {
   return JSON.parse(blockWith('"requests"')) as DispatchRequestParams;
 }
 
+/** The document with every run of whitespace collapsed, for probes about MEANING. */
+function flat(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
 /**
- * A slice of the document between two sentinels, where a MISSING sentinel is an
- * error rather than a silently wider slice.
+ * The one index at which `marker` occurs, refusing ABSENCE and AMBIGUITY alike.
+ *
+ * ## The half `between()` closed, kept
  *
  * `indexOf` returns -1 for a heading that has moved, and `slice(start, -1)` then
  * runs to the end of the document — so a scoped assertion quietly becomes a
  * whole-file one and keeps passing. Task 7.2 renamed the two artifact headings
  * and did exactly that to the `Field rules` slice; `rev-lang-1` found it on the
  * review cycle for the same commit.
+ *
+ * ## The half it did not, which is this function's reason for existing
+ *
+ * A refusal on `-1` sees a marker that occurs ZERO times. It is blind to one
+ * that occurs TWICE, and `indexOf` silently takes the first — so every slice is
+ * right only for as long as nothing upstream acquires the same words.
+ *
+ * **Measured, live in this file.** `"Turn one"` occurred twice in
+ * `roles/collator.md`: the `### Turn one` heading and a body mention of "turn
+ * one" inside the turn-one section itself. Five call sites passed the bare
+ * `between("Turn one", "Turn two")` and all five were correct, by the accident
+ * of which occurrence came first. Reword the HEADING and nothing throws: the
+ * marker re-anchors onto the body mention a hundred lines down, every one of
+ * those slices silently narrows to a fraction of the section, and the `.not`
+ * assertions among them go green on a slice that no longer contains the text
+ * they are watching for. That is the same fail-open the docblock above
+ * describes, one level up — surviving inside the helper written to prevent it.
+ *
+ * ## The fix is a more specific MARKER, never a looser helper
+ *
+ * The refusal is deliberately not "take the first" or "take the outermost". A
+ * caller whose marker went ambiguous has lost the ability to say which region it
+ * meant, and there is no rule this function can apply that recovers the
+ * intention — only the caller knows it. `### Turn one` is what that looks like
+ * in practice: four characters, unambiguous, and it stays unambiguous when the
+ * prose around it changes. Same shape and same argument as `blockWith()` above,
+ * which has refused anything but exactly one match since task 7.2.
  */
-/** The document with every run of whitespace collapsed, for probes about MEANING. */
-function flat(text: string): string {
-  return text.replace(/\s+/g, " ");
+function onlyIndexOf(marker: string): number {
+  const occurrences = ROLE.split(marker).length - 1;
+  if (occurrences === 0) throw new Error(`roles/collator.md no longer contains ${marker}`);
+  if (occurrences > 1) {
+    throw new Error(
+      `roles/collator.md contains ${marker} ${occurrences} times; a slice marker must be ` +
+        `unique or the slice is whichever one comes first. Make the marker more specific — a ` +
+        `heading's \`### \` prefix usually does it — rather than loosening this check.`,
+    );
+  }
+  return ROLE.indexOf(marker);
 }
 
+/**
+ * A slice of the document between two sentinels, where a missing OR AMBIGUOUS
+ * sentinel is an error rather than a silently different slice.
+ *
+ * (This docblock had drifted onto `flat()` below it and described a function it
+ * was not attached to. Moved back, unchanged; the argument it carried now lives
+ * on `onlyIndexOf` above, which both slicers share.)
+ */
 function between(startMarker: string, endMarker: string): string {
-  const start = ROLE.indexOf(startMarker);
-  const end = ROLE.indexOf(endMarker);
-  if (start < 0) throw new Error(`roles/collator.md no longer contains ${startMarker}`);
-  if (end < 0) throw new Error(`roles/collator.md no longer contains ${endMarker}`);
+  const start = onlyIndexOf(startMarker);
+  const end = onlyIndexOf(endMarker);
   if (end < start) throw new Error(`${endMarker} precedes ${startMarker} in roles/collator.md`);
   return ROLE.slice(start, end);
 }
+
+/**
+ * The TAIL of the document from a sentinel, with the same refusal — the
+ * one-sentinel half of `between()`, which task 7.2 left unconverted.
+ *
+ * `between()` closed this for two-sentinel slices. Two one-sentinel slices were
+ * left on the raw `ROLE.slice(ROLE.indexOf(m))` form, and they are the more
+ * dangerous half, because what a missing marker does here depends entirely on
+ * the polarity of the assertion underneath it. `indexOf` returns -1, `slice(-1)`
+ * yields the document's LAST CHARACTER, and then:
+ *
+ * - a `toContain` fails, but names a missing SENTENCE when what actually
+ *   happened was a renamed HEADING — a true failure with a misleading cause; and
+ * - a `.not.toContain` PASSES UNCONDITIONALLY. Every substring is absent from a
+ *   one-character string.
+ *
+ * The second is the worst polarity this defect has, and it was live in this
+ * file: "the stop instruction is inside turn one" is a drift detector whose only
+ * assertion is a `.not.toContain`. Reword "Turn two" and it goes permanently,
+ * silently green while still claiming to watch for exactly the drift it can no
+ * longer see. A detector that cannot see is indistinguishable from one reporting
+ * nothing to see. Measured before this change: with the marker perturbed, that
+ * test reported `1 pass, 0 fail`.
+ *
+ * Same refusal as `sliceFrom` in `test/unit/reviewer-role.test.ts`, which took
+ * eight of these on the sibling commit — deliberately the same NAME so a grep
+ * finds both. That one carries a document and a name because it scopes into four
+ * documents; this one needs neither, because every slice here is of
+ * `roles/collator.md`.
+ *
+ * There is no `sliceTo` here: this file takes no head slices. Add it with the
+ * index-0 refusal its counterpart carries if that ever changes.
+ *
+ * **The AMBIGUOUS marker goes through `onlyIndexOf` for the same reason.** A
+ * tail slice re-anchored onto a later duplicate of its own marker is strictly
+ * worse than the two-sentinel case: it does not narrow to a wrong region, it
+ * narrows to the document's tail, and the `.not.toContain` polarity this
+ * docblock is already about passes just as unconditionally on a short tail as
+ * on one character. Both slicers share the one guard so neither can drift into
+ * holding half of it.
+ */
+function sliceFrom(marker: string): string {
+  return ROLE.slice(onlyIndexOf(marker));
+}
+
+/**
+ * THE SLICE GUARDS ACTUALLY REFUSE — pinned here, because until this block
+ * existed nothing committed said they did.
+ *
+ * ## Why these needed writing down, given that they are correct today
+ *
+ * Every marker at every call site in this file resolves uniquely against
+ * `roles/collator.md`, and every `between()` pair is in document order. That is
+ * not an accident, it is the point — and it is also what makes these refusals
+ * **dormant**: deleting the `occurrences === 0` arm, the `occurrences > 1` arm,
+ * or `between`'s ordering check leaves every other test in this file passing.
+ * Measured before this block was written: all three deletions gave 84 pass /
+ * 0 fail.
+ *
+ * They were correct because somebody perturbed a marker by hand once and
+ * watched what happened. A manual perturbation leaves nothing behind. The next
+ * person to decide this guard is fussy — and its own docblock anticipates that
+ * person, which is why it argues at length against "take the first" — gets a
+ * green suite for removing it. So the refusals are asserted directly, three
+ * cheap probes that stay true for as long as the functions do.
+ *
+ * ## Why the MARKERS are synthetic and the document is not
+ *
+ * `onlyIndexOf` here closes over `ROLE` by design — the sibling
+ * `test/unit/reviewer-role.test.ts` takes a document and a name because it
+ * scopes into four, and this one deliberately does not. So the synthetic half
+ * available here is the marker, not the text. That is enough: what is under
+ * test is the ARITHMETIC on the occurrence count, and a marker chosen for its
+ * multiplicity exercises it exactly as a synthetic document would.
+ *
+ * The non-unique marker is `"\n"` rather than a quoted phrase on purpose. A
+ * phrase that happens to occur twice today is one edit away from occurring
+ * once, and then this probe reddens for a reason that has nothing to do with
+ * the guard it is watching. A newline is non-unique by CONSTRUCTION in any
+ * document with more than one line, and the count is asserted below so the
+ * probe cannot go vacuous if that ever stops being true.
+ */
+describe("the slice helpers refuse the inputs they promise to refuse", () => {
+  test("an ABSENT marker is an error, not a silent -1", () => {
+    expect(() =>
+      onlyIndexOf("### A heading roles/collator.md has never carried"),
+    ).toThrow(/no longer contains/);
+  });
+
+  test("a NON-UNIQUE marker is an error, not silently the first occurrence", () => {
+    // Non-vacuous: the marker really does occur more than once, so the refusal
+    // below is the thing being observed rather than an accident of the fixture.
+    expect(ROLE.split("\n").length - 1, "roles/collator.md has more than one line").toBeGreaterThan(
+      1,
+    );
+    expect(() => onlyIndexOf("\n")).toThrow(/a slice marker must be unique/);
+  });
+
+  /**
+   * The pair is the one five call sites in this file already depend on, used
+   * BACKWARDS. Reusing markers the file is already coupled to means this probe
+   * adds no new coupling of its own: if `### Turn one` or `Turn two` is ever
+   * reworded, those five call sites fail first and for the right reason, and
+   * this test does not become an independent thing to remember to update.
+   */
+  test("between() refuses a slice whose end precedes its start", () => {
+    expect(() => between("Turn two", "### Turn one")).toThrow(/precedes/);
+  });
+});
 
 describe("the mechanism the document describes is the one that exists", () => {
   /**
@@ -337,14 +497,14 @@ describe("the ids the document tells the collator to name are the derived ones",
    * rather than wherever the string happens to occur.
    */
   test("the collation id appears in the turn-one instruction", () => {
-    const turnOne = between("Turn one", "Turn two");
+    const turnOne = between("### Turn one", "Turn two");
     expect(turnOne).toContain(collationTaskId(PARENT));
     expect(collationTaskId(PARENT)).toBe(`${PARENT}-${COLLATION_ASPECT}`);
   });
 
   /** The same scoping for the three child ids, for the same reason. */
   test("every child id appears in the turn-one instruction, not merely somewhere", () => {
-    const turnOne = between("Turn one", "Turn two");
+    const turnOne = between("### Turn one", "Turn two");
     for (const seat of REVIEW_CONSOLE_ASPECTS) {
       expect(turnOne, `turn one never names ${childTaskId(PARENT, seat.aspect)}`).toContain(
         childTaskId(PARENT, seat.aspect),
@@ -454,6 +614,131 @@ describe("every worked example in the document validates", () => {
   });
 });
 
+/**
+ * THE SPLIT THE DOCUMENT INSTRUCTS IS THE ONE `submit_report` PERFORMS.
+ *
+ * ## What these replace, and why the replacement is executable
+ *
+ * Task 8.2 deleted three claims from the fan-out brief because `submit_report`
+ * had made them false, and a deletion justified by a mechanism is only as good
+ * as the evidence that the mechanism does what the deletion assumed. Each probe
+ * below DRIVES THE REAL TOOL and asserts the fact the deleted sentence used to
+ * assert in prose, so the justification lives in the suite rather than in a
+ * commit message:
+ *
+ *  - *"declare that file in its envelope's `artifacts` array"* — redundant
+ *    because `composeEnvelope` appends every `report` file itself.
+ *  - *"a reviewer … wrote a FILE called `notes`"* — unreachable because `notes`
+ *    is a typed parameter of a tool the role cannot bypass, not a path.
+ *  - *"An invalid escape in a quoted regex broke one"* — unreachable because the
+ *    tool serialises the envelope, so no character of the prose can reach the
+ *    JSON as syntax.
+ *
+ * **These are the arm the string probes above cannot be.** Everything else in
+ * this file quotes the document; a quotation cannot tell you whether the thing
+ * quoted is still true. Deleting a true sentence and deleting a false one look
+ * identical to a `toContain`, which is exactly how a Phase C cut goes wrong.
+ */
+describe("the mechanism that retired the deleted prose really does what it claimed", () => {
+  const REPORT_CONTENT = "# review\n\nfindings go here.\n";
+
+  function submitWithReport(params: {
+    notes?: string;
+    artifacts?: { kind: "file" | "diff" | "log" | "note"; path: string }[];
+  }) {
+    const f = policyFixture();
+    const out = submitReport(
+      {
+        status: "success",
+        summary: "a collated review",
+        ...params,
+        report: [{ filename: ARTIFACT_NAMES.prose, content: REPORT_CONTENT }],
+      },
+      "col-1",
+      { ...f.mounts, workdir: null },
+    );
+    const envelope = JSON.parse(readFileSync(out.path, "utf8"));
+    return { dir: f.dir, out, envelope };
+  }
+
+  /**
+   * THE DESTINATION, derived rather than retyped.
+   *
+   * The document names `/outbox/<task-id>/files/review.md` and the reviewer is
+   * told to file its long review there. That is now a claim about where
+   * `submit_report` puts a `report` entry, so it is checked by putting one there
+   * — with `<task-id>` substituted for the fixture's own id, which is the only
+   * part of the string that is not literal.
+   */
+  test("the path the document names is the path the tool writes a `report` file to", () => {
+    const { dir, out } = submitWithReport({});
+    expect(ROLE, "the document no longer names the review's destination").toContain(
+      `/outbox/<task-id>/files/${ARTIFACT_NAMES.prose}`,
+    );
+    expect(out.reportPaths).toHaveLength(1);
+    expect(
+      out.reportPaths[0]!.endsWith(`/${EXAMPLE_TASK_ID}/files/${ARTIFACT_NAMES.prose}`),
+      `the tool wrote ${out.reportPaths[0]}, which is not the shape the document promises`,
+    ).toBe(true);
+    expect(readFileSync(out.reportPaths[0]!, "utf8")).toBe(REPORT_CONTENT);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * THE REDUNDANCY, asserted on a call that declares NOTHING.
+   *
+   * `artifacts` is deliberately absent here. If the envelope still claims the
+   * review, the instruction to declare it by hand was work the tool was already
+   * doing — which is the whole justification for cutting it from the brief.
+   */
+  test("the tool declares the report file with no `artifacts` in the call", () => {
+    const { dir, envelope } = submitWithReport({});
+    const claimed = (envelope.artifacts ?? []).map((a: { path: string }) => a.path);
+    expect(claimed, "the envelope does not claim the file the tool just wrote").toContain(
+      `files/${ARTIFACT_NAMES.prose}`,
+    );
+    // ONCE, not twice. A collator that also declared it by hand would double the
+    // claim, and an operator reading two entries for one file cannot tell a
+    // duplicate from a second document that was overwritten.
+    expect(claimed.filter((p: string) => p === `files/${ARTIFACT_NAMES.prose}`)).toHaveLength(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * THE UNREACHABILITY, which is the deleted paragraph's own claim inverted.
+   *
+   * The document used to say an invalid escape in a quoted regex destroyed an
+   * envelope. That required a model composing JSON by hand with `write`. The
+   * role holds no `write` and `notes` is a string parameter, so the bytes below
+   * — a backslash escape that is invalid in JSON, quotes, a brace, a newline —
+   * must survive into the envelope as DATA and must not reach it as syntax.
+   *
+   * If this ever fails, the deleted paragraph was right and should come back.
+   */
+  test("prose in `notes` cannot break the envelope it rides in", () => {
+    const nasty = 'a regex like /\\w+"{2}/ and a stray \\ plus a brace } and a newline\nhere';
+    const { dir, out, envelope } = submitWithReport({ notes: nasty });
+    expect(envelope.notes, "`notes` did not survive serialisation byte-exact").toBe(nasty);
+    expect(envelope.schema).toBe("pifleet.result/v1");
+    expect(envelope.task_id).toBe(EXAMPLE_TASK_ID);
+    // And the file beside it is untouched by what the envelope carried.
+    expect(readFileSync(out.reportPaths[0]!, "utf8")).toBe(REPORT_CONTENT);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * `notes` IS NOT A PATH, which is what retires the `notes`-as-a-filename
+   * anecdote. The tool writes exactly two things — the report file and the
+   * envelope — and no argument to it can add a third called `notes`.
+   */
+  test("nothing named `notes` is ever written beside the review", () => {
+    const { dir, out } = submitWithReport({ notes: "a short summary" });
+    const filesDir = out.reportPaths[0]!.slice(0, out.reportPaths[0]!.lastIndexOf("/"));
+    expect(readdirSync(filesDir).sort()).toEqual([ARTIFACT_NAMES.prose]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("the statuses the document instructs are ones the schema accepts", () => {
   test("every backticked status word in the document is a legal status", () => {
     const legal = new Set<string>(StatusSchema.options);
@@ -474,7 +759,7 @@ describe("the statuses the document instructs are ones the schema accepts", () =
    * by `min`.
    */
   test("turn one is instructed to claim success", () => {
-    const turnOne = between("Turn one", "Turn two");
+    const turnOne = between("### Turn one", "Turn two");
     expect(turnOne).toContain('`status: "success"`');
   });
 
@@ -493,10 +778,25 @@ describe("the statuses the document instructs are ones the schema accepts", () =
  * enforced.
  */
 describe("the document does not spell the structural check as acceptance", () => {
-  const GRADED = ROLE.slice(ROLE.indexOf("HOW THIS IS GRADED"));
+  /*
+   * LAZY, for the reason `turnOne` below is lazy. A `const` in a describe body
+   * evaluates at COLLECTION time, so a throwing helper there would abort the
+   * whole file — 47 tests reporting one error about a heading — instead of
+   * reddening the three tests that actually depend on the marker.
+   *
+   * SCOPE, recorded rather than narrowed: this runs to the END of the document,
+   * so it also covers `## THE PROPRIETARY-REMOTE CHECK IS NOT YOURS TO MAKE`,
+   * which follows the grading section. All four phrases the tests below look for
+   * are inside the grading section today (roles/collator.md:421-427), so the
+   * over-reach changes no result — but a future `accepted`/`verified`/`proven`
+   * landing in the proprietary-remote section would satisfy the third test from
+   * outside the section it names. Narrowing the slice would change what these
+   * assert, which this pass deliberately does not do.
+   */
+  const graded = (): string => sliceFrom("HOW THIS IS GRADED");
 
   test("it says plainly that this is not acceptance", () => {
-    expect(GRADED.includes("not acceptance"), "the grading section never says so").toBe(true);
+    expect(graded().includes("not acceptance"), "the grading section never says so").toBe(true);
   });
 
   test("it does not instruct the collator to write acceptance criteria", () => {
@@ -504,7 +804,7 @@ describe("the document does not spell the structural check as acceptance", () =>
       // Matched WITHOUT the leading "do not", which the document's own wrapping
       // splits across a newline. A probe pinned to a line break is a probe that
       // reddens on a reflow.
-      GRADED.includes("put acceptance commands on a review task"),
+      graded().includes("put acceptance commands on a review task"),
       "the grading section no longer refuses acceptance commands",
     ).toBe(true);
   });
@@ -516,8 +816,9 @@ describe("the document does not spell the structural check as acceptance", () =>
    * mistake.
    */
   test("it names the words the schema will refuse", () => {
+    const g = graded();
     for (const w of ["accepted", "verified", "proven"]) {
-      expect(GRADED.includes(w), `the grading section never names "${w}"`).toBe(true);
+      expect(g.includes(w), `the grading section never names "${w}"`).toBe(true);
     }
   });
 });
@@ -577,7 +878,7 @@ describe("the house rule on attribution holds in the document itself", () => {
  *   and it is the arm a single grep for either sentence alone would miss.
  */
 describe("turn one scopes the change rather than reviewing it", () => {
-  const turnOne = (): string => between("Turn one", "Turn two");
+  const turnOne = (): string => between("### Turn one", "Turn two");
 
   test("turn one denies the collator standing to make findings", () => {
     expect(turnOne()).toContain("findings are not yours");
@@ -645,7 +946,7 @@ describe("turn one scopes the change rather than reviewing it", () => {
  * will be tempted to cut them.
  */
 describe("turn one tells the collator what DONE looks like, not just what not to do", () => {
-  const turnOne = (): string => between("Turn one", "Turn two");
+  const turnOne = (): string => between("### Turn one", "Turn two");
 
   test("the envelope is named as the last tool call of the turn", () => {
     expect(turnOne(), "turn one never says the envelope ends it").toContain("LAST TOOL CALL");
@@ -697,7 +998,10 @@ describe("turn one tells the collator what DONE looks like, not just what not to
    * there.
    */
   test("the stop instruction is inside turn one, where the collator will be reading", () => {
-    const turnTwo = ROLE.slice(ROLE.indexOf("Turn two"));
+    // `sliceFrom`, NOT `ROLE.slice(ROLE.indexOf(...))`. The assertion below is a
+    // `.not.toContain`, which is satisfied by the one-character slice a missing
+    // marker produces — so on the raw form this probe's failure mode was to pass.
+    const turnTwo = sliceFrom("Turn two");
     expect(turnTwo, "the stop instruction drifted out of turn one").not.toContain("LAST TOOL CALL");
   });
 });

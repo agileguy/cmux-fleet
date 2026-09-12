@@ -913,7 +913,7 @@ describe("§6.6 layer 4: per-seat pins, resolved per seat rather than per run", 
     const runs = await resolveSeatRuns(undefined, process.env);
     expect(runs[TRIAGE_COLLATOR]).toBe(newer.runId);
     // Resolved against its OWN directory: the newest run does not hold obs-t1,
-    // and assuming all four seats share one run would answer `2222` here.
+    // and assuming both seats share one run would answer `2222` here.
     expect(runs["obs-t1"]).toBe(older.runId);
     // A seat with no directory anywhere is ABSENT, never an empty string.
     expect(Object.keys(runs)).not.toContain("obs-t3");
@@ -1085,10 +1085,11 @@ describe("buildTriageSweepDriver: ten members from one dep set", () => {
  * default `sweep_deadline_s` of 240 (`cadence_s 300 − reserve_s 60`), so the
  * loader's own cross-file refusals are satisfied by a value rather than by luck.
  *
- * THREE services and three observers, one each, because a partition is only
- * exercised by a fixture it can be wrong about: with one service two of the
- * three seats would have nothing to be assigned and `checkTriagePartition` would
- * be satisfied by a request that named one worker.
+ * THREE services, all in the one observer's slice (see `SLICE_OF` below),
+ * because a partition is only exercised by a fixture it can be wrong about:
+ * with one service, `checkTriagePartition` would be satisfied by a request
+ * naming that single service, and a missing, duplicated or undeclared
+ * service would never have a chance to show up.
  */
 const FIXTURE_TARGETS = `
 version: 1
@@ -1359,10 +1360,11 @@ interface FixtureFleet {
  */
 interface FixtureFleetOptions {
   /**
-   * Which seats the run materialises. The default is all four; a list WITHOUT
-   * {@link TRIAGE_COLLATOR} is the cold console task 6.5c is about, and it has
-   * to be built by omission rather than by deleting a directory afterwards —
-   * see the note on `seats` below.
+   * Which seats the run materialises. The default is both of the console's
+   * current seats — {@link TRIAGE_COLLATOR} plus its one observer; a list
+   * WITHOUT {@link TRIAGE_COLLATOR} is the cold console task 6.5c is about,
+   * and it has to be built by omission rather than by deleting a directory
+   * afterwards — see the note on `seats` below.
    */
   readonly seats?: readonly string[];
   /**
@@ -1681,12 +1683,13 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
      * the collation goes last because it names the children. Those two are causal
      * and are asserted exactly, by position.
      *
-     * The three observers between them are NOT ordered by anything. They are
+     * Whatever observers sit between them are NOT ordered by anything. They are
      * dispatched concurrently (§6.5 — a slice is independent of every other slice
      * by construction), so their entry order is a scheduling detail. Asserting it
-     * would fail on a schedule rather than on a defect, and pinning it is what made
-     * the fan-out serial in the first place — which cost this console two of three
-     * observers on its first live sweep.
+     * would fail on a schedule rather than on a defect — which is exactly what
+     * pinning it did back when this console still ran three observers: it made
+     * the fan-out serial and cost this console two of three observers on its
+     * first live sweep.
      */
     expect(fleet.dispatched).toHaveLength(2 + TRIAGE_CONSOLE_ASPECTS.length);
     expect(fleet.dispatched[0]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1`);
@@ -2383,9 +2386,9 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
     const first = fleet.run;
     /*
      * `obs-t1` is the seat this console lost, and the directory is removed AFTER
-     * `fixtureFleet` rather than before: that helper materialises all four seats
-     * itself, so a run tree built short would be silently made whole again and
-     * the boundary would find nothing due — a vacuous pass rather than a test.
+     * `fixtureFleet` rather than before: that helper materialises both of its
+     * seats itself, so a run tree built short would be silently made whole again
+     * and the boundary would find nothing due — a vacuous pass rather than a test.
      */
     await rm(join(first.workersDir, "obs-t1"), { recursive: true, force: true });
     expect((await resolveSeatRuns(ALL_SEATS, fleet.effects.env))["obs-t1"]).toBeUndefined();
@@ -2467,7 +2470,7 @@ describe("§13 task 6.5b: --poll recycles, through the composition root's own ef
           runs: Object.fromEntries(ALL_SEATS.map((s) => [s, before.runId])),
           sweep_cursor: 100,
           consecutive_skips: 0,
-          // 100 - 0 ≥ 48 for the collator; 100 - 100 < 48 for the three observers.
+          // 100 - 0 ≥ 48 for the collator; 100 - 100 < 48 for the observer.
           recycled_at: Object.fromEntries(
             ALL_SEATS.map((s) => [s, s === TRIAGE_COLLATOR ? 0 : 100]),
           ),
@@ -2694,7 +2697,7 @@ describe("§13 task 6.9: §7.8's cadence_s reaches --poll, and --poll overrides 
 // §13 task 6.5c — a console with no collator at start
 // ---------------------------------------------------------------------------
 
-/** The three observers, i.e. every seat EXCEPT the one the watch is pinned to. */
+/** The observer, i.e. every seat EXCEPT the one the watch is pinned to. */
 const OBSERVER_SEATS = TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker);
 
 describe("§13 task 6.5c: an actor may START into a console with no collator", () => {
@@ -2762,7 +2765,7 @@ describe("§13 task 6.5c: an actor may START into a console with no collator", (
     );
 
     expect(exit).toEqual({ kind: "stopped", passes: 1 });
-    // ONLY the collator was due: the three observers are present and unstamped,
+    // ONLY the collator was due: the observer is present and unstamped,
     // and there was no run to hand `downRun`, so the repair is one `up`.
     expect(fleet.recycled).toEqual([`up ${TRIAGE_COLLATOR}`]);
     expect(repaired).not.toBeNull();

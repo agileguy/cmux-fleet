@@ -105,8 +105,8 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
 | `col-1` | collator | review | `base` | writes the fan-out request; does not review |
 | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | reviewer | review | `base` | three vendors, read-only, `shared-ro` |
-| `tri-1` | triage | triage | `base` | the collator: partitions the environment's services and collates the sweep. **Local `gpt-oss-20b-MXFP4-Q8`** |
-| `obs-t1`, `obs-t2`, `obs-t3` | triage | triage | `base` | one share of services each, per sweep. Same local model; `tools: [read, write, grep, find, ls]` |
+| `tri-1` | triage | triage | `base` | the collator: writes ONE request naming every declared service, then collates the reply. **Local `gemma-4-26b-a4b-it-bf16`**; `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
+| `obs-t1` | **observer** | triage | `base` | the console's ONE observer; it sweeps the whole service list, there is nothing to share it with. Same local model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
 is gitignored. The tracked `fleet.example.yaml` differs in three ways worth
@@ -114,14 +114,32 @@ knowing before it is used to reason about this one: its `tester` role declares n
 `egress_access` and its `egress.allow` names no package registry, so **"egress to
 the registries" is false there**; its development seats run local oMLX models
 rather than hosted ones; and the `review` console's four seats are not declared in
-it at all. **The `triage` console's four ARE** — `{id: tri-1, role: triage}` and the three
-`obs-t*` seats appear in both files, on the local `gpt-oss-20b-MXFP4-Q8` the role pins, so the
-example can stand that console up where it cannot stand up `review`. Checked 2026-09-07 rather
-than assumed: the `workers:` block is a LIST of `{id, role}` maps, and a `^\s+<id>:` search over
-it finds nothing and reads as *"not declared"* — which is how this sentence would have grown a
-fourth false clause. `rev-1` is gone from both — the development console's fourth seat is
-`tst-2` on `role: tester`, and `role: reviewer` now serves the three `review`
-console lenses.
+it at all. **The `triage` console's TWO ARE** — `{id: tri-1, role: triage}` and
+`{id: obs-t1, role: observer}` appear in both files, so the example can stand that
+console up where it cannot stand up `review`.
+
+**This row said FOUR until 2026-09-11, and that is the reason to distrust this
+table rather than read it.** It claimed *"the `triage` console's four ARE — … and
+the three `obs-t*` seats … on the local `gpt-oss-20b-MXFP4-Q8` the role pins"*,
+and it carried the words *"Checked 2026-09-07 rather than assumed"* plus a warning
+about how it had nearly grown a fourth false clause. It grew one anyway, by
+rotting: there is no `obs-t2` or `obs-t3` in either config, and both files now put
+these seats on `gemma-4-26b-a4b-it-bf16` — `fleet.yaml` by an explicit per-worker
+`model:`, the example by role inheritance after its own test deleted the override.
+**A claim that says when it was checked is a claim nobody re-checks**; the date
+reads as a guarantee and is only a timestamp. The seat count has four sources and
+none of them is this table — `TRIAGE_CONSOLE_ROSTER` in
+`src/run/dispatch-request.ts`, `DEFAULT_TRIAGE_WORKERS` in
+`src/backends/cmux/operations-plan.ts`, the `workers:` block of
+`fleet.example.yaml`, and the `workers:` block of `fleet.yaml`. Open one before
+repeating this row.
+
+The search lesson the old sentence recorded is still the right one, and it is why
+the "declared in both" half survived while everything around it rotted: the
+`workers:` block is a LIST of `{id, role}` maps, so a `^\s+<id>:` search over it
+finds nothing and reads as *"not declared"*. `rev-1` is gone from both — the
+development console's fourth seat is `tst-2` on `role: tester`, and
+`role: reviewer` now serves the three `review` console lenses.
 
 Roles, models, secrets, egress and **toolchain** are in
 `~/repos/cmux-fleet/fleet.yaml`; per-role system prompts are in `roles/*.md`.

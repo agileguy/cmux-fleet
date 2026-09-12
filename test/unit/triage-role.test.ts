@@ -54,6 +54,29 @@ function jsonBlocks(): string[] {
 }
 
 /**
+ * `collator-role.test.ts`'s helper, copied here for the reason it exists there:
+ * **a bare `ROLE.slice(ROLE.indexOf(A), ROLE.indexOf(B))` FAILS OPEN.** A renamed
+ * heading makes `indexOf` return `-1`, the slice silently runs to the end of the
+ * document, and every assertion inside it keeps passing while the scoping it
+ * claims is gone. Task 8.3 renamed two headings in this file, so the hazard is
+ * live rather than hypothetical and the sentinels throw by name instead.
+ *
+ * The slice comes back whitespace-NORMALISED, because every sentence in this
+ * document is longer than its wrap column and a raw `toContain` over a slice is
+ * really an assertion about where a line happens to break — the false refusal
+ * ISC-1141 already paid for once. The sentinels themselves are matched on the raw
+ * text, which is sound because headings do not wrap.
+ */
+function between(startMarker: string, endMarker: string): string {
+  const start = ROLE.indexOf(startMarker);
+  const end = ROLE.indexOf(endMarker);
+  if (start < 0) throw new Error(`roles/triage.md no longer contains ${startMarker}`);
+  if (end < 0) throw new Error(`roles/triage.md no longer contains ${endMarker}`);
+  if (end < start) throw new Error(`${endMarker} precedes ${startMarker} in roles/triage.md`);
+  return ROLE.slice(start, end).replace(/\s+/g, " ");
+}
+
+/**
  * A `/policy/task` and an outbox, so the real tool can be driven.
  *
  * `declaredParentTaskId` used to live here, reading the id out of the example
@@ -148,10 +171,10 @@ describe("the fan-out example is a document the real parser accepts", () => {
   });
 
   /**
-   * The partition the example draws is a real one — three observers, five
+   * The partition the example draws is a real one — one observer, three
    * services, no repeats. Asserted BY VALUE across the union, because a fixture
-   * where every observer holds the same count is one a `sort`, a `Set` or a
-   * `reverse` all survive, and this document is the thing a model copies.
+   * asserted only by count is one a `sort`, a `Set` or a `reverse` all survive,
+   * and this document is the thing a model copies.
    */
   test("the example's shares are disjoint and its union is asserted by name", () => {
     const parsed = fanoutExample() as { requests: { services: string[] }[] };
@@ -452,5 +475,178 @@ describe("a write-less collator is told not to declare what it has not written (
 
   test("repeating a refused call is named as the failure, not the retry", () => {
     expect(FLAT).toContain("If a call is refused, change what you send. Sending it again is the failure, not the retry.");
+  });
+});
+
+/**
+ * ── §2.6's CONTRADICTION, CLOSED AND PINNED (§13 task 8.3) ──────────────────
+ *
+ * The document disagreed with itself about how many observers exist, in three
+ * places at once: a three-observer TABLE that reasoned about a three-wide
+ * fan-out, a section shouting **"YOU HAVE EXACTLY ONE OBSERVER"** that said
+ * *"those seats do not exist"*, and a turn-one `notes` example naming all three.
+ * §2.6 records it as the strongest single argument for §8 — *"the roster is
+ * host-side data and the prose is a hand copy of it that has already drifted"*.
+ *
+ * **So the count is asserted AGAINST `TRIAGE_CONSOLE_ROSTER` rather than spelled
+ * here**, which is the whole point: a test that typed `["obs-t1"]` into its own
+ * expectation would be a second hand copy, drifting on the same schedule as the
+ * first. A console that grows a second observer reddens this file and the fix is
+ * then to rewrite the prose, not to raise a number.
+ */
+describe("the document no longer contradicts itself about how many observers exist", () => {
+  const FLAT = ROLE.replace(/\s+/g, " ");
+  const ROSTER = TRIAGE_CONSOLE_ROSTER.reviewers;
+
+  /**
+   * The premise every assertion below rests on, asserted first so that none of
+   * them can pass vacuously over an empty or unexpected roster.
+   */
+  test("the console this document describes really does have exactly one observer", () => {
+    expect(ROSTER).toEqual(["obs-t1"]);
+  });
+
+  /**
+   * The table's own ghosts, checked IN PLACE rather than counted. `obs-t2` and
+   * `obs-t3` are allowed to appear — the row that refuses them by name is worth
+   * having, because a model that has met a three-observer version of this console
+   * needs to be told which seats are the imaginary ones. What is not allowed is
+   * an id off the roster appearing anywhere the document treats it as real.
+   *
+   * Asserted as a LINE COUNT plus the refusal wording, so both directions redden:
+   * restoring the table (or the deleted envelope example) puts a ghost on a line
+   * that does not refuse it, and deleting the warning altogether drops the count.
+   */
+  test("an observer id off the roster appears only where the document denies it exists", () => {
+    const ghostLines = ROLE.split("\n").filter((line) =>
+      [...line.matchAll(/obs-t\d+/g)].some((m) => !ROSTER.includes(m[0])),
+    );
+    expect(
+      ghostLines,
+      "a line in roles/triage.md names an observer this console does not have; the only " +
+        "line permitted to do that is the one saying those seats do not exist",
+    ).toHaveLength(1);
+    expect(ghostLines[0]).toContain("those seats do not exist");
+  });
+
+  /**
+   * The third leg, by absence. The turn-one worked example was a hand-composed
+   * `pifleet.result/v1` envelope whose `notes` dispatched to all three seats —
+   * false twice over, because `submit_report` composes that envelope from typed
+   * arguments and this role has held no `write` since task 7.3.
+   */
+  test("the hand-composed result envelope, which named all three seats, is gone", () => {
+    expect(ROLE).not.toContain("pifleet.result/v1");
+  });
+
+  /**
+   * And the three-wide REASONING, which is the half a reader would restore first
+   * — the table is obviously stale, a sentence about fan-out width is not.
+   */
+  test("the document does not reason about a fan-out wider than the roster", () => {
+    expect(FLAT).not.toContain("the fan-out is never wider than three");
+    expect(FLAT).not.toContain("All three are the same role on the same model");
+    expect(FLAT).toContain("Write ONE request. Name EVERY service in it.");
+  });
+
+  /**
+   * The example is the strongest instruction in the document, so it is held to
+   * the roster too — by VALUE, not by shape. A fan-out of one request naming one
+   * seat is the only thing this console can dispatch.
+   */
+  test("the fan-out example dispatches the roster and nothing else", () => {
+    const parsed = fanoutExample() as { requests: { worker: string }[] };
+    expect(parsed.requests.map((r) => r.worker)).toEqual([...ROSTER]);
+  });
+
+  /**
+   * And the `triage.json` example, which attributes rows to a seat. Before task
+   * 8.3 its second row was attributed to `obs-t2` — a service observed by a seat
+   * that does not exist, in the document a model copies its output from.
+   */
+  test("every row of the triage.json example is attributed to a seat that exists", () => {
+    const body = jsonBlocks().find((b) => b.includes(TRIAGE_DOCUMENT_SCHEMA))!;
+    const got = parseTriageDocument(body, {
+      worker: TRIAGE_CONSOLE_ROSTER.collators[0]!,
+      path: "roles/triage.md#triage.json",
+    });
+    if (got.kind !== "ok") throw new Error("premise failed: the example no longer parses");
+    expect(got.document.services.length).toBeGreaterThan(1);
+    for (const row of got.document.services) {
+      // `observer` is NULLABLE in the schema, so the membership check below would
+      // pass over a row that attributed itself to nobody if this did not run
+      // first — the example is the thing a model copies and it must model the
+      // attribution the prose demands, not the weakest document the host accepts.
+      expect(row.observer).not.toBeNull();
+      expect(ROSTER).toContain(row.observer!);
+    }
+  });
+});
+
+/**
+ * ── PHASE C: THE DOCUMENT NAMES WHAT A FILE IS, NEVER WHERE IT GOES ─────────
+ *
+ * §13 task 8.3. Phases A and B put `submit_report` and `dispatch_request` in the
+ * image and then took `write` away; this phase removes the prose that used to
+ * stand in for them. The surviving headings are the test of whether it happened:
+ * they read `## WHAT YOU WRITE ON TURN TWO` and
+ * `### /outbox/<task-id>/files/triage.json` while this role delivers both
+ * documents through `report` and holds no tool that takes a path.
+ *
+ * **Placement is asserted, not merely presence**, and that is what the sentinel
+ * helper is for. The delivery rule used to sit at the tail of the turn-one block,
+ * sixty lines above the section that announces the delivery — ISC-1147's defect
+ * exactly, a rule housed where the failure does not happen. A `toContain` over
+ * the whole document cannot tell the two arrangements apart.
+ */
+describe("the turn-two delivery section is where the delivery rule lives (task 8.3)", () => {
+  test("the headings name the document, not the directory the host chooses", () => {
+    expect(ROLE).toContain("## WHAT YOU DELIVER ON TURN TWO");
+    expect(ROLE).toContain("### `triage.json`");
+    expect(ROLE).toContain("### `triage.md`");
+    expect(ROLE).not.toContain("## WHAT YOU WRITE ON TURN TWO");
+    expect(ROLE).not.toContain("### `/outbox/<task-id>/files/triage");
+  });
+
+  /**
+   * The fan-out path is the ONE outbox path that stays, and it is the anti-half
+   * of the assertion above: a rule banning every `/outbox/` string would make a
+   * correct document unwritable, since `dispatch_request` writes a file the
+   * operator has to be able to recognise in a transcript.
+   */
+  test("the fan-out file is still named as the poller spells it", () => {
+    expect(ROLE).toContain(`/outbox/<task-id>/${DISPATCH_REQUEST_FILE}`);
+  });
+
+  test("the delivery rule sits inside the section that announces the delivery", () => {
+    const delivery = between("## WHAT YOU DELIVER ON TURN TWO", "### `triage.json`");
+    expect(delivery).toContain("Both go in ONE `submit_report` call");
+    expect(delivery).toContain("DO NOT PUT YOUR OWN TWO DOCUMENTS IN `artifacts`");
+    expect(delivery).toContain("Done looks like this: one delivery carrying two documents");
+  });
+
+  /**
+   * And it is not ALSO left where it was, which is the half that makes the move
+   * a move rather than a copy. Two statements of a delivery rule are two
+   * spellings for a model to choose between — ISC-1131's shape.
+   */
+  test("it is not also left stranded in the turn-one block", () => {
+    const turnOne = between("### Turn one", "### Turn two");
+    expect(turnOne).not.toContain("Both go in ONE `submit_report` call");
+    expect(turnOne).not.toContain("DO NOT PUT YOUR OWN TWO DOCUMENTS IN `artifacts`");
+  });
+
+  /**
+   * THE SENTENCE THAT MOVES WITH THE GRANT, kept out of Phase C deliberately.
+   * Task 7.1 recorded what a role claiming a grant it does not hold costs — an
+   * entire review lens — so the grant sentence came FORWARD into Phase 7 rather
+   * than being deleted with the mechanics around it. Asserted here because this
+   * is the phase that would delete it by accident.
+   */
+  test("the grant sentence survives the deletions, with both refusals named", () => {
+    expect(ROLE).toContain(
+      "You have read, grep, find, ls, `dispatch_request` and `submit_report`.",
+    );
+    expect(ROLE.replace(/\s+/g, " ")).toContain("**No bash and no write.**");
   });
 });

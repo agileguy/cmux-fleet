@@ -1,18 +1,38 @@
 # Consoles
 
-The three standing cmux workspaces.
+The four standing cmux workspaces.
 
 | Console | Script | Panes |
 |---------|--------|-------|
 | operations | `./scripts/operations` | `obs-1` agent, `pifleet monitor`, `tick-1` agent |
 | development | `./scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` — four equal agent panes |
 | review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — four equal agent panes, **plus a host process** |
-| triage | `./scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3` — four equal agent panes, **plus a host process, and no keyboard** |
+| triage | `./scripts/triage` | `tri-1`, `obs-t1` — **two** equal agent panes, **plus a host process** |
 
 The development console's fourth seat is `tst-2` on `role: tester`; `rev-1` is
 gone, and review is the `review` console's job now. The review console's four
 seats are `shared-ro` — they read the operator's checkout at whatever ref it
 stands on, and the three reviewers hold no `bash`.
+
+**The triage row read `tri-1, obs-t1, obs-t2, obs-t3` — "four equal agent panes"
+— until 2026-09-11, and it was the only row in this table that was wrong.**
+`obs-t2` and `obs-t3` are in neither config. The console is `tri-1` composing the
+request and `obs-t1` answering it, and `roles/triage.md` has been telling the
+collator *"this console has exactly one observer"* the whole time this table said
+three. Before repeating any seat list from this file, read
+`DEFAULT_TRIAGE_WORKERS` in `src/backends/cmux/operations-plan.ts` or the
+`workers:` block of `fleet.yaml` — a pane count is exactly the kind of fact a
+prose table keeps after the code has moved on.
+
+**"No keyboard" came off that row with them, because it depends on which config
+you mean.** Both triage seats inherit `pane_mode: rpc` from their roles in the
+tracked `fleet.example.yaml`, and `scripts/triage` reads the mode from the config
+rather than hard-coding it. But the operator's gitignored `fleet.yaml` overrides
+BOTH seats to `pane_mode: tui` with themes, on a 2026-09-07 decision recorded in
+the file — *"the operator watches these panes, and a console nobody can see is a
+console nobody trusts"* — and tracked `triage/console.yaml` corroborates it in
+passing (*"6 was the value while the seats were rpc"*). Say which file you mean
+before telling anybody this console cannot be typed at.
 
 The git/monitor panes watch **the directory the script was run from** — and so
 does something more consequential: **that directory becomes the run's
@@ -46,10 +66,12 @@ than adopted**.
 ## The review console has a fifth process
 
 Four panes are four workers and **none of them is the actor**. A collator cannot
-dispatch: all it can do is write `dispatch-request.json` into its outbox.
-Something host-side has to read that and perform the three dispatches, and that
-something is `pifleet relay`. Without it the console has four healthy workers and
-no way for a collator's request to become three reviews.
+dispatch: all it can do *toward a fan-out* is write `dispatch-request.json` into
+its outbox. (It is not otherwise mute — `col-1` holds `submit_report`, which is
+what produces the collation row of the table below.) Something host-side has to
+read that request and perform the three dispatches, and that something is
+`pifleet relay`. Without it the console has four healthy workers and no way for
+a collator's request to become three reviews.
 
 `./scripts/review` starts one, last, after the panes. What the relay then does is
 the whole review mechanism, and every file it writes is host-written — which is
@@ -85,14 +107,30 @@ A record it cannot verify (`unreadable`, or a pid whose identity cannot be
 confirmed) is **left exactly where it is and nothing is signalled**. The script
 says so and starts nothing; find out what that pid is, then remove the file.
 
-## The triage console has a fifth process too, and nobody types at the other four
+## The triage console has an actor too — the third process behind its two panes
 
-Same shape as review, different reason. `tri-1` is a collator: it can write
-`dispatch-request.json` and nothing else. But where the review console's actor
-waits for an operator to ask for a review, **this one is also the clock** — it
-decides when a sweep happens, every five minutes, forever, with nobody watching.
+Same shape as review, different reason. `tri-1` is a collator, and the thing a
+collator cannot do is **dispatch**: all it can do toward a sweep is write
+`dispatch-request.json` and let something host-side act on it. But where the
+review console's actor waits for an operator to ask for a review, **this one is
+also the clock** — it decides when a sweep happens, forever, without being asked.
 That is the whole difference, and it is why this console is the only one whose
 own modules are held read-only by a test that walks their import closure.
+
+**That is a limit on dispatching, not on writing, and this paragraph said `tri-1`
+could write `dispatch-request.json` *"and nothing else"* until 2026-09-11.** The
+`triage` role grants `submit_report` beside `dispatch_request` (its `tools:` line
+in `fleet.example.yaml`), and `roles/triage.md` spends a section telling `tri-1`
+to pass `triage.json` and `triage.md` as two entries of ONE `submit_report` call
+— which is how a sweep produces anything a person can read. Read a role's
+`tools:` list before describing any seat's reach from this file.
+
+The tick is `triage/console.yaml`'s `cadence_s`, and **it is 900 — a sweep every
+fifteen minutes, 96 a day**. This paragraph said *"every five minutes"* until
+2026-09-11; the cadence was widened because a 35B observer could not finish inside
+a 300-second tick's derived deadline (`sweep_deadline_s` is `cadence_s - reserve_s`
+and is not a field: 900 − 120 = 780). Read the number out of that file rather than
+out of this one.
 
 The actor is `pifleet triage`, not `pifleet relay`:
 
@@ -190,15 +228,17 @@ cd ~/repos/cmux-fleet && ./scripts/review --recreate
 ```
 
 `--recreate` **stops every run the old panes created** before building the new
-ones. That is a teardown of live agents — three bystanders for one wedged
-worker. Use it when the *set* of workers changes or the pane layout is wrong;
-use `--restart` for everything else.
+ones. That is a teardown of live agents — as many as three bystanders for one
+wedged worker on a four-pane console, and one on `triage`. Use it when the *set*
+of workers changes or the pane layout is wrong; use `--restart` for everything
+else.
 
 `development` and `review` are **four runs each**, because every pane is
 attended and `--attach-here` hands over the terminal of the process that runs it.
 `review --recreate` stops its relay first, before those runs go down, since the
-relay's whole configuration is their run ids. Only runs holding that console's
-own workers are stopped — the other two consoles survive a rebuild.
+relay's whole configuration is their run ids. `triage` is **two** runs on the same
+rule. Only runs holding that console's own workers are stopped — the other three
+consoles survive a rebuild.
 
 **Known defect:** it stops the runs *before* closing the workspace, and the
 close can then fail on a pinned workspace with

@@ -37,6 +37,8 @@ import { readFileSync } from "node:fs";
 
 import { RESULT_ENVELOPE_NAME } from "../../src/contracts.ts";
 
+import type { ResolvedWorker } from "../../src/config/load.ts";
+import { effectiveToolGrant, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
 import {
   COLLATION_ARTIFACT_NAME,
   COLLATION_REPORT_NAME,
@@ -199,6 +201,53 @@ export function grantedTools(configText: string, role: string): readonly string[
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t !== "");
+}
+
+/**
+ * A ROLE's resolved grant: `defaults ← role`, then `exclude_tools` subtracted.
+ *
+ * Lifted from `config.test.ts`'s identical, `describe`-local pair (its own
+ * ISC-59 guard's resolution, restated for a probe to call) because three
+ * probes outside that file — `worker-docs-currency.test.ts`'s
+ * `reportOnlyRoles()`, `observer-role.test.ts`'s grant CONTROL, and
+ * `role-envelope-prose.test.ts`'s `evaluateRoles()` — were each resolving
+ * `effectiveToolGrant(role.tools ?? defaults.tools)` and stopping there,
+ * silent on `exclude_tools`. `render.ts`'s `--exclude-tools` argv is a real
+ * subtraction Pi applies at launch, so a role declaring a write verb and then
+ * excluding it is not write-capable in the fleet actually running, and a
+ * probe that never subtracts `exclude_tools` reports a narrowing it no
+ * longer checks — the exact failure `WRITE_CAPABLE_TOOLS`'s own docblock was
+ * exported to prevent. `exclude_tools` is `[]` in both shipped configs today
+ * (no role or worker override narrows anything), so this is a correction to
+ * match the documented resolution rule, not a live-bug fix.
+ *
+ * Deliberately NOT an extension of `grantedTools()` above: that function is a
+ * textual regex reader by design, so it still reports on a config that does
+ * not parse, and folding a parsed-config resolution into it would fight that.
+ * This is a sibling that reads the already-loaded, already-validated config
+ * instead.
+ *
+ * Throws on a missing role rather than returning an empty grant, matching
+ * `evaluateRoles()`'s own reasoning: a role a probe cannot check is not a
+ * passing role.
+ */
+export function roleGrant(cfg: FleetConfig, name: string): readonly ToolName[] {
+  const role = cfg.roles[name];
+  if (role === undefined) {
+    throw new Error(
+      `no role named "${name}" — it is GONE, not merely retooled. ` +
+        `The config holds: ${Object.keys(cfg.roles).join(", ")}`,
+    );
+  }
+  const declared = role.tools ?? cfg.defaults.tools;
+  const excluded = role.exclude_tools ?? cfg.defaults.exclude_tools ?? [];
+  return effectiveToolGrant(declared).filter((t) => !excluded.includes(t));
+}
+
+/** The same subtraction, for a worker that has been through the full three-level resolve. */
+export function workerGrant(w: ResolvedWorker): readonly ToolName[] {
+  const excluded = w.excludeTools ?? [];
+  return effectiveToolGrant(w.tools).filter((t) => !excluded.includes(t));
 }
 
 /**

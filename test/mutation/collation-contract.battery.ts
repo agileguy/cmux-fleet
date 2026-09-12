@@ -519,32 +519,87 @@ const MUTATIONS: M[] = [
   // already rotted to 0x against a partial fix and was reported on every run.
   //
   // Re-anchored to the INSTRUCTIONS rather than to their headings. A heading is
-  // reworded by anyone tightening prose; a destination path, a declaration
-  // requirement and the sentence stating why the two channels fail differently
-  // are things a reviewer executes, and changing any of them changes what the
-  // console does.
+  // reworded by anyone tightening prose; a destination path and a routing
+  // instruction are things a reviewer executes, and changing either of them
+  // changes what the console does.
+  //
+  // RE-ANCHORED AGAIN 2026-09-10 (SRD-WORKER-DISPATCH-EXTENSION task 8.1). The
+  // role file no longer tells the reviewer to write `result.json` by hand, so
+  // the anchors move onto the sentences that survived the Phase C deletion —
+  // shorter fragments, chosen to survive a re-wrap rather than to quote a whole
+  // wrapped line. RV2 and RV24 are GONE with the `notes` ceiling and the
+  // asymmetry built on it: `SUBMIT_REPORT_PARAMETERS` caps `notes` at 20000 and
+  // throws in front of the model, so the two channels no longer share a ceiling
+  // and the over-cap `notes` no longer destroys an envelope. RV27 and RV28 are
+  // GONE with the worked `json` envelope, which a model copying it would now
+  // have refused under `additionalProperties: false`.
   {
     id: "RV1",
     what: "REVIEWER: the review's destination is unnamed — 'file it somewhere'",
     file: REVIEWER,
-    find: "1. **`/outbox/<task-id>/files/review.md` — the whole review.**",
-    replace: "1. **The whole review, filed wherever suits you.**",
+    find: "It lands at `/outbox/<task-id>/files/review.md`.",
+    replace: "File it wherever suits you.",
     expect: "red",
   },
-  {
-    id: "RV2",
-    what: "REVIEWER: the two caps stop failing differently — the reason for the split",
-    file: REVIEWER,
-    find: "**Same ceiling, opposite failure:**",
-    replace: "**Both are capped:**",
-    expect: "red",
-  },
+  /**
+   * RE-ANCHORED 2026-09-11, onto the ROUTE clause, after `a1ae886` rewrote the
+   * paragraph this quoted whole.
+   *
+   * ## Why the old anchor could not survive that commit
+   *
+   * It quoted all three wrapped lines verbatim, including where they wrap. The
+   * middle line was the sentence `a1ae886` had to change — the collator was
+   * ordering reviewers to declare the review in `artifacts`, which
+   * `roles/reviewer.md` now tells them not to do — so NO wording that fixes the
+   * contradiction leaves this matching. That is the rule stated 20 lines above
+   * being broken by the case directly under it: short fragments, chosen to
+   * survive a re-wrap rather than to quote a whole wrapped line.
+   *
+   * ## Why the ROUTE clause, and not the other three fragments measured
+   *
+   * All four occur exactly 1x in the current `roles/collator.md`. Only this one
+   * makes the case mutate what its `what:` says, MEASURED rather than reasoned:
+   *
+   * - `**Tell each reviewer to file its long review at` — the honest weakening,
+   *   mandatory to optional (*"A reviewer may, if it likes, file its long review
+   *   at ..."*), leaves all four suites GREEN: 195 pass. Every probe on this
+   *   paragraph reads further down the sentence. A case whose `expect: "red"`
+   *   depends on the `replace:` happening to delete some other probe's literal
+   *   is not measuring the document.
+   * - `Tell each reviewer to file its long review` — reddens, but only by
+   *   destroying `file its long review`, the marker `sliceFrom` scopes BOTH
+   *   collator probes with. The failure is *"roles/collator.md no longer
+   *   contains file its long review"*, a marker lookup, and it takes RV26's
+   *   guard down as collateral while the destination, the route and the
+   *   summary ceiling all survive verbatim in the mutated document. The case
+   *   would claim the split was dropped; the split would still be there.
+   * - `` `notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.** ``
+   *   — reddens, on *"the collator does not say `notes` is a field"*. That is
+   *   the notes-is-a-FIELD-not-a-PATH contract, which is a different claim, and
+   *   again the red is a property of the `replace:` dropping that literal
+   *   rather than of the summary half going.
+   *
+   * The ROUTE clause is the one fragment whose removal reddens the probe named
+   * for this case's own subject — *"the collator does not name the route that
+   * declares the review"*, inside *"the collator's copy instructs the same split
+   * the reviewer's does"*. `` `report` entry `` occurs ONCE in the whole
+   * document, so deleting it here is genuinely detectable; the destination path
+   * is stated twice (here and in the turn-two delivery section), so a case
+   * anchored on that would have been unfalsifiable.
+   *
+   * It is also the half the document itself nominates: **"The ROUTE is the half
+   * worth repeating", because it is the half still capable of going wrong: a
+   * review sent out by any other route has nothing appending anything for it.**
+   * The `replace:` is the brief that says exactly that — a destination with no
+   * route — rather than the long form's *"write a thorough review"*, which no
+   * longer fits the span being replaced.
+   */
   {
     id: "RV3",
-    what: "REVIEWER: the collator's copy of the split instruction is dropped",
+    what: "REVIEWER: the collator's copy of the split stops naming the route that files the review",
     file: ROLE,
-    find: "**Tell each reviewer to file its long review at `/outbox/<task-id>/files/review.md` — its own\ntask id, not yours — to declare that file in its envelope's `artifacts` array, and to keep the\n`notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.**",
-    replace: "**Tell each reviewer to write a thorough review.**",
+    find: "by passing it as the one `report` entry of its `submit_report` call",
+    replace: "by whatever route it likes",
     expect: "red",
   },
   /**
@@ -558,12 +613,17 @@ const MUTATIONS: M[] = [
    * safety net and go back to writing long envelopes, which is the defect this
    * whole change removes — arriving by way of a sentence that reads like
    * reassurance.
+   *
+   * The lie survives Phase C in a narrower form: the model can no longer produce
+   * an unparseable envelope, but a lens that never called `submit_report`, or
+   * whose task settled anything other than `success`, still has no reply
+   * published — and the filed artifact still does not change that.
    */
   {
     id: "RV4",
-    what: "REVIEWER: the file is promised to rescue a broken envelope — the plausible lie",
+    what: "REVIEWER: the file is promised to rescue a lens that did not report — the plausible lie",
     file: REVIEWER,
-    find: "**It does\nnot rescue the lens.**",
+    find: "**It does not rescue the lens.**",
     replace: "**It also rescues the lens.**",
     expect: "red",
   },
@@ -653,21 +713,33 @@ const MUTATIONS: M[] = [
     replace: "Split any suffix off the path.",
     expect: "red",
   },
+  /**
+   * RE-ANCHORED 2026-09-11 (task 8.2), AND THE COMMENT MOVED OUT OF THE OBJECT.
+   *
+   * The anchor this replaces was `tools: [read, write, grep, find, ls]`, which
+   * task 7.1 narrowed to the grant below. It had matched NOTHING since — zero
+   * occurrences in `fleet.example.yaml`, so the replacer rewrote nothing, the
+   * suite passed on unmutated source, and the case reported GREEN-as-expected
+   * while proving that the file still contains a string it no longer contains.
+   *
+   * **It hid because this comment used to sit between `file:` and `find:`.**
+   * `mutation-anchors.test.ts` could not see a case shaped that way, so the one
+   * guard that exists to catch a dead anchor skipped the two cases that had
+   * one. The prose moves above the object for that reason, which is the shape
+   * every other case in this battery already uses.
+   *
+   * The three-line form is kept rather than reduced to the `tools:` line alone.
+   * That line is unique in both configs today — `triage` no longer copies the
+   * reviewer's grant byte for byte — but it was not unique when RV15 was first
+   * anchored, and re-narrowing to it would reintroduce the two-match hazard the
+   * moment another role's grant converges again.
+   */
   {
     id: "RV15",
     what: "GRANT: bash is granted to the reviewer in the TRACKED config",
     file: EXAMPLE,
-    /*
-     * ANCHORED THROUGH `./roles/reviewer.md` RATHER THAN ON THE `tools:` LINE
-     * ALONE, which is RV17's spelling arriving in the tracked file for the same
-     * reason it was needed in the live one. The triage console's `triage` role
-     * carries a byte-identical grant by deliberate copy, so the bare line now
-     * matches twice and a two-match anchor mutates whichever the replacer
-     * reaches first. `mutation-anchors.test.ts` caught it the day the role
-     * landed; this is the re-anchor it asked for.
-     */
-    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
-    replace: "    tools: [read, write, grep, find, ls, bash]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    find: "    tools: [read, grep, find, ls, submit_report]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    replace: "    tools: [read, grep, find, ls, submit_report, bash]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
   // ── The file/summary split, added 2026-09-05 with the contract it measures. ─
@@ -679,20 +751,36 @@ const MUTATIONS: M[] = [
     replace: "with the whole review in `notes`: one line",
     expect: "red",
   },
+  /**
+   * RE-POINTED FROM THE CLAIM TO THE ROUTE, 2026-09-10 (task 8.1).
+   *
+   * This mutated *"And DECLARE the file in the envelope's `artifacts` array"*,
+   * an instruction the reviewer no longer carries out: `composeEnvelope` appends
+   * every `report` file to `artifacts` itself. What remains mutable is the
+   * sentence that says so — a document that instead told the reviewer to declare
+   * the file by hand sends it back to writing a claim `artifactMissingProblem`
+   * refuses, or out by a route with nothing appending anything.
+   */
   {
     id: "RV22",
-    what: "SPLIT: the review file need not be declared, so the harvest contradicts it",
+    what: "SPLIT: the declaration is handed back to the model, which no longer writes one",
     file: REVIEWER,
-    find: "**And DECLARE the file in the envelope's `artifacts` array**",
-    replace: "**The file needs no further mention**",
+    find: "`submit_report` declares it for you",
+    replace: "declare it yourself in the envelope's `artifacts` array",
     expect: "red",
   },
   /**
    * THE CAPS DRIFT FROM THE CODE. The document's numbers are asserted against
-   * `MAX_REPLY_ARTIFACT_BYTES`, `MAX_REPLY_INLINE_BYTES` and `MAX_TEXT` rather
-   * than as string literals, so a doc that states a cap the fleet does not
-   * enforce reddens. The previous probe hard-coded "64 KiB", which pinned the
-   * prose to itself and would have stayed green through exactly this edit.
+   * `MAX_REPLY_ARTIFACT_BYTES` and `MAX_REPLY_INLINE_BYTES` rather than as
+   * string literals, so a doc that states a cap the fleet does not enforce
+   * reddens. The previous probe hard-coded "64 KiB", which pinned the prose to
+   * itself and would have stayed green through exactly this edit.
+   *
+   * `MAX_TEXT` was the third number here and came out with RV24 on 2026-09-10:
+   * the binding ceiling on a reviewer's `notes` is `SUBMIT_REPORT_PARAMETERS`'
+   * 20000, checked in front of the model, not the envelope schema's 65536
+   * checked on the host. These two are still the host's, still applied where the
+   * model cannot see them, and still the only numbers in the section.
    */
   /**
    * RV23 SURVIVED ON ITS FIRST RUN, and the probe was the defect.
@@ -723,17 +811,41 @@ const MUTATIONS: M[] = [
     replace: "and 512 KiB across all of them",
     expect: "red",
   },
-  {
-    id: "RV24",
-    what: "CAPS: the `notes` ceiling is dropped, so the two channels look unbounded",
-    file: REVIEWER,
-    find: "at the same 65536 bytes",
-    replace: "at some size or other",
-    expect: "red",
-  },
+  /**
+   * RELABELLED 2026-09-11. The anchor still matches 1x and the case still
+   * reddens; what had gone wrong is the `what:`, which is the harder half to
+   * notice because nothing goes red for it.
+   *
+   * It read *"the collator's brief stops REQUIRING the artifact declaration"*.
+   * Until `a1ae886` that was true: `roles/collator.md` ordered the collator to
+   * tell each reviewer *"to declare that file in its envelope's `artifacts`
+   * array"*, and this mutation removed the order. `a1ae886` INVERTED that
+   * sentence — the brief now says **"Do NOT tell it to declare that file in its
+   * envelope's `artifacts` array"** — so the identical anchor moved into the
+   * prohibition, and this mutation now removes a PROHIBITION. Measured: it
+   * reddens on *"the collator still orders the hand-declaration
+   * `roles/reviewer.md` tells reviewers not to make"*, the probe `a1ae886`
+   * flipped to assert the prohibition positively. Same red, opposite meaning.
+   *
+   * ## THIS IS THE SECOND TIME A TWIN WAS RE-POINTED ALONE
+   *
+   * RV25 is the collator-side twin of RV22, and that pairing is the whole point
+   * of both: two role documents that must say the same thing, with one case per
+   * end. Task 8.1 re-pointed RV22 from the claim to the route on the reviewer's
+   * side and did not reach RV25 — and the console then ran with two prompts
+   * issuing opposite instructions about the same field for a full round, with
+   * both ends green, because each probe only ever read its own end. That is the
+   * contradiction `a1ae886` cleaned up, and this stale label is the same miss
+   * wearing its other face: a document changed, its twin's case not re-read.
+   *
+   * **A battery has now been bitten by this shape twice.** When one end of a
+   * pinned pair is re-pointed, the other end's case is part of the change —
+   * re-read its `find:` AND its `what:`, because the anchor can keep matching
+   * through an inversion that makes the label a lie.
+   */
   {
     id: "RV25",
-    what: "SPLIT: the collator's brief stops requiring the artifact declaration",
+    what: "SPLIT: the collator's brief stops FORBIDDING the artifact declaration",
     file: ROLE,
     find: "to declare that file in its envelope's `artifacts` array",
     replace: "and nothing more",
@@ -748,27 +860,23 @@ const MUTATIONS: M[] = [
     expect: "red",
   },
   /**
-   * THE WORKED ENVELOPE, which is the part of a prompt a model copies most
-   * literally. An example that the real schema refuses teaches the exact shape
-   * the harvester throws away — and this one is now parsed against
-   * `ResultEnvelopeSchema` rather than eyeballed.
+   * RV27 AND RV28 ARE GONE, 2026-09-10 (task 8.1), and this is the record of
+   * what went with them.
+   *
+   * They mutated the worked `json` envelope in `roles/reviewer.md` — the part of
+   * a prompt a model copies most literally — and `reviewer-role.test.ts` parsed
+   * that block through `ResultEnvelopeSchema` rather than eyeballing it. Phase C
+   * deleted the block: a reviewer holds no `write`, `submit_report` composes the
+   * envelope, and `schema`/`task_id`/`epoch`/`worker` are ABSENT from
+   * `SUBMIT_REPORT_PARAMETERS` under `additionalProperties: false`, so a model
+   * copying the example earns a validation error.
+   *
+   * **The coverage is not replaced.** No probe in this battery now mutates a
+   * worked example in that file, because it has none. The equivalent for the new
+   * contract is an example `submit_report` ARGUMENT checked against
+   * `SUBMIT_REPORT_PARAMETERS`; writing one is an addition rather than a
+   * deletion and was outside task 8.1.
    */
-  {
-    id: "RV27",
-    what: "EXAMPLE: the worked envelope stops claiming the review file",
-    file: REVIEWER,
-    find: '  "artifacts": [{"kind": "file", "path": "/outbox/<task-id>/files/review.md"}],\n',
-    replace: "",
-    expect: "red",
-  },
-  {
-    id: "RV28",
-    what: "EXAMPLE: the worked envelope carries a wire tag the schema refuses",
-    file: REVIEWER,
-    find: '  "schema": "pifleet.result/v1",',
-    replace: '  "schema": "pifleet.review/v1",',
-    expect: "red",
-  },
   // ── Turn one ENDS: the polling defect, measured on run 5. ────────────────
   /**
    * The collator wrote both files correctly and then spent its last twelve tool
@@ -1056,21 +1164,51 @@ const MUTATIONS: M[] = [
     expect: "red",
   },
   // ── The grant, and the two halves independently pinned. ──────────────────
+  /**
+   * RV16 AND RV17 CHANGED THEIR MUTATION, not just their anchor — 2026-09-11.
+   *
+   * Both used to remove `write` from the reviewer's grant, on the premise that a
+   * reviewer without it *"cannot report"*. **Task 7.1 already removed `write`**,
+   * so that edit is now a no-op on a role that does not hold it: the string is
+   * absent, nothing is rewritten, and a case that cannot change the tree cannot
+   * redden. The premise died with the grant, and the anchor died with it.
+   *
+   * The live mutation is REMOVING `submit_report`, and it is the same claim
+   * pointed at the tool that took `write`'s place. `config/schema.ts` makes
+   * {write, edit, bash} the writer set and this role holds none of them; nothing
+   * host-side writes `result.json` (`harvest/outbox.ts` only reads it). So
+   * `submit_report` is the only verb that can put an envelope anywhere, and a
+   * reviewer stripped of it is state 1 of `review-plan.test.ts`'s three-state
+   * history exactly: every lens missing, `relay.ts` answering `not_collated`, no
+   * collation dispatched, and the fan-out task settling `success` with the review
+   * showing green. That is the worst signature in this console's history, which
+   * is why it is the one worth pinning.
+   *
+   * **The two halves are graded by DIFFERENT suites, and that is the point of
+   * keeping both.** RV16 mutates the TRACKED `fleet.example.yaml`, which
+   * `reviewer-role.test.ts` parses with `grantedTools` and CI therefore grades.
+   * RV17 mutates the operator's gitignored `fleet.yaml`, which only
+   * `review-plan.test.ts`'s `describe.skipIf(!HAVE_CONFIG)` block reads — it
+   * resolves the three `rev-*` seats through `resolveWorker`, and none of them
+   * declares its own `tools:`, so the role's grant is what they inherit. That
+   * block SKIPS on a machine without the file, which is why RV17 was invisible
+   * rather than merely dead: `atHead` returns null for an untracked target and
+   * the anchors guard skips it instead of reporting it. The battery copies the
+   * operator's `fleet.yaml` into the worktree, so it runs here.
+   */
   {
     id: "RV16",
-    what: "GRANT: `write` is removed from the TRACKED config — the role cannot report",
+    what: "GRANT: `submit_report` is removed from the TRACKED config — the role cannot report",
     file: EXAMPLE,
-    // Re-anchored with RV15, and for that entry's reason: `triage` copies this
-    // grant byte for byte, so the bare `tools:` line is no longer unique here.
-    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    find: "    tools: [read, grep, find, ls, submit_report]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     replace: "    tools: [read, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
   {
     id: "RV17",
-    what: "GRANT: the live config diverges from the tracked one",
+    what: "GRANT: `submit_report` is removed from the LIVE config — the role cannot report",
     file: FLEET,
-    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    find: "    tools: [read, grep, find, ls, submit_report]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     replace: "    tools: [read, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
     expect: "red",
   },
