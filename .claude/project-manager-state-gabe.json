@@ -73,8 +73,16 @@
        "BEFORE measurement taken first: 8001 and 8002 both unreachable from the LAN, ufw inactive, INPUT policy ACCEPT -- so the change is attributable and no firewall could mask it"
      ],
      "false_alarm_recorded": "My first LAN probe returned 000 on every check and looked like a failed bind. It was not: curl's 14-retry budget was spent during the 48GiB model reload, so it gave up before vLLM bound. Re-tested against a ready server, everything passed. Reporting that as a broken bind would have been wrong."},
-    {"phase": 6, "name": "Tunnel", "state": "PENDING_PARTIAL",
-     "note": "cloudflared absent; outbound 7844 verified OPEN from gabe. Will stop short of the DNS record, which needs Phase 0's dashboard action."},
+    {"phase": 6, "name": "Tunnel", "state": "BUILT_NOT_PUBLISHED", "completed": "2026-09-12",
+     "note": "cloudflared was absent; outbound 7844 verified OPEN from gabe. Stops short of the DNS record, which needs Phase 0's dashboard action.",
+     "tunnel_id": "79be1ed1-ad5b-487a-a935-dfdfea5ba979",
+     "tunnel_name": "inference2",
+     "config_src": "local -- locally-managed with /etc/cloudflared/config.yml, chosen because `cloudflared tunnel login` needs a browser and cannot run headless. The tunnel was created through the API with the token instead, and the credentials file written directly.",
+     "ingress": "inference2.agileguy.ca -> http://127.0.0.1:8001, with a http_status:404 catch-all. This is why Phase 5 had to KEEP the loopback binding rather than replace it.",
+     "WHY_THIS_PUBLISHES_NOTHING_YET": "CLOUDFLARE_API_TOKEN can create and manage tunnels but CANNOT write DNS -- re-verified live 2026-09-12, zones/{id}/dns_records returns code 10000 Authentication error. Without the inference2.agileguy.ca CNAME, the tunnel runs and the hostname resolves to nothing. The exposure is therefore gated behind a dashboard action only the operator can take, which is a genuine safety boundary rather than an obstacle.",
+     "collision_check": "inference2 verified UNCLAIMED across all 8 tunnels on the account before creation. Only inference -> inference.agileguy.ca exists, on a different tunnel (macbook.local). The memory note warns that collisions silently break live services, so this was re-checked live rather than trusted.",
+     "operator_step_to_publish": "In the Cloudflare dashboard, add a CNAME: inference2.agileguy.ca -> 79be1ed1-ad5b-487a-a935-dfdfea5ba979.cfargotunnel.com, proxied. Nothing else is needed -- the tunnel and ingress are already in place.",
+     "security_note_at_publish_time": "Once that record exists, the ONLY gate on this endpoint is [REDACTED], by explicit operator decision on 2026-09-12 after being offered a two-key alternative. SRD 9.2/7 records that the LAN accepted-risk argument -- 'an attacker is already adjacent to a port they can open anyway' -- is FALSE for a publicly-resolvable endpoint."},
     {"phase": 7, "name": "Fleet config", "state": "PENDING",
      "note": "edits fleet.yaml (UNTRACKED). providers: map exists at line 127 with omlx + ollama-cloud; gabe is a clean third entry. Second edit is the egress.allow {host: 192.168.86.199, port: 8001} entry."}
   ],
