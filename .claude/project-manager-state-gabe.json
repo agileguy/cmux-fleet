@@ -1,0 +1,72 @@
+{
+  "srd_path": "Docs/SRD-INFERENCE-PROVIDERS.md",
+  "repo_path": "/Users/de895996/repos/cmux-fleet",
+  "branch": "srd-providers-gabe",
+  "branch_policy": "LONG-LIVED: no per-phase branches; every phase commits here",
+  "total_phases": 8,
+  "phase_order": "0 (operator, DEFERRED) ; 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7",
+  "current_phase": 2,
+  "status": "in_progress",
+
+  "WHY_NO_ENGINEERS": "This SRD's §12 is a HOST RUNBOOK, not a code plan, so no engineer was dispatched. Verified 2026-09-12: (a) the provider design is already implemented -- src/config/schema.ts carries the full provider block and `providers` flows through 12 source files -- and already tested across 17 provider test files, with every §10 probe spot-checked present; (b) ISA.md has ZERO open `[ ]` criteria (963/990, 27 partial, 6 retired); (c) the only config phase edits fleet.yaml, which is .gitignore:9 and untracked, so no branch, PR, CI run or merge can carry it. Dispatching subagents here would have been theatre. The repo work that DOES exist is correcting this SRD from live measurement, which is what the branch carries.",
+
+  "operator_decisions_2026_09_12": {
+    "scope": "Phases 2-7 authorized, including the Phase 3 production restart",
+    "api_key": "REUSE the existing shared value rather than minting a fresh one -- operator's explicit choice, extending the accepted risk recorded in reference_inference_tunnel to a second endpoint",
+    "phase_0": "DEFERRED by operator. Costs only Phase 6's DNS record; the fleet dials the LAN literal under D18. Address stays DHCP."
+  },
+
+  "phases": [
+    {
+      "phase": 0,
+      "name": "Prerequisites (operator)",
+      "state": "DEFERRED_BY_OPERATOR",
+      "blocked_on": "DHCP reservation on wired MAC 30:c5:99:3e:f1:aa -> 192.168.86.199, and the inference2 DNS record in the Cloudflare DASHBOARD (the API token answers Authentication error on DNS)",
+      "note": "gabe currently resolves to 192.168.86.213 (Wi-Fi) while the plan pins the wired .199. BOTH answer. This is the exact ambiguity the reservation removes."
+    },
+    {
+      "phase": 1,
+      "name": "Snapshot for rollback",
+      "state": "COMPLETE",
+      "artifact": "gabe:~/pifleet-rollback/inspect-20260912T142351.json (34143 bytes, both containers)",
+      "local_copy": "NONE -- scp was denied by the permission classifier (Sensitive-Source Provenance). The rollback lives only on the host it protects. Worth fixing before Phase 3.",
+      "findings": [
+        "--kv-cache-dtype fp8 is live and was absent from every draft of §6.9.2. Not NVFP4-specific; must be KEPT through the swap.",
+        "Runtime=runc with DeviceRequests [[gpu]] -- i.e. `--gpus all`, NOT the nvidia runtime §6.9.1 implies.",
+        "BOTH containers are on two networks, bridge AND ragnet. ragnet is how lightrag resolves rag-llm by name; a rebuild must `docker network connect ragnet` after create or the RAG stack loses its model with both containers healthy."
+      ],
+      "verified_commit": "see branch srd-providers-gabe"
+    },
+    {
+      "phase": 2,
+      "name": "Fetch bf16 weights",
+      "state": "IN_FLIGHT",
+      "mechanism": "detached container `gemma4-bf16-dl` from vllm/vllm-openai:latest, which already ships hf 1.19.0 -- chosen so gabe's system Python is never mutated (no hf/huggingface-cli/uv installed on the host)",
+      "target": "/home/dan/models/Gemma-4-26B-A4B-it-bf16 (bind-mounted to /models in the server)",
+      "rollback": "the NVFP4 directory is UNTOUCHED and is the rollback",
+      "expected_size_gb": 51.6
+    },
+    {"phase": 3, "name": "Reconfigure (PRODUCTION RESTART)", "state": "PENDING", "authorized": true,
+     "must_preserve": ["all three --served-model-name aliases incl. gemma-4-e4b-it-mxfp8 which LightRAG is configured against", "--kv-cache-dtype fp8", "--ipc host", "--gpus all with runc", "-p 127.0.0.1:8001:8000", "--restart unless-stopped", "docker network connect ragnet AFTER create"],
+     "must_drop": ["--quantization modelopt", "--moe-backend marlin"],
+     "must_add": ["--enable-auto-tool-choice", "--tool-call-parser gemma4", "--api-key"]},
+    {"phase": 4, "name": "Prove the gate (Q13/Q14)", "state": "PENDING",
+     "note": "CAN REFUSE THE PROVIDER OUTRIGHT. Concurrent probe at --max-num-seqs 8; a serial probe is not evidence."},
+    {"phase": 5, "name": "Expose to LAN", "state": "PENDING",
+     "precondition": "the --api-key from Phase 3 MUST be in place first -- 8001 is loopback-only and unauthenticated today"},
+    {"phase": 6, "name": "Tunnel", "state": "PENDING_PARTIAL",
+     "note": "cloudflared absent; outbound 7844 verified OPEN from gabe. Will stop short of the DNS record, which needs Phase 0's dashboard action."},
+    {"phase": 7, "name": "Fleet config", "state": "PENDING",
+     "note": "edits fleet.yaml (UNTRACKED). providers: map exists at line 127 with omlx + ollama-cloud; gabe is a clean third entry. Second edit is the egress.allow {host: 192.168.86.199, port: 8001} entry."}
+  ],
+
+  "verified_preconditions_2026_09_12": {
+    "hf_repo": "google/gemma-4-26B-A4B-it -> 200 (lowercase 307-redirects; the mixed case is load-bearing)",
+    "outbound_7844": "OPEN from gabe",
+    "cloudflared": "ABSENT",
+    "port_8001": "bound 127.0.0.1 only, no --api-key -- Phase 5 is genuinely what exposes it",
+    "disk_free_gb": 683,
+    "memory": "121 total / 86 used / 34 available -- matches §6.9.2's arithmetic exactly",
+    "tailscale": "UNREACHABLE from the fleet host, confirming §6.9.3's reason for dialling the LAN"
+  }
+}
