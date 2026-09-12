@@ -274,8 +274,12 @@ describe("the relay record — what makes 'start it again' idempotent (§6.5)", 
     // `resolveCollatorRun` answers "the newest run whose collator DIRECTORY
     // exists", and a directory outlives `pifleet down`. The script has just read
     // the real `alive` flag, so it says which run rather than relying on that.
+    // argv[0] is `process.execPath` — the RUNNING bun, never the word `bun`.
+    // cmux carries launchd's PATH (four entries, no ~/.bun/bin), so a bare
+    // `bun` is `command not found` in anything it spawns. See
+    // operations-plan.ts's fourth host fact.
     expect(consoleRelayArgv("/repo/src/cli/index.ts", "r-7")).toEqual([
-      "bun",
+      process.execPath,
       "run",
       "/repo/src/cli/index.ts",
       "relay",

@@ -38,12 +38,28 @@
  * byte-for-byte by a unit test with no cmux running. Every claim in the
  * comments below is re-checked by `test/unit/operations-plan.test.ts`.
  *
- * ## Three host facts this file is shaped by, each measured on 2026-08-30
+ * ## Four host facts this file is shaped by, the first three measured 2026-08-30
  *
  * - **`pifleet` is not on `PATH`.** `package.json` is `private: true` and its
  *   `bin` entry is never linked, so `which pifleet` finds nothing. Every pane
- *   therefore invokes the CLI as `bun run <repo>/src/cli/index.ts`, by ABSOLUTE
- *   path, so the pane keeps working if its cwd is ever somewhere else.
+ *   therefore invokes the CLI by ABSOLUTE path, so the pane keeps working if its
+ *   cwd is ever somewhere else.
+ * - **`bun` IS NOT ON THE PANE'S `PATH` EITHER, measured 2026-09-12.** The rung
+ *   above solved this for the SCRIPT and stopped one token short of the
+ *   INTERPRETER. cmux is a GUI app launched by launchd, so it inherits
+ *   launchd's environment and not a login shell's: `/Applications/cmux.app`
+ *   (pid 888) carries `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, four entries, and
+ *   `bun` lives at `~/.bun/bin/bun`. Every pane cmux spawns starts from that
+ *   PATH, so a bare `bun` is `command not found` there while `which bun`
+ *   succeeds in every terminal an operator would check it from.
+ *
+ *   The cost was three consoles dark and a long diagnosis: the triage panes
+ *   printed `/bin/sh: bun: command not found` once per rung, fell through the
+ *   `;` ladder to a bare `$SHELL`, and presented as panes that existed, were
+ *   correctly titled, and ran nothing. `status` showed no run, `docker ps` no
+ *   container, `cmux top` `0 procs` — every indirect probe said "not started"
+ *   and none of them said why. So the interpreter is named by absolute path
+ *   for exactly the reason the CLI already was.
  * - **`watch(1)` does not exist on this host.** It is a Linux/procps tool, and
  *   macOS does not ship it. The git pane is a `while` loop for that reason and
  *   must stay one; a `watch` line would fail on the first tick with
@@ -54,6 +70,7 @@
  *   `shellQuote`.
  */
 
+import { dirname } from "node:path";
 import type { SplitDirection } from "./client.ts";
 import { shellQuote } from "./parse.ts";
 
@@ -290,8 +307,20 @@ function assertPlainValue(what: string, v: string): void {
  * a `pifleet` off `PATH` would work on a machine where someone had linked it
  * and nowhere else, and that difference is invisible until the pane is opened.
  */
-export function pifleetCommand(repoRoot: string, argv: readonly string[]): string {
-  return `bun run ${shellQuote([`${repoRoot}/src/cli/index.ts`, ...argv])}`;
+export function pifleetCommand(
+  repoRoot: string,
+  argv: readonly string[],
+  /**
+   * The interpreter, defaulting to THE RUNNING BUN rather than the word `bun`.
+   *
+   * Same idiom and same reason as `src/supervisor/launch.ts:39` — "the running
+   * bun binary, not whatever is on PATH". A parameter rather than an inlined
+   * `process.execPath` so the string stays pinnable byte-for-byte by a unit test
+   * with no cmux running, which is the property this file's header requires.
+   */
+  bun: string = process.execPath,
+): string {
+  return `${shellQuote([bun])} run ${shellQuote([`${repoRoot}/src/cli/index.ts`, ...argv])}`;
 }
 
 /**
@@ -808,8 +837,69 @@ export function agentSquarePanes(
  * the ceiling on what may cross into a container, and a name absent from it
  * does not reach one however it got into this shell.
  */
-export function envPreamble(): string {
-  return `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
+export function envPreamble(
+  /**
+   * The `PATH` the pane runs with, defaulting to THE LAUNCHING SHELL'S OWN.
+   *
+   * ## Why a pane needs to be told its PATH at all
+   *
+   * The fourth host fact in this file's header, and the reason it is handed over
+   * here rather than patched at each call site. cmux is a GUI app started by
+   * launchd, so it carries `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and every pane it
+   * spawns inherits those four entries. On this host that is enough for `git`
+   * (`/usr/bin/git`) and enough for nothing else the fleet needs: `bun` is at
+   * `~/.bun/bin/bun` and `docker` at `/opt/homebrew/bin/docker`.
+   *
+   * MEASURED 2026-09-12, both directions, same host and same binary:
+   *   env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin docker version  -> env: docker:
+   *                                                                No such file
+   *   docker version                                            -> 28.4.0
+   *
+   * ## Why here and not at the `docker` call sites
+   *
+   * `"docker"` is spelled at seventeen sites across ten modules, and
+   * `contracts.ts:505-509` already argues against matching that string around the
+   * codebase. Resolving each one would be seventeen edits to fix one fact about
+   * the ENVIRONMENT, and it would fix only the binaries someone remembered — the
+   * pane found `bun` missing first and `docker` only once `bun` was fixed, so the
+   * list of what is missing is not knowable in advance. One PATH, handed over
+   * once, covers every binary the fleet shells out to including the next one.
+   *
+   * This is a HANDOVER and not a widening: the console is being launched BY the
+   * operator's shell, so the pane running with that shell's PATH is the pane
+   * behaving as if they had typed the command themselves — which is exactly the
+   * argument the `~/.env` half of this function already makes below.
+   *
+   * ## DIRECTORIES TO PREPEND, never the whole inherited PATH
+   *
+   * The first version of this handed over `process.env.PATH` entire. It worked
+   * and it was wrong: this operator's PATH is 789 characters, which took the
+   * pane command to 1392 and past the 1024-character cap `assertCmuxText`
+   * (`client.ts:45`) applies to every free-text value this system sends to a
+   * pane backend. `operations-plan.test.ts`'s "every command is something cmux
+   * will accept" case caught it. The live path does NOT call that guard, so the
+   * over-long command was accepted by cmux and the breach would have shown up
+   * only as a mystery on some future longer PATH.
+   *
+   * So: the directories holding the binaries the fleet shells out to, resolved
+   * in the LAUNCHING shell where they are on PATH, prepended to whatever the
+   * pane already had. Two entries instead of twenty, `"$PATH"` left expanding at
+   * pane time so nothing inherited is discarded.
+   *
+   * A parameter rather than an inlined lookup so the string stays pinnable
+   * byte-for-byte by a unit test on any machine, matching
+   * {@link pifleetCommand}'s interpreter argument. An empty list means "say
+   * nothing", which keeps a bare `PATH=` out of a pane.
+   */
+  pathPrefix: readonly string[] = [
+    dirname(process.execPath),
+    ...(Bun.which("docker") === null ? [] : [dirname(Bun.which("docker") as string)]),
+  ],
+): string {
+  const dirs = pathPrefix.filter((d) => d !== "");
+  const exportPath =
+    dirs.length === 0 ? "" : `export PATH=${shellQuote([dirs.join(":")])}:"$PATH"; `;
+  return `${exportPath}set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
 }
 
 

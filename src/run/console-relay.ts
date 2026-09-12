@@ -484,7 +484,14 @@ export class ConsoleWatch {
  * answer better than the fallback can and says so rather than relying on it.
  */
 export function consoleRelayArgv(cliEntry: string, runId: string): string[] {
-  return ["bun", "run", cliEntry, "relay", "--run", runId];
+  // `process.execPath` and NOT the word `bun`, measured 2026-09-12: cmux is a
+  // launchd-launched GUI app carrying PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a
+  // bare `bun` is `command not found` in every pane it spawns while `which bun`
+  // succeeds in any terminal an operator would check it in. A relay is spawned
+  // when nobody is watching, so the failure would surface as a console that
+  // polls nothing rather than as an error anyone reads. Same idiom and reason as
+  // `src/supervisor/launch.ts:39` and `operations-plan.ts`'s fourth host fact.
+  return [process.execPath, "run", cliEntry, "relay", "--run", runId];
 }
 
 /**

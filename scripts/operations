@@ -396,7 +396,10 @@ try {
 /** Run a `pifleet` subcommand and return its stdout, swallowing failure. */
 async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
   try {
-    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+    // `process.execPath` and not `"bun"`: this script is reachable from a cmux
+    // pane, whose PATH is launchd's four entries and carries no bun. See
+    // operations-plan.ts's fourth host fact, measured 2026-09-12.
+    const proc = Bun.spawn([process.execPath, "run", `${repoRoot}/src/cli/index.ts`, ...args], {
       stdout: "pipe",
       stderr: "ignore",
     });

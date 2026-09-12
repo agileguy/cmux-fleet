@@ -550,7 +550,13 @@ async function main(argv: string[]): Promise<number> {
  */
 function triageActorArgv(cliEntry: string, cadenceS: number | null): string[] {
   return [
-    "bun",
+    // THE RUNNING BUN, never the word `bun` — measured 2026-09-12. cmux is
+    // launched by launchd and carries PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a
+    // bare `bun` is `command not found` in anything it spawns while `which bun`
+    // succeeds in every terminal an operator would check it in. The actor is the
+    // half that runs when nobody is watching, so it is the worst place to leave
+    // a PATH dependency. Same idiom as src/supervisor/launch.ts:39.
+    process.execPath,
     "run",
     cliEntry,
     "triage",
@@ -877,7 +883,9 @@ function hostEnvFile(): Record<string, string> {
  */
 async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
   try {
-    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+    // `process.execPath` and not `"bun"`: this script is reachable from a cmux
+    // pane, whose PATH is launchd's four entries and has no bun on it.
+    const proc = Bun.spawn([process.execPath, "run", `${repoRoot}/src/cli/index.ts`, ...args], {
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -902,7 +910,8 @@ async function runOutput(repoRoot: string, args: readonly string[]): Promise<str
  * SAY SOMETHING, by keeping the validator's own complaint.
  */
 async function runChecked(repoRoot: string, args: readonly string[]): Promise<string> {
-  const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+  // `process.execPath` and not `"bun"`, for the reason `runOutput` records.
+  const proc = Bun.spawn([process.execPath, "run", `${repoRoot}/src/cli/index.ts`, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });

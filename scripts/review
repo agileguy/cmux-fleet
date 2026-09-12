@@ -696,7 +696,10 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
  */
 async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
   try {
-    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+    // `process.execPath` and not `"bun"`: this script is reachable from a cmux
+    // pane, whose PATH is launchd's four entries and carries no bun. See
+    // operations-plan.ts's fourth host fact, measured 2026-09-12.
+    const proc = Bun.spawn([process.execPath, "run", `${repoRoot}/src/cli/index.ts`, ...args], {
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -726,7 +729,8 @@ async function runOutput(repoRoot: string, args: readonly string[]): Promise<str
  * no output", and with it the operator gets the validator's own complaint.
  */
 async function runChecked(repoRoot: string, args: readonly string[]): Promise<string> {
-  const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+  // `process.execPath` and not `"bun"`, for the reason `runOutput` records.
+  const proc = Bun.spawn([process.execPath, "run", `${repoRoot}/src/cli/index.ts`, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
