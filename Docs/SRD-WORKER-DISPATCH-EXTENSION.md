@@ -200,7 +200,7 @@ whether or not this extension is ever built.
 | **C** | **The supervisor never opens an outbox before settling, and its one substantive success-downgrade is unreachable for exactly the roles that matter.** `src/supervisor/index.ts:1261-1263` is the RPC quiesce chain's `else`: `verdict = "success"; reason = "quiesced";`. The TUI path is the same shape at `:2299-2325` with `transcript_quiesced`. The ISC-299 downgrade (`:1035-1053`) requires `treeHash !== null && settledBaseline !== null`, and a `workspace: none` role has no worktree — it logs `quiesce_sample_skipped` (`:1105-1110`) and yields `treeHash = null`. **Observer, triage, collator, reviewer, verifier and ticketing are therefore all outside it by construction**, and they are the six roles whose entire deliverable is a written file. The other guard, the prose detector (`prose-detector.ts:97`, `NO_TOOL_CALLS_REASON`), asks whether tools were called — and `roles/observer.md:42-46` records an observer that made **150 `kubectl` calls** and wrote nothing. | Yes | §2.5, §6.3 |
 | **D** | **Dispatch state already exists as a host-written, worker-unwritable file, and its docblock is this design's argument in advance.** `/policy/task` (`src/run/task-policy.ts:47`) is two lines — task id, epoch — rewritten by the supervisor at every dispatch with the chmod-truncate-chmod recipe (`:73-79`, `:33-41`). Its header (`:11-28`) rejects `PIFLEET_TASK_ID` on two grounds that apply verbatim to a prompt-recited task id: *"It is fixed at launch and the value is not"* and *"The worker controls it… a process that can `export PIFLEET_TASK_ID` can forge the provenance on its own audit rows."* **A task id parsed out of the model's own prompt is worse than an env var on the second ground**, because the model is the thing being audited. §6.4 reads the file instead. Verified live: `/policy/task` in `…-4b57-tri-1` is 9 bytes, mode `0444`, owner `pi` — `<none>\n0\n`, an idle worker. | Yes | §2.4, §6.4 |
 | **E** | **`/replies` accumulates across sweeps, so a tool that enumerates it is a freshness bug.** `workerRepliesDir(run.root, worker)` (`src/run/paths.ts:490-492`) is one directory per worker per **run**, and the triage console is one long-lived run publishing `<childTaskId>.json` per sweep (`triage-envelope.ts:1115-1124`). Sweep 5's collator would see sweeps 1-5. This is why `get_replies` cannot be `readdir` — and why `src/run/replies.ts:24-30`'s existing refusal of *"a `/replies` the collator enumerates"* is right for a second reason its author did not need: *"A listing hands the worker a directory to walk and re-introduces exactly the discoverability the outbox contract denies in the other direction."* | Yes | §2.4, §6.2, §7.4 |
-| **F** | **The obligation prose is ~40-70% of every role file, and it is the half written in capitals.** `roles/triage.md` is 573 lines of which roughly 70% is mechanics — the `triage.json` field-rule block alone is `:325-457`. `roles/reviewer.md` spent 62 of 168 lines (38%) on the envelope, across four consecutive sections — **that block is gone as of `b94c58b` (task 8.1), and the file is 113 lines**, which is this finding's proportions confirmed by removal rather than by estimate. `roles/observer.md` gives `:10-64` and `:138-147` to *where and when to write* against `:66-136` for *what to look at*. The sentence *"An envelope you never wrote does not fail your task; it removes you from the grading"* appears in file after file in paraphrase — grep `never wrote does not fail`, which today matches `roles/observer.md`, `roles/tester.md`, `roles/verifier.md` and `roles/ticketing.md`, plus the *"A missing envelope does not fail your task"* wording in `skills/pifleet-worker/SKILL.md`. It is a **five**-file count and was never the six this row first claimed: `roles/reviewer.md`'s copy was real and `b94c58b` deleted it as task 8.6's sentence, but `roles/collator.md` carried no paraphrase at the cited lines or anywhere else, in this branch or any commit before it — a citation with nothing behind it, of the kind §2.6 records. **Every one of the paragraphs that IS there exists because the mechanism it describes failed once.** | Yes | §2.6, §8 |
+| **F** | **The obligation prose is ~40-70% of every role file, and it is the half written in capitals.** `roles/triage.md` is 618 lines of which roughly 70% is mechanics — the `triage.json` field-rule block alone, opening at *"Field rules. **They are not all enforced the same way, and each says which**"*, is the largest single one. **(Corrected 2026-09-11: this read "573 lines" and `:325-457` until review recounted it. The file has been 618 lines since before `609fcbb`; `:325` is blank and `:457` is mid-sentence. Pinned on the opening phrase rather than re-numbered, because a number here has now rotted once and nothing in this repository re-checks one.)** `roles/reviewer.md` spent 62 of 168 lines (38%) on the envelope, across four consecutive sections — **that block is gone as of `b94c58b` (task 8.1), and the file is 113 lines**, which is this finding's proportions confirmed by removal rather than by estimate. `roles/observer.md` gives `:10-64` and `:138-147` to *where and when to write* against `:66-136` for *what to look at*. The sentence *"An envelope you never wrote does not fail your task; it removes you from the grading"* appears in file after file in paraphrase — grep `never wrote does not fail`, which today matches `roles/observer.md`, `roles/tester.md`, `roles/verifier.md` and `roles/ticketing.md`, plus the *"A missing envelope does not fail your task"* wording in `skills/pifleet-worker/SKILL.md`. It is a **five**-file count and was never the six this row first claimed: `roles/reviewer.md`'s copy was real and `b94c58b` deleted it as task 8.6's sentence, but `roles/collator.md` carried no paraphrase at the cited lines or anywhere else, in this branch or any commit before it — a citation with nothing behind it, of the kind §2.6 records. **Every one of the paragraphs that IS there exists because the mechanism it describes failed once.** | Yes | §2.6, §8 |
 | **G** | **`SweepJoin.claimedSuccess` is a typed field no consumer reads.** Added this session (`efaf63a`), declared at `src/run/triage-pass.ts:254`, populated at `src/run/triage-envelope.ts:1142`, and its whole effect is a `console.error` at `:1143-1149`. `completeSweep` (`triage-pass.ts:942-1022`) reads `join.artifacts.length` and `join.blocked.length` and nothing else. An exhaustive grep finds it in two source files and three test files and nowhere in the incident machine, the verdict mapping or the notifier. **The commission calls it "a diagnosis, not a prevention" and that is exactly right — it is currently a diagnosis printed to a stream.** | Yes | §1.3, §12 |
 | **H** | **`roles/observer.md` asserts a host-side clamp that does not exist for it.** `:140-141` and `skills/observer-ops/SKILL.md:28-32` both claim a run producing only the `.md` half *"clamps to `failed`"*. `grep -rn "observer" src/harvest/` returns zero. The clamp that exists is `ticket-ops`': `TICKET_OPS_ARTIFACT_NAME` (`src/harvest/reconcile.ts:175`), the orphaned-document scan (`:745-765`), the ceiling (`:202-204`). **This is a role prompt describing a mechanism that is not there** — the same class of defect the commission warns about in this document's own commission, found in the file this design is meant to shrink. Recorded here because it is a live bug independent of this SRD, and because it is the strongest single argument for §8: prose that asserts mechanics drifts from the mechanics. | Yes | §2.6, §8, §11 Q7 |
 
@@ -231,7 +231,9 @@ a previous observer read the *absence of `edit`* as an absence of permission to 
 correctly named the file, the file existed and was readable inside the container (verified with
 `docker exec`), and the event log for that turn shows only `tui_turn_ended`/`settled` with zero tool
 calls. It then wrote a document listing every service `unaccounted`. The same class is already
-recorded from the review console at `roles/collator.md:159-168` from the opposite direction — a
+recorded from the review console at `roles/collator.md` — under *"MEASURED, on the run this step was
+written for"* (**`:172-176`; this cited `:159-168` until 2026-09-11, the turn-two "new prompt"
+passage, a different subject**) — from the opposite direction: a
 collator that *"spent its last twelve tool calls listing `/replies`, searching `/replies`"* and
 achieved nothing.
 
@@ -844,7 +846,7 @@ task (§7.4), reading each named file from `/replies` — never a `readdir` (Fin
 `src/run/replies.ts:24-30`). Returns one text block per reply plus
 `details: { replies: [{ task_id, worker, aspect, bytes, ok }], missing: [...] }`, and the text block
 for a missing declared reply says so explicitly rather than being omitted, because
-`roles/triage.md:299-312` already distinguishes *"No report was produced"* from *"A report was
+`roles/triage.md` already distinguishes (**near `:324`; this cited `:299-312` until 2026-09-11, a range that lands on the `/replies/<child-task-id>.json` material instead**) *"No report was produced"* from *"A report was
 produced and could not be read"* and losing that distinction would cost the collation its vocabulary.
 
 **What it refuses:**
@@ -853,7 +855,7 @@ produced and could not be read"* and losing that distinction would cost the coll
 |---|---|
 | Returning any file not in the declared set | Finding E: a standing console's `/replies` holds every sweep of the day |
 | Returning a file that fails to parse as JSON, silently | It returns it as `{ ok: false, error }`. `e5d5751` is the recorded case of a right answer to the wrong document; an unreadable reply must read as unreadable |
-| Being callable when the declared set is absent | Throws *"No replies were declared for this task."* — which is the correct and complete answer for a turn-one dispatch, and is exactly what `roles/triage.md:266-271` currently spends six lines of prose saying |
+| Being callable when the declared set is absent | Throws *"No replies were declared for this task."* — which is the correct and complete answer for a turn-one dispatch, and is exactly what `roles/triage.md` spends a paragraph saying, opening *"So checking cannot tell you anything"*. **(Read `:266-271`, "six lines of prose", until 2026-09-11; `:266` is a blank line and `:266-271` is the `summary` rule, a different subject. This is the second site carrying that stale range — `c61857c` de-numbered the copy in `report-tools.ts` and left this one and `:1204`.)** |
 
 **This tool's value is not that it reads better than `read`.** It is that **the host now knows
 whether the collator looked**, because a `get_replies` call is a tool call the extension can record.
@@ -874,8 +876,10 @@ and it would be easy.
    same information, and `Docs/SRD-TRIAGE-CONSOLE.md` §7.8's argument against writing defaults into a
    tracked file applies unchanged: *"a value that must always equal a function of two others is one
    that will one day disagree with them."*
-2. **It rewards the wrong turn shape.** `roles/collator.md:159-168` records a collator that *"spent
-   its last twelve tool calls listing `/replies`, searching `/replies`"*, and `roles/triage.md:273-278`
+2. **It rewards the wrong turn shape.** `roles/collator.md` — under *"MEASURED, on the run this step
+   was written for"* (**`:172-176`; this cited `:159-168` until 2026-09-11, which is the turn-two
+   "new prompt" passage, a different subject**) — records a collator that *"spent
+   its last twelve tool calls listing `/replies`, searching `/replies`"*, and `roles/triage.md` (**near `:289`, wrapped across lines; this cited `:273-278` until 2026-09-11, which is the "give it a status and one sentence" passage. Note the quoted sentence appears VERBATIM in two files — `roles/triage.md` and `roles/collator.md:73` — so a phrase pin alone does not disambiguate it here, and the file name is doing the work**)
    records a worker that *"read one file and grepped one document nine times in twenty seconds, wrote
    nothing, and burned a hundred and forty thousand tokens."* **Adding a free, safe, always-succeeds
    tool to a fleet whose measured failure is tool-thrash is adding fuel.**
@@ -1201,7 +1205,7 @@ enumerate. The set must be declared.
 
 **Empty array on a turn-one dispatch**, which is what makes `get_replies` able to answer *"nothing was
 declared"* instead of *"the directory is empty"* — the distinction
-`roles/triage.md:266-271` and `roles/collator.md:153-158` each spend six lines of prose establishing.
+`roles/triage.md` and `roles/collator.md` each spend a paragraph establishing — both opening *"So checking cannot tell you anything"*. **(Corrected 2026-09-11: this cited `roles/triage.md:266-271` and `roles/collator.md:153-158`, neither of which resolves — `:266-271` is the `summary` rule, a different subject, and the real material sits at `:281-283` and `:164-168` respectively. `c61857c` de-numbered the identical claim in `report-tools.ts` and left this twin and the one in `replies-policy.ts` numbered.)**
 
 **Where the host writes it.** The same composition roots that already publish the replies:
 **one function**, `productionRelayEffects.publishReplies` in `src/run/relay.ts` — reached by the
@@ -1273,7 +1277,7 @@ drifted from the mechanism they describe.
 | `skills/pifleet-worker/SKILL.md` | the *"Write it as ONE LINE"* rule and its bullets (the one-line/escaping rule — a tool takes structured arguments), the `epoch` bullet *"read it, never guess it"* (§6.4), the pretty-printed example (the `json` fence), and most of the *"Field rules, each of which is checked"* block | `:131-142` (**"Your report is a claim, not a verdict"** — this is judgement and is the most load-bearing paragraph in the bundle), the *"This is the last thing you do"* paragraph (why silence costs you the grading), the **"Choosing a status honestly"** table (which status *means* what — the enum constrains the spelling, not the choice) |
 | `roles/reviewer.md` | **DONE 2026-09-10 (`b94c58b`, task 8.1).** What were `:45-144` — all four sections, ~62 lines — are deleted; the `report` parameter absorbed them and the file is 113 lines | `:15-45` (what a review is for, and how to rank and locate a finding) and the **"THE REFUSAL THAT IS NOT YOURS TO MAKE"** section, both kept as written |
 | `roles/observer.md` | `:138-142` (filenames and directory), most of `:26-34` (the tool-permission disambiguation, which exists because `write`'s role was ambiguous) | `:39-58` — **the write-before-you-run-out-of-turn budget stays**, because it is a *judgement about pacing* that no schema expresses, and because §6.8 says layer 1 does not reach this role |
-| `roles/triage.md` | `:325-457` — the 133-line `triage.json` field-rule block, the largest single mechanics block in the repository. `:282-291` (reply paths). `:246-257` (envelope mechanics) | `:66-87`, `:293-323`, `:459-533` — what to do with what you read, and the notification boundary |
+| `roles/triage.md` | The `triage.json` field-rule block — opening at *"Field rules. **They are not all enforced the same way, and each says which**"* — the largest single mechanics block in the repository. **(Read `:325-457`, "133-line", until 2026-09-11; that range predates `fe0735e` and no longer resolves.)** `:282-291` (reply paths). `:246-257` (envelope mechanics) | `:66-87`, `:293-323`, `:459-533` — what to do with what you read, and the notification boundary |
 | `roles/collator.md` | `:170-254` (reply reading), `:255-346` (the `collation.json` schema) | `:9-26`, `:35-108`, `:392-421` |
 | `roles/engineer.md`, `tester.md`, `verifier.md`, `sre.md` | The closing formula, one sentence each | Everything else — these are already ~85% judgement |
 
@@ -2185,7 +2189,9 @@ rather than discovered per task.
   prose can reach it as syntax. The split's surviving justification was already stated in the next
   paragraph and is kept. Recorded here 2026-09-11 because this bullet carried no result while 8.1
   and 8.3 both did — the missing thing was the note, not the work.
-- **8.3** `roles/triage.md`: delete `:325-457`, `:282-291`, `:246-257`. **And fix the
+- **8.3** `roles/triage.md`: delete `:325-457`, `:282-291`, `:246-257` — **these ranges are the
+  instruction AS GIVEN, against the file before `fe0735e`, and are left unrepointed on purpose: a
+  record of what was ordered is not a claim about the file today.** **And fix the
   three-observer/one-observer contradiction (§2.6) in the same commit**, because the surviving prose
   must not carry it. Touches: `roles/triage.md`.
 
@@ -2368,7 +2374,9 @@ rather than discovered per task.
 - `roles/observer.md:10-64`, `:138-152` (was `:138-147` until `8d58068` — task 8.4 replaced four
   lines with nine); `roles/triage.md`'s opening protocol section and its
   **"YOU HAVE EXACTLY ONE OBSERVER"** section — the two §2.6 records as having contradicted each
-  other until `fe0735e` — plus `:237-257`, `:266-323`, `:325-457`; `roles/collator.md:109-114`,
+  other until `fe0735e` — plus `:237-257`, `:266-323`, `:325-457` (**ranges against the file as it
+  stood BEFORE `fe0735e`, left unrepointed on purpose: this sentence records what was there then**);
+  `roles/collator.md:109-114`,
   `:153-183`, `:422-423`; `skills/pifleet-worker/SKILL.md:131-293`.
   `roles/reviewer.md:45-144` was on this list and **is no longer readable — `b94c58b` deleted it**;
   read it at `b94c58b^` if the four envelope sections are what you are after.

@@ -158,8 +158,11 @@ export function triageDocumentPath(run: RunPaths, collateTaskId: string): string
  * under, whatever id the collator wrote there.
  *
  * **Both prompts already forbid the mistake this repairs, and both were
- * disobeyed on the same sweep.** `roles/triage.md:212` tells `tri-1` to name
- * *"its own task id, not yours"*; `roles/observer.md:139` tells the observer to
+ * disobeyed on the same sweep.** `roles/triage.md` told `tri-1` to name
+ * *"its own task id, not yours"* — **the wording MEASURED here, since reworded
+ * away; the file now records the supersession rather than the instruction, at
+ * *"against an earlier version of this line that said"*. Cited as history, not
+ * as a live line**; `roles/observer.md:139` tells the observer to
  * write *"in the directory named by the id you were dispatched under"*. Measured
  * 2026-09-07 on `T-sweep-1`: `tri-1` wrote `/outbox/T-sweep-1/files/` — its OWN
  * id, the one word its instruction excludes — and `obs-t1` believed the brief
@@ -184,7 +187,7 @@ export function triageDocumentPath(run: RunPaths, collateTaskId: string): string
  * the artifact to see it (ISC-1120).** `T-sweep-13`'s live request:
  * *"Write both `observer-ops.json` and `observer-ops.md` into
  * `/outbox/T-sweep-13/files/` using the observer's own task id."* The collator
- * reproduced `roles/triage.md:212`'s own phrase — *"its own task id, not yours"* —
+ * reproduced the prompt's own phrase of the time — *"its own task id, not yours"* —
  * and then filled the path with the only id it holds. **It obeyed the sentence and
  * could not obey the value.** `T-sweep-13-slice1` is `childTaskId(sweepId,
  * aspect)` over `TRIAGE_CONSOLE_ASPECTS`, a host constant the collator has never
@@ -1718,7 +1721,8 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
           `/outbox/${childId}/files/, the id it is dispatched under and the only one ` +
           `observerArtifactPath reads. The sweep envelope names this exact path in its ` +
           `"## The seats" block, so the collator had it and did not copy it ` +
-          `(roles/triage.md:212). Before ISC-1120 the id was never handed over at all, and ` +
+          `(roles/triage.md, "the task id its slice will be dispatched under"). ` +
+          `Before ISC-1120 the id was never handed over at all, and ` +
           `this line blamed the collator for not knowing it.`,
       );
     }
