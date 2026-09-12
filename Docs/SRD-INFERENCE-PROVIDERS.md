@@ -1,5 +1,32 @@
 # System Requirements Document — per-worker inference providers
 
+**SRD-PROVIDERS-001 v0.3 — A THIRD PROVIDER, PLANNED 2026-09-12 AND NOT YET BUILT**
+
+**What changed in v0.3.** A third provider is specified: `gabe`, an ASUS Ascent GX10 (NVIDIA GB10) on
+the operator's LAN, serving Gemma 4 26B-A4B. **It is `hosted: false`** — the operator's own hardware,
+the same class as `omlx` — so none of §4's prohibition argument is reopened and §5.2's "any provider
+other than Ollama Cloud" non-goal is untouched: that non-goal bounds which *hosted vendor* this
+design was validated against, and this is not one.
+
+**The premise the plan was commissioned against was wrong, and the recon is the deliverable.** The
+request was to download and serve a model on a new host. **gabe has been serving that model for three
+weeks** — container `rag-llm`, `vllm serve /models/Gemma-4-26B-A4B-NVFP4`, inside a live LightRAG /
+Neo4j / pgvector stack. This is a reconfiguration of a production service, which is a smaller job than
+an install and a considerably more dangerous one.
+
+| What | Disposition | Where |
+|---|---|---|
+| Third provider `gabe` | **Specified, NOT built.** `hosted: false`, reached at a LAN IP literal | §6.9, D17 |
+| Precision NVFP4 → bf16 | **Owner decision 2026-09-12**, one server for both RAG and fleet | §6.9.2, D17 |
+| `inference2.agileguy.ca` | **Tunnel for external/CI only** — the fleet dials the LAN, not the tunnel | §6.9.3, D18 |
+| Dense 31B | **Rejected on measurement.** ~4 tok/s on 273 GB/s; see §6.9.1 | §6.9.1 |
+| Native tool calls | **At risk.** The server has tool calling switched off; two open vLLM bugs | §9.2 Q13 |
+
+**Everything in §6.9 was measured on gabe on 2026-09-12, not read from a datasheet.** Where a figure is
+a vendor claim it says so. The one number this plan originally rested on — 500 GB/s of memory
+bandwidth — was a marketing figure and was wrong by a factor of nearly two; the correction is what
+killed the dense-31B option, and it is recorded in §6.9.1 rather than quietly dropped.
+
 **SRD-PROVIDERS-001 v0.2 — ADOPTED 2026-09-03, disposition (2) *bound***
 Sits alongside `Docs/SRD.md` (SRD-PIFLEET-001). Its amendment to §5.9 **has been adopted** by owner
 decision on 2026-09-03 and is written into that document at §5.9; this is a specification, not a
@@ -9,6 +36,8 @@ the operator's own oMLX, rather than the prohibition being repealed outright.
 
 **As configured on this fleet:** `ollama-cloud` (`hosted: true`) serves the `engineer`, `tester` and
 `reviewer` roles — the `development` console's four seats. Every other role resolves to `omlx`.
+**`gabe` is specified in §6.9 and is not yet configured**; no role resolves to it until §12's phases
+land, and under D7 a declared-but-unused provider creates no network and opens no route.
 
 ### Deployed assignment, 2026-09-03
 
@@ -1013,6 +1042,101 @@ the generative probe tests the path a worker takes.
 
 ---
 
+### 6.9 The third provider — `gabe`, on the operator's LAN
+
+#### 6.9.1 What the hardware is, and the measurement that decided the model
+
+ASUS Ascent GX10, NVIDIA GB10 Grace Blackwell, compute capability **12.1** (SM121), 20-core ARM64,
+**121 GiB unified memory**, Ubuntu 24.04.4, kernel 6.17.0-1021-nvidia, Docker 29.2.1 with the `nvidia`
+runtime, 683 GB free disk. Two LAN interfaces: **wired `enP7s7` at 1000 Mb/s holding `192.168.86.199`**
+(default route, metric 100) and Wi-Fi `wlP9s9` holding `192.168.86.213` (metric 600). Both are DHCP
+today. Tailscale is up at `100.126.91.107`, which **this fleet cannot use** — the fleet host is not on
+Tailscale (`infra_hosts`), which is why §6.9.3 dials the wired LAN address.
+
+**The dense-model option was killed by bandwidth, and the figure this plan first used was wrong.** The
+GX10's real memory bandwidth is **273 GB/s**, not the 500 GB/s marketing number. Decode is
+bandwidth-bound: every weight is read per token, so a dense **31B at bf16 (~62 GB) ceilings near 4
+tok/s**, and published measurement on this hardware class shows dense models reaching 85% of exactly
+that ceiling (12.3 tok/s against a computed 14.54). The **26B-A4B activates ~3.8B parameters**, reads
+roughly an eighth as much per token, and a 30B-class MoE measures **27.8 tok/s** on the same silicon.
+**This is why Google ships a 26B-A4B for this machine class**, and it is why the dense 31B — which was
+briefly recommended in this plan's drafting — is refused here rather than left as an option.
+
+#### 6.9.2 What is already running, and what the swap actually costs
+
+| Container | Serves | Reservation | Note |
+|---|---|---|---|
+| `rag-llm` | `/models/Gemma-4-26B-A4B-NVFP4`, vLLM 0.23.0 | `--gpu-memory-utilization 0.35` | published **`127.0.0.1:8001` only** |
+| `rag-embeddings` | `Qwen/Qwen3-Embedding-4B` | `--gpu-memory-utilization 0.25` | ~30 GB reserved for a 4B model |
+| `lightrag`, `neo4j`, `rag-pgvector`, `dcgm-exporter`, `vllm-metrics-proxy` | the RAG stack | — | all on `ragnet` |
+
+**`docker stats` understates this by an order of magnitude and must not be used to size it.** It
+reports `rag-llm` at 4.6 GiB while `nvidia-smi` shows its EngineCore holding **31,934 MiB**: vLLM
+**reserves `gpu-memory-utilization × total` from the unified pool** irrespective of weight size. The
+two servers therefore hold ~0.60 × 121 GB ≈ 73 GB, which with ~12 GB of container RSS is the 86 GB
+observed in `free`. **34 GiB is available, and bf16 weights are 51.6 GB, so the swap does not fit
+without reclaiming memory first** — and the reclaim is available at no real cost, because a 4B
+embedding model does not need 30 GB. Dropping embeddings to ~0.08 funds `rag-llm` at ~0.55.
+
+**Three properties of the running service are load-bearing and easy to destroy in a precision swap:**
+
+- **`--served-model-name` carries THREE aliases** — `gemma-4-26b-a4b-it`, `gemma-4-26b-a4b-it-nvfp4`
+  and `gemma-4-e4b-it-mxfp8` — and **LightRAG is configured against the third one**
+  (`LLM_MODEL=gemma-4-e4b-it-mxfp8`). It is an alias, not a separate model. Dropping it breaks the RAG
+  stack silently, and the name gives no hint that it resolves to a 26B.
+- **`--quantization modelopt` and `--moe-backend marlin` are NVFP4-specific** and must both go for
+  bf16. They are not tuning flags; they select a kernel path.
+- **`--max-model-len 32768`**, which is *not* the 256,000 the `omlx` bf16 build reports. Declared
+  wrongly, Pi registers its own 128,000 default and three-quarters of the window does not exist.
+
+#### 6.9.3 Reachability — the LAN literal, not the tunnel
+
+**D9 forbids a hostname `relay_upstream` on a `hosted: false` block**, and gabe is the operator's own
+hardware, so the tunnel cannot be the fleet's path without either lying about `hosted:` or pinning a
+Cloudflare anycast address the way `omlx` does. Neither is necessary here: **a Colima container on the
+fleet host reaches `192.168.86.199` directly — verified 2026-09-12** — so the fleet dials the LAN
+literal and keeps D9's stronger property intact, with no anycast re-derivation chore.
+
+```yaml
+    gabe:
+      hosted: false                          # operator's own hardware — §5.9's third private shape
+      base_url: http://192.168.86.199:8001/v1
+      relay_upstream: 192.168.86.199:8001    # IP literal; a hostname is REFUSED for hosted:false (D9)
+      api_key_env: GABE_API_KEY
+      models_allowlist: [gemma-4-26b-a4b-it]
+      context_windows:
+        gemma-4-26b-a4b-it: 32768            # what THIS server serves — not omlx's 256000
+```
+with `egress.allow: [{host: 192.168.86.199, port: 8001}]` as the second of D9's two places.
+
+**The tunnel is still built, and it is deliberately off the fleet's critical path.**
+`inference2.agileguy.ca` fronts gabe for CI and remote use, which is the job
+`inference.agileguy.ca` already does for oMLX. It **must run on gabe**: outbound 7844 is blocked from
+the fleet host and open from gabe, both measured. The hostname is unclaimed across all eight tunnels
+on the account, and **the DNS record must be added in the dashboard** — the API token does tunnels but
+answers `Authentication error` on DNS.
+
+**The address is DHCP today and the plan depends on it not moving.** The reservation belongs on the
+**wired** NIC, MAC `30:c5:99:3e:f1:aa`.
+
+#### 6.9.4 The tool-call gate — the one thing that can refuse this outright
+
+`require_native_tool_calls: true` is fleet-wide and has no per-provider override, so a provider whose
+model fails `probeNativeToolCalls` cannot serve this fleet at all. **The running server fails that
+probe today**, and the reason is a flag rather than the model:
+
+```
+"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set
+```
+
+Plain completion works and the response already carries a `tool_calls[]` field. **`gemma4_tool_parser.py`
+is present in the running vLLM 0.23.0 image** — verified by listing the package, not inferred from the
+version — so `--enable-auto-tool-choice --tool-call-parser gemma4` is a valid pairing. **This is the
+criterion to prove first**, because everything else is wasted if it does not hold under load; see
+§9.2 Q13 for the two open upstream defects that make "under load" the operative phrase.
+
+---
+
 ## 7. Security model — what changes and what it costs
 
 ### 7.1 What is unchanged
@@ -1446,6 +1570,43 @@ artifact clamped every verdict. A provider key is high-entropy and unlikely to c
 endpoint URL that caused that incident, but the mechanism for declaring an exception already exists if
 it does.
 
+### D17 — one bf16 server for both RAG and fleet, rather than a second instance
+
+**Chosen 2026-09-12 by the owner: replace the NVFP4 weights with bf16 on the existing `rag-llm` and
+serve both consumers from it. Rejected: a second vLLM instance for the fleet; rejected: leaving NVFP4
+in place and pointing the fleet at it.**
+
+**A second instance was rejected on arithmetic.** Two servers means two `gpu-memory-utilization`
+reservations, and bf16 weights alone are 51.6 GB against 34 GiB available — the second instance does
+not fit beside the first without evicting the RAG stack, which is the thing the separation was meant
+to protect.
+
+**Leaving NVFP4 was rejected by the owner on quality**, and the trade is worth stating because it runs
+the other way for latency: NVFP4 is the format Blackwell accelerates natively, so the bf16 swap buys
+fidelity and spends throughput. **This document does not know what it spends** — no before/after
+tok/s measurement was taken, because the swap has not happened. §12 Phase 4 takes it.
+
+**The declared cost: RAG and the fleet now contend for one model server.** A fleet sweep with eight
+seats will slow LightRAG, and `--max-num-seqs 8` is shared between them. That is a real coupling
+introduced deliberately, and the alternative was not "no coupling" but "no room".
+
+### D18 — the tunnel is for external use; the fleet dials the LAN
+
+**Chosen: build `inference2.agileguy.ca` for CI and remote access, and have the fleet's
+`relay_upstream` name gabe's wired LAN literal. Rejected: the fleet dialling the tunnel as `omlx`
+does.**
+
+**The rejection is D9 applied honestly.** A `hosted: false` block refuses a hostname, so a fleet
+dialling the tunnel would have to pin a Cloudflare anycast address — which `omlx` does, and which
+`fleet.yaml` already documents as a cost with a re-derivation procedure. **gabe is one hop away on the
+same subnet**; paying an anycast pin to reach a machine on the LAN buys nothing and inherits a
+documented failure mode.
+
+**What this does NOT buy, stated so it is not assumed:** the fleet now depends on the LAN. If the
+fleet host moves off `192.168.86.0/24`, this provider stops resolving and the tunnel does **not**
+transparently cover for it — the `relay_upstream` would have to change. That is the trade for D9's
+stronger property, and it is the right one while both machines sit on one subnet.
+
 ### D16 — the probe budget becomes per-provider, and the allowlist gains a second job
 
 **Forced by measurement, not anticipated by the design.** `PROBE_TIMEOUT_MS = 60_000` in
@@ -1515,6 +1676,8 @@ None of these blocks the design. Where a section depends on one, it says so.
 | **Q8** | The exact wording of the vendor's retention and training policy. §7.4 declines to quote it because it was retrieved through a summarising fetch. | Read the policy page directly and quote it, or decline to rely on it | §7.4's framing only. Nothing in §7.2 depends on it |
 | **Q10** | Is the catalogue stable enough to write a `models_allowlist` against? Vendor material cites model ids absent from today's catalogue, and 19 ids were observed on 2026-09-01. | `GET /v1/models` on a schedule and diff against the recorded 19 | Whether the allowlist is a durable config value or a recurring chore like the address pin |
 | **Q11** | Is the `/v1` surface at full parity with a local install's? One third-party report of a `500` on that path for vision models was surfaced and not read. | Exercise the paths the fleet actually uses beyond chat completions; treat the report as a signal to check, not a finding | Nothing known. Raised so parity is not assumed from a passing chat-completions probe |
+| **Q13** | **Does the `gemma4` tool-call parser hold under CONCURRENCY?** Two open upstream defects say it may not: vllm-project/vllm **#39392** (`<pad>` tokens emitted under concurrent requests) and **#44522** (raw `<&#124;"&#124;>` delimiters leaking into streaming responses instead of parsing to `tool_calls`). The fleet runs eight seats against `--max-num-seqs 8`, so the concurrent path is the only one that matters. **This is the question that can refuse the whole provider** — `require_native_tool_calls` is fleet-wide with no per-provider override (§6.9.4). | Drive `probeNativeToolCalls` at the configured concurrency, not serially, and assert `finish_reason: tool_calls` with a non-empty `tool_calls[]` on every response. A single serial pass is NOT evidence. | §12 Phase 4; blocks Phase 7 |
+| **Q14** | What does the NVFP4 → bf16 swap cost in tokens/sec? NVFP4 is the format this hardware accelerates natively, so the quality gain is paid for in throughput, and the size of that payment is unmeasured. | Measure tok/s at concurrency 1 and 8 on the NVFP4 build before the swap, and on bf16 after. | Nothing — but it decides whether D17 is revisited |
 | **Q12** | What is the *distribution* behind §3.1's latencies? One sample per model, host-side and unqueued, established a bimodal shape; it did not establish that any single figure is stable. | Repeat the sweep n times, through the relay and from a container, and report spread rather than a point | D16's *numbers*, not its shape. D16 is deliberately written to the shape so a shifting figure does not invalidate it |
 
 ---
@@ -1642,3 +1805,34 @@ Proposed new criteria, by area:
 - `src/config/render.ts` — the Pi argv builder.
 - `docker/entrypoint.sh` — the `models.json` render block.
 - `fleet.yaml` — the annotated live configuration; the values this document declines to name.
+- **gabe** (`192.168.86.199`, wired) — `rag-llm` and `rag-embeddings` on the `ragnet` Docker network;
+  host model store `/home/dan/models`; vLLM 0.23.0 with `vllm/tool_parsers/gemma4_tool_parser.py`.
+- `reference_inference_tunnel` / `reference_cloudflare_account_layout` — the existing tunnel's shape,
+  the account and zone ids, and the token's DNS limitation §6.9.3 depends on.
+
+---
+
+## 12. Implementation plan — eight phases, none of them yet run
+
+**Ordered by what can refuse the rest.** Phase 4 proves the tool-call gate before anything is exposed
+or configured, because a failure there refuses the provider outright (§6.9.4) and every later phase
+would be wasted. Phases 0-2 are reversible; Phase 3 is the first that touches a running service.
+
+| # | Phase | Touches production | Reversible |
+|---|---|---|---|
+| 0 | **Prerequisites (operator).** DHCP reservation on wired MAC `30:c5:99:3e:f1:aa` → `192.168.86.199`. Create the `inference2` DNS record in the Cloudflare **dashboard** — the API token cannot write DNS. | no | n/a |
+| 1 | **Snapshot for rollback.** `docker inspect rag-llm rag-embeddings` to a file. The three-week-old argv *is* the rollback; capture it before the first edit, not after the first failure. | no | n/a |
+| 2 | **Fetch bf16 weights on gabe.** `google/gemma-4-26B-A4B-it`, 51.6 GB into `/home/dan/models/`; gabe's HF token already returns 200 on the gated repo and 683 GB is free. **Keep the NVFP4 directory** — it is the rollback. | no | yes |
+| 3 | **Reconfigure.** Lower `rag-embeddings` to `--gpu-memory-utilization 0.08` **first**, then `rag-llm`: bf16 path, `0.55`, drop `--quantization modelopt` and `--moe-backend marlin`, add `--enable-auto-tool-choice --tool-call-parser gemma4` and `--api-key`, and **keep all three `--served-model-name` aliases**. | **yes** | yes, via Phase 1 |
+| 4 | **Prove the gate — Q13 and Q14.** Concurrent tool-call probe at `--max-num-seqs 8`; LightRAG still answers through `gemma-4-e4b-it-mxfp8`; tok/s recorded. **A serial probe is not evidence.** | yes | — |
+| 5 | **Expose to the LAN.** Rebind from `127.0.0.1:8001` to `192.168.86.199:8001`. The API key from Phase 3 is what makes this safe; without it the endpoint is open to the subnet. | yes | yes |
+| 6 | **Tunnel.** `cloudflared` on gabe (absent today; 7844 open there, blocked on the fleet host), named tunnel → `http://127.0.0.1:8001`, systemd unit, then the Phase 0 DNS record. | no | yes |
+| 7 | **Fleet config.** The §6.9.3 block plus its `egress.allow` entry, then assign roles deliberately. Under D7 nothing is created until a worker resolves to `gabe`. | yes | yes |
+
+**Phase 5 has a security precondition that is easy to skip.** The running server has **no `--api-key`**
+today — it is reachable only because it is bound to loopback. Binding it to the LAN without the key
+added in Phase 3 publishes an unauthenticated inference endpoint to the subnet, and the tunnel in
+Phase 6 would publish it to the internet. The existing shared value `[REDACTED]` is guessable and is
+already an accepted risk for `inference.agileguy.ca` (`reference_inference_tunnel`); reusing it here
+extends that acceptance to a second endpoint rather than making a fresh decision, and should be
+chosen rather than defaulted into.
