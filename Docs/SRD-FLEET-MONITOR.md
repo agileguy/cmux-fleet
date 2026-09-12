@@ -1,6 +1,36 @@
 # System Requirements Document — a read-only fleet monitor TUI
 
-**SRD-FLEET-MONITOR-001 v0.2 — OWNER-REVIEWED, ACCEPTED FOR IMPLEMENTATION**
+**SRD-FLEET-MONITOR-001 v0.3 — DELIVERED, WITH ONE REQUIREMENT WITHDRAWN AFTER DELIVERY**
+
+**What changed in v0.3 — the git strip was BUILT, then REMOVED, and this document did not know.**
+On 2026-09-04 the operator removed the monitor's git region from the shipped build as answering a
+question nobody asked on that screen. `src/monitor/read/git.ts`, `test/unit/monitor-git.test.ts` and
+the console's watched-directory plumbing went with it. **Nothing recorded the withdrawal for a
+week**, so §6.8, D12, Q8 and §5.1 went on specifying a feature the product does not have, ISA.md
+went on grading it `[x]` (ISC-486, with no probe anywhere in `src test docker scripts` naming it),
+and two test comments went on describing the deleted module in the present tense — one of them
+crediting it with a security boundary the surface no longer has.
+
+| What | Disposition | Where it landed |
+|---|---|---|
+| **The git strip** (§6.8, D12, §5.1) | **WITHDRAWN 2026-09-04 by the operator** — built, delivered, then removed | §6.8, D12 and §5.1 marked superseded in place; ISC-486 retired behind **ISC-1165** |
+| **Q8** (status-first vs commits-first) | **MOOT.** The answer was correct and was implemented; the thing it decided the default of no longer exists | §9 Q8 marked moot rather than unanswered |
+| **What replaced it** | **The absence itself** — the monitor spawns no git at all, which is strictly stronger than spawning it carefully | `monitor-readonly.test.ts` pins the spawning modules to `["monitor/read/docker.ts"]` by name |
+
+**Why this is marked rather than deleted, and why the entries stay whole.** Every property §6.8
+required was MET and mutation-verified when the strip shipped — the `--no-pager` guard against
+`less`-at-`(END)`, `git -C` never `cd`, argv with no shell. The requirement did not fail; its
+subject was withdrawn. Deleting the sections would erase the reasoning a future reader needs if the
+question is ever reopened, and would also erase the measured host facts that outlived the feature.
+**The lessons did not retire with it:** `watch(1)` is absent from macOS and a pager hangs a poll
+loop, and both are properties of the host rather than of this pane — ISC-487 is deliberately NOT
+retired and is where they still live.
+
+**The one thing a reader should carry away.** This document was accurate when written, accurate when
+delivered, and false a week later, because a deletion is a change nobody writes a spec revision for.
+The strip is the second requirement in this project to be graded `[x]` against code that had already
+been removed. **A document is not self-correcting and neither is a checkbox** — what caught this was
+someone reading the branches before deleting them.
 
 **What changed in v0.2.** Four decisions were put to the owner on 2026-09-02 and all four were
 answered; the answers are folded in below rather than appended, and every place this document
@@ -675,7 +705,8 @@ alternative — one clock, tuned to the fastest field — was costed and rejecte
   pre-check (§6.2, D10).
 - The three-clock refresh ladder and per-region staleness (§6.3, §6.4, D4, D5).
 - The `docker ps` join, on the slow clock only (§6.7, D7).
-- The git strip that preserves what `git-watch` showed (§6.8, D12).
+- ~~The git strip that preserves what `git-watch` showed (§6.8, D12).~~ **WITHDRAWN 2026-09-04
+  after delivery** — built, verified, then removed by the operator. §6.8.
 - Degradation under width and height, stated as behaviour rather than discovered (§6.5, D14).
 
 **SCOPE CONFIRMED 2026-09-02 by the owner: all four views, no first slice.** The alternative put to
@@ -957,7 +988,27 @@ Three refusals come with it:
 **The cost: one subprocess spawn every 30 s from a process whose whole security argument is that it
 does nothing.** D7 is where that is argued, and §4.2 is why it needs arguing.
 
-### 6.8 What replaces the git pane
+### 6.8 What replaces the git pane — WITHDRAWN 2026-09-04, AFTER DELIVERY
+
+> **WITHDRAWN 2026-09-04 by the operator, having been built and shipped first.** The region was
+> removed from the monitor as answering a question nobody asked on that screen; `read/git.ts`, its
+> test and the watched directory went with it. **Everything below was delivered and verified before
+> it was withdrawn** — all five properties held, and `--no-pager`, `--branch` and the bad-log
+> distinction were each mutation-killed — so this section is a record of a requirement that was met
+> and then retired, not of one that failed. It is kept whole because it holds the reasoning and the
+> measured host facts, which a reader reopening the question would otherwise pay for twice.
+>
+> **What the monitor does instead: nothing.** There is no git region, and the replacement property
+> is the absence — a monitor that spawns no git cannot hang at `(END)`, cannot `cd` instead of
+> `git -C`, and cannot re-interpret an injected string one layer down. `ISC-486` is retired behind
+> `ISC-1165`, which pins the monitor's spawning modules to exactly `["monitor/read/docker.ts"]` by
+> name, so a returning reader must add itself to that literal rather than move a count.
+>
+> **The cost, named rather than buried.** The argv-with-no-shell layer was also the second of two
+> injection boundaries on the operations console's pane command. That surface now rests on
+> `shellQuote` alone — true before this strip existed, true again now — and
+> `operations-plan.test.ts` carried a comment claiming two boundaries for a week after there was
+> one.
 
 Everything `git-watch` showed, in a strip rather than a pane, and the replacement must not lose:
 
@@ -1221,7 +1272,15 @@ showing nothing, because it is *believed*.
 **The cost: a live task has no verdict on screen until something settles it**, and the honest
 rendering of that is `running` plus an age — which is exactly what §1.3 says a live answer is.
 
-### D12 — keep the git content, compress it
+### D12 — keep the git content, compress it — SUPERSEDED IN EFFECT 2026-09-04
+
+> **SUPERSEDED IN EFFECT by the withdrawal of the git strip (§6.8).** D12 decided how to compress
+> git content the monitor no longer shows, so the decision is moot rather than wrong: it was
+> implemented as written, revised by Q8 as written, and then its subject was removed. The argument
+> is preserved because it is the argument anyone reopening §6.8 would have to make again — in
+> particular the commission's own terms, *"a replacement that drops something the incumbent showed
+> is a regression however good the rest is"*, which the 2026-09-04 removal chose to accept rather
+> than refute.
 
 **Chosen: preserve all four elements (branch, short status, ten commits, watched directory) and
 compress by default with a key to expand. Rejected: dropping the commit list; rejected: keeping the
@@ -1289,7 +1348,7 @@ knowingly took on.
 | **Q5** | **ANSWERED 2026-09-02, and the extrapolation was close but its stated reason was only half right.** Measured: **80 real runs → `liveRunIds` 331 ms; 500 synthetic runs → 1777 ms** (the document predicted ~2.5 s). Cost is linear at ~3.6-4.1 ms per run. **The dominant term is the per-worker `ps` spawn inside `processStartTime`, NOT directory enumeration:** `runIdsAscending` is 3 ms at 80 runs and **9 ms at 500**, i.e. 0.5% of the total. **This makes §6.3's sketched mitigation correct and cheap rather than speculative** — appearance detection can run a name-set `readdir` on the medium clock for 9 ms while liveness stays on the slow clock, because the two costs are three orders of magnitude apart. At 1777 ms a 30 s slow clock is a 6% duty cycle, so D4's period survives 500 runs; it would not survive putting this walk anywhere faster. ~~Original question:~~ **How does the slow clock scale to 500 runs?** Measured: 403 ms at 80 runs holding `run.json`. The naive extension is ~2.5 s, which would exceed the incumbent's whole poll interval. The extrapolation assumes the cost is linear in runs and dominated by `ps` spawns; neither is established. | Synthesise 500 run directories (empty `run.json` plus a `workers/<id>/state.json` naming a dead pid) under a scratch `PIFLEET_RUNS_DIR` and time `liveRunIds` and `runIdsAscending` separately. | **D4's slow-clock period, and possibly D6.** If the walk is 2.5 s, 30 s is too fast and the monitor needs a live-set cache invalidated by the medium clock's name-set comparison — which §6.3 already sketches but does not require. |
 | **Q6** | **ANSWERED 2026-09-03: NO, and the premise was half wrong.** The two facts land on different clocks. `phase: "dead"` reaches the frame in **500 ms** — the `workers` fast source re-reads `state.json` for every known worker twice a second — while the run leaves the list in **30 s** on `liveRunIds`. So a `down`-ed run does not claim to be alive for half a minute: it says `phase dead` almost at once and its ROW lingers, which §6.4 already permits. **The mitigation this row proposes is therefore unnecessary rather than deferred** — putting `phase: "dead"` on the fast clock for known-live workers is exactly what the fast source already does. Measured deterministically on a fixture rather than by the stated probe: that probe destroys a live console worker to measure a property of the scheduler, and the scheduler is measurable without destroying anything. ISC-496 carries it. ~~Original question:~~ **Does a run *disappearing* need to be faster than 30 s?** §6.3 makes appearance a 5 s event through a cheap name-set `readdir` and leaves disappearance on the slow clock, so a `down`-ed run can show as live for up to half a minute. | Run `pifleet down` on one console run and time how long the pane keeps claiming it is alive; ask whether that is worse than the incumbent's 5 s. | **§6.3's mitigation only.** The fix if it matters is cheap — `state.json`'s `phase: "dead"` is on the fast clock for known-live workers — but it should be a decision rather than an accident. |
 | **Q7** | **ANSWERED 2026-09-02 for the runs that exist, and §2.5's characterisation was WRONG in the safe direction. Measured: 117 ms on the largest event log (23.5 MB, 1 task) and 139 ms on the busiest run (13.7 MB, 3 tasks, 1 merge entry) — both INCLUDING ~70 ms of `bun` process startup, so `collectRunReport` itself is well under 100 ms.** §2.5 called this path "seconds, not milliseconds" without measuring it; it is milliseconds. **The merge path really executed** — the busiest run's report carries a non-empty `merge` array — so `git merge-tree` is not being skipped. **THE CAVEAT IS THE HONEST HALF AND MUST NOT BE DROPPED: no run on this disk has more than 3 tasks or 1 merge entry**, and §2.5's concern was per-(worker, branch) and per-task fan-out. So this measurement bounds the cost for runs of the shape that actually occur here and establishes **nothing** about a run with 20 tasks across 6 workers with real branches. **View 4 needs no progress indicator at observed scale; whether it needs one at fan-out is untested and stays open.** ~~Original question:~~ **What does view 4 cost on the largest run on disk?** `collectRunReport` runs `git merge-tree` per (worker, branch) and `harvestTask` per task, and §2.5 calls it "seconds, not milliseconds" without measuring it. | Time `pifleet report --run 2026-08-30T23-41-07Z-1b0a --json` — the run holding the 24.7 MB event log — and again on the largest multi-worker run. | **Whether view 4 needs a progress indicator or merely a spinner**, and whether it can be pre-warmed on the slow clock for the selected run. Not the shape of the view. |
-| **Q8** | ~~Should the git strip default to status-only and expand to commits, rather than the reverse?~~ **ANSWERED 2026-09-02: YES — status first, commits behind `[c]`.** | Asked the operator, which is what this row said to do. The answer was the reverse of D12's original default, with the operator's stated reason matching the one this row conjectured: dirty paths change and a commit list on an idle branch does not. | **Closed.** D12 revised, §6.8 rewritten, §7.2's loss row updated. Both halves are still preserved; which one costs a keypress is reversed. |
+| **Q8** | ~~Should the git strip default to status-only and expand to commits, rather than the reverse?~~ **ANSWERED 2026-09-02: YES — status first, commits behind `[c]`. MOOT SINCE 2026-09-04:** the answer was right and was implemented; the strip whose default it set was then withdrawn (§6.8), so the question is settled and its subject is gone. Recorded rather than struck, because an owner ruling that outlives the thing it ruled on is exactly what goes stale unread — this one did, for a week. | Asked the operator, which is what this row said to do. The answer was the reverse of D12's original default, with the operator's stated reason matching the one this row conjectured: dirty paths change and a commit list on an idle branch does not. | **Closed.** D12 revised, §6.8 rewritten, §7.2's loss row updated. Both halves are still preserved; which one costs a keypress is reversed. |
 | **Q9** | **ANSWERED 2026-09-03, and the answer is NO — the figure does not survive measurement.** Measured on the operator's own six-worker fleet with all four views built: `status --all` renders 12 lines and view 1 renders 20; per worker the incumbent asserts 5 field kinds and view 1 asserts 7. **1.4x per worker, 2.8x across views 1+2 — not 10x, and not within a factor of five of it on any reading of "density".** §3.6 said in advance where this goes: "if it cannot, the design has failed on its own terms and D16 is where to say so." What the measurement found instead cannot be expressed as a ratio at all: three fact classes have a denominator of ZERO in the incumbent — container presence, per-region staleness, and the dispatch route with the fence — and the fourth gain is discriminating power inside one field, where `status` prints `idle` for every attended worker and did so on all six real rows. A note on the coverage argument, which looked stronger than it is: the DEFAULT `pifleet status` shows one run to the monitor's six, but `--all` (`status.ts:93`) renders every live run, so the ratio above is measured against `--all` rather than against the default. ISC-495 carries it, and the test states the ratio as an inequality against 10 so it fails if the claim is ever made true. ~~Original question:~~ **What is the falsifiable form of "an order of magnitude denser"?** §3.6's third property and D16's cost paragraph both name this as unresolved. | Count the distinct facts per worker row in the incumbent (two: the worker id, and `idle task=- supervisor=up`) and in a rendered mock of §6.2's row, and let the owner set the floor. | **D16, and the acceptance criterion §10 proposes for it.** A criterion whose threshold is a rhetorical figure will be graded `[~]` forever. |
 | **Q10** | **ANSWERED 2026-09-03: NO FLASH. Observed by the owner at a real operations-console pane, against a calibrated control.** The monitor ran on the shipping build beside a pane doing `clear` + subprocess once a second — the incumbent's exact pattern, which §6.6.1 identified as the source of the old flash — so the judgement was made against a reference rather than against memory. **The control was confirmed FLASHING and the monitor beside it was not** — which is what rules out the alternative a bare negative cannot, that this display simply does not show flashes. Verdict: no flash on the monitor. **D2's one knowingly-accepted risk did not materialise, and §6.4's fast clock keeps its 500 ms period** rather than having to slow down. ISC-498 stays `[~]` and NOT `[x]`, for a reason that is now about evidence rather than about the answer: an owner's eyeball verdict is the least reproducible evidence there is, nothing re-runs it, and the strictness rule does not bend for good news. The frequency half is separately measured and machine-checked. On the scheduler path the pane actually runs, 60 samples at 500 ms over 32.7 s gave **47 distinct frames — 1.44 repaints/sec, 22% of paints skipped**. A first measurement of 0.03/sec was WRONG and is kept as a caution: it sampled `composeFleet`, which re-reads every region per call so every marker renders `as of 0s` and the frame cannot move. **The finding is that the STALENESS MARKERS dominate, not the fleet data** — an entirely idle fleet still repainted 47 times, because three regions on three clocks tick their own `as of Ns` at 1 Hz out of phase. §6.4 is therefore what produces the rate this row worries about, and the two requirements pull against each other with neither wrong. If the perceptual half ever comes back positive, the cheap lever is the marker granularity, not the clock period. ~~Original question:~~ **Does Ink's full-frame repaint flash visibly inside a cmux pane?** Measured (§6.6.1): Ink rewrites every row on every update, including unchanged ones. Measured separately: the incumbent's flash came from `clear` + subprocess, which leaves a blank window Ink does not have. **Whether one atomic overwrite still flashes is established by neither measurement**, and D2 accepted the repaint without settling it. | Run the monitor in a real operations pane at the 500 ms clock with a changing activity column, and watch. If it flashes, compare against an Ink build whose static regions are memoised so unchanged rows are not re-rendered. | **Nothing structural — the seam in D2 makes the renderer swappable — but it decides whether §6.4's fast clock can run at 500 ms or must slow down.** This is the one risk D2 knowingly took on, and it is filed rather than assumed because `operations-plan.ts:655-671` is precedent for this repository being wrong about exactly this. |
 
