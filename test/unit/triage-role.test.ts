@@ -171,10 +171,10 @@ describe("the fan-out example is a document the real parser accepts", () => {
   });
 
   /**
-   * The partition the example draws is a real one — three observers, five
+   * The partition the example draws is a real one — one observer, three
    * services, no repeats. Asserted BY VALUE across the union, because a fixture
-   * where every observer holds the same count is one a `sort`, a `Set` or a
-   * `reverse` all survive, and this document is the thing a model copies.
+   * asserted only by count is one a `sort`, a `Set` or a `reverse` all survive,
+   * and this document is the thing a model copies.
    */
   test("the example's shares are disjoint and its union is asserted by name", () => {
     const parsed = fanoutExample() as { requests: { services: string[] }[] };

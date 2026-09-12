@@ -846,7 +846,7 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
    * ── §13 TASK 4.5a(a): THE SEAT LIST HAS ONE HOME ──────────────────────────
    *
    * **THE TASK'S PREMISE IS STALE AND THIS SAYS SO RATHER THAN PRETENDING TO
-   * FIX IT.** §13:2935-2937 reads *"`scripts/triage` spells its four seats as
+   * FIX IT.** §13 task 4.5a(a) reads *"`scripts/triage` spells its four seats as
    * literals rather than importing `DEFAULT_TRIAGE_WORKERS`"*. It does not, and
    * did not when the line was written: `scripts/triage:93` imports the constant
    * and `:263` is the single site that resolves it. What the file DOES spell as
@@ -856,7 +856,7 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
    * never going to catch it either way.
    *
    * So the claim is split to match what is actually there: the CODE takes the
-   * list from one import, and the DIAGRAM is held to the same four names.
+   * list from one import, and the DIAGRAM is held to the same two names.
    *
    * **A source-text probe is the only instrument available, and that is
    * measured rather than assumed.** ISC-600: `tsconfig.json`'s `include` is
@@ -882,7 +882,7 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
       .join("\n");
   };
 
-  test("the four seats reach its code only through DEFAULT_TRIAGE_WORKERS", async () => {
+  test("its seats reach its code only through DEFAULT_TRIAGE_WORKERS", async () => {
     const src = await source("triage");
     const code = codeOnly(src);
 
@@ -916,11 +916,11 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
   });
 
   /**
-   * The pane diagram in its header is held to the same four, in the same order.
+   * The pane diagram in its header is held to the same seats, in the same order.
    *
-   * This is where the divergence actually lives now: add a fifth seat to
+   * This is where the divergence actually lives now: add a third seat to
    * `DEFAULT_TRIAGE_WORKERS` and the code adapts while `scripts/triage:14-20`
-   * goes on drawing a 2x2 of four names, in a file no compiler opens. The
+   * goes on drawing its two names, in a file no compiler opens. The
    * diagram is parsed rather than string-matched, so the assertion is an
    * EQUALITY in both directions — a seat removed from the constant but left in
    * the picture reddens too, which a `toContain` per seat would not catch.
@@ -929,7 +929,7 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
    * `console-restart.test.ts`'s header records that cmux's reported index and
    * the `--workers` order disagree, and `triage-plan.test.ts` owns that.
    */
-  test("its pane diagram names those same four, in the same order", async () => {
+  test("its pane diagram names those same seats, in the same order", async () => {
     const src = await source("triage");
     const open = at(src, "```", 0, "scripts/triage's header draws no pane diagram");
     const close = at(src, "```", open + 3, "the pane diagram's fence is unterminated");
