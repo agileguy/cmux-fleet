@@ -198,8 +198,23 @@ describe("argv builders produce exactly the documented command line", () => {
     ]);
   });
 
-  test("focus-pane addresses a pane, not a surface", () => {
-    expect(focusPaneArgv("pane-uuid")).toEqual(["focus-pane", "--pane", "pane-uuid"]);
+  /**
+   * `--workspace` is not optional here any more, and the 2026-08-18 note that
+   * `focus-pane` "isn't workspace-scoped" is what this replaces. Measured
+   * 2026-09-13 on cmux 0.64.22: without `--workspace` the pane resolves against
+   * `$CMUX_WORKSPACE_ID`, so from a shell inside ANOTHER workspace a pane that
+   * exists answers `not_found: Pane not found` — the same pane, same shell,
+   * resolved the moment that variable was unset. `--recreate` died there after
+   * stopping the old runs and before closing, grouping or colouring anything.
+   */
+  test("focus-pane addresses a pane scoped to its workspace", () => {
+    expect(focusPaneArgv("ws-uuid", "pane-uuid")).toEqual([
+      "focus-pane",
+      "--workspace",
+      "ws-uuid",
+      "--pane",
+      "pane-uuid",
+    ]);
   });
 
   test("read-screen addresses a surface", () => {
@@ -339,7 +354,8 @@ describe("argv builders produce exactly the documented command line", () => {
 
   test("every builder refuses an injected identifier rather than emitting it", () => {
     expect(() => listPanesArgv("--rm")).toThrow(/refusing/);
-    expect(() => focusPaneArgv("a b")).toThrow(/refusing/);
+    expect(() => focusPaneArgv("ws", "a b")).toThrow(/refusing/);
+    expect(() => focusPaneArgv("-x", "pane")).toThrow(/refusing/);
     expect(() => workspaceCloseArgv("-x")).toThrow(/refusing/);
     expect(() => setStatusArgv("ws", "-k", "v")).toThrow(/refusing/);
     // `sendArgv`'s TEXT is no longer part of this sweep — it rides after `--`

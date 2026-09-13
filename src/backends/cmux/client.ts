@@ -210,9 +210,23 @@ export function resizePaneArgv(
   return ["resize-pane", "--pane", paneId, `-${dir}`, "--amount", String(Math.round(amount))];
 }
 
-export function focusPaneArgv(paneId: string): string[] {
+/**
+ * `focus-pane --workspace <id> --pane <id>`.
+ *
+ * `--workspace` is the same workspace CONTEXT `rename-tab` and `respawn-pane`
+ * need, and for the same reason: omitted, cmux resolves the pane against
+ * `$CMUX_WORKSPACE_ID`. That is unset outside cmux, which is why a bare
+ * `--pane` passed every earlier probe, and it is the CALLER'S OWN workspace
+ * inside cmux. Measured 2026-09-13 on 0.64.22 from a shell in another
+ * workspace: `focus-pane --pane <uuid>` answered `not_found: Pane not found`
+ * for a pane that exists, and the identical call resolved with the variable
+ * unset. `createWorkspace` threw there, so `--recreate` stopped every old run,
+ * built the new console and never closed, grouped or coloured anything.
+ */
+export function focusPaneArgv(workspaceId: string, paneId: string): string[] {
+  assertCmuxValue("workspace id", workspaceId);
   assertCmuxValue("pane id", paneId);
-  return ["focus-pane", "--pane", paneId];
+  return ["focus-pane", "--workspace", workspaceId, "--pane", paneId];
 }
 
 export function renameTabArgv(workspaceId: string, surfaceId: string, title: string): string[] {
@@ -225,8 +239,9 @@ export function renameTabArgv(workspaceId: string, surfaceId: string, title: str
   // `$CMUX_WORKSPACE_ID` when omitted. Neither is set by this client, so on
   // 0.64.22 a surface id that demonstrably exists reports `not_found: Tab not
   // found` (probed live 2026-08-18), even though the identical id resolves
-  // fine for `send`/`send-key`/`read-screen`/`focus-pane`, none of which are
-  // workspace-scoped. Either UUID or ref form works once the context is
+  // fine for `send`/`send-key`/`read-screen`, none of which are
+  // workspace-scoped (`focus-pane` IS — see `focusPaneArgv`; re-probed
+  // 2026-09-13 from inside another workspace). Either UUID or ref form works once the context is
   // supplied — the regression was the missing context, not the id spelling
   // (see `respawnPaneArgv`).
   return ["rename-tab", "--workspace", workspaceId, "--surface", surfaceId, "--title", title];
@@ -244,8 +259,9 @@ export function respawnPaneArgv(workspaceId: string, surfaceId: string, command:
   // `new-split` had just returned moments earlier. Adding `--workspace` (any
   // id form, UUID included) alongside the identical `--surface <uuid>` fixes
   // it outright; ref-vs-UUID spelling was never the actual variable, and
-  // `read-screen`/`send`/`send-key`/`focus-pane` need no context at all
-  // because they aren't workspace-scoped. A prior write-up in this project
+  // `read-screen`/`send`/`send-key` need no context at all because they aren't
+  // workspace-scoped. (`focus-pane` was listed here too; it is scoped — see
+  // `focusPaneArgv` for the 2026-09-13 measurement.) A prior write-up in this project
   // mis-attributed the failure to a UUID/ref addressing regression —
   // corrected after this direct A/B test (see ISA.md).
   return ["respawn-pane", "--workspace", workspaceId, "--surface", surfaceId, "--command", command];

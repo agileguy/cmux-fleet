@@ -651,7 +651,7 @@ export async function createWorkspace(
     parseListPanes(await client.runOk(listPanesArgv(wsId))),
     created.surfaceId,
   );
-  if (firstPaneId !== null) await client.runOk(focusPaneArgv(firstPaneId));
+  if (firstPaneId !== null) await client.runOk(focusPaneArgv(wsId, firstPaneId));
   await applyTopFraction(client, wsId, spec.topFraction);
   // HEIGHT FIRST, THEN WIDTH, and the order is not arbitrary even though the
   // two corrections are independent in this layout: the height pass moves the

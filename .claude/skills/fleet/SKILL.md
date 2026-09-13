@@ -301,6 +301,42 @@ tests can run at all.
   the agents are already gone. Recovery is
   `cmux workspace-action --action unpin --workspace <id>` and a retry. Known
   defect, unfixed; one more reason to prefer `--restart`.
+- **A console script run from inside ANOTHER cmux workspace inherits that
+  workspace's `$CMUX_WORKSPACE_ID`, and cmux resolves context-scoped verbs
+  against it.** Measured 2026-09-13: `--recreate` on triage, review and
+  operations, launched from a shell sitting in the `driver` workspace,
+  stopped every old run, built each new workspace, then died on
+
+  ```
+  cmux focus-pane --pane <uuid> exited 1: Error: not_found: Pane not found
+  ```
+
+  — BEFORE closing the old console, adding the new one to `pi-fleet`, or giving
+  it its colour back. Every console then existed twice, the new copies ungrouped
+  and uncoloured, each script exit 2. The pane existed; `focus-pane` had looked
+  for it in `driver`. The same call resolved the moment the variable was unset,
+  and resolves with `--workspace` passed while it is still set.
+
+  **Fixed in code 2026-09-13:** `focusPaneArgv` now takes the workspace and
+  emits `--workspace` — the fix `rename-tab` and `respawn-pane` got for the same
+  class of failure on 2026-08-18. Its comment and the ones in `client.ts` and
+  `parse.ts` that called `focus-pane` "not workspace-scoped" are corrected.
+  **On a checkout without that fix**, launch from outside the foreign context:
+
+  ```bash
+  env -u CMUX_WORKSPACE_ID -u CMUX_TAB_ID ./scripts/<console> --recreate
+  ```
+
+  **Recovering the half-done state:** close the new, ungrouped duplicates and
+  run `--recreate` again the same way. The OLD workspace still holds the group
+  membership and `custom_color`, and `--recreate` reads both from it before it
+  builds — which is exactly why closing the old copy first would lose them.
+
+  **The general lesson:** a cmux verb that passed a probe from a plain terminal
+  proves nothing about the same verb run from inside cmux, where the context
+  variable is set to somebody else's workspace. `read-screen` was re-probed the
+  same day and genuinely is unscoped; `focus-pane` only looked it. Probe a new
+  verb from inside a DIFFERENT workspace before trusting its argv.
 - **A changed toolchain needs its image built.** The tag is a hash over the
   build context, so editing `fleet.yaml` or the Dockerfile alone leaves `up`
   refusing a stale tag rather than running one. Build it:

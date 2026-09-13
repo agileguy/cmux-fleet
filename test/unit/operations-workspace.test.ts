@@ -243,6 +243,11 @@ describe("creating the workspace", () => {
     // pane-0 is the one holding the INITIAL surface, and it is listed last by
     // the fake, so an implementation that took `panes[0]` would focus pane-1.
     expect(focus![focus!.indexOf("--pane") + 1]).toBe("pane-0");
+    // …in the workspace just CREATED. Without `--workspace`, cmux resolves the
+    // pane against `$CMUX_WORKSPACE_ID` — the workspace of whatever shell ran
+    // the script — and a rebuild launched from inside another console died here.
+    expect(focus!.indexOf("--workspace"), "focus-pane carries no workspace").toBeGreaterThan(-1);
+    expect(focus![focus!.indexOf("--workspace") + 1]).toBe("ws-new");
   });
 
   test("the workspace is created on the INVOCATION directory", async () => {
