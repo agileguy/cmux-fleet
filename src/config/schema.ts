@@ -1938,9 +1938,9 @@ export function kubeconfigScopeWarning(workerIds: readonly string[]): string | n
  * `fleet.example.yaml` and `fleet.yaml` (SRD-OBSERVER-ROLES-001 §4.1).
  *
  * One constant rather than a literal at each site, so the rename to
- * `observer-k8s` is a change to this value and the two configs, not a hunt for
- * every place that compares against the old string. Still `"observer"` until
- * that rename lands.
+ * `observer-k8s` was a change to this value and the two configs, not a hunt for
+ * every place that compares against the old string. The rename has landed, and
+ * `test/unit/observer-rename.test.ts` pins this literal and refuses the old name.
  */
 export const OBSERVER_K8S_ROLE = "observer-k8s";
 
@@ -2106,9 +2106,9 @@ export function submitReportWriteWarning(
     out +=
       `  Never available here, because bash can cat > a file (${shellWriters.join(", ")}): ` +
       `removing write takes away a tool and not a capability (§6.8). Worth doing anyway for the ` +
-      `smaller reason §6.8 gives — the failure at roles/observer.md:19-22 is a model reasoning ` +
-      `about which tools it holds and concluding wrongly, and a seat whose only writing verb is ` +
-      `named submit_report leaves that reasoning less room.\n`;
+      `smaller reason §6.8 gives — the failure at roles/observer-k8s.md:19-22 is a model ` +
+      `reasoning about which tools it holds and concluding wrongly, and a seat whose only ` +
+      `writing verb is named submit_report leaves that reasoning less room.\n`;
   }
   out +=
     `  Not a refusal: §13 phase 6 adds submit_report to every role and removes nothing, and ` +
