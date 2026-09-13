@@ -796,10 +796,9 @@ roles:
     # THE TWO TRACKED FILES DISAGREE ABOUT THIS, and the disagreement is
     # RECORDED here rather than settled. THIS file declares `rpc` on both
     # `triage` and `observer-k8s` and neither seat overrides it, so in the
-    # example the console is unattended.
-    # The tracked `triage/console.yaml` describes
-    # seats that are `pane_mode: tui` and pays the stated price for it —
-    # `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
+    # example the console is unattended. The tracked `triage/console.yaml`
+    # describes seats that are `pane_mode: tui` and pays the stated price for
+    # it — `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
     # which takes a tui seat down and cannot bring it back. The operator's
     # `fleet.yaml` — TRACKED since 2026-09-12, so the split is three files wide
     # and diffable now rather than two files and one report of a third —

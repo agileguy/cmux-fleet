@@ -4,16 +4,16 @@
  *
  * ## Why this role's rewrite is not a copy of 8.1/8.2/8.3's
  *
- * `fleet.example.yaml`'s `observer-k8s` is
- * `tools: [read, write, bash, grep, find, ls, submit_report]` — the only role
- * Phase 8 has touched so far that holds a
- * write-capable builtin AND `submit_report` at once. Reviewer and triage hold
- * `submit_report` with no write verb at all, so their prose could say "you
- * have no write tool, call it" and be unconditionally true; that argument does
- * not apply here, because observer's `write` is real and does report-related
- * work of its own: it is how the `observer-ops.json`/`.md` pair reaches the
- * outbox (`skills/observer-ops/SKILL.md`, `roles/observer-k8s.md`).
- * `submit_report` is still the only route for the envelope itself.
+ * `fleet.example.yaml`'s `observer-k8s` is `tools: [read, write, bash, grep,
+ * find, ls, submit_report]` — the only role Phase 8 has touched so far that
+ * holds a write-capable builtin AND `submit_report` at once. Reviewer and
+ * triage hold `submit_report` with no write verb at all, so their prose could
+ * say "you have no write tool, call it" and be unconditionally true; that
+ * argument does not apply here, because observer's `write` is real and does
+ * report-related work of its own: it is how the `observer-ops.json`/`.md`
+ * pair reaches the outbox (`skills/observer-ops/SKILL.md`,
+ * `roles/observer-k8s.md`). `submit_report` is still the only route for the
+ * envelope itself.
  *
  * `skills/pifleet-worker/SKILL.md`'s routing table settles the "both" case
  * explicitly: *"Call `submit_report`. The hand-written envelope stays

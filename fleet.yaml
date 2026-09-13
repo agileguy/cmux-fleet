@@ -530,8 +530,8 @@ egress:
     # SCOPE, STATED PLAINLY: `egress.allow` is FLEET-WIDE. There is no per-role
     # allow list — `egress_access: true` buys a role the ROUTE and the
     # destinations are these. So this entry is reachable by every role that has
-    # that key, which today is `observer-k8s`, `tester` and `engineer`, not
-    # testers alone.
+    # that key, which today is `observer-k8s`, `tester`, `engineer` and
+    # `ticketing`, not testers alone.
     - {host: cdn.playwright.dev, port: 443}     # playwright browser binaries
     # The relay's dial target — REQUIRED by `llm.relay_upstream`, and the second
     # of the two edits that decision deliberately takes: the relay is the single
@@ -1287,7 +1287,32 @@ workers:
      model: ollama-cloud/glm-5.3,
      append_system_prompt_file: ./roles/review/implementation-language.md}
 
-  # ---- The triage console (SRD-TRIAGE-CONSOLE §6.1) — four rpc seats, one run ----
+  # ---- The triage console (SRD-TRIAGE-CONSOLE §6.1) — four tui seats, one run ----
+  #
+  # WHAT THIS FILE SAYS TODAY, each claim checkable against a line it names.
+  # All four seats set `model: gabe/gemma-4-26b-a4b-it` and `pane_mode: tui` on
+  # their own lines: `tri-1` and `obs-t1` below, and the `obs-t2`/`obs-t3` pair
+  # that closes this list. Both roles name that same model (`roles.triage.model`,
+  # `roles.observer-k8s.model`) and both are `pane_mode: rpc`. So on each seat the
+  # `model:` repeats its role's value and is still the line that binds, because a
+  # worker's own `model:` wins over its role's (`pick` in `src/config/load.ts`),
+  # while the `pane_mode:` is a real override of the role.
+  #
+  # The tracked `fleet.example.yaml` differs on both counts. Its `triage` and
+  # `observer-k8s` roles name `gemma-4-26b-a4b-it-bf16` and are `pane_mode: rpc`,
+  # and its four triage seats carry no `model:` or `pane_mode:` of their own, so
+  # they take both from their roles.
+  #
+  # [SUPERSEDED 2026-09-13] The lines between this paragraph and HISTORY below
+  # are this block's earlier account of the console, kept as history. The Phase 1
+  # rename re-stamped `observer` to `observer-k8s` in them and changed nothing
+  # else. These claims in them are false today: that the three observers carry
+  # no `model:` override (each does); that this file's `observer-k8s` role is
+  # `gpt-oss-20b-MXFP4-Q8` and the example's is `Qwen3.5-35B-A3B-8bit` (both
+  # roles are the models named above); that the example's seats carry an override
+  # (they carry none); that the seats are rpc (they are tui, the reversal the
+  # `recycle_after_sweeps: 0` paragraph below records); and that the triage seats
+  # are on `gemma-4-26b-a4b-it-bf16` (they are on gabe).
   #
   # NO `model:` OVERRIDE ON THE THREE OBSERVERS HERE, and the tracked
   # `fleet.example.yaml` DOES carry one. That difference is deliberate and it is
