@@ -1934,7 +1934,18 @@ export function kubeconfigScopeWarning(workerIds: readonly string[]): string | n
 }
 
 /**
- * Worker ids whose resolved role is literally `observer` and whose resolved
+ * The name the shipped read-only Kubernetes diagnostic role carries in
+ * `fleet.example.yaml` and `fleet.yaml` (SRD-OBSERVER-ROLES-001 §4.1).
+ *
+ * One constant rather than a literal at each site, so the rename to
+ * `observer-k8s` is a change to this value and the two configs, not a hunt for
+ * every place that compares against the old string. Still `"observer"` until
+ * that rename lands.
+ */
+export const OBSERVER_K8S_ROLE = "observer";
+
+/**
+ * Worker ids whose resolved role is `OBSERVER_K8S_ROLE` and whose resolved
  * `pane_mode` is `tui` (§6.2, §7.5).
  *
  * Keyed to the role's NAME rather than to a property this schema can derive,
@@ -1947,7 +1958,7 @@ export function kubeconfigScopeWarning(workerIds: readonly string[]): string | n
 export function observerTuiWorkers(cfg: FleetConfig): string[] {
   const out: string[] = [];
   for (const w of cfg.workers) {
-    if (w.role !== "observer") continue;
+    if (w.role !== OBSERVER_K8S_ROLE) continue;
     const role = cfg.roles[w.role];
     if (!role) continue;
     const mode = pickRoleField(w, role, cfg.defaults, "pane_mode") ?? "rpc";

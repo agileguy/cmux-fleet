@@ -42,6 +42,7 @@ import {
   RESERVED_ENV_PREFIXES,
   effectiveToolGrant,
   kubeconfigScopeWarning,
+  OBSERVER_K8S_ROLE,
   observerTuiEpochWarning,
   observerTuiWorkers,
   DEFAULT_GIT_IDENTITY,
@@ -2367,8 +2368,8 @@ describe("cloud_access without cloud.kubeconfig warns, never refuses (SRD-OBSERV
 describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER-001 §6.2, §7.5)", () => {
   test("an observer role resolving pane_mode: tui is named, and the mechanism is stated", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: { pane_mode: "tui" } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const loaded = await writeAndLoad(doc);
     const tuiWorkers = observerTuiWorkers(loaded.config);
     expect(tuiWorkers).toEqual(["obs-1"]);
@@ -2383,14 +2384,14 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
 
   test("the same document still loads — this is a warning, not a schema refusal", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: { pane_mode: "tui" } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     // Must not throw, unlike the tui+oneshot / tui+headless refusals above.
     await writeAndLoad(doc);
   });
 
   test("pane_mode: tui on a DIFFERENT role's name raises nothing", async () => {
-    // Keyed to the literal role name "observer" — the hazard is a property of
+    // Keyed to the role name OBSERVER_K8S_ROLE — the hazard is a property of
     // what the observer-ops skill does, not a generic fact this schema can
     // derive from any read-only role.
     const doc = baseDoc();
@@ -2401,8 +2402,8 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
 
   test("observer at pane_mode: rpc (the shipped default) raises nothing", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: {} };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: {} };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const loaded = await writeAndLoad(doc);
     expect(observerTuiWorkers(loaded.config)).toEqual([]);
   });
