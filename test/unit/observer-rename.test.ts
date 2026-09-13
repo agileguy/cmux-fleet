@@ -15,27 +15,44 @@
  * was (§4.2, last row). This file excludes itself, because its detector cases
  * spell every form it refuses.
  *
- * Every form in {@link FORMS} reads every scanned file, except the quoted
- * literal, which reads `src/`, `test/` and `scripts/` only. The scripts are
+ * Every form in {@link FORMS} reads every scanned file, with two exceptions.
+ * The quoted literal reads `src/`, `test/` and `scripts/` only; the scripts are
  * extensionless Bun TypeScript, so the scope is by directory, not extension.
+ * The docs form reads `skills/`, `roles/` and `.claude/skills/fleet/` only, the
+ * worker and operator documents where §4.1 found the role named in markdown.
  *
- * Two things are deliberately NOT guarded:
+ * The docs form reads three shapes, each the name used as an identifier and none
+ * of them a sentence: the backticked name followed by `'s` or a hyphen
+ * (`` `observer`'s ``, `` `observer`-specific ``); a table cell holding the name
+ * alone, bare, bold or backticked; and a comma list with a role name beside it,
+ * as in `(observer, verifier, ticketing)`. Role names are read off the prompts
+ * in `roles/`, so an English list such as "one file per observer, read-only"
+ * stays quiet.
  *
- * - **English prose.** "The observer" in a comment, a role prompt or a skill is
- *   §4.2's seat that looks. No form reads words; each one is an identifier
- *   shape.
- * - **Backtick spans.** The quoted-literal form covers `"` and `'` only.
- *   Docblocks name the role in backticks dozens of times, and §4.2 lets English
- *   and historical prose stay.
+ * Three things are deliberately NOT guarded:
  *
- * ## Four traps the detectors are built around
+ * - **English prose, the phrase "observer role" included.** "The observer" in a
+ *   comment, a role prompt or a skill is §4.2's seat that looks, and §4.2 lets
+ *   English stay. A form reading "observer role" would refuse legitimate future
+ *   sentences, so no form reads words.
+ * - **Backtick spans outside the docs form's shapes.** The quoted-literal form
+ *   covers `"` and `'` only, and the index form reads a backticked index only.
+ *   Docblocks and documents name the role in backticks as English dozens of
+ *   times.
+ * - **One §4.1 row, the named residual.** On the pre-rename tree (909f817),
+ *   `skills/observer-ops/SKILL.md:3` read "How the observer role writes …" and
+ *   "Mounted for the observer role." Both are English, so nothing here catches
+ *   that row. Its text is a pinned miss in the detector cases, so the gap stays
+ *   visible.
+ *
+ * ## Five traps the detectors are built around
  *
  * **Word boundaries.** `\b` after `observer` matches `observer-k8s`, because
  * `\b` sits between `r` and `-`. Every form ending in the bare name anchors
  * with `(?![-\w])` or a closing quote or backtick instead.
  *
  * **Newlines.** Swept text is a whole file, so `\s` crosses lines. Where a
- * match must stay on one line it spells `[ \t]`.
+ * match must stay on one line it spells `[ \t]`, or it reads one line at a time.
  *
  * **Role indentation is structural.** `observer:` is also the `triage.json`
  * row field holding a worker id (`src/run/triage-document.ts`, §4.2), and test
@@ -46,12 +63,23 @@
  * `worker-secrets.test.ts`; §4.3's other forms reached them only through a
  * paired `role:` line in the same fixture.
  *
+ * A `roles` map opens as a YAML key, a fixture key or assignment, or a typed
+ * declaration (`const roles: Record<string, RoleDoc> = {`), with its `{` on the
+ * same line or alone on the next. A map written on one line is read key by key
+ * at depth one, so `{sre: {}, observer: {}}` fires and `{sre: {observer:
+ * obs-t1}}` does not.
+ *
  * **A quoted key is not a quoted literal.** The same row field is a quoted key
  * in JSON, as in `{"service": "api", "observer": "obs-t1"}`. The quoted-literal
  * form lets a literal through when `:` follows its closing quote directly.
  * The colon must be adjacent, so a ternary's spaced ` : ` still fires. A quoted
  * ROLE key is still refused, by the role-key form, which reads structure
  * instead of quotes.
+ *
+ * **A variable named for the seat is not the role.** `src/run/triage-verdict.ts`
+ * holds a variable called `observer`, so a `role:` whose value is
+ * `observer.role` reads a property, not the role name. The role-value form lets
+ * the bare name through when `.` or `?.` and an identifier follow it.
  *
  * ## The exemptions are line shapes, NAMED per file
  *
@@ -74,7 +102,18 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
 import { loadConfig } from "../../src/config/load.ts";
@@ -169,17 +208,21 @@ const PANE_TITLE_SITES: Readonly<Record<string, readonly TitleShape[]>> = {
 };
 
 /**
- * Every file under `rel`, repo-relative. A missing root throws, naming itself,
+ * Every regular file under `rel`, relative to `root`. Below the root, only
+ * directories and regular files are read: a symlink is skipped, so a dangling
+ * link or a loop cannot crash module load. A missing root throws, naming itself,
  * rather than sweeping nothing.
  */
-function walk(rel: string): string[] {
-  if (!statSync(join(REPO, rel)).isDirectory()) return [rel];
-  return readdirSync(join(REPO, rel))
-    .sort()
-    .flatMap((name) => walk(join(rel, name)));
+function walk(rel: string, root = REPO): string[] {
+  if (!statSync(join(root, rel)).isDirectory()) return [rel];
+  return readdirSync(join(root, rel), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() || entry.isFile())
+    .map((entry) => ({ path: join(rel, entry.name), dir: entry.isDirectory() }))
+    .sort((a, b) => (a.path < b.path ? -1 : 1))
+    .flatMap(({ path, dir }) => (dir ? walk(path, root) : [path]));
 }
 
-const FILES = SCAN_ROOTS.flatMap(walk).filter((rel) => rel !== SELF);
+const FILES = SCAN_ROOTS.flatMap((root) => walk(root)).filter((rel) => rel !== SELF);
 const TEXT = new Map(FILES.map((rel) => [rel, readFileSync(join(REPO, rel), "utf8")]));
 
 /** 1-based line numbers at which `re` starts a match. `re` must carry the `g` flag. */
@@ -188,30 +231,89 @@ function matchLines(text: string, re: RegExp): number[] {
 }
 
 /**
- * Lines holding `observer:` as a DIRECT child of a `roles` block.
+ * `roles` opening a map, as regex source matched against ONE line: a key or an
+ * assignment (`roles:`, `doc["roles"] =`), or a typed declaration
+ * (`const roles: Record<string, RoleDoc> =`). The type is a name with optional
+ * generic arguments, so `{ roles: someVar, x: 1 }; const y =` does not open one.
+ */
+const ROLES_OPENER = String.raw`\broles(?:["']?\]?\s*[:=]|\s*:\s*[\w.]+(?:<[^=;]*>)?(?:\[\])?\s*=)`;
+/** A line ending at the opener or its `{`: the map's keys are on the lines below. */
+const BLOCK_OPENER = new RegExp(String.raw`^(\s*)(?:\S.*)?${ROLES_OPENER}\s*(\{\s*)?(?:(?:#|\/\/).*)?$`);
+/** An opener and its `{` on one line; the rest of the line is a flow map to read. */
+const FLOW_OPENER = new RegExp(String.raw`${ROLES_OPENER}\s*\{`, "g");
+/** The old name as a key, starting exactly at `lastIndex`. */
+const OLD_KEY = /[ \t]*["']?observer["']?[ \t]*:/y;
+
+function oldKeyAt(text: string, at: number): boolean {
+  OLD_KEY.lastIndex = at;
+  return OLD_KEY.test(text);
+}
+
+/** Neither blank nor a comment. */
+const significant = (line: string): boolean => !/^\s*(?:$|#|\/\/)/.test(line);
+
+/**
+ * Whether a flow map holds the old name as a DIRECT key. `rest` is its line after
+ * the `{`. Depth counts every bracket, so a key nested under a role is not read,
+ * and a quoted span closed on the line is skipped whole, so a brace inside a
+ * string cannot end the map early.
+ */
+function flowMapHoldsOldKey(rest: string): boolean {
+  let depth = 1;
+  for (let i = -1; i < rest.length; i++) {
+    const ch = i < 0 ? "," : rest[i]!;
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const close = rest.indexOf(ch, i + 1);
+      if (close !== -1) i = close;
+    } else if (ch === "{" || ch === "[" || ch === "(") {
+      depth++;
+    } else if (ch === "}" || ch === "]" || ch === ")") {
+      if (--depth === 0) return false;
+    } else if (ch === "," && depth === 1 && oldKeyAt(rest, i + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Lines holding `observer:` as a DIRECT key of a `roles` map.
  *
- * A block opens on a line ending `roles:` (YAML), `roles: {` or `roles"] = {`
- * (a fixture object). Its child indentation is that of its first line that is
- * neither blank nor a comment, and the first such line at or left of the opener
- * closes it. Blank and comment lines do neither, so a comment between two roles
- * cannot hide the second. A one-line `{ observer: … }` is caught when the old
- * name is its first key, the only one-line shape the pre-rename tree held.
+ * A map opened by {@link ROLES_OPENER} is read one of three ways. With `{` and
+ * more on the same line, the rest of the line is a flow map, read key by key.
+ * With the line ending at the opener or its `{`, the map is a block: its child
+ * indentation is that of its first line that is neither blank nor a comment, and
+ * the first such line at or left of the opener closes it. Blank and comment lines
+ * do neither, so a comment between two roles cannot hide the second. With no `{`
+ * on the opener and one starting the next such line, that line is read as a flow
+ * map and the block's children must sit deeper than it.
  */
 function roleKeyLines(text: string): number[] {
   const lines = text.split("\n");
-  // `[ \t]`, not `\s`: a `\s` here crosses the newline and reports a multi-line block at its opener too.
-  const hits = matchLines(text, /\broles["']?\]?[ \t]*[:=][ \t]*\{[ \t]*["']?observer["']?[ \t]*:/g);
+  const hits: number[] = [];
   lines.forEach((line, i) => {
-    const opener = /^(\s*)(?:\S.*)?\broles["']?\]?\s*[:=]\s*\{?\s*(?:(?:#|\/\/).*)?$/.exec(line);
+    for (const m of line.matchAll(FLOW_OPENER)) {
+      if (flowMapHoldsOldKey(line.slice(m.index! + m[0].length))) hits.push(i + 1);
+    }
+    const opener = BLOCK_OPENER.exec(line);
     if (!opener) return;
+    let base = opener[1]!.length;
+    let j = i + 1;
+    while (j < lines.length && !significant(lines[j]!)) j++;
+    const brace = lines[j]?.trimStart() ?? "";
+    if (opener[2] === undefined && brace.startsWith("{")) {
+      if (flowMapHoldsOldKey(brace.slice(1))) hits.push(j + 1);
+      base = lines[j]!.length - brace.length;
+      j++;
+    }
     let childIndent: number | undefined;
-    for (let j = i + 1; j < lines.length; j++) {
+    for (; j < lines.length; j++) {
+      if (!significant(lines[j]!)) continue;
       const body = lines[j]!.trimStart();
-      if (body === "" || body.startsWith("#") || body.startsWith("//")) continue;
       const indent = lines[j]!.length - body.length;
-      if (indent <= opener[1]!.length) break;
+      if (indent <= base) break;
       childIndent ??= indent;
-      if (indent === childIndent && /^["']?observer["']?\s*:(\s|$)/.test(body)) hits.push(j + 1);
+      if (indent === childIndent && oldKeyAt(body, 0)) hits.push(j + 1);
     }
   });
   return hits.sort((a, b) => a - b);
@@ -235,6 +337,24 @@ function unshapedLiteralLines(text: string, rel = ""): number[] {
   });
 }
 
+/** Role names, read off the prompts in `roles/`: each one there is named for its role (§4.1). */
+const ROLE_NAMES = FILES.flatMap((rel) => /^roles\/([^/]+)\.md$/.exec(rel)?.slice(1) ?? []);
+
+/**
+ * The old name used as the role's name in a document, in three shapes; see the
+ * header. Each is read within one line, and a line is reported once.
+ */
+function docsRoleNameLines(text: string): number[] {
+  const names = ROLE_NAMES.join("|");
+  const shapes = [
+    /`observer`(?:['’]s|-[A-Za-z])/g,
+    /(?<=\|)[ \t]*(\*\*|`)?observer\1[ \t]*(?=\|)/g,
+    new RegExp(String.raw`(?<![-\w])observer\x60?[ \t]*,[ \t]*(?:(?:and|or)[ \t]+)?\x60?(?:${names})(?![-\w])`, "g"),
+    new RegExp(String.raw`(?<![-\w])(?:${names})\x60?[ \t]*,[ \t]*(?:(?:and|or)[ \t]+)?\x60?observer(?![-\w])`, "g"),
+  ];
+  return [...new Set(shapes.flatMap((re) => matchLines(text, re)))].sort((a, b) => a - b);
+}
+
 type Form = {
   name: string;
   scope: (rel: string) => boolean;
@@ -251,19 +371,19 @@ const FORMS = {
     find: roleKeyLines,
   },
   roleValue: {
-    name: `"role: ${OLD}" not followed by "-" or a word character`,
+    name: `"role: ${OLD}" on one line, not followed by "-", a word character or a property access`,
     scope: everywhere,
-    find: (t) => matchLines(t, /role["']?\s*:\s*["']?observer(?![-\w])/g),
+    find: (t) => matchLines(t, /role["']?[ \t]*:[ \t]*["']?observer(?![-\w]|\??\.[A-Za-z_$])/g),
   },
   rolesIndex: {
-    name: `roles["${OLD}"] or roles['${OLD}']`,
+    name: `roles.${OLD} or roles["${OLD}"], in any quote and optionally chained`,
     scope: everywhere,
-    find: (t) => matchLines(t, /roles\[\s*(["'])observer\1\s*\]/g),
+    find: (t) => matchLines(t, /roles(?:\??\.observer(?![-\w])|(?:\?\.)?\[\s*(["'`])observer\1\s*\])/g),
   },
   roleGrant: {
     name: `roleGrant(…"${OLD}")`,
     scope: everywhere,
-    find: (t) => matchLines(t, /roleGrant\s*\([^)]*?(["'])observer\1\s*,?\s*\)/g),
+    find: (t) => matchLines(t, /roleGrant\s*\([^)]*?(["'])observer\1\s*(?:,\s*)?\)/g),
   },
   promptPath: {
     name: `the path ${OLD_PROMPT}`,
@@ -276,9 +396,14 @@ const FORMS = {
     find: (t) => matchLines(t, /You are `observer`/g),
   },
   quotedLiteral: {
-    name: `a quoted "${OLD}" literal in src/, test/ or scripts/ on no named pane-title line shape`,
+    name: `a quoted "${OLD}" literal in src/, test/ or scripts/ outside the named pane-title line shapes`,
     scope: (rel) => ["src/", "test/", "scripts/"].some((root) => rel.startsWith(root)),
     find: unshapedLiteralLines,
+  },
+  docsRoleName: {
+    name: `the role name ${OLD} in worker or operator docs as a backticked name, a table cell or a comma list of roles`,
+    scope: (rel) => ["skills/", "roles/", ".claude/skills/fleet/"].some((root) => rel.startsWith(root)),
+    find: docsRoleNameLines,
   },
 } satisfies Record<string, Form>;
 
@@ -296,8 +421,8 @@ describe("§4.3 layer 2: nothing that means the role still says the old name", (
     expect(SELF, "the self-exclusion must name this file").toBe("test/unit/observer-rename.test.ts");
   });
 
-  for (const form of Object.values(FORMS) as Form[]) {
-    test(`no ${form.name}`, () => {
+  for (const form of Object.values(FORMS)) {
+    test(`no line holds ${form.name}`, () => {
       const hits = FILES.filter(form.scope).flatMap((rel) => located(rel, form.find(TEXT.get(rel)!, rel)));
       expect(hits, `found ${form.name}; each entry is file:line`).toEqual([]);
     });
@@ -321,6 +446,43 @@ describe("§4.3 layer 2: nothing that means the role still says the old name", (
  * spelling and stays quiet on the new name and on the near-misses §4.2 keeps.
  */
 describe("each detector fires on its form and stays quiet on the new name", () => {
+  /**
+   * §4.1's worker- and operator-document rows, verbatim from the pre-rename tree
+   * (909f817) with the old name spliced back in. Before the docs form, no form
+   * caught any of them.
+   */
+  const PRE_RENAME_DOC_LINES = {
+    "skills/observer-ops/SKILL.md:8":
+      "**Scope of this file, stated up front.** This bundle exists so `" + OLD + "`'s `fleet.yaml` entry",
+    "skills/observer-ops/SKILL.md:23":
+      "is absent — an envelope written with no `" + OLD + "`-specific fields at all still runs as an",
+    "skills/pifleet-worker/SKILL.md:15":
+      "| `/workspace` | your checkout of the repo, on a branch created for you. **Whether it exists and whether it " +
+      "is writable depend on your role.** A `worktree` role gets its own writable checkout and may commit; a " +
+      "`shared-ro` role (the reviewer) gets the operator's checkout mounted **read-only**; a `none` role (" +
+      OLD +
+      ", verifier, ticketing) gets **no `/workspace` at all** and works against live systems. An absent or " +
+      "read-only `/workspace` is your role, not a fault |",
+    ".claude/skills/fleet/SKILL.md:102":
+      "| `obs-1` | " + OLD + " | operations | `base` | read-only cluster/log questions; has cloud access |",
+    ".claude/skills/fleet/SKILL.md:109":
+      "| `obs-t1`, `obs-t2`, `obs-t3` | **" +
+      OLD +
+      "** | triage | `base` | three seats under the one collator, each handed a share of the environment and " +
+      "never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share " +
+      "rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |",
+  };
+
+  /** §4.1's `skills/observer-ops/SKILL.md:3` row, verbatim from 909f817. English, so the named residual. */
+  const PRE_RENAME_RESIDUAL =
+    "description: How the " +
+    OLD +
+    " role writes its result — the observer-ops.json/.md artifact pair, the deploy and inquiry task shapes, and " +
+    "where the fuller procedural content (target resolution, channel reconciliation, the degradation ladder) " +
+    "belongs. Mounted for the " +
+    OLD +
+    " role.";
+
   const CASES: Record<keyof typeof FORMS, { hit: string[]; miss: string[] }> = {
     roleKey: {
       hit: [
@@ -335,6 +497,17 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         // A QUOTED role key is this form's, not quotedLiteral's, which lets any quoted key through.
         `roles:\n  "${OLD}":\n    tools: [read]\n`,
         `{"roles": {"${OLD}": {}}}`,
+        // A flow map whose old key is not first, in YAML and in TS.
+        `roles: {sre: {}, ${OLD}: {}}`,
+        `const doc = { roles: { sre: { tools: [read] }, ${OLD}: {} } };`,
+        // No space after the colon.
+        `const doc = {\n  roles: {\n    ${OLD}:{},\n  },\n};`,
+        // A typed opener, across lines and on one line.
+        `const roles: Record<string, RoleDoc> = {\n  ${OLD}: { tools: [] },\n};`,
+        `const roles: Record<string, RoleDoc> = { sre: {}, ${OLD}: {} };`,
+        // The opening brace on the line after the opener, as a block and as a flow map.
+        `const doc = {\n  roles:\n  {\n    ${OLD}: {},\n  },\n};`,
+        `roles:\n  {sre: {}, ${OLD}: {}}\n`,
       ],
       miss: [
         "roles:\n  observer-k8s:\n    tools: [read]\n",
@@ -344,19 +517,59 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         'doc["roles"] = { [OBSERVER_K8S_ROLE]: { pane_mode: "tui" } };',
         'doc["roles"] = {\n  "observer-k8s": {},\n};',
         `const row = {\n  ${OLD}: "obs-t1",\n};`,
+        `const row = { ${OLD}: "obs-t1" };`,
+        // A key nested under a role is not a role key, on one line or across lines.
+        `roles: {sre: {${OLD}: obs-t1}}`,
+        `const doc = { roles: { triage: { ${OLD}: "obs-t1" } } };`,
+        `const roles: Record<string, RoleDoc> = {\n  triage: {\n    ${OLD}: "obs-t1",\n  },\n};`,
+        "roles: {sre: {}, observer-k8s: {}}",
       ],
     },
     roleValue: {
-      hit: [`  - {id: obs-2, role: ${OLD}}`, `{ id: "obs-1", role: "${OLD}" }`, `"role": "${OLD}"`],
-      miss: ["  - {id: obs-2, role: observer-k8s}", `role: ${OLD}s`, `role: "${OLD}_blocked"`],
+      hit: [
+        `  - {id: obs-2, role: ${OLD}}`,
+        `{ id: "obs-1", role: "${OLD}" }`,
+        `"role": "${OLD}"`,
+        `role: ${OLD} # the read-only seat`,
+      ],
+      miss: [
+        "  - {id: obs-2, role: observer-k8s}",
+        `role: ${OLD}s`,
+        `role: "${OLD}_blocked"`,
+        // A bare role key, then a row field on the next line: the value does not cross the newline.
+        `role:\n  ${OLD}: obs-t1\n`,
+        // A property of a variable named for the seat, as src/run/triage-verdict.ts holds.
+        `const seat = { role: ${OLD}.role };`,
+        `const seat = { role: ${OLD}?.role };`,
+      ],
     },
     rolesIndex: {
-      hit: [`roles["${OLD}"]`, `roles['${OLD}']`, `cfg.roles[ "${OLD}" ]`],
-      miss: ['roles["observer-k8s"]', "roles[OBSERVER_K8S_ROLE]"],
+      hit: [
+        `roles["${OLD}"]`,
+        `roles['${OLD}']`,
+        `cfg.roles[ "${OLD}" ]`,
+        `cfg.roles.${OLD}`,
+        `const stale = cfg.roles.${OLD};`,
+        `roles?.${OLD}`,
+        `roles?.["${OLD}"]`,
+        `roles[\`${OLD}\`]`,
+      ],
+      miss: [
+        'roles["observer-k8s"]',
+        "roles[OBSERVER_K8S_ROLE]",
+        "roles.observer-k8s",
+        `roles.${OLD}s`,
+        "roles[`observer-k8s`]",
+        "roles?.[OBSERVER_K8S_ROLE]",
+      ],
     },
     roleGrant: {
-      hit: [`roleGrant(config, "${OLD}")`, `roleGrant(\n  config,\n  '${OLD}',\n)`],
-      miss: ['roleGrant(config, "observer-k8s")', "roleGrant(config, OBSERVER_K8S_ROLE)"],
+      hit: [`roleGrant(config, "${OLD}")`, `roleGrant(\n  config,\n  '${OLD}',\n)`, `roleGrant(config, "${OLD}",)`],
+      miss: [
+        'roleGrant(config, "observer-k8s")',
+        "roleGrant(config, OBSERVER_K8S_ROLE)",
+        `roleGrant(config, "${OLD}", extra)`,
+      ],
     },
     promptPath: {
       hit: [`append_system_prompt_file: ./${OLD_PROMPT}`, `the failure at ${OLD_PROMPT}:19-22`],
@@ -383,17 +596,44 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `'${OLD}': obs-t1`,
       ],
     },
+    docsRoleName: {
+      hit: [
+        ...Object.values(PRE_RENAME_DOC_LINES),
+        `the \`${OLD}\`’s brief`,
+        `| \`${OLD}\` | read-only |`,
+        `a \`none\` role (sre, ${OLD})`,
+        `the ${OLD}, verifier and ticketing roles`,
+        `| \`obs-9\` | ${OLD} | operations | \`base\` |`,
+      ],
+      miss: [
+        PRE_RENAME_RESIDUAL,
+        "How the observer-k8s role writes its result",
+        "This bundle exists so `observer-k8s`'s `fleet.yaml` entry",
+        "no `observer-k8s`-specific fields",
+        "a `none` role (observer-k8s, verifier, ticketing)",
+        "| `obs-1` | observer-k8s | operations | `base` |",
+        "| `obs-t1` | **observer-k8s** | triage | `base` |",
+        `the \`${OLD}\` role`,
+        `| \`${OLD}_blocked\` | an incident kind |`,
+        `| **DispatchTask** | "use tick-1", "ask the ${OLD}" | \`Workflows/DispatchTask.md\` |`,
+        // English lists that hold the word beside something that is not a role, as roles/triage.md does.
+        `| ONE entry per ${OLD}, all in ONE file | one entry for each seat |`,
+        `\`/replies/<child-task-id>.json\`, one file per ${OLD}, read-only.`,
+        `the ${OLD}, the collator and the reviewer`,
+        // The triage.json row field in a documented example.
+        `      "${OLD}": "obs-t1",`,
+      ],
+    },
   };
 
   for (const [key, { hit, miss }] of Object.entries(CASES)) {
     const form: Form = FORMS[key as keyof typeof FORMS];
     test(`${key}: ${form.name}`, () => {
-      for (const text of hit) {
-        expect(form.find(text), `should fire on ${JSON.stringify(text)}`).not.toEqual([]);
-      }
-      for (const text of miss) {
-        expect(form.find(text), `should stay quiet on ${JSON.stringify(text)}`).toEqual([]);
-      }
+      const wrong = [
+        ...hit.filter((text) => form.find(text).length === 0).map((text) => `should fire on ${JSON.stringify(text)}`),
+        ...miss.filter((text) => form.find(text).length > 0).map((text) => `should stay quiet on ${JSON.stringify(text)}`),
+      ];
+      expect(wrong, `${key}: the cases this detector gets wrong`).toEqual([]);
     });
   }
 
@@ -403,6 +643,13 @@ describe("each detector fires on its form and stays quiet on the new name", () =
     expect(FORMS.roleKey.find(multiLine), "not also at the opener").toEqual([2]);
     const seats = `workers:\n  - {id: obs-1, role: sre}\n  - {id: obs-2, role: ${OLD}}\n`;
     expect(FORMS.roleValue.find(seats)).toEqual([3]);
+    expect(FORMS.roleKey.find(`# head\nroles: {sre: {}, ${OLD}: {}}\n`), "a flow map").toEqual([2]);
+    const nextLineBrace = `const doc = {\n  roles:\n  {\n    sre: {},\n    ${OLD}: {},\n  },\n};`;
+    expect(FORMS.roleKey.find(nextLineBrace), "a brace on the line after the opener").toEqual([5]);
+    const typed = `const roles: Record<string, RoleDoc> = {\n  sre: {},\n  ${OLD}: {},\n};`;
+    expect(FORMS.roleKey.find(typed), "a typed opener").toEqual([3]);
+    const table = `| Worker | Role |\n|---|---|\n| \`obs-1\` | ${OLD} |\n`;
+    expect(FORMS.docsRoleName.find(table), "a table cell").toEqual([3]);
   });
 
   test("quotedLiteral reaches src/, test/ and scripts/, the named pane-title files included", () => {
@@ -410,6 +657,15 @@ describe("each detector fires on its form and stays quiet on the new name", () =
     expect(reached.filter((rel) => !FORMS.quotedLiteral.scope(rel)), "should be in scope").toEqual([]);
     const prose = ["roles/triage.md", "skills/observer-ops/SKILL.md", ".claude/skills/fleet/SKILL.md", "fleet.yaml"];
     expect(prose.filter((rel) => FORMS.quotedLiteral.scope(rel)), "should be out of scope").toEqual([]);
+  });
+
+  test("docsRoleName reaches skills/, roles/ and .claude/skills/fleet/, and nothing else", () => {
+    const docs = ["skills/observer-ops/SKILL.md", "roles/triage.md", ".claude/skills/fleet/Workflows/Triage.md"];
+    expect(docs.filter((rel) => !FORMS.docsRoleName.scope(rel)), "should be in scope").toEqual([]);
+    const code = ["src/run/a.ts", "test/unit/b.test.ts", "scripts/operations", "fleet.yaml", "Docs/SRD-OBSERVER-ROLES.md"];
+    expect(code.filter((rel) => FORMS.docsRoleName.scope(rel)), "should be out of scope").toEqual([]);
+    expect(ROLE_NAMES, "the comma-list shape's role names, read off roles/*.md").toContain("observer-k8s");
+    expect(ROLE_NAMES, "a role name the pre-rename list held beside the old one").toContain("verifier");
   });
 
   /**
@@ -436,6 +692,40 @@ describe("each detector fires on its form and stays quiet on the new name", () =
     expect(FORMS.quotedLiteral.find(tail, planTest)).toEqual([2, 2]);
 
     expect(FORMS.quotedLiteral.find(allowed, "test/unit/config.test.ts"), "an unnamed file").toEqual([1]);
+  });
+});
+
+/** The sweep walks at module load, so a walk that throws takes every test in this file down with it. */
+describe("the walk skips symlinks and still refuses a missing root", () => {
+  function inScratch(check: (root: string) => void): void {
+    const root = mkdtempSync(join(tmpdir(), "observer-rename-walk-"));
+    try {
+      mkdirSync(join(root, "tree", "sub"), { recursive: true });
+      writeFileSync(join(root, "tree", "sub", "file.md"), "");
+      check(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("a dangling link under a root is skipped", () => {
+    inScratch((root) => {
+      symlinkSync(join(root, "missing"), join(root, "tree", "dangling"));
+      expect(walk("tree", root)).toEqual([join("tree", "sub", "file.md")]);
+    });
+  });
+
+  test("a link back up the tree is skipped, not followed", () => {
+    inScratch((root) => {
+      symlinkSync(join(root, "tree"), join(root, "tree", "sub", "loop"));
+      expect(walk("tree", root)).toEqual([join("tree", "sub", "file.md")]);
+    });
+  });
+
+  test("a missing root throws, naming itself", () => {
+    inScratch((root) => {
+      expect(() => walk("absent-root", root)).toThrow("absent-root");
+    });
   });
 });
 
