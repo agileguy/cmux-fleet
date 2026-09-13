@@ -22,7 +22,7 @@
  * an assertion on escapes would pass vacuously exactly where it is run.
  */
 import { describe, expect, test } from "bun:test";
-import { containerCell, containerColour, phaseCell, rowColour, unclaimedContainers } from "../../src/monitor/views/fleet.tsx";
+import { containerCell, containerColour, egressContainers, phaseCell, rowColour } from "../../src/monitor/views/fleet.tsx";
 import { failed, never, ok, type FleetModel } from "../../src/monitor/model.ts";
 import { workerContainerName } from "../../src/run/paths.ts";
 import { COLOUR, PLAIN } from "../../src/monitor/views/chrome.tsx";
@@ -163,23 +163,20 @@ describe("the container cell", () => {
 });
 
 /**
- * The containers region lists what the worker rows do not explain.
+ * The egresses region lists the egress relays and nothing else.
  *
- * It was a bare count — `containers — as of 3s — 9 seen`. Six of those nine
- * were the workers listed directly above it, each with its own `Up` cell, so
- * the number's only real content was the other three, stated as arithmetic the
- * reader had to do. Those three are the egress relays: every worker's outbound
- * traffic goes through one, and a worker whose relay has died fails at its
- * first request with nothing on this screen to explain why.
+ * It used to list every container no worker row accounted for, which on a
+ * shared Docker host put unrelated stacks beside the relays. The relays are
+ * the ones worth a line: every worker's outbound traffic goes through one, and
+ * a worker whose relay has died fails at its first request with nothing on
+ * this screen to explain why.
  */
-describe("unclaimedContainers", () => {
+describe("egressContainers", () => {
   const RUN = "2026-09-04T04-54-27Z-59e3";
-  const model = (containers: string[], runsOk = true): FleetModel =>
+  const model = (containers: FleetModel["containers"]): FleetModel =>
     ({
-      runs: runsOk
-        ? ok([{ runId: RUN, workers: [row({ workerId: "tst-1" })] }], 0)
-        : failed("boom", 0),
-      containers: ok(containers, 0),
+      runs: ok([{ runId: RUN, workers: [row({ workerId: "tst-1" })] }], 0),
+      containers,
       now: 0,
       columns: 120,
       view: { kind: "fleet" },
@@ -188,40 +185,27 @@ describe("unclaimedContainers", () => {
       report: never(),
     }) as FleetModel;
 
-  test("a worker's own container is claimed and does not appear", () => {
-    const own = workerContainerName(RUN, "tst-1");
-    expect(unclaimedContainers(model([own]))).toEqual([]);
-  });
-
-  test("a relay is unclaimed and does appear", () => {
-    const relay = "pifleet-egress-relay-pifleet-egress";
-    expect(unclaimedContainers(model([relay]))).toEqual([relay]);
-  });
-
-  test("it keeps and drops in the same call — the discriminating case", () => {
+  test("it keeps the relays and drops everything else in one call — the discriminating case", () => {
     /*
-     * Either assertion alone passes on a broken filter: "returns everything"
-     * satisfies the relay case, "returns nothing" satisfies the worker case.
-     * Only a list containing one and not the other rules out both.
+     * Either half alone passes on a broken filter: "returns everything" keeps
+     * the relays, "returns nothing" drops the rest. Only a list holding both
+     * rules out both. `my-egress-proxy` is here because the match is a PREFIX:
+     * a container that merely mentions egress is not one of the fleet's relays.
      */
     const own = workerContainerName(RUN, "tst-1");
-    const relay = "pifleet-egress-relay-pifleet-egress-omlx";
-    expect(unclaimedContainers(model([own, relay]))).toEqual([relay]);
+    const omlx = "pifleet-egress-relay-pifleet-egress-omlx";
+    const gabe = "pifleet-egress-relay-pifleet-egress-gabe";
+    const all = [own, omlx, "some-app", gabe, "my-egress-proxy", "some-app-db"];
+    expect(egressContainers(model(ok(all, 0)))).toEqual([omlx, gabe]);
   });
 
-  test("the name is built by the production function, not a literal", () => {
+  test("the worker name is built by the production function, not a literal", () => {
     // A hand-written `pifleet-<run>-<worker>` here would keep passing after a
-    // rename that made every worker container render as a non-worker — which
-    // is exactly what the old `pifleet-3906-eng-1` fixture did.
+    // rename — which is exactly what the old `pifleet-3906-eng-1` fixture did.
     expect(workerContainerName(RUN, "tst-1")).toBe(`pifleet-${RUN}-tst-1`);
   });
 
-  test("a failed runs region lists nothing, rather than every container", () => {
-    /*
-     * With no worker rows every container is unclaimed, so the naive answer is
-     * to list all of them under a heading that says "not a worker" — a lie
-     * told by a region already reporting a failure one line up.
-     */
-    expect(unclaimedContainers(model(["anything"], false))).toEqual([]);
+  test("a failed docker read lists nothing", () => {
+    expect(egressContainers(model(failed("boom", 0)))).toEqual([]);
   });
 });

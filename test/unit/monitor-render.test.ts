@@ -475,11 +475,11 @@ describe("ISC-479: never-read renders differently from read-and-empty", () => {
     expect(neverRead).not.toBe(empty);
   });
 
-  test("the containers region distinguishes no data from none running", () => {
-    const line = (m: FleetModel) => renderFleet(m).find((l) => l.startsWith("containers"));
-    expect(line({ ...healthy, containers: never() })).toBe("containers — no data");
+  test("the egresses region distinguishes no data from none running", () => {
+    const line = (m: FleetModel) => renderFleet(m).find((l) => l.startsWith("egresses"));
+    expect(line({ ...healthy, containers: never() })).toBe("egresses — no data");
     expect(line({ ...healthy, containers: ok([], NOW - 12_000) })).toBe(
-      "containers — as of 12s — none running",
+      "egresses — as of 12s — none running",
     );
   });
 
@@ -506,7 +506,7 @@ describe("ISC-477: every region shows an age derived from its own read", () => {
   test("two regions read at two times show two different ages", () => {
     const first = renderFleet(healthy);
     expect(headingFor(first, "fleet")).toContain("as of 2s");
-    expect(first.find((l) => l.startsWith("containers"))).toContain("as of 12s");
+    expect(first.find((l) => l.startsWith("egresses"))).toContain("as of 12s");
   });
 
   test("advancing only `now` ages every region, with the frozen model unchanged", () => {
@@ -515,7 +515,7 @@ describe("ISC-477: every region shows an age derived from its own read", () => {
     // reasonable person writes first and the reason this is asserted.
     const later = renderFleet({ ...healthy, now: NOW + 60_000 });
     expect(headingFor(later, "fleet")).toContain("as of 1m");
-    expect(later.find((l) => l.startsWith("containers"))).toContain("as of 1m");
+    expect(later.find((l) => l.startsWith("egresses"))).toContain("as of 1m");
   });
 
   test("the age coarsens the way `ago` does, and never reads as a bug", () => {
@@ -697,7 +697,7 @@ describe("the frame, pinned", () => {
       "  * rev-1   container gone      Running   Down  task t-9",
       "  run 2026-09-02T09-11-02Z-1180 — 2 workers",
       RULE,
-      "containers — as of 12s — 3 seen, 1 not a worker",
+      "egresses — as of 12s — 1 running",
       "    Up    pifleet-egress-relay-pifleet-egress",
     ]);
   });

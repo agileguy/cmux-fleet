@@ -28,6 +28,14 @@ const DOCKER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 export const MAX_DOCKER_NAME = 128;
 
 /**
+ * The egress relay container name's fixed prefix. `relay.ts` builds every relay
+ * name from it and records why its LENGTH matters (ISC-412). It lives here
+ * because this module imports nothing, so the monitor can pick relay containers
+ * out of `docker ps` without reaching the relay's own code.
+ */
+export const RELAY_NAME_PREFIX = "pifleet-egress-relay-";
+
+/**
  * Throws on a name that could not have come from a validated config.
  *
  * Networks and containers share one grammar and one bound because they share

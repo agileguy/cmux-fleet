@@ -138,7 +138,7 @@ import {
 } from "./egress.ts";
 import { providerIsHosted } from "../config/load.ts";
 import { EXIT } from "../contracts.ts";
-import { dockerNameGrammarOk, MAX_DOCKER_NAME } from "./docker-names.ts";
+import { dockerNameGrammarOk, MAX_DOCKER_NAME, RELAY_NAME_PREFIX } from "./docker-names.ts";
 import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
 
 /**
@@ -797,8 +797,11 @@ export function relayContainerName(egressNetwork: string): string {
  * renaming the prefix would silently move the real limit while the budget kept
  * reserving room for the old one, and the fleet would go back to failing with
  * the derived-string message this criterion exists to replace.
+ *
+ * DEFINED in `docker-names.ts`, which imports nothing, so the monitor can match
+ * relay containers by it without pulling this module into its closure.
  */
-export const RELAY_NAME_PREFIX = "pifleet-egress-relay-";
+export { RELAY_NAME_PREFIX };
 
 /**
  * The longest provider key this fleet's `docker.network` leaves room for.

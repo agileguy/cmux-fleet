@@ -52,7 +52,7 @@
 import { Box, Text } from "ink";
 
 import type { FleetModel, Region, RunRow, WorkerRow } from "../model.ts";
-import { workerContainerName } from "../../run/paths.ts";
+import { RELAY_NAME_PREFIX } from "../../security/docker-names.ts";
 import {
   BodyLine,
   Bullet,
@@ -323,65 +323,43 @@ export function containerColour(present: boolean | null, p: Palette): string | u
 }
 
 /**
- * Containers `docker ps` reported that no worker row accounts for.
+ * The egress relays `docker ps` reported — the only containers this region lists.
  *
- * The count was the whole region: `containers — as of 3s — 9 seen`. Six of
- * those nine are the workers listed directly above it, each with its own `Up`
- * cell — so the number's only real content was the OTHER three, and it stated
- * them by arithmetic the reader had to do.
+ * It used to list every container no worker row accounted for, which on a
+ * shared Docker host meant unrelated stacks too: four containers from other
+ * projects sat beside the relays, measured 2026-09-13. The relays are
+ * the ones this screen owes an operator. Every worker's outbound traffic goes
+ * through one, and a worker whose relay has died fails at its first request
+ * with nothing else here to explain it. Worker containers already have their
+ * own `Up` cell on the rows above.
  *
- * The other three are the egress relays. They are the fleet's network, every
- * worker's outbound traffic goes through one, and a worker whose relay has
- * died is a worker that fails at its first `curl` with nothing on this screen
- * to explain it. They were the least visible containers in the design and are
- * the ones an operator cannot diagnose around.
- *
- * DERIVED, never a second list. `workerContainerName` is the single definition
- * of a worker container's name and the same function `up` names them with, so
- * a rename cannot leave this filter matching the old shape and quietly
- * promoting every worker into this section.
+ * DERIVED, never a second list. `RELAY_NAME_PREFIX` is the constant
+ * `relayContainerName` builds the names from, so a rename cannot leave this
+ * filter matching the old shape and quietly emptying the region.
  */
-export function unclaimedContainers(model: FleetModel): readonly string[] {
+export function egressContainers(model: FleetModel): readonly string[] {
   if (model.containers.status !== "ok") return [];
-  /*
-   * A FAILED runs region lists NOTHING, and the guard belongs here rather than
-   * at the call site.
-   *
-   * With no worker rows every container is unclaimed, so the arithmetic answer
-   * is "all of them" under a heading that says `not a worker` — a lie told by
-   * a region already reporting a failure one line up. Keeping this in the
-   * component would make it a property of one caller instead of a property of
-   * the answer, and the next caller would get the lie.
-   */
-  if (model.runs.status !== "ok") return [];
-  const claimed = new Set<string>();
-  for (const run of model.runs.value) {
-    for (const w of run.workers) claimed.add(workerContainerName(run.runId, w.workerId));
-  }
-  return model.containers.value.filter((n) => !claimed.has(n));
+  return model.containers.value.filter((n) => n.startsWith(RELAY_NAME_PREFIX));
 }
 
 /**
- * The containers region: the count, then the ones no worker row explains.
+ * The egresses region: how many relays are running, then each by name.
  *
- * A failed `runs` region yields an empty list — see `unclaimedContainers`,
- * which owns that rule — so the heading's own failure marker is left to say
- * what happened.
+ * A failed `docker ps` yields an empty list, so the heading's own failure
+ * marker is left to say what happened.
  */
-function ContainersRegion({ model }: { model: FleetModel }) {
+function EgressesRegion({ model }: { model: FleetModel }) {
   const p = usePalette();
-  const others = unclaimedContainers(model);
+  const egresses = egressContainers(model);
   return (
     <Box flexDirection="column">
       <RegionHeading
-        text={regionLine("containers", model.containers, model.now, (names) =>
-          names.length === 0
-            ? "none running"
-            : `${names.length} seen, ${others.length} not a worker`,
+        text={regionLine("egresses", model.containers, model.now, () =>
+          egresses.length === 0 ? "none running" : `${egresses.length} running`,
         )}
         failed={model.containers.status === "failed"}
       />
-      {others.map((name) => (
+      {egresses.map((name) => (
         /*
          * STATE FIRST, NAME LAST AND UNBOUNDED — the same shape the task id
          * needed, for the same reason.
@@ -938,7 +916,7 @@ export function Fleet({ model }: { model: FleetModel }) {
           ))
         : null}
       <Rule width={model.columns} />
-      <ContainersRegion model={model} />
+      <EgressesRegion model={model} />
     </Box>
   );
 }

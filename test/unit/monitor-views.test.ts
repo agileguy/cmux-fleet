@@ -200,7 +200,7 @@ describe("ISC-503: a view renders its own region and cannot reach another", () =
    */
   const MARKERS = {
     runs: "wrote 4s ago",
-    containers: "containers — as of",
+    containers: "egresses — as of",
     history: "finished",
     detail: "tool_result ok",
     report: "would merge cleanly",
