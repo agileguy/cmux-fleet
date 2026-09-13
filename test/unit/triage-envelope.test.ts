@@ -1384,6 +1384,52 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
   });
 
   /**
+   * `T-sweep-120`, 2026-09-13 — the sweep that wedged the console.
+   *
+   * `obs-t1`'s report EXISTED and was read. It carried no `services` array at
+   * all: its rows sat under `coverage` as `{service, workload, checks[]}`, with
+   * `assessment`, `selector`, `window` and `evidence_ref` absent. The brief
+   * ordered the collator to copy those fields *"from the observer's row and NOT
+   * reconstructed"*, and named `unaccounted` for exactly one case — a file that
+   * was MISSING. So `tri-1` held an instruction it could not obey, about a file
+   * that was there, with no sanctioned way to say so. It spent its entire
+   * deadline running `rg` across the container filesystem hunting for values
+   * that exist in no file, wrote no collation, and was still wedged on that
+   * abandoned turn when the next sweep was staged 25 minutes later.
+   *
+   * **The gap was never the row shape.** `skills/observer-ops/SKILL.md` has
+   * pinned that since [[ISC-1125]], and sweep 119 produced it perfectly from
+   * this same code. The gap is that a file which EXISTS but cannot be read as
+   * rows had no named outcome — and that nothing told the collator to stop
+   * looking, which is the half that turns a lost report into a lost console.
+   *
+   * Deleting either half of that paragraph reddens this.
+   */
+  test("a listed-but-unusable report has a named outcome, and searching for it is forbidden", async () => {
+    const run = await seedRun("2026-09-13T00-00-41Z-0041");
+    const { sent, producers } = producerFixture(run);
+    await producers.collate(sweepTaskId(41));
+    const brief = sent[0]!.brief;
+
+    // The case that had no name: listed, present, and unusable.
+    expect(
+      brief,
+      "the brief still names only the MISSING-file case, which is the gap T-sweep-120 fell into",
+    ).toContain("no `services` array");
+    expect(brief).toContain("`unaccounted`");
+
+    // The half that ends the deadlock rather than merely naming the case.
+    expect(
+      brief,
+      "the collator is never told to stop looking — T-sweep-120 spent its whole deadline " +
+        "searching the filesystem for values that exist in no file",
+    ).toContain("Do not go looking for the missing values");
+
+    // Still an envelope, so still audited for the same four classes.
+    expect(envelopeIssues(brief, null)).toEqual([]);
+  });
+
+  /**
    * **The previous document reaches `openSweep` through the same projection**, so
    * the anti-criterion holds on the PRODUCTION path and not only on the renderer
    * a test calls directly. A producer that fetched the document and passed it
