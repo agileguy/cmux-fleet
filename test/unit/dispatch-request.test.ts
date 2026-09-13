@@ -1659,8 +1659,8 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    *
    * **The ROLE is asserted as well as the id**, because an id that still exists
    * under a different role is the more likely edit and the more confusing
-   * outcome: `tri-1` demoted to `observer` would still be found here and would
-   * be dispatched a partition brief it has no prompt for.
+   * outcome: `tri-1` demoted to `observer-k8s` would still be found here and
+   * would be dispatched a partition brief it has no prompt for.
    *
    * **THE GAP THIS PARAGRAPH USED TO NAME IS CLOSED, and the paragraph outlived
    * it by long enough to be worth recording.** It said this console "has no

@@ -1853,13 +1853,13 @@ export type FleetConfig = z.infer<typeof FleetConfigSchema>;
 // is the finding rather than an oversight: both name a document a real fleet
 // must stay free to run. `sre` ships with `cloud_access: true` and no
 // `cloud:` block in THIS file — refusing that would refuse the shipped
-// default. `pane_mode: tui` on `observer` is a choice an operator can make on
-// purpose — `scripts/operations` reads `resolveWorker(loaded, agent).paneMode
-// === "tui"` to decide whether its console owns a pane for exactly this role
-// — so a schema that refused it would make that console unbuildable. What
-// must not stay silent is the MECHANISM each one gives up, so both compute
-// text a caller prints, on `cli/commands/up.ts`'s `unattendedTuiWarning`
-// pattern, rather than an issue this schema could add.
+// default. `pane_mode: tui` on `observer-k8s` is a choice an operator can
+// make on purpose — `scripts/operations` reads `resolveWorker(loaded,
+// agent).paneMode === "tui"` to decide whether its console owns a pane for
+// exactly this role — so a schema that refused it would make that console
+// unbuildable. What must not stay silent is the MECHANISM each one gives up,
+// so both compute text a caller prints, on `cli/commands/up.ts`'s
+// `unattendedTuiWarning` pattern, rather than an issue this schema could add.
 
 /**
  * Resolve one `RoleFields` key through `defaults <- role <- worker`.

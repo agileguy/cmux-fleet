@@ -6,7 +6,7 @@
  * D10 reversed a refusal. The draft SRD proposed that `up` REFUSE a worker
  * resolving to a `hosted: true` provider while holding `cloud_access: true` or
  * a non-empty `secrets:`; the owner ruled against it. Every role stays
- * eligible, `observer` and `ticketing` included, and **the control is
+ * eligible, `observer-k8s` and `ticketing` included, and **the control is
  * prominence rather than prevention** — §7.2's words. So a credentialled
  * worker on a hosted provider now stands up, and the only thing standing
  * between the operator and a surprise is the line this module produces.

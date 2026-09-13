@@ -2621,7 +2621,7 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
  * §6.8 is the reason the rule is conditioned on the shell instead of being
  * stated over every role. Removing `write` from a role that holds `bash` takes
  * away a tool and not a capability — `cat > /outbox/…` is still right there —
- * so asserting this of `sre`, `observer` or `ticketing` would be asserting
+ * so asserting this of `sre`, `observer-k8s` or `ticketing` would be asserting
  * something both false and undesirable.
  *
  * ## What this can reach, and what it provably cannot

@@ -443,7 +443,7 @@ describe("the seats the plan names are the seats the tracked config declares", (
 
     /*
      * BY ID AND BY ROLE, in pane order. The id alone would pass on a `tri-1`
-     * demoted to `observer`, which is the more likely edit and the more
+     * demoted to `observer-k8s`, which is the more likely edit and the more
      * confusing outcome — the reconciler seat would still be found, still be
      * pane 1, and would be briefed a reconciliation it has no prompt for.
      */
