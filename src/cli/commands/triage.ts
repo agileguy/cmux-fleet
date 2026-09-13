@@ -1275,33 +1275,42 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
     const { name: environment, environment: target } = soleEnvironment(pair.targets.environments);
 
     /*
-     * THE SPLIT — one slice of the ONE environment per collator, as even as the
-     * count allows (operator, 2026-09-12: *"numerically as even as possible"*).
+     * THE SPLIT — BOTH halves of it, by collator count.
      *
-     * **Pairing is POSITIONAL and written out rather than zipped**, because it is
-     * the invariant the whole design rests on: collator `i` owns aspect seat `i`,
-     * so `tri-1` owns `obs-t1` and `tri-2` owns `obs-t2`. Nothing in either
-     * constant declares that relationship — `TRIAGE_CONSOLE_ROSTER` lists legal
-     * senders and legal targets, and `TRIAGE_CONSOLE_ASPECTS` lists seats — so it
-     * is asserted here, once, where both lists are in scope.
+     * **This was positional pairing until 2026-09-13 and deliberately is not any
+     * more.** The text here used to call "collator `i` owns aspect seat `i`" the
+     * invariant the whole design rests on, and with two collators over one seat
+     * each it was. The console now runs ONE collator over THREE observers, so
+     * there is no pairing left to assert: `tri-1` is shown every seat in
+     * `TRIAGE_CONSOLE_ASPECTS` and decides the partition across them itself.
      *
-     * `declared` below stays the WHOLE list deliberately. The slices are what
-     * each collator is asked for; the whole list is what the host counts the
-     * union against, which is how `checkTriagePartition` still answers §6.5's
-     * question — *"is this a partition OF the declared set?"* — rather than
-     * degrading to two unrelated per-slice checks that could both pass while a
+     * Splitting both lists by `collators.length` keeps this general rather than
+     * hard-coding the one. At a count of 1 it is the identity — every seat and
+     * every service to the single collator — and if a second collator is ever
+     * added back it divides seats and services the same way, front-loaded, with
+     * no second code path to discover. `evenSlices` is already the function that
+     * says "as even as the count allows" (operator, 2026-09-12).
+     *
+     * WHAT THE HOST STILL DOES AND WHAT IT NO LONGER DOES: it hands `tri-1` the
+     * whole environment and checks the union that comes back. It does NOT decide
+     * which observer gets which service — that is §6.5's ⌈N/3⌉, *"the partition
+     * is the triage worker's to make"*, and `checkTriagePartition` refuses an
+     * incomplete or duplicated partition without refusing a lopsided one.
+     *
+     * `declared` below stays the WHOLE list for the reason it always did: it is
+     * what the union is counted against, so §6.5's question — *"is this a
+     * partition OF the declared set?"* — is asked once over the environment
+     * rather than degrading into per-slice checks that could each pass while a
      * service fell down the gap between them.
      */
     const collators = TRIAGE_CONSOLE_ROSTER.collators;
     const slices = evenSlices(target.services, collators.length);
-    const sweepPairs = collators.map((collator, i) => {
-      const seat = TRIAGE_CONSOLE_ASPECTS[i];
-      return {
-        collator,
-        seats: seat === undefined ? [] : [seat],
-        services: slices[i] ?? [],
-      };
-    });
+    const seatShares = evenSlices(TRIAGE_CONSOLE_ASPECTS, collators.length);
+    const sweepPairs = collators.map((collator, i) => ({
+      collator,
+      seats: seatShares[i] ?? [],
+      services: slices[i] ?? [],
+    }));
 
     const outcome = await triagePass({
       environment,

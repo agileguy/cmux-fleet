@@ -1033,37 +1033,40 @@ export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
 export const TRIAGE_WORKSPACE = "triage";
 
 /**
- * The two workers the triage console stands up, in PANE ORDER.
+ * The four workers the triage console stands up, in PANE ORDER.
  *
  * ```
- * +---------------+---------------+
- * |     tri-1     |     tri-2     |
- * +---------------+---------------+
- * |    obs-t1     |    obs-t2     |
- * +---------------+---------------+
+ * +-----------------------------------+
+ * |               tri-1               |
+ * +----------+-----------+------------+
+ * |  obs-t1  |  obs-t2   |   obs-t3   |
+ * +----------+-----------+------------+
  * ```
  *
- * A FULL SQUARE as of 2026-09-12, and the ORDER is what makes each observer sit
- * under its own collator rather than merely somewhere on the bottom row.
- * {@link agentSquarePanes}' split table is `[null, right, down-from-0,
- * down-from-1]`: pane 1 takes the workspace's initial surface, pane 2 splits
- * `right` off it, pane 3 splits `down` off PANE 1 and pane 4 splits `down` off
- * PANE 2. So listing the two collators first and the two observers second is not
- * a stylistic grouping — it is the only order that puts `obs-t1` beneath `tri-1`
- * and `obs-t2` beneath `tri-2`. Reorder this list to
- * `[tri-1, obs-t1, tri-2, obs-t2]` and the console still builds, with each
- * collator sitting above the OTHER pair's observer.
+ * ONE COLLATOR OVER THREE OBSERVERS as of 2026-09-13, and the ORDER is what puts
+ * the collator across the top rather than in a corner. {@link triagePanes}' own
+ * table is `[null, down-from-0, right-from-1, right-from-2]`: pane 1 takes the
+ * workspace's initial surface, pane 2 splits `down` off it to create the
+ * observer row, and panes 3 and 4 walk `right` along that row. The collator
+ * must therefore be FIRST; any other position and the full-width pane holds an
+ * observer.
  *
- * That the rows are now ALIKE — agents over agents — is the case
- * {@link TRIAGE_TOP_FRACTION} predicted for its own `null`, and it is why that
- * constant survives this change rather than becoming a number.
+ * **THIS DOCBLOCK HAS NOW DESCRIBED THREE DIFFERENT CONSOLES, and the last two
+ * were wrong at the moment they were read rather than when they were written.**
+ * It described a collator beside one observer, then a 2x2 of two pairs whose
+ * argument turned on {@link agentSquarePanes}' split table — a table this
+ * console no longer uses. It also asserted that {@link TRIAGE_TOP_FRACTION}
+ * *"survives this change rather than becoming a number"*; that constant is now
+ * `1/3`. Both claims went stale in place, with nothing to redden, because a
+ * prose diagram is not checked against the list beneath it. `triage-plan.test.ts`
+ * pins the shape; this paragraph is the warning that the PICTURE is not pinned.
  *
- * THE RECONCILER IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for
- * a weaker version of its reason. Pane 1 consumes the workspace's initial
- * surface and is where the operator lands. Nobody drives this console by typing
- * — see the fraction below — but somebody DEBUGS it, and `tri-1` is the seat
- * that holds the reconciliation the observer feeds, so it is the pane worth
- * landing on when a sweep has said something surprising.
+ * THE COLLATOR IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for a
+ * weaker version of its reason. Pane 1 consumes the workspace's initial surface
+ * and is where the operator lands. Nobody drives this console by typing — see
+ * the fraction below — but somebody DEBUGS it, and `tri-1` is the seat that
+ * holds the reconciliation the observers feed, so it is the pane worth landing
+ * on when a sweep has said something surprising.
  *
  * ## WHY TWO PAIRS — and why `soleEnvironment` did NOT have to be lifted
  *
@@ -1156,149 +1159,194 @@ export const TRIAGE_WORKSPACE = "triage";
  * lower this key by reading either version: it bounds a RUN rather
  * than the host, and a hand-run `up` over a wider worker set is the same run.
  */
-export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "tri-2", "obs-t1", "obs-t2"];
+export const DEFAULT_TRIAGE_WORKERS: readonly string[] = [
+  "tri-1",
+  "obs-t1",
+  "obs-t2",
+  "obs-t3",
+];
 
 /**
- * The triage console's panes are EQUAL, and `null` says so — but the argument
- * that gets there is not {@link REVIEW_TOP_FRACTION}'s, and copying it would
- * have hidden the reason this console is the clearest `null` of the four.
+ * How much of the console's height the COLLATOR's row gets: one third, by owner
+ * decision 2026-09-13.
  *
- * ## A fraction moves the border BETWEEN ROWS, and this console has ONE ROW
+ * ## THIS WAS `null`, AND THE ARGUMENT FOR `null` WAS NOT WRONG — IT EXPIRED
  *
- * `applyTopFraction` addresses the BORDER BETWEEN THE ROWS — `operations.ts:539-553`,
- * the paragraph opening *"A RESIZE ADDRESSES A BORDER, NOT A PANE"*: a pane in the
- * top row has no border above it and cmux refuses `-U` there. So the only thing a
- * fraction can express is "the top row over the bottom one". Read that against the
- * diagram above: `tri-1` and `obs-t1` sit side by side in a SINGLE row, and the
- * shared builder's `down` entries begin at pane 3, which this console never reaches.
+ * The block this replaces ran to a hundred lines and concluded that a fraction
+ * here was *structurally inexpressible*. Its reasoning was sound and its premise
+ * was load-bearing and single: **`applyTopFraction` moves the border BETWEEN
+ * ROWS, and this console had ONE ROW.** `tri-1` and `obs-t1` sat side by side;
+ * the shared builder's `down` entries begin at pane 3, which a two-seat console
+ * never reached. With no second row there is no border, and a fraction has
+ * nothing to move.
  *
- * So the preference somebody would reach for this constant to state — *give the
- * reconciler more room than the observer* — is not expressible. That much is
- * structural. What a value here would DO if somebody wrote one anyway is a
- * weaker claim, and this docblock used to overstate it: it said such a value was
- * **"INERT, provably rather than as a matter of taste"**. It is not provable.
- * The argument below is split into the half that holds unconditionally and the
- * half that rests on a premise nothing in this repository asserts.
+ * That premise died with {@link triagePanes}' rewrite. The collator now takes
+ * the full width and the observers sit beneath it, so there IS a border between
+ * two rows and a fraction is expressible for the first time. The old docblock
+ * even named this as the trigger — *"whatever this console gained third would
+ * create a second row and make a fraction expressible"* — and it deserves the
+ * credit: it forecast the condition precisely, and the forecast is why this edit
+ * is a value change rather than a rediscovery.
  *
- * ### Unconditional: `null` is read before any geometry is
+ * **The lesson worth carrying forward is about the SHAPE of that argument, not
+ * its conclusion.** It was a long, confident case resting on one structural fact
+ * that a later edit removed, and nothing connected the two — no test, no type,
+ * nothing that reddened when the shape changed. It sat above a value that had
+ * silently become wrong. An argument whose premise can quietly expire should say
+ * which premise, plainly, so the next reader can check it in one glance. This one
+ * does: **the number below is defensible only while `triagePanes` builds one
+ * full-width row over another.** If the collator ever shares its row again, this
+ * goes back to `null`.
  *
- * `applyTopFraction` returns on `null` BEFORE it reads a pane
- * (`operations.ts:592`, `if (fraction === null) return;`), so `null` is the one
- * value whose meaning does not depend on a pane shape that can change underneath
- * it — and the only way a reader can tell "this console wants the halves
- * `new-split` gave it" from "this console asked for something the geometry
- * silently threw away" is which of the two the constant says. **That is what
- * makes `null` load-bearing rather than decorative here**, and it is the half of
- * the old argument that survives untouched.
+ * ## Why one third rather than a half
  *
- * ### Conditional: the empty-set reading needs two numbers to agree
+ * `new-split` halves, so the shape that arrives is 50/50 and the correction is a
+ * shrink. The rows are genuinely UNLIKE, which is {@link OPERATIONS_TOP_FRACTION}'s
+ * situation rather than {@link REVIEW_TOP_FRACTION}'s: the collator holds ONE
+ * document — the sweep it composed and the collation it wrote back — while the
+ * row beneath holds three independent observers working three slices at once.
+ * Three panes of live work want the room; one pane of settled output does not.
  *
- * Both panes share one `y`, so `topY` selects both, and the row `movingIds` then
- * asks to move is `p.y !== topY` — the EMPTY SET — **whenever `growTop` is
- * false** (`operations.ts:619-624`). That qualifier is the whole of it. `growTop`
- * is `topTarget > topHeight`, and those two come off the SAME `list-panes`
- * payload by DIFFERENT keys: `topHeight` is the largest `pixel_frame.height` in
- * the top row, `topTarget` is `container_frame.height` times the fraction
- * (`parsePaneGeometry`, `parse.ts:283-296`, reads each from its own key).
- * **Nothing here asserts that a single row's pane height equals its container's**
- * — no test, no invariant, no comment on the cmux side of the parse.
+ * A shrink is also the branch that already works. `applyTopFraction` chooses the
+ * row by the SIGN of the correction, so a target below the current height
+ * addresses the BOTTOM row with `-U`, which is a border those panes really have.
+ * Measured on the live console 2026-09-13: container 1052px, top row 526px, so
+ * the target of 350.67px makes `growTop` false and the three observer panes each
+ * ask to grow to 701.33px. They share ONE divider, so the re-read-before-every-pane
+ * rule collapses the second and third asks to sub-pixel no-ops — the behaviour
+ * that docblock's 2026-09-03 measurement describes, reached here for the first
+ * time by a console other than `operations`.
  *
- * If `container_frame` counts chrome the panes' `pixel_frame` does not, then some
- * fraction below 1 makes `topTarget > topHeight`, `growTop` flips TRUE, and the
- * row selected is `p.y === topY` — BOTH panes. A `resize-pane -D` is then issued
- * for every pane whose delta clears the one-pixel guard, against a border a
- * single-row console does not have; what cmux does with that is its business, and
- * either outcome falsifies *"not one `resize-pane` is issued"*. A fraction ABOVE
- * 1 takes that branch with no assumption about chrome at all.
- *
- * So `0.65` here would still not be a layout with a rationale — but for a better
- * reason than "it would do nothing": it would be a number whose effect turns on a
- * geometry relationship nothing pins down. That is a worse thing to write than an
- * inert one, which is why the narrower claim argues for `null` at least as hard.
- *
- * The INEXPRESSIBILITY, which is the structural half, is a stronger statement
- * than {@link REVIEW_TOP_FRACTION}'s *"there is nothing to favour"*, and
- * deliberately so: that argument concedes the day somebody decides there IS
- * something to favour, and on this console's shape there is no such day, because
- * there is nowhere for the favour to go.
- *
- * ## What `OPERATIONS_TOP_FRACTION` exists for, which this console does not have
- *
- * 0.65 corrects a console whose rows are UNLIKE — two agent panes over one
- * full-width monitor that says its piece in a handful of lines and repeats.
- * This console has no second row to be unlike the first, and both panes are an
- * agent's view in any case, so `new-split`'s halves are already the answer.
- * `null` skips the resize outright rather than asking for a fraction of `1/2`
- * and leaning on the sub-pixel guard to make it a no-op:
- * {@link DEVELOPMENT_TOP_FRACTION} records why a value that happens to round to
- * nothing must not stand in for a stated one.
- *
- * ## And the reason that is this console's alone: nobody is watching
+ * ## And the old caveat that still stands: nobody is watching
  *
  * Height is a claim about where an eye should go first, and on the ordinary path
- * there is no eye — this console runs on a clock, with no keyboard in either
- * seat. The moment it IS read is after something has already gone wrong, and
- * then the interesting pane is whichever one broke. A layout that had
- * pre-committed to an answer would be wrong half the time.
- *
- * ## WHEN THIS SHOULD BECOME A NUMBER, named so the next reader knows the trigger
- *
- * **THE TRIGGER FIRED ON 2026-09-12, AND THE ANSWER WAS STILL `null`.** This
- * paragraph named a third pane as the sharp trigger — pane 3 is the shared
- * builder's first `down` entry, so whatever this console gained third would
- * create a second row and make a fraction expressible for the first time. The
- * console gained panes 3 AND 4 together, as a second `(collator, observer)`
- * pair, which is the first of the two candidates below: the rows are ALIKE,
- * agents over agents, so `null` survives on {@link REVIEW_TOP_FRACTION}'s weaker
- * argument exactly as predicted. Kept as the record of a forecast that held.
- *
- * **One half of it did NOT hold, and that is the more useful half to keep.** It
- * said a second observer seat *"needs `soleEnvironment` lifted first"*. It did
- * not: §12's limit binds ENVIRONMENTS, and what a second pair needs is a second
- * SLICE of the one environment. `soleEnvironment` still refuses any count but
- * one and still should — see {@link DEFAULT_TRIAGE_WORKERS} for why splitting by
- * environment would have made the console report health for a fleet.
- *
- * The other candidate is unchanged and still wants the opposite value: the
- * non-agent pane SRD-TRIAGE-CONSOLE §11 Q6 leaves open — a `pifleet monitor`
- * view, or a tail of the actor's log — would make the bottom row a status
- * readout. That second case is precisely `OPERATIONS_TOP_FRACTION`'s situation,
- * and at that point a fraction stops being inert and starts being required.
+ * there is no eye — this console runs on a clock with no keyboard in any seat.
+ * The moment it IS read is after something has gone wrong. That argued for
+ * declining to pre-commit while the panes were interchangeable; it does not argue
+ * against this value, because the asymmetry being expressed is not about interest
+ * but about CONTENT — three panes doing three things need more room than one pane
+ * holding one document, whoever is or is not looking at them.
  */
-export const TRIAGE_TOP_FRACTION: number | null = null;
+export const TRIAGE_TOP_FRACTION: number | null = 1 / 3;
 
 /**
- * The triage console's panes, in creation order.
+ * How much of the container's WIDTH each pane in the observer row gets.
  *
- * The same BUILDER as {@link reviewPanes} and {@link developmentPanes} — the
- * shared {@link agentSquarePanes} — with only the default worker set and the
- * name in a refusal differing. **Not the same SHAPE, and the distinction is the
- * one this docblock exists to keep straight**: those two name four workers and
- * get the full 2x2, this one names two and gets the square's first row. One
- * table, read with a shorter list.
+ * ## Why this constant exists when no sibling console has one
  *
- * **That this is three lines is the claim SRD-TRIAGE-CONSOLE D5 makes about the
- * whole design**: a fourth console is a DATA addition. The request plane
- * collected that bet already (`TRIAGE_CONSOLE_ROSTER` is a literal over the same
- * two roles and changed no logic); this is the layout plane collecting it, and
- * the split table — the part that actually breaks, because pane 4 must anchor on
- * pane 2 rather than on pane 3 — is read from one place for the third time
- * rather than copied for the second.
+ * `new-split` halves. Every console before this one was a 2x2, so two columns
+ * each split once were already equal and nothing ever had to ask. A row of
+ * THREE cannot be reached that way at any depth — halving produces powers of
+ * two — so the observer row comes out of the builder at **50/25/25** and stays
+ * there unless something corrects it.
  *
- * **The seat count MOVING is what proved the delegation was worth having, and
- * that is no longer a forecast.** A hand copy of the square made here would have
- * had to be edited when this console went from four seats to two; the delegation
- * absorbed it in {@link DEFAULT_TRIAGE_WORKERS} and this function did not change
- * at all.
+ * MEASURED on the live console 2026-09-13, before any correction: a 795.33px
+ * container holding `obs-t1` at 397.67, `obs-t2` at 198.83 and `obs-t3` at
+ * 198.83. Exactly one half and two quarters, which is what a `right` split
+ * chain always gives — each split halves only what the previous pane held.
  *
- * `triage-plan.test.ts` pins the sharing structurally rather than taking it on
- * trust: this plan's split table is compared against `reviewPanes`' at RUNTIME
- * on one shared FOUR-worker set — deliberately not the two consoles' defaults,
- * which no longer agree even in length — so a copy made here would pass on the
- * day it was written and redden the moment `agentSquarePanes` moved, which is
- * the only day the difference between sharing and copying has ever cost
- * anything.
+ * ## Why that is a defect rather than a preference
+ *
+ * The three observers are handed EVEN shares of the environment
+ * (`roles/triage.md` asks for the split to be even, and `evenSlices` makes it
+ * so). A row that renders one of them at twice the width of the other two says
+ * the opposite — it reads as a lead observer and two helpers, which is not the
+ * arrangement and not what the collator briefed. The layout is the only part of
+ * this console an operator sees before reading anything, so a shape that
+ * misdescribes the work is worse here than on a console somebody is typing in.
+ *
+ * ## `1/3` rather than a list of three
+ *
+ * One fraction applied per pane, not a per-pane table, because the requirement
+ * is EQUALITY rather than a chosen distribution — a table would be three
+ * numbers that must be kept summing to one, and the first edit that added a
+ * fourth observer would leave it summing to more. A single fraction with N
+ * panes is the same statement and cannot drift out of range.
+ */
+export const TRIAGE_OBSERVER_WIDTH_FRACTION: number | null = 1 / 3;
+
+/**
+ * The triage console's panes, in creation order: ONE COLLATOR ACROSS THE TOP,
+ * its observers along the bottom.
+ *
+ *     +-----------------------------------+
+ *     |               tri-1               |
+ *     +----------+-----------+------------+
+ *     |  obs-t1  |  obs-t2   |   obs-t3   |
+ *     +----------+-----------+------------+
+ *
+ * **THIS STOPPED SHARING {@link agentSquarePanes} ON 2026-09-13, and the reason
+ * is a shape the square cannot express.** The square's table is
+ * `[right, down·from0, down·from1]`, which makes pane 2 the top row's second
+ * half — so pane 1 can never be full width. A collator over N observers needs
+ * the first split to go DOWN off pane 1 and every later one to go RIGHT along
+ * the row that split created. Delegating would have produced a 2x2 with `tri-1`
+ * in a quarter of the screen and `obs-t3` under `obs-t1`, which is a different
+ * console from the one the operator asked for.
+ *
+ * **The docblock this replaces argued the opposite and was right at the time**,
+ * so the reversal is recorded rather than quietly dropped. It said a hand copy
+ * "would have had to be edited when this console went from four seats to two"
+ * and that the delegation "absorbed it… and this function did not change at
+ * all". That held while triage was a subset of the square — one row of it, then
+ * all four cells of it. It stops holding the moment the SHAPE differs rather
+ * than the COUNT, and a shared table read with a shorter list cannot produce a
+ * full-width row at any length.
+ *
+ * What is NOT copied is the part that actually breaks. The anchor discipline —
+ * that a split names the pane it divides rather than "the previous one" — is the
+ * lesson `operationsPanes` learned at its git pane and `agentSquarePanes` states
+ * at its own table; this table obeys it explicitly (`splitFrom` on every entry
+ * after the first) instead of relying on creation order.
+ *
+ * `triage-plan.test.ts` pinned the SHARING structurally, comparing this plan's
+ * split table against `reviewPanes`' at runtime on a shared four-worker set.
+ * That premise is now false by design, and the test is re-pinned to this table's
+ * own shape — the collator full width, the observers in one row beneath it —
+ * which is the property an operator would notice breaking.
  */
 export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
-  return agentSquarePanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
+  const repoRoot = opts.repoRoot;
+  const workers = opts.workers ?? DEFAULT_TRIAGE_WORKERS;
+  const backend = opts.backend ?? "headless";
+  const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
+
+  if (workers.length === 0) {
+    throw new Error("triage: refusing an empty --workers set — name at least one worker");
+  }
+  if (workers.length > SQUARE_MAX_PANES) {
+    throw new Error(
+      `triage: refusing ${workers.length} workers — the console holds at most ` +
+        `${SQUARE_MAX_PANES}: one collator and its observers`,
+    );
+  }
+  for (const w of workers) assertPlainValue("worker id", w);
+  assertPlainValue("backend", backend);
+
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
+
+  return workers.map((worker, i) => ({
+    title: worker,
+    worker,
+    command: `${envPreamble()} ${agentPaneCommand({
+      repoRoot,
+      worker,
+      backend,
+      configPath,
+      attach: tuiWorkers.has(worker),
+      workspaceName: opts.workspaceName,
+    })}`,
+    /*
+     * Pane 1 takes the initial surface. Pane 2 splits DOWN off it, creating the
+     * observer row; panes 3 and 4 split RIGHT off the pane before them, walking
+     * along that row. Anchored by index rather than by "the previous pane" for
+     * the reason the square's table states: creation order is what gets read
+     * backwards.
+     */
+    ...(i === 0
+      ? { split: null }
+      : i === 1
+        ? { split: "down" as const, splitFrom: 0 }
+        : { split: "right" as const, splitFrom: i - 1 }),
+  }));
 }

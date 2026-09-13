@@ -105,8 +105,8 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
 | `col-1` | collator | review | `base` | writes the fan-out request; does not review |
 | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | reviewer | review | `base` | three vendors, read-only, `shared-ro` |
-| `tri-1`, `tri-2` | triage | triage | `base` | TWO collators, one per pair. Each writes ONE request naming every service in **its own half** of the environment, then collates its own observer's reply. **`gabe/gemma-4-26b-a4b-it`** (LAN, `hosted: false`); `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
-| `obs-t1`, `obs-t2` | **observer** | triage | `base` | one observer per collator — `obs-t1` belongs to `tri-1`, `obs-t2` to `tri-2`. Each sweeps its pair's slice, never the whole list. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `tri-1` | triage | triage | `base` | THE collator, and there is exactly one. Its envelope names every declared service and all three observer seats; it DIVIDES the environment between them (§6.5's ⌈N/3⌉ — the partition is the worker's judgement, not the host's arithmetic), then collates all three replies into ONE document. **`gabe/gemma-4-26b-a4b-it`** (LAN, `hosted: false`); `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
+| `obs-t1`, `obs-t2`, `obs-t3` | **observer** | triage | `base` | three seats under the one collator, each handed a share of the environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
 is gitignored. The tracked `fleet.example.yaml` differs in three ways worth
@@ -114,8 +114,8 @@ knowing before it is used to reason about this one: its `tester` role declares n
 `egress_access` and its `egress.allow` names no package registry, so **"egress to
 the registries" is false there**; its development seats run local oMLX models
 rather than hosted ones; and the `review` console's four seats are not declared in
-it at all. **The `triage` console's FOUR ARE** — `tri-1`, `tri-2`, `obs-t1` and
-`obs-t2` appear in both files, so the example can stand that console up where it
+it at all. **The `triage` console's FOUR ARE** — `tri-1`, `obs-t1`, `obs-t2` and
+`obs-t3` appear in both files, so the example can stand that console up where it
 cannot stand up `review`.
 
 **THIS ROW HAS NOW BEEN WRONG IN BOTH DIRECTIONS, AND THAT IS THE REASON TO

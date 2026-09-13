@@ -95,7 +95,7 @@ const BASE = { repoRoot: REPO, watchDir: "/work" } as const;
  */
 const unattended = () => triagePanes(BASE);
 
-describe("the triage console is a 2x2 of views with the reconciler in the landing seat", () => {
+describe("the triage console is a collator across the top, its observers beneath", () => {
   it("is a distinct workspace from all three other consoles", () => {
     expect(TRIAGE_WORKSPACE).toBe("triage");
     expect(TRIAGE_WORKSPACE).not.toBe(REVIEW_WORKSPACE);
@@ -104,30 +104,43 @@ describe("the triage console is a 2x2 of views with the reconciler in the landin
   });
 
   /**
-   * THE TWO SEATS BY NAME, which is the assertion this file exists for.
+   * THE SEATS BY NAME, which is the assertion this file exists for.
    *
-   * Not a count, and not a length. Three consoles are built by one function from
-   * one constant each, so a matching shape is true of more than one of them and
-   * pins none by itself — a `triagePanes` that had been handed
-   * `DEFAULT_REVIEW_WORKERS` would satisfy every structural probe in this file
-   * and stand up the wrong fleet.
+   * Not a count, and not a length. Three consoles are built from one constant
+   * each, so a matching shape is true of more than one of them and pins none by
+   * itself — a `triagePanes` handed `DEFAULT_REVIEW_WORKERS` would satisfy every
+   * structural probe in this file and stand up the wrong fleet.
+   *
+   * **This header said "THE TWO SEATS BY NAME" while asserting four**, and had
+   * done since the console grew its second pair. A count in prose above a list
+   * in code is the cheapest thing in this file to get wrong and the last thing
+   * anything checks — which is the argument for naming seats rather than
+   * counting them, made accidentally by the comment that was counting.
    */
-  it("names both reconcilers then both observers, in pane order", () => {
+  it("names the collator first, then its three observers, in pane order", () => {
     /*
-     * THE ORDER IS THE PAIRING, not a grouping preference. `agentSquarePanes`
-     * splits `[null, right, down-from-0, down-from-1]`, so listing the collators
-     * first puts `obs-t1` under `tri-1` and `obs-t2` under `tri-2`. Spell it
-     * `[tri-1, obs-t1, tri-2, obs-t2]` and the console still builds four panes,
-     * with each collator sitting above the OTHER pair's observer.
+     * THE ORDER IS THE LAYOUT, not a grouping preference. `triagePanes` splits
+     * `[null, down-from-0, right-from-1, right-from-2]`: pane 1 takes the
+     * initial surface, pane 2 splits DOWN to open the observer row, and the rest
+     * walk right along it. So the collator must come FIRST — put any observer
+     * there and it is the one that spans the width.
+     *
+     * The rule this replaces was the 2x2's, where the order carried the PAIRING:
+     * collators first so `obs-t1` fell under `tri-1`. Same constant, same kind of
+     * constraint, different table — which is why it is spelled out here rather
+     * than cross-referenced.
      */
-    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "tri-2", "obs-t1", "obs-t2"]);
+    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
   });
 
   it("titles panes by WORKER ID — the four named seats, in order", () => {
-    // A role title would print `observer` on two of the four panes, and `triage`
-    // on the other two — losing which pair each belongs to. The id is also what
-    // `dispatch --worker` takes, so the title is the argument.
-    expect(unattended().map((p) => p.title)).toEqual(["tri-1", "tri-2", "obs-t1", "obs-t2"]);
+    // A role title would print `observer` on THREE of the four panes, which is
+    // worse than the two it would have printed on the 2x2: the whole point of
+    // the bottom row is that its seats hold different slices, and a title that
+    // cannot tell them apart is a pane an operator cannot map to a container.
+    // The id is also what `dispatch --worker` takes, so the title is the
+    // argument.
+    expect(unattended().map((p) => p.title)).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
   });
 
   /**
@@ -189,20 +202,25 @@ describe("the triage console is a 2x2 of views with the reconciler in the landin
     }
   });
 
-  it("leaves the halves alone — a fraction here would favour one arbitrary observer", () => {
+  it("gives the collator ONE THIRD of the height, because the rows are UNLIKE", () => {
     /*
-     * `applyTopFraction` moves the border BETWEEN THE ROWS, and the top row is
-     * `tri-1` and `obs-t1`. So a value that grew the reconciler would grow one
-     * observer by exactly as much and shrink its two identical siblings —
-     * the preference somebody would reach for this constant to state is not
-     * expressible, which is a stronger reason than `review`'s "nothing to
-     * favour".
+     * **THIS ASSERTED `null` UNTIL 2026-09-13, and it was right to.** While the
+     * console was one row — `tri-1` beside its observer — `applyTopFraction` had
+     * no border between rows to move, so a value here could not express the
+     * preference anyone would reach for it to state. That is why the old test
+     * name said the halves were left alone.
      *
-     * Compared against `OPERATIONS_TOP_FRACTION` as well as against `null`: that
-     * constant exists to correct a console whose rows are UNLIKE, and asserting
-     * the two are different is what stops this one being "fixed" by copying it.
+     * `triagePanes` now builds the collator full-width over a row of three, so
+     * there IS a border and the fraction means something. The rows are genuinely
+     * unlike — one settled document above, three observers working concurrent
+     * slices below — which is `OPERATIONS_TOP_FRACTION`'s situation rather than
+     * `review`'s "nothing to favour".
+     *
+     * Still compared against `OPERATIONS_TOP_FRACTION`: the two consoles want
+     * different numbers for different reasons, and asserting they differ is what
+     * stops this one being "fixed" by copying that one.
      */
-    expect(TRIAGE_TOP_FRACTION).toBeNull();
+    expect(TRIAGE_TOP_FRACTION).toBeCloseTo(1 / 3, 10);
     expect(TRIAGE_TOP_FRACTION).not.toBe(OPERATIONS_TOP_FRACTION);
   });
 
@@ -220,63 +238,67 @@ describe("the triage console is a 2x2 of views with the reconciler in the landin
 });
 
 /**
- * THE ANTI-VACUITY BLOCK: is this plan the shared builder, or a copy of it?
+ * THE ANTI-VACUITY BLOCK: does this plan build ITS OWN shape, or the square's?
  *
- * Every assertion above would pass on a `triagePanes` that reimplemented the
- * 2x2 by hand. These would too, on the day the copy was made — and that is the
- * point. They are written against `reviewPanes` computed at RUNTIME rather than
- * against a literal shape, so the two consoles are pinned to MOVE TOGETHER. A
- * copy is caught on the day `agentSquarePanes`' table changes and one of them
- * follows it, which is the only day the distinction has ever cost anything.
+ * **RE-AIMED 2026-09-13, AND THE PREMISE IS NOW INVERTED.** This block used to
+ * pin `triagePanes` BYTE-IDENTICAL to `reviewPanes` on a shared worker set,
+ * because the two consoles genuinely shared `agentSquarePanes` and the risk
+ * worth guarding was a hand copy that would drift the day the shared table
+ * changed. `triagePanes` stopped delegating when this console became one
+ * collator over three observers: the square's table makes pane 2 the top row's
+ * second half, so pane 1 can never be full width, and no shorter or longer
+ * worker list changes that. The shape differs, not merely the count.
  *
- * `operations-plan.ts:690-706` records what that day looks like: two identical
- * copies of the split table *"would be identical on the day they were written
- * and only diverge afterwards"*, and the table is the part that breaks, because
- * pane 4 must anchor on pane 2 rather than on pane 3.
+ * **The guard is still needed, pointed the other way.** The old equality was
+ * what stopped a silent copy; with the equality gone, the same vacuity returns
+ * unless something pins this console's OWN table. So these assertions now name
+ * the collator-over-observers anchors explicitly AND assert the two consoles
+ * DISAGREE — which is what catches a future edit that quietly re-delegates
+ * `triagePanes` to `agentSquarePanes` and puts `tri-1` back in a quarter of the
+ * screen.
  */
-describe("the triage plan IS the shared square builder, not a copy of it", () => {
+describe("the triage plan builds its own shape, NOT the shared square", () => {
   /**
-   * ONE WORKER SET, BOTH CONSOLES. With the defaults removed from the picture,
-   * everything left is `agentSquarePanes`' decision — the split directions, the
-   * anchors, the titles-are-ids rule, the `envPreamble` prefix and the whole
-   * shape of the `up` ladder.
-   *
-   * Byte-identical is the right bar rather than merely structurally similar:
-   * these two calls differ ONLY in a default that neither of them reaches and a
-   * label that appears only in refusals, so anything else that differs is a
-   * second implementation.
+   * ONE WORKER SET, BOTH CONSOLES — kept from the version this replaces, and
+   * for a reason that survived the inversion: with the defaults removed from the
+   * picture, everything left is the BUILDER's decision. It used to prove the two
+   * agree; it now proves they cannot be made to.
    */
   const SHARED = ["w-1", "w-2", "w-3", "w-4"] as const;
 
-  it("produces byte-identical panes to the review console on one shared worker set", () => {
-    expect(triagePanes({ ...BASE, workers: SHARED })).toEqual(
+  it("does NOT produce the review console's panes, on the very set that used to match", () => {
+    expect(triagePanes({ ...BASE, workers: SHARED })).not.toEqual(
       reviewPanes({ ...BASE, workers: SHARED }),
     );
   });
 
-  it("takes its split table from the same place, anchors included", () => {
+  it("anchors a full-width collator over one row of observers", () => {
     /*
-     * Stated separately from the equality above, because the equality would also
-     * be satisfied by two consoles that were equally and identically wrong, and
-     * this names the property that must hold: the anchor table is what a copy
-     * gets backwards. Read against the shared builder's own diagram —
+     * THE ANCHOR TABLE IS THE WHOLE TEST, exactly as it was before — only the
+     * table changed. Read against `triagePanes`' own diagram:
      *
-     *   1: the initial surface          2: "right" off 1
-     *   3: "down" off 1  (splitFrom 0)  4: "down" off 2  (splitFrom 1)
+     *   1: the initial surface
+     *   2: "down"  off 1  (splitFrom 0)   <- creates the observer row
+     *   3: "right" off 2  (splitFrom 1)   <- walks along it
+     *   4: "right" off 3  (splitFrom 2)
+     *
+     * The FIRST split is the load-bearing one: it must go `down` off pane 1, or
+     * the top row is divided and the collator never spans the width. Every
+     * count, title and command assertion in this file passes either way.
      */
     const shape = (panes: ReturnType<typeof triagePanes>) =>
       panes.map((p) => [p.split, p.splitFrom ?? null]);
 
     expect(shape(triagePanes({ ...BASE, workers: SHARED }))).toEqual([
       [null, null],
-      ["right", null],
       ["down", 0],
-      ["down", 1],
+      ["right", 1],
+      ["right", 2],
     ]);
-    // …and the same table, read out of the OTHER console at runtime. If someone
-    // edits `agentSquarePanes`, this line and the literal above disagree only
-    // when exactly one console followed the edit.
-    expect(shape(triagePanes({ ...BASE, workers: SHARED }))).toEqual(
+    // …and the square's table, read at RUNTIME, is a different one. If someone
+    // re-delegates this plan to `agentSquarePanes`, the literal above and this
+    // line stop disagreeing and both reds point at the same edit.
+    expect(shape(triagePanes({ ...BASE, workers: SHARED }))).not.toEqual(
       shape(reviewPanes({ ...BASE, workers: SHARED })),
     );
   });
@@ -344,9 +366,9 @@ describe("the seats the plan names are the seats the tracked config declares", (
      */
     expect([...DEFAULT_TRIAGE_WORKERS].map((id) => [id, roles.get(id)])).toEqual([
       ["tri-1", "triage"],
-      ["tri-2", "triage"],
       ["obs-t1", "observer"],
       ["obs-t2", "observer"],
+      ["obs-t3", "observer"],
     ]);
   });
 });

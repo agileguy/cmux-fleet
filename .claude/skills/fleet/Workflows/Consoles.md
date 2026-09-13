@@ -7,24 +7,33 @@ The four standing cmux workspaces.
 | operations | `./scripts/operations` | `obs-1` agent, `pifleet monitor`, `tick-1` agent |
 | development | `./scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` — four equal agent panes |
 | review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — four equal agent panes, **plus a host process** |
-| triage | `./scripts/triage` | `tri-1`, `tri-2`, `obs-t1`, `obs-t2` — **four** equal agent panes in TWO PAIRS, **plus a host process** |
+| triage | `./scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3` — **four** agent panes: the collator full width on top, its three observers along the bottom, **plus a host process** |
 
 The development console's fourth seat is `tst-2` on `role: tester`; `rev-1` is
 gone, and review is the `review` console's job now. The review console's four
 seats are `shared-ro` — they read the operator's checkout at whatever ref it
 stands on, and the three reviewers hold no `bash`.
 
-**This row has been wrong in BOTH directions, which is why it is worth a
-paragraph rather than a correction.** It read `tri-1, obs-t1, obs-t2, obs-t3` —
-"four equal agent panes" — until 2026-09-11, when `obs-t2` and `obs-t3` were in
-neither config and `roles/triage.md` had been telling the collator *"this console
-has exactly one observer"* the whole time this table said three. It was corrected
-to two. On 2026-09-12 the console grew a real second pair, so it is four again —
-this time by an edit to five files rather than by prose outliving code.
+**This row has been wrong in BOTH directions and has now returned to its FIRST
+spelling, which is why it is worth a paragraph rather than a correction.** It read
+`tri-1, obs-t1, obs-t2, obs-t3` — "four equal agent panes" — until 2026-09-11,
+when `obs-t2` and `obs-t3` were in neither config and `roles/triage.md` had been
+telling the collator *"this console has exactly one observer"* the whole time this
+table said three. It was corrected to two. On 2026-09-12 the console grew a real
+second pair, so it was four again, by an edit to five files rather than by prose
+outliving code. On 2026-09-13 the second COLLATOR became a third OBSERVER.
 
-The shape is now `tri-1`+`obs-t1` and `tri-2`+`obs-t2`: each collator composes a
-request for **its own half** of the environment and collates its own observer's
-reply, and neither is told the other observer's id. Before repeating any seat list
+**So the seat list is once more the one this table first claimed — and this time
+the seats behind it exist.** That is the distinction to check rather than the
+spelling: `obs-t3` is now in `TRIAGE_CONSOLE_ASPECTS`, `TRIAGE_CONSOLE_ROSTER`,
+`DEFAULT_TRIAGE_WORKERS` and the `workers:` block of both config files. The 2026-09-11
+correction was made because none of that was true.
+
+The shape is `tri-1` over `obs-t1`, `obs-t2` and `obs-t3`: one collator is handed
+the WHOLE environment, divides it between the three observers itself (§6.5's
+⌈N/3⌉ — a judgement the host checks rather than performs), and collates all three
+replies into ONE document. The two-pair arrangement it replaced wrote two
+documents the host had to merge and echo-check for staleness. Before repeating any seat list
 from this file, read `DEFAULT_TRIAGE_WORKERS` in
 `src/backends/cmux/operations-plan.ts` or the `workers:` block of `fleet.yaml` — a
 pane count is exactly the kind of fact a prose table keeps after the code has

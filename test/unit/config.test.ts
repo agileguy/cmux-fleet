@@ -78,16 +78,24 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
  * has to change.
  */
 /*
- * IN `fleet.example.yaml`'S DECLARATION ORDER, which is not pane order.
+ * IN `fleet.example.yaml`'S DECLARATION ORDER, which as of 2026-09-13 happens to
+ * EQUAL pane order — and the coincidence is worth naming so nobody builds on it.
  *
- * The file declares the first pair, then the second — `tri-1, obs-t1, tri-2,
- * obs-t2` — and the roster assertion below compares against `resolveAllWorkers`,
- * which preserves that. PANE order is a different fact with its own constant:
- * `DEFAULT_TRIAGE_WORKERS` lists both collators before both observers, because
- * that is what puts each observer under its own collator in the 2x2. Two orders,
- * two constants, neither wrong.
+ * This comment used to record a real divergence: the file declared two pairs,
+ * `tri-1, obs-t1, tri-2, obs-t2`, while `DEFAULT_TRIAGE_WORKERS` listed both
+ * collators before both observers, because that is what put each observer under
+ * its own collator in the 2x2. Two orders, two constants, neither wrong.
+ *
+ * The console is now ONE collator over THREE observers, and `obs-t3` was
+ * APPENDED after `obs-t2` rather than dropped into `tri-2`'s old slot — so both
+ * orders read `tri-1, obs-t1, obs-t2, obs-t3` and the two constants agree
+ * element for element. **They are still two different facts.** This list is
+ * whatever `resolveAllWorkers` yields from the file; `DEFAULT_TRIAGE_WORKERS` is
+ * the order that puts the collator in the full-width pane. Re-ordering the YAML
+ * would move this and not that, and an assertion that leaned on today's
+ * agreement would fail somewhere unrelated to the edit that caused it.
  */
-const TRIAGE_SEATS = ["tri-1", "obs-t1", "tri-2", "obs-t2"] as const;
+const TRIAGE_SEATS = ["tri-1", "obs-t1", "obs-t2", "obs-t3"] as const;
 
 /**
  * D1, settled 2026-09-06 as arm 3: all four seats run the LOCAL 20b, in both
@@ -2753,7 +2761,15 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
 
     // By NAME, for `seatsOf`'s reason above: a seat deleted and a seat retooled
     // want different edits, and an emptied filter reports neither.
-    expect(seats.map((w) => w.id).sort()).toEqual(["tri-1", "tri-2"]);
+    //
+    // **ONE seat since 2026-09-13, and this assertion earned its wording.** It
+    // read `["tri-1", "tri-2"]` while the console ran two collators; `tri-2` was
+    // DELETED from the config when the console became one collator over three
+    // observers. A count check would have said "2 became 1" and left open which
+    // of the two failures it was — a seat removed, or a seat that quietly grew
+    // `bash` and fell out of the filter. Naming them distinguishes those, and
+    // that is exactly the distinction that mattered here.
+    expect(seats.map((w) => w.id).sort()).toEqual(["tri-1"]);
 
     for (const w of seats) {
       const exempt = HOLDS_A_WRITER[w.role] ?? [];

@@ -64,6 +64,7 @@ import {
   OPERATIONS_WORKSPACE,
   REVIEW_TOP_FRACTION,
   REVIEW_WORKSPACE,
+  TRIAGE_OBSERVER_WIDTH_FRACTION,
   TRIAGE_TOP_FRACTION,
   TRIAGE_WORKSPACE,
   developmentPanes,
@@ -96,6 +97,23 @@ export interface WorkspaceSpec {
    * console of equal panes says `null` rather than `1/2`.
    */
   readonly topFraction: number | null;
+  /**
+   * Fraction of the WIDTH each pane in the BOTTOM row gets, or `null` to leave
+   * the halves `new-split` produces alone.
+   *
+   * A second field rather than a reuse of {@link topFraction}, because the two
+   * say different things and only one of them is a ratio between rows: a top
+   * fraction divides ONE border, and this divides the N−1 borders inside a row.
+   * Folding them together would make `0.5` mean "half the height above" in one
+   * console and "two equal columns below" in another.
+   *
+   * `null` on every console but `triage`, and that is not an oversight to be
+   * tidied up later: the other three are 2x2s, where two columns each split once
+   * are already equal and a correction would be a no-op dressed as a decision.
+   * {@link DEVELOPMENT_TOP_FRACTION} records why a value that rounds to nothing
+   * must not stand in for a stated one, and the same rule governs here.
+   */
+  readonly bottomWidthFraction: number | null;
 }
 
 /**
@@ -122,6 +140,9 @@ export const OPERATIONS_SPEC: WorkspaceSpec = {
   name: OPERATIONS_WORKSPACE,
   panes: operationsPanes,
   topFraction: OPERATIONS_TOP_FRACTION,
+  // ONE pane in the bottom row — the merged monitor — so there is no border
+  // inside it to divide. See {@link WorkspaceSpec.bottomWidthFraction}.
+  bottomWidthFraction: null,
 };
 
 /** The four-agent console: two engineers on top, two testers below. */
@@ -129,6 +150,8 @@ export const DEVELOPMENT_SPEC: WorkspaceSpec = {
   name: DEVELOPMENT_WORKSPACE,
   panes: developmentPanes,
   topFraction: DEVELOPMENT_TOP_FRACTION,
+  // A 2x2: one split gives two equal columns already.
+  bottomWidthFraction: null,
 };
 
 /**
@@ -145,30 +168,45 @@ export const REVIEW_SPEC: WorkspaceSpec = {
   name: REVIEW_WORKSPACE,
   panes: reviewPanes,
   topFraction: REVIEW_TOP_FRACTION,
+  // A 2x2, as `development` is, and asked for as "four equally sized panes".
+  bottomWidthFraction: null,
 };
 
 /**
- * The scheduled triage console: TWO reconcilers over their own TWO observers, a
- * full 2x2 — and, in the tracked `fleet.example.yaml`, no keyboard in any of
- * them. (A reconciler and ONE observer in a single row until 2026-09-12.)
+ * The scheduled triage console: ONE collator across the top, THREE observers in
+ * a row beneath it — and, in the tracked `fleet.example.yaml`, no keyboard in
+ * any of them. (A reconciler and ONE observer in a single row until 2026-09-12;
+ * two such pairs in a 2x2 for one day after that.)
  *
  * The FOURTH value in this file and still not a fourth builder, which is the
  * whole of what {@link WorkspaceSpec} was written to buy and the whole of what
- * SRD-TRIAGE-CONSOLE D5 bet on. Three fields, no branch, no new argument: the
+ * SRD-TRIAGE-CONSOLE D5 bet on. Four fields, no branch, no new argument: the
  * BUILD-FIRST-CLOSE-SECOND order in {@link ensureWorkspace} — a measured lesson
  * that cost a destroyed console once — is stated in exactly one place and cannot
  * be got backwards a fourth time.
  *
- * `topFraction` is `null` here for an argument that is NOT `REVIEW_SPEC`'s, and
- * {@link TRIAGE_TOP_FRACTION} is where it lives. `DEFAULT_TRIAGE_WORKERS` names
- * TWO workers, so the shared builder's `down` entries — which begin at pane 3 —
- * are never reached and THERE IS NO SECOND ROW. A fraction moves the border
- * BETWEEN rows, so on one row there is no border for it to move.
+ * **BOTH FRACTIONS ARE NUMBERS HERE, AND THIS IS THE ONLY SPEC WHERE EITHER
+ * SECOND ONE IS.** That is what the shape bought and what it costs: a console of
+ * one full-width row over a row of three is the first layout in this repository
+ * that `new-split` cannot produce correctly on its own. Halving gives 50/50
+ * vertically and 50/25/25 horizontally, and neither is what this console means —
+ * the three observers are handed EVEN slices of the environment, so a row that
+ * renders one at twice the width of its siblings describes work that is not
+ * being done. {@link TRIAGE_TOP_FRACTION} and
+ * {@link TRIAGE_OBSERVER_WIDTH_FRACTION} carry the arguments.
+ *
+ * **The previous version of this docblock asserted the opposite and was right
+ * when written**, which is why the reversal is recorded rather than overwritten:
+ * it said `DEFAULT_TRIAGE_WORKERS` *"names TWO workers … THERE IS NO SECOND
+ * ROW"*, and on a two-seat console that was exactly true. It went stale in place
+ * when the roster grew, with nothing to redden — the same failure mode
+ * {@link TRIAGE_TOP_FRACTION} now warns about at greater length.
  */
 export const TRIAGE_SPEC: WorkspaceSpec = {
   name: TRIAGE_WORKSPACE,
   panes: triagePanes,
   topFraction: TRIAGE_TOP_FRACTION,
+  bottomWidthFraction: TRIAGE_OBSERVER_WIDTH_FRACTION,
 };
 
 /**
@@ -527,6 +565,13 @@ export async function createWorkspace(
   );
   if (firstPaneId !== null) await client.runOk(focusPaneArgv(firstPaneId));
   await applyTopFraction(client, wsId, spec.topFraction);
+  // HEIGHT FIRST, THEN WIDTH, and the order is not arbitrary even though the
+  // two corrections are independent in this layout: the height pass moves the
+  // row divider, which changes every bottom pane's `y`. The width pass re-reads
+  // geometry, so it sees the settled rows rather than the ones it was planned
+  // against — running it first would leave it computing against a row that is
+  // about to move underneath it.
+  await applyBottomWidths(client, wsId, spec.bottomWidthFraction);
   return { created: true, workspaceId: wsId };
 }
 
@@ -652,6 +697,138 @@ async function applyTopFraction(
     // the operator gets a line and still gets a console.
     process.stderr.write(
       `operations: pane layout left as split ` +
+        `(${err instanceof Error ? err.message : String(err)})\n`,
+    );
+  }
+}
+
+/**
+ * Give every pane in the BOTTOM row an equal share of the width.
+ *
+ * The horizontal twin of {@link applyTopFraction}, and it exists for the same
+ * reason one rung down: `new-split` has no size argument, so a row of three
+ * arrives as 50/25/25 — each `right` split halving only what the pane before it
+ * held — and thirds are not reachable by halving at any depth.
+ *
+ * ## A ROW OF THREE IS A NESTED PAIR, NOT A FLAT SPLIT — MEASURED, NOT DERIVED
+ *
+ * This is the fact the whole function turns on, it is not visible anywhere in
+ * `list-panes`, and the first version of this pass was written without it and
+ * was wrong. A chain of `right` splits does not build one row of N cells; it
+ * builds a right-nested tree, `[obs-t1 | [obs-t2 | obs-t3]]`, because each split
+ * divides only the pane it was anchored on. That is also why the row arrives at
+ * 50/25/25 rather than at thirds.
+ *
+ * The consequence is that a resize does NOT move width between two neighbours.
+ * It moves the addressed border, and the space is redistributed PROPORTIONALLY
+ * across the whole subtree on the far side. Measured on the live console
+ * 2026-09-13, `resize-pane --pane obs-t2 -L --amount 30` against 265/176/352:
+ *
+ *   obs-t1  265 -> 235   lost all 30, as expected
+ *   obs-t2  176 -> 186   gained only 10
+ *   obs-t3  352 -> 372   gained 20
+ *
+ * The 30px came out of one pane and was shared 1:2 between the two on the right
+ * — exactly their existing ratio. `--amount` is pixels, as
+ * {@link resizePaneArgv} says; what is not pixels is the ASSUMPTION that one
+ * border move touches one neighbour.
+ *
+ * **The pass this replaces walked RIGHT TO LEFT and grew each pane in turn**,
+ * on the reasoning that a `right`-split chain leaves the leftmost pane widest,
+ * so every pane needing to shrink is the one the next step steals from. That
+ * argument is sound for a flat row and lands on 265/265/265. Against the real
+ * tree it lands on 265.67/176.83/352.83, because the second step's "left
+ * neighbour" is the outer border and its take is split 1:2 down the subtree.
+ * The console rendered 265/176/352. **The discarded model predicted the wrong
+ * numbers and the tree model predicts the observed ones to the pixel**, which is
+ * the only reason this docblock states the tree as fact rather than as a theory.
+ *
+ * ## SO: LEFT TO RIGHT, ONE BORDER AT A TIME, SIGN CHOOSES THE PANE
+ *
+ * Settle the leftmost border so pane 0 is exactly its share; whatever that
+ * redistributes to the right is then settled by the next step, and so on. The
+ * LAST pane is never addressed — it holds the remainder, which is correct once
+ * every border to its left is. Nothing needs to predict the proportional
+ * redistribution, because each step re-reads after it.
+ *
+ * Direction comes from the sign, which is {@link applyTopFraction}'s own rule
+ * rather than a new one — and it is what the first version reached past when it
+ * picked an ORDER instead. Both panes touch the divider between them, so one of
+ * the two always has it adjacent in the direction it must travel:
+ *
+ *   widen pane i   -> divider RIGHT -> `-R` on pane i
+ *   narrow pane i  -> divider LEFT  -> `-L` on pane i+1
+ *
+ * This also removes the old version's grow-only restriction and the four-pane
+ * caveat that came with it: no step ever squeezes an intermediate pane, because
+ * no step asks for more than one border's worth of movement.
+ *
+ * Best-effort for {@link applyTopFraction}'s reason, and with its remedy: a
+ * console whose panes are all correct but unevenly split is fully usable, so a
+ * cosmetic failure must not take the workspace down — but the `catch` says what
+ * it swallowed, because a silent one is how two defects survived every rebuild.
+ */
+async function applyBottomWidths(
+  client: CmuxClient,
+  wsId: string,
+  fraction: number | null,
+): Promise<void> {
+  // `null` is a console saying it wants the columns `new-split` produced —
+  // every 2x2 in this file. Returning before any geometry is read keeps "no
+  // correction wanted" distinguishable from "correction computed to nothing".
+  if (fraction === null) return;
+  let first: ReturnType<typeof parsePaneGeometry>;
+  try {
+    first = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+  } catch {
+    // The geometry read failed, which on every test double means no
+    // `container_frame` at all. Nothing to correct and nothing an operator
+    // could do about it. See {@link applyTopFraction}'s note on the two
+    // distinct failures.
+    return;
+  }
+  try {
+    if (first.panes.length < 2) return;
+    // The bottom row is the one with the largest `y`. Compared BETWEEN panes
+    // rather than against zero: `container_frame` is a size with no origin and
+    // pane coordinates carry the window's own offsets, so only the relative
+    // ordering means anything (`parse.ts`, `parsePaneGeometry`).
+    const bottomY = Math.max(...first.panes.map((p) => p.y));
+    const row = first.panes.filter((p) => p.y === bottomY).sort((a, b) => a.x - b.x);
+    // One pane in the bottom row has no internal border to divide — the
+    // operations console's merged monitor is exactly this shape. Nothing to do,
+    // and issuing a resize would address a border that is not there.
+    if (row.length < 2) return;
+    // LEFT TO RIGHT, and never the LAST pane: each step settles one border and
+    // leaves the rest of the row to the steps after it. The final pane is not
+    // addressed at all — it holds the remainder, which is its share once every
+    // border to its left is where it belongs.
+    for (let i = 0; i < row.length - 1; i += 1) {
+      const paneId = row[i]!.paneId;
+      const nextId = row[i + 1]!.paneId;
+      // Re-read before EVERY border — and for a stronger reason than
+      // {@link applyTopFraction}'s. There, one move shifted the neighbour the
+      // next delta was computed against. Here one move shifts SEVERAL panes at
+      // once, proportionally, and no snapshot taken beforehand can say by how
+      // much. Measuring after each step is what lets this pass stay ignorant of
+      // the redistribution rule rather than having to model it.
+      const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+      const pane = geo.panes.find((p) => p.paneId === paneId);
+      if (pane === undefined) continue;
+      const delta = geo.containerWidth * fraction - pane.width;
+      // Sub-pixel deltas are what an already-correct row produces; issuing them
+      // would be a no-op command per border on every adoption.
+      if (Math.abs(delta) < 1) continue;
+      // The SIGN picks which pane to address, so the border is always adjacent
+      // in the direction it has to travel — the same rule, and the same reason,
+      // as choosing a ROW by the sign in {@link applyTopFraction}.
+      await (delta > 0
+        ? client.runOk(resizePaneArgv(paneId, "R", delta))
+        : client.runOk(resizePaneArgv(nextId, "L", -delta)));
+    }
+  } catch (err) {
+    process.stderr.write(
+      `operations: observer row left as split ` +
         `(${err instanceof Error ? err.message : String(err)})\n`,
     );
   }

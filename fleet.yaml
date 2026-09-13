@@ -1323,29 +1323,55 @@ workers:
   # MOVED TO gabe 2026-09-12, same reasoning as tri-1 above: the worker's own
   # `model:` overrides the role's, so this line is what binds the seat to gabe.
   - {id: obs-t1, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-dark}
-  # ---- THE SECOND PAIR, added 2026-09-12 ----
+  # ---- THE SECOND AND THIRD OBSERVERS ----
   #
-  # `tri-2` is a second COLLATOR, not a second lens, and `obs-t2` is ITS observer.
-  # The pairing is not expressed here — this is a flat list and the schema has no
-  # vocabulary for "belongs to" — it is expressed by what each collator is SHOWN:
-  # `renderSweepEnvelope` takes `seats`, so `tri-2`'s envelope names `obs-t2` and
-  # no other id, and a collator cannot dispatch to a seat whose child task id it
-  # was never given.
+  # THIS WAS `tri-2` + `obs-t2`, A SECOND PAIR, FOR ONE DAY (2026-09-12), and the
+  # reversal is recorded rather than overwritten because both edits were
+  # deliberate. That shape worked — T-sweep-116 split the environment 5/4 across
+  # the two collators with no overlap, and each observer's slice was a subset of
+  # its own collator's half — but it produced TWO collation documents the host had
+  # to merge and echo-check. The operator asked for ONE collated report, in the
+  # shape the review console already has, so the second COLLATOR was withdrawn on
+  # 2026-09-13 and a third OBSERVER took its seat.
   #
-  # THE ORDER OF THESE FOUR LINES DOES NOT SET THE PANE ORDER.
-  # `DEFAULT_TRIAGE_WORKERS` does (`src/backends/cmux/operations-plan.ts`), and it
-  # lists both collators before both observers so the square builder puts each
-  # observer directly under its own collator. Reordering here changes nothing;
-  # reordering there changes who sits above whom.
+  # SO THERE IS NO PAIRING LEFT TO EXPRESS. `tri-1` is shown all three observers
+  # in `renderSweepEnvelope`'s `seats` and divides the environment between them
+  # itself — §6.5's ⌈N/3⌉, *"the partition is the triage worker's to make"*. The
+  # host checks the union and refuses an incomplete or duplicated partition; it
+  # does not choose the shares.
   #
-  # THEMES, chosen adjacent rather than arbitrary: `tokyo-night-storm` beside
-  # `tri-1`'s `tokyo-night` and `gruvbox-light` beside `obs-t1`'s `gruvbox-dark`,
-  # so a glance tells you both WHICH ROLE a pane holds and WHICH PAIR it is in.
-  # That is `obs-1`/`obs-2`'s stated reason for differing palettes, applied to a
-  # console with twice the panes and nobody watching most of the time.
+  # THREE OBSERVERS RATHER THAN TWO IS A DEADLINE DECISION, not symmetry. On
+  # T-sweep-116 `obs-t2` spent its entire 480s child deadline on FOUR services and
+  # wrote no artifact, so all four came back `unobserved`; `obs-t1` delivered five
+  # with about twenty seconds to spare. Nine services across three seats is three
+  # each — the load this console sustained for 115 sweeps — and the deadline was
+  # raised to 600s in `triage/console.yaml` in the same edit.
   #
-  # `pane_mode: tui` on both, matching the first pair, which is what keeps
+  # THE ORDER OF THESE LINES DOES NOT SET THE PANE ORDER.
+  # `DEFAULT_TRIAGE_WORKERS` does (`src/backends/cmux/operations-plan.ts`): it
+  # lists `tri-1` first and the three observers after it, and `triagePanes` splits
+  # DOWN off pane 1 and then RIGHT along that row, so the collator gets the full
+  # top row and the observers share the bottom one. Reordering here changes
+  # nothing; reordering there changes the layout.
+  #
+  # THEMES, chosen so the three observers are tellable APART rather than merely
+  # tellable from the collator — `gruvbox-dark`, `gruvbox-light`, `everforest-dark`
+  # against `tri-1`'s `tokyo-night`. That is `obs-1`/`obs-2`'s stated reason for
+  # differing palettes, applied to a console with four panes and nobody watching
+  # most of the time.
+  #
+  # `everforest-dark` RATHER THAN a third gruvbox, and the near-miss is the reason
+  # to say so: this line first read `gruvbox-material`, which is a real cmux theme
+  # and NOT a Pi one. `theme` is deliberately not enum-validated (`schema.ts:281` —
+  # refusing a whole fleet over a cosmetic name is the worse trade), so it passes
+  # `config validate` as a WARNING and the pane then silently falls back to the
+  # default. Two panes meant to be distinguishable quietly stop being so, which is
+  # the one thing this key exists to buy. The names Pi actually carries are in
+  # `src/config/themes.ts`; `cmux themes list` is a different catalogue and reading
+  # it instead is how the wrong name got here.
+  #
+  # `pane_mode: tui` on both, matching `obs-t1`, which is what keeps
   # `triage/console.yaml`'s `recycle_after_sweeps: 0` correct — a headless
   # recycle cannot rebuild a tui pane, and that trade is already recorded above.
-  - {id: tri-2,  role: triage,   model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: tokyo-night-storm}
   - {id: obs-t2, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-light}
+  - {id: obs-t3, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: everforest-dark}

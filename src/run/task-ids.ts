@@ -164,26 +164,36 @@ export const REVIEW_CONSOLE_ASPECTS: readonly AspectSeat[] = [
  */
 export const TRIAGE_CONSOLE_ASPECTS: readonly AspectSeat[] = [
   { worker: "obs-t1", aspect: "slice1" },
-  /*
-   * THE SECOND PAIR, 2026-09-12. `obs-t2` is not a second LENS — it is a second
-   * PAIR, and the distinction is the whole difference from the review console.
-   *
-   * The review console's three aspects are three readings of one artifact, so
-   * `aspect` there names a judgement (`arch`, `context`, `lang`) and D11 keeps a
-   * collator from assigning them. Here the aspects are `slice1`/`slice2` because
-   * an observer looks at DIFFERENT SERVICES, not at the same services
-   * differently: the name is an index into a partition and carries no opinion.
-   *
-   * Each observer belongs to exactly one collator — `tri-1` to `obs-t1`, `tri-2`
-   * to `obs-t2` — and that pairing is NOT enforced by this constant, which is a
-   * flat list. It is enforced by what each collator is SHOWN: `renderSweepEnvelope`
-   * takes `seats` as a parameter, so each collator's envelope names only its own
-   * observer and the `## The seats` block it reads lists exactly one id. A
-   * collator cannot dispatch to a seat it was never told exists, because it
-   * cannot derive the child task id — that is this constant's own argument at
-   * `:193`, now doing a second job.
-   */
   { worker: "obs-t2", aspect: "slice2" },
+  /*
+   * THREE SLICES UNDER ONE COLLATOR, 2026-09-13 — and the shape this list had
+   * for one day in between is worth recording, because both edits were made on
+   * purpose and the second reverses the first.
+   *
+   * On 2026-09-12 this held `slice1`/`slice2` as TWO PAIRS: `tri-1` over
+   * `obs-t1`, `tri-2` over `obs-t2`, each collator shown only its own seat. That
+   * worked — T-sweep-116 split 5/4 with no overlap and each observer's slice was
+   * a subset of its own collator's half — but it produced TWO collation
+   * documents that the host had to merge, and the operator wanted one collated
+   * report in the shape the review console already has. So the second COLLATOR
+   * went away and a third OBSERVER took its place.
+   *
+   * **The distinction from the review console survives that change and is still
+   * the point.** Its three aspects are three readings of ONE artifact, so
+   * `aspect` there names a judgement (`arch`, `context`, `lang`) and D11 keeps a
+   * collator from assigning them. Here `slice1`/`slice2`/`slice3` are an index
+   * into a PARTITION: an observer looks at different services, not at the same
+   * services differently, and the name carries no opinion about which.
+   *
+   * What DID die with the second collator is the pairing. One collator now holds
+   * every seat in this list, so `renderSweepEnvelope`'s `seats` parameter shows
+   * it all three ids and the `## The seats` block lists three. The partition
+   * across them is §6.5's ⌈N/3⌉ — *"the partition is the triage worker's to
+   * make"* — which is a model judgement the host checks rather than arithmetic
+   * the host performs. `checkTriagePartition` still refuses an incomplete or
+   * duplicated one; it does not refuse a lopsided one.
+   */
+  { worker: "obs-t3", aspect: "slice3" },
 ];
 
 /**

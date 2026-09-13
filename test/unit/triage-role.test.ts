@@ -519,23 +519,32 @@ describe("the document no longer contradicts itself about how many observers exi
    * The premise every assertion below rests on, asserted first so that none of
    * them can pass vacuously over an empty or unexpected roster.
    */
-  test("the console this document describes has one observer PER COLLATOR", () => {
+  test("the console this document describes has THREE observers under ONE collator", () => {
     /*
-     * TWO observers as of 2026-09-12, and the document's claim changed shape
-     * rather than its number: it said *"this console has exactly one observer"*
-     * and now says each COLLATOR has exactly one, named by its envelope. Both
-     * statements are about the fan-out a single collator may write, which is
-     * what every assertion below actually tests.
+     * THREE observers as of 2026-09-13, and this claim has now changed shape
+     * twice in two days — which is the reason it is asserted against the roster
+     * rather than spelled as prose. It said *"this console has exactly one
+     * observer"*, then *"each COLLATOR has exactly one"* while there were two
+     * pairs, and now says one collator fans out to three. Every version was
+     * about the same underlying thing: the fan-out a single collator may write.
+     *
+     * This is §6.5's ⌈N/3⌉ shape restored — the ORIGINAL design, which the
+     * console shrank away from and has now come back to.
      */
-    expect(ROSTER).toEqual(["obs-t1", "obs-t2"]);
+    expect(ROSTER).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
   });
 
   /**
-   * The table's own ghosts, checked IN PLACE rather than counted. `obs-t2` and
-   * `obs-t3` are allowed to appear — the row that refuses them by name is worth
-   * having, because a model that has met a three-observer version of this console
-   * needs to be told which seats are the imaginary ones. What is not allowed is
-   * an id off the roster appearing anywhere the document treats it as real.
+   * The table's own ghosts, checked IN PLACE rather than counted. `obs-t4` is
+   * allowed to appear — the row that refuses it by name is worth having, because
+   * a model that has met a wider version of this console needs to be told which
+   * seats are the imaginary ones. What is not allowed is an id off the roster
+   * appearing anywhere the document treats it as real.
+   *
+   * **The ghost has MOVED, and that is the maintenance cost of naming one.**
+   * `obs-t2` and `obs-t3` were the imaginary seats until 2026-09-13; both are
+   * real now, and the role file's refusal row moved to `obs-t4` in the same
+   * edit. A ghost row is a claim about the roster like any other.
    *
    * Asserted as a LINE COUNT plus the refusal wording, so both directions redden:
    * restoring the table (or the deleted envelope example) puts a ghost on a line

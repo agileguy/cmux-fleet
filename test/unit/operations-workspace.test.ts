@@ -314,12 +314,19 @@ describe("creating the workspace", () => {
  *
  * ## The asymmetry that makes these probes mean something
  *
- * `TRIAGE_SPEC.topFraction` is `null` and `OPERATIONS_SPEC`'s is `0.65`, and
- * that difference is OBSERVABLE rather than merely declared: `applyTopFraction`
- * returns immediately on `null`, before it reads geometry, so this console
- * issues exactly ONE `list-panes` where the operations console issues two. The
- * fraction is therefore pinned by behaviour and not by reading the constant back
- * — a spec that had copied `OPERATIONS_TOP_FRACTION` reddens here.
+ * **INVERTED 2026-09-13, and the mechanism is unchanged.** This console used to
+ * be the one with NO layout correction: `topFraction: null` made
+ * `applyTopFraction` return before it read geometry, so triage issued exactly
+ * ONE `list-panes` where operations issued two — and that count, not a constant
+ * read back, was how the fraction was pinned.
+ *
+ * It is now the console with the MOST correction: `topFraction` is `1/3` and it
+ * is the only spec with a `bottomWidthFraction`, because a collator over three
+ * observers is the one layout `new-split` cannot produce — halving gives 50/50
+ * vertically and 50/25/25 horizontally. So it issues THREE `list-panes`: the
+ * focus lookup, the height pass, and the width pass. The probe is the same
+ * behavioural one, counting up instead of down — a spec that dropped either
+ * fraction reddens here.
  */
 describe("the triage console is built from its own spec", () => {
   test("an existing triage workspace is adopted, and nothing is created or respawned", async () => {
@@ -389,7 +396,7 @@ describe("the triage console is built from its own spec", () => {
     expect(verbsOf(calls)).toContain("workspace create");
   });
 
-  test("issues one create, three splits and four respawns — and only ONE list-panes", async () => {
+  test("issues one create, three splits and four respawns — and THREE list-panes", async () => {
     const { client, calls } = fakeCmux();
 
     const result = await ensureTriage(client, OPTS);
@@ -411,13 +418,21 @@ describe("the triage console is built from its own spec", () => {
       "rename-tab",
       "respawn-pane",
       "select-workspace",
-      // ONE `list-panes`, for the focus lookup, and no second one for geometry.
-      // The operations console's equivalent test pins TWO, because its
-      // `topFraction` is 0.65 and `applyTopFraction` reads geometry to correct
-      // it. `null` returns before that read, so the absence of a second call is
-      // this spec's fraction asserted through behaviour.
+      // THREE `list-panes`, and each one is a different claim about this spec.
+      // The first is the focus lookup, which every console does. The second is
+      // `applyTopFraction` reading geometry — it returns before that read when
+      // `topFraction` is `null`, so its presence IS the 1/3 asserted through
+      // behaviour. The third is `applyBottomWidths`, which only this console
+      // reaches, because it is the only spec carrying a `bottomWidthFraction`.
+      //
+      // No `resize-pane` follows any of them: this fake reports no
+      // `container_frame`, so both passes take their parse-failed path. The
+      // calls being ISSUED is what this pins — the arithmetic has no double to
+      // run against and is measured on the live console instead.
       "list-panes",
       "focus-pane",
+      "list-panes",
+      "list-panes",
     ]);
   });
 
@@ -431,7 +446,7 @@ describe("the triage console is built from its own spec", () => {
     // THE NAMED SEATS, never a count: three consoles are one function call apart
     // and a spec pointed at the wrong constant would still produce four panes in
     // a 2x2 and stand up the wrong fleet.
-    expect(titles).toEqual(["tri-1", "tri-2", "obs-t1", "obs-t2"]);
+    expect(titles).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
     // …and against the exported default rather than only against literals, so a
     // seat renamed in the plan and not here is a red test rather than a console
     // whose panes are titled for workers it never starts.
@@ -465,7 +480,7 @@ describe("the triage console is built from its own spec", () => {
     for (const c of commands) expect(c).not.toContain("'--attach-here'");
   });
 
-  test("the observer splits right off the reconciler, and each pane respawns once", async () => {
+  test("the observer row splits DOWN off the collator, and each pane respawns once", async () => {
     const { client, calls } = fakeCmux();
     await ensureTriage(client, OPTS);
 
@@ -473,23 +488,27 @@ describe("the triage console is built from its own spec", () => {
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
 
     /*
-     * COVERAGE RESTORED 2026-09-12, on the instruction the shrunken version of
-     * this comment left: *"Restore this test to its 2x2 form if the console
-     * regains its other seats."* It regained them as a second
-     * `(collator, observer)` pair.
+     * **THE FIRST SPLIT IS THE LOAD-BEARING ASSERTION** as of 2026-09-13, and
+     * the previous version of this comment named a different pane for the same
+     * structural reason — worth keeping, because the lesson outlived its shape.
+     * It said pane 4's anchor was the one that mattered, since the 2x2 needed
+     * `down` off `surf-1` rather than off its predecessor, and a wrong anchor
+     * produced a 3+1 console every other assertion in this file accepted.
      *
-     * **THE FOURTH PANE'S ANCHOR IS THE LOAD-BEARING ASSERTION**, and it is the
-     * whole reason `splitFrom` exists: pane 4 splits `down` off `surf-1` — pane
-     * 2's surface — rather than off its predecessor `surf-2`. Anchored wrongly
-     * the console comes out 3+1, and every count, title and direction assertion
-     * in this file still passes. Only the surface list catches it.
+     * The shape is now a collator over a row, and the fragile anchor has moved
+     * to the FRONT: pane 2 splits `down` off `surf-0`, which is what creates the
+     * observer row and leaves `tri-1` spanning the width. Make it `right` — the
+     * square builder's table — and the console comes out a 2x2 with the collator
+     * in a quarter, while every count, title and command assertion here still
+     * passes. Only the direction list catches it.
      *
-     * It is also what pairs the console correctly: `obs-t2` sits under `tri-2`
-     * because pane 4 hangs off pane 2. Get this wrong and each collator is
-     * above the OTHER pair's observer.
+     * Panes 3 and 4 then walk ALONG that row, each anchored on its predecessor:
+     * `surf-1` then `surf-2`. That is the one part that got simpler — a row is
+     * the shape where "the previous pane" is finally the right anchor, so the
+     * surface list is now consecutive rather than doubling back.
      */
-    expect(splits.map((c) => c[1])).toEqual(["right", "down", "down"]);
-    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-0", "surf-1"]);
+    expect(splits.map((c) => c[1])).toEqual(["down", "right", "right"]);
+    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2"]);
     // Every pane respawns into the surface it was given, and never twice into
     // one: a stale anchor repeats an id here.
     const respawned = calls

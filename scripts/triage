@@ -2,27 +2,35 @@
 /**
  * `scripts/triage` — open the standing scheduled triage console.
  *
- *   ./scripts/triage                                # tri-1, tri-2, obs-t1, obs-t2
+ *   ./scripts/triage                                # tri-1, obs-t1, obs-t2, obs-t3
  *   ./scripts/triage --dry-run                      # print the plan, touch nothing
  *   ./scripts/triage --restart obs-t1               # respawn one observer
  *   ./scripts/triage --restart tri-1 --task t.json  # fresh reconciler, then dispatch
  *
- * EQUAL panes, TWO PAIRS. Each collator takes a top pane and ITS OWN observer
- * sits directly beneath it — `tri-1` over `obs-t1`, `tri-2` over `obs-t2`:
+ * ONE COLLATOR ACROSS THE TOP, ITS THREE OBSERVERS ALONG THE BOTTOM. `tri-1`
+ * divides the environment between them and collates their reports into one
+ * document:
  *
  * ```
- * +---------------+---------------+
- * |     tri-1     |     tri-2     |
- * +---------------+---------------+
- * |    obs-t1     |    obs-t2     |
- * +---------------+---------------+
+ * +-----------------------------------+
+ * |               tri-1               |
+ * +----------+-----------+------------+
+ * |  obs-t1  |  obs-t2   |   obs-t3   |
+ * +----------+-----------+------------+
  * ```
  *
- * THE ORDER OF `DEFAULT_TRIAGE_WORKERS` IS WHAT PAIRS THEM, and this diagram is
+ * THE ORDER OF `DEFAULT_TRIAGE_WORKERS` IS WHAT BUILDS THIS, and the diagram is
  * pinned to it cell-for-cell by `fresh-dispatch.test.ts` — the picture is
- * load-bearing, not decoration. `agentSquarePanes` splits `[null, right,
- * down-from-0, down-from-1]`, so collators-then-observers is the only order that
- * puts each observer under its own collator rather than under the other pair's.
+ * load-bearing, not decoration. `triagePanes` splits `[null, down-from-0,
+ * right-from-1, right-from-2]`: the collator first, then one split DOWN to make
+ * the observer row, then RIGHT along it. It STOPPED sharing `agentSquarePanes`
+ * on 2026-09-13 — that table's `[null, right, down-from-0, down-from-1]` makes
+ * pane 2 the top row's second half, so pane 1 can never be full width.
+ *
+ * (TWO PAIRS for one day, 2026-09-12: `tri-1` over `obs-t1` and `tri-2` over
+ * `obs-t2`, a 2x2 off the shared square. It worked, and it produced two
+ * collation documents the host had to merge; one collated report is why the
+ * second collator became a third observer.)
  *
  * ## What makes this different from `scripts/review`
  *

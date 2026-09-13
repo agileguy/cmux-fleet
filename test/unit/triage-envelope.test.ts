@@ -2424,11 +2424,20 @@ describe("BOUNDED_CALLS_DEMAND (ISC-1134, authored under ISC-1136)", () => {
 
   /**
    * The bound is derived from the deadline it protects. Ten-ish calls at the
-   * timeout must leave the seat room to write the artifact inside 480 s — a
-   * bound that consumes the deadline reinstates the exact failure.
+   * timeout must leave the seat room to write the artifact inside the child
+   * deadline — a bound that consumes the deadline reinstates the exact failure.
+   *
+   * **600 s as of 2026-09-13, raised from 480 by a measured failure.** On
+   * T-sweep-116 — the last sweep of the two-pair arrangement — an observer
+   * holding four services spent its entire 480 s deadline mid-`kubectl logs` and
+   * wrote no artifact, so every service it held came back `unobserved`. The
+   * deadline is not set directly: it falls out of `cadence_s - reserve_s - 300`,
+   * so `triage/console.yaml`'s cadence moving to 1020 is what moved this. The
+   * 300 is `RELAY_CHILD_DEADLINE_MARGIN_MS`, shared with the review console and
+   * pinned there — which is why the cadence, and not the margin, is the knob.
    */
   test("the timeout leaves an unreachable sweep time to report", () => {
-    const CHILD_DEADLINE_S = 480;
+    const CHILD_DEADLINE_S = 600;
     const CALLS_PER_SWEEP = 10;
     expect(CLUSTER_CALL_TIMEOUT_S * CALLS_PER_SWEEP).toBeLessThan(CHILD_DEADLINE_S);
     // And not so tight it refuses a slow-but-working API.

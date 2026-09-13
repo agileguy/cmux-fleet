@@ -1648,12 +1648,13 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    * outcome: `tri-1` demoted to `observer` would still be found here and would
    * be dispatched a partition brief it has no prompt for.
    *
-   * **What this does NOT pin, so the silence is not read as coverage.**
-   * `REVIEW_CONSOLE_ROSTER` is pinned to `DEFAULT_REVIEW_WORKERS` as a SET, in
-   * both directions. This console has no worker-set export yet — the pane plan
-   * is Phase 4 — so a THIRD seat added to the config and not to this roster
-   * passes here. When `DEFAULT_TRIAGE_WORKERS` lands, this should become the
-   * same set equality.
+   * **THE GAP THIS PARAGRAPH USED TO NAME IS CLOSED, and the paragraph outlived
+   * it by long enough to be worth recording.** It said this console "has no
+   * worker-set export yet — the pane plan is Phase 4", so a seat added to the
+   * config and not to the roster would pass; it asked for a set equality "when
+   * `DEFAULT_TRIAGE_WORKERS` lands". That constant landed, and the set equality
+   * is asserted twenty lines below — the request and its fulfilment sat in one
+   * test, contradicting each other, through two roster changes.
    */
   test("names every seat the tracked example declares, by id and by role", async () => {
     const path = `${ROOT}fleet.example.yaml`;
@@ -1662,11 +1663,11 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
 
     expect(TRIAGE_CONSOLE_ROSTER.collators.map((id) => [id, roles.get(id)])).toEqual([
       ["tri-1", "triage"],
-      ["tri-2", "triage"],
     ]);
     expect(TRIAGE_CONSOLE_ROSTER.reviewers.map((id) => [id, roles.get(id)])).toEqual([
       ["obs-t1", "observer"],
       ["obs-t2", "observer"],
+      ["obs-t3", "observer"],
     ]);
 
     /*

@@ -103,8 +103,33 @@ recycle_after_sweeps: 0
 # wrong, not the observer: 474 tool calls and 13 writes is what checking three
 # services against a live control plane actually costs on a 35B.
 #
-# 900 - 120 = 780s. Thirteen minutes for a sweep, and a tick every fifteen.
-cadence_s: 900
+# 1020 - 120 = 900s, and the OBSERVER's own bound is 900 - 300 = 600s.
+#
+# RAISED 2026-09-13 by operator instruction ("make deadline for an observer be
+# 600s"), and this file is the only lever that reaches it. The observer's
+# deadline is not a field anywhere: `childDeadlineS` derives it as
+# `sweep_deadline_s - RELAY_CHILD_DEADLINE_MARGIN_MS`, and that 300s margin is
+# SHARED with the review console — `collator-relay-adapter.test.ts` pins
+# `childDeadlineS(1_800_000)` at 1500s so review is "unchanged to the second",
+# so lowering the margin to buy triage 600s would silently retune a console
+# nobody asked about. Raising the settle bound is the change that stays local.
+#
+# 600 therefore needs a 900s settle bound, and `sweepDeadlineIssue` refuses a
+# deadline that is not STRICTLY under the cadence, so the cadence goes to 1020
+# rather than 900. `reserve_s` stays at the operator's measured 120 instead of
+# dropping to the schema floor of 15, which would leave a sweep fifteen seconds
+# clear of the next tick.
+#
+# MEASURED CAUSE, T-sweep-116: obs-t2 hit the 480s deadline mid-investigation --
+# its transcript ends on a `kubectl logs` for kube-state-metrics, the third of
+# its four services -- and wrote no artifact, so all four were recorded
+# unobserved. obs-t1 delivered five services with about twenty seconds to spare.
+# The deadline was the binding constraint on both, not the cluster.
+#
+# THE COST IS TICK FREQUENCY: a sweep every seventeen minutes rather than every
+# fifteen. It does not slow a sweep down -- a sweep already spans several passes
+# by design, and 116 ran about twenty-three minutes wall at the old deadline.
+cadence_s: 1020
 reserve_s: 120
 
 # The channel. Only the env var NAME is here — §6.9 requirement 4 and the block

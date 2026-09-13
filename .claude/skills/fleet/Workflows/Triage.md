@@ -28,25 +28,29 @@ design property with a test behind it.
 ## Starting it
 
 ```bash
-cd ~/repos/cmux-fleet && ./scripts/triage            # two panes, then the actor
+cd ~/repos/cmux-fleet && ./scripts/triage            # four panes, then the actor
 cd ~/repos/cmux-fleet && ./scripts/triage --no-actor # panes only, actor by hand
 cd ~/repos/cmux-fleet && ./scripts/triage --actor-stop
 ```
 
-**Four seats, in TWO PAIRS** as of 2026-09-12: `tri-1` composes a sweep request
-and collates the reply for `obs-t1`; `tri-2` does the same for `obs-t2`. Each
-collator is handed a SLICE of the environment — the host splits the declared list
-as evenly as the count allows (`evenSlices`, `src/run/triage-partition.ts`) — and
-each is shown only its own observer.
+**Four seats: ONE COLLATOR OVER THREE OBSERVERS** as of 2026-09-13. `tri-1`
+composes the sweep request and collates the replies; `obs-t1`, `obs-t2` and
+`obs-t3` each sweep a share of the environment. The collator's envelope carries
+the WHOLE declared service list and names all three seats.
 
-**There is no partition to spread WITHIN a pair, and that is still what
-`roles/triage.md` tells a collator**: one request, naming every service in ITS
-envelope, because within the pair there is nobody to share with. A collator that
-starts reasoning about which observer a service belongs to has still imported a
-distinction from the review console. What changed is the level: the console now
-runs two slices concurrently, but each collator's own slice is sequential by
-construction, and neither collator is told the other's observer id — it cannot
-derive that seat's task id, which is what stops it dispatching there.
+**The partition is the COLLATOR's to make, and that is what `roles/triage.md` now
+tells it**: one entry per observer inside one `requests[]` file, the union
+covering every declared service exactly once. This is §6.5's ⌈N/3⌉ — *"the
+partition is the triage worker's to make"*. The host checks the union and refuses
+`partition_incomplete` or `partition_duplicate`; it does NOT choose the shares and
+does not refuse a lopsided one.
+
+**The role prompt asks for an EVEN split for a measured reason.** The three
+observers run concurrently against one shared deadline, so a sweep costs the
+largest share rather than the sum. On T-sweep-116 — the last sweep of the two-pair
+arrangement — an observer handed four services spent its entire 480s deadline and
+wrote no artifact, so all four came back `unobserved`. The deadline is now 600s
+(`triage/console.yaml`), and three seats make nine services three each.
 
 **READ THIS BEFORE REPEATING THE COUNT, because this line has been wrong in BOTH
 directions.** It said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one share

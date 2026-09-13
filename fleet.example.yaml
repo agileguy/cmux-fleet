@@ -72,12 +72,15 @@ run:
   # bind on, at any value. The triage console is the first run holding MORE
   # THAN ONE seat, which is what finally gave this key something to bind on.
   #
-  # THE ARGUMENT THAT RAISED IT IS STALE AND THE VALUE IS NOT. That argument
-  # was a three-wide fan-out needing at least 3. The console is TWO seats —
-  # `tri-1` and `obs-t1` (`DEFAULT_TRIAGE_WORKERS`,
-  # `src/backends/cmux/operations-plan.ts`) — and the fan-out is one observer
-  # wide, so an admission budget of four is spent by two and this console now
-  # runs with SLACK where it was once sized to fit exactly.
+  # THE ARGUMENT THAT RAISED IT IS LIVE AGAIN AND THE VALUE FITS EXACTLY. That
+  # argument was a three-wide fan-out needing at least 3. It went stale on
+  # 2026-09-11 when the console shrank to `tri-1` + `obs-t1` and the fan-out
+  # became one observer wide, and it is true again as of 2026-09-13: the console
+  # is FOUR seats — `tri-1` over `obs-t1`, `obs-t2` and `obs-t3`
+  # (`DEFAULT_TRIAGE_WORKERS`, `src/backends/cmux/operations-plan.ts`) — and the
+  # fan-out really is three observers wide. An admission budget of four is spent
+  # by four, with nothing spare. Do not lower this key by reading the paragraph
+  # that called it slack; that paragraph described a console that no longer runs.
   # `operations-plan.ts:1027-1035` reaches the same reading and names this
   # block as the stale one.
   #
@@ -893,11 +896,17 @@ workers:
   #
   # THE CADENCE IS NOT SET HERE, and which number is right depends on which file
   # you are reading. The schema default is `cadence_s: 300` — a sweep every five
-  # minutes, 288 a day. The tracked `triage/console.yaml` sets 900, so the
-  # SHIPPED console sweeps every fifteen minutes, 96 a day.
+  # minutes, 288 a day. The tracked `triage/console.yaml` sets 1020, so the
+  # SHIPPED console sweeps every seventeen minutes, about 85 a day.
+  #
+  # It was 900 — fifteen minutes, 96 a day — until 2026-09-13, when the cadence
+  # was raised to buy each observer a 600s deadline. That bound is not a field
+  # anywhere: it is `cadence_s - reserve_s - 300`, and the 300 is shared with the
+  # review console, so the cadence is the only lever that reaches it without
+  # retuning a console nobody asked about.
   #
   # ONE RUN, one run id, stable for the console's whole life:
-  #   pifleet up --workers tri-1,tri-2,obs-t1,obs-t2
+  #   pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3
   # FOUR SEATS SPEND FOUR of `run.max_concurrent`, which is 4 (the key itself is
   # at :93; find it by NAME if that number has drifted) — so this console now
   # fits EXACTLY, with nothing spare.
@@ -959,20 +968,29 @@ workers:
   # went red the moment the roles converged, and the file yielded to it rather
   # than the other way round.
   - {id: obs-t1, role: observer}
-  # ---- THE SECOND PAIR, added 2026-09-12 ----
+  # ---- THE SECOND AND THIRD OBSERVERS ----
   #
   # Declared with no `model:`, no `pane_mode:` and no `theme:` for exactly the
-  # reasons the first pair carries none: both resolve from their roles, and this
-  # file's `triage` and `observer` roles already name the model the console runs.
-  # A worker-level override here would re-state a decision rather than make one.
+  # reason `obs-t1` carries none: both resolve from their role, and this file's
+  # `observer` role already names the model the console runs. A worker-level
+  # override here would re-state a decision rather than make one.
   #
-  # `tri-2` is a second COLLATOR and `obs-t2` is ITS observer. The pairing is not
-  # expressible in a flat `workers:` list and is not meant to be: each collator is
-  # SHOWN only its own seat, because `renderSweepEnvelope` takes `seats` and a
-  # collator cannot dispatch to a child task id it was never given.
+  # THIS WAS `tri-2` + `obs-t2`, A SECOND PAIR, FOR ONE DAY (2026-09-12). That
+  # shape ran a real sweep — T-sweep-116 split the environment 5/4 across the two
+  # collators with no overlap — but it wrote TWO collation documents the host had
+  # to merge and echo-check. One collated report is what the operator wanted, so
+  # on 2026-09-13 the second COLLATOR was withdrawn and a third OBSERVER took its
+  # place. `tri-1` is now shown all three seats and divides the environment
+  # between them itself (§6.5's ⌈N/3⌉).
   #
-  # PANE ORDER IS NOT SET HERE. `DEFAULT_TRIAGE_WORKERS` lists both collators
-  # before both observers so the square builder puts each observer directly under
-  # its own collator; this file only declares that the seats exist.
-  - {id: tri-2,  role: triage}
+  # THREE OBSERVERS RATHER THAN TWO IS A DEADLINE DECISION. On T-sweep-116
+  # `obs-t2` spent its whole child deadline on four services and wrote nothing, so
+  # all four were recorded `unobserved`. Nine services across three seats is three
+  # each, and `triage/console.yaml` raised the deadline to 600s in the same edit.
+  #
+  # PANE ORDER IS NOT SET HERE. `DEFAULT_TRIAGE_WORKERS` lists `tri-1` first and
+  # the three observers after it, and `triagePanes` splits DOWN off pane 1 then
+  # RIGHT along that row — collator full width on top, observers beneath. This
+  # file only declares that the seats exist.
   - {id: obs-t2, role: observer}
+  - {id: obs-t3, role: observer}

@@ -441,25 +441,26 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
  */
 export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
   /*
-   * TWO PAIRS as of 2026-09-12, and this constant is deliberately the WIDE half
-   * of the enforcement rather than the precise one.
+   * ONE COLLATOR OVER THREE OBSERVERS as of 2026-09-13, and this constant is
+   * EXACT again rather than the wide half of a pairing.
    *
-   * `worker_not_in_console` asks "is this target inside the console?" and the
-   * honest answer for both observers is yes. What this cannot express is that
-   * `obs-t1` belongs to `tri-1` and `obs-t2` to `tri-2` — a flat roster would
-   * accept `tri-1` naming `obs-t2`, and nothing here would refuse it.
+   * It held `collators: ["tri-1", "tri-2"]` for one day. That shape needed this
+   * comment to admit a gap: a flat roster would accept `tri-1` naming `obs-t2`,
+   * and nothing here refused it — the pairing was enforced one layer up, by what
+   * each collator was SHOWN in `renderSweepEnvelope`'s `seats`. With a single
+   * collator there is no other pair to cross into, so the roster and the truth
+   * coincide: every reviewer listed here really is a seat `tri-1` may name, and
+   * `worker_not_in_console` is now the whole of the check rather than its wide
+   * half.
    *
-   * That gap is closed one layer up rather than widened here, and closing it
-   * here would be the wrong shape: the roster's two halves answer "may this
-   * worker ask?" and "is this target inside the console?", and a pairing is
-   * neither. Each collator is shown only its own seat in `renderSweepEnvelope`'s
-   * `seats` parameter, so it never learns the other's child task id; and the
-   * per-collator `declared` slice means a request naming the wrong observer's
-   * services is refused as `partition_incomplete` against the slice it was
-   * actually given.
+   * The fan-out is three because §6.5 puts the partition in the collator's hands
+   * — ⌈N/3⌉ is that rule's own arithmetic — and because nine services across two
+   * observers was measured too slow: on T-sweep-116 `obs-t2` spent its whole
+   * deadline on four services and wrote nothing. Three observers make it three
+   * each, which is the load this console sustained for 115 sweeps.
    */
-  collators: ["tri-1", "tri-2"],
-  reviewers: ["obs-t1", "obs-t2"],
+  collators: ["tri-1"],
+  reviewers: ["obs-t1", "obs-t2", "obs-t3"],
   /*
    * §7.3's triage row, and the half that makes the completeness check
    * REACHABLE. §6.5 puts the count on the host — *"a model that partitions can
