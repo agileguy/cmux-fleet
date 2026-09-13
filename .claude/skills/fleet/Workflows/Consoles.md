@@ -7,25 +7,31 @@ The four standing cmux workspaces.
 | operations | `./scripts/operations` | `obs-1` agent, `pifleet monitor`, `tick-1` agent |
 | development | `./scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` — four equal agent panes |
 | review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — four equal agent panes, **plus a host process** |
-| triage | `./scripts/triage` | `tri-1`, `obs-t1` — **two** equal agent panes, **plus a host process** |
+| triage | `./scripts/triage` | `tri-1`, `tri-2`, `obs-t1`, `obs-t2` — **four** equal agent panes in TWO PAIRS, **plus a host process** |
 
 The development console's fourth seat is `tst-2` on `role: tester`; `rev-1` is
 gone, and review is the `review` console's job now. The review console's four
 seats are `shared-ro` — they read the operator's checkout at whatever ref it
 stands on, and the three reviewers hold no `bash`.
 
-**The triage row read `tri-1, obs-t1, obs-t2, obs-t3` — "four equal agent panes"
-— until 2026-09-11, and it was the only row in this table that was wrong.**
-`obs-t2` and `obs-t3` are in neither config. The console is `tri-1` composing the
-request and `obs-t1` answering it, and `roles/triage.md` has been telling the
-collator *"this console has exactly one observer"* the whole time this table said
-three. Before repeating any seat list from this file, read
-`DEFAULT_TRIAGE_WORKERS` in `src/backends/cmux/operations-plan.ts` or the
-`workers:` block of `fleet.yaml` — a pane count is exactly the kind of fact a
-prose table keeps after the code has moved on.
+**This row has been wrong in BOTH directions, which is why it is worth a
+paragraph rather than a correction.** It read `tri-1, obs-t1, obs-t2, obs-t3` —
+"four equal agent panes" — until 2026-09-11, when `obs-t2` and `obs-t3` were in
+neither config and `roles/triage.md` had been telling the collator *"this console
+has exactly one observer"* the whole time this table said three. It was corrected
+to two. On 2026-09-12 the console grew a real second pair, so it is four again —
+this time by an edit to five files rather than by prose outliving code.
+
+The shape is now `tri-1`+`obs-t1` and `tri-2`+`obs-t2`: each collator composes a
+request for **its own half** of the environment and collates its own observer's
+reply, and neither is told the other observer's id. Before repeating any seat list
+from this file, read `DEFAULT_TRIAGE_WORKERS` in
+`src/backends/cmux/operations-plan.ts` or the `workers:` block of `fleet.yaml` — a
+pane count is exactly the kind of fact a prose table keeps after the code has
+moved on, in whichever direction the code went.
 
 **"No keyboard" came off that row with them, because it depends on which config
-you mean.** Both triage seats inherit `pane_mode: rpc` from their roles in the
+you mean.** All four triage seats inherit `pane_mode: rpc` from their roles in the
 tracked `fleet.example.yaml`, and `scripts/triage` reads the mode from the config
 rather than hard-coding it. But the operator's gitignored `fleet.yaml` overrides
 BOTH seats to `pane_mode: tui` with themes, on a 2026-09-07 decision recorded in
@@ -107,7 +113,7 @@ A record it cannot verify (`unreadable`, or a pid whose identity cannot be
 confirmed) is **left exactly where it is and nothing is signalled**. The script
 says so and starts nothing; find out what that pid is, then remove the file.
 
-## The triage console has an actor too — the third process behind its two panes
+## The triage console has an actor too — the fifth process behind its four panes
 
 Same shape as review, different reason. `tri-1` is a collator, and the thing a
 collator cannot do is **dispatch**: all it can do toward a sweep is write
@@ -229,15 +235,16 @@ cd ~/repos/cmux-fleet && ./scripts/review --recreate
 
 `--recreate` **stops every run the old panes created** before building the new
 ones. That is a teardown of live agents — as many as three bystanders for one
-wedged worker on a four-pane console, and one on `triage`. Use it when the *set*
+wedged worker on a four-pane console, `triage` included since it grew its second
+pair. Use it when the *set*
 of workers changes or the pane layout is wrong; use `--restart` for everything
 else.
 
 `development` and `review` are **four runs each**, because every pane is
 attended and `--attach-here` hands over the terminal of the process that runs it.
 `review --recreate` stops its relay first, before those runs go down, since the
-relay's whole configuration is their run ids. `triage` is **two** runs on the same
-rule. Only runs holding that console's own workers are stopped — the other three
+relay's whole configuration is their run ids. `triage` is **four** runs on the same
+rule, since 2026-09-12. Only runs holding that console's own workers are stopped — the other three
 consoles survive a rebuild.
 
 **Known defect:** it stops the runs *before* closing the workspace, and the

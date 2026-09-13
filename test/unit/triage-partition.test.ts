@@ -73,7 +73,6 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 
 import {
   DISPATCH_REQUEST_SCHEMA,
@@ -84,25 +83,68 @@ import {
 import {
   checkTriagePartition,
   dispatchPartition,
+  evenSlices,
   partitionFromRequests,
   type PartitionAssignment,
 } from "../../src/run/triage-partition.ts";
 import { parseTriageTargets } from "../../src/run/triage-targets.ts";
-import { ROOT } from "../support/role-docs.ts";
 
 /**
- * The environment as `triage/targets.yaml` declares it.
+ * The environment THIS SUITE declares — its own, not the operator's.
  *
  * Three real service names from the SRD's own examples (§6.2), because a fixture
  * spelled `a`/`b`/`c` makes an order-dependent bug read as an alphabetisation
- * bug. `MAX_SERVICES_PER_ENVIRONMENT` is 64 and the schema's `.min(1)` means this
+ * bug. `MAX_SERVICES_PER_ENVIRONMENT` is 16 and the schema's `.min(1)` means this
  * list is never empty in production — see the vacuous-completeness test for why
  * that matters here.
+ *
+ * **THREE IS LOAD-BEARING, and it is why this no longer tracks the operator's
+ * file.** Every fixture below is a MINIMAL adversarial construction, several of
+ * them recording the exact mutation they were added to kill: the order test
+ * needs exactly two missing names, because "a single-element list is
+ * order-invariant, so appending `.reverse()` passed the whole file"; the
+ * contiguity test separates a contiguous split from a round-robin one only
+ * because 3 splits 2/1. Growing this list to whatever `triage/targets.yaml`
+ * happens to declare would bury each two-name claim inside a longer one and
+ * make a `.reverse()` mutation HARDER to catch, not easier.
  */
 const DECLARED = ["ntfy", "prometheus", "grafana"] as const;
 
-/** `TRIAGE_CONSOLE_ROSTER.reviewers`, spelled out so a roster edit is visible. */
-const OBS = ["obs-t1"] as const;
+/**
+ * `DECLARED` as a targets document — the fixture the pin at the end parses.
+ *
+ * Inline rather than a file under `test/fixtures/`, following
+ * `triage-targets.test.ts`'s `GOOD_YAML`: the suite most about this schema reads
+ * no file at all and passes a PATH STRING to `parseTriageTargets` purely so a
+ * refusal carries a name. The path spelled here is that label, not a read.
+ */
+const FIXTURE_TARGETS = `
+version: 1
+environments:
+  do-cluster:
+    kube_context: do-cluster
+    default_window: 5m
+    services:
+      - {name: ntfy,       namespace: ntfy,       checks: [rollout, logs]}
+      - {name: prometheus, namespace: monitoring, checks: [rollout, logs]}
+      - {name: grafana,    namespace: monitoring, checks: [rollout, logs]}
+`;
+
+/**
+ * `TRIAGE_CONSOLE_ROSTER.reviewers`, spelled out so a roster edit is visible.
+ *
+ * **It went to two on 2026-09-12 and this fixture is why the change was noticed.**
+ * The console grew a second pair, and the four assertions that compared a
+ * ONE-assignment partition against `[...OBS]` reddened immediately. Widening this
+ * back to a single id would have made them green again and disabled the tripwire
+ * the comment above promises, so the assertions were corrected instead: they name
+ * the worker the partition actually dispatched to.
+ *
+ * Most tests here still build single-observer partitions deliberately. That is a
+ * legal partition, not an oversight — see *"a lopsided partition and an idle
+ * observer are both legal"* below.
+ */
+const OBS = ["obs-t1", "obs-t2"] as const;
 
 function assign(worker: string, ...services: string[]): PartitionAssignment {
   return { worker, services };
@@ -149,8 +191,8 @@ describe("the positive control — a partition that covers the environment exact
 
     expect(outcome.kind).toBe("dispatched");
     if (outcome.kind !== "dispatched") return;
-    expect(outcome.results).toEqual([...OBS]);
-    expect(calls.map((c) => c.worker)).toEqual([...OBS]);
+    expect(outcome.results).toEqual([OBS[0]]);
+    expect(calls.map((c) => c.worker)).toEqual([OBS[0]]);
   });
 
   /**
@@ -240,7 +282,7 @@ describe("the positive control — a partition that covers the environment exact
      * could have run were reached. A serial loop records exactly one here, which is
      * what made this the coverage bug rather than a throughput one.
      */
-    expect([...calls].sort()).toEqual([...OBS].sort());
+    expect([...calls].sort()).toEqual([OBS[0]].sort());
   });
 });
 
@@ -658,7 +700,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
     );
 
     expect(outcome.kind).toBe("dispatched");
-    expect(calls.map((c) => c.worker)).toEqual([...OBS]);
+    expect(calls.map((c) => c.worker)).toEqual([OBS[0]]);
     expect(calls.map((c) => c.services)).toEqual([["ntfy", "prometheus", "grafana"]]);
   });
 
@@ -708,37 +750,118 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
   });
 
   /**
-   * THE ENVIRONMENT THIS SUITE FIXTURES IS THE ONE THE TRACKED FILE DECLARES.
+   * `DECLARED` IS A SERVICE LIST THE TARGETS SCHEMA WOULD ACTUALLY ADMIT.
    *
-   * §13 task 5.1a's acceptance says a triage request's services *"validate
-   * against `triage/targets.yaml`"*, and without this pin that sentence is true
-   * only of a `DECLARED` constant that happens to agree with the file today.
-   * Rename a service there and every fixture above keeps passing while the live
-   * console refuses every sweep as `partition_incomplete` — a refusal naming a
-   * service the operator just deleted.
+   * `DECLARED` is a bare array, and every fixture above trusts it to be
+   * something `triage/targets.yaml`'s own grammar would accept. This parses it
+   * through `parseTriageTargets` so that a name this suite happily partitions
+   * but the schema refuses — a slash, a space, a leading dot, anything outside
+   * `SESSION_ID_RE` — is a red test here rather than a live console that refuses
+   * every sweep at load.
    *
-   * The tracked file rather than a fixture, for `reviewer-role.test.ts`'s
-   * reason: `fleet.yaml` is gitignored and `triage/targets.yaml` is not, so this
-   * is the copy a clean checkout has.
+   * **IT NO LONGER READS THE TRACKED FILE, and that is a trade made deliberately
+   * on 2026-09-12 rather than a coupling nobody noticed.** This pin used to parse
+   * `triage/targets.yaml` itself, so that renaming a service there reddened these
+   * fixtures. The price was that the operator's real service list dictated the
+   * SIZE of every arithmetic fixture above, and those are minimal on purpose —
+   * see `DECLARED`. Expanding the console to nine services would have forced ~22
+   * hand-computed assertion lists whose minimality was the thing making them
+   * probes rather than scenarios.
+   *
+   * **The drift guard did not go away with it.** `cli-exit-codes.test.ts` copies
+   * the tracked `targets.yaml` and `console.yaml` into a rig, asserts the
+   * environment and the service COUNT, and proves the pair passes the kube-context
+   * fence — so a rename, a retarget, or a service added and forgotten still
+   * reddens a test. It is simply no longer this one, and that test is now the
+   * SOLE place the shipped file is checked: do not decouple it too.
    */
-  test("DECLARED is the environment triage/targets.yaml actually declares", () => {
-    const path = `${ROOT}triage/targets.yaml`;
-    const targets = parseTriageTargets(readFileSync(path, "utf8"), path);
+  test("DECLARED is a service list the targets schema admits", () => {
+    const targets = parseTriageTargets(FIXTURE_TARGETS, "triage/targets.yaml");
     const declared = targets.environments_unchecked_against_kubeconfig;
 
     /*
-     * The SOLE environment, read out of the file rather than named here.
-     *
-     * This pin used to spell `cni-dev`, and on 2026-09-10 the operator
-     * retargeted the console at an environment reachable without the corporate
-     * VPN — at which point the pin failed for the environment's NAME while the
-     * property it exists to protect was untouched. `soleEnvironment` refuses any
-     * count but one, so "the one this file declares" is well defined without
-     * naming it, and the fixtures below stay pinned to the real service list
-     * across a retarget instead of only across a rename.
+     * The SOLE environment, read out of the document rather than named here.
+     * `soleEnvironment` refuses any count but one, so "the one this document
+     * declares" is well defined without spelling the token a second time.
      */
     const names = Object.keys(declared);
     expect(names).toHaveLength(1);
     expect(declared[names[0]!]!.services.map((s) => s.name)).toEqual([...DECLARED]);
+  });
+});
+
+/**
+ * ── `evenSlices` — the HOST's split, one level above §6.5's partition ─────────
+ *
+ * §6.5 reserves the partition ACROSS OBSERVERS for the model. This function
+ * decides something the model cannot: which collator is handed which half, at a
+ * moment when no model has been dispatched yet because the slice IS the envelope.
+ * So it is arithmetic, and the operator fixed the rule in those terms —
+ * *"numerically as even as possible"* (2026-09-12).
+ */
+describe("evenSlices divides a declared list between the console's collators", () => {
+  /**
+   * THE POSITIVE CONTROL, and the block means nothing without it: a function
+   * returning `[]` for everything would satisfy every "no service is lost" check
+   * below while dispatching an empty console.
+   */
+  test("the union is the input, in order, with nothing lost or duplicated", () => {
+    for (const parts of [1, 2, 3, 4]) {
+      const slices = evenSlices([...DECLARED], parts);
+      expect(slices.flat()).toEqual([...DECLARED]);
+    }
+  });
+
+  /**
+   * BOTH SIDES OF "as even as possible". A sizes check alone passes for a
+   * function that returns the right SHAPE with the wrong contents, which is why
+   * the union test above runs first and this one asserts sizes only.
+   */
+  test("sizes differ by at most one, and the remainder goes to the front", () => {
+    // 3 services, 2 collators -> 2/1, not 1/2.
+    expect(evenSlices([...DECLARED], 2).map((s) => s.length)).toEqual([2, 1]);
+    // Exact division leaves every slice equal.
+    expect(evenSlices(["a", "b", "c", "d"], 2).map((s) => s.length)).toEqual([2, 2]);
+    // 5 across 2 is the monitoring-sized case: 3/2.
+    expect(evenSlices(["a", "b", "c", "d", "e"], 2).map((s) => s.length)).toEqual([3, 2]);
+    // 16 across 2 is the doubled cap: 8/8, which is what keeps each collation
+    // inside TRIAGE_DOCUMENT_MAX_BYTES.
+    expect(
+      evenSlices(Array.from({ length: 16 }, (_, i) => `svc-${i}`), 2).map((s) => s.length),
+    ).toEqual([8, 8]);
+  });
+
+  /**
+   * CONTIGUOUS, NOT ROUND-ROBIN — asserted by VALUE, because both strategies
+   * produce identical SIZES and a sizes-only suite could not tell them apart.
+   * The operator reads `triage/targets.yaml` top to bottom; a round-robin split
+   * would interleave the collators through that file.
+   */
+  test("slices are contiguous runs of the file's own order", () => {
+    expect(evenSlices([...DECLARED], 2)).toEqual([["ntfy", "prometheus"], ["grafana"]]);
+  });
+
+  /**
+   * THE EMPTY SLICE IS RETURNED, NOT DROPPED. `openSweep` relies on the result's
+   * length equalling the collator count so index `i` means collator `i`, and it
+   * skips an empty slice rather than dispatching an envelope that names no
+   * services — which a model could only answer with a refused partition.
+   */
+  test("fewer services than collators leaves a trailing empty slice, kept", () => {
+    const slices = evenSlices(["only"], 2);
+    expect(slices).toHaveLength(2);
+    expect(slices[1]).toEqual([]);
+    expect(evenSlices([], 2)).toEqual([[], []]);
+  });
+
+  /**
+   * A part count of zero would divide by nothing and return `[]`, silently
+   * sweeping no services at all — the failure this console exists to notice,
+   * caused by the console. It throws instead.
+   */
+  test("a part count below one is refused rather than answered", () => {
+    expect(() => evenSlices([...DECLARED], 0)).toThrow(RangeError);
+    expect(() => evenSlices([...DECLARED], -1)).toThrow(RangeError);
+    expect(() => evenSlices([...DECLARED], 1.5)).toThrow(RangeError);
   });
 });

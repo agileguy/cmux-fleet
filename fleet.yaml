@@ -1323,3 +1323,29 @@ workers:
   # MOVED TO gabe 2026-09-12, same reasoning as tri-1 above: the worker's own
   # `model:` overrides the role's, so this line is what binds the seat to gabe.
   - {id: obs-t1, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-dark}
+  # ---- THE SECOND PAIR, added 2026-09-12 ----
+  #
+  # `tri-2` is a second COLLATOR, not a second lens, and `obs-t2` is ITS observer.
+  # The pairing is not expressed here — this is a flat list and the schema has no
+  # vocabulary for "belongs to" — it is expressed by what each collator is SHOWN:
+  # `renderSweepEnvelope` takes `seats`, so `tri-2`'s envelope names `obs-t2` and
+  # no other id, and a collator cannot dispatch to a seat whose child task id it
+  # was never given.
+  #
+  # THE ORDER OF THESE FOUR LINES DOES NOT SET THE PANE ORDER.
+  # `DEFAULT_TRIAGE_WORKERS` does (`src/backends/cmux/operations-plan.ts`), and it
+  # lists both collators before both observers so the square builder puts each
+  # observer directly under its own collator. Reordering here changes nothing;
+  # reordering there changes who sits above whom.
+  #
+  # THEMES, chosen adjacent rather than arbitrary: `tokyo-night-storm` beside
+  # `tri-1`'s `tokyo-night` and `gruvbox-light` beside `obs-t1`'s `gruvbox-dark`,
+  # so a glance tells you both WHICH ROLE a pane holds and WHICH PAIR it is in.
+  # That is `obs-1`/`obs-2`'s stated reason for differing palettes, applied to a
+  # console with twice the panes and nobody watching most of the time.
+  #
+  # `pane_mode: tui` on both, matching the first pair, which is what keeps
+  # `triage/console.yaml`'s `recycle_after_sweeps: 0` correct — a headless
+  # recycle cannot rebuild a tui pane, and that trade is already recorded above.
+  - {id: tri-2,  role: triage,   model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: tokyo-night-storm}
+  - {id: obs-t2, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-light}

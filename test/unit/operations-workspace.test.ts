@@ -389,7 +389,7 @@ describe("the triage console is built from its own spec", () => {
     expect(verbsOf(calls)).toContain("workspace create");
   });
 
-  test("issues one create, one split and two respawns — and only ONE list-panes", async () => {
+  test("issues one create, three splits and four respawns — and only ONE list-panes", async () => {
     const { client, calls } = fakeCmux();
 
     const result = await ensureTriage(client, OPTS);
@@ -399,6 +399,12 @@ describe("the triage console is built from its own spec", () => {
       "workspace list",
       "workspace create",
       // Pane 1 consumes the surface `workspace create` opened with — no split.
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
       "rename-tab",
       "respawn-pane",
       "new-split",
@@ -425,7 +431,7 @@ describe("the triage console is built from its own spec", () => {
     // THE NAMED SEATS, never a count: three consoles are one function call apart
     // and a spec pointed at the wrong constant would still produce four panes in
     // a 2x2 and stand up the wrong fleet.
-    expect(titles).toEqual(["tri-1", "obs-t1"]);
+    expect(titles).toEqual(["tri-1", "tri-2", "obs-t1", "obs-t2"]);
     // …and against the exported default rather than only against literals, so a
     // seat renamed in the plan and not here is a red test rather than a console
     // whose panes are titled for workers it never starts.
@@ -467,22 +473,29 @@ describe("the triage console is built from its own spec", () => {
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
 
     /*
-     * COVERAGE DROPPED 2026-09-07 with the move to a two-seat console. This used
-     * to be a 2x2 and the load-bearing assertion was the FOURTH pane's anchor —
-     * `down` off `surf-1` rather than off its predecessor `surf-2`, which is the
-     * whole reason `splitFrom` exists: anchored wrongly the console comes out 3+1
-     * while every count, title and direction assertion still passes. With two
-     * panes there is no second row, so `splitFrom` is no longer exercised here.
-     * Restore this test to its 2x2 form if the console regains its other seats.
+     * COVERAGE RESTORED 2026-09-12, on the instruction the shrunken version of
+     * this comment left: *"Restore this test to its 2x2 form if the console
+     * regains its other seats."* It regained them as a second
+     * `(collator, observer)` pair.
+     *
+     * **THE FOURTH PANE'S ANCHOR IS THE LOAD-BEARING ASSERTION**, and it is the
+     * whole reason `splitFrom` exists: pane 4 splits `down` off `surf-1` — pane
+     * 2's surface — rather than off its predecessor `surf-2`. Anchored wrongly
+     * the console comes out 3+1, and every count, title and direction assertion
+     * in this file still passes. Only the surface list catches it.
+     *
+     * It is also what pairs the console correctly: `obs-t2` sits under `tri-2`
+     * because pane 4 hangs off pane 2. Get this wrong and each collator is
+     * above the OTHER pair's observer.
      */
-    expect(splits.map((c) => c[1])).toEqual(["right"]);
-    expect(splits.map(surfaceOf)).toEqual(["surf-0"]);
+    expect(splits.map((c) => c[1])).toEqual(["right", "down", "down"]);
+    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-0", "surf-1"]);
     // Every pane respawns into the surface it was given, and never twice into
     // one: a stale anchor repeats an id here.
     const respawned = calls
       .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
       .map(surfaceOf);
-    expect(respawned).toEqual(["surf-0", "surf-1"]);
+    expect(respawned).toEqual(["surf-0", "surf-1", "surf-2", "surf-3"]);
   });
 
   test("the workspace is named `triage` and opened on the INVOCATION directory", async () => {

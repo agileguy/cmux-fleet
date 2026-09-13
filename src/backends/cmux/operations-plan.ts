@@ -1018,7 +1018,7 @@ export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
 }
 
 // ---------------------------------------------------------------------------
-// The `triage` console — a reconciler and one observer (SRD-TRIAGE-CONSOLE)
+// The `triage` console — two reconcilers, each over its own observer (SRD-TRIAGE-CONSOLE)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1037,17 +1037,26 @@ export const TRIAGE_WORKSPACE = "triage";
  *
  * ```
  * +---------------+---------------+
- * |     tri-1     |     obs-t1    |
+ * |     tri-1     |     tri-2     |
+ * +---------------+---------------+
+ * |    obs-t1     |    obs-t2     |
  * +---------------+---------------+
  * ```
  *
- * ONE ROW OF TWO, AND NOT A SQUARE — which needs saying precisely because the
- * builder is the square one. {@link agentSquarePanes} holds at most four and
- * this console names two, so only the first entry of its split table is ever
- * reached: `tri-1` takes the workspace's initial surface and `obs-t1` splits
- * `right` off it. The table's `down` rows begin at pane 3, which this console
- * does not have, so there is no second row at all — and
- * {@link TRIAGE_TOP_FRACTION} below turns entirely on that.
+ * A FULL SQUARE as of 2026-09-12, and the ORDER is what makes each observer sit
+ * under its own collator rather than merely somewhere on the bottom row.
+ * {@link agentSquarePanes}' split table is `[null, right, down-from-0,
+ * down-from-1]`: pane 1 takes the workspace's initial surface, pane 2 splits
+ * `right` off it, pane 3 splits `down` off PANE 1 and pane 4 splits `down` off
+ * PANE 2. So listing the two collators first and the two observers second is not
+ * a stylistic grouping — it is the only order that puts `obs-t1` beneath `tri-1`
+ * and `obs-t2` beneath `tri-2`. Reorder this list to
+ * `[tri-1, obs-t1, tri-2, obs-t2]` and the console still builds, with each
+ * collator sitting above the OTHER pair's observer.
+ *
+ * That the rows are now ALIKE — agents over agents — is the case
+ * {@link TRIAGE_TOP_FRACTION} predicted for its own `null`, and it is why that
+ * constant survives this change rather than becoming a number.
  *
  * THE RECONCILER IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for
  * a weaker version of its reason. Pane 1 consumes the workspace's initial
@@ -1056,19 +1065,38 @@ export const TRIAGE_WORKSPACE = "triage";
  * that holds the reconciliation the observer feeds, so it is the pane worth
  * landing on when a sweep has said something surprising.
  *
- * ## WHY ONE OBSERVER — a refusal in code, not a fan-out someone forgot to build
+ * ## WHY TWO PAIRS — and why `soleEnvironment` did NOT have to be lifted
  *
- * The design is ONE OBSERVER SEAT PER ENVIRONMENT, and a sweep is exactly one
- * environment: `soleEnvironment` (`src/cli/commands/triage.ts:915`) refuses a
- * targets file declaring any other number, by name on both sides, quoting
- * SRD-TRIAGE-CONSOLE §12 — *"one sweep is ONE environment, and that is a limit
- * rather than a law"*. So the fan-out is one wide because the thing it fans out
- * over is one wide. **A second observer seat is therefore not a worker line; it
- * is that refusal being lifted first**, and a `DEFAULT_TRIAGE_WORKERS` grown
- * ahead of it would stand up a pane whose share of the sweep does not exist.
- * `triage/targets.yaml` ships one live environment (`do-cluster`) with `cni-dev`
- * commented out beside it rather than deleted, which is what the limit looks
- * like from the operator's side.
+ * **This docblock said the opposite until 2026-09-12, and the correction is
+ * worth keeping rather than overwriting silently.** It argued that the fan-out
+ * was one wide because the thing it fans out over is one wide, and that *"a
+ * second observer seat is therefore not a worker line; it is that refusal being
+ * lifted first"* — the refusal being `soleEnvironment`
+ * (`src/cli/commands/triage.ts:915`), which quotes SRD-TRIAGE-CONSOLE §12: *"one
+ * sweep is ONE environment, and that is a limit rather than a law"*.
+ *
+ * That inference was wrong, and the reason is worth stating because it is the
+ * whole shape of this change. §12's limit binds ENVIRONMENTS, not SEATS. A
+ * second pair does not need a second environment; it needs a second SLICE of the
+ * one environment — and the slice is a thing this console already had a
+ * vocabulary for. Splitting by environment would have been the damaging way to
+ * get here: `environment` is a path segment under `~/.pifleet/triage/` and the
+ * scope every incident is reported against, so inventing two tokens for one
+ * cluster would make the console *"report health for a fleet"* — precisely the
+ * failure `soleEnvironment`'s own docblock exists to refuse. It stays.
+ *
+ * What actually carries the split is that the collator never reads
+ * `triage/targets.yaml`: `roles/triage.md` tells it *"Read the envelope, and read
+ * it as the whole of your input. It carries the environment, the full service
+ * list…"*, and that list is `SweepProducerDeps.services`, rendered by
+ * `renderSweepEnvelope`. So each collator is handed its own slice as its whole
+ * world, with `declared` narrowed to match — which keeps §6.5's completeness
+ * check meaningful per pair instead of making each pair fail the other's half.
+ *
+ * SRD §2.1 is the corroboration that this is a seam rather than a new idea: the
+ * roster it specifies is `{collators: ["tri-1"], reviewers: ["obs-t1", "obs-t2",
+ * "obs-t3"]}`. The multi-observer shape is the ORIGINAL design the console later
+ * shrank away from; this restores two of it, paired.
  *
  * `tri-1` RECONCILES AND `obs-t1` OBSERVES, which is the review console's
  * collator/reviewer shape reappearing over a different role pair
@@ -1117,14 +1145,18 @@ export const TRIAGE_WORKSPACE = "triage";
  * THE COST, stated as its two siblings state theirs — and it is the one line
  * here that got CHEAPER rather than merely shorter. One run at
  * `run.max_concurrent: 4` (`fleet.example.yaml:93`) is an admission budget of
- * four spent by two seats, so this console runs with slack where it was once
- * sized to fit exactly and none spare. The comment that raised that key
- * (`fleet.example.yaml:67-93`) argued from a three-wide fan-out and now says so
- * itself, citing this paragraph back; the VALUE is not wrong, it is merely no
- * longer tight. Do not lower it by reading this line: it bounds a RUN rather
+ * four spent by FOUR seats, so this console fits exactly with nothing spare —
+ * which is the size that key was raised for, not a size it has outgrown. Its own
+ * comment says so: *"The triage console is the first run holding four seats, and
+ * three of them fan out at once"*, text written for this shape that outlived the
+ * 2026-09-11 shrink to one pair and became correct again on 2026-09-12.
+ *
+ * **This paragraph claimed SLACK between those two dates and no longer does.**
+ * The slack was real while the console held two seats and is gone now. Do not
+ * lower this key by reading either version: it bounds a RUN rather
  * than the host, and a hand-run `up` over a wider worker set is the same run.
  */
-export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
+export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "tri-2", "obs-t1", "obs-t2"];
 
 /**
  * The triage console's panes are EQUAL, and `null` says so — but the argument
@@ -1211,14 +1243,23 @@ export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
  *
  * ## WHEN THIS SHOULD BECOME A NUMBER, named so the next reader knows the trigger
  *
- * **A THIRD PANE — which is a sharp trigger rather than a vague one, and the
- * shrink to two seats is what sharpened it.** Pane 3 is the shared builder's
- * first `down` entry, so whatever this console gains third is the thing that
- * creates a second row and makes a fraction expressible for the first time.
- * Two candidates are already on the table and they want opposite values: a
- * second observer seat (which needs `soleEnvironment` lifted first — see
- * {@link DEFAULT_TRIAGE_WORKERS}) would make the rows ALIKE and this `null`
- * would survive on {@link REVIEW_TOP_FRACTION}'s weaker argument, whereas the
+ * **THE TRIGGER FIRED ON 2026-09-12, AND THE ANSWER WAS STILL `null`.** This
+ * paragraph named a third pane as the sharp trigger — pane 3 is the shared
+ * builder's first `down` entry, so whatever this console gained third would
+ * create a second row and make a fraction expressible for the first time. The
+ * console gained panes 3 AND 4 together, as a second `(collator, observer)`
+ * pair, which is the first of the two candidates below: the rows are ALIKE,
+ * agents over agents, so `null` survives on {@link REVIEW_TOP_FRACTION}'s weaker
+ * argument exactly as predicted. Kept as the record of a forecast that held.
+ *
+ * **One half of it did NOT hold, and that is the more useful half to keep.** It
+ * said a second observer seat *"needs `soleEnvironment` lifted first"*. It did
+ * not: §12's limit binds ENVIRONMENTS, and what a second pair needs is a second
+ * SLICE of the one environment. `soleEnvironment` still refuses any count but
+ * one and still should — see {@link DEFAULT_TRIAGE_WORKERS} for why splitting by
+ * environment would have made the console report health for a fleet.
+ *
+ * The other candidate is unchanged and still wants the opposite value: the
  * non-agent pane SRD-TRIAGE-CONSOLE §11 Q6 leaves open — a `pifleet monitor`
  * view, or a tail of the actor's log — would make the bottom row a status
  * readout. That second case is precisely `OPERATIONS_TOP_FRACTION`'s situation,

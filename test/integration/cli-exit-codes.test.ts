@@ -527,7 +527,7 @@ describe("config validate — the triage pair", () => {
     // 900/120 above and for the same recorded reason: this test states what the
     // tracked file says, and a test is not a reason to give the file back.
     expect(d.triage.environments).toEqual(["do-cluster"]);
-    expect(d.triage.services).toBe(3);
+    expect(d.triage.services).toBe(9);
     // The tracked file's own values, and the derivation between them:
     // `sweep_deadline_s` is `cadence_s - reserve_s` (§7.8 property 1) and is
     // not a field, so 900 - 120 = 780 is the arithmetic being checked here as
@@ -617,7 +617,7 @@ describe("config validate — the triage pair", () => {
       const d = JSON.parse(r.stdout);
       expect(d.triage.fenced).toBe(true);
       expect(d.triage.environments).toEqual(["do-cluster"]);
-      expect(d.triage.services).toBe(3);
+      expect(d.triage.services).toBe(9);
       // 900 - 120, off the tracked console.yaml copied in above — see the
       // previous test for why this is no longer §7.8's default of 240.
       expect(d.triage.sweep_deadline_s).toBe(780);

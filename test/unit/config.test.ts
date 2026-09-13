@@ -77,7 +77,17 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
  * ISC-526's lens map above — and the roster test below is the one place that
  * has to change.
  */
-const TRIAGE_SEATS = ["tri-1", "obs-t1"] as const;
+/*
+ * IN `fleet.example.yaml`'S DECLARATION ORDER, which is not pane order.
+ *
+ * The file declares the first pair, then the second — `tri-1, obs-t1, tri-2,
+ * obs-t2` — and the roster assertion below compares against `resolveAllWorkers`,
+ * which preserves that. PANE order is a different fact with its own constant:
+ * `DEFAULT_TRIAGE_WORKERS` lists both collators before both observers, because
+ * that is what puts each observer under its own collator in the 2x2. Two orders,
+ * two constants, neither wrong.
+ */
+const TRIAGE_SEATS = ["tri-1", "obs-t1", "tri-2", "obs-t2"] as const;
 
 /**
  * D1, settled 2026-09-06 as arm 3: all four seats run the LOCAL 20b, in both
@@ -385,7 +395,7 @@ describe("worked example", () => {
  * which of those this block can see is the reason the override test below is
  * written the way it is.
  */
-describe("the triage console's two seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
+describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
   /**
    * The example's two seats, resolved, in the order `TRIAGE_SEATS` names them.
    *
@@ -413,7 +423,7 @@ describe("the triage console's two seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () =
     // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
     // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
     // of them pass while checking nothing.
-    expect(TRIAGE_SEATS).toHaveLength(2);
+    expect(TRIAGE_SEATS).toHaveLength(4);
 
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     // ONE set-shaped comparison rather than four independent expectations: a
@@ -2743,7 +2753,7 @@ describe("Phase B: a bash-less role holds no writer but submit_report (§13 task
 
     // By NAME, for `seatsOf`'s reason above: a seat deleted and a seat retooled
     // want different edits, and an emptied filter reports neither.
-    expect(seats.map((w) => w.id).sort()).toEqual(["tri-1"]);
+    expect(seats.map((w) => w.id).sort()).toEqual(["tri-1", "tri-2"]);
 
     for (const w of seats) {
       const exempt = HOLDS_A_WRITER[w.role] ?? [];

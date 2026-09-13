@@ -531,8 +531,20 @@ export const MAX_DISPATCH_REQUEST_ITEMS = 8;
 export const MAX_DISPATCH_TEXT = 32 * 1024;
 /** Mirrors `MAX_DISPATCH_ID_CHARS`. */
 export const MAX_DISPATCH_ID_CHARS = 64;
-/** Mirrors `MAX_DISPATCH_SERVICES`. */
-export const MAX_DISPATCH_SERVICES = 8;
+/**
+ * Mirrors `MAX_DISPATCH_SERVICES`.
+ *
+ * DOUBLED 8 -> 16 on 2026-09-12, in step with the host. `report-tools.test.ts`
+ * pins this equal to `src/run/dispatch-request.ts`'s copy and caught the drift
+ * the moment the host moved alone — which is the whole reason the mirror is
+ * asserted rather than trusted.
+ *
+ * Left behind, the cost lands where it is hardest to see: this constant gates
+ * `dispatch_request` INSIDE the container, so a collator handed a legal
+ * nine-service slice would have its own tool refuse the share with a message
+ * naming a cap the host does not use, while the host went on accepting sixteen.
+ */
+export const MAX_DISPATCH_SERVICES = 16;
 /**
  * Mirrors `SESSION_ID_RE` (`src/contracts.ts`).
  *

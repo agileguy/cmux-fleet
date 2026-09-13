@@ -164,6 +164,26 @@ export const REVIEW_CONSOLE_ASPECTS: readonly AspectSeat[] = [
  */
 export const TRIAGE_CONSOLE_ASPECTS: readonly AspectSeat[] = [
   { worker: "obs-t1", aspect: "slice1" },
+  /*
+   * THE SECOND PAIR, 2026-09-12. `obs-t2` is not a second LENS — it is a second
+   * PAIR, and the distinction is the whole difference from the review console.
+   *
+   * The review console's three aspects are three readings of one artifact, so
+   * `aspect` there names a judgement (`arch`, `context`, `lang`) and D11 keeps a
+   * collator from assigning them. Here the aspects are `slice1`/`slice2` because
+   * an observer looks at DIFFERENT SERVICES, not at the same services
+   * differently: the name is an index into a partition and carries no opinion.
+   *
+   * Each observer belongs to exactly one collator — `tri-1` to `obs-t1`, `tri-2`
+   * to `obs-t2` — and that pairing is NOT enforced by this constant, which is a
+   * flat list. It is enforced by what each collator is SHOWN: `renderSweepEnvelope`
+   * takes `seats` as a parameter, so each collator's envelope names only its own
+   * observer and the `## The seats` block it reads lists exactly one id. A
+   * collator cannot dispatch to a seat it was never told exists, because it
+   * cannot derive the child task id — that is this constant's own argument at
+   * `:193`, now doing a second job.
+   */
+  { worker: "obs-t2", aspect: "slice2" },
 ];
 
 /**

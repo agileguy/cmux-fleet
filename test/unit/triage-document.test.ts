@@ -292,12 +292,16 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
        * THE RESIDUAL GAP, and it is deliberately small now.
        *
        * Before task 7.3 this fixture was ~60x the cap, because 64 rows x 4 000
-       * bytes of `note` is 256 000. The retune to 8 and 1 024 closes most of
+       * bytes of `note` is 256 000. The retune to 8 and 1 024 closed most of
        * that, and what is left cannot be closed by any choice of three numbers:
-       * 8 maximal notes are 8 192 bytes and will not fit in 4 096 whatever the
-       * ceilings are. So the claim this test makes is the narrow, permanent
-       * one — per-field bounds do not compose into a document bound, and the
-       * document cap is therefore doing work no field bound does.
+       * at the 2026-09-12 doubling, 16 maximal notes are 16 384 bytes and will
+       * not fit in 8 192 whatever the ceilings are — and note that DOUBLING
+       * BOTH preserves this exactly, because the overflow is a ratio
+       * (`MAX_SERVICES_PER_ENVIRONMENT` x `TRIAGE_NOTE_MAX_BYTES` is 2x the
+       * document cap) and scaling both numerator and denominator leaves it
+       * alone. So the claim this test makes is the narrow, permanent one —
+       * per-field bounds do not compose into a document bound, and the document
+       * cap is therefore doing work no field bound does.
        */
       expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(TRIAGE_DOCUMENT_MAX_BYTES);
 
@@ -317,26 +321,56 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
     test("exactly at the cap parses, and one byte over refuses", () => {
       /*
        * Padded through `selector` rather than `note`, and the choice matters:
-       * `note` is bounded at 1 024 bytes, so padding with it cannot reach a
-       * 4 096-byte document at all and the "at the cap" arm would be asserting
-       * the NOTE bound while claiming to assert the document one. `selector` is
-       * a plain bounded string with room to spare.
+       * `note` is bounded at 1 024 bytes, so padding with it cannot reach the
+       * document cap at all and the "at the cap" arm would be asserting the NOTE
+       * bound while claiming to assert the document one.
+       *
+       * ## SPREAD ACROSS TWO ROWS, and that is a correction rather than a style
+       *
+       * This padded ONE row until 2026-09-12 and said `selector` was *"a plain
+       * bounded string with room to spare"*. That premise died the moment the
+       * document cap was doubled to 8 192: `selector` is {@link shortStr}, capped
+       * at 4 096, so a single-row document padded to 8 192 breaks the FIELD bound
+       * and `parseTriageDocument` answers `refused` on the SCHEMA arm — while this
+       * test's own byte assertion still passed, because the document really was
+       * exactly at the cap. A test asserting "at the cap parses" was therefore
+       * failing for a reason that had nothing to do with the cap.
+       *
+       * Two rows keep every string inside its own bound, and the guard below
+       * makes the premise an ASSERTION instead of a sentence: the next raise of
+       * `TRIAGE_DOCUMENT_MAX_BYTES` reddens here naming the field cap, rather
+       * than looking like the document cap is broken.
        */
-      const base = goodDocument({ services: [goodRow({ selector: "" })] });
+      const base = goodDocument({
+        services: [goodRow({ selector: "" }), goodRow({ selector: "" })],
+      });
       const overhead = Buffer.byteLength(JSON.stringify(base), "utf8");
       const room = TRIAGE_DOCUMENT_MAX_BYTES - overhead;
       expect(room, "the empty document already exceeds the cap").toBeGreaterThan(0);
 
-      const atCapText = JSON.stringify(
-        goodDocument({ services: [goodRow({ selector: "x".repeat(room) })] }),
-      );
+      /** `shortStr`'s ceiling — the bound each PAD must stay inside. */
+      const FIELD_MAX = 4096;
+      const firstPad = Math.ceil(room / 2);
+      const secondPad = room - firstPad;
+      expect(
+        firstPad,
+        "the pad no longer fits one `selector`: spread it across more rows",
+      ).toBeLessThanOrEqual(FIELD_MAX);
+
+      const padded = (extra: number): Json =>
+        goodDocument({
+          services: [
+            goodRow({ selector: "x".repeat(firstPad) }),
+            goodRow({ selector: "x".repeat(secondPad + extra) }),
+          ],
+        });
+
+      const atCapText = JSON.stringify(padded(0));
       expect(Buffer.byteLength(atCapText, "utf8")).toBe(TRIAGE_DOCUMENT_MAX_BYTES);
       // The positive half. Without it, everything below passes for a cap of zero.
       expect(parseTriageDocument(atCapText, CTX).kind).toBe("ok");
 
-      const overText = JSON.stringify(
-        goodDocument({ services: [goodRow({ selector: "x".repeat(room + 1) })] }),
-      );
+      const overText = JSON.stringify(padded(1));
       expect(Buffer.byteLength(overText, "utf8")).toBe(TRIAGE_DOCUMENT_MAX_BYTES + 1);
       const over = parseTriageDocument(overText, CTX);
       if (over.kind !== "refused") throw new Error(`expected a refusal, got ${over.kind}`);

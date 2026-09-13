@@ -2,19 +2,27 @@
 /**
  * `scripts/triage` — open the standing scheduled triage console.
  *
- *   ./scripts/triage                                # tri-1, obs-t1
+ *   ./scripts/triage                                # tri-1, tri-2, obs-t1, obs-t2
  *   ./scripts/triage --dry-run                      # print the plan, touch nothing
- *   ./scripts/triage --restart obs-t1               # respawn the observer
+ *   ./scripts/triage --restart obs-t1               # respawn one observer
  *   ./scripts/triage --restart tri-1 --task t.json  # fresh reconciler, then dispatch
  *
- * EQUAL panes. The reconciler takes pane 1 — the seat the keyboard would land
- * in, if anybody were typing — and the observer sits beside it:
+ * EQUAL panes, TWO PAIRS. Each collator takes a top pane and ITS OWN observer
+ * sits directly beneath it — `tri-1` over `obs-t1`, `tri-2` over `obs-t2`:
  *
  * ```
  * +---------------+---------------+
- * |     tri-1     |    obs-t1     |
+ * |     tri-1     |     tri-2     |
+ * +---------------+---------------+
+ * |    obs-t1     |    obs-t2     |
  * +---------------+---------------+
  * ```
+ *
+ * THE ORDER OF `DEFAULT_TRIAGE_WORKERS` IS WHAT PAIRS THEM, and this diagram is
+ * pinned to it cell-for-cell by `fresh-dispatch.test.ts` — the picture is
+ * load-bearing, not decoration. `agentSquarePanes` splits `[null, right,
+ * down-from-0, down-from-1]`, so collators-then-observers is the only order that
+ * puts each observer under its own collator rather than under the other pair's.
  *
  * ## What makes this different from `scripts/review`
  *

@@ -152,7 +152,16 @@ describe("the fan-out example is a document the real parser accepts", () => {
           `${read.kind === "refused" ? read.reason : ""}`,
       );
     }
-    expect(read.request.requests).toHaveLength(TRIAGE_CONSOLE_ROSTER.reviewers.length);
+    /*
+     * ONE request, not one per observer — corrected 2026-09-12.
+     *
+     * This asserted `reviewers.length` while the console had a single collator
+     * fanning out to every observer. It now runs PAIRS: each collator writes one
+     * request naming only its own seat, and an example carrying both observers
+     * would teach precisely the thing the document forbids, in the strongest
+     * instruction it contains.
+     */
+    expect(read.request.requests).toHaveLength(1);
   });
 
   /**
@@ -167,7 +176,15 @@ describe("the fan-out example is a document the real parser accepts", () => {
     for (const r of parsed.requests) {
       expect(Array.isArray(r.services)).toBe(true);
     }
-    expect(parsed.requests.map((r) => r.worker)).toEqual([...TRIAGE_CONSOLE_ROSTER.reviewers]);
+    /*
+     * A REAL SEAT, and exactly one — the anti-vacuity this test is for survives
+     * without pinning the example to the console's width. A placeholder id was
+     * tried on 2026-09-12 and is what this assertion correctly refused: the
+     * example is parsed by the real parser under the real roster, so a
+     * non-roster string is a document a model would copy into a refusal.
+     */
+    expect(parsed.requests).toHaveLength(1);
+    expect(TRIAGE_CONSOLE_ROSTER.reviewers).toContain(parsed.requests[0]!.worker);
   });
 
   /**
@@ -502,8 +519,15 @@ describe("the document no longer contradicts itself about how many observers exi
    * The premise every assertion below rests on, asserted first so that none of
    * them can pass vacuously over an empty or unexpected roster.
    */
-  test("the console this document describes really does have exactly one observer", () => {
-    expect(ROSTER).toEqual(["obs-t1"]);
+  test("the console this document describes has one observer PER COLLATOR", () => {
+    /*
+     * TWO observers as of 2026-09-12, and the document's claim changed shape
+     * rather than its number: it said *"this console has exactly one observer"*
+     * and now says each COLLATOR has exactly one, named by its envelope. Both
+     * statements are about the fan-out a single collator may write, which is
+     * what every assertion below actually tests.
+     */
+    expect(ROSTER).toEqual(["obs-t1", "obs-t2"]);
   });
 
   /**
@@ -546,7 +570,14 @@ describe("the document no longer contradicts itself about how many observers exi
   test("the document does not reason about a fan-out wider than the roster", () => {
     expect(FLAT).not.toContain("the fan-out is never wider than three");
     expect(FLAT).not.toContain("All three are the same role on the same model");
-    expect(FLAT).toContain("Write ONE request. Name EVERY service in it.");
+    /*
+     * FOLLOWS THE PROSE, which is what this block's own docblock asks for: *"the
+     * fix is then to rewrite the prose, not to raise a number."* The sentence
+     * changed on 2026-09-12 because "EVERY service" stopped being true at the
+     * environment level — a collator now names every service in ITS OWN
+     * envelope, and reaching past that slice is the new way to be wrong.
+     */
+    expect(FLAT).toContain("Write ONE request. Name every service YOUR ENVELOPE gave you.");
   });
 
   /**
@@ -556,7 +587,15 @@ describe("the document no longer contradicts itself about how many observers exi
    */
   test("the fan-out example dispatches the roster and nothing else", () => {
     const parsed = fanoutExample() as { requests: { worker: string }[] };
-    expect(parsed.requests.map((r) => r.worker)).toEqual([...ROSTER]);
+    /*
+     * ONE request naming ONE roster seat — which is what the docblock above has
+     * always said: *"A fan-out of one request naming one seat is the only thing
+     * this console can dispatch."* The assertion contradicted its own prose the
+     * moment a second pair arrived, because `[...ROSTER]` is now two ids and no
+     * single collator may name both.
+     */
+    expect(parsed.requests).toHaveLength(1);
+    expect(ROSTER).toContain(parsed.requests[0]!.worker);
   });
 
   /**

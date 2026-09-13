@@ -203,7 +203,14 @@ export const MAX_DISPATCH_REQUEST_ITEMS = 8;
  * entry:
  *
  *     MAX_DISPATCH_REQUEST_ITEMS x MAX_DISPATCH_SERVICES x (MAX_DISPATCH_ID_CHARS + 3)
- *       = 8 x 64 x 67 = 34,304 bytes = 33.5 KiB
+ *       = 8 x 16 x 67 = 8,576 bytes = 8.4 KiB
+ *
+ * **This sum read `8 x 64 x 67 = 34,304` until 2026-09-12 and was stale in the
+ * SAFE direction, which is why nothing caught it.** `MAX_DISPATCH_SERVICES` had
+ * already been lowered to 8 and the prose kept the old 64, so the term was
+ * over-stated four-fold and the headroom claim below stayed true by accident.
+ * Recomputed here at the doubled value (8 -> 16); the term is negligible either
+ * way, because the 3 MiB text term dominates and always did.
  *
  * — the `+ 3` being the two quotes and the comma each name costs inside the
  * array, and the multiplier being 1 rather than 6 because `SESSION_ID_RE`
@@ -262,7 +269,19 @@ export const MAX_DISPATCH_ID_CHARS = 64;
  * than a partition refused as `schema` — a code naming neither file — the day
  * an operator extends an environment past this number.
  */
-export const MAX_DISPATCH_SERVICES = 8;
+/*
+ * DOUBLED 8 -> 16 on 2026-09-12, and it had to move in the SAME edit as
+ * `MAX_SERVICES_PER_ENVIRONMENT`. `dispatch-request.test.ts` pins the two equal
+ * and says why: *"raise `MAX_SERVICES_PER_ENVIRONMENT` alone and a legal
+ * partition starts being refused as `schema`, which names neither file."* The
+ * two are spelled in two modules deliberately — this one must not grow a
+ * dependency on `triage/targets.yaml` — so the pin is the only thing holding
+ * them together.
+ *
+ * The size proof above was recomputed rather than assumed: at 16 the `services`
+ * term is 8,576 bytes against a 4 MiB cap whose dominant term is 3 MiB of text.
+ */
+export const MAX_DISPATCH_SERVICES = 16;
 
 /**
  * Hard byte cap, enforced from `fstat` on the open fd BEFORE the read, and
@@ -421,8 +440,26 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
  * catches a rename and does not catch a fifth seat added to only one of them.
  */
 export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
-  collators: ["tri-1"],
-  reviewers: ["obs-t1"],
+  /*
+   * TWO PAIRS as of 2026-09-12, and this constant is deliberately the WIDE half
+   * of the enforcement rather than the precise one.
+   *
+   * `worker_not_in_console` asks "is this target inside the console?" and the
+   * honest answer for both observers is yes. What this cannot express is that
+   * `obs-t1` belongs to `tri-1` and `obs-t2` to `tri-2` — a flat roster would
+   * accept `tri-1` naming `obs-t2`, and nothing here would refuse it.
+   *
+   * That gap is closed one layer up rather than widened here, and closing it
+   * here would be the wrong shape: the roster's two halves answer "may this
+   * worker ask?" and "is this target inside the console?", and a pairing is
+   * neither. Each collator is shown only its own seat in `renderSweepEnvelope`'s
+   * `seats` parameter, so it never learns the other's child task id; and the
+   * per-collator `declared` slice means a request naming the wrong observer's
+   * services is refused as `partition_incomplete` against the slice it was
+   * actually given.
+   */
+  collators: ["tri-1", "tri-2"],
+  reviewers: ["obs-t1", "obs-t2"],
   /*
    * §7.3's triage row, and the half that makes the completeness check
    * REACHABLE. §6.5 puts the count on the host — *"a model that partitions can

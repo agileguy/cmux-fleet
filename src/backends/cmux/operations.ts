@@ -148,8 +148,9 @@ export const REVIEW_SPEC: WorkspaceSpec = {
 };
 
 /**
- * The scheduled triage console: a reconciler and ONE observer side by side in a
- * single row — and, in the tracked `fleet.example.yaml`, no keyboard in either.
+ * The scheduled triage console: TWO reconcilers over their own TWO observers, a
+ * full 2x2 — and, in the tracked `fleet.example.yaml`, no keyboard in any of
+ * them. (A reconciler and ONE observer in a single row until 2026-09-12.)
  *
  * The FOURTH value in this file and still not a fourth builder, which is the
  * whole of what {@link WorkspaceSpec} was written to buy and the whole of what

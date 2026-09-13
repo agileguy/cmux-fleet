@@ -876,7 +876,7 @@ workers:
   # it and one process has one terminal — so two attended panes are two
   # runs, which `status --all` reports and `--recreate` tears down.
   - {id: tick-1, role: ticketing, pane_mode: tui, theme: catppuccin-latte}
-  # ---- the `triage` console's two seats ----
+  # ---- the `triage` console's four seats — TWO PAIRS ----
   #
   # NO KEYBOARD IN THIS FILE, AND NO THEME EITHER. BOTH resolve to
   # `pane_mode: rpc` from their roles — `triage` and `observer` both declare it
@@ -897,29 +897,51 @@ workers:
   # SHIPPED console sweeps every fifteen minutes, 96 a day.
   #
   # ONE RUN, one run id, stable for the console's whole life:
-  #   pifleet up --workers tri-1,obs-t1
-  # TWO SEATS SPEND TWO of `run.max_concurrent`, which is 4 (the key itself is
-  # at :93; find it by NAME if that number has drifted) — so this console runs
-  # with SLACK rather than fitting exactly, and the note above that key has been
-  # corrected to say so.
+  #   pifleet up --workers tri-1,tri-2,obs-t1,obs-t2
+  # FOUR SEATS SPEND FOUR of `run.max_concurrent`, which is 4 (the key itself is
+  # at :93; find it by NAME if that number has drifted) — so this console now
+  # fits EXACTLY, with nothing spare.
   #
-  # A SECOND ENVIRONMENT IS NEITHER A WORKER LINE NOR A `max_concurrent`
-  # DECISION. `soleEnvironment` (`src/cli/commands/triage.ts:915`) REFUSES a
-  # targets file declaring other than exactly one environment, so that refusal
-  # is the thing that has to be lifted first — a seat grown ahead of it would
-  # stand up a pane whose share of the sweep does not exist.
+  # **That is the size the key was raised for, not a size it has outgrown.** Its
+  # own comment says so in as many words — *"The triage console is the first run
+  # holding four seats, and three of them fan out at once"* — text written for
+  # this shape, which outlived the shrink to one pair and is correct again. The
+  # paragraph that used to sit here said two seats left SLACK; that was true of
+  # the shrunken console and contradicted `max_concurrent`'s own note in this
+  # same file. Corrected 2026-09-12 rather than deleted, because a reader who
+  # remembers the slack should find out where it went.
+  #
+  # A SECOND ENVIRONMENT IS STILL NEITHER A WORKER LINE NOR A `max_concurrent`
+  # DECISION, and the second pair did NOT lift that refusal — it went around it.
+  # `soleEnvironment` (`src/cli/commands/triage.ts:915`) still refuses a targets
+  # file declaring other than exactly one environment, and still should: an
+  # environment token is a path segment under `~/.pifleet/triage/` and the scope
+  # every incident is reported against, so two tokens for one cluster would make
+  # the console report health for a fleet. What the pairs divide is the SERVICE
+  # LIST of the one environment, not the environments.
   - {id: tri-1,  role: triage}
-  # ONE OBSERVER, ON THE ROLE THAT ALREADY EXISTS, doing the job it was written
+  # OBSERVERS ON THE ROLE THAT ALREADY EXISTS, doing the job it was written
   # for, at a cadence — no new role, no widened grant, and that is the strongest
-  # thing this design has going for it.
+  # thing this design has going for it. That still holds at two pairs: the
+  # second pair adds seats, not permissions.
   #
-  # ONE SEAT PER ENVIRONMENT is the design, and there is ONE seat because
-  # `soleEnvironment` admits exactly one environment (above) — the fan-out is
-  # therefore one observer wide, which `TRIAGE_CONSOLE_ROSTER.reviewers`
-  # (`src/run/dispatch-request.ts:425`) and `DEFAULT_TRIAGE_WORKERS` both say
-  # by enumeration. A sweep that fans out in PARALLEL rather than walking a
-  # list is what the shape buys the day that refusal is lifted; today it buys
-  # nothing, and saying so is cheaper than a reader discovering it.
+  # ONE OBSERVER PER COLLATOR is the design as of 2026-09-12, and this paragraph
+  # said ONE SEAT PER ENVIRONMENT until then. The old reasoning — that the
+  # fan-out is one observer wide because `soleEnvironment` admits one
+  # environment — confused a limit on ENVIRONMENTS with a limit on SEATS. One
+  # environment can be divided among several observers; what it cannot be is
+  # reported as several environments.
+  #
+  # The pairing is not expressible in this file. `TRIAGE_CONSOLE_ROSTER`
+  # (`src/run/dispatch-request.ts`) enumerates both observers as legal targets
+  # and cannot say which collator owns which. What enforces it is that each
+  # collator is SHOWN only its own seat — `renderSweepEnvelope` takes `seats`,
+  # and a collator cannot dispatch to a child task id it was never given.
+  #
+  # The fan-out now genuinely runs in PARALLEL, which the old note said the
+  # shape would buy "the day that refusal is lifted". It bought it without the
+  # lift: `dispatchPartition` was always concurrent, and there are now two
+  # slices for it to be concurrent across.
   #
   # THE `model:` OVERRIDE IS GONE, AND ITS OWN TEST IS WHAT REMOVED IT.
   # SRD-TRIAGE-CONSOLE §6.11 says these seats take the `observer` role's model
@@ -937,3 +959,20 @@ workers:
   # went red the moment the roles converged, and the file yielded to it rather
   # than the other way round.
   - {id: obs-t1, role: observer}
+  # ---- THE SECOND PAIR, added 2026-09-12 ----
+  #
+  # Declared with no `model:`, no `pane_mode:` and no `theme:` for exactly the
+  # reasons the first pair carries none: both resolve from their roles, and this
+  # file's `triage` and `observer` roles already name the model the console runs.
+  # A worker-level override here would re-state a decision rather than make one.
+  #
+  # `tri-2` is a second COLLATOR and `obs-t2` is ITS observer. The pairing is not
+  # expressible in a flat `workers:` list and is not meant to be: each collator is
+  # SHOWN only its own seat, because `renderSweepEnvelope` takes `seats` and a
+  # collator cannot dispatch to a child task id it was never given.
+  #
+  # PANE ORDER IS NOT SET HERE. `DEFAULT_TRIAGE_WORKERS` lists both collators
+  # before both observers so the square builder puts each observer directly under
+  # its own collator; this file only declares that the seats exist.
+  - {id: tri-2,  role: triage}
+  - {id: obs-t2, role: observer}

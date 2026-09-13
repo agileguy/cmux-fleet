@@ -70,7 +70,33 @@ environments:
     # So the rule holds for two reasons rather than one: a host declaring a
     # workload does not only decide what the observer is for, it renames the
     # thing being reported on.
+    #
+    # EXPANDED to the whole `monitoring` namespace on 2026-09-12, from three
+    # services to nine. `kubectl -n monitoring get deploy,sts,ds` returns exactly
+    # eight workloads and this list names all of them, plus `ntfy` in its own
+    # namespace. Nine is inside `MAX_SERVICES_PER_ENVIRONMENT` (16, doubled the
+    # same day) and the two collators split it 5/4 with `evenSlices`, so each
+    # writes a five- or four-row `triage.json`.
+    #
+    # THE SIZE IS MEASURED rather than projected from the schema: across the 103
+    # collations on disk that parse with rows (109 files in all), a row costs 415
+    # bytes on average and 621 at worst (largest document 1 863 bytes, 3 rows,
+    # T-sweep-4).
+    # A five-row slice at the worst observed row cost is ~3.1 KB against the
+    # 8 192-byte document cap.
+    #
+    # NOT ONE ROW DECLARES A `workload`, for the reason recorded above, and the
+    # live workload names are why it matters: `grafana` is `kps-grafana`,
+    # `prometheus` is `prometheus-kps-prometheus`, `kube-state-metrics` is
+    # `kube-prometheus-stack-kube-state-metrics`. Declaring any of those renames
+    # the observer's row and costs that service its reconciliation.
     services:
-      - {name: ntfy,       namespace: ntfy,       checks: [rollout, logs]}
-      - {name: prometheus, namespace: monitoring, checks: [rollout, logs]}
-      - {name: grafana,    namespace: monitoring, checks: [rollout, logs]}
+      - {name: ntfy,                namespace: ntfy,       checks: [rollout, logs]}
+      - {name: prometheus,          namespace: monitoring, checks: [rollout, logs]}
+      - {name: grafana,             namespace: monitoring, checks: [rollout, logs]}
+      - {name: alertmanager,        namespace: monitoring, checks: [rollout, logs]}
+      - {name: loki,                namespace: monitoring, checks: [rollout, logs]}
+      - {name: alloy,               namespace: monitoring, checks: [rollout, logs]}
+      - {name: kube-state-metrics,  namespace: monitoring, checks: [rollout, logs]}
+      - {name: node-exporter,       namespace: monitoring, checks: [rollout, logs]}
+      - {name: prometheus-operator, namespace: monitoring, checks: [rollout, logs]}

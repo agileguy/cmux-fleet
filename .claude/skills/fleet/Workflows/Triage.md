@@ -33,20 +33,31 @@ cd ~/repos/cmux-fleet && ./scripts/triage --no-actor # panes only, actor by hand
 cd ~/repos/cmux-fleet && ./scripts/triage --actor-stop
 ```
 
-**Two seats**: `tri-1` composes the sweep request and collates the reply; `obs-t1`
-observes. **There is no partition to spread.** `roles/triage.md` tells the
-collator so in those words — one request, naming every declared service, because
-there is nobody to share the work with — and a `tri-1` that starts reasoning about
-which observer a service belongs to has imported a distinction from the review
-console. The slices are sequential by construction, not concurrent.
+**Four seats, in TWO PAIRS** as of 2026-09-12: `tri-1` composes a sweep request
+and collates the reply for `obs-t1`; `tri-2` does the same for `obs-t2`. Each
+collator is handed a SLICE of the environment — the host splits the declared list
+as evenly as the count allows (`evenSlices`, `src/run/triage-partition.ts`) — and
+each is shown only its own observer.
 
-**This line said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one share each"*
-until 2026-09-11.** `obs-t2` and `obs-t3` appear in neither `fleet.yaml` nor
-`fleet.example.yaml`, and in no roster in the source. The sentence rotted in place
-while the code and the role prompt moved — which is the standing warning about
-every count in this file: verify it against `DEFAULT_TRIAGE_WORKERS`
-(`src/backends/cmux/operations-plan.ts`) or a `workers:` block before repeating
-it.
+**There is no partition to spread WITHIN a pair, and that is still what
+`roles/triage.md` tells a collator**: one request, naming every service in ITS
+envelope, because within the pair there is nobody to share with. A collator that
+starts reasoning about which observer a service belongs to has still imported a
+distinction from the review console. What changed is the level: the console now
+runs two slices concurrently, but each collator's own slice is sequential by
+construction, and neither collator is told the other's observer id — it cannot
+derive that seat's task id, which is what stops it dispatching there.
+
+**READ THIS BEFORE REPEATING THE COUNT, because this line has been wrong in BOTH
+directions.** It said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one share
+each"* until 2026-09-11, when `obs-t2` and `obs-t3` existed in no config and no
+roster — a sentence that rotted upward while the code shrank under it. It is four
+again now, by a real edit rather than by drift: `TRIAGE_CONSOLE_ROSTER`
+(`src/run/dispatch-request.ts`), `DEFAULT_TRIAGE_WORKERS`
+(`src/backends/cmux/operations-plan.ts`), `TRIAGE_CONSOLE_ASPECTS`
+(`src/run/task-ids.ts`), and the `workers:` blocks of both `fleet.yaml` and
+`fleet.example.yaml`. The standing warning is unchanged and applies to this
+sentence too: **verify the count against one of those before repeating it.**
 
 Both seats run a **local** `gemma-4-26b-a4b-it-bf16`. The model has moved twice —
 `gpt-oss-20b-MXFP4-Q8` under the 2026-09-03 decision, then a hosted trial on

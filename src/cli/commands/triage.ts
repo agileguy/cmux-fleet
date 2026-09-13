@@ -116,12 +116,17 @@ import {
 } from "../../run/paths.ts";
 import { readBudgetState, readTaskRecord } from "../../run/state.ts";
 import { processStartTime } from "../../run/registry.ts";
-import { collationTaskId, sweepNumber, sweepTaskId } from "../../run/task-ids.ts";
+import {
+  collationTaskId,
+  sweepNumber,
+  sweepTaskId,
+  TRIAGE_CONSOLE_ASPECTS,
+} from "../../run/task-ids.ts";
 import {
   TRIAGE_CONSOLE_ROSTER,
   readDispatchRequest,
 } from "../../run/dispatch-request.ts";
-import { partitionFromRequests } from "../../run/triage-partition.ts";
+import { evenSlices, partitionFromRequests } from "../../run/triage-partition.ts";
 import {
   readTriageDocumentAt,
   sweepProducers,
@@ -552,13 +557,33 @@ export async function resolveSeatRuns(
 export async function readSweepPartition(
   run: RunPaths,
   sweepId: string,
+  /*
+   * EVERY COLLATOR THAT WAS DISPATCHED, and the default is the one-pair console
+   * this function shipped for.
+   *
+   * With two pairs the partition is written in TWO files, one per collator's
+   * outbox, each in its own run. Reading only `tri-1`'s and handing that to
+   * `checkTriagePartition` yields half a partition against the whole declared
+   * list, so EVERY sweep would be refused `partition_incomplete` naming the other
+   * pair's services — a refusal that points an operator at `triage/targets.yaml`
+   * when the actual fault is the host reading one outbox.
+   *
+   * The reads are concatenated, not reconciled: the slices are disjoint by
+   * construction, and it is `checkTriagePartition`'s job — not this function's —
+   * to say whether they add up.
+   */
+  senders: readonly { readonly collator: string; readonly run: RunPaths }[] = [
+    { collator: TRIAGE_COLLATOR, run },
+  ],
 ): Promise<ReturnType<typeof partitionFromRequests>> {
-  const read = await readDispatchRequest({
-    runRoot: run.root,
-    sender: TRIAGE_COLLATOR,
-    taskId: sweepId,
-    roster: TRIAGE_CONSOLE_ROSTER,
-  });
+  const merged: ReturnType<typeof partitionFromRequests>[number][] = [];
+  for (const sender of senders) {
+    const read = await readDispatchRequest({
+      runRoot: sender.run.root,
+      sender: sender.collator,
+      taskId: sweepId,
+      roster: TRIAGE_CONSOLE_ROSTER,
+    });
   // A missing or refused request is an EMPTY partition rather than a throw:
   // `checkTriagePartition` inside the pass then answers `partition_incomplete`
   // naming every declared service, which is §6.5's *"refused whole"* with the
@@ -576,14 +601,16 @@ export async function readSweepPartition(
   // later. `missing` stays quiet because it is the ordinary state of a sweep whose
   // collator has not answered yet; `refused` is always a defect in something and
   // is always worth a line in §7.7's log.
-  if (read.kind === "refused") {
-    console.error(
-      `triage: ${TRIAGE_COLLATOR}'s partition for ${sweepId} was REFUSED (${read.code}): ` +
-        `${read.reason}. No observer is dispatched for this sweep, so it will settle having ` +
-        `produced nothing — the cause is this refusal and not the environment.`,
-    );
+    if (read.kind === "refused") {
+      console.error(
+        `triage: ${sender.collator}'s partition for ${sweepId} was REFUSED (${read.code}): ` +
+          `${read.reason}. Its observer is not dispatched for this sweep, so that slice will ` +
+          `settle having produced nothing — the cause is this refusal and not the environment.`,
+      );
+    }
+    if (read.kind === "ok") merged.push(...partitionFromRequests(read.request.requests));
   }
-  return read.kind === "ok" ? partitionFromRequests(read.request.requests) : [];
+  return merged;
 }
 
 /** The run-tree half, plus the four members {@link SweepBriefing} supplies. */
@@ -591,13 +618,26 @@ export function buildSweepDriver(
   run: RunPaths,
   briefing: SweepBriefing,
   env: Record<string, string | undefined> = process.env,
+  /*
+   * The partition read, overridable — added 2026-09-12 for the second pair.
+   *
+   * A multi-pair console reads one request per collator, each out of that
+   * collator's OWN run, and those runs resolve asynchronously through
+   * `seatRun`. This function is synchronous, so the resolution cannot happen
+   * here; the override lets `buildTriageSweepDriver` close over its pairs and
+   * resolve them lazily per call.
+   *
+   * Defaulted rather than required so the one-pair reading — this run, this
+   * collator — stays the behaviour of every caller that does not care.
+   */
+  readPartition: SweepDriver["readPartition"] = (sweepId) => readSweepPartition(run, sweepId),
 ): SweepDriver {
   return {
     inFlight: () => inFlightSweep(run),
     resumableSweep: () => resumableSweep(run),
     highestSweepNumber: () => highestSweepNumber(run),
     runs: () => resolveSeatRuns(undefined, env),
-    readPartition: (sweepId) => readSweepPartition(run, sweepId),
+    readPartition,
     openSweep: briefing.openSweep,
     dispatchObserver: briefing.dispatchObserver,
     join: briefing.join,
@@ -644,7 +684,30 @@ export function buildTriageSweepDriver(
         return id === undefined ? producers.run : runPaths(id, runsRoot(env));
       }),
   };
-  return buildSweepDriver(producers.run, sweepProducers(withSeatRun), env);
+  /*
+   * The partition is read from EVERY dispatched collator's own run.
+   *
+   * Resolved inside the closure rather than here: `seatRun` is async and this
+   * function is not, and re-deriving the pair list at each call keeps it in step
+   * with a recycle that moved a seat into a new run — `resolveSeatRuns` is
+   * re-read every pass for exactly that reason (§6.6 layer 4 moves the pins).
+   */
+  const pairs = withSeatRun.pairs;
+  const readPartition: SweepDriver["readPartition"] =
+    pairs === undefined
+      ? (sweepId) => readSweepPartition(producers.run, sweepId)
+      : async (sweepId) => {
+          const senders = await Promise.all(
+            pairs
+              .filter((p) => p.services.length > 0)
+              .map(async (p) => ({
+                collator: p.collator,
+                run: await withSeatRun.seatRun!(p.collator),
+              })),
+          );
+          return readSweepPartition(producers.run, sweepId, senders);
+        };
+  return buildSweepDriver(producers.run, sweepProducers(withSeatRun), env, readPartition);
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,12 +1068,26 @@ export function productionIncidentStore(
  * reach the next sweep's brief as instruction. Nothing here reads a string out of
  * the document; it is handed over whole and the envelope renderer projects it.
  */
-export async function previousSweepDocument(run: RunPaths): Promise<TriageDocument | null> {
+export async function previousSweepDocument(
+  run: RunPaths,
+  /*
+   * WHOSE previous document. Defaulted, because every existing caller means
+   * `tri-1` and this console had only that seat until 2026-09-12.
+   *
+   * Each collator writes a document covering only ITS OWN half of the
+   * environment, so `tri-2` must be handed `tri-2`'s. Handing it `tri-1`'s is
+   * not merely imprecise: `renderSweepEnvelope` projects the previous document
+   * through the pair's own declared list, so none of `tri-2`'s services would
+   * survive the projection and it would open every sweep believing the
+   * environment had never been seen.
+   */
+  collator: string = TRIAGE_COLLATOR,
+): Promise<TriageDocument | null> {
   const n = await highestSweepNumber(run);
   if (n === 0) return null;
   const collateTaskId = collationTaskId(sweepTaskId(n));
-  const path = triageDocumentPath(run, collateTaskId);
-  const read = await readTriageDocumentAt(path, { worker: TRIAGE_COLLATOR, path });
+  const path = triageDocumentPath(run, collateTaskId, collator);
+  const read = await readTriageDocumentAt(path, { worker: collator, path });
   return read.kind === "ok" ? read.document : null;
 }
 
@@ -1197,6 +1274,35 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
     });
     const { name: environment, environment: target } = soleEnvironment(pair.targets.environments);
 
+    /*
+     * THE SPLIT — one slice of the ONE environment per collator, as even as the
+     * count allows (operator, 2026-09-12: *"numerically as even as possible"*).
+     *
+     * **Pairing is POSITIONAL and written out rather than zipped**, because it is
+     * the invariant the whole design rests on: collator `i` owns aspect seat `i`,
+     * so `tri-1` owns `obs-t1` and `tri-2` owns `obs-t2`. Nothing in either
+     * constant declares that relationship — `TRIAGE_CONSOLE_ROSTER` lists legal
+     * senders and legal targets, and `TRIAGE_CONSOLE_ASPECTS` lists seats — so it
+     * is asserted here, once, where both lists are in scope.
+     *
+     * `declared` below stays the WHOLE list deliberately. The slices are what
+     * each collator is asked for; the whole list is what the host counts the
+     * union against, which is how `checkTriagePartition` still answers §6.5's
+     * question — *"is this a partition OF the declared set?"* — rather than
+     * degrading to two unrelated per-slice checks that could both pass while a
+     * service fell down the gap between them.
+     */
+    const collators = TRIAGE_CONSOLE_ROSTER.collators;
+    const slices = evenSlices(target.services, collators.length);
+    const sweepPairs = collators.map((collator, i) => {
+      const seat = TRIAGE_CONSOLE_ASPECTS[i];
+      return {
+        collator,
+        seats: seat === undefined ? [] : [seat],
+        services: slices[i] ?? [],
+      };
+    });
+
     const outcome = await triagePass({
       environment,
       /*
@@ -1229,8 +1335,19 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
           run,
           environment,
           services: target.services,
+          pairs: sweepPairs,
           defaultWindowS: target.default_window,
-          previousDocument: () => previousSweepDocument(run),
+          /*
+           * PER COLLATOR, and `run` is still `tri-1`'s — which is right for
+           * `tri-1` and wrong for `tri-2`. `highestSweepNumber` and the document
+           * path both read from the run handed in, so `tri-2`'s previous document
+           * lives in `tri-2`'s run; resolving that needs the seat map, which the
+           * driver owns. Until it is threaded, `tri-2` reads its own outbox
+           * inside `tri-1`'s run, finds nothing, and opens each sweep with no
+           * carried state — the SAFE direction (unseen, never a stale claim), and
+           * recorded here rather than left to be discovered.
+           */
+          previousDocument: (collator) => previousSweepDocument(run, collator),
           /*
            * The injected effect, gated on §6.10's ceiling. The ORDER is the
            * point: the budget read is the console's decision and wraps the

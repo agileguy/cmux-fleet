@@ -112,14 +112,22 @@ describe("the triage console is a 2x2 of views with the reconciler in the landin
    * `DEFAULT_REVIEW_WORKERS` would satisfy every structural probe in this file
    * and stand up the wrong fleet.
    */
-  it("names the reconciler and the observer, in pane order", () => {
-    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "obs-t1"]);
+  it("names both reconcilers then both observers, in pane order", () => {
+    /*
+     * THE ORDER IS THE PAIRING, not a grouping preference. `agentSquarePanes`
+     * splits `[null, right, down-from-0, down-from-1]`, so listing the collators
+     * first puts `obs-t1` under `tri-1` and `obs-t2` under `tri-2`. Spell it
+     * `[tri-1, obs-t1, tri-2, obs-t2]` and the console still builds four panes,
+     * with each collator sitting above the OTHER pair's observer.
+     */
+    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "tri-2", "obs-t1", "obs-t2"]);
   });
 
-  it("titles panes by WORKER ID — the two named seats, in order", () => {
-    // A role title would print `observer` on one of the two panes. The id is
-    // also what `dispatch --worker` takes, so the title is the argument.
-    expect(unattended().map((p) => p.title)).toEqual(["tri-1", "obs-t1"]);
+  it("titles panes by WORKER ID — the four named seats, in order", () => {
+    // A role title would print `observer` on two of the four panes, and `triage`
+    // on the other two — losing which pair each belongs to. The id is also what
+    // `dispatch --worker` takes, so the title is the argument.
+    expect(unattended().map((p) => p.title)).toEqual(["tri-1", "tri-2", "obs-t1", "obs-t2"]);
   });
 
   /**
@@ -336,7 +344,9 @@ describe("the seats the plan names are the seats the tracked config declares", (
      */
     expect([...DEFAULT_TRIAGE_WORKERS].map((id) => [id, roles.get(id)])).toEqual([
       ["tri-1", "triage"],
+      ["tri-2", "triage"],
       ["obs-t1", "observer"],
+      ["obs-t2", "observer"],
     ]);
   });
 });
