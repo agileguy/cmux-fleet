@@ -45,7 +45,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { OUTBOX_FILES_DIR } from "../../src/harvest/outbox.ts";
-import { COVERAGE_RESULTS, OBSERVER_ASSESSMENTS } from "../../src/run/triage-verdict.ts";
+import {
+  COVERAGE_RESULTS,
+  EVIDENCE_GAPS,
+  OBSERVER_ASSESSMENTS,
+} from "../../src/run/triage-verdict.ts";
 import {
   runPaths,
   taskRecordPath,
@@ -95,6 +99,7 @@ import {
   CLUSTER_CALL_TIMEOUT_S,
   BOUNDED_CALLS_DEMAND,
   COVERAGE_VOCABULARY_DEMAND,
+  ROW_SHAPE_DEMAND,
   OBSERVER_CONTRACT_HEADING,
   composeObserverBrief,
   freshnessEchoDemand,
@@ -1384,6 +1389,52 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
   });
 
   /**
+   * `T-sweep-120`, 2026-09-13 — the sweep that wedged the console.
+   *
+   * `obs-t1`'s report EXISTED and was read. It carried no `services` array at
+   * all: its rows sat under `coverage` as `{service, workload, checks[]}`, with
+   * `assessment`, `selector`, `window` and `evidence_ref` absent. The brief
+   * ordered the collator to copy those fields *"from the observer's row and NOT
+   * reconstructed"*, and named `unaccounted` for exactly one case — a file that
+   * was MISSING. So `tri-1` held an instruction it could not obey, about a file
+   * that was there, with no sanctioned way to say so. It spent its entire
+   * deadline running `rg` across the container filesystem hunting for values
+   * that exist in no file, wrote no collation, and was still wedged on that
+   * abandoned turn when the next sweep was staged 25 minutes later.
+   *
+   * **The gap was never the row shape.** `skills/observer-ops/SKILL.md` has
+   * pinned that since [[ISC-1125]], and sweep 119 produced it perfectly from
+   * this same code. The gap is that a file which EXISTS but cannot be read as
+   * rows had no named outcome — and that nothing told the collator to stop
+   * looking, which is the half that turns a lost report into a lost console.
+   *
+   * Deleting either half of that paragraph reddens this.
+   */
+  test("a listed-but-unusable report has a named outcome, and searching for it is forbidden", async () => {
+    const run = await seedRun("2026-09-13T00-00-41Z-0041");
+    const { sent, producers } = producerFixture(run);
+    await producers.collate(sweepTaskId(41));
+    const brief = sent[0]!.brief;
+
+    // The case that had no name: listed, present, and unusable.
+    expect(
+      brief,
+      "the brief still names only the MISSING-file case, which is the gap T-sweep-120 fell into",
+    ).toContain("no `services` array");
+    expect(brief).toContain("`unaccounted`");
+
+    // The half that ends the deadlock rather than merely naming the case.
+    expect(
+      brief,
+      "the collator is never told to stop looking — T-sweep-120 spent its whole deadline " +
+        "searching the filesystem for values that exist in no file",
+    ).toContain("Do not go looking for the missing values");
+
+    // Still an envelope, so still audited for the same four classes.
+    expect(envelopeIssues(brief, null)).toEqual([]);
+  });
+
+  /**
    * **The previous document reaches `openSweep` through the same projection**, so
    * the anti-criterion holds on the PRODUCTION path and not only on the renderer
    * a test calls directly. A producer that fetched the document and passed it
@@ -2307,6 +2358,7 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       childTaskId: CHILD,
     });
     expect(brief).toContain(freshnessEchoDemand(SWEEP, WINDOW));
+    expect(brief).toContain(ROW_SHAPE_DEMAND);
     expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
     expect(brief).toContain(BOUNDED_CALLS_DEMAND);
   });
@@ -2390,6 +2442,61 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
  * artifact. `unreachable` has always been in `COVERAGE_RESULTS`; nothing told the
  * observer how to REACH it, because an unbounded call does not fail, it hangs.
  */
+/**
+ * ISC-1166's follow-up — the row shape joins the host's authored contract.
+ *
+ * `T-sweep-120`: obs-t1 wrote its rows under `coverage` as
+ * `{service, workload, checks[]}` with all four graded fields absent, the
+ * collator could not carry them, and the sweep recorded every service unobserved.
+ * The shape was already documented in `skills/observer-ops/SKILL.md` and the
+ * observer READ it — `obs-t3` spent a whole deadline doing exactly that. So this
+ * is the shape taking its place in the one document the host guarantees the
+ * observer sees on every dispatch, not a second copy of a missing one.
+ */
+describe("ROW_SHAPE_DEMAND (ISC-1166 follow-up)", () => {
+  /**
+   * **THE GAP NAMES ARE NOT THE FIELD NAMES, and this is the test for it.**
+   *
+   * `EVIDENCE_GAPS` calls the fourth gap `ledger`; the field an observer writes
+   * is `evidence_ref`. A demand derived naively from that constant would order
+   * the observer to emit a field nothing reads — [[ISC-1131]]'s second-spelling
+   * defect arrived at from the opposite direction.
+   */
+  test("names a field for every graded gap, in the observer's spelling", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("`evidence_ref`");
+    expect(
+      ROW_SHAPE_DEMAND,
+      "the demand names the host's GAP name; an observer cannot write a field called `ledger`",
+    ).not.toContain("`ledger`");
+    for (const gap of EVIDENCE_GAPS) {
+      if (gap === "ledger") continue;
+      expect(ROW_SHAPE_DEMAND, `graded gap ${gap} is never named to the observer`).toContain(
+        `\`${gap}\``,
+      );
+    }
+  });
+
+  /**
+   * The exact confusion sweep 120 produced: `coverage` used as the ARRAY OF ROWS
+   * rather than as a field inside one. Naming the array is what distinguishes
+   * this demand from the schema block that was already being read.
+   */
+  test("says the rows live in a top-level services array, not under coverage", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("`services`");
+    expect(ROW_SHAPE_DEMAND).toContain("INSIDE");
+  });
+
+  /**
+   * The consequence, which is what makes the fields worth copying rather than a
+   * list to be skimmed: the host downgrades an unevidenced `healthy`, and three
+   * of those send a person to a cluster.
+   */
+  test("states the consequence the host actually applies", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("indeterminate");
+    expect(ROW_SHAPE_DEMAND).toContain("unobserved");
+  });
+});
+
 describe("BOUNDED_CALLS_DEMAND (ISC-1134, authored under ISC-1136)", () => {
   test("states the bound, at the constant's value", () => {
     expect(BOUNDED_CALLS_DEMAND).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
@@ -2424,11 +2531,20 @@ describe("BOUNDED_CALLS_DEMAND (ISC-1134, authored under ISC-1136)", () => {
 
   /**
    * The bound is derived from the deadline it protects. Ten-ish calls at the
-   * timeout must leave the seat room to write the artifact inside 480 s — a
-   * bound that consumes the deadline reinstates the exact failure.
+   * timeout must leave the seat room to write the artifact inside the child
+   * deadline — a bound that consumes the deadline reinstates the exact failure.
+   *
+   * **600 s as of 2026-09-13, raised from 480 by a measured failure.** On
+   * T-sweep-116 — the last sweep of the two-pair arrangement — an observer
+   * holding four services spent its entire 480 s deadline mid-`kubectl logs` and
+   * wrote no artifact, so every service it held came back `unobserved`. The
+   * deadline is not set directly: it falls out of `cadence_s - reserve_s - 300`,
+   * so `triage/console.yaml`'s cadence moving to 1020 is what moved this. The
+   * 300 is `RELAY_CHILD_DEADLINE_MARGIN_MS`, shared with the review console and
+   * pinned there — which is why the cadence, and not the margin, is the knob.
    */
   test("the timeout leaves an unreachable sweep time to report", () => {
-    const CHILD_DEADLINE_S = 480;
+    const CHILD_DEADLINE_S = 600;
     const CALLS_PER_SWEEP = 10;
     expect(CLUSTER_CALL_TIMEOUT_S * CALLS_PER_SWEEP).toBeLessThan(CHILD_DEADLINE_S);
     // And not so tight it refuses a slow-but-working API.

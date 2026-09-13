@@ -98,7 +98,13 @@ import { cliBudget } from "../support/budget.ts";
 import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 
 const REPO = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
-/** The TRACKED config. The operator's `fleet.yaml` is gitignored — CI has none. */
+/**
+ * The shipped reference config, and the one this file drives the console
+ * against. NOT because the live `fleet.yaml` is unavailable — that file has been
+ * tracked since 2026-09-12 and CI checks it out like any other — but because the
+ * example is the artifact these scripts ship against, so a failure here is news
+ * about the repository rather than about the operator's current fleet.
+ */
 const CONFIG = "fleet.example.yaml";
 
 announceMissingHostDeps();

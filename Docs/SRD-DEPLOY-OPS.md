@@ -81,7 +81,9 @@ Two consequences that are easy to miss:
   requires that every such placeholder be a *field the worker reads*, not a string it substitutes,
   because a placeholder the worker is expected to fill from memory is a placeholder that becomes a
   guess.
-- **`fleet.example.yaml` is committed; `fleet.yaml` is gitignored.** The example carries
+- **`fleet.example.yaml` is committed; so, since 2026-09-12, is `fleet.yaml`** — this line read
+  "`fleet.yaml` is gitignored" until then, and the ignore was dropped because the live config had
+  drifted from the example with no diffable record of how. The example carries
   `example.com`-class values that resolve nowhere, so an unedited copy fails closed. `egressRuleHost`
   refuses a literal `<PLACEHOLDER>` string at load time, which is correct: a rule the matcher can
   never match silently denies the destination it was written for.

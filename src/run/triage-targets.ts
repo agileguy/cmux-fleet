@@ -99,18 +99,47 @@ export type TriageCheck = (typeof TRIAGE_CHECKS)[number];
  * **8, lowered from 64 by SRD-WORKER-DISPATCH-EXTENSION §13 task 7.3**, because
  * Phase B makes `tri-1`'s collation a `submit_report` ARGUMENT rather than a
  * file it writes, and {@link TRIAGE_DOCUMENT_MAX_BYTES} bounds that argument at
- * the size the wire was measured to carry. At the ~570 bytes a real row costs,
- * 64 rows is a 37 KB document — nine times the cap — so the old ceiling was not
- * a bound this console could ever have reached and Phase B turns "could not
+ * the size the wire was measured to carry. At the 621 bytes the most expensive
+ * real row has actually cost, 64 rows is a 40 KB document — still five times
+ * the cap even after the 2026-09-12 doubling — so the old ceiling was not a
+ * bound this console could ever have reached and Phase B turns "could not
  * reach" into "refuses". Lowering it is what keeps the two numbers in the same
  * story.
  *
- * Measured demand, not guessed: all 20 collations this console has harvested
- * carry exactly 3 services or none, so 8 is 2.6x the observed maximum. Raising
- * it again is legitimate and cheap — but it has to move with the byte cap, and
- * `triage-document.test.ts` fails if the two stop agreeing.
+ * Measured demand, not guessed — and RE-MEASURED 2026-09-12. When this was
+ * written, all 20 collations harvested carried exactly 3 services or none, so 8
+ * was 2.6x the observed maximum. There are 109 on disk now and still no
+ * collation wider than 3 rows, but the environment went to 9 services the same
+ * day this cap went to 16, so that old ratio no longer describes the headroom:
+ * nine services split 5/4 across two collators, and 16 is 3.2x the largest
+ * slice either one can be handed. Raising it again is legitimate and cheap —
+ * but it has to move with the byte cap, and `triage-document.test.ts` fails if
+ * the two stop agreeing.
+ *
+ * (The "~570 bytes a row" this paragraph used to quote was an estimate reported
+ * as a measurement. The real figures, over the 103 collations that parse with
+ * rows, are 415 mean and 621 max — see `triage-document.ts`.)
  */
-export const MAX_SERVICES_PER_ENVIRONMENT = 8;
+/*
+ * DOUBLED 8 -> 16 on 2026-09-12, by operator instruction, in the same edit as
+ * `TRIAGE_DOCUMENT_MAX_BYTES` 4096 -> 8192. The paragraph above says a raise
+ * "has to move with the byte cap" and this is that rule being obeyed rather
+ * than excepted.
+ *
+ * **The raise is cheap for a reason that did not exist when the warning was
+ * written.** The coupling it warns about was that ONE collator wrote ONE
+ * document covering every declared service, so the service count and the
+ * document size were the same number twice. The triage console now runs TWO
+ * pairs (`DEFAULT_TRIAGE_WORKERS`), the host splits the declared list between
+ * the collators with `evenSlices`, and each collator collates only its own
+ * half — so 16 declared services is two 8-row documents, not one 16-row one.
+ *
+ * WHAT THIS UNBLOCKS, concretely: the `monitoring` namespace holds 8 workloads,
+ * and at the old ceiling `monitoring` + `ntfy` was 9 and refused at load — the
+ * console would not have started. 16 leaves room for that list and for the
+ * cloudflared and vault services beside it.
+ */
+export const MAX_SERVICES_PER_ENVIRONMENT = 16;
 
 const shortStr = z.string().min(1).max(4096);
 

@@ -269,6 +269,27 @@ export interface SweepCollation {
    * from an absence.
    */
   readonly evidenceRef: string;
+  /**
+   * Collators whose document did not echo THIS sweep — added 2026-09-12 with the
+   * second pair, and it exists to stop a merge losing an accusation.
+   *
+   * **The hazard, stated concretely.** `assessTriageSweep` takes ONE document and
+   * derives `stale_replay` from `document.worker` when that document's
+   * `sweep_id` echo fails. With two collators the adapter merges their documents,
+   * so a fresh `tri-1` merged with a `tri-2` replaying last sweep would carry the
+   * FRESH sweep id, be judged fresh, and `tri-2` would never be named. Its
+   * services would still come back unobserved — §6.5 counts what the host
+   * harvested, never what a worker claimed — but the DIAGNOSIS would degrade from
+   * *"tri-2 replayed last sweep"* to *"those services were unobserved"*, which
+   * sends an operator to the cluster instead of to the seat.
+   *
+   * So the adapter runs `sweepIdEcho` per document, contributes rows only from
+   * the fresh ones, and names the rest here. `triagePass` appends them to the
+   * assessment's own list, which is already keyed BY PRODUCING WORKER and
+   * already documented as including the collator — so nothing downstream needs a
+   * new concept, and a one-pair console puts an empty array here.
+   */
+  readonly staleCollators: readonly string[];
 }
 
 /**
@@ -959,7 +980,10 @@ async function completeSweep(
   const collation: SweepCollation =
     s.join.artifacts.length > 0
       ? await deps.sweep.collate(s.sweepId)
-      : { document: null, evidenceRef: s.sweepId };
+      : // §6.5's zero-row: no child succeeded, so no collation was dispatched and
+        // no collator can have replayed one. Empty rather than absent — see
+        // `SweepCollation.staleCollators`.
+        { document: null, evidenceRef: s.sweepId, staleCollators: [] };
 
   const coverage: SweepCoverage = {
     declared: deps.declared,
@@ -971,11 +995,35 @@ async function completeSweep(
       dispatched_at: s.dispatchedAt,
     },
   };
-  const assessment = assessTriageSweep(
+  const assessed = assessTriageSweep(
     s.sweepId,
     coverage,
     collation.document ?? silentDocument(s.sweepId),
   );
+  /*
+   * THE COLLATORS THE MERGE ALREADY REFUSED, folded back in — §6.6 layer 3 for a
+   * console with more than one collator.
+   *
+   * `assessTriageSweep` takes ONE document and can therefore accuse only one
+   * author. With two pairs the adapter merges two documents, and it echo-checks
+   * each BEFORE merging precisely so a replay cannot ride in on the other
+   * collator's fresh sweep id (see `SweepCollation.staleCollators`). Those
+   * refusals are computed there and would be dropped on the floor here — the
+   * services would still come back unobserved, so the console would still be
+   * right, while saying `coverage` where it could have said WHO replayed.
+   *
+   * `stale_replay` is already "every artifact whose echo failed, BY PRODUCING
+   * WORKER — the collator included", so this needs no new concept and no new
+   * field: it is the same list, completed. A one-pair console contributes an
+   * empty array and this is identity.
+   */
+  const assessment =
+    collation.staleCollators.length === 0
+      ? assessed
+      : {
+          ...assessed,
+          stale_replay: [...assessed.stale_replay, ...collation.staleCollators],
+        };
 
   const memo = memoized(deps.saturationMemo, s.sweepId, deps.probe);
   const saturation = await saturationVerdict(assessment, deps.endpoint, memo.probe);

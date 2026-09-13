@@ -197,8 +197,11 @@ describe("the observer pane", () => {
     // `private: true` and its bin entry is never linked. A pane invoking a bare
     // `pifleet` would work only on a machine where somebody had linked it.
     const cmd = paneNamed("observer").command;
-    expect(cmd).toContain("bun run ");
     expect(cmd).toContain(`'${REPO}/src/cli/index.ts'`);
+    // And the INTERPRETER by absolute path too, for the same host fact one
+    // layer down — see the fourth bullet in operations-plan.ts's header.
+    expect(cmd).toContain(process.execPath);
+    expect(cmd).not.toContain("bun run ");
   });
 
   test("loads ~/.env into the pane BEFORE up runs, and exports it", () => {
@@ -457,7 +460,8 @@ describe("the monitor pane — the eleven assertions that survived the merge", (
     // invocation fails with `command not found` in a pane that looks correctly
     // configured — the same failure shape as `watch(1)`, from a different
     // cause.
-    expect(monitorCmd()).toContain(`bun run '${REPO}/src/cli/index.ts' 'monitor'`);
+    expect(monitorCmd()).toContain(`run '${REPO}/src/cli/index.ts' 'monitor'`);
+    expect(monitorCmd()).toContain(process.execPath);
   });
 
   test("the two shell-loop builders it replaced are gone, not merely unused", () => {
@@ -517,9 +521,27 @@ describe("quoting", () => {
   });
 
   test("pifleetCommand quotes every argument it is given", () => {
-    expect(pifleetCommand("/r", ["up", "--workers", "a b"])).toBe(
-      `bun run '/r/src/cli/index.ts' 'up' '--workers' 'a b'`,
+    expect(pifleetCommand("/r", ["up", "--workers", "a b"], "/opt/bun")).toBe(
+      `'/opt/bun' run '/r/src/cli/index.ts' 'up' '--workers' 'a b'`,
     );
+  });
+
+  test("defaults the interpreter to the running bun, never a bare `bun` off PATH", () => {
+    /*
+     * MEASURED 2026-09-12, and it cost three consoles. cmux is launched by
+     * launchd, so `/Applications/cmux.app` (pid 888) carries
+     * `PATH=/usr/bin:/bin:/usr/sbin:/sbin` — four entries, and `bun` lives at
+     * `~/.bun/bin/bun`. Every pane it spawns starts from that PATH, so the
+     * triage panes printed `/bin/sh: bun: command not found` once per rung and
+     * fell through to a bare `$SHELL`: present, correctly titled, running
+     * nothing. `which bun` succeeds from any terminal an operator would check
+     * it in, which is what made this invisible.
+     *
+     * The same failure shape as the bare `pifleet` the test above forbids, from
+     * the same cause, one layer down.
+     */
+    expect(pifleetCommand("/r", ["up"])).toContain(process.execPath);
+    expect(pifleetCommand("/r", ["up"]).startsWith("bun ")).toBe(false);
   });
 });
 

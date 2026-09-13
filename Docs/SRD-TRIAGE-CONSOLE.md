@@ -789,10 +789,14 @@ Rejected, each with its reason:
 - **`fleet.yaml`.** Three reasons, and the third is decisive. `FleetConfigSchema` is `.strict()`
   (`schema.ts:1502`), so a `triage:` key is a schema change to the fleet's own contract for data that
   is not fleet configuration. A service inventory changes on a different clock than roles and models.
-  And **`fleet.yaml` is gitignored** (`.gitignore:9`), so a service list there is untracked,
-  undiffable, and undispatchable — a worker told to edit it produces no diff and is graded `failed`
+  And **`fleet.yaml` was gitignored**, so a service list there was untracked,
+  undiffable, and undispatchable — a worker told to edit it produced no diff and was graded `failed`
   as a fabrication under ISC-93, which is the trap `Docs/SRD-FLEET-PROJECT-MANAGER.md` §13 Phase 1
-  had to split a task around.
+  had to split a task around. **SUPERSEDED 2026-09-12: `fleet.yaml` is TRACKED, so this third reason
+  is void — an engineer editing it now produces a real diff and is dispatchable. The first two
+  reasons above are untouched and still decide the question: `FleetConfigSchema` is `.strict()`, and
+  a service inventory changes on a different clock than roles and models.** (The `.gitignore:9`
+  citation is dropped rather than repointed: that entry no longer exists.)
 - **A CLI argument.** 288 invocations a day against a list nobody can review. An inventory in argv is
   an inventory with no history.
 - **The task envelope.** SRD-OBSERVER-001 §7.1 records that `inputs[]` reaches no prompt — *"a
@@ -2214,7 +2218,7 @@ and validated by `pifleet config validate` in the same pass as `fleet.yaml` and 
 
 | Home | Why not |
 |---|---|
-| **`fleet.yaml`** | §6.2's three reasons, unchanged and all still binding: `FleetConfigSchema` is `.strict()` with thirteen keys (`schema.ts:1486-1502`), so a `triage:` key is a schema change to the fleet's own contract for data that is not fleet configuration; it changes on a different clock than roles and models; and **it is gitignored** (`.gitignore:9`), so a notification endpoint written there is untracked, undiffable and undispatchable |
+| **`fleet.yaml`** | §6.2's three reasons, unchanged and all still binding: `FleetConfigSchema` is `.strict()` with thirteen keys (`schema.ts:1486-1502`), so a `triage:` key is a schema change to the fleet's own contract for data that is not fleet configuration; it changes on a different clock than roles and models; and **it was gitignored**, so a notification endpoint written there was untracked, undiffable and undispatchable — **SUPERSEDED 2026-09-12, when `fleet.yaml` became TRACKED; that third reason is void and the first two still decide it** |
 | **A CLI flag** | **This is the arm to reject loudest, because it is the one that looks reasonable.** §6.2 already refused argv as the inventory mechanism — *"288 invocations a day against a list nobody can review. An inventory in argv is an inventory with no history."* Every word of that applies here and one more besides: the endpoint is the console's **output destination**, so an endpoint in argv is a console whose entire product is decided by a shell line nobody reviewed, changed by editing a script that `bun run typecheck` does not read (§3.3). `--cadence` survives as an **override** for a hand-run, and an override with a home is a different thing from a value with no home |
 | **Merged into `triage/targets.yaml`** | Tempting — one file is cheaper than two, and §10 D4 already books the cost of a second one. Refused on **blast radius**: the targets file is the one an operator edits *often* (§6.2 property 1, *"Adding an environment or a service is a YAML edit and nothing else"*), and this file holds the two values whose accidental edit costs the most — the cadence and the endpoint. Different edit frequency, different file. It is §6.2's own argument applied one level down, and it costs nothing extra, because both files are validated in the same `config validate` pass |
 | **`~/.pifleet/triage-relay.json`** | That is the actor's **record** (§7.7), written by the actor, and D12 makes the run tree authoritative over it. Configuration an operator writes and state a process writes must not share a file, or a crashed actor rewrites the cadence |
@@ -2908,12 +2912,16 @@ and 4.
 already exists.
 
 **And one interaction that bites this phase, inherited from SRD-FLEET-PM-001 §13 Phase 1.**
-`fleet.yaml` is **gitignored** (`.gitignore:9`), so an engineer dispatched to edit it produces **no
+`fleet.yaml` **was gitignored**, so an engineer dispatched to edit it produced **no
 diff**, and a `success` claim with an empty diff is graded `failed` under ISC-93 as a fabrication.
 **The live config is edited by the operator by hand; only `fleet.example.yaml` may be given to a
-worker.** Task 1.1 is split on that line.
+worker.** Task 1.1 is split on that line. **SUPERSEDED 2026-09-12 — `fleet.yaml` is TRACKED, so the
+empty-diff trap is gone and this task need not be split for that reason. Whether the live config
+should still be operator-only is now a JUDGEMENT about blast radius rather than a mechanical
+constraint, and it has not been re-decided.**
 
-- **1.1a** *(operator, not dispatchable)* In the untracked live `fleet.yaml`: add the `triage` role
+- **1.1a** *(operator, not dispatchable — and that no longer follows from the ignore: `fleet.yaml` is
+  TRACKED as of 2026-09-12, so an engineer editing it produces a real diff)* In the live `fleet.yaml`: add the `triage` role
   (§6.1), the four worker entries, and — if Q1 requires it — `gpt-oss:120b` to
   `llm.providers.ollama-cloud.models_allowlist` (after `:251`) and its measured window to
   `context_windows` (after `:270`). Touches: `fleet.yaml`.

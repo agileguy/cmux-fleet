@@ -38,12 +38,28 @@
  * byte-for-byte by a unit test with no cmux running. Every claim in the
  * comments below is re-checked by `test/unit/operations-plan.test.ts`.
  *
- * ## Three host facts this file is shaped by, each measured on 2026-08-30
+ * ## Four host facts this file is shaped by, the first three measured 2026-08-30
  *
  * - **`pifleet` is not on `PATH`.** `package.json` is `private: true` and its
  *   `bin` entry is never linked, so `which pifleet` finds nothing. Every pane
- *   therefore invokes the CLI as `bun run <repo>/src/cli/index.ts`, by ABSOLUTE
- *   path, so the pane keeps working if its cwd is ever somewhere else.
+ *   therefore invokes the CLI by ABSOLUTE path, so the pane keeps working if its
+ *   cwd is ever somewhere else.
+ * - **`bun` IS NOT ON THE PANE'S `PATH` EITHER, measured 2026-09-12.** The rung
+ *   above solved this for the SCRIPT and stopped one token short of the
+ *   INTERPRETER. cmux is a GUI app launched by launchd, so it inherits
+ *   launchd's environment and not a login shell's: `/Applications/cmux.app`
+ *   (pid 888) carries `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, four entries, and
+ *   `bun` lives at `~/.bun/bin/bun`. Every pane cmux spawns starts from that
+ *   PATH, so a bare `bun` is `command not found` there while `which bun`
+ *   succeeds in every terminal an operator would check it from.
+ *
+ *   The cost was three consoles dark and a long diagnosis: the triage panes
+ *   printed `/bin/sh: bun: command not found` once per rung, fell through the
+ *   `;` ladder to a bare `$SHELL`, and presented as panes that existed, were
+ *   correctly titled, and ran nothing. `status` showed no run, `docker ps` no
+ *   container, `cmux top` `0 procs` — every indirect probe said "not started"
+ *   and none of them said why. So the interpreter is named by absolute path
+ *   for exactly the reason the CLI already was.
  * - **`watch(1)` does not exist on this host.** It is a Linux/procps tool, and
  *   macOS does not ship it. The git pane is a `while` loop for that reason and
  *   must stay one; a `watch` line would fail on the first tick with
@@ -54,6 +70,7 @@
  *   `shellQuote`.
  */
 
+import { dirname } from "node:path";
 import type { SplitDirection } from "./client.ts";
 import { shellQuote } from "./parse.ts";
 
@@ -290,8 +307,20 @@ function assertPlainValue(what: string, v: string): void {
  * a `pifleet` off `PATH` would work on a machine where someone had linked it
  * and nowhere else, and that difference is invisible until the pane is opened.
  */
-export function pifleetCommand(repoRoot: string, argv: readonly string[]): string {
-  return `bun run ${shellQuote([`${repoRoot}/src/cli/index.ts`, ...argv])}`;
+export function pifleetCommand(
+  repoRoot: string,
+  argv: readonly string[],
+  /**
+   * The interpreter, defaulting to THE RUNNING BUN rather than the word `bun`.
+   *
+   * Same idiom and same reason as `src/supervisor/launch.ts:39` — "the running
+   * bun binary, not whatever is on PATH". A parameter rather than an inlined
+   * `process.execPath` so the string stays pinnable byte-for-byte by a unit test
+   * with no cmux running, which is the property this file's header requires.
+   */
+  bun: string = process.execPath,
+): string {
+  return `${shellQuote([bun])} run ${shellQuote([`${repoRoot}/src/cli/index.ts`, ...argv])}`;
 }
 
 /**
@@ -715,17 +744,27 @@ export function developmentPanes(opts: OperationsPlanOptions): OperationsPane[] 
 }
 
 /**
- * A 2x2 of attended agent panes — the shape BOTH `development` and `review`
- * are, built once.
+ * A 2x2 of attended agent panes — `development`'s shape, and since 2026-09-13
+ * ONLY `development`'s.
  *
- * Extracted when the second such console arrived, and the extraction is not
- * tidiness. The split TABLE below is the part that breaks: a 2x2 cannot be
- * built from "always split the previous pane", pane 4 has to name pane 2 as its
- * anchor, and `operationsPanes` already learned that lesson separately at its
- * git pane. A copied table is a second place to get that backwards, and the two
- * copies would be identical on the day they were written and only diverge
- * afterwards — which is exactly the drift the Dockerfile's `toolchain-full`
- * stage was carrying when it was folded into its siblings.
+ * **IT WAS EXTRACTED BECAUSE `review` SHARED IT, AND `review` HAS SINCE LEFT**
+ * for {@link collatorOverRowPanes}, so this function now has exactly one caller.
+ * That is recorded here rather than left for a reader to discover by grepping
+ * and finding a "shared" builder shared with nobody. It is KEPT rather than
+ * inlined because the argument below is about where a fragile table lives, and
+ * that argument does not depend on the number of callers — but if `development`
+ * ever changes shape too, this should be deleted rather than left standing as a
+ * builder nothing builds with.
+ *
+ * The original extraction argument, which still explains the table's shape:
+ * a 2x2 cannot be built from "always split the previous pane", pane 4 has to
+ * name pane 2 as its anchor, and `operationsPanes` already learned that lesson
+ * separately at its git pane. A copied table is a second place to get that
+ * backwards, and the two copies would be identical on the day they were written
+ * and only diverge afterwards — which is exactly the drift the Dockerfile's
+ * `toolchain-full` stage was carrying when it was folded into its siblings.
+ * {@link collatorOverRowPanes} was extracted on that same reasoning the moment
+ * `review` became the second console of ITS shape.
  *
  * `label` is the console's name and appears ONLY in the refusals, because a
  * refusal that does not say which console refused sends the operator to check
@@ -787,6 +826,92 @@ export function agentSquarePanes(
 }
 
 /**
+ * A COLLATOR ACROSS THE TOP with its workers in ONE ROW beneath — the shape
+ * BOTH `triage` and `review` are, built once.
+ *
+ * ```
+ * +-----------------------------------+
+ * |              pane 1               |
+ * +----------+-----------+------------+
+ * |  pane 2  |  pane 3   |   pane 4   |
+ * +----------+-----------+------------+
+ * ```
+ *
+ * **Extracted 2026-09-13, when `review` became the second console of this
+ * shape** — which is the trigger {@link agentSquarePanes} names for extracting
+ * over copying, applied to a different shape. `triage` reached it first and
+ * carried the only implementation for a day; a hand copy into `reviewPanes`
+ * would have been identical on the day it was written and free to diverge
+ * afterwards.
+ *
+ * **This is NOT {@link agentSquarePanes} with a shorter list, and that is the
+ * whole reason it exists.** The square's table is `[right, down·from0,
+ * down·from1]`, which makes pane 2 the top row's second half — so pane 1 can
+ * never span the container. A collator over N workers needs the first split to
+ * go DOWN off pane 1 and every later one to go RIGHT along the row that split
+ * created. The two tables are not a parameterisation of each other; they are
+ * different consoles.
+ *
+ * The anchor discipline is the part that actually breaks under copying, so it
+ * is explicit here: every entry after the first names the pane it divides via
+ * `splitFrom`, rather than relying on creation order meaning "the previous
+ * one". That is the lesson `operationsPanes` learned at its git pane and the
+ * square states at its own table.
+ *
+ * `label` appears ONLY in the refusals, because a refusal that does not say
+ * which console refused sends the operator to check the wrong `--workers` flag.
+ */
+export function collatorOverRowPanes(
+  opts: OperationsPlanOptions,
+  defaultWorkers: readonly string[],
+  label: string,
+): OperationsPane[] {
+  const repoRoot = opts.repoRoot;
+  const workers = opts.workers ?? defaultWorkers;
+  const backend = opts.backend ?? "headless";
+  const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
+
+  if (workers.length === 0) {
+    throw new Error(`${label}: refusing an empty --workers set — name at least one worker`);
+  }
+  if (workers.length > SQUARE_MAX_PANES) {
+    throw new Error(
+      `${label}: refusing ${workers.length} workers — the console holds at most ` +
+        `${SQUARE_MAX_PANES}: one collator and its workers`,
+    );
+  }
+  for (const w of workers) assertPlainValue("worker id", w);
+  assertPlainValue("backend", backend);
+
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
+
+  return workers.map((worker, i) => ({
+    title: worker,
+    worker,
+    command: `${envPreamble()} ${agentPaneCommand({
+      repoRoot,
+      worker,
+      backend,
+      configPath,
+      attach: tuiWorkers.has(worker),
+      workspaceName: opts.workspaceName,
+    })}`,
+    /*
+     * Pane 1 takes the initial surface. Pane 2 splits DOWN off it, creating the
+     * bottom row; panes 3 and 4 split RIGHT off the pane before them, walking
+     * along that row. Anchored by index rather than by "the previous pane" for
+     * the reason the square's table states: creation order is what gets read
+     * backwards.
+     */
+    ...(i === 0
+      ? { split: null }
+      : i === 1
+        ? { split: "down" as const, splitFrom: 0 }
+        : { split: "right" as const, splitFrom: i - 1 }),
+  }));
+}
+
+/**
  * Load `~/.env` into pane 1 before `up` runs, if it is there.
  *
  * `up` reads the model credential (`llm.api_key_env`, `OMLX_API_KEY`) and every
@@ -808,8 +933,69 @@ export function agentSquarePanes(
  * the ceiling on what may cross into a container, and a name absent from it
  * does not reach one however it got into this shell.
  */
-export function envPreamble(): string {
-  return `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
+export function envPreamble(
+  /**
+   * The `PATH` the pane runs with, defaulting to THE LAUNCHING SHELL'S OWN.
+   *
+   * ## Why a pane needs to be told its PATH at all
+   *
+   * The fourth host fact in this file's header, and the reason it is handed over
+   * here rather than patched at each call site. cmux is a GUI app started by
+   * launchd, so it carries `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and every pane it
+   * spawns inherits those four entries. On this host that is enough for `git`
+   * (`/usr/bin/git`) and enough for nothing else the fleet needs: `bun` is at
+   * `~/.bun/bin/bun` and `docker` at `/opt/homebrew/bin/docker`.
+   *
+   * MEASURED 2026-09-12, both directions, same host and same binary:
+   *   env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin docker version  -> env: docker:
+   *                                                                No such file
+   *   docker version                                            -> 28.4.0
+   *
+   * ## Why here and not at the `docker` call sites
+   *
+   * `"docker"` is spelled at seventeen sites across ten modules, and
+   * `contracts.ts:505-509` already argues against matching that string around the
+   * codebase. Resolving each one would be seventeen edits to fix one fact about
+   * the ENVIRONMENT, and it would fix only the binaries someone remembered — the
+   * pane found `bun` missing first and `docker` only once `bun` was fixed, so the
+   * list of what is missing is not knowable in advance. One PATH, handed over
+   * once, covers every binary the fleet shells out to including the next one.
+   *
+   * This is a HANDOVER and not a widening: the console is being launched BY the
+   * operator's shell, so the pane running with that shell's PATH is the pane
+   * behaving as if they had typed the command themselves — which is exactly the
+   * argument the `~/.env` half of this function already makes below.
+   *
+   * ## DIRECTORIES TO PREPEND, never the whole inherited PATH
+   *
+   * The first version of this handed over `process.env.PATH` entire. It worked
+   * and it was wrong: this operator's PATH is 789 characters, which took the
+   * pane command to 1392 and past the 1024-character cap `assertCmuxText`
+   * (`client.ts:45`) applies to every free-text value this system sends to a
+   * pane backend. `operations-plan.test.ts`'s "every command is something cmux
+   * will accept" case caught it. The live path does NOT call that guard, so the
+   * over-long command was accepted by cmux and the breach would have shown up
+   * only as a mystery on some future longer PATH.
+   *
+   * So: the directories holding the binaries the fleet shells out to, resolved
+   * in the LAUNCHING shell where they are on PATH, prepended to whatever the
+   * pane already had. Two entries instead of twenty, `"$PATH"` left expanding at
+   * pane time so nothing inherited is discarded.
+   *
+   * A parameter rather than an inlined lookup so the string stays pinnable
+   * byte-for-byte by a unit test on any machine, matching
+   * {@link pifleetCommand}'s interpreter argument. An empty list means "say
+   * nothing", which keeps a bare `PATH=` out of a pane.
+   */
+  pathPrefix: readonly string[] = [
+    dirname(process.execPath),
+    ...(Bun.which("docker") === null ? [] : [dirname(Bun.which("docker") as string)]),
+  ],
+): string {
+  const dirs = pathPrefix.filter((d) => d !== "");
+  const exportPath =
+    dirs.length === 0 ? "" : `export PATH=${shellQuote([dirs.join(":")])}:"$PATH"; `;
+  return `${exportPath}set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
 }
 
 
@@ -864,18 +1050,25 @@ export const REVIEW_WORKSPACE = "review";
  * The four workers the review console stands up, in PANE ORDER.
  *
  * ```
- * +---------------+---------------+
- * |     col-1     |   rev-arch-1  |
- * +---------------+---------------+
- * |   rev-ctx-1   |   rev-lang-1  |
- * +---------------+---------------+
+ * +-------------------------------------------+
+ * |                   col-1                   |
+ * +---------------+-------------+-------------+
+ * |   rev-arch-1  |  rev-ctx-1  |  rev-lang-1 |
+ * +---------------+-------------+-------------+
  * ```
+ *
+ * **THIS WAS A 2x2 UNTIL 2026-09-13**, and the diagram above replaced one. The
+ * console was changed to match `triage` on the operator's request — one
+ * collator across the top, its three workers in a row beneath — and the two
+ * now share {@link collatorOverRowPanes} rather than each carrying a table.
  *
  * THE COLLATOR IS PANE 1, and that placement is the contract rather than a
  * preference: pane 1 consumes the workspace's initial surface and is where the
  * operator lands. This console is driven by talking to the collator — it writes
  * the three briefs and reads the three reports back — so the seat the keyboard
- * arrives in is the one seat a person actually types into.
+ * arrives in is the one seat a person actually types into. The new shape
+ * STRENGTHENS that: the collator is no longer one quarter in a corner, it is
+ * the row the eye starts on.
  *
  * THE THREE REVIEWERS RUN THREE DIFFERENT VENDORS, which is the whole product
  * of the console and not a detail of it. `rev-arch-1` is on `deepseek-v4-pro`,
@@ -902,33 +1095,79 @@ export const DEFAULT_REVIEW_WORKERS: readonly string[] = [
 ];
 
 /**
- * The review console's panes are EQUAL, and `null` says so.
+ * The collator's row gets one third of the container's height.
  *
- * Same reasoning as {@link DEVELOPMENT_TOP_FRACTION}, and the stated
- * requirement here is stronger: this console was asked for as "four equally
- * sized panes in a square". `new-split` halves, so two columns each split once
- * are already four quarters, and `null` skips the resize rather than asking for
- * a fraction of `1/2` and relying on the sub-pixel guard to make it a no-op.
+ * **THIS WAS `null`, AND THE DOCBLOCK ARGUING FOR IT IS REPLACED RATHER THAN
+ * PATCHED, because what changed is the REQUIREMENT and not the arithmetic.**
+ * The old text rested on a stated ask — *"four equally sized panes in a
+ * square"* — and reasoned correctly from it: `new-split` halves, two columns
+ * each split once are already four quarters, so `null` skipped a resize that
+ * would have been a no-op. Every step of that held. The operator asked for a
+ * different console on 2026-09-13, so the premise is withdrawn, not refuted.
  *
- * There is also nothing to favour. The collator has three reports to show and
- * each reviewer has one; that is not a difference in HEIGHT, it is a difference
- * in how often you scroll.
+ * That is the distinction worth keeping: a value can stop being right because
+ * somebody changed their mind about the goal, and a docblock that reads as if
+ * the old argument were WRONG teaches the next reader to distrust reasoning
+ * that was sound. It was not wrong. It is superseded.
+ *
+ * **The number is defensible only while {@link reviewPanes} builds one
+ * full-width row over another** — the same standing condition
+ * {@link TRIAGE_TOP_FRACTION} states about itself, and for the same reason. If
+ * the collator ever shares its row again, this goes back to `null`.
+ *
+ * ## Why a third, when the old text said there was nothing to favour
+ *
+ * The old docblock's observation survives and now cuts the other way. It noted
+ * the collator has three reports to show and each reviewer has one, and
+ * concluded that is "not a difference in HEIGHT, it is a difference in how
+ * often you scroll." True of four equal quarters. Once the collator owns a full
+ * row on its own, the comparison is no longer collator-versus-reviewer, it is
+ * ONE settled document against THREE reviews being written at once — and three
+ * panes of live work want the room. Same asymmetry {@link TRIAGE_TOP_FRACTION}
+ * names between its collator and its observers.
  */
-export const REVIEW_TOP_FRACTION: number | null = null;
+export const REVIEW_TOP_FRACTION: number | null = 1 / 3;
 
 /**
- * The review console's panes, in creation order.
+ * How much of the container's WIDTH each pane in the reviewer row gets.
  *
- * The same 2x2 as {@link developmentPanes} and built by the same function —
- * see {@link agentSquarePanes} for why the split table is shared rather than
- * copied. Only the default worker set and the name in a refusal differ.
+ * One fraction applied per pane rather than a per-pane table, for the reason
+ * {@link TRIAGE_OBSERVER_WIDTH_FRACTION} states at length: the requirement is
+ * EQUALITY rather than a chosen distribution, and a table of three numbers that
+ * must keep summing to one is a thing the first edit adding a fourth reviewer
+ * would leave summing to more.
+ *
+ * The three reviewers run three different vendors and are read side by side —
+ * the whole product of this console is the DISAGREEMENT between them — so a row
+ * where one lens is wider than another invites reading it as the important one.
+ */
+export const REVIEW_REVIEWER_WIDTH_FRACTION: number | null = 1 / 3;
+
+/**
+ * The review console's panes, in creation order: the collator across the top,
+ * its three reviewers in a row beneath.
+ *
+ * **Stopped being a 2x2 on 2026-09-13** and stopped sharing
+ * {@link agentSquarePanes} with it, on the operator's request that this console
+ * match `triage` visually. It now shares {@link collatorOverRowPanes} with
+ * `triage` instead — which was extracted in the same change, because this is
+ * the second console of that shape and copying `triagePanes`' table would have
+ * been the drift the square's own docblock warns about.
+ *
+ * **One consequence worth stating rather than leaving to be discovered:
+ * {@link agentSquarePanes} now has exactly ONE caller,
+ * {@link developmentPanes}.** It was extracted precisely because a second
+ * console shared its shape, and that justification is now gone. It is kept
+ * because `development` genuinely is a 2x2 and the anchor lesson in its table
+ * is worth keeping in one place — but a reader wondering why a "shared" builder
+ * is shared with nobody deserves the answer here.
  */
 export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
-  return agentSquarePanes(opts, DEFAULT_REVIEW_WORKERS, "review");
+  return collatorOverRowPanes(opts, DEFAULT_REVIEW_WORKERS, "review");
 }
 
 // ---------------------------------------------------------------------------
-// The `triage` console — a reconciler and one observer (SRD-TRIAGE-CONSOLE)
+// The `triage` console — two reconcilers, each over its own observer (SRD-TRIAGE-CONSOLE)
 // ---------------------------------------------------------------------------
 
 /**
@@ -943,42 +1182,73 @@ export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
 export const TRIAGE_WORKSPACE = "triage";
 
 /**
- * The two workers the triage console stands up, in PANE ORDER.
+ * The four workers the triage console stands up, in PANE ORDER.
  *
  * ```
- * +---------------+---------------+
- * |     tri-1     |     obs-t1    |
- * +---------------+---------------+
+ * +-----------------------------------+
+ * |               tri-1               |
+ * +----------+-----------+------------+
+ * |  obs-t1  |  obs-t2   |   obs-t3   |
+ * +----------+-----------+------------+
  * ```
  *
- * ONE ROW OF TWO, AND NOT A SQUARE — which needs saying precisely because the
- * builder is the square one. {@link agentSquarePanes} holds at most four and
- * this console names two, so only the first entry of its split table is ever
- * reached: `tri-1` takes the workspace's initial surface and `obs-t1` splits
- * `right` off it. The table's `down` rows begin at pane 3, which this console
- * does not have, so there is no second row at all — and
- * {@link TRIAGE_TOP_FRACTION} below turns entirely on that.
+ * ONE COLLATOR OVER THREE OBSERVERS as of 2026-09-13, and the ORDER is what puts
+ * the collator across the top rather than in a corner. {@link triagePanes}' own
+ * table is `[null, down-from-0, right-from-1, right-from-2]`: pane 1 takes the
+ * workspace's initial surface, pane 2 splits `down` off it to create the
+ * observer row, and panes 3 and 4 walk `right` along that row. The collator
+ * must therefore be FIRST; any other position and the full-width pane holds an
+ * observer.
  *
- * THE RECONCILER IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for
- * a weaker version of its reason. Pane 1 consumes the workspace's initial
- * surface and is where the operator lands. Nobody drives this console by typing
- * — see the fraction below — but somebody DEBUGS it, and `tri-1` is the seat
- * that holds the reconciliation the observer feeds, so it is the pane worth
- * landing on when a sweep has said something surprising.
+ * **THIS DOCBLOCK HAS NOW DESCRIBED THREE DIFFERENT CONSOLES, and the last two
+ * were wrong at the moment they were read rather than when they were written.**
+ * It described a collator beside one observer, then a 2x2 of two pairs whose
+ * argument turned on {@link agentSquarePanes}' split table — a table this
+ * console no longer uses. It also asserted that {@link TRIAGE_TOP_FRACTION}
+ * *"survives this change rather than becoming a number"*; that constant is now
+ * `1/3`. Both claims went stale in place, with nothing to redden, because a
+ * prose diagram is not checked against the list beneath it. `triage-plan.test.ts`
+ * pins the shape; this paragraph is the warning that the PICTURE is not pinned.
  *
- * ## WHY ONE OBSERVER — a refusal in code, not a fan-out someone forgot to build
+ * THE COLLATOR IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for a
+ * weaker version of its reason. Pane 1 consumes the workspace's initial surface
+ * and is where the operator lands. Nobody drives this console by typing — see
+ * the fraction below — but somebody DEBUGS it, and `tri-1` is the seat that
+ * holds the reconciliation the observers feed, so it is the pane worth landing
+ * on when a sweep has said something surprising.
  *
- * The design is ONE OBSERVER SEAT PER ENVIRONMENT, and a sweep is exactly one
- * environment: `soleEnvironment` (`src/cli/commands/triage.ts:915`) refuses a
- * targets file declaring any other number, by name on both sides, quoting
- * SRD-TRIAGE-CONSOLE §12 — *"one sweep is ONE environment, and that is a limit
- * rather than a law"*. So the fan-out is one wide because the thing it fans out
- * over is one wide. **A second observer seat is therefore not a worker line; it
- * is that refusal being lifted first**, and a `DEFAULT_TRIAGE_WORKERS` grown
- * ahead of it would stand up a pane whose share of the sweep does not exist.
- * `triage/targets.yaml` ships one live environment (`do-cluster`) with `cni-dev`
- * commented out beside it rather than deleted, which is what the limit looks
- * like from the operator's side.
+ * ## WHY TWO PAIRS — and why `soleEnvironment` did NOT have to be lifted
+ *
+ * **This docblock said the opposite until 2026-09-12, and the correction is
+ * worth keeping rather than overwriting silently.** It argued that the fan-out
+ * was one wide because the thing it fans out over is one wide, and that *"a
+ * second observer seat is therefore not a worker line; it is that refusal being
+ * lifted first"* — the refusal being `soleEnvironment`
+ * (`src/cli/commands/triage.ts:915`), which quotes SRD-TRIAGE-CONSOLE §12: *"one
+ * sweep is ONE environment, and that is a limit rather than a law"*.
+ *
+ * That inference was wrong, and the reason is worth stating because it is the
+ * whole shape of this change. §12's limit binds ENVIRONMENTS, not SEATS. A
+ * second pair does not need a second environment; it needs a second SLICE of the
+ * one environment — and the slice is a thing this console already had a
+ * vocabulary for. Splitting by environment would have been the damaging way to
+ * get here: `environment` is a path segment under `~/.pifleet/triage/` and the
+ * scope every incident is reported against, so inventing two tokens for one
+ * cluster would make the console *"report health for a fleet"* — precisely the
+ * failure `soleEnvironment`'s own docblock exists to refuse. It stays.
+ *
+ * What actually carries the split is that the collator never reads
+ * `triage/targets.yaml`: `roles/triage.md` tells it *"Read the envelope, and read
+ * it as the whole of your input. It carries the environment, the full service
+ * list…"*, and that list is `SweepProducerDeps.services`, rendered by
+ * `renderSweepEnvelope`. So each collator is handed its own slice as its whole
+ * world, with `declared` narrowed to match — which keeps §6.5's completeness
+ * check meaningful per pair instead of making each pair fail the other's half.
+ *
+ * SRD §2.1 is the corroboration that this is a seam rather than a new idea: the
+ * roster it specifies is `{collators: ["tri-1"], reviewers: ["obs-t1", "obs-t2",
+ * "obs-t3"]}`. The multi-observer shape is the ORIGINAL design the console later
+ * shrank away from; this restores two of it, paired.
  *
  * `tri-1` RECONCILES AND `obs-t1` OBSERVES, which is the review console's
  * collator/reviewer shape reappearing over a different role pair
@@ -1008,8 +1278,9 @@ export const TRIAGE_WORKSPACE = "triage";
  * re-litigate it.** In `fleet.example.yaml` neither seat carries a worker-level
  * override (`{id: tri-1,` at `:911`, `{id: obs-t1,` at `:939`), so both resolve to
  * `pane_mode: rpc` from their roles and the plan this file builds is genuinely
- * the unattended one described above. The operator's gitignored `fleet.yaml`
- * overrides both to `tui`, and the TRACKED `triage/console.yaml` says so in its
+ * the unattended one described above. The operator's `fleet.yaml` — TRACKED
+ * since 2026-09-12, so this divergence is now a diff rather than a report of one
+ * — overrides both to `tui`, and `triage/console.yaml` says so in its
  * own words and pays the stated price — `recycle_after_sweeps: 0`, because
  * §6.6's recycle is a headless `up` that takes a `tui` seat down and cannot
  * bring it back. **Do not reconcile this docblock against the live file.** What
@@ -1027,147 +1298,177 @@ export const TRIAGE_WORKSPACE = "triage";
  * THE COST, stated as its two siblings state theirs — and it is the one line
  * here that got CHEAPER rather than merely shorter. One run at
  * `run.max_concurrent: 4` (`fleet.example.yaml:93`) is an admission budget of
- * four spent by two seats, so this console runs with slack where it was once
- * sized to fit exactly and none spare. The comment that raised that key
- * (`fleet.example.yaml:67-93`) argued from a three-wide fan-out and now says so
- * itself, citing this paragraph back; the VALUE is not wrong, it is merely no
- * longer tight. Do not lower it by reading this line: it bounds a RUN rather
+ * four spent by FOUR seats, so this console fits exactly with nothing spare —
+ * which is the size that key was raised for, not a size it has outgrown. Its own
+ * comment says so: *"The triage console is the first run holding four seats, and
+ * three of them fan out at once"*, text written for this shape that outlived the
+ * 2026-09-11 shrink to one pair and became correct again on 2026-09-12.
+ *
+ * **This paragraph claimed SLACK between those two dates and no longer does.**
+ * The slack was real while the console held two seats and is gone now. Do not
+ * lower this key by reading either version: it bounds a RUN rather
  * than the host, and a hand-run `up` over a wider worker set is the same run.
  */
-export const DEFAULT_TRIAGE_WORKERS: readonly string[] = ["tri-1", "obs-t1"];
+export const DEFAULT_TRIAGE_WORKERS: readonly string[] = [
+  "tri-1",
+  "obs-t1",
+  "obs-t2",
+  "obs-t3",
+];
 
 /**
- * The triage console's panes are EQUAL, and `null` says so — but the argument
- * that gets there is not {@link REVIEW_TOP_FRACTION}'s, and copying it would
- * have hidden the reason this console is the clearest `null` of the four.
+ * How much of the console's height the COLLATOR's row gets: one third, by owner
+ * decision 2026-09-13.
  *
- * ## A fraction moves the border BETWEEN ROWS, and this console has ONE ROW
+ * ## THIS WAS `null`, AND THE ARGUMENT FOR `null` WAS NOT WRONG — IT EXPIRED
  *
- * `applyTopFraction` addresses the BORDER BETWEEN THE ROWS — `operations.ts:539-553`,
- * the paragraph opening *"A RESIZE ADDRESSES A BORDER, NOT A PANE"*: a pane in the
- * top row has no border above it and cmux refuses `-U` there. So the only thing a
- * fraction can express is "the top row over the bottom one". Read that against the
- * diagram above: `tri-1` and `obs-t1` sit side by side in a SINGLE row, and the
- * shared builder's `down` entries begin at pane 3, which this console never reaches.
+ * The block this replaces ran to a hundred lines and concluded that a fraction
+ * here was *structurally inexpressible*. Its reasoning was sound and its premise
+ * was load-bearing and single: **`applyTopFraction` moves the border BETWEEN
+ * ROWS, and this console had ONE ROW.** `tri-1` and `obs-t1` sat side by side;
+ * the shared builder's `down` entries begin at pane 3, which a two-seat console
+ * never reached. With no second row there is no border, and a fraction has
+ * nothing to move.
  *
- * So the preference somebody would reach for this constant to state — *give the
- * reconciler more room than the observer* — is not expressible. That much is
- * structural. What a value here would DO if somebody wrote one anyway is a
- * weaker claim, and this docblock used to overstate it: it said such a value was
- * **"INERT, provably rather than as a matter of taste"**. It is not provable.
- * The argument below is split into the half that holds unconditionally and the
- * half that rests on a premise nothing in this repository asserts.
+ * That premise died with {@link triagePanes}' rewrite. The collator now takes
+ * the full width and the observers sit beneath it, so there IS a border between
+ * two rows and a fraction is expressible for the first time. The old docblock
+ * even named this as the trigger — *"whatever this console gained third would
+ * create a second row and make a fraction expressible"* — and it deserves the
+ * credit: it forecast the condition precisely, and the forecast is why this edit
+ * is a value change rather than a rediscovery.
  *
- * ### Unconditional: `null` is read before any geometry is
+ * **The lesson worth carrying forward is about the SHAPE of that argument, not
+ * its conclusion.** It was a long, confident case resting on one structural fact
+ * that a later edit removed, and nothing connected the two — no test, no type,
+ * nothing that reddened when the shape changed. It sat above a value that had
+ * silently become wrong. An argument whose premise can quietly expire should say
+ * which premise, plainly, so the next reader can check it in one glance. This one
+ * does: **the number below is defensible only while `triagePanes` builds one
+ * full-width row over another.** If the collator ever shares its row again, this
+ * goes back to `null`.
  *
- * `applyTopFraction` returns on `null` BEFORE it reads a pane
- * (`operations.ts:592`, `if (fraction === null) return;`), so `null` is the one
- * value whose meaning does not depend on a pane shape that can change underneath
- * it — and the only way a reader can tell "this console wants the halves
- * `new-split` gave it" from "this console asked for something the geometry
- * silently threw away" is which of the two the constant says. **That is what
- * makes `null` load-bearing rather than decorative here**, and it is the half of
- * the old argument that survives untouched.
+ * ## Why one third rather than a half
  *
- * ### Conditional: the empty-set reading needs two numbers to agree
+ * `new-split` halves, so the shape that arrives is 50/50 and the correction is a
+ * shrink. The rows are genuinely UNLIKE, which is {@link OPERATIONS_TOP_FRACTION}'s
+ * situation rather than {@link REVIEW_TOP_FRACTION}'s: the collator holds ONE
+ * document — the sweep it composed and the collation it wrote back — while the
+ * row beneath holds three independent observers working three slices at once.
+ * Three panes of live work want the room; one pane of settled output does not.
  *
- * Both panes share one `y`, so `topY` selects both, and the row `movingIds` then
- * asks to move is `p.y !== topY` — the EMPTY SET — **whenever `growTop` is
- * false** (`operations.ts:619-624`). That qualifier is the whole of it. `growTop`
- * is `topTarget > topHeight`, and those two come off the SAME `list-panes`
- * payload by DIFFERENT keys: `topHeight` is the largest `pixel_frame.height` in
- * the top row, `topTarget` is `container_frame.height` times the fraction
- * (`parsePaneGeometry`, `parse.ts:283-296`, reads each from its own key).
- * **Nothing here asserts that a single row's pane height equals its container's**
- * — no test, no invariant, no comment on the cmux side of the parse.
+ * A shrink is also the branch that already works. `applyTopFraction` chooses the
+ * row by the SIGN of the correction, so a target below the current height
+ * addresses the BOTTOM row with `-U`, which is a border those panes really have.
+ * Measured on the live console 2026-09-13: container 1052px, top row 526px, so
+ * the target of 350.67px makes `growTop` false and the three observer panes each
+ * ask to grow to 701.33px. They share ONE divider, so the re-read-before-every-pane
+ * rule collapses the second and third asks to sub-pixel no-ops — the behaviour
+ * that docblock's 2026-09-03 measurement describes, reached here for the first
+ * time by a console other than `operations`.
  *
- * If `container_frame` counts chrome the panes' `pixel_frame` does not, then some
- * fraction below 1 makes `topTarget > topHeight`, `growTop` flips TRUE, and the
- * row selected is `p.y === topY` — BOTH panes. A `resize-pane -D` is then issued
- * for every pane whose delta clears the one-pixel guard, against a border a
- * single-row console does not have; what cmux does with that is its business, and
- * either outcome falsifies *"not one `resize-pane` is issued"*. A fraction ABOVE
- * 1 takes that branch with no assumption about chrome at all.
- *
- * So `0.65` here would still not be a layout with a rationale — but for a better
- * reason than "it would do nothing": it would be a number whose effect turns on a
- * geometry relationship nothing pins down. That is a worse thing to write than an
- * inert one, which is why the narrower claim argues for `null` at least as hard.
- *
- * The INEXPRESSIBILITY, which is the structural half, is a stronger statement
- * than {@link REVIEW_TOP_FRACTION}'s *"there is nothing to favour"*, and
- * deliberately so: that argument concedes the day somebody decides there IS
- * something to favour, and on this console's shape there is no such day, because
- * there is nowhere for the favour to go.
- *
- * ## What `OPERATIONS_TOP_FRACTION` exists for, which this console does not have
- *
- * 0.65 corrects a console whose rows are UNLIKE — two agent panes over one
- * full-width monitor that says its piece in a handful of lines and repeats.
- * This console has no second row to be unlike the first, and both panes are an
- * agent's view in any case, so `new-split`'s halves are already the answer.
- * `null` skips the resize outright rather than asking for a fraction of `1/2`
- * and leaning on the sub-pixel guard to make it a no-op:
- * {@link DEVELOPMENT_TOP_FRACTION} records why a value that happens to round to
- * nothing must not stand in for a stated one.
- *
- * ## And the reason that is this console's alone: nobody is watching
+ * ## And the old caveat that still stands: nobody is watching
  *
  * Height is a claim about where an eye should go first, and on the ordinary path
- * there is no eye — this console runs on a clock, with no keyboard in either
- * seat. The moment it IS read is after something has already gone wrong, and
- * then the interesting pane is whichever one broke. A layout that had
- * pre-committed to an answer would be wrong half the time.
- *
- * ## WHEN THIS SHOULD BECOME A NUMBER, named so the next reader knows the trigger
- *
- * **A THIRD PANE — which is a sharp trigger rather than a vague one, and the
- * shrink to two seats is what sharpened it.** Pane 3 is the shared builder's
- * first `down` entry, so whatever this console gains third is the thing that
- * creates a second row and makes a fraction expressible for the first time.
- * Two candidates are already on the table and they want opposite values: a
- * second observer seat (which needs `soleEnvironment` lifted first — see
- * {@link DEFAULT_TRIAGE_WORKERS}) would make the rows ALIKE and this `null`
- * would survive on {@link REVIEW_TOP_FRACTION}'s weaker argument, whereas the
- * non-agent pane SRD-TRIAGE-CONSOLE §11 Q6 leaves open — a `pifleet monitor`
- * view, or a tail of the actor's log — would make the bottom row a status
- * readout. That second case is precisely `OPERATIONS_TOP_FRACTION`'s situation,
- * and at that point a fraction stops being inert and starts being required.
+ * there is no eye — this console runs on a clock with no keyboard in any seat.
+ * The moment it IS read is after something has gone wrong. That argued for
+ * declining to pre-commit while the panes were interchangeable; it does not argue
+ * against this value, because the asymmetry being expressed is not about interest
+ * but about CONTENT — three panes doing three things need more room than one pane
+ * holding one document, whoever is or is not looking at them.
  */
-export const TRIAGE_TOP_FRACTION: number | null = null;
+export const TRIAGE_TOP_FRACTION: number | null = 1 / 3;
 
 /**
- * The triage console's panes, in creation order.
+ * How much of the container's WIDTH each pane in the observer row gets.
  *
- * The same BUILDER as {@link reviewPanes} and {@link developmentPanes} — the
- * shared {@link agentSquarePanes} — with only the default worker set and the
- * name in a refusal differing. **Not the same SHAPE, and the distinction is the
- * one this docblock exists to keep straight**: those two name four workers and
- * get the full 2x2, this one names two and gets the square's first row. One
- * table, read with a shorter list.
+ * ## Why this constant exists when no sibling console has one
  *
- * **That this is three lines is the claim SRD-TRIAGE-CONSOLE D5 makes about the
- * whole design**: a fourth console is a DATA addition. The request plane
- * collected that bet already (`TRIAGE_CONSOLE_ROSTER` is a literal over the same
- * two roles and changed no logic); this is the layout plane collecting it, and
- * the split table — the part that actually breaks, because pane 4 must anchor on
- * pane 2 rather than on pane 3 — is read from one place for the third time
- * rather than copied for the second.
+ * `new-split` halves. Every console before this one was a 2x2, so two columns
+ * each split once were already equal and nothing ever had to ask. A row of
+ * THREE cannot be reached that way at any depth — halving produces powers of
+ * two — so the observer row comes out of the builder at **50/25/25** and stays
+ * there unless something corrects it.
  *
- * **The seat count MOVING is what proved the delegation was worth having, and
- * that is no longer a forecast.** A hand copy of the square made here would have
- * had to be edited when this console went from four seats to two; the delegation
- * absorbed it in {@link DEFAULT_TRIAGE_WORKERS} and this function did not change
- * at all.
+ * MEASURED on the live console 2026-09-13, before any correction: a 795.33px
+ * container holding `obs-t1` at 397.67, `obs-t2` at 198.83 and `obs-t3` at
+ * 198.83. Exactly one half and two quarters, which is what a `right` split
+ * chain always gives — each split halves only what the previous pane held.
  *
- * `triage-plan.test.ts` pins the sharing structurally rather than taking it on
- * trust: this plan's split table is compared against `reviewPanes`' at RUNTIME
- * on one shared FOUR-worker set — deliberately not the two consoles' defaults,
- * which no longer agree even in length — so a copy made here would pass on the
- * day it was written and redden the moment `agentSquarePanes` moved, which is
- * the only day the difference between sharing and copying has ever cost
- * anything.
+ * ## Why that is a defect rather than a preference
+ *
+ * The three observers are handed EVEN shares of the environment
+ * (`roles/triage.md` asks for the split to be even, and `evenSlices` makes it
+ * so). A row that renders one of them at twice the width of the other two says
+ * the opposite — it reads as a lead observer and two helpers, which is not the
+ * arrangement and not what the collator briefed. The layout is the only part of
+ * this console an operator sees before reading anything, so a shape that
+ * misdescribes the work is worse here than on a console somebody is typing in.
+ *
+ * ## `1/3` rather than a list of three
+ *
+ * One fraction applied per pane, not a per-pane table, because the requirement
+ * is EQUALITY rather than a chosen distribution — a table would be three
+ * numbers that must be kept summing to one, and the first edit that added a
+ * fourth observer would leave it summing to more. A single fraction with N
+ * panes is the same statement and cannot drift out of range.
+ */
+export const TRIAGE_OBSERVER_WIDTH_FRACTION: number | null = 1 / 3;
+
+/**
+ * The triage console's panes, in creation order: ONE COLLATOR ACROSS THE TOP,
+ * its observers along the bottom.
+ *
+ *     +-----------------------------------+
+ *     |               tri-1               |
+ *     +----------+-----------+------------+
+ *     |  obs-t1  |  obs-t2   |   obs-t3   |
+ *     +----------+-----------+------------+
+ *
+ * **THIS STOPPED SHARING {@link agentSquarePanes} ON 2026-09-13, and the reason
+ * is a shape the square cannot express.** The square's table is
+ * `[right, down·from0, down·from1]`, which makes pane 2 the top row's second
+ * half — so pane 1 can never be full width. A collator over N observers needs
+ * the first split to go DOWN off pane 1 and every later one to go RIGHT along
+ * the row that split created. Delegating to the square would have produced a
+ * 2x2 with `tri-1` in a quarter of the screen and `obs-t3` under `obs-t1`,
+ * which is a different console from the one the operator asked for.
+ *
+ * **AND ON THE SAME DAY IT STARTED SHARING AGAIN — {@link collatorOverRowPanes},
+ * with `review`.** That is not a reversal of the paragraph above; it is the
+ * distinction that paragraph was drawing, arriving in code. What triage could
+ * never share was the SQUARE. What it always could share is a builder for its
+ * own shape, and the moment `review` was asked to take that shape there were two
+ * consoles needing one table. So the table moved out of this function rather
+ * than being copied into that one.
+ *
+ * **THREE CLAIMS ABOUT SHARING HAVE NOW BEEN TRUE HERE IN TWENTY-FOUR HOURS**,
+ * and the sequence is worth more than any one of them. It read "shares the
+ * square, and a hand copy would have had to be edited when this console went
+ * from four seats to two" — true while triage was a SUBSET of the square. Then
+ * "shares nothing; the shape differs rather than the count" — true for one day,
+ * while it was the only console of its shape. Now "shares `collatorOverRowPanes`
+ * with `review`". Every one of the three was correct when written and none of
+ * them was wrong later; what changed underneath each was the set of consoles in
+ * this file. **A docblock about what a function SHARES is a claim about its
+ * siblings, not about itself, so it expires when a sibling moves and nothing in
+ * this function will redden.** Check the caller list before believing this
+ * paragraph: `grep -n 'collatorOverRowPanes' src/`.
+ *
+ * The anchor discipline — that a split names the pane it divides rather than
+ * "the previous one" — moved out with the table and is stated at
+ * {@link collatorOverRowPanes}. It is the lesson `operationsPanes` learned at
+ * its git pane, and it is the part that actually breaks under copying, which is
+ * why it now lives in exactly one place for both consoles.
+ *
+ * `triage-plan.test.ts` pinned the SHARING structurally, comparing this plan's
+ * split table against `reviewPanes`' at runtime. That pin was inverted on
+ * 2026-09-13 to assert the two do NOT match, and is now inverted BACK, because
+ * they match again through a different builder. It has therefore flipped twice
+ * in a day — which is the strongest argument available that the property worth
+ * pinning is **this console's own shape**, the collator full width over one row
+ * of observers, rather than its agreement with a neighbour that is free to move.
  */
 export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
-  return agentSquarePanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
+  return collatorOverRowPanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
 }

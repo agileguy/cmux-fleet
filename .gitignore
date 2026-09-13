@@ -6,7 +6,6 @@ dist/
 .pifleet/
 run-*/
 coverage/
-fleet.yaml
 
 # The mount probe's sentinel (MOUNT_PROBE_SENTINEL). `doctor` now probes the
 # CHECKOUT as well as the runs and scratch roots, because the relay bind-mounts
@@ -24,9 +23,13 @@ gha-creds-*.json
 # Agent worktrees — transient, created by background agents
 .claude/worktrees/
 
-# Local console fleets. `fleet.yaml` is already ignored for this reason; these
-# are the same thing under a name `--config` can point at, and they name the
-# operator's own hosts, endpoints and egress allowances. `fleet.example.yaml`
-# is the tracked, annotated one.
+# Local console fleets — the same thing as `fleet.yaml` under a name `--config`
+# can point at, naming the operator's own hosts, endpoints and egress
+# allowances. `fleet.yaml` ITSELF IS NOW TRACKED, by operator decision
+# 2026-09-12: the live config had drifted from `fleet.example.yaml` with no
+# diffable record of how, which is the cost the ignore was buying. These two
+# stay ignored because they are per-machine scratch configs rather than the
+# fleet's one live definition. `fleet.example.yaml` remains the annotated
+# reference copy.
 fleet-development.yaml
 fleet-operations-local.yaml

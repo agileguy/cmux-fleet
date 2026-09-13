@@ -156,6 +156,19 @@ export interface WorkspaceListed {
   id: string;
   /** `custom_title` round-trips `--name` (SRD §4.1); `title` is derived and unstable. */
   customTitle: string | null;
+  /**
+   * `custom_color` — `#rrggbb`, or `null` when nobody ever set one.
+   *
+   * Read so `--recreate` can put a console's colour back. Closing a workspace
+   * takes the colour with it and the rebuilt console is a DIFFERENT workspace,
+   * which cmux has no reason to colour; capturing it before the close is the
+   * only moment it can still be read.
+   *
+   * `null` is the ordinary case and means *leave it uncoloured* — never *apply
+   * a default*. A console that never had a colour must not acquire one from a
+   * rebuild.
+   */
+  customColor: string | null;
 }
 
 /** `workspace list --json --id-format uuids` → `{window_id, workspaces:[{id, custom_title, …}]}`. */
@@ -172,7 +185,14 @@ export function parseWorkspaceList(stdout: string): WorkspaceListed[] {
     const id = pick(e, ["id", "ref"]);
     if (id === null) continue;
     const title = e["custom_title"];
-    out.push({ id, customTitle: typeof title === "string" ? title : null });
+    const color = e["custom_color"];
+    out.push({
+      id,
+      customTitle: typeof title === "string" ? title : null,
+      // Empty string reads as absent: cmux emits `null` for "no colour", and a
+      // blank would otherwise become a `--color ""` on the rebuild.
+      customColor: typeof color === "string" && color.length > 0 ? color : null,
+    });
   }
   return out;
 }
@@ -186,6 +206,57 @@ export function parseWorkspaceList(stdout: string): WorkspaceListed[] {
  */
 export function findWorkspaceByTitle(list: WorkspaceListed[], name: string): WorkspaceListed | null {
   return list.find((w) => w.customTitle === name) ?? null;
+}
+
+/** One sidebar group, from `workspace group list --json`. */
+export interface WorkspaceGroupListed {
+  /** A `workspace_group:N` ref, or a UUID under `--id-format uuids`. */
+  id: string;
+  /** The name the SIDEBAR shows — the one field no other verb prints. */
+  name: string | null;
+}
+
+/**
+ * `workspace group list --json` → `{groups:[{ref|id, name, …}]}`.
+ *
+ * A SEPARATE parser from {@link parseWorkspaceList}, because a group is not a
+ * workspace: it OWNS one — its anchor — and the anchor is what `workspace list`
+ * reports. Reusing that parser here would answer with the anchor's
+ * `custom_title` (`Group 1`) when the caller asked for the group's name
+ * (`pi-fleet`), which is a wrong answer that looks like a right one.
+ */
+export function parseWorkspaceGroupList(stdout: string): WorkspaceGroupListed[] {
+  const o = asObject("workspace group list output", stdout);
+  const list = o["groups"];
+  if (!Array.isArray(list)) {
+    throw new CmuxParseError("workspace group list output (no groups array)", stdout);
+  }
+  const out: WorkspaceGroupListed[] = [];
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    // Both spellings, for the same reason every accessor in this file tries
+    // both: `--id-format uuids` renames `ref` to `id`.
+    const id = pick(e, ["id", "ref"]);
+    if (id === null) continue;
+    const name = e["name"];
+    out.push({ id, name: typeof name === "string" ? name : null });
+  }
+  return out;
+}
+
+/**
+ * Find a sidebar group by the name the operator actually sees.
+ *
+ * Matched on `name` ONLY, and resolved on every rebuild rather than stored: a
+ * `workspace_group:N` ref renumbers as groups move, and a UUID belongs to one
+ * machine. Neither can be written down in a tracked repository, and a name can.
+ */
+export function findWorkspaceGroupByName(
+  list: WorkspaceGroupListed[],
+  name: string,
+): WorkspaceGroupListed | null {
+  return list.find((g) => g.name === name) ?? null;
 }
 
 export interface PaneListed {
@@ -257,21 +328,57 @@ export function parsePaneSurfaces(stdout: string): PaneSurface[] {
   return out;
 }
 
-/** One pane's vertical extent, in the pixel space `list-panes --json` reports. */
+/**
+ * One pane's BOX, in the pixel space `list-panes --json` reports.
+ *
+ * ## The horizontal keys, added 2026-09-13, and why they are not optional
+ *
+ * This was `{paneId, y, height}` while every console was a 2x2 or a pair of
+ * rows: `new-split` halves, so equal columns came for free and nothing ever
+ * needed to know where a pane STARTED. The triage console's observer row is the
+ * first layout in this repository with THREE panes side by side, and thirds are
+ * not reachable by halving at any depth — so a horizontal correction has to be
+ * computed, and computing one needs `x` to order the row and `width` to size it.
+ *
+ * A pane is admitted below only when ALL FOUR numbers are numbers. That couples
+ * the vertical pass to the horizontal keys, which is a real cost and is stated
+ * rather than hidden: a cmux that reported `y`/`height` and no `x`/`width` would
+ * now drop every pane, and {@link parsePaneGeometry}'s caller would take its
+ * "nothing to correct" path and leave the layout as split. The alternative —
+ * defaulting the missing ones — is worse, because a default is a number the
+ * arithmetic cannot distinguish from a measurement, and the resize it produces
+ * would be confidently wrong rather than absent.
+ *
+ * MEASURED against the installed cmux 0.64.x on 2026-09-13, reading the live
+ * triage workspace: `pixel_frame` carries `x`, `y`, `width` and `height`, and
+ * `container_frame` carries `height` and `width`. Four panes, all four keys
+ * present on every one.
+ */
 export interface PaneGeometry {
   paneId: string;
+  x: number;
   y: number;
+  width: number;
   height: number;
 }
 
 /**
- * `list-panes --json` → the container's height plus each pane's vertical box.
+ * `list-panes --json` → the container's box plus each pane's box.
  *
  * Separate from {@link parseListPanes} because it needs fields that call does
  * not: identity is enough to focus a pane, and nothing but layout wants pixels.
+ *
+ * `container_frame` is a SIZE and not a rectangle — it reports `height` and
+ * `width` with no origin, while each pane's `x`/`y` are absolute and carry the
+ * window's own offsets (measured: a top pane at `y: 28` under a 1052-high
+ * container, and a left edge at `x: 264.67` beside a sidebar). So a pane's
+ * position is only ever meaningful RELATIVE to its siblings — which is why the
+ * callers group rows by comparing `y` between panes rather than against zero,
+ * and order a row by comparing `x` the same way.
  */
 export function parsePaneGeometry(stdout: string): {
   containerHeight: number;
+  containerWidth: number;
   panes: PaneGeometry[];
 } {
   const o = asObject("list-panes output", stdout);
@@ -284,6 +391,10 @@ export function parsePaneGeometry(stdout: string): {
   if (typeof h !== "number") {
     throw new CmuxParseError("list-panes output (container_frame has no height)", stdout);
   }
+  const w = (frame as Record<string, unknown>)["width"];
+  if (typeof w !== "number") {
+    throw new CmuxParseError("list-panes output (container_frame has no width)", stdout);
+  }
   const panes: PaneGeometry[] = [];
   for (const entry of list) {
     if (typeof entry !== "object" || entry === null) continue;
@@ -292,10 +403,19 @@ export function parsePaneGeometry(stdout: string): {
     const box = e["pixel_frame"];
     if (paneId === null || typeof box !== "object" || box === null) continue;
     const b = box as Record<string, unknown>;
-    if (typeof b["y"] !== "number" || typeof b["height"] !== "number") continue;
-    panes.push({ paneId, y: b["y"], height: b["height"] });
+    // All four, for the reason {@link PaneGeometry} states: a partial box is
+    // dropped rather than completed with a default the arithmetic would trust.
+    if (
+      typeof b["x"] !== "number" ||
+      typeof b["y"] !== "number" ||
+      typeof b["width"] !== "number" ||
+      typeof b["height"] !== "number"
+    ) {
+      continue;
+    }
+    panes.push({ paneId, x: b["x"], y: b["y"], width: b["width"], height: b["height"] });
   }
-  return { containerHeight: h, panes };
+  return { containerHeight: h, containerWidth: w, panes };
 }
 
 export interface SplitCreated {

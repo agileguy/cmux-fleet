@@ -1992,10 +1992,13 @@ where `get_replies` first meets a model.
 
 ### Phase 6 — Phase A rollout
 
-- **6.1** *(operator, not dispatchable)* Add `submit_report` to every role's `tools:` in the untracked
+- **6.1** *(operator, not dispatchable)* Add `submit_report` to every role's `tools:` in the then-untracked
   live `fleet.yaml`. **Remove nothing.** Touches: `fleet.yaml`.
-  *Acceptance: `config validate` exits 0. **Not dispatchable — `fleet.yaml` is gitignored
-  (`.gitignore:9`) and an engineer editing it produces no diff**, which grades `failed` under ISC-93.*
+  *Acceptance: `config validate` exits 0. **Not dispatchable — `fleet.yaml` was gitignored
+  and an engineer editing it produced no diff**, which grades `failed` under ISC-93.*
+  **[SUPERSEDED 2026-09-12: `fleet.yaml` is TRACKED. The non-dispatchability reason is void — an
+  engineer editing it now produces a real diff. The task itself is long done; this note exists so the
+  PATTERN is not copied into a future phase that no longer needs splitting.]**
 - **6.2** The same additions in the tracked example. Touches: `fleet.example.yaml`.
 - **6.3** One review console cycle and one triage sweep, with `write` still present. Touches: nothing.
   *Acceptance: at least one `pifleet.submit/v1` per seat, and the harvest reads the envelopes exactly
@@ -2039,7 +2042,8 @@ where `get_replies` first meets a model.
   sentence that made it wrong is 7.1's.** The original reasoning still holds for the half it was
   about: there is no `collator` in `fleet.example.yaml` — its `roles:` block is
   `sre observer verifier engineer reviewer tester ticketing triage` — so the config change really
-  does live only in the operator's gitignored file, exactly as 6.1's does. What that reasoning
+  does live only in the operator's own file — gitignored when this was written, TRACKED since
+  2026-09-12 — exactly as 6.1's does. What that reasoning
   missed is that the config is not the only thing a narrowing touches. **7.1 measured a role whose
   prompt still claimed a grant the config had taken away, and it cost a lens**: `rev-ctx-1`
   composed a 13 933-byte review into a `write` it no longer held, got `Tool write not found`, and
@@ -2321,8 +2325,14 @@ rather than discovered per task.
   block in `fleet.example.yaml`, so its GRANT is never resolved by the tracked probe; only the prose
   half is checked unconditionally (it carries no paraphrase, satisfying the implication vacuously).
   A `describe.skipIf` block re-runs the full nine-role check against the operator's own `fleet.yaml`,
-  which is gitignored — **so that block SKIPS in CI and is local-only evidence.** ISC-1161 therefore
-  stays `[~]`: nothing the repository ships grades the `collator`'s grant.
+  which was gitignored — **so that block SKIPPED in CI and was local-only evidence.** ISC-1161
+  therefore stayed `[~]`: nothing the repository shipped graded the `collator`'s grant.
+  **[SUPERSEDED 2026-09-12/13. `fleet.yaml` is TRACKED, so the gate's condition became permanently
+  true and the block ran everywhere while still reading as conditional; it has since been retired by
+  inversion — the check runs unconditionally and asserts the file's presence. The `collator`'s grant
+  IS now graded by something the repository ships. ISC-1161's grade was not mechanically upgraded,
+  because the criterion as written is about `fleet.example.yaml` having no `collator` block, which
+  remains true; re-grading it is a decision, not a formality.]**
 
 ---
 

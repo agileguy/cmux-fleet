@@ -2,19 +2,35 @@
 /**
  * `scripts/triage` — open the standing scheduled triage console.
  *
- *   ./scripts/triage                                # tri-1, obs-t1
+ *   ./scripts/triage                                # tri-1, obs-t1, obs-t2, obs-t3
  *   ./scripts/triage --dry-run                      # print the plan, touch nothing
- *   ./scripts/triage --restart obs-t1               # respawn the observer
+ *   ./scripts/triage --restart obs-t1               # respawn one observer
  *   ./scripts/triage --restart tri-1 --task t.json  # fresh reconciler, then dispatch
  *
- * EQUAL panes. The reconciler takes pane 1 — the seat the keyboard would land
- * in, if anybody were typing — and the observer sits beside it:
+ * ONE COLLATOR ACROSS THE TOP, ITS THREE OBSERVERS ALONG THE BOTTOM. `tri-1`
+ * divides the environment between them and collates their reports into one
+ * document:
  *
  * ```
- * +---------------+---------------+
- * |     tri-1     |    obs-t1     |
- * +---------------+---------------+
+ * +-----------------------------------+
+ * |               tri-1               |
+ * +----------+-----------+------------+
+ * |  obs-t1  |  obs-t2   |   obs-t3   |
+ * +----------+-----------+------------+
  * ```
+ *
+ * THE ORDER OF `DEFAULT_TRIAGE_WORKERS` IS WHAT BUILDS THIS, and the diagram is
+ * pinned to it cell-for-cell by `fresh-dispatch.test.ts` — the picture is
+ * load-bearing, not decoration. `triagePanes` splits `[null, down-from-0,
+ * right-from-1, right-from-2]`: the collator first, then one split DOWN to make
+ * the observer row, then RIGHT along it. It STOPPED sharing `agentSquarePanes`
+ * on 2026-09-13 — that table's `[null, right, down-from-0, down-from-1]` makes
+ * pane 2 the top row's second half, so pane 1 can never be full width.
+ *
+ * (TWO PAIRS for one day, 2026-09-12: `tri-1` over `obs-t1` and `tri-2` over
+ * `obs-t2`, a 2x2 off the shared square. It worked, and it produced two
+ * collation documents the host had to merge; one collated report is why the
+ * second collator became a third observer.)
  *
  * ## What makes this different from `scripts/review`
  *
@@ -550,7 +566,13 @@ async function main(argv: string[]): Promise<number> {
  */
 function triageActorArgv(cliEntry: string, cadenceS: number | null): string[] {
   return [
-    "bun",
+    // THE RUNNING BUN, never the word `bun` — measured 2026-09-12. cmux is
+    // launched by launchd and carries PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a
+    // bare `bun` is `command not found` in anything it spawns while `which bun`
+    // succeeds in every terminal an operator would check it in. The actor is the
+    // half that runs when nobody is watching, so it is the worst place to leave
+    // a PATH dependency. Same idiom as src/supervisor/launch.ts:39.
+    process.execPath,
     "run",
     cliEntry,
     "triage",
@@ -877,7 +899,9 @@ function hostEnvFile(): Record<string, string> {
  */
 async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
   try {
-    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+    // `process.execPath` and not `"bun"`: this script is reachable from a cmux
+    // pane, whose PATH is launchd's four entries and has no bun on it.
+    const proc = Bun.spawn([process.execPath, "run", `${repoRoot}/src/cli/index.ts`, ...args], {
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -902,7 +926,8 @@ async function runOutput(repoRoot: string, args: readonly string[]): Promise<str
  * SAY SOMETHING, by keeping the validator's own complaint.
  */
 async function runChecked(repoRoot: string, args: readonly string[]): Promise<string> {
-  const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+  // `process.execPath` and not `"bun"`, for the reason `runOutput` records.
+  const proc = Bun.spawn([process.execPath, "run", `${repoRoot}/src/cli/index.ts`, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });

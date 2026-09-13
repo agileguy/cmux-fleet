@@ -47,7 +47,10 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { DEFAULT_REVIEW_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
+import {
+  DEFAULT_REVIEW_WORKERS,
+  DEFAULT_TRIAGE_WORKERS,
+} from "../../src/backends/cmux/operations-plan.ts";
 import { parseConfig } from "../../src/config/load.ts";
 import { workerOutboxDir } from "../../src/run/paths.ts";
 import {
@@ -1542,7 +1545,18 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
 
     expect(read.kind).toBe("ok");
     if (read.kind !== "ok") return;
-    expect(read.request.requests.map((r) => r.worker)).toEqual(["obs-t1"]);
+    /*
+     * ASSERTED AGAINST THE ROSTER, not against a literal — corrected 2026-09-12
+     * when the console grew a second pair. `triageFanOut` builds one request per
+     * entry of `TRIAGE_CONSOLE_ROSTER.reviewers`, so a hard-coded `["obs-t1"]`
+     * was asserting the fixture's old WIDTH rather than the roster's acceptance,
+     * and it reddened on a roster edit that this positive control should have
+     * been indifferent to. What this test is for is that a legal fan-out is
+     * ACCEPTED, at whatever width the console currently has.
+     */
+    expect(read.request.requests.map((r) => r.worker)).toEqual([
+      ...TRIAGE_CONSOLE_ROSTER.reviewers,
+    ]);
   });
 
   /**
@@ -1619,9 +1633,22 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
   });
 
   /**
-   * The anti-drift pin, and it is against the TRACKED config for CI's reason:
-   * `fleet.yaml` is gitignored, so a probe reading it is red on a clean
-   * checkout (`reviewer-role.test.ts:354-359`).
+   * The anti-drift pin, and it is against `fleet.example.yaml` — but NOT for
+   * the reason this docblock used to give. It said `fleet.yaml` "is gitignored,
+   * so a probe reading it is red on a clean checkout", and cited
+   * `reviewer-role.test.ts:354-359` for it. Both halves are wrong now. The live
+   * file has been tracked since 2026-09-12, so a probe reading it would be red
+   * nowhere; and the citation has rotted — lines 354-359 of that file are a
+   * docblock about the reviewer's report ROUTE, while the CI argument being
+   * pointed at sits near its line 631 and is itself written against the old
+   * ignore.
+   *
+   * What the pin rests on instead: `fleet.example.yaml` is the annotated
+   * reference this repository ships, so grading the roster against it measures
+   * the artifact rather than whichever seats the operator's fleet holds today.
+   * Both files declare all four triage seats, so the choice costs no coverage
+   * here — which is exactly why it should be made on the shipped-artifact
+   * argument and not on an availability one that no longer exists.
    *
    * Without this the roster is a second, private spelling of the console's
    * membership. Rename a seat in `fleet.example.yaml` and not here and the
@@ -1634,14 +1661,15 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
    * outcome: `tri-1` demoted to `observer` would still be found here and would
    * be dispatched a partition brief it has no prompt for.
    *
-   * **What this does NOT pin, so the silence is not read as coverage.**
-   * `REVIEW_CONSOLE_ROSTER` is pinned to `DEFAULT_REVIEW_WORKERS` as a SET, in
-   * both directions. This console has no worker-set export yet — the pane plan
-   * is Phase 4 — so a THIRD seat added to the config and not to this roster
-   * passes here. When `DEFAULT_TRIAGE_WORKERS` lands, this should become the
-   * same set equality.
+   * **THE GAP THIS PARAGRAPH USED TO NAME IS CLOSED, and the paragraph outlived
+   * it by long enough to be worth recording.** It said this console "has no
+   * worker-set export yet — the pane plan is Phase 4", so a seat added to the
+   * config and not to the roster would pass; it asked for a set equality "when
+   * `DEFAULT_TRIAGE_WORKERS` lands". That constant landed, and the set equality
+   * is asserted twenty lines below — the request and its fulfilment sat in one
+   * test, contradicting each other, through two roster changes.
    */
-  test("names both seats the tracked example declares, by id and by role", async () => {
+  test("names every seat the tracked example declares, by id and by role", async () => {
     const path = `${ROOT}fleet.example.yaml`;
     const { config } = await parseConfig(exampleConfig(), path);
     const roles = new Map(config.workers.map((w) => [w.id, w.role]));
@@ -1651,8 +1679,26 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
     ]);
     expect(TRIAGE_CONSOLE_ROSTER.reviewers.map((id) => [id, roles.get(id)])).toEqual([
       ["obs-t1", "observer"],
-
+      ["obs-t2", "observer"],
+      ["obs-t3", "observer"],
     ]);
+
+    /*
+     * THE SET EQUALITY THIS BLOCK'S DOCBLOCK ASKED FOR, landed 2026-09-12.
+     *
+     * The gap it names is precise and the four literals above do not close it:
+     * a config check catches a seat RENAMED in one place, and catches nothing
+     * when a seat is added to `DEFAULT_TRIAGE_WORKERS` and not to the roster, or
+     * the other way round. Both lists are now the console's seats, so they must
+     * agree as SETS — `REVIEW_CONSOLE_ROSTER`'s pin at :240, over this console.
+     *
+     * Sorted rather than ordered on purpose: `DEFAULT_TRIAGE_WORKERS` is in PANE
+     * order (both collators, then both observers, which is what pairs each
+     * observer under its own collator) and the roster is grouped by ROLE. The
+     * two orders are different facts and neither is wrong.
+     */
+    const rostered = [...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ROSTER.reviewers];
+    expect([...rostered].sort()).toEqual([...DEFAULT_TRIAGE_WORKERS].sort());
   });
 
   /**
@@ -1926,7 +1972,15 @@ describe("§7.3 — `services` is required on triage and refused on review", () 
     // BY VALUE. A parse that dropped the field would leave `partitionFromRequests`
     // projecting an idle observer and the sweep refused as incomplete — a
     // failure whose message points at the model rather than at the schema.
-    expect(read.request.requests.map((r) => r.services)).toEqual([["mia"]]);
+    //
+    // DERIVED FROM THE FIXTURE'S OWN RULE, not spelled as a literal. `triageFanOut`
+    // gives worker `i` the share `[TRIAGE_SERVICES[i % 3]]`, so a hard-coded
+    // `[["mia"]]` pinned the roster's old WIDTH into a test about whether the
+    // FIELD survives the parse — and it reddened on the 2026-09-12 second pair
+    // for a reason that had nothing to do with `services`.
+    expect(read.request.requests.map((r) => r.services)).toEqual(
+      TRIAGE_CONSOLE_ROSTER.reviewers.map((_, i) => [TRIAGE_SERVICES[i % 3]!]),
+    );
   });
 
   /**

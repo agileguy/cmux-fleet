@@ -270,7 +270,13 @@ function driver(opts: DriverOptions = {}): Spy {
         collated.push(sweepId);
         if (opts.collation !== undefined) return opts.collation(sweepId);
         const rows = opts.rows?.(sweepId) ?? SERVICES.map((s) => healthyRow(s));
-        return { document: document(sweepId, rows), evidenceRef: `${sweepId}/triage.json` };
+        return {
+          document: document(sweepId, rows),
+          evidenceRef: `${sweepId}/triage.json`,
+          // The default fake is a CLEAN sweep, so no collator replayed. A test
+          // that wants the stale arm supplies its own `collation`.
+          staleCollators: [],
+        };
       },
     },
   };

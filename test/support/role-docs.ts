@@ -251,15 +251,36 @@ export function workerGrant(w: ResolvedWorker): readonly ToolName[] {
 }
 
 /**
- * The TRACKED config, which is the one CI has.
+ * The SHIPPED REFERENCE config — `fleet.example.yaml`, the annotated copy this
+ * repository publishes — which is what every ungated probe in the suite grades.
  *
- * `fleet.yaml` is gitignored — `ci.yml` is checkout, `bun install`,
+ * ## The reason this docblock used to give, and why it is void
+ *
+ * It said: "`fleet.yaml` is gitignored — `ci.yml` is checkout, `bun install`,
  * `bun test test/unit`, with no step that creates it — so a probe that read it
- * unconditionally would be red on every clean checkout. That is the defect
- * `review-plan.test.ts` documents thirteen tests' worth of, and this function
- * exists so no caller has to remember it: the grading arm reads
- * `fleet.example.yaml`, which is committed and always present, and the live file
- * is a SEPARATE, GATED probe.
+ * unconditionally would be red on every clean checkout." The `ci.yml` half is
+ * still exactly right, and the conclusion no longer follows from it.
+ * `fleet.yaml` has been TRACKED since 2026-09-12, by operator decision recorded
+ * in `.gitignore`: the live config had drifted from this file with no diffable
+ * record of how, which is the cost the ignore was buying. A plain checkout
+ * therefore CONTAINS it, in CI and everywhere else, and a probe reading it
+ * unconditionally would now be green. Anything in the suite still gated on
+ * `existsSync(fleet.yaml)` is gated on a condition that is always true.
+ *
+ * ## The reason that survives, and it is the one that should have been written
+ *
+ * Availability was never the good argument for reading this file; it was only
+ * the urgent one. The good argument is WHAT IS BEING MEASURED.
+ * `fleet.example.yaml` is the artifact this repository ships and the one a new
+ * operator copies, so a suite that grades it is asserting something about the
+ * product. A suite that graded `fleet.yaml` would be asserting something about
+ * one machine's live fleet — which changes whenever a seat is retuned, and
+ * whose failures would be news about the operator's afternoon rather than about
+ * the code. That distinction is untouched by tracking, which is why this
+ * function is untouched by it too.
+ *
+ * The live file remains a SEPARATE, deliberately narrow probe, and a caller
+ * that wants it should say so by name rather than reaching for it through here.
  */
 export function exampleConfig(): string {
   return readFileSync(`${ROOT}fleet.example.yaml`, "utf8");

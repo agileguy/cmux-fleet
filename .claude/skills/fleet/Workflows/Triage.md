@@ -28,32 +28,49 @@ design property with a test behind it.
 ## Starting it
 
 ```bash
-cd ~/repos/cmux-fleet && ./scripts/triage            # two panes, then the actor
+cd ~/repos/cmux-fleet && ./scripts/triage            # four panes, then the actor
 cd ~/repos/cmux-fleet && ./scripts/triage --no-actor # panes only, actor by hand
 cd ~/repos/cmux-fleet && ./scripts/triage --actor-stop
 ```
 
-**Two seats**: `tri-1` composes the sweep request and collates the reply; `obs-t1`
-observes. **There is no partition to spread.** `roles/triage.md` tells the
-collator so in those words — one request, naming every declared service, because
-there is nobody to share the work with — and a `tri-1` that starts reasoning about
-which observer a service belongs to has imported a distinction from the review
-console. The slices are sequential by construction, not concurrent.
+**Four seats: ONE COLLATOR OVER THREE OBSERVERS** as of 2026-09-13. `tri-1`
+composes the sweep request and collates the replies; `obs-t1`, `obs-t2` and
+`obs-t3` each sweep a share of the environment. The collator's envelope carries
+the WHOLE declared service list and names all three seats.
 
-**This line said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one share each"*
-until 2026-09-11.** `obs-t2` and `obs-t3` appear in neither `fleet.yaml` nor
-`fleet.example.yaml`, and in no roster in the source. The sentence rotted in place
-while the code and the role prompt moved — which is the standing warning about
-every count in this file: verify it against `DEFAULT_TRIAGE_WORKERS`
-(`src/backends/cmux/operations-plan.ts`) or a `workers:` block before repeating
-it.
+**The partition is the COLLATOR's to make, and that is what `roles/triage.md` now
+tells it**: one entry per observer inside one `requests[]` file, the union
+covering every declared service exactly once. This is §6.5's ⌈N/3⌉ — *"the
+partition is the triage worker's to make"*. The host checks the union and refuses
+`partition_incomplete` or `partition_duplicate`; it does NOT choose the shares and
+does not refuse a lopsided one.
+
+**The role prompt asks for an EVEN split for a measured reason.** The three
+observers run concurrently against one shared deadline, so a sweep costs the
+largest share rather than the sum. On T-sweep-116 — the last sweep of the two-pair
+arrangement — an observer handed four services spent its entire 480s deadline and
+wrote no artifact, so all four came back `unobserved`. The deadline is now 600s
+(`triage/console.yaml`), and three seats make nine services three each.
+
+**READ THIS BEFORE REPEATING THE COUNT, because this line has been wrong in BOTH
+directions.** It said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one share
+each"* until 2026-09-11, when `obs-t2` and `obs-t3` existed in no config and no
+roster — a sentence that rotted upward while the code shrank under it. It is four
+again now, by a real edit rather than by drift: `TRIAGE_CONSOLE_ROSTER`
+(`src/run/dispatch-request.ts`), `DEFAULT_TRIAGE_WORKERS`
+(`src/backends/cmux/operations-plan.ts`), `TRIAGE_CONSOLE_ASPECTS`
+(`src/run/task-ids.ts`), and the `workers:` blocks of both `fleet.yaml` and
+`fleet.example.yaml`. The standing warning is unchanged and applies to this
+sentence too: **verify the count against one of those before repeating it.**
 
 Both seats run a **local** `gemma-4-26b-a4b-it-bf16`. The model has moved twice —
 `gpt-oss-20b-MXFP4-Q8` under the 2026-09-03 decision, then a hosted trial on
 `obs-t1` that was taken and withdrawn on the same day — but D1 has not moved: it
 is about whether an observer's context may leave the machine, not about speed.
-`fleet.yaml` is gitignored, so **read the model out of it rather than out of
-here.**
+**Read the model out of `fleet.yaml` rather than out of here.** The reason is no
+longer that the file is unreadable from a commit — it has been tracked since
+2026-09-12 — but the older one that outlives the ignore: this is prose, and that
+file is what the console actually loads.
 
 **On a fresh create the actor is deliberately not started**, the same as review:
 the `up`s have not finished when the script returns, so there is no run to point
@@ -190,6 +207,9 @@ actor holds …/triage-relay.lock"*. The lock file names its pid; a lock held by
 DEAD pid is taken over automatically, so the remedy after a crash is to run the
 script again rather than delete a file.
 
-**`fleet.yaml` is gitignored.** Changing the triage seats' `pane_mode` or model
-is a local edit that no commit will carry to another machine — say so rather than
-reporting it as a change that landed.
+**`fleet.yaml` IS TRACKED, as of 2026-09-12** — this paragraph said the exact
+opposite until then, and the instruction it gave is now wrong. Changing the
+triage seats' `pane_mode` or model is an ordinary working-tree edit: it appears
+in `git status`, and it reaches another machine once it is committed and pushed.
+Report it as uncommitted if it is uncommitted. Do not report it, as this file
+used to require, as a change no commit can ever carry.

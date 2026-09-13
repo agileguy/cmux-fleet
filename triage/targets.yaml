@@ -18,12 +18,12 @@
 # project, no cluster endpoint, no namespace, no credential value", and this file
 # is tracked in a repository that boundary applies to just as much as the SRD.
 #
-#   - `kube_context` is a LOGICAL token — `cni-dev`, not GKE's generated
+#   - `kube_context` is a LOGICAL token — `do-cluster`, not a vendor's generated
 #     `gke_<project>_<region>_<cluster>`. §6.2 property 3 and SRD-OBSERVER-001
 #     §7.1 both say so: the filtered kubeconfig carries the environment token the
 #     envelope carries. If your filtered copy still has the vendor's generated
 #     name, rename it there — `kubectl --kubeconfig <filtered copy> config
-#     rename-context <generated> cni-dev` — rather than pasting the generated
+#     rename-context <generated> <env-token>` — rather than pasting the generated
 #     name here, which would put a cloud project id in a tracked file.
 #   - `namespace` is DECLARED, never derived (§6.2 rule 2). Nothing infers it
 #     from the service name or from a branch.
@@ -37,45 +37,18 @@
 version: 1
 
 environments:
-  # The commission's own example: `mia`, `authorization` and `authentication` in
-  # `cni-dev`. The key is the logical environment token, and it must match
-  # `SESSION_ID_RE` because it becomes a path segment under `~/.pifleet/triage/`.
-  # DISABLED, not deleted. `soleEnvironment` refuses a targets file that declares
-  # anything other than exactly ONE environment — "one sweep is ONE environment,
-  # and that is a limit rather than a law" (§12) — so a second environment is a
-  # refusal at load rather than a second sweep. cni-dev is the one commented out
-  # because its control plane is reachable only over the corporate VPN; swap the
-  # comment markers to put it back.
-  # cni-dev:
-  #   kube_context: cni-dev
-
-  #   # 5m, matching the default cadence — NOT something generous. §6.10 rule 1:
-  #   # a six-hour window re-read every five minutes is 72x the necessary read
-  #   # volume against a live logging API, and it is the obvious default a person
-  #   # would write. A window wider than `cadence_s` in triage/console.yaml is
-  #   # refused, naming both files.
-  #   default_window: 5m
-
-  #   # `checks` is a CLOSED enum — [rollout, logs, sink, endpoint]. No free
-  #   # strings, so this file selects among the observers' procedures and cannot
-  #   # extend them (§6.2 property 4). Every entry is a read against a live
-  #   # control plane on every sweep, 288 times a day, so the list is the ones
-  #   # that earn their place rather than all four by default.
-  #   services:
-  #     # `workload` is deliberately OMITTED on all three. Each of these namespaces
-  #     # holds more than one deployment, and naming one here would be the host
-  #     # deciding what the observer is for. The observer identifies the workload
-  #     # behind the service and names what it found; a service it cannot resolve to
-  #     # exactly one comes back indeterminate, which is the honest answer.
-  #     - {name: alert-notifier, namespace: aodapnc-alerts-notifier-dev, checks: [rollout, logs]}
-  #     - {name: prometheus,     namespace: aodapnc-prometheus-dev,      checks: [rollout, logs]}
-  #     - {name: grafana,        namespace: aodapnc-grafana-dev,         checks: [rollout, logs]}
-
-  # A second environment, and the reason it is here is that it does not need the
-  # corporate VPN: `cni-dev`'s control plane is reachable only over the tunnel,
-  # so a sweep scheduled while the tunnel is down costs a full child deadline per
-  # service and publishes `coverage` about an environment nobody asked about.
-  # This one answers from the open internet.
+  # `soleEnvironment` refuses a targets file that declares anything other than
+  # exactly ONE environment — "one sweep is ONE environment, and that is a limit
+  # rather than a law" (§12) — so a second environment here is a refusal at load
+  # rather than a second sweep. The key is the logical environment token, and it
+  # must match `SESSION_ID_RE` because it becomes a path segment under
+  # `~/.pifleet/triage/`.
+  #
+  # This environment answers from the open internet and needs no corporate VPN.
+  # An environment whose control plane is reachable only over a tunnel costs a
+  # full child deadline per service on every sweep scheduled while that tunnel is
+  # down, and publishes `coverage` about an environment nobody asked about — so
+  # the one declared here is deliberately the one that is always reachable.
   do-cluster:
     kube_context: do-cluster
     default_window: 5m
@@ -94,10 +67,36 @@ environments:
     # observation sat in the artifact. `ntfy` matched only by the accident of its
     # workload sharing its service's name.
     #
-    # So the cni-dev rule holds here for a second reason beyond the one it
-    # states: the host declaring a workload does not only decide what the
-    # observer is for, it renames the thing being reported on.
+    # So the rule holds for two reasons rather than one: a host declaring a
+    # workload does not only decide what the observer is for, it renames the
+    # thing being reported on.
+    #
+    # EXPANDED to the whole `monitoring` namespace on 2026-09-12, from three
+    # services to nine. `kubectl -n monitoring get deploy,sts,ds` returns exactly
+    # eight workloads and this list names all of them, plus `ntfy` in its own
+    # namespace. Nine is inside `MAX_SERVICES_PER_ENVIRONMENT` (16, doubled the
+    # same day) and the two collators split it 5/4 with `evenSlices`, so each
+    # writes a five- or four-row `triage.json`.
+    #
+    # THE SIZE IS MEASURED rather than projected from the schema: across the 103
+    # collations on disk that parse with rows (109 files in all), a row costs 415
+    # bytes on average and 621 at worst (largest document 1 863 bytes, 3 rows,
+    # T-sweep-4).
+    # A five-row slice at the worst observed row cost is ~3.1 KB against the
+    # 8 192-byte document cap.
+    #
+    # NOT ONE ROW DECLARES A `workload`, for the reason recorded above, and the
+    # live workload names are why it matters: `grafana` is `kps-grafana`,
+    # `prometheus` is `prometheus-kps-prometheus`, `kube-state-metrics` is
+    # `kube-prometheus-stack-kube-state-metrics`. Declaring any of those renames
+    # the observer's row and costs that service its reconciliation.
     services:
-      - {name: ntfy,       namespace: ntfy,       checks: [rollout, logs]}
-      - {name: prometheus, namespace: monitoring, checks: [rollout, logs]}
-      - {name: grafana,    namespace: monitoring, checks: [rollout, logs]}
+      - {name: ntfy,                namespace: ntfy,       checks: [rollout, logs]}
+      - {name: prometheus,          namespace: monitoring, checks: [rollout, logs]}
+      - {name: grafana,             namespace: monitoring, checks: [rollout, logs]}
+      - {name: alertmanager,        namespace: monitoring, checks: [rollout, logs]}
+      - {name: loki,                namespace: monitoring, checks: [rollout, logs]}
+      - {name: alloy,               namespace: monitoring, checks: [rollout, logs]}
+      - {name: kube-state-metrics,  namespace: monitoring, checks: [rollout, logs]}
+      - {name: node-exporter,       namespace: monitoring, checks: [rollout, logs]}
+      - {name: prometheus-operator, namespace: monitoring, checks: [rollout, logs]}

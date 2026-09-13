@@ -203,7 +203,14 @@ export const MAX_DISPATCH_REQUEST_ITEMS = 8;
  * entry:
  *
  *     MAX_DISPATCH_REQUEST_ITEMS x MAX_DISPATCH_SERVICES x (MAX_DISPATCH_ID_CHARS + 3)
- *       = 8 x 64 x 67 = 34,304 bytes = 33.5 KiB
+ *       = 8 x 16 x 67 = 8,576 bytes = 8.4 KiB
+ *
+ * **This sum read `8 x 64 x 67 = 34,304` until 2026-09-12 and was stale in the
+ * SAFE direction, which is why nothing caught it.** `MAX_DISPATCH_SERVICES` had
+ * already been lowered to 8 and the prose kept the old 64, so the term was
+ * over-stated four-fold and the headroom claim below stayed true by accident.
+ * Recomputed here at the doubled value (8 -> 16); the term is negligible either
+ * way, because the 3 MiB text term dominates and always did.
  *
  * — the `+ 3` being the two quotes and the comma each name costs inside the
  * array, and the multiplier being 1 rather than 6 because `SESSION_ID_RE`
@@ -262,7 +269,19 @@ export const MAX_DISPATCH_ID_CHARS = 64;
  * than a partition refused as `schema` — a code naming neither file — the day
  * an operator extends an environment past this number.
  */
-export const MAX_DISPATCH_SERVICES = 8;
+/*
+ * DOUBLED 8 -> 16 on 2026-09-12, and it had to move in the SAME edit as
+ * `MAX_SERVICES_PER_ENVIRONMENT`. `dispatch-request.test.ts` pins the two equal
+ * and says why: *"raise `MAX_SERVICES_PER_ENVIRONMENT` alone and a legal
+ * partition starts being refused as `schema`, which names neither file."* The
+ * two are spelled in two modules deliberately — this one must not grow a
+ * dependency on `triage/targets.yaml` — so the pin is the only thing holding
+ * them together.
+ *
+ * The size proof above was recomputed rather than assumed: at 16 the `services`
+ * term is 8,576 bytes against a 4 MiB cap whose dominant term is 3 MiB of text.
+ */
+export const MAX_DISPATCH_SERVICES = 16;
 
 /**
  * Hard byte cap, enforced from `fstat` on the open fd BEFORE the read, and
@@ -421,8 +440,27 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
  * catches a rename and does not catch a fifth seat added to only one of them.
  */
 export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
+  /*
+   * ONE COLLATOR OVER THREE OBSERVERS as of 2026-09-13, and this constant is
+   * EXACT again rather than the wide half of a pairing.
+   *
+   * It held `collators: ["tri-1", "tri-2"]` for one day. That shape needed this
+   * comment to admit a gap: a flat roster would accept `tri-1` naming `obs-t2`,
+   * and nothing here refused it — the pairing was enforced one layer up, by what
+   * each collator was SHOWN in `renderSweepEnvelope`'s `seats`. With a single
+   * collator there is no other pair to cross into, so the roster and the truth
+   * coincide: every reviewer listed here really is a seat `tri-1` may name, and
+   * `worker_not_in_console` is now the whole of the check rather than its wide
+   * half.
+   *
+   * The fan-out is three because §6.5 puts the partition in the collator's hands
+   * — ⌈N/3⌉ is that rule's own arithmetic — and because nine services across two
+   * observers was measured too slow: on T-sweep-116 `obs-t2` spent its whole
+   * deadline on four services and wrote nothing. Three observers make it three
+   * each, which is the load this console sustained for 115 sweeps.
+   */
   collators: ["tri-1"],
-  reviewers: ["obs-t1"],
+  reviewers: ["obs-t1", "obs-t2", "obs-t3"],
   /*
    * §7.3's triage row, and the half that makes the completeness check
    * REACHABLE. §6.5 puts the count on the host — *"a model that partitions can

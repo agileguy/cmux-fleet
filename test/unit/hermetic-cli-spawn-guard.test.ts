@@ -6,17 +6,37 @@
  * The defect this closes was invisible on CI by construction. Config
  * resolution is `--config` -> `./fleet.yaml` -> `~/.config/pifleet/fleet.yaml`,
  * and a spawn that inherits the developer's cwd discovers a `fleet.yaml` in the
- * repo root. That file is gitignored, so it exists on laptops and not on
- * runners: the suite was green on CI and failed fifteen tests on a machine with
- * one, with symptoms that pointed at product defects that did not exist.
+ * repo root. That file was gitignored in August 2026, when this happened, so it
+ * existed on laptops and not on runners: the suite was green on CI and failed
+ * fifteen tests on a machine with one, with symptoms that pointed at product
+ * defects that did not exist.
  *
  * A sweep fixes the files that exist today. It cannot say anything about the
- * file someone writes next month, and that file will pass CI for exactly the
- * reason the original defect passed CI — the runner has no `fleet.yaml` to
- * discover. This is the same argument ISC-274's budget guard makes, and it
- * applies harder here, because the failure is not merely invisible on CI, it
- * is ANTI-correlated with it: the more hermetic the runner, the less likely CI
- * is to notice that the suite is not.
+ * file someone writes next month, and that file would have passed CI for
+ * exactly the reason the original defect passed CI — the runner had no
+ * `fleet.yaml` to discover. This is the same argument ISC-274's budget guard
+ * makes, and it applied harder here, because the failure was not merely
+ * invisible on CI, it was ANTI-correlated with it: the more hermetic the
+ * runner, the less likely CI is to notice that the suite is not.
+ *
+ * ## What changed on 2026-09-12, and why the guard stays
+ *
+ * `fleet.yaml` is now TRACKED, so THIS PARTICULAR ASYMMETRY IS OVER: the runner
+ * and the laptop both have one, and an ambient-config difference between those
+ * two is no longer something a green CI run can hide. The account above is kept
+ * in the past tense rather than deleted, because it is the measurement that
+ * bought this guard, and a guard whose reason has been edited out gets deleted
+ * by the next person to read it.
+ *
+ * The guard's justification is untouched, because it was never about that one
+ * file. It is about a spawn inheriting an ambient cwd AT ALL: the resolution
+ * chain still ends at `~/.config/pifleet/fleet.yaml`, which is per-machine and
+ * always will be; `fleet-development.yaml` and `fleet-operations-local.yaml`
+ * are still ignored by name and still sit in operators' working trees, and
+ * `--config` can point at either; and a test that reaches ambient state is
+ * wrong even on a day when the ambient state happens to be identical
+ * everywhere. Tracking `fleet.yaml` removed one instance of the hazard, not the
+ * hazard.
  *
  * ## What is asserted
  *

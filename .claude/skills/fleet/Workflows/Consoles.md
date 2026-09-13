@@ -6,28 +6,44 @@ The four standing cmux workspaces.
 |---------|--------|-------|
 | operations | `./scripts/operations` | `obs-1` agent, `pifleet monitor`, `tick-1` agent |
 | development | `./scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` — four equal agent panes |
-| review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — four equal agent panes, **plus a host process** |
-| triage | `./scripts/triage` | `tri-1`, `obs-t1` — **two** equal agent panes, **plus a host process** |
+| review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — **four** agent panes: the collator full width on top, its three reviewers along the bottom, **plus a host process** (a 2x2 until 2026-09-13, when it was changed to match `triage`) |
+| triage | `./scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3` — **four** agent panes: the collator full width on top, its three observers along the bottom, **plus a host process** |
 
 The development console's fourth seat is `tst-2` on `role: tester`; `rev-1` is
 gone, and review is the `review` console's job now. The review console's four
 seats are `shared-ro` — they read the operator's checkout at whatever ref it
 stands on, and the three reviewers hold no `bash`.
 
-**The triage row read `tri-1, obs-t1, obs-t2, obs-t3` — "four equal agent panes"
-— until 2026-09-11, and it was the only row in this table that was wrong.**
-`obs-t2` and `obs-t3` are in neither config. The console is `tri-1` composing the
-request and `obs-t1` answering it, and `roles/triage.md` has been telling the
-collator *"this console has exactly one observer"* the whole time this table said
-three. Before repeating any seat list from this file, read
-`DEFAULT_TRIAGE_WORKERS` in `src/backends/cmux/operations-plan.ts` or the
-`workers:` block of `fleet.yaml` — a pane count is exactly the kind of fact a
-prose table keeps after the code has moved on.
+**This row has been wrong in BOTH directions and has now returned to its FIRST
+spelling, which is why it is worth a paragraph rather than a correction.** It read
+`tri-1, obs-t1, obs-t2, obs-t3` — "four equal agent panes" — until 2026-09-11,
+when `obs-t2` and `obs-t3` were in neither config and `roles/triage.md` had been
+telling the collator *"this console has exactly one observer"* the whole time this
+table said three. It was corrected to two. On 2026-09-12 the console grew a real
+second pair, so it was four again, by an edit to five files rather than by prose
+outliving code. On 2026-09-13 the second COLLATOR became a third OBSERVER.
+
+**So the seat list is once more the one this table first claimed — and this time
+the seats behind it exist.** That is the distinction to check rather than the
+spelling: `obs-t3` is now in `TRIAGE_CONSOLE_ASPECTS`, `TRIAGE_CONSOLE_ROSTER`,
+`DEFAULT_TRIAGE_WORKERS` and the `workers:` block of both config files. The 2026-09-11
+correction was made because none of that was true.
+
+The shape is `tri-1` over `obs-t1`, `obs-t2` and `obs-t3`: one collator is handed
+the WHOLE environment, divides it between the three observers itself (§6.5's
+⌈N/3⌉ — a judgement the host checks rather than performs), and collates all three
+replies into ONE document. The two-pair arrangement it replaced wrote two
+documents the host had to merge and echo-check for staleness. Before repeating any seat list
+from this file, read `DEFAULT_TRIAGE_WORKERS` in
+`src/backends/cmux/operations-plan.ts` or the `workers:` block of `fleet.yaml` — a
+pane count is exactly the kind of fact a prose table keeps after the code has
+moved on, in whichever direction the code went.
 
 **"No keyboard" came off that row with them, because it depends on which config
-you mean.** Both triage seats inherit `pane_mode: rpc` from their roles in the
+you mean.** All four triage seats inherit `pane_mode: rpc` from their roles in the
 tracked `fleet.example.yaml`, and `scripts/triage` reads the mode from the config
-rather than hard-coding it. But the operator's gitignored `fleet.yaml` overrides
+rather than hard-coding it. But the operator's `fleet.yaml` — tracked since
+2026-09-12, not gitignored as this line used to say — overrides
 BOTH seats to `pane_mode: tui` with themes, on a 2026-09-07 decision recorded in
 the file — *"the operator watches these panes, and a console nobody can see is a
 console nobody trusts"* — and tracked `triage/console.yaml` corroborates it in
@@ -107,7 +123,7 @@ A record it cannot verify (`unreadable`, or a pid whose identity cannot be
 confirmed) is **left exactly where it is and nothing is signalled**. The script
 says so and starts nothing; find out what that pid is, then remove the file.
 
-## The triage console has an actor too — the third process behind its two panes
+## The triage console has an actor too — the fifth process behind its four panes
 
 Same shape as review, different reason. `tri-1` is a collator, and the thing a
 collator cannot do is **dispatch**: all it can do toward a sweep is write
@@ -229,16 +245,54 @@ cd ~/repos/cmux-fleet && ./scripts/review --recreate
 
 `--recreate` **stops every run the old panes created** before building the new
 ones. That is a teardown of live agents — as many as three bystanders for one
-wedged worker on a four-pane console, and one on `triage`. Use it when the *set*
+wedged worker on a four-pane console, `triage` included since it grew its second
+pair. Use it when the *set*
 of workers changes or the pane layout is wrong; use `--restart` for everything
 else.
 
 `development` and `review` are **four runs each**, because every pane is
 attended and `--attach-here` hands over the terminal of the process that runs it.
 `review --recreate` stops its relay first, before those runs go down, since the
-relay's whole configuration is their run ids. `triage` is **two** runs on the same
-rule. Only runs holding that console's own workers are stopped — the other three
+relay's whole configuration is their run ids. `triage` is **four** runs on the same
+rule, since 2026-09-12. Only runs holding that console's own workers are stopped — the other three
 consoles survive a rebuild.
+
+**A recreated console goes back into its sidebar group and keeps its colour.**
+Closing a workspace drops both: the rebuilt console is a DIFFERENT workspace, and
+cmux carries no memory that the old one was grouped or coloured. So `--recreate`
+reads the old workspace's `custom_color` BEFORE it builds the new one — the order
+matters, because after the close there is nothing left to read it from — and then,
+once the build has succeeded:
+
+```bash
+cmux workspace group list --json                            # pi-fleet -> workspace_group:N
+cmux workspace-group add --group <group> --workspace <new>
+cmux workspace-action --action set-color --color <hex> --workspace <new>
+```
+
+**The group is resolved by NAME on every rebuild, never stored.** A
+`workspace_group:N` ref renumbers and a UUID is machine-specific, so neither
+belongs in a tracked repo; `pi-fleet` is a name that means the same thing on any
+machine that has one. All four consoles go into `pi-fleet`.
+
+**Both steps are best-effort and neither can fail a rebuild.** A console outside
+its group, or wearing no colour, is a cosmetic fault; a console that refused to
+rebuild because a sidebar group was missing is an outage. The rebuild is the
+thing being protected.
+
+**Colour is CAPTURED, not declared.** No spec names a colour, so whatever the
+operator set by hand is what comes back, and a console that never had one stays
+uncoloured rather than acquiring a default nobody chose. Measured 2026-09-13:
+`operations` `#196F3D`, `triage` `#7D6608`, `review` `#6A1B9A`.
+
+**The group's anchor is not a console, and that is why this is safe.** cmux gives
+every group an anchor workspace whose sidebar row IS the group header — closing
+the anchor promotes the next member, and closing the LAST member removes the
+group entirely. `pi-fleet`'s anchor is the workspace titled `Group 1`, not
+`operations`, `triage` or `review`, so no console rebuild can dissolve the group.
+Note the two names differ on purpose: `workspace list` shows the anchor's
+`custom_title` (`Group 1`), while the sidebar shows the GROUP's name
+(`pi-fleet`), and only `cmux workspace group list` prints the latter.
 
 **Known defect:** it stops the runs *before* closing the workspace, and the
 close can then fail on a pinned workspace with

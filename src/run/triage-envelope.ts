@@ -106,7 +106,17 @@ import type { SweepCollation, SweepJoin, SweepOpen } from "./triage-pass.ts";
 import { TRIAGE_CHECKS, type TriageService } from "./triage-targets.ts";
 import {
   COVERAGE_RESULTS,
+  EVIDENCE_GAPS,
   OBSERVER_ASSESSMENTS,
+  /*
+   * Imported rather than re-spelled, and that is the point: `collate` now
+   * echo-checks EACH collator's document before merging them, and
+   * `assessTriageSweep` echo-checks the merged one. Two implementations of
+   * "fresh" would be two answers to §6.6 layer 3 — see `SweepCollation.staleCollators`
+   * for what the merge would otherwise lose.
+   */
+  sweepIdEcho,
+  type EvidenceGap,
   type ObserverArtifact,
   type ObserverAssessment,
   type TriageDocument,
@@ -144,9 +154,29 @@ export function observerArtifactPath(run: RunPaths, worker: string, taskId: stri
 }
 
 /** Where the collator's §7.5 document sits on the host. */
-export function triageDocumentPath(run: RunPaths, collateTaskId: string): string {
+export function triageDocumentPath(
+  run: RunPaths,
+  collateTaskId: string,
+  /*
+   * WHICH COLLATOR'S OUTBOX — defaulted, because this composed the path from
+   * `TRIAGE_COLLATOR` directly until 2026-09-12 and every existing caller means
+   * that seat.
+   *
+   * It had to become a parameter when the console grew a second pair: `tri-2`
+   * writes its collation into ITS OWN outbox, in its own run, and a reader that
+   * kept the constant would look under `tri-1` and find nothing. That failure is
+   * SILENT in the worst way — `SweepProducerDeps.seatRun`'s docblock records the
+   * same mistake being made twice, and notes that *"reading a path that does not
+   * exist is indistinguishable from a worker that wrote nothing"*, so the join
+   * reported every service unobserved however well the seats had done.
+   *
+   * Defaulted rather than required so the five existing call sites keep saying
+   * what they already meant.
+   */
+  collator: string = TRIAGE_COLLATOR,
+): string {
   return join(
-    workerOutboxDir(run.root, TRIAGE_COLLATOR),
+    workerOutboxDir(run.root, collator),
     collateTaskId,
     SWEEP_FILES_DIR,
     TRIAGE_DOCUMENT_FILE,
@@ -482,6 +512,61 @@ export const BOUNDED_CALLS_DEMAND: string =
   `inside your deadline; an artifact that never arrives tells the operator nothing at all.`;
 
 /**
+ * Each graded gap, in the spelling the OBSERVER writes rather than the one the
+ * host grades under.
+ *
+ * **The two are not the same word, and that is the whole reason this map exists.**
+ * {@link EVIDENCE_GAPS} calls the fourth gap `ledger`; the field an observer puts
+ * in `observer-ops.json` is `evidence_ref`. A demand derived naively from that
+ * constant would instruct the observer to emit a field nothing reads — the same
+ * class of defect as [[ISC-1131]]'s second spelling of an enum, arrived at from
+ * the opposite direction.
+ *
+ * A `Record` over the closed gap set rather than a hand-written list, so a fifth
+ * gap added to `evidenceGaps()` FAILS TO COMPILE here instead of going quietly
+ * undemanded. That is stronger than {@link COVERAGE_VOCABULARY_DEMAND}'s import
+ * can be, and it has to be: the observer cannot be graded on a field nobody asked
+ * it for, which is exactly what [[ISC-1125]] measured.
+ */
+const GRADED_ROW_FIELD: Record<EvidenceGap, string> = {
+  coverage: "`coverage` (a list of `{channel, result}` objects)",
+  selector: "`selector` (the one you actually matched on)",
+  window: "`window`",
+  ledger: "`evidence_ref` (a list naming what you read)",
+};
+
+/**
+ * The row shape, stated to the seat that writes it (ISC-1166's open follow-up).
+ *
+ * ## Why a fourth demand when the shape is already documented
+ *
+ * `skills/observer-ops/SKILL.md` has carried the full row since [[ISC-1125]], and
+ * the observer does read it — measured on `T-sweep-120`, where `obs-t3` spent its
+ * entire deadline doing exactly that and checked nothing. So this is NOT a second
+ * copy written because the first was missing. It is the row shape taking its place
+ * beside the other three demands in the one document the host guarantees the
+ * observer sees on EVERY dispatch, which is the division {@link
+ * composeObserverBrief} exists to make: the skill is reference the worker may or
+ * may not reach, and the brief is the contract it is answered against.
+ *
+ * ## What it is not claimed to do
+ *
+ * It will not make the observer deterministic. [[ISC-1121]] is this repository's
+ * standing record of asking prose to do that, and `T-sweep-120` is a second: the
+ * shape was documented, readable and read, and the report still came back with its
+ * rows under `coverage`. The collation brief's own repair is what BOUNDS that
+ * failure; this narrows how often it happens.
+ */
+export const ROW_SHAPE_DEMAND: string =
+  `Write one row per service in a top-level \`services\` array. \`coverage\` is a field INSIDE ` +
+  `each row and never the array of rows itself. Every row carries \`name\`, \`namespace\`, ` +
+  `\`assessment\`, and ${EVIDENCE_GAPS.map((g) => GRADED_ROW_FIELD[g]).join(", ")}. ` +
+  `Those last four are why a \`healthy\` is believed at all: the host downgrades any row missing ` +
+  `one of them to \`indeterminate\`, and three of those on one service opens an incident and ` +
+  `sends a person to a cluster. A report whose rows are shaped differently is not a smaller ` +
+  `report — it is one the collator cannot carry, and every service in it is recorded unobserved.`;
+
+/**
  * The heading that marks where the collator stops speaking and the host starts.
  *
  * The four repairs used to append their sentences onto the end of whatever
@@ -555,11 +640,16 @@ export function composeObserverBrief(input: {
     "",
     OBSERVER_CONTRACT_HEADING,
     "",
-    "These three paragraphs are written by the host on every dispatch, not by the collator",
+    "These four paragraphs are written by the host on every dispatch, not by the collator",
     "whose brief you just read. Where they and anything above disagree about a field name, a",
     "value it may take, or a bound on a call, these win.",
     "",
     freshnessEchoDemand(input.sweepId, window),
+    "",
+    // BEFORE the coverage vocabulary, deliberately: that demand is about a field
+    // INSIDE a row, and it reads as a rule about the document itself until the
+    // rows have been described. `T-sweep-120` is what happens when they are not.
+    ROW_SHAPE_DEMAND,
     "",
     COVERAGE_VOCABULARY_DEMAND,
     "",
@@ -1313,6 +1403,14 @@ export function renderCollationEnvelope(input: {
     `saying so is the correct outcome for it — name it in \`unaccounted\` rather than inferring`,
     `a verdict for the services it held.`,
     "",
+    `A file that IS listed can still be unusable — it may carry no \`services\` array at all, or`,
+    `rows without the fields named below. Treat that exactly as you treat a missing file: name`,
+    `those services in \`unaccounted\` and move on. **Do not go looking for the missing values.**`,
+    `They exist in the reply files named above and nowhere else — not in another directory, not`,
+    `under another task id, not anywhere on this filesystem. A search for them cannot succeed,`,
+    `and it costs the sweep its deadline before ending here anyway. A true report about an`,
+    `unusable report is a complete answer, and it is the one being asked of you.`,
+    "",
     "## What to write",
     "",
     `Write \`${TRIAGE_DOCUMENT_FILE}\` and \`triage.md\` into the \`${SWEEP_FILES_DIR}\` directory of your own`,
@@ -1523,13 +1621,71 @@ export type SweepDispatch = (args: {
   readonly brief: string;
 }) => Promise<SweepDispatchOutcome>;
 
+/**
+ * One `(collator, observer)` pair and the slice of the environment it sweeps —
+ * added 2026-09-12 with the console's second pair.
+ *
+ * **A pair is the unit, and that is the whole design.** The console is not one
+ * collator with two observers (which is what `TRIAGE_CONSOLE_ASPECTS` alone
+ * would suggest) and it is not two environments (which `soleEnvironment` refuses,
+ * correctly — an environment token is a path segment and the scope every
+ * incident is reported against, so two tokens for one cluster would report health
+ * for a fleet). It is ONE environment whose service list is divided between two
+ * collators, each briefing its own observer.
+ *
+ * **`seats` is what enforces the pairing, and nothing else does.**
+ * `TRIAGE_CONSOLE_ROSTER` lists both observers as legal targets and has no
+ * vocabulary for "belongs to" — it answers *"is this target inside the
+ * console?"*. What stops `tri-1` dispatching to `obs-t2` is that its envelope
+ * names only `obs-t1`: `renderSweepEnvelope`'s `## The seats` block is the ONLY
+ * place a collator ever sees a child task id, and `childTaskId(sweepId, aspect)`
+ * is a host constant it has never been shown. That argument is already written
+ * down at `:193` for a different reason, and it does a second job here.
+ */
+export interface SweepPair {
+  /** The collator seat this envelope is dispatched to. */
+  readonly collator: string;
+  /** The observers it may fan out to — and the only ones it is told exist. */
+  readonly seats: readonly AspectSeat[];
+  /** Its slice of the environment, in `triage/targets.yaml` file order. */
+  readonly services: readonly TriageService[];
+}
+
 export interface SweepProducerDeps {
   readonly run: RunPaths;
   readonly environment: string;
   readonly services: readonly TriageService[];
+  /**
+   * The console's pairs. Defaults to the ONE pair this console shipped with —
+   * `TRIAGE_COLLATOR` over `TRIAGE_CONSOLE_ASPECTS`, sweeping {@link services}
+   * whole — so a caller that knows nothing about pairs gets exactly the
+   * behaviour it had before this field existed.
+   *
+   * {@link services} stays because it is still the environment's WHOLE declared
+   * list: the pairs' slices partition it, and a caller that supplies `pairs`
+   * supplies slices that must add up to it. Nothing here checks that — the host
+   * checks it where it already checks partitions, in `checkTriagePartition`
+   * against `declared`.
+   */
+  readonly pairs?: readonly SweepPair[];
   readonly defaultWindowS: number;
-  /** The previous sweep's document, fetched lazily. Projected, never rendered. */
-  readonly previousDocument: () => Promise<TriageDocument | null>;
+  /**
+   * The previous sweep's document FOR ONE COLLATOR, fetched lazily. Projected,
+   * never rendered.
+   *
+   * **It takes the collator as of 2026-09-12, and a zero-arg version was a silent
+   * half-blinding.** `renderSweepEnvelope` projects this through
+   * `projectPreviousState(previousDocument, declared)`, which keeps only rows
+   * whose service is in THIS pair's slice. Each collator writes a document
+   * covering only its own half, so handing `tri-2` the document `tri-1` wrote
+   * leaves nothing that survives the projection: `tri-2` would open every sweep
+   * with *"There is no previous state for this environment"* and lose the carried
+   * assessment for half the environment, forever, with no symptom anywhere.
+   *
+   * A function ignoring its parameter is still assignable, so every existing
+   * fixture (`async () => null`, `async () => PREVIOUS`) means what it did.
+   */
+  readonly previousDocument: (collator: string) => Promise<TriageDocument | null>;
   readonly dispatch: SweepDispatch;
   /**
    * Where a given SEAT's run tree lives. Defaults to {@link run}.
@@ -1625,31 +1781,74 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
   const read = deps.read ?? DEFAULT_READ;
   /** The collator's run, for callers that have no per-seat map. */
   const seatRun = deps.seatRun ?? (async (): Promise<RunPaths> => deps.run);
+  /**
+   * The console's pairs, defaulted to the ONE this console shipped with.
+   *
+   * Resolved ONCE here rather than at each producer, for `scripts/triage`'s
+   * stated reason about its own worker list: *"Re-deriving … at each site is how
+   * those two sets come to differ"*. `openSweep`, `dispatchObserver` and
+   * `collate` must agree about which collator owns which observer, or a sweep is
+   * dispatched under one pairing and harvested under another.
+   */
+  const pairs: readonly SweepPair[] = deps.pairs ?? [
+    { collator: TRIAGE_COLLATOR, seats: TRIAGE_CONSOLE_ASPECTS, services: deps.services },
+  ];
 
   const openSweep = async (sweepId: string, dispatchedAt: string): Promise<SweepOpen> => {
-    const envelope = renderSweepEnvelope({
-      sweepId,
-      windowOpenedAt: windowOpenedAt(dispatchedAt, deps.defaultWindowS),
-      environment: deps.environment,
-      services: deps.services,
-      defaultWindowS: deps.defaultWindowS,
-      previousDocument: await deps.previousDocument(),
-    });
-    const outcome = await deps.dispatch({
-      taskId: sweepId,
-      worker: TRIAGE_COLLATOR,
-      title: envelope.title,
-      brief: envelope.brief,
-    });
-    if (outcome.kind === "budget_exhausted") {
-      return { kind: "budget_exhausted", reason: outcome.reason };
-    }
-    if (outcome.kind === "refused") {
-      throw new SweepEnvelopeError(
-        `the request plane refused sweep ${sweepId}: ${outcome.reason}. This is a HOST fault — ` +
-          `the envelope was composed here and the roster is a constant — so it is a thrown pass ` +
-          `rather than a §6.10 exit, which is a configured limit doing its job.`,
-      );
+    /*
+     * ONE ENVELOPE PER PAIR, each naming only its OWN slice and its OWN seat.
+     *
+     * **This is the entire enforcement of the pairing.**
+     * `TRIAGE_CONSOLE_ROSTER` lists both observers as legal targets and would
+     * accept `tri-1` naming `obs-t2`; what stops it is that `tri-1`'s `## The
+     * seats` block never names `obs-t2`, so it holds no child task id for it.
+     * That a collator cannot act on an id it has never been shown is already
+     * this module's own argument at `:193`, made there about a different gap.
+     *
+     * SEQUENTIAL, unlike the observer fan-out, and deliberately so. The
+     * observers' slices are byte-independent and `dispatchPartition` says at
+     * length why they must go concurrently; these are two cheap dispatches once
+     * per sweep, and a budget refusal on the first MUST stop the second rather
+     * than race it — `refuseOnExhaustedBudget` wraps this effect, and opening a
+     * second envelope against a run that just refused admission is exactly what
+     * §6.10's gate exists to prevent.
+     */
+    for (const pair of pairs) {
+      /*
+       * A pair with an EMPTY slice is not dispatched, and `evenSlices` promises
+       * this case exists: with fewer services than collators the trailing slice
+       * is `[]`. An envelope naming no services asks a model to partition
+       * nothing, and whatever it wrote would be refused as `partition_incomplete`
+       * against an empty declared list — a refusal naming the console rather
+       * than the environment.
+       */
+      if (pair.services.length === 0) continue;
+      const envelope = renderSweepEnvelope({
+        sweepId,
+        windowOpenedAt: windowOpenedAt(dispatchedAt, deps.defaultWindowS),
+        environment: deps.environment,
+        services: pair.services,
+        defaultWindowS: deps.defaultWindowS,
+        previousDocument: await deps.previousDocument(pair.collator),
+        seats: pair.seats,
+      });
+      const outcome = await deps.dispatch({
+        taskId: sweepId,
+        worker: pair.collator,
+        title: envelope.title,
+        brief: envelope.brief,
+      });
+      if (outcome.kind === "budget_exhausted") {
+        return { kind: "budget_exhausted", reason: outcome.reason };
+      }
+      if (outcome.kind === "refused") {
+        throw new SweepEnvelopeError(
+          `the request plane refused sweep ${sweepId} for ${pair.collator}: ${outcome.reason}. ` +
+            `This is a HOST fault — the envelope was composed here and the roster is a constant ` +
+            `— so it is a thrown pass rather than a §6.10 exit, which is a configured limit ` +
+            `doing its job.`,
+        );
+      }
     }
     return { kind: "opened" };
   };
@@ -1668,17 +1867,38 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
     sweepId: string,
     assignment: PartitionAssignment,
   ): Promise<void> => {
-    const seat = TRIAGE_CONSOLE_ASPECTS.find((s) => s.worker === assignment.worker);
-    if (seat === undefined) {
+    /*
+     * WHICH PAIR OWNS THIS OBSERVER — resolved before anything is read, because
+     * both of the reads below are per-collator and getting either wrong is
+     * silent. The seat search runs over the PAIRS' seats rather than over
+     * `TRIAGE_CONSOLE_ASPECTS` so that a console configured with one pair cannot
+     * dispatch to the other pair's observer merely because the host constant
+     * still lists it.
+     */
+    const owner = pairs.find((p) => p.seats.some((s) => s.worker === assignment.worker));
+    const seat = owner?.seats.find((s) => s.worker === assignment.worker);
+    if (owner === undefined || seat === undefined) {
       throw new SweepEnvelopeError(
-        `${assignment.worker} is not a seat of the triage console (${TRIAGE_CONSOLE_ASPECTS.map(
-          (s) => s.worker,
-        ).join(", ")}), so no child task id can be derived for it.`,
+        `${assignment.worker} is not a seat of the triage console (${pairs
+          .flatMap((p) => p.seats.map((s) => s.worker))
+          .join(", ")}), so no child task id can be derived for it.`,
       );
     }
+    /*
+     * READ FROM THE OWNING COLLATOR'S OWN RUN, not from `deps.run`.
+     *
+     * `deps.run` is `tri-1`'s and only `tri-1`'s — D4 makes this console several
+     * runs. Reading `tri-2`'s fan-out out of `tri-1`'s run root finds no file,
+     * and `readDispatchRequest` answers `missing`, which this function then
+     * reports as *"the file changed under the sweep"* — an accusation against a
+     * collator that wrote its request correctly into its own outbox. The same
+     * mistake is recorded twice already in `SweepProducerDeps.seatRun`; this is
+     * the third place it could have been made.
+     */
+    const ownerRun = await seatRun(owner.collator);
     const request = await readDispatchRequest({
-      runRoot: deps.run.root,
-      sender: TRIAGE_COLLATOR,
+      runRoot: ownerRun.root,
+      sender: owner.collator,
       taskId: sweepId,
       roster: TRIAGE_CONSOLE_ROSTER,
     });
@@ -1954,23 +2174,138 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
    */
   const collate = async (sweepId: string): Promise<SweepCollation> => {
     const collateTaskId = collationTaskId(sweepId);
-    const envelope = renderCollationEnvelope({
-      sweepId,
-      environment: deps.environment,
-      childTaskIds: TRIAGE_CONSOLE_ASPECTS.map((s) => childTaskId(sweepId, s.aspect)),
-    });
-    const outcome = await deps.dispatch({
-      taskId: collateTaskId,
-      worker: TRIAGE_COLLATOR,
-      title: envelope.title,
-      brief: envelope.brief,
-    });
-    const evidenceRef = `${TRIAGE_COLLATOR}:${collateTaskId}/${SWEEP_FILES_DIR}/${TRIAGE_DOCUMENT_FILE}`;
-    if (outcome.kind !== "accepted") return { document: null, evidenceRef };
+    /*
+     * ONE COLLATION PER PAIR, MERGED BY THE HOST — and the merge is where §6.5's
+     * discipline lands for the second time in this sweep.
+     *
+     * Each collator reconciles ONLY its own observer's report, because that is
+     * the half of the environment it briefed. The two documents are disjoint by
+     * construction (the slices partition the declared list), so merging them is
+     * concatenation rather than reconciliation — the host joins what it split,
+     * and no worker is asked to account for services it was never shown.
+     *
+     * Both pairs dispatch the SAME `T-sweep-N-collate` id. That is not a
+     * collision: a task id is a directory under ONE worker's outbox in ONE run,
+     * and D4 makes this console several runs — `<tri-1-run>/outbox/tri-1/…` and
+     * `<tri-2-run>/outbox/tri-2/…`. `openSweep` already dispatches the sweep id
+     * itself to both collators on the same reasoning.
+     */
+    const rows: TriageDocument["services"][number][] = [];
+    const unaccounted: string[] = [];
+    const staleCollators: string[] = [];
+    const refs: string[] = [];
+    const authors: string[] = [];
 
-    const path = triageDocumentPath(deps.run, collateTaskId);
-    const found = await readTriageDocumentAt(path, { worker: TRIAGE_COLLATOR, path }, read);
-    if (found.kind !== "ok") {
+    for (const pair of pairs) {
+      // Not dispatched, so nothing to collate — `openSweep` skipped it too.
+      if (pair.services.length === 0) continue;
+
+      const envelope = renderCollationEnvelope({
+        sweepId,
+        environment: deps.environment,
+        /*
+         * ITS OWN seats only. A collation brief naming the other pair's child id
+         * would point this collator at `/replies/<id>.json` files that were
+         * published into the other collator's run — a path it cannot read, about
+         * an observer it never briefed.
+         */
+        childTaskIds: pair.seats.map((s) => childTaskId(sweepId, s.aspect)),
+      });
+      const outcome = await deps.dispatch({
+        taskId: collateTaskId,
+        worker: pair.collator,
+        title: envelope.title,
+        brief: envelope.brief,
+      });
+      const ref = `${pair.collator}:${collateTaskId}/${SWEEP_FILES_DIR}/${TRIAGE_DOCUMENT_FILE}`;
+      refs.push(ref);
+      if (outcome.kind !== "accepted") continue;
+
+      const ownerRun = await seatRun(pair.collator);
+      const path = triageDocumentPath(ownerRun, collateTaskId, pair.collator);
+      const found = await readTriageDocumentAt(path, { worker: pair.collator, path }, read);
+      if (found.kind === "ok") {
+        /*
+         * THE ECHO IS CHECKED PER DOCUMENT, BEFORE THE MERGE, and this is the
+         * one place the two-pair design could have lost an accusation.
+         *
+         * `assessTriageSweep` derives `stale_replay` from ONE document's
+         * `worker` when that document's `sweep_id` fails §6.6 layer 3. Merge a
+         * fresh `tri-1` with a `tri-2` replaying last sweep and the merged
+         * document carries the FRESH id, reads fresh, and `tri-2` is never
+         * named — its services still come back unobserved, because §6.5 counts
+         * what the host harvested, but the diagnosis degrades from *"tri-2
+         * replayed"* to *"those services were unobserved"* and sends an operator
+         * to the cluster instead of to the seat.
+         *
+         * So a stale document contributes NO ROWS and its author is named in
+         * `staleCollators`, which `triagePass` folds into the assessment's own
+         * list — a list already keyed by producing worker and already documented
+         * as including the collator.
+         */
+        if (sweepIdEcho(sweepId, found.document.sweep_id) === "fresh") {
+          authors.push(pair.collator);
+          rows.push(...found.document.services);
+          unaccounted.push(...found.document.unaccounted);
+        } else {
+          staleCollators.push(pair.collator);
+          console.warn(
+            `triage: ${pair.collator}'s collation for ${sweepId} echoed ` +
+              `${JSON.stringify(found.document.sweep_id)} rather than ${sweepId}, so it is a ` +
+              `REPLAY of an earlier sweep. Its rows are discarded and its services will be ` +
+              `recorded unobserved; the seat is named in stale_replay.`,
+          );
+        }
+        continue;
+      }
+      collationFault(pair.collator, sweepId, found);
+    }
+
+    /*
+     * BOTH refs, joined. `evidenceRef` is a pointer an operator opens, and it is
+     * consumed by `serviceSignal` as a per-row FALLBACK rather than parsed
+     * anywhere — so naming both documents is strictly more useful than picking
+     * one arbitrarily. It is non-nullable by contract even when nothing was
+     * collated: *"a sweep that collated nothing still has a task an operator can
+     * go and read"*.
+     */
+    const evidenceRef = refs.length > 0 ? refs.join(", ") : sweepId;
+    if (authors.length === 0) return { document: null, evidenceRef, staleCollators };
+    return {
+      document: {
+        /*
+         * The merged document's author. `TriageDocument.worker` has exactly one
+         * consumer — `assessTriageSweep`'s `stale_replay.unshift(document.worker)`
+         * — and it cannot fire here, because every document that contributed rows
+         * was already proved fresh above. Joining the names keeps the field
+         * honest about who wrote what reached this object.
+         */
+        worker: authors.join("+"),
+        sweep_id: sweepId,
+        services: rows,
+        unaccounted,
+      },
+      evidenceRef,
+      staleCollators,
+    };
+  };
+
+  /** The two silences a collation can arrive as, named apart. Unchanged by the pairing. */
+  const collationFault = (
+    collator: string,
+    sweepId: string,
+    /*
+     * TYPED FROM THE READER, not from `TriageDocumentRead`, and the difference is
+     * real: `parseTriageDocument`'s union has exactly TWO arms (`ok`, `refused`)
+     * and carries no `absent`. The third silence — the collator wrote no file at
+     * all — is `readTriageDocumentAt`'s own, so deriving the parameter from that
+     * function's return type is what makes both faults reachable here. An
+     * `Extract` naming `absent` against the narrower union silently resolved to
+     * the refused arm alone.
+     */
+    found: Exclude<Awaited<ReturnType<typeof readTriageDocumentAt>>, { kind: "ok" }>,
+  ): void => {
+    {
       /*
        * **The reason was being computed and thrown away, and that is the whole
        * defect.** `parseTriageDocument` returns a refusal that names the field and
@@ -1996,7 +2331,7 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
             ? found.issues.map((i) => `${i.path}: ${i.message}`).join("; ")
             : found.reason;
         console.warn(
-          `triage: ${TRIAGE_COLLATOR}'s collation for ${sweepId} was REFUSED (${found.code}) ` +
+          `triage: ${collator}'s collation for ${sweepId} was REFUSED (${found.code}) ` +
             `and every service in it will be recorded unobserved - ${detail}`,
         );
       } else {
@@ -2007,13 +2342,11 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
          * `sweepIdEcho` draws between `stale` and `absent`.
          */
         console.warn(
-          `triage: ${TRIAGE_COLLATOR} wrote no collation for ${sweepId} at ${found.path}; ` +
+          `triage: ${collator} wrote no collation for ${sweepId} at ${found.path}; ` +
             `every service in it will be recorded unobserved.`,
         );
       }
-      return { document: null, evidenceRef };
     }
-    return { document: found.document, evidenceRef };
   };
 
   return { openSweep, dispatchObserver, join: joinSweep, collate };

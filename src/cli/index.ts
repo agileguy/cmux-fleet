@@ -239,7 +239,7 @@ function productionSweepDispatchFor(
      * THE WORK IS DONE — clear the seat's session so the next task starts empty.
      *
      * A `pane_mode: tui` worker keeps its session across dispatches, and this
-     * console dispatches to the same two seats every cadence forever, so without
+     * console dispatches to the same four seats every cadence forever, so without
      * this the collator accumulates every sweep of the day into one transcript
      * and answers from what it already holds (`fresh-dispatch.ts`'s measured
      * case). §6.6's recycle is the designed remedy and cannot serve these seats:

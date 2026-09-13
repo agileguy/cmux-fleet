@@ -627,12 +627,19 @@ describe("the review is a file, notes is a summary, and both ends say so", () =>
  * verb, `bash` and `edit` absent because §12.1's argument is about a shell and
  * `edit` buys nothing against a `:ro` checkout.
  *
- * **Read from `fleet.example.yaml`, which is TRACKED.** `fleet.yaml` is
- * gitignored and `ci.yml` is checkout → `bun install` → `bun test test/unit` with
- * no step that creates it, so a probe reading it unconditionally is red on every
- * clean checkout — the defect `review-plan.test.ts` documents thirteen tests'
- * worth of, and which this file shipped with. The live file gets its own gated
- * probe below.
+ * **Read from `fleet.example.yaml`, and the REASON changed on 2026-09-12.** This
+ * paragraph used to say `fleet.yaml` was gitignored, that `ci.yml` is checkout →
+ * `bun install` → `bun test test/unit` with no step creating it, and that a
+ * probe reading it unconditionally would therefore be red on every clean
+ * checkout. The `ci.yml` half is still exactly right; the conclusion no longer
+ * follows, because `fleet.yaml` is now TRACKED and ships in the checkout.
+ *
+ * The surviving reason is a better one and was always the real one: this block
+ * grades the SHIPPED ARTIFACT. `fleet.example.yaml` is what a reader copies and
+ * what CI is entitled to judge the repository by, so a grant assertion made
+ * against it measures what this project publishes rather than what one machine
+ * happens to run. The live file gets its own probe below — no longer gated,
+ * because there is nothing left to gate on.
  */
 describe("the reviewer's grant is what the document says it is", () => {
   const EXAMPLE = exampleConfig();
@@ -910,12 +917,27 @@ describe("the reviewer's grant is what the document says it is", () => {
   });
 
   /**
-   * The LIVE config, GATED. It is what the console actually runs from, so a
-   * divergence matters — and it cannot be a hard dependency, for the reason in
-   * this block's header.
+   * The LIVE config, NO LONGER GATED. It is what the console actually runs from,
+   * so a divergence matters — and as of 2026-09-12 it is a tracked file, so it
+   * CAN be a hard dependency where it previously could not.
+   *
+   * **The gate was retired rather than left in place, because it had stopped
+   * being able to fire.** `describe.skipIf(!existsSync(fleet.yaml))` was written
+   * when the file was gitignored and absent from CI; with it tracked the
+   * condition is always false, so the block ran everywhere while still reading
+   * as conditional. A guard that cannot fire is worse than no guard: it tells
+   * the next reader this coverage is optional when it is not.
+   *
+   * The existence check is kept as an ASSERTION, which is the same information
+   * pointed the other way — a checkout missing a tracked file is broken, and
+   * that should be loud rather than silently skipped.
    */
-  describe.skipIf(!existsSync(`${ROOT}fleet.yaml`))("the operator's own fleet.yaml agrees", () => {
+  describe("the operator's own fleet.yaml agrees", () => {
     test("the live reviewer grant matches the example's", () => {
+      expect(
+        existsSync(`${ROOT}fleet.yaml`),
+        "fleet.yaml is tracked as of 2026-09-12 — its absence is a broken checkout, not a machine without it",
+      ).toBe(true);
       const LIVE = readFileSync(`${ROOT}fleet.yaml`, "utf8");
       expect([...grantedTools(LIVE, "reviewer")].sort()).toEqual(
         [...grantedTools(EXAMPLE, "reviewer")].sort(),

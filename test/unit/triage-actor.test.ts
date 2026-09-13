@@ -862,7 +862,17 @@ describe("the watched seat is the roster's, not a literal typed twice", () => {
    * one.
    */
   test("TRIAGE_COLLATOR is exactly the triage roster's collator", () => {
-    expect(TRIAGE_CONSOLE_ROSTER.collators).toEqual([TRIAGE_COLLATOR]);
+    /*
+     * THE FIRST collator, not the only one — corrected 2026-09-12 when the
+     * console grew a second pair. `TRIAGE_COLLATOR`'s own docblock has always
+     * defined it as `TRIAGE_CONSOLE_ROSTER.collators[0]`: it is the seat the
+     * ACTOR WATCHES, which is a different question from which seats may send.
+     * §6.4 puts the watch on one seat deliberately — `cli/commands/relay.ts`
+     * records that a watch hard-coded to the wrong seat *"would have exited the
+     * moment the unrelated review console came down"* — so this pins the
+     * relationship the constant claims rather than the roster's width.
+     */
+    expect(TRIAGE_CONSOLE_ROSTER.collators[0]).toBe(TRIAGE_COLLATOR);
     expect(TRIAGE_COLLATOR).toBe("tri-1");
   });
 });

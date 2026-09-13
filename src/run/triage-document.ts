@@ -345,15 +345,25 @@ export const TriageDocumentSchema = z
  * was individually "bounded", and with a single row permitted to be very nearly
  * the whole cap below on its own.
  *
- * Task 7.3 therefore moved BOTH of those to sizes this cap can hold —
- * {@link MAX_SERVICES_PER_ENVIRONMENT} is 8 and {@link TRIAGE_NOTE_MAX_BYTES}
- * is 1 024 — so that every bound is reachable rather than nominal. They remain
- * un-composable at their extremes, which is inherent: 8 maximal notes cannot
- * fit in 4 096 and no choice of three numbers makes them. What changed is that
- * each bound can now be hit by a document this parser accepts, instead of
- * describing a document it would always refuse.
+ * Task 7.3 therefore moved BOTH of those to sizes this cap can hold — at the
+ * time {@link MAX_SERVICES_PER_ENVIRONMENT} 8 against a 4 096-byte cap, with
+ * {@link TRIAGE_NOTE_MAX_BYTES} 1 024 — so that every bound is reachable rather
+ * than nominal.
  *
- * ## Why 4 096, and the one thing this number is NOT
+ * **The services cap and this document cap were both DOUBLED on 2026-09-12, to
+ * 16 and 8 192; the note cap did not move.** The argument survives because the
+ * two that moved moved together, which is this constant's own rule — see the
+ * note on the constant below and `triage-targets.ts`. They remain un-composable
+ * at their extremes, which is inherent: 16 maximal notes cannot fit in 8 192 and
+ * no choice of three numbers makes them. What changed is that each bound can now
+ * be hit by a document this parser accepts, instead of describing a document it
+ * would always refuse.
+ *
+ * ## Why 4 096 ORIGINALLY, and the one thing this number is NOT
+ *
+ * (The cap is 8 192 since 2026-09-12. The measurement below is what sized the
+ * original 4 096 and is the reason the raise needed an argument rather than a
+ * preference — read it before moving this number again.)
  *
  * §11's Q8 probe measured a local model accepting a 4 KB tool argument intact
  * and **silently delivering 39% of an 8 KB one** — `isError` false, epoch
@@ -365,8 +375,18 @@ export const TriageDocumentSchema = z
  * and is why the cap arrives in the same task as the withdrawal.
  *
  * §11's census of 119 real envelopes from this console's three producing seats
- * puts the observed maximum at 1 472 bytes, so this is 2.8x the largest
- * collation this console has ever written.
+ * puts the observed maximum at 1 472 bytes, so this was 2.8x the largest
+ * collation this console had written when the cap was first set.
+ *
+ * **RE-MEASURED 2026-09-12: the largest collation on disk is now 1 863 bytes (3
+ * rows, T-sweep-4), across all 109 documents, every one written by `tri-1`.**
+ * (The mean and per-row figures quoted at the constant below are over the 103 of
+ * those that parse with rows; this maximum is over the full 109.)
+ * The census figure is left standing rather than overwritten, because it names a
+ * population — 119 envelopes from three producing seats — that a count of
+ * collation documents does not reproduce, and replacing it would trade a
+ * reconcilable number for a confident wrong one. What is certain either way: the
+ * observed maximum has grown and is still under a quarter of the cap.
  *
  * **The number is measured on the model these seats actually run, and checking
  * that took reading the operator's file rather than the tracked one.** The
@@ -384,7 +404,30 @@ export const TriageDocumentSchema = z
  * A refusal is the right side to err on either way: it is loud, it is
  * recoverable, and it is the opposite of the silent short read it prevents.
  */
-export const TRIAGE_DOCUMENT_MAX_BYTES = 4096;
+/*
+ * DOUBLED 4096 -> 8192 on 2026-09-12, by operator instruction, in the same edit
+ * as `MAX_SERVICES_PER_ENVIRONMENT` 8 -> 16. The two move together or neither
+ * moves — that is this constant's own rule, stated at `triage-targets.ts`, and
+ * `triage-document.test.ts` is what enforces it.
+ *
+ * **What made the raise defensible is the two-pair console, not a new
+ * measurement.** Until 2026-09-12 one collator wrote ONE `triage.json` covering
+ * the whole environment, so the document cap and the service cap bounded the
+ * same object and 16 services would have meant a ~9 KB document against a 4 KB
+ * wire. With `tri-1` and `tri-2` each collating only its own slice, 16 declared
+ * services is two documents of 8 rows, and at the 621 bytes the most expensive
+ * real row has ever cost that is ~5.0 KB each — inside 8 192 and roughly where
+ * one collation sat before the split. (MEASURED 2026-09-12 across the 103
+ * collations on disk that parse with rows, out of 109 files: 415 bytes a row
+ * mean, 621 max. The figure here read "~570" until then, which was an estimate
+ * quoted as though it were a measurement.)
+ *
+ * The observed maximum moved with that measurement, and the multiplier moves
+ * with it: the largest collation this console has written is 1 863 bytes, so
+ * this cap is 4.4x that — not the 5.6x it would be against §11's older 1 472,
+ * which counted a different population. The cap is a wire limit, not a target.
+ */
+export const TRIAGE_DOCUMENT_MAX_BYTES = 8192;
 
 /** Why a `triage.json` was refused, as a value rather than as prose. */
 export type TriageDocumentRefusal = "too_large" | "not_json" | "not_an_object" | "schema";

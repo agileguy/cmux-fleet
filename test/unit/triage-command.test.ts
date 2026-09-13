@@ -96,6 +96,7 @@ import {
 } from "../../src/run/paths.ts";
 import {
   DISPATCH_REQUEST_SCHEMA,
+  TRIAGE_CONSOLE_ROSTER,
   dispatchRequestPath,
 } from "../../src/run/dispatch-request.ts";
 import { TRIAGE_CONSOLE_ASPECTS } from "../../src/run/task-ids.ts";
@@ -930,7 +931,7 @@ describe("buildSweepDriver", () => {
       openSweep: async () => ({ kind: "opened" as const, marker }),
       dispatchObserver: async () => {},
       join: async () => ({ artifacts: [], blocked: [], claimedSuccess: [] }),
-      collate: async () => ({ document: null, evidenceRef: "ref" }),
+      collate: async () => ({ document: null, evidenceRef: "ref", staleCollators: [] }),
     };
     const driver = buildSweepDriver(run, briefing, process.env);
     expect(await driver.highestSweepNumber()).toBe(7);
@@ -964,7 +965,7 @@ describe("buildSweepDriver", () => {
         openSweep: async () => ({ kind: "opened" as const }),
         dispatchObserver: async () => {},
         join: async () => ({ artifacts: [], blocked: [], claimedSuccess: [] }),
-        collate: async () => ({ document: null, evidenceRef: "ref" }),
+        collate: async () => ({ document: null, evidenceRef: "ref", staleCollators: [] }),
       },
       process.env,
     );
@@ -982,7 +983,7 @@ describe("buildSweepDriver", () => {
         openSweep: async () => ({ kind: "opened" as const }),
         dispatchObserver: async () => {},
         join: async () => ({ artifacts: [], blocked: [], claimedSuccess: [] }),
-        collate: async () => ({ document: null, evidenceRef: "ref" }),
+        collate: async () => ({ document: null, evidenceRef: "ref", staleCollators: [] }),
       },
       process.env,
     );
@@ -1112,13 +1113,63 @@ contexts:
 current-context: gke-cni-dev
 `;
 
-/** `tri-1`'s partition, fixed so the host's completeness check has one answer. */
+/**
+ * Each observer's partition — the division the COLLATOR chooses, spelled once.
+ *
+ * **WHOSE CHOICE THIS IS CHANGED ON 2026-09-13, and that is the whole of the
+ * rework.** While there were two collators the host split the environment
+ * between them — `evenSlices(3, 2)` is `[[routing, authorization],
+ * [authentication]]` — and each collator was BRIEFED with its half, so a fixture
+ * claiming a different division had its requests refused `partition_incomplete`
+ * against the slice it was actually given. The division was not a free choice.
+ *
+ * With ONE collator it is. `evenSlices(3 services, 1 collator)` hands `tri-1`
+ * the whole environment and `evenSlices(3 aspects, 1)` hands it all three seats,
+ * so the partition among those seats is the collator's own judgement — §6.5's
+ * ⌈N/3⌉, *"the partition is the triage worker's to make"*. The host checks only
+ * that the union covers every declared service exactly once; it does not choose
+ * the shares and does not refuse a lopsided one.
+ *
+ * So this table is now the FIXTURE COLLATOR's decision rather than a transcript
+ * of the host's arithmetic, and one service each is the even split the role
+ * prompt asks for. What still constrains it is the completeness check: drop a
+ * service here and the sweep is refused `partition_incomplete`, name one twice
+ * and it is refused `partition_duplicate`.
+ */
 const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
-  // ONE observer, so its slice is the whole environment. This was one service per
-  // seat when the console had three; the partition's completeness check is
-  // unchanged and still refuses a request that misses any declared service.
-  "obs-t1": ["routing", "authorization", "authentication"],
+  "obs-t1": ["routing"],
+  "obs-t2": ["authorization"],
+  "obs-t3": ["authentication"],
 };
+
+/**
+ * Which observers each collator owns — the fan-out, spelled once.
+ *
+ * **`seats`, PLURAL, since 2026-09-13.** This was `seat: TRIAGE_CONSOLE_ASPECTS[i]`
+ * — one aspect seat per collator, positional, exactly as `triage.ts` built it
+ * while the console was two pairs. `SweepPair.seats` was always a LIST, which is
+ * why one collator over three observers needed no re-architecture: the pairing
+ * collapsed to a single entry holding every seat.
+ *
+ * **THIS FIXTURE ASSUMES ONE COLLATOR, and the assumption is asserted rather
+ * than left to rot.** `expectDispatchesWereWellFormed` derives its dispatch
+ * count from `p.seats.length` per pair, so a second collator would not silently
+ * produce wrong expectations — but the flat `seats: TRIAGE_CONSOLE_ASPECTS`
+ * below WOULD hand both collators all three seats, which is not what
+ * `evenSlices` would do. If `TRIAGE_CONSOLE_ROSTER.collators` ever grows, this
+ * line has to share the aspects out rather than copy them.
+ */
+const PAIRS = TRIAGE_CONSOLE_ROSTER.collators.map((collator) => ({
+  collator,
+  seats: TRIAGE_CONSOLE_ASPECTS,
+}));
+
+const isCollator = (worker: string): boolean =>
+  TRIAGE_CONSOLE_ROSTER.collators.includes(worker);
+
+/** The pair a collator acts for. */
+const pairOf = (collator: string): (typeof PAIRS)[number] =>
+  PAIRS.find((p) => p.collator === collator)!;
 
 /**
  * `routing` is the one service that reports badly, and the asymmetry is the
@@ -1194,7 +1245,7 @@ function fixtureFleetDispatch(
     log.push(`${worker}:${taskId}`);
     await writeJson(inboxTaskPath(run, taskId), { schema: "pifleet.task/v1", task_id: taskId });
 
-    if (worker === TRIAGE_COLLATOR && !taskId.endsWith("-collate")) {
+    if (isCollator(worker) && !taskId.endsWith("-collate")) {
       /*
        * Turn one. The window instant is read back OUT OF THE BRIEF rather than
        * recomputed, which is exactly what §7.2 instructs the collator to do —
@@ -1211,17 +1262,35 @@ function fixtureFleetDispatch(
       // refuses, so the pass changes shape too — and the claim itself is made
       // outside the loop's swallow.
       windows.push(window?.[1] ?? null);
-      await writeJson(dispatchRequestPath(run.root, TRIAGE_COLLATOR, taskId), {
+      /*
+       * INTO THE ACTING COLLATOR'S OWN OUTBOX, naming EVERY SEAT IT OWNS.
+       *
+       * ONE entry per observer inside ONE `requests[]` file, the union covering
+       * every declared service exactly once — which is what `roles/triage.md`
+       * now asks the collator for, and what §6.5 always specified.
+       *
+       * **This has been all three shapes, and the middle one is the instructive
+       * failure.** It wrote one request covering every aspect (one collator, all
+       * observers); then one request naming only its own seat, because two
+       * collators each briefed their own observer and `readSweepPartition` reads
+       * both outboxes and CONCATENATES — a fixture that kept writing the whole
+       * partition from one sender would have produced a duplicate claim on every
+       * service the moment the second collator wrote, and the sweep would be
+       * refused `partition_duplicate`. With one collator the concatenation has a
+       * single contributor again, so the fan-out returns to this file.
+       */
+      const { seats } = pairOf(worker);
+      await writeJson(dispatchRequestPath(run.root, worker, taskId), {
         schema: DISPATCH_REQUEST_SCHEMA,
         parent_task_id: taskId,
-        requests: TRIAGE_CONSOLE_ASPECTS.map((s) => ({
-          worker: s.worker,
-          title: `${taskId} ${s.worker}`,
-          brief: `Observe ${SLICE_OF[s.worker]!.join(", ")} and report one row per service.`,
-          services: [...SLICE_OF[s.worker]!],
+        requests: seats.map((seat) => ({
+          worker: seat.worker,
+          title: `${taskId} ${seat.worker}`,
+          brief: `Observe ${SLICE_OF[seat.worker]!.join(", ")} and report one row per service.`,
+          services: [...SLICE_OF[seat.worker]!],
         })),
       });
-    } else if (worker !== TRIAGE_COLLATOR) {
+    } else if (!isCollator(worker)) {
       /*
        * An observer's turn — §7.4's artifact, echoing both host-minted values.
        *
@@ -1248,10 +1317,23 @@ function fixtureFleetDispatch(
       });
     } else {
       // Turn two — §7.5's collation document.
-      await writeJson(triageDocumentPath(run, taskId), {
+      /*
+       * ONE DOCUMENT PER COLLATOR, carrying the rows of every seat it owns,
+       * written into its own outbox — `triageDocumentPath`'s third argument.
+       *
+       * With one collator this is the whole environment again, and the ROW
+       * ATTRIBUTION is what now carries the split: each row is stamped with the
+       * seat that observed it (`documentRow`'s second argument), so a wiring
+       * that collated one observer's rows three times, or lost a seat's rows
+       * entirely, is visible here even though the service list is complete
+       * either way. While there were two collators the split was visible as two
+       * half-documents; it has moved inside the one document rather than gone.
+       */
+      const { seats } = pairOf(worker);
+      await writeJson(triageDocumentPath(run, taskId, worker), {
         schema: TRIAGE_DOCUMENT_SCHEMA,
         sweep_id: sweepId,
-        services: TRIAGE_CONSOLE_ASPECTS.flatMap((s) =>
+        services: seats.flatMap((s) =>
           SLICE_OF[s.worker]!.map((service) => documentRow(service, s.worker)),
         ),
         unaccounted: [],
@@ -1403,7 +1485,7 @@ async function fixtureFleet(
   await writeFile(join(run.root, "run.json"), JSON.stringify({ run_id: runId }));
   // The collator's directory is what `resolveCollatorRun` scans for.
   for (const w of fixture.seats ??
-    [TRIAGE_COLLATOR, ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker)]) {
+    [...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker)]) {
     await mkdir(join(run.workersDir, w), { recursive: true });
   }
 
@@ -1534,10 +1616,22 @@ function expectDispatchesWereWellFormed(
 ): void {
   const { sweeps } = expected;
   // THE COMPLETENESS CLAIM, and the one that makes every line below meaningful:
-  // three dispatches per sweep — the parent, this console's one observer, the
-  // collation. It was five when the console had three observers.
+  // FIVE dispatches per sweep since 2026-09-13 — one collator's sweep envelope,
+  // its three observers' slices, and its collation. It was three at one pair and
+  // six at two, and the comment that stood here predicted this exact figure
+  // ("five when one collator fanned out to three observers") a day before it
+  // became true.
+  //
+  // DERIVED PER PAIR rather than spelled, because every fixed expression tried
+  // here has been wrong within a day of being written. `PAIRS.length * 3` was
+  // right at two pairs of one seat each and is wrong the moment a pair holds a
+  // different number of seats; `2 + TRIAGE_CONSOLE_ASPECTS.length` coincided with
+  // the right answer at one pair and evaluated to four at two. Each pair
+  // contributes its open, its collation, and one dispatch per seat it owns —
+  // which is the actual rule and is true at every shape this console has had.
+  const perSweep = PAIRS.reduce((n, p) => n + 2 + p.seats.length, 0);
   expect(fleet.dispatched.length, "the recorded dispatch sequence is short — a stub threw").toBe(
-    (2 + TRIAGE_CONSOLE_ASPECTS.length) * sweeps,
+    perSweep * sweeps,
   );
   // ENTERED equals FINISHED. This is the arm that catches a throw from the LAST
   // line of the stub, where everything has already been recorded and only the
@@ -1563,8 +1657,14 @@ function expectDispatchesWereWellFormed(
   // A title per dispatch, none of them empty.
   expect(fleet.titles.length).toBe(fleet.dispatched.length);
   expect(fleet.titles.filter((t) => t.trim() === "")).toEqual([]);
-  // One host-minted observation window per sweep, none of them missing.
-  expect(fleet.windows.length).toBe(sweeps);
+  // One host-minted observation window per COLLATOR per sweep, none missing.
+  // Each pair is opened with its own envelope and each envelope states its own
+  // instant. **Back to one per sweep, and still spelled `* PAIRS.length`**: this
+  // read a bare `sweeps` while the console had one collator, went wrong when it
+  // grew to two, and is numerically identical again now that it is back to one.
+  // The factor stays because it is the REASON rather than the current value —
+  // the number of windows is a fact about collators, not about sweeps.
+  expect(fleet.windows.length).toBe(sweeps * PAIRS.length);
   expect(fleet.windows.filter((w) => w === null)).toEqual([]);
   // §12's closing anti-criterion: no criterion in this file requires a real
   // model. The fixture's probe THROWS, and a throw inside the pass is exactly
@@ -1691,19 +1791,50 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
      * the fan-out serial and cost this console two of three observers on its
      * first live sweep.
      */
-    expect(fleet.dispatched).toHaveLength(2 + TRIAGE_CONSOLE_ASPECTS.length);
-    expect(fleet.dispatched[0]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1`);
-    expect(fleet.dispatched[2]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1-collate`);
+    const seatsOf = PAIRS.flatMap((p) => p.seats);
+    expect(fleet.dispatched).toHaveLength(2 * PAIRS.length + seatsOf.length);
     /*
-     * COVERAGE DROPPED 2026-09-07, deliberately and on the operator's call: this
-     * console now has ONE observer, so the middle of the sequence is a single
-     * slice. What is no longer asserted anywhere is that a partition reaches
-     * SEVERAL seats in one sweep — a fan-out that dropped or duplicated a slice
-     * across observers would not fail here, because there is no longer more than
-     * one. Restore this to a set assertion if the console regains a second seat.
+     * THE OPENS FIRST, in pair order. `openSweep` loops the pairs sequentially
+     * and deliberately — a budget refusal on the first must STOP the second
+     * rather than race it — so this order is a fact rather than a schedule.
      */
-    expect(fleet.dispatched.slice(1, 2)).toEqual(["obs-t1:T-sweep-1-slice1"]);
-    expect(out).toContain("T-sweep-1: swept 1 observers");
+    expect(fleet.dispatched.slice(0, PAIRS.length)).toEqual(
+      PAIRS.map((p) => `${p.collator}:T-sweep-1`),
+    );
+    /* THE COLLATIONS LAST, one per pair. Sorted: nothing orders the pairs here. */
+    expect([...fleet.dispatched.slice(-PAIRS.length)].sort()).toEqual(
+      PAIRS.map((p) => `${p.collator}:T-sweep-1-collate`).sort(),
+    );
+    /*
+     * AND THE FAN-OUT IN THE MIDDLE — asserted by WHICH SEATS, never by order
+     * and never by task-id spelling. This is the coverage the note below records
+     * as dropped in 2026-09-07: a partition reaching several seats in one sweep
+     * is checkable again, so a fan-out that dropped or duplicated a slice across
+     * observers now fails here.
+     */
+    expect(
+      fleet.dispatched
+        .slice(PAIRS.length, PAIRS.length + seatsOf.length)
+        .map((d) => d.slice(0, d.indexOf(":")))
+        .sort(),
+    ).toEqual(seatsOf.map((s) => s.worker).sort());
+    /*
+     * COVERAGE RESTORED 2026-09-12, on the instruction the 2026-09-07 note left
+     * here: *"Restore this to a set assertion if the console regains a second
+     * seat."* It regained one as a second PAIR, and the set assertion is the
+     * fan-out check above — a partition that dropped or duplicated a slice
+     * across observers fails there now, which is the property that note
+     * recorded as unguarded.
+     *
+     * The line that stood here read `dispatched.slice(1, 2)` and expected the
+     * single observer's slice. Index 1 is now the SECOND COLLATOR's open, so it
+     * was not merely narrow — it was asserting against the wrong entry, and
+     * would have gone on passing only while the console had exactly one pair.
+     */
+    // OBSERVERS, not pairs — the two were the same number while each collator
+    // owned exactly one seat, and this line rode that coincidence. One collator
+    // over three observers separates them: the sweep reports THREE.
+    expect(out).toContain(`T-sweep-1: swept ${seatsOf.length} observers`);
     // Deadline, titles, window and §12's closing anti-criterion, all out here.
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
@@ -1720,7 +1851,12 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     const outcome = await productionTriageDeps(async () => fleet.effects).pass();
 
     expect(outcome.kind).toBe("swept");
-    expect([...outcome.dispatched]).toEqual(["obs-t1"]);
+    // ALL THREE observers, sorted: the fan-out is concurrent by construction
+    // (§6.5 — a slice is independent of every other slice), so the order these
+    // settle in is a schedule rather than a fact worth asserting. Sorting was
+    // already the right call when there were two; at three it is what keeps this
+    // from failing on a scheduler rather than on a defect.
+    expect([...outcome.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     // §12: *"A first `unhealthy` observation notifies nothing."*
     expect(outcome.notifications).toEqual([]);
     expect(fleet.delivered).toEqual([]);
@@ -1927,7 +2063,7 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     const doc = JSON.parse(out) as { schema: string; kind: string; dispatched: string[] };
     expect(doc.schema).toBe("pifleet.triagepass/v1");
     expect(doc.kind).toBe("swept");
-    expect(doc.dispatched).toEqual(["obs-t1"]);
+    expect([...doc.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 });
@@ -2114,11 +2250,30 @@ describe("§6.6 layer 3: the previous sweep's document, and the store that keeps
     await productionTriageDeps(async () => fleet.effects).pass();
     const doc = await previousSweepDocument(fleet.run);
     expect(doc?.sweep_id).toBe("T-sweep-1");
-    expect(doc?.services.map((s) => s.service).sort()).toEqual([
-      "authentication",
-      "authorization",
-      "routing",
-    ]);
+    /*
+     * THE COLLATOR'S WHOLE ENVIRONMENT, and the SPLIT asserted where it now
+     * lives — between the SEATS inside one document.
+     *
+     * **This test has been re-aimed twice and the second move is not a
+     * narrowing.** It expected all three services while one collator covered the
+     * environment; then each collator's own half separately, because two
+     * collators each collated only the slice they were briefed with. With one
+     * collator the environment is whole again, so a naive restoration of the
+     * first version would pass — and would assert nothing about the fan-out,
+     * which is the property that actually changed.
+     *
+     * So the union is asserted against the SEATS' slices rather than against the
+     * targets file: a wiring that collated one observer's rows three times, or
+     * dropped a seat's rows entirely, produces a service list that is wrong here
+     * even though the collator "reported the whole environment" either way. The
+     * length check is the duplicate arm — three services, three rows, so a
+     * double-collation reddens rather than hiding inside a `sort()`.
+     */
+    const seats = PAIRS[0]!.seats;
+    expect(doc?.services.map((s) => s.service).sort()).toEqual(
+      seats.flatMap((s) => [...SLICE_OF[s.worker]!]).sort(),
+    );
+    expect(doc?.services).toHaveLength(seats.reduce((n, s) => n + SLICE_OF[s.worker]!.length, 0));
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
@@ -2176,7 +2331,10 @@ describe("§6.6 layer 3: the previous sweep's document, and the store that keeps
 // ---------------------------------------------------------------------------
 
 /** Every seat this console has, spelled from the roster rather than typed. */
-const ALL_SEATS = [TRIAGE_COLLATOR, ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker)];
+const ALL_SEATS = [
+  ...TRIAGE_CONSOLE_ROSTER.collators,
+  ...TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker),
+];
 
 /**
  * Effects whose loop is BOUNDED BY THE WATCH, not by the pass — and the reason
@@ -2697,7 +2855,14 @@ describe("§13 task 6.9: §7.8's cadence_s reaches --poll, and --poll overrides 
 // §13 task 6.5c — a console with no collator at start
 // ---------------------------------------------------------------------------
 
-/** The observer, i.e. every seat EXCEPT the one the watch is pinned to. */
+/**
+ * The observers — i.e. every seat EXCEPT the collators.
+ *
+ * A fleet materialised from these alone is a console with NO collator, which is
+ * what task 6.5c is about. That was ONE missing seat while the console had one
+ * collator and is TWO since 2026-09-12, so the repairs below stand up two — and
+ * the watch is still pinned to `TRIAGE_COLLATOR`, which is a separate fact.
+ */
 const OBSERVER_SEATS = TRIAGE_CONSOLE_ASPECTS.map((s) => s.worker);
 
 describe("§13 task 6.5c: an actor may START into a console with no collator", () => {
@@ -2765,9 +2930,12 @@ describe("§13 task 6.5c: an actor may START into a console with no collator", (
     );
 
     expect(exit).toEqual({ kind: "stopped", passes: 1 });
-    // ONLY the collator was due: the observer is present and unstamped,
-    // and there was no run to hand `downRun`, so the repair is one `up`.
-    expect(fleet.recycled).toEqual([`up ${TRIAGE_COLLATOR}`]);
+    // ONLY the collators were due: both observers are present and unstamped,
+    // and there was no run to hand `downRun`, so the repair is one `up` each.
+    // Sorted, because nothing orders the repair of two independent seats.
+    expect([...fleet.recycled].sort()).toEqual(
+      TRIAGE_CONSOLE_ROSTER.collators.map((c) => `up ${c}`).sort(),
+    );
     expect(repaired).not.toBeNull();
     // THE GATE OPENED — the repair reached the pass and not merely the log.
     expect(passes).toBe(1);
@@ -2834,8 +3002,10 @@ describe("§13 task 6.5c: an actor may START into a console with no collator", (
     // It ended, and it ended for the right reason.
     expect(exit.kind).toBe("console_gone");
     expect(exit.kind === "console_gone" && exit.worker).toBe(TRIAGE_COLLATOR);
-    // THE PREMISE: it really did try to repair the seat first.
-    expect(ups).toBe(1);
+    // THE PREMISE: it really did try to repair the seats first — one attempt
+    // per collator, because a cold console is missing both and the repair does
+    // not stop at the first throw.
+    expect(ups).toBe(TRIAGE_CONSOLE_ROSTER.collators.length);
     // §6.6's gate held the sweep while `tri-1` was unresolved, which is the
     // clause that would make an `unverifiable` watch immortal.
     expect(passes).toBe(0);

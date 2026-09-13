@@ -100,6 +100,75 @@ export interface PartitionAssignment {
 }
 
 /**
+ * Divide a declared list between the console's collators, as evenly as the
+ * count allows — the HOST's half of a two-pair sweep (2026-09-12).
+ *
+ * ## This is not the partition §6.5 reserves for the worker
+ *
+ * §6.5 gives the model the judgement of *which services are related, cheap, or
+ * changed since the last sweep* — that partition is still the collator's, made
+ * ACROSS ITS OWN OBSERVERS, and {@link checkTriagePartition} still counts it.
+ * What this function decides is one level up and is not a judgement at all:
+ * which collator is handed which half of the environment. A model cannot make
+ * that call, because at the moment it would be made no model has been dispatched
+ * yet — the slice IS the envelope, and the envelope is what wakes the collator.
+ *
+ * So the rule is arithmetic rather than discernment, and the operator fixed it
+ * in those terms: *"the split should be numerically as even as possible."*
+ *
+ * ## Contiguous in FILE ORDER, not round-robin, and the reason is the operator
+ *
+ * `declared` is in `triage/targets.yaml` order and stays that way — the same
+ * rule `triagePass`'s own call site gives for not sorting it, *"sorting here
+ * would make `partition_incomplete`'s list disagree with the file an operator is
+ * about to open"*. Contiguous slices extend that: an operator reading the
+ * targets file top-to-bottom can see where the cut falls. Round-robin would
+ * interleave the two collators through the file and make "who has `grafana`?" a
+ * question only this function can answer.
+ *
+ * ## The remainder goes to the FRONT, so `tri-1` carries the odd one
+ *
+ * With 3 services and 2 collators the split is 2/1, not 1/2. Front-loading is
+ * arbitrary between the two but it must be DECIDED rather than emergent, because
+ * the alternative is a split that depends on iteration order and changes the day
+ * someone reverses a loop. `tri-1` is the seat an operator lands on (it is pane
+ * 1), so if either collator is going to be the busier one it should be the one
+ * being looked at.
+ *
+ * ## An EMPTY slice is possible and is the caller's problem, deliberately
+ *
+ * With fewer services than collators — one service, two seats — a trailing slice
+ * is `[]`. This function returns it rather than dropping it, so the result's
+ * length always equals `parts` and a caller can rely on index `i` meaning
+ * collator `i`. A collator handed an empty slice must NOT be dispatched: an
+ * envelope naming no services asks a model to partition nothing, and whatever it
+ * writes would be refused as `partition_incomplete` against an empty declared
+ * list. Skipping it is the caller's job because only the caller knows what a
+ * skipped seat means for coverage.
+ */
+export function evenSlices<T>(items: readonly T[], parts: number): readonly (readonly T[])[] {
+  if (!Number.isInteger(parts) || parts < 1) {
+    throw new RangeError(
+      `evenSlices needs at least one part and got ${JSON.stringify(parts)}; the part count is ` +
+        `the console's collator count, which is a host constant rather than anything a worker ` +
+        `or a config file can drive to zero.`,
+    );
+  }
+  const base = Math.floor(items.length / parts);
+  // The first `extra` slices take one more than the rest — see the docblock for
+  // why the remainder is front-loaded rather than trailing.
+  const extra = items.length % parts;
+  const out: (readonly T[])[] = [];
+  let at = 0;
+  for (let i = 0; i < parts; i += 1) {
+    const size = base + (i < extra ? 1 : 0);
+    out.push(items.slice(at, at + size));
+    at += size;
+  }
+  return out;
+}
+
+/**
  * The two codes this module can spend, narrowed FROM the request plane's union
  * rather than re-spelled.
  *

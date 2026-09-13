@@ -45,7 +45,19 @@ interface Fake {
   calls: string[][];
 }
 
-function fakeCmux(opts: { workspaces?: Array<{ id: string; custom_title: string | null }> } = {}): Fake {
+function fakeCmux(
+  opts: {
+    /** `custom_color` is optional so every existing caller stays byte-identical. */
+    workspaces?: Array<{ id: string; custom_title: string | null; custom_color?: string | null }>;
+    /** `workspace group list` — omitted means a cmux reporting no groups at all. */
+    groups?: Array<{ id: string; name: string }>;
+    /**
+     * Raw stdout for the group lookup, for the ONE test that needs malformed
+     * output: a cmux too old to know the verb answers with an empty string.
+     */
+    groupsRaw?: string;
+  } = {},
+): Fake {
   const calls: string[][] = [];
   let splits = 0;
   const client = new CmuxClient({
@@ -56,6 +68,14 @@ function fakeCmux(opts: { workspaces?: Array<{ id: string; custom_title: string 
           return ok("");
         case "workspace list":
           return ok(JSON.stringify({ window_id: "win-1", workspaces: opts.workspaces ?? [] }));
+        case "workspace group":
+          // The ONLY way to get malformed output here, and it exists for one
+          // test: a cmux too old to know this verb answers with an empty string.
+          if (opts.groupsRaw !== undefined) return ok(opts.groupsRaw);
+          // Otherwise valid JSON naming no groups — NOT that empty string. The
+          // throw path is covered deliberately below, so it must never be the
+          // accidental default every other test here runs through.
+          return ok(JSON.stringify({ groups: opts.groups ?? [] }));
         case "workspace create":
           return ok(JSON.stringify({ workspace_id: "ws-new", surface_id: "surf-0", window_id: "win-1" }));
         case "new-split": {
@@ -203,6 +223,11 @@ describe("creating the workspace", () => {
       // evenly split is fully usable, so a cosmetic failure must not take the
       // workspace down with it. The call being ISSUED is what this pins.
       "list-panes",
+      // A rebuilt console goes back into its sidebar group, so `ensureWorkspace`
+      // asks which groups exist. This fake reports none, so no
+      // `workspace-group add` follows it — the LOOKUP is what is pinned here,
+      // and the adding is pinned where a group actually exists.
+      "workspace group",
     ]);
   });
 
@@ -314,12 +339,26 @@ describe("creating the workspace", () => {
  *
  * ## The asymmetry that makes these probes mean something
  *
- * `TRIAGE_SPEC.topFraction` is `null` and `OPERATIONS_SPEC`'s is `0.65`, and
- * that difference is OBSERVABLE rather than merely declared: `applyTopFraction`
- * returns immediately on `null`, before it reads geometry, so this console
- * issues exactly ONE `list-panes` where the operations console issues two. The
- * fraction is therefore pinned by behaviour and not by reading the constant back
- * — a spec that had copied `OPERATIONS_TOP_FRACTION` reddens here.
+ * **INVERTED 2026-09-13, and the mechanism is unchanged.** This console used to
+ * be the one with NO layout correction: `topFraction: null` made
+ * `applyTopFraction` return before it read geometry, so triage issued exactly
+ * ONE `list-panes` where operations issued two — and that count, not a constant
+ * read back, was how the fraction was pinned.
+ *
+ * It is now a console with the MOST correction: `topFraction` is `1/3` and it
+ * carries a `bottomWidthFraction`, because a collator over three observers is a
+ * layout `new-split` cannot produce — halving gives 50/50 vertically and
+ * 50/25/25 horizontally. So it issues THREE `list-panes`: the focus lookup, the
+ * height pass, and the width pass. The probe is the same behavioural one,
+ * counting up instead of down — a spec that dropped either fraction reddens
+ * here.
+ *
+ * **"THE ONLY SPEC WITH A `bottomWidthFraction`" LASTED ONE DAY.** This docblock
+ * said that until 2026-09-13, when `review` was asked to take the same shape and
+ * became the second. Nothing here reddened, because a uniqueness claim about
+ * OTHER specs is not a property of the console under test — the same expiry
+ * `triagePanes`' own docblock now warns about at greater length. The verb counts
+ * below are unaffected: they are assertions about the calls THIS spec makes.
  */
 describe("the triage console is built from its own spec", () => {
   test("an existing triage workspace is adopted, and nothing is created or respawned", async () => {
@@ -389,7 +428,7 @@ describe("the triage console is built from its own spec", () => {
     expect(verbsOf(calls)).toContain("workspace create");
   });
 
-  test("issues one create, one split and two respawns — and only ONE list-panes", async () => {
+  test("issues one create, three splits and four respawns — and THREE list-panes", async () => {
     const { client, calls } = fakeCmux();
 
     const result = await ensureTriage(client, OPTS);
@@ -404,14 +443,31 @@ describe("the triage console is built from its own spec", () => {
       "new-split",
       "rename-tab",
       "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
       "select-workspace",
-      // ONE `list-panes`, for the focus lookup, and no second one for geometry.
-      // The operations console's equivalent test pins TWO, because its
-      // `topFraction` is 0.65 and `applyTopFraction` reads geometry to correct
-      // it. `null` returns before that read, so the absence of a second call is
-      // this spec's fraction asserted through behaviour.
+      // THREE `list-panes`, and each one is a different claim about this spec.
+      // The first is the focus lookup, which every console does. The second is
+      // `applyTopFraction` reading geometry — it returns before that read when
+      // `topFraction` is `null`, so its presence IS the 1/3 asserted through
+      // behaviour. The third is `applyBottomWidths`, which only this console
+      // reaches, because it is the only spec carrying a `bottomWidthFraction`.
+      //
+      // No `resize-pane` follows any of them: this fake reports no
+      // `container_frame`, so both passes take their parse-failed path. The
+      // calls being ISSUED is what this pins — the arithmetic has no double to
+      // run against and is measured on the live console instead.
       "list-panes",
       "focus-pane",
+      "list-panes",
+      "list-panes",
+      // The group lookup every rebuild does. No `workspace-group add` follows:
+      // this fake reports no groups.
+      "workspace group",
     ]);
   });
 
@@ -425,7 +481,7 @@ describe("the triage console is built from its own spec", () => {
     // THE NAMED SEATS, never a count: three consoles are one function call apart
     // and a spec pointed at the wrong constant would still produce four panes in
     // a 2x2 and stand up the wrong fleet.
-    expect(titles).toEqual(["tri-1", "obs-t1"]);
+    expect(titles).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
     // …and against the exported default rather than only against literals, so a
     // seat renamed in the plan and not here is a red test rather than a console
     // whose panes are titled for workers it never starts.
@@ -459,7 +515,7 @@ describe("the triage console is built from its own spec", () => {
     for (const c of commands) expect(c).not.toContain("'--attach-here'");
   });
 
-  test("the observer splits right off the reconciler, and each pane respawns once", async () => {
+  test("the observer row splits DOWN off the collator, and each pane respawns once", async () => {
     const { client, calls } = fakeCmux();
     await ensureTriage(client, OPTS);
 
@@ -467,22 +523,33 @@ describe("the triage console is built from its own spec", () => {
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
 
     /*
-     * COVERAGE DROPPED 2026-09-07 with the move to a two-seat console. This used
-     * to be a 2x2 and the load-bearing assertion was the FOURTH pane's anchor —
-     * `down` off `surf-1` rather than off its predecessor `surf-2`, which is the
-     * whole reason `splitFrom` exists: anchored wrongly the console comes out 3+1
-     * while every count, title and direction assertion still passes. With two
-     * panes there is no second row, so `splitFrom` is no longer exercised here.
-     * Restore this test to its 2x2 form if the console regains its other seats.
+     * **THE FIRST SPLIT IS THE LOAD-BEARING ASSERTION** as of 2026-09-13, and
+     * the previous version of this comment named a different pane for the same
+     * structural reason — worth keeping, because the lesson outlived its shape.
+     * It said pane 4's anchor was the one that mattered, since the 2x2 needed
+     * `down` off `surf-1` rather than off its predecessor, and a wrong anchor
+     * produced a 3+1 console every other assertion in this file accepted.
+     *
+     * The shape is now a collator over a row, and the fragile anchor has moved
+     * to the FRONT: pane 2 splits `down` off `surf-0`, which is what creates the
+     * observer row and leaves `tri-1` spanning the width. Make it `right` — the
+     * square builder's table — and the console comes out a 2x2 with the collator
+     * in a quarter, while every count, title and command assertion here still
+     * passes. Only the direction list catches it.
+     *
+     * Panes 3 and 4 then walk ALONG that row, each anchored on its predecessor:
+     * `surf-1` then `surf-2`. That is the one part that got simpler — a row is
+     * the shape where "the previous pane" is finally the right anchor, so the
+     * surface list is now consecutive rather than doubling back.
      */
-    expect(splits.map((c) => c[1])).toEqual(["right"]);
-    expect(splits.map(surfaceOf)).toEqual(["surf-0"]);
+    expect(splits.map((c) => c[1])).toEqual(["down", "right", "right"]);
+    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2"]);
     // Every pane respawns into the surface it was given, and never twice into
     // one: a stale anchor repeats an id here.
     const respawned = calls
       .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
       .map(surfaceOf);
-    expect(respawned).toEqual(["surf-0", "surf-1"]);
+    expect(respawned).toEqual(["surf-0", "surf-1", "surf-2", "surf-3"]);
   });
 
   test("the workspace is named `triage` and opened on the INVOCATION directory", async () => {
@@ -516,10 +583,129 @@ describe("the triage console is built from its own spec", () => {
     const viaSpec = fakeCmux();
     await createWorkspace(viaSpec.client, TRIAGE_SPEC, OPTS);
 
-    expect(viaEnsure.calls.slice(1)).toEqual(viaSpec.calls);
+    /*
+     * `ensureTriage` BRACKETS the build with two calls `createWorkspace` does
+     * not make: the adoption probe at the front (already dropped by `slice(1)`)
+     * and the group/colour restore at the back. Both belong to
+     * `ensureWorkspace` — REPLACING a console is what needs them, CONSTRUCTING
+     * one does not — so both ends are dropped rather than the comparison being
+     * loosened into something that would stop catching a second copy of the spec.
+     */
+    const PRESENTATION = new Set(["workspace group", "workspace-group", "workspace-action"]);
+    const construction = (cs: string[][]): string[][] =>
+      cs.filter((c) => !PRESENTATION.has(verb(["cmux", ...c])));
+    expect(construction(viaEnsure.calls.slice(1))).toEqual(construction(viaSpec.calls));
     // And the spec's name is the title the create actually used, rather than a
     // field nothing reads.
     expect(TRIAGE_SPEC.name).toBe("triage");
+  });
+});
+
+/**
+ * Closing a workspace takes its sidebar group and its colour with it, and the
+ * rebuilt console is a DIFFERENT workspace that cmux has no reason to decorate.
+ * So `--recreate` used to return a console sitting outside `pi-fleet` wearing no
+ * colour, every time — a small fault, but one the operator had to repair by hand
+ * on every rebuild.
+ *
+ * The colour has to be read BEFORE the old workspace is closed, because after
+ * that there is nothing left to read it from. That is why this belongs to
+ * `ensureWorkspace` and not to `createWorkspace`, and why the test above that
+ * compares their two call streams has to drop this from the comparison.
+ */
+describe("a rebuilt console goes back into its group wearing its colour", () => {
+  const OLD_TRIAGE = { id: "ws-old", custom_title: "triage", custom_color: "#7D6608" };
+
+  test("--recreate adds the new workspace to pi-fleet and re-applies the old colour", async () => {
+    const { client, calls } = fakeCmux({
+      workspaces: [OLD_TRIAGE],
+      groups: [
+        // The decoy is FIRST on purpose: with `pi-fleet` at index 0, a "use the
+        // only group" or "use the first group" bug passes by accident.
+        { id: "workspace_group:2", name: "daily" },
+        { id: "workspace_group:1", name: "pi-fleet" },
+      ],
+    });
+
+    await ensureTriage(client, OPTS, true);
+
+    const add = calls.find((c) => verb(["cmux", ...c]) === "workspace-group");
+    expect(add, "the rebuilt console was never added to any group").toBeDefined();
+    expect(add![add!.indexOf("--group") + 1]).toBe("workspace_group:1");
+    // The NEW workspace, never the one that is about to be closed.
+    expect(add![add!.indexOf("--workspace") + 1]).toBe("ws-new");
+
+    const colored = calls.find((c) => verb(["cmux", ...c]) === "workspace-action");
+    expect(colored, "the rebuilt console lost its colour").toBeDefined();
+    expect(colored![colored!.indexOf("--color") + 1]).toBe("#7D6608");
+    expect(colored![colored!.indexOf("--workspace") + 1]).toBe("ws-new");
+  });
+
+  /**
+   * ORDER, not merely presence. The close is the step with a known failure mode
+   * — a pinned workspace refuses it — and if it does fail, the rebuilt console
+   * should already be decorated rather than stranded outside its group.
+   */
+  test("both restorations happen BEFORE the old workspace is closed", async () => {
+    const { client, calls } = fakeCmux({
+      workspaces: [OLD_TRIAGE],
+      groups: [{ id: "workspace_group:1", name: "pi-fleet" }],
+    });
+
+    await ensureTriage(client, OPTS, true);
+
+    const verbs = verbsOf(calls);
+    expect(verbs).toContain("workspace close");
+    expect(verbs.indexOf("workspace-group")).toBeLessThan(verbs.indexOf("workspace close"));
+    expect(verbs.indexOf("workspace-action")).toBeLessThan(verbs.indexOf("workspace close"));
+  });
+
+  /** A console that never had a colour must not ACQUIRE one from a rebuild. */
+  test("a console with no colour is rebuilt without one", async () => {
+    const { client, calls } = fakeCmux({
+      workspaces: [{ id: "ws-old", custom_title: "triage", custom_color: null }],
+      groups: [{ id: "workspace_group:1", name: "pi-fleet" }],
+    });
+
+    await ensureTriage(client, OPTS, true);
+
+    expect(verbsOf(calls)).not.toContain("workspace-action");
+  });
+
+  /** A group that does not exist is not an error — nothing is added. */
+  test("no pi-fleet group means no add, and no refusal", async () => {
+    const { client, calls } = fakeCmux({
+      workspaces: [OLD_TRIAGE],
+      groups: [{ id: "workspace_group:2", name: "daily" }],
+    });
+
+    const result = await ensureTriage(client, OPTS, true);
+
+    expect(result).toEqual({ created: true, workspaceId: "ws-new" });
+    expect(verbsOf(calls)).not.toContain("workspace-group");
+    // The colour is a separate repair and still happens.
+    expect(verbsOf(calls)).toContain("workspace-action");
+  });
+
+  /**
+   * THE REBUILD OUTRANKS ITS DECORATION, and this is the test that pins it.
+   *
+   * A cmux too old to know `workspace group` answers the lookup with an empty
+   * string, which `parseWorkspaceGroupList` THROWS on — deliberately, because
+   * that strictness is right for every other caller. Here the throw must not
+   * escape: the console has already been built by the time it happens, and a
+   * rebuild lost to a sidebar detail is precisely the outage `--recreate`
+   * exists to repair. Delete the `catch` in `restoreWorkspacePresentation` and
+   * this reddens.
+   */
+  test("a cmux that cannot answer the group lookup still rebuilds the console", async () => {
+    const { client, calls } = fakeCmux({ workspaces: [OLD_TRIAGE], groupsRaw: "" });
+
+    const result = await ensureTriage(client, OPTS, true);
+
+    expect(result).toEqual({ created: true, workspaceId: "ws-new" });
+    // And the old console is still closed — the rebuild ran to completion.
+    expect(verbsOf(calls)).toContain("workspace close");
   });
 });
 

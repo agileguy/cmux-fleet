@@ -61,8 +61,15 @@ run:
   # written for a repository you thought about would cover every one you did
   # not. An echoed URL cannot transfer, and a wrong echo refuses and prints both.
   #
-  # It lives in the gitignored `fleet.yaml`, never here — a consent committed to
-  # a shared example is a consent nobody chose.
+  # It lives in `fleet.yaml`, never here. The reason printed here used to be
+  # that `fleet.yaml` was kept out of git; since 2026-09-12 it is TRACKED, so
+  # that reason is gone and the real one has to carry the weight on its own. It
+  # does: this file is the shared annotated reference, copied by people who do
+  # not run this fleet, and a consent committed HERE is a consent nobody
+  # chose — it would arrive pre-echoed in every copy, naming a repository the
+  # copier never looked at. `fleet.yaml` is one machine's live definition,
+  # where the echo is an act by the operator who owns that machine. Whether
+  # the file is committed was never the point; who chose the consent is.
   # hosted_repo_consent: <the exact remote you mean to send>
   # RAISED to 4 for the triage console (SRD-TRIAGE-CONSOLE Q3/task 0.4). It
   # bounds each RUN, not the host, and until the triage console existed every
@@ -72,12 +79,15 @@ run:
   # bind on, at any value. The triage console is the first run holding MORE
   # THAN ONE seat, which is what finally gave this key something to bind on.
   #
-  # THE ARGUMENT THAT RAISED IT IS STALE AND THE VALUE IS NOT. That argument
-  # was a three-wide fan-out needing at least 3. The console is TWO seats —
-  # `tri-1` and `obs-t1` (`DEFAULT_TRIAGE_WORKERS`,
-  # `src/backends/cmux/operations-plan.ts`) — and the fan-out is one observer
-  # wide, so an admission budget of four is spent by two and this console now
-  # runs with SLACK where it was once sized to fit exactly.
+  # THE ARGUMENT THAT RAISED IT IS LIVE AGAIN AND THE VALUE FITS EXACTLY. That
+  # argument was a three-wide fan-out needing at least 3. It went stale on
+  # 2026-09-11 when the console shrank to `tri-1` + `obs-t1` and the fan-out
+  # became one observer wide, and it is true again as of 2026-09-13: the console
+  # is FOUR seats — `tri-1` over `obs-t1`, `obs-t2` and `obs-t3`
+  # (`DEFAULT_TRIAGE_WORKERS`, `src/backends/cmux/operations-plan.ts`) — and the
+  # fan-out really is three observers wide. An admission budget of four is spent
+  # by four, with nothing spare. Do not lower this key by reading the paragraph
+  # that called it slack; that paragraph described a console that no longer runs.
   # `operations-plan.ts:1027-1035` reaches the same reading and names this
   # block as the stale one.
   #
@@ -219,7 +229,10 @@ cloud:
   # An OBVIOUS EXAMPLE VALUE, on the same rule `egress.allow` states below:
   # a copy of this file that is never edited must fail closed rather than
   # bill or scope against someone else's project. Your real project id
-  # belongs in `fleet.yaml`, which is gitignored.
+  # belongs in `fleet.yaml` — not because that file is kept out of git (it has
+  # been TRACKED since 2026-09-12), but because it is one machine's live
+  # definition, while this is the reference copy everyone else starts from and
+  # every value in it has to fail closed for a copier who never edits it.
   #
   # It must also belong to the ADC identity the fleet inherits — the two move
   # together, and a quota project from a different account is refused at the
@@ -370,10 +383,26 @@ egress:
     # reserved for documentation and resolves nowhere, so a copy of this file
     # that is never edited fails closed instead of reaching a real host.
     #
-    # Your real hostname belongs in `fleet.yaml`, which is gitignored. It does
-    # not belong here: this file is committed to a public repository, and an
-    # internal hostname is an infrastructure disclosure that no amount of
-    # later editing takes back.
+    # Your real hostname belongs in `fleet.yaml` rather than here, but READ WHY,
+    # because the reason this comment gave until 2026-09-12 was wrong and is
+    # corrected rather than quietly trimmed. It said `fleet.yaml` was an ignored
+    # file, which implied the hostname stayed out of git altogether. It does not.
+    # `fleet.yaml` is TRACKED now, by the operator decision recorded in
+    # `.gitignore`, so a hostname written there is committed to this repository
+    # exactly as this line is. The ignore is not buying secrecy any more and
+    # nothing here should be read as if it were.
+    #
+    # What still separates the two files is scope and audience, and that alone
+    # decides where the value goes. This file is the shared annotated reference,
+    # read and copied by people who do not run this fleet, so every value in it
+    # must be one that fails closed for a copier who never edits it, and an
+    # internal hostname sitting here is an infrastructure disclosure to an
+    # audience that no amount of later editing takes back. `fleet.yaml` is one
+    # machine's live definition, read by the people already running it. A
+    # hostname that is merely internal belongs in the live definition for that
+    # reason. A hostname that is genuinely secret belongs in NEITHER — since
+    # 2026-09-12 there is no ignored file left to hide it in, and that is a
+    # repository-visibility problem to solve somewhere other than a comment.
     #
     # A placeholder like `<TICKET_HOST>` is NOT an option — `egressRuleHost`
     # validates every rule at load time with the same predicate the matcher
@@ -771,11 +800,13 @@ roles:
     # seats that are `pane_mode: tui` and pays the stated price for it —
     # `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
     # which takes a tui seat down and cannot bring it back. The operator's
-    # gitignored `fleet.yaml` overrides both seats to `tui` and agrees with
-    # `console.yaml`, not with this line. `operations-plan.ts:1006-1017` records
-    # the same split and says in as many words not to reconcile the plan against
-    # the live file. Which console this repository means to ship is a config
-    # decision for whoever owns these files; a comment cannot make it.
+    # `fleet.yaml` — TRACKED since 2026-09-12, so the split is three files wide
+    # and diffable now rather than two files and one report of a third —
+    # overrides both seats to `tui` and agrees with `console.yaml`, not with
+    # this line. `operations-plan.ts:1006-1017` records the same split and says
+    # in as many words not to reconcile the plan against the live file. Which
+    # console this repository means to ship is a config decision for whoever
+    # owns these files; a comment cannot make it.
     pane_mode: rpc
     append_system_prompt_file: ./roles/triage.md
 
@@ -853,19 +884,23 @@ workers:
   #
   # So this console goes from three bash seats to four. NOT an egress change
   # here: neither `reviewer` nor `tester` declares `egress_access` in this
-  # file. In the operator's own untracked `fleet.yaml` the `tester` role DOES
-  # carry `egress_access: true`, so the same swap there widens egress as well,
-  # from one routed seat to two — a difference between the two configs worth
-  # knowing before this example is used to reason about that one.
+  # file. In the operator's own `fleet.yaml` — TRACKED since 2026-09-12, so
+  # this difference is diffable now rather than asserted from memory — the
+  # `tester` role DOES carry `egress_access: true`, so the same swap there
+  # widens egress as well, from one routed seat to two — a difference between
+  # the two configs worth knowing before this example is used to reason about
+  # that one.
   #
   # It is a deliberate trade: review moved to a separate `review` console,
   # which this example does not declare — its four seats (col-1, rev-arch-1,
-  # rev-ctx-1, rev-lang-1) exist only in the untracked `fleet.yaml`, and its
-  # three lenses are `shared-ro` and read the INTEGRATED tree. This console
-  # gains a second seat that can run a suite. The cost is that nothing here
-  # reviews in-loop any more — a defect eng-1 writes is not read by a
-  # reviewer until the end of the phase, after the host has merged it. Stated
-  # because it is a real gap, not because it is fixed.
+  # rev-ctx-1, rev-lang-1) exist only in `fleet.yaml`, which has been TRACKED
+  # since 2026-09-12 — so those seats can be read there rather than taken on
+  # trust from this comment — and its three lenses are `shared-ro` and read
+  # the INTEGRATED tree. This console gains a second seat that can run a
+  # suite. The cost is that nothing here reviews in-loop any more — a defect
+  # eng-1 writes is not read by a reviewer until the end of the phase, after
+  # the host has merged it. Stated because it is a real gap, not because it
+  # is fixed.
   - {id: tst-2,  role: tester,   pane_mode: tui, theme: nord}
   # One, not two. A second concurrent writer against the same ticket system is
   # a way to interleave two workers' edits on one object, and nothing in the
@@ -876,7 +911,7 @@ workers:
   # it and one process has one terminal — so two attended panes are two
   # runs, which `status --all` reports and `--recreate` tears down.
   - {id: tick-1, role: ticketing, pane_mode: tui, theme: catppuccin-latte}
-  # ---- the `triage` console's two seats ----
+  # ---- the `triage` console's four seats — TWO PAIRS ----
   #
   # NO KEYBOARD IN THIS FILE, AND NO THEME EITHER. BOTH resolve to
   # `pane_mode: rpc` from their roles — `triage` and `observer` both declare it
@@ -893,33 +928,61 @@ workers:
   #
   # THE CADENCE IS NOT SET HERE, and which number is right depends on which file
   # you are reading. The schema default is `cadence_s: 300` — a sweep every five
-  # minutes, 288 a day. The tracked `triage/console.yaml` sets 900, so the
-  # SHIPPED console sweeps every fifteen minutes, 96 a day.
+  # minutes, 288 a day. The tracked `triage/console.yaml` sets 1020, so the
+  # SHIPPED console sweeps every seventeen minutes, about 85 a day.
+  #
+  # It was 900 — fifteen minutes, 96 a day — until 2026-09-13, when the cadence
+  # was raised to buy each observer a 600s deadline. That bound is not a field
+  # anywhere: it is `cadence_s - reserve_s - 300`, and the 300 is shared with the
+  # review console, so the cadence is the only lever that reaches it without
+  # retuning a console nobody asked about.
   #
   # ONE RUN, one run id, stable for the console's whole life:
-  #   pifleet up --workers tri-1,obs-t1
-  # TWO SEATS SPEND TWO of `run.max_concurrent`, which is 4 (the key itself is
-  # at :93; find it by NAME if that number has drifted) — so this console runs
-  # with SLACK rather than fitting exactly, and the note above that key has been
-  # corrected to say so.
+  #   pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3
+  # FOUR SEATS SPEND FOUR of `run.max_concurrent`, which is 4 (the key itself is
+  # at :93; find it by NAME if that number has drifted) — so this console now
+  # fits EXACTLY, with nothing spare.
   #
-  # A SECOND ENVIRONMENT IS NEITHER A WORKER LINE NOR A `max_concurrent`
-  # DECISION. `soleEnvironment` (`src/cli/commands/triage.ts:915`) REFUSES a
-  # targets file declaring other than exactly one environment, so that refusal
-  # is the thing that has to be lifted first — a seat grown ahead of it would
-  # stand up a pane whose share of the sweep does not exist.
+  # **That is the size the key was raised for, not a size it has outgrown.** Its
+  # own comment says so in as many words — *"The triage console is the first run
+  # holding four seats, and three of them fan out at once"* — text written for
+  # this shape, which outlived the shrink to one pair and is correct again. The
+  # paragraph that used to sit here said two seats left SLACK; that was true of
+  # the shrunken console and contradicted `max_concurrent`'s own note in this
+  # same file. Corrected 2026-09-12 rather than deleted, because a reader who
+  # remembers the slack should find out where it went.
+  #
+  # A SECOND ENVIRONMENT IS STILL NEITHER A WORKER LINE NOR A `max_concurrent`
+  # DECISION, and the second pair did NOT lift that refusal — it went around it.
+  # `soleEnvironment` (`src/cli/commands/triage.ts:915`) still refuses a targets
+  # file declaring other than exactly one environment, and still should: an
+  # environment token is a path segment under `~/.pifleet/triage/` and the scope
+  # every incident is reported against, so two tokens for one cluster would make
+  # the console report health for a fleet. What the pairs divide is the SERVICE
+  # LIST of the one environment, not the environments.
   - {id: tri-1,  role: triage}
-  # ONE OBSERVER, ON THE ROLE THAT ALREADY EXISTS, doing the job it was written
+  # OBSERVERS ON THE ROLE THAT ALREADY EXISTS, doing the job it was written
   # for, at a cadence — no new role, no widened grant, and that is the strongest
-  # thing this design has going for it.
+  # thing this design has going for it. That still holds at two pairs: the
+  # second pair adds seats, not permissions.
   #
-  # ONE SEAT PER ENVIRONMENT is the design, and there is ONE seat because
-  # `soleEnvironment` admits exactly one environment (above) — the fan-out is
-  # therefore one observer wide, which `TRIAGE_CONSOLE_ROSTER.reviewers`
-  # (`src/run/dispatch-request.ts:425`) and `DEFAULT_TRIAGE_WORKERS` both say
-  # by enumeration. A sweep that fans out in PARALLEL rather than walking a
-  # list is what the shape buys the day that refusal is lifted; today it buys
-  # nothing, and saying so is cheaper than a reader discovering it.
+  # ONE OBSERVER PER COLLATOR is the design as of 2026-09-12, and this paragraph
+  # said ONE SEAT PER ENVIRONMENT until then. The old reasoning — that the
+  # fan-out is one observer wide because `soleEnvironment` admits one
+  # environment — confused a limit on ENVIRONMENTS with a limit on SEATS. One
+  # environment can be divided among several observers; what it cannot be is
+  # reported as several environments.
+  #
+  # The pairing is not expressible in this file. `TRIAGE_CONSOLE_ROSTER`
+  # (`src/run/dispatch-request.ts`) enumerates both observers as legal targets
+  # and cannot say which collator owns which. What enforces it is that each
+  # collator is SHOWN only its own seat — `renderSweepEnvelope` takes `seats`,
+  # and a collator cannot dispatch to a child task id it was never given.
+  #
+  # The fan-out now genuinely runs in PARALLEL, which the old note said the
+  # shape would buy "the day that refusal is lifted". It bought it without the
+  # lift: `dispatchPartition` was always concurrent, and there are now two
+  # slices for it to be concurrent across.
   #
   # THE `model:` OVERRIDE IS GONE, AND ITS OWN TEST IS WHAT REMOVED IT.
   # SRD-TRIAGE-CONSOLE §6.11 says these seats take the `observer` role's model
@@ -937,3 +1000,29 @@ workers:
   # went red the moment the roles converged, and the file yielded to it rather
   # than the other way round.
   - {id: obs-t1, role: observer}
+  # ---- THE SECOND AND THIRD OBSERVERS ----
+  #
+  # Declared with no `model:`, no `pane_mode:` and no `theme:` for exactly the
+  # reason `obs-t1` carries none: both resolve from their role, and this file's
+  # `observer` role already names the model the console runs. A worker-level
+  # override here would re-state a decision rather than make one.
+  #
+  # THIS WAS `tri-2` + `obs-t2`, A SECOND PAIR, FOR ONE DAY (2026-09-12). That
+  # shape ran a real sweep — T-sweep-116 split the environment 5/4 across the two
+  # collators with no overlap — but it wrote TWO collation documents the host had
+  # to merge and echo-check. One collated report is what the operator wanted, so
+  # on 2026-09-13 the second COLLATOR was withdrawn and a third OBSERVER took its
+  # place. `tri-1` is now shown all three seats and divides the environment
+  # between them itself (§6.5's ⌈N/3⌉).
+  #
+  # THREE OBSERVERS RATHER THAN TWO IS A DEADLINE DECISION. On T-sweep-116
+  # `obs-t2` spent its whole child deadline on four services and wrote nothing, so
+  # all four were recorded `unobserved`. Nine services across three seats is three
+  # each, and `triage/console.yaml` raised the deadline to 600s in the same edit.
+  #
+  # PANE ORDER IS NOT SET HERE. `DEFAULT_TRIAGE_WORKERS` lists `tri-1` first and
+  # the three observers after it, and `triagePanes` splits DOWN off pane 1 then
+  # RIGHT along that row — collator full width on top, observers beneath. This
+  # file only declares that the seats exist.
+  - {id: obs-t2, role: observer}
+  - {id: obs-t3, role: observer}

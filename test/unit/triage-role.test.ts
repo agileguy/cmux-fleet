@@ -152,7 +152,16 @@ describe("the fan-out example is a document the real parser accepts", () => {
           `${read.kind === "refused" ? read.reason : ""}`,
       );
     }
-    expect(read.request.requests).toHaveLength(TRIAGE_CONSOLE_ROSTER.reviewers.length);
+    /*
+     * ONE request, not one per observer — corrected 2026-09-12.
+     *
+     * This asserted `reviewers.length` while the console had a single collator
+     * fanning out to every observer. It now runs PAIRS: each collator writes one
+     * request naming only its own seat, and an example carrying both observers
+     * would teach precisely the thing the document forbids, in the strongest
+     * instruction it contains.
+     */
+    expect(read.request.requests).toHaveLength(1);
   });
 
   /**
@@ -167,7 +176,15 @@ describe("the fan-out example is a document the real parser accepts", () => {
     for (const r of parsed.requests) {
       expect(Array.isArray(r.services)).toBe(true);
     }
-    expect(parsed.requests.map((r) => r.worker)).toEqual([...TRIAGE_CONSOLE_ROSTER.reviewers]);
+    /*
+     * A REAL SEAT, and exactly one — the anti-vacuity this test is for survives
+     * without pinning the example to the console's width. A placeholder id was
+     * tried on 2026-09-12 and is what this assertion correctly refused: the
+     * example is parsed by the real parser under the real roster, so a
+     * non-roster string is a document a model would copy into a refusal.
+     */
+    expect(parsed.requests).toHaveLength(1);
+    expect(TRIAGE_CONSOLE_ROSTER.reviewers).toContain(parsed.requests[0]!.worker);
   });
 
   /**
@@ -502,16 +519,32 @@ describe("the document no longer contradicts itself about how many observers exi
    * The premise every assertion below rests on, asserted first so that none of
    * them can pass vacuously over an empty or unexpected roster.
    */
-  test("the console this document describes really does have exactly one observer", () => {
-    expect(ROSTER).toEqual(["obs-t1"]);
+  test("the console this document describes has THREE observers under ONE collator", () => {
+    /*
+     * THREE observers as of 2026-09-13, and this claim has now changed shape
+     * twice in two days — which is the reason it is asserted against the roster
+     * rather than spelled as prose. It said *"this console has exactly one
+     * observer"*, then *"each COLLATOR has exactly one"* while there were two
+     * pairs, and now says one collator fans out to three. Every version was
+     * about the same underlying thing: the fan-out a single collator may write.
+     *
+     * This is §6.5's ⌈N/3⌉ shape restored — the ORIGINAL design, which the
+     * console shrank away from and has now come back to.
+     */
+    expect(ROSTER).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
   });
 
   /**
-   * The table's own ghosts, checked IN PLACE rather than counted. `obs-t2` and
-   * `obs-t3` are allowed to appear — the row that refuses them by name is worth
-   * having, because a model that has met a three-observer version of this console
-   * needs to be told which seats are the imaginary ones. What is not allowed is
-   * an id off the roster appearing anywhere the document treats it as real.
+   * The table's own ghosts, checked IN PLACE rather than counted. `obs-t4` is
+   * allowed to appear — the row that refuses it by name is worth having, because
+   * a model that has met a wider version of this console needs to be told which
+   * seats are the imaginary ones. What is not allowed is an id off the roster
+   * appearing anywhere the document treats it as real.
+   *
+   * **The ghost has MOVED, and that is the maintenance cost of naming one.**
+   * `obs-t2` and `obs-t3` were the imaginary seats until 2026-09-13; both are
+   * real now, and the role file's refusal row moved to `obs-t4` in the same
+   * edit. A ghost row is a claim about the roster like any other.
    *
    * Asserted as a LINE COUNT plus the refusal wording, so both directions redden:
    * restoring the table (or the deleted envelope example) puts a ghost on a line
@@ -546,7 +579,14 @@ describe("the document no longer contradicts itself about how many observers exi
   test("the document does not reason about a fan-out wider than the roster", () => {
     expect(FLAT).not.toContain("the fan-out is never wider than three");
     expect(FLAT).not.toContain("All three are the same role on the same model");
-    expect(FLAT).toContain("Write ONE request. Name EVERY service in it.");
+    /*
+     * FOLLOWS THE PROSE, which is what this block's own docblock asks for: *"the
+     * fix is then to rewrite the prose, not to raise a number."* The sentence
+     * changed on 2026-09-12 because "EVERY service" stopped being true at the
+     * environment level — a collator now names every service in ITS OWN
+     * envelope, and reaching past that slice is the new way to be wrong.
+     */
+    expect(FLAT).toContain("Write ONE request. Name every service YOUR ENVELOPE gave you.");
   });
 
   /**
@@ -556,7 +596,15 @@ describe("the document no longer contradicts itself about how many observers exi
    */
   test("the fan-out example dispatches the roster and nothing else", () => {
     const parsed = fanoutExample() as { requests: { worker: string }[] };
-    expect(parsed.requests.map((r) => r.worker)).toEqual([...ROSTER]);
+    /*
+     * ONE request naming ONE roster seat — which is what the docblock above has
+     * always said: *"A fan-out of one request naming one seat is the only thing
+     * this console can dispatch."* The assertion contradicted its own prose the
+     * moment a second pair arrived, because `[...ROSTER]` is now two ids and no
+     * single collator may name both.
+     */
+    expect(parsed.requests).toHaveLength(1);
+    expect(ROSTER).toContain(parsed.requests[0]!.worker);
   });
 
   /**
