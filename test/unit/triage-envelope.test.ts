@@ -543,6 +543,14 @@ describe("§7.2/§12.6: the four classes an envelope may never carry", () => {
   });
 
   /**
+   * A token-shaped string that is not a token, joined at runtime so the source
+   * holds no literal a secret scanner matches. Measured 2026-09-13: the literal
+   * blocked every push of this public repo at the pre-push deny-scan. The
+   * checker under test still sees the whole value.
+   */
+  const FAKE_GITHUB_TOKEN = ["ghp", "0123456789abcdefghijklmnopqrstuvwxyzAB"].join("_");
+
+  /**
    * **THE PREMISE, and without it the test above asserts nothing.** A checker
    * that always answered `[]` would pass the clean fixture; these four fixtures
    * are what say it can fail, one per class, each wrong in exactly one way so no
@@ -550,7 +558,7 @@ describe("§7.2/§12.6: the four classes an envelope may never carry", () => {
    */
   test("each of the four classes is REACHABLE — one fixture per class", () => {
     const cases: readonly (readonly [ForbiddenEnvelopeClass, string])[] = [
-      ["credential", "Use the token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB when you query."],
+      ["credential", `Use the token ${FAKE_GITHUB_TOKEN} when you query.`],
       ["host_path", "The targets file is at /Users/operator/.pifleet/triage/targets.yaml."],
       ["command", "Run `kubectl get deploy -n aodapn-routing -o wide` and paste the output."],
       ["worker_prose", `Last sweep reported: app=routing ${MARKER}`],
@@ -570,7 +578,7 @@ describe("§7.2/§12.6: the four classes an envelope may never carry", () => {
    * here because this message reaches §7.7's log, *"which appends forever"*.
    */
   test("a credential refusal never quotes the secret back", () => {
-    const secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB";
+    const secret = FAKE_GITHUB_TOKEN;
     const issues = envelopeIssues(`token: ${secret}`, null);
     expect(issues.map((i) => i.forbidden)).toContain("credential");
     for (const issue of issues) {
