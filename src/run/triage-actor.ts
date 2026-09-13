@@ -691,6 +691,7 @@ export const TRIAGE_ACTOR_EVENT_KINDS = [
   "boundary_unreadable",
   "seat_recycled",
   "recycle_failed",
+  "sweep_expired",
   "sweep_withheld",
   "actor_stopped",
 ] as const;
@@ -747,6 +748,18 @@ export type TriageActorEvent =
   /** §6.6 layer 4: one seat went down and came back up, at this sweep. */
   | { kind: "seat_recycled"; worker: string; sweep_cursor: number }
   | { kind: "recycle_failed"; worker: string; reason: string }
+  /**
+   * ISC-1168: a sweep was ABANDONED because it had owed longer than
+   * `sweepExpiryS` allows, and the pass swept again instead of skipping.
+   *
+   * The one line that separates "the console recovered by itself" from "the
+   * console was rebuilt by hand", which is the distinction the eleven silent
+   * skips on `T-sweep-127` could not be read back from. Field names avoid every
+   * banned substring the closed-union guard checks — there is no `token`, no
+   * `env`, no `endpoint` here, and `age_s` is a duration rather than an instant
+   * so no clock spelling can creep in.
+   */
+  | { kind: "sweep_expired"; sweep_id: string; waiting_on: string; age_s: number }
   /** §6.6 layer 4's gate: these seats had no resolved pin, so no sweep was dispatched. */
   | { kind: "sweep_withheld"; seats: readonly string[] }
   | { kind: "actor_stopped"; passes: number };
@@ -836,6 +849,8 @@ export function actorLogLine(event: TriageActorEvent, at: number): string {
         return `worker=${event.worker} run=${event.run_id} passes=${event.passes}`;
       case "seat_recycled":
         return `worker=${event.worker} sweep=${event.sweep_cursor}`;
+      case "sweep_expired":
+        return `sweep=${event.sweep_id} waiting_on=${event.waiting_on} age_s=${event.age_s}`;
       /*
        * The seat list goes through `quotedField` even though every value in it
        * is host-minted from the roster. The log never shrinks, so the question

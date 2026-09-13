@@ -667,6 +667,7 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       "record_write_failed",
       "recycle_failed",
       "seat_recycled",
+      "sweep_expired",
       "sweep_withheld",
     ]);
     const sample: TriageActorEvent[] = [
@@ -690,6 +691,16 @@ describe("the actor log is append-only and carries nothing it should not (§7.7)
       { kind: "boundary_unreadable", reason: "runs root is not readable" },
       { kind: "seat_recycled", worker: "obs-t2", sweep_cursor: 96 },
       { kind: "recycle_failed", worker: "obs-t2", reason: "no image" },
+      /*
+       * ISC-1168's arm. `age_s` is a DURATION rather than an instant, which is
+       * what keeps it clear of the banned list below: every spelling of a
+       * timestamp this console uses carries `at`, and `dispatched_at` would
+       * have been the natural name — it is also the one that reads like a
+       * field a credential could ride in on a future edit. The value is the
+       * sweep that produced the criterion: `T-sweep-127`, waiting on its own
+       * parent, abandoned after 3h50m.
+       */
+      { kind: "sweep_expired", sweep_id: "T-sweep-127", waiting_on: "T-sweep-127", age_s: 13_801 },
       { kind: "sweep_withheld", seats: ["obs-t2"] },
       { kind: "actor_stopped", passes: 9 },
     ];

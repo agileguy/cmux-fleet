@@ -429,16 +429,39 @@ export async function inFlightSweep(run: RunPaths): Promise<InFlightSweep | null
   const n = await highestSweepNumber(run);
   if (n === 0) return null;
   const parent = sweepTaskId(n);
-  if (!existsSync(inboxTaskPath(run, parent))) return null;
+  const envelope = inboxTaskPath(run, parent);
+  if (!existsSync(envelope)) return null;
 
   const collator = workerPaths(run, TRIAGE_COLLATOR);
   const collate = collationTaskId(parent);
+  /*
+   * ISC-1168 — the sweep's AGE, read on the two branches that can answer "in
+   * flight" and on neither of the two that answer `null`.
+   *
+   * This port reported whether a sweep had settled and never how long it had
+   * owed, which is why a collator that died mid-turn stopped the console
+   * permanently rather than for one cadence. The read is
+   * {@link dispatchedAtOf}, the SAME one `resumableSweep` already uses — so the
+   * bound needs no new reader, no new file and no fourth branch here. What it
+   * needs is for this function to stop discarding a fact it is already standing
+   * next to.
+   *
+   * The decision stays with the caller: `triagePass` holds `deps.config`, and
+   * putting the deadline here would also change what
+   * `TriageConsolePorts.sweepInFlight` means — an expired sweep would read to
+   * the recycle gate as "no sweep in flight" and let a seat be torn down
+   * mid-sweep.
+   */
   if (!existsSync(inboxTaskPath(run, collate))) {
     const parentRecord = await readTaskRecord(taskRecordPath(collator, parent));
-    return parentRecord === null ? { sweepId: parent, waitingOn: parent } : null;
+    return parentRecord === null
+      ? { sweepId: parent, waitingOn: parent, dispatchedAt: await dispatchedAtOf(envelope) }
+      : null;
   }
   const settled = await readTaskRecord(taskRecordPath(collator, collate));
-  return settled === null ? { sweepId: parent, waitingOn: collate } : null;
+  return settled === null
+    ? { sweepId: parent, waitingOn: collate, dispatchedAt: await dispatchedAtOf(envelope) }
+    : null;
 }
 
 /**
@@ -1386,6 +1409,33 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
        */
       now: () => Date.now(),
     });
+
+    /*
+     * ISC-1168's abandonment, announced HERE because this is the last place the
+     * outcome is whole.
+     *
+     * `TriageActorDeps.pass` is typed `() => Promise<TriageActorCursor>` and the
+     * adapter above narrows to `.cursor`, so by the time the actor's loop sees a
+     * pass there is no expiry left to report. Widening that port would push a
+     * pass-shaped type through the actor's whole test surface to carry one
+     * optional fact; writing the line where `outcome` still exists costs
+     * nothing and keeps §7.7's log the actor's single surface.
+     *
+     * Logged, never thrown: an abandonment that could not be recorded must not
+     * cost the sweep that the abandonment exists to permit.
+     */
+    if (outcome.expired !== null) {
+      try {
+        await appendActorLog(triageActorLogPath(e.env), {
+          kind: "sweep_expired",
+          sweep_id: outcome.expired.sweepId,
+          waiting_on: outcome.expired.waitingOn,
+          age_s: outcome.expired.ageS,
+        });
+      } catch {
+        /* §7.7 is best-effort here; the sweep already happened. */
+      }
+    }
 
     cursor = outcome.cursor;
     delivery = outcome.delivery;

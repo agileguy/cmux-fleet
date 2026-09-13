@@ -484,6 +484,46 @@ export function sweepDeadlineS(cfg: { cadence_s: number; reserve_s: number }): n
   return cfg.cadence_s - cfg.reserve_s;
 }
 
+/**
+ * How long a sweep may OWE before the console stops waiting for it — ISC-1168.
+ * COMPUTED from two fields that already exist, and never configured.
+ *
+ * ## Why this is not simply `sweep_deadline_s`
+ *
+ * `sweep_deadline_s` bounds ONE dispatch: it is what the observers are given
+ * and what `dispatchFor`'s `settleDeadlineMs` carries. A whole sweep is at
+ * least two of those in series — the fan-out, then the collation — so a bound
+ * of one deadline would abandon sweeps that were merely working. Two is the
+ * structural floor, and it is the second term below.
+ *
+ * ## Why the FIRST term is the one that usually wins, and that is deliberate
+ *
+ * `max_consecutive_skips × cadence_s` is the moment §6.8a has already finished
+ * complaining: the console raises `sweeps_skipped` at the third skip, and this
+ * expires the sweep only once that warning has been given and gone unheeded.
+ * The alternative — expiring at `2 × sweep_deadline_s`, which at the defaults
+ * is 480 s against 900 s — would self-heal sooner and would make
+ * `sweeps_skipped` unreachable in practice, retiring a working alarm and
+ * [[ISC-673]]'s deduplication behind it as a side effect of fixing something
+ * else. **A bound that silently deletes an alarm is a worse bound**, so the
+ * warning keeps its place and this sits behind it as the backstop.
+ *
+ * At the schema defaults (`cadence_s: 300`, `reserve_s: 60`,
+ * `max_consecutive_skips: 3`) this is `max(900, 480) = 900` seconds.
+ *
+ * `Math.max` rather than either term alone because neither dominates across the
+ * whole config space: `max_consecutive_skips: 1` with a long cadence would
+ * otherwise expire a sweep inside its own observer window, and a short cadence
+ * with a large skip count would otherwise wait most of an hour.
+ */
+export function sweepExpiryS(cfg: {
+  cadence_s: number;
+  reserve_s: number;
+  max_consecutive_skips: number;
+}): number {
+  return Math.max(cfg.max_consecutive_skips * cfg.cadence_s, 2 * sweepDeadlineS(cfg));
+}
+
 // ---------------------------------------------------------------------------
 // Parsing — pure, and every failure names the file
 // ---------------------------------------------------------------------------

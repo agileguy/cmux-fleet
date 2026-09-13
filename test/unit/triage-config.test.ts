@@ -61,6 +61,7 @@ import {
   parseTriageConsoleConfig,
   reserveFitsCadenceIssue,
   sweepDeadlineS,
+  sweepExpiryS,
   type TriageConsoleConfig,
 } from "../../src/run/triage-config.ts";
 
@@ -230,6 +231,43 @@ describe("sweep_deadline_s is COMPUTED and is not a field (§7.8 property 1)", (
 
   test("the shipped defaults compute §6.5's 240-second deadline", () => {
     expect(sweepDeadlineS(defaultTriageConsoleConfig())).toBe(240);
+  });
+
+  test("sweepExpiryS is the LATER of the skip allowance and two deadlines — ISC-1168", () => {
+    // Defaults: max(3 x 300, 2 x 240) = max(900, 480) = 900. The FIRST term
+    // wins, which is what leaves `sweeps_skipped` room to fire at skip 3 first.
+    expect(sweepExpiryS({ cadence_s: 300, reserve_s: 60, max_consecutive_skips: 3 })).toBe(900);
+    // The SECOND term wins when the skip allowance is small: max(300, 480).
+    // Both arms are asserted, so `Math.max` cannot degrade into either one.
+    expect(sweepExpiryS({ cadence_s: 300, reserve_s: 60, max_consecutive_skips: 1 })).toBe(480);
+    // A third pair, because the two above both pass a `=> 900 | 480` stub.
+    expect(sweepExpiryS({ cadence_s: 600, reserve_s: 120, max_consecutive_skips: 2 })).toBe(1_200);
+  });
+
+  test("the shipped defaults expire a sweep at 900 seconds", () => {
+    expect(sweepExpiryS(defaultTriageConsoleConfig())).toBe(900);
+  });
+
+  /**
+   * **The floor that matters: a sweep is never abandoned inside its own
+   * fan-out.** A whole sweep is at least two dispatches in series — the
+   * observers, then the collation — so an expiry shorter than twice
+   * `sweep_deadline_s` would tear down sweeps that were merely working, which
+   * is a worse failure than the wedge it is meant to fix.
+   */
+  test("the expiry is never shorter than two observer deadlines, across the field range", () => {
+    for (const max_consecutive_skips of [1, 2, 3, 24]) {
+      for (const [cadence_s, reserve_s] of [
+        [60, 15],
+        [300, 60],
+        [600, 120],
+        [3_600, 600],
+      ] as const) {
+        expect(sweepExpiryS({ cadence_s, reserve_s, max_consecutive_skips })).toBeGreaterThanOrEqual(
+          2 * sweepDeadlineS({ cadence_s, reserve_s }),
+        );
+      }
+    }
   });
 
   test("§6.5's `deadline >= cadence` arm is unreachable across the whole field range", () => {

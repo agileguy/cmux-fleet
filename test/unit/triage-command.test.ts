@@ -259,6 +259,8 @@ const CLEAN_DELIVERY = freshDeliveryState();
 
 const NOTHING_OUTCOME: TriagePassOutcome = {
   kind: "swept",
+  /** ISC-1168: this fixture is an ordinary sweep, so it abandoned nothing. */
+  expired: null,
   cursor: { runs: {}, sweep_cursor: 1, consecutive_skips: 0 },
   delivery: CLEAN_DELIVERY,
   saturationMemo: { result: null, sweepId: null },
@@ -753,6 +755,9 @@ describe("§6.4's in-flight read, including the case its own sentence gets wrong
     expect(await inFlightSweep(run)).toEqual({
       sweepId: "T-sweep-4",
       waitingOn: "T-sweep-4-collate",
+      // `inboxTask` wrote no `dispatched_at`, so the sweep cannot be dated and
+      // ISC-1168's bound will never expire it. Undateable is not expired.
+      dispatchedAt: null,
     });
   });
 
@@ -767,7 +772,11 @@ describe("§6.4's in-flight read, including the case its own sentence gets wrong
   test("a parent still working, with no collation yet, is in flight on the parent", async () => {
     const run = await seedRun("2026-09-06T00-00-03Z-dddd");
     await inboxTask(run, "T-sweep-4");
-    expect(await inFlightSweep(run)).toEqual({ sweepId: "T-sweep-4", waitingOn: "T-sweep-4" });
+    expect(await inFlightSweep(run)).toEqual({
+      sweepId: "T-sweep-4",
+      waitingOn: "T-sweep-4",
+      dispatchedAt: null,
+    });
   });
 
   /**
@@ -832,6 +841,9 @@ describe("§13 task 6.4a: the run tree's read for a sweep abandoned before colla
     expect(await inFlightSweep(live)).toEqual({
       sweepId: "T-sweep-4",
       waitingOn: "T-sweep-4-collate",
+      // This fixture DID date its envelope, so the same read that feeds
+      // `resumableSweep` feeds ISC-1168's bound — one reader, two callers.
+      dispatchedAt: DISPATCHED_AT,
     });
 
     const done = await seedRun("2026-09-06T00-01-02Z-c3c3");
@@ -852,7 +864,11 @@ describe("§13 task 6.4a: the run tree's read for a sweep abandoned before colla
     const run = await seedRun("2026-09-06T00-01-03Z-d4d4");
     await inboxTask(run, "T-sweep-4", DISPATCHED_AT);
     expect(await resumableSweep(run)).toBeNull();
-    expect(await inFlightSweep(run)).toEqual({ sweepId: "T-sweep-4", waitingOn: "T-sweep-4" });
+    expect(await inFlightSweep(run)).toEqual({
+      sweepId: "T-sweep-4",
+      waitingOn: "T-sweep-4",
+      dispatchedAt: DISPATCHED_AT,
+    });
   });
 
   /**
@@ -935,7 +951,11 @@ describe("buildSweepDriver", () => {
     };
     const driver = buildSweepDriver(run, briefing, process.env);
     expect(await driver.highestSweepNumber()).toBe(7);
-    expect(await driver.inFlight()).toEqual({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7" });
+    expect(await driver.inFlight()).toEqual({
+      sweepId: "T-sweep-7",
+      waitingOn: "T-sweep-7",
+      dispatchedAt: null,
+    });
     // §13 task 6.4a's member, wired to the SAME run — this parent has not
     // settled, so it is in flight and there is nothing to resume.
     expect(await driver.resumableSweep()).toBeNull();

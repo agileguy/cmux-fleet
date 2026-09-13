@@ -136,6 +136,7 @@ import { TRIAGE_COLLATOR, type TriageActorCursor } from "./triage-actor.ts";
  * taking it costs the read-only closure exactly one leaf.
  */
 import { sweepTaskId } from "./task-ids.ts";
+import { sweepExpiryS } from "./triage-config.ts";
 import type { NotifyConfig, TriageConsoleConfig } from "./triage-config.ts";
 import type { ToolCallProbeResult } from "../security/model-probe.ts";
 
@@ -157,6 +158,52 @@ export interface InFlightSweep {
   readonly sweepId: string;
   /** The task the actor is waiting on, verbatim, for the skip record and the log. */
   readonly waitingOn: string;
+  /**
+   * The instant the sweep was dispatched, ISO-8601, or `null` when it cannot be
+   * dated — ISC-1168.
+   *
+   * ## This port reported whether a sweep had SETTLED and never how long it had OWED
+   *
+   * §6.4's predicate is a pure run-tree read and every branch of it is a
+   * question about existence: does the parent envelope exist, does the
+   * `-collate` task exist, has either settled. None of those can become false
+   * on their own. A collator whose turn dies mid-work leaves a parent that is
+   * dispatched and never settles, so *"in flight"* is true, is true for the
+   * same reason forever, and the actor skips every subsequent tick — measured
+   * live on `T-sweep-127`, eleven consecutive skips over 2h50m, ending only
+   * because the console was rebuilt by hand.
+   *
+   * **REQUIRED and nullable rather than optional**, which is the whole of the
+   * guarantee. An optional field defaults to absent, and absent would have to
+   * mean *"never expires"* — so every construction site that forgot it would
+   * re-create the wedge silently. A required field makes each caller say what
+   * it knows, and `null` is a caller SAYING it cannot date this sweep.
+   *
+   * `null` is therefore never expired. A sweep whose envelope is truncated or
+   * unreadable is not abandoned on a guess: the same refusal
+   * {@link ResumableSweep} already makes, for the same reason — the cost of
+   * refusing is one wasted cadence, and the cost of acting on a bad date is
+   * tearing down a sweep that was working.
+   */
+  readonly dispatchedAt: string | null;
+}
+
+/**
+ * A sweep the pass ABANDONED because it had owed longer than the console allows
+ * — ISC-1168, and the fact §7.7's log renders as `sweep_expired`.
+ *
+ * Published on {@link TriagePassOutcome} rather than logged here because
+ * `triagePass` holds no log port: §7.7's surface belongs to the actor, and the
+ * composition root at `cli/commands/triage.ts` is where the outcome is still
+ * whole. Carrying the fact out keeps the pass pure and keeps the log line
+ * beside every other one the actor writes.
+ */
+export interface ExpiredSweep {
+  readonly sweepId: string;
+  /** The task it was still waiting on when it was abandoned, verbatim. */
+  readonly waitingOn: string;
+  /** How long it had been outstanding, whole seconds, for the operator's log line. */
+  readonly ageS: number;
 }
 
 /**
@@ -523,6 +570,14 @@ export interface TriagePassOutcome {
   readonly written: readonly IncidentRecord[];
   /** Records on disk this pass declined to act on. §7.6. */
   readonly refused: readonly RefusedRecord[];
+  /**
+   * The sweep this pass abandoned on §6.4's expiry, or `null` — ISC-1168.
+   *
+   * Non-null on the kinds that RAN, never on `skipped`: an expired sweep stops
+   * being skipped, which is the whole point of the bound. The actor renders it
+   * as `sweep_expired`; nothing else reads it.
+   */
+  readonly expired: ExpiredSweep | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -760,6 +815,44 @@ function extrasFor(
  * a broken driver or a permanently broken probe here would make it
  * indistinguishable from a healthy console with nothing to say.
  */
+/**
+ * §6.4's missing clock — ISC-1168. `null` when the sweep may still be owed.
+ *
+ * ## Three ways to answer "not expired", and only one of them is a duration
+ *
+ *  - **No sweep in flight.** Nothing to expire.
+ *  - **A sweep that cannot be DATED.** {@link InFlightSweep.dispatchedAt} is
+ *    `null`, which is the adapter saying the envelope was unreadable. A sweep
+ *    is never abandoned on a guess: the cost of refusing is one more cadence of
+ *    waiting, and the cost of guessing is tearing down a collator that was
+ *    working. Same refusal {@link ResumableSweep} makes, for the same reason.
+ *  - **A sweep still inside its allowance**, which is the ordinary case.
+ *
+ * A dispatch instant in the FUTURE — a clock that stepped backwards, a
+ * hand-edited envelope — yields a negative age and is therefore *not* expired,
+ * which falls out of the comparison rather than needing a branch. That is the
+ * safe direction: skew delays an abandonment, it never manufactures one.
+ *
+ * Pure, and takes the config rather than reading one, so the whole policy is
+ * assertable without a run tree.
+ */
+function expiredSweep(
+  inFlight: InFlightSweep | null,
+  config: TriageConsoleConfig,
+  at: number,
+): ExpiredSweep | null {
+  if (inFlight === null || inFlight.dispatchedAt === null) return null;
+  const dispatched = Date.parse(inFlight.dispatchedAt);
+  if (!Number.isFinite(dispatched)) return null;
+  const ageMs = at - dispatched;
+  if (ageMs < sweepExpiryS(config) * 1_000) return null;
+  return {
+    sweepId: inFlight.sweepId,
+    waitingOn: inFlight.waitingOn,
+    ageS: Math.floor(ageMs / 1_000),
+  };
+}
+
 export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcome> {
   const at = deps.now();
   const runs = await deps.sweep.runs();
@@ -773,7 +866,32 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
    */
   const highest = await deps.sweep.highestSweepNumber();
 
-  if (inFlight !== null) {
+  /*
+   * ISC-1168's bound, and it is a condition on the SKIP rather than a third
+   * quadrant in the predicate.
+   *
+   * §6.4's read asks whether a sweep has SETTLED and never how long it has
+   * OWED, so a collator whose turn dies mid-work leaves an answer that is true
+   * for the same reason forever. Measured live on `T-sweep-127`: eleven
+   * consecutive skips over 2h50m, ending only because the console was rebuilt
+   * by hand.
+   *
+   * **The fact and the policy are separated on purpose.** The adapter reports
+   * WHEN the sweep was dispatched, because it is the half that can read the run
+   * tree; this decides what is too old, because it is the half that holds
+   * `deps.config`. Bounding the predicate itself would have put a deadline in a
+   * function that has no config and is also consulted by the recycle gate
+   * (`TriageConsolePorts.sweepInFlight`), where "expired" would wrongly read as
+   * "no sweep in flight" and permit a teardown mid-sweep.
+   *
+   * An expired sweep does NOT settle as `skipped` — it falls through to the
+   * mint below and the pass reports what it actually did. §6.6 layer 2's *"no
+   * sweep ever reuses an id"* makes that safe: the abandoned worker can only
+   * write into the old id's outbox, which nothing joins again.
+   */
+  const expired = expiredSweep(inFlight, deps.config, at);
+
+  if (inFlight !== null && expired === null) {
     return await settle(deps, {
       at,
       runs,
@@ -821,6 +939,8 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
       dispatched: [],
       serviceObservations: [],
       memo: deps.saturationMemo,
+      /* A skip is the branch an expiry does not take. Structurally `null`. */
+      expired: null,
     });
   }
 
@@ -857,6 +977,7 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
         join: carried,
         dispatched: [],
         refusedPartition: null,
+        expired,
       });
     }
   }
@@ -900,6 +1021,7 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
       dispatched: [],
       serviceObservations: [],
       memo: deps.saturationMemo,
+      expired,
     });
   }
 
@@ -936,6 +1058,7 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
     join,
     dispatched,
     refusedPartition,
+    expired,
   });
 }
 
@@ -953,6 +1076,8 @@ interface CompletedSweep {
   /** The observers THIS pass dispatched to. Empty on a refusal and on a resume. */
   readonly dispatched: readonly string[];
   readonly refusedPartition: PartitionFault | null;
+  /** ISC-1168's abandonment, passed through to {@link Settlement}. */
+  readonly expired: ExpiredSweep | null;
 }
 
 /**
@@ -1067,6 +1192,7 @@ async function completeSweep(
     dispatched: s.dispatched,
     serviceObservations,
     memo: nextMemo,
+    expired: s.expired,
   });
 }
 
@@ -1088,6 +1214,8 @@ interface Settlement {
   readonly dispatched: readonly string[];
   readonly serviceObservations: readonly IncidentObservation[];
   readonly memo: SaturationMemo;
+  /** ISC-1168's abandonment, carried to the outcome. `null` on every ordinary exit. */
+  readonly expired: ExpiredSweep | null;
 }
 
 /** `ConsoleEnvironmentFacts`, named locally so the settlement shape reads whole. */
@@ -1270,5 +1398,6 @@ async function settle(deps: TriagePassDeps, s: Settlement): Promise<TriagePassOu
     report,
     written,
     refused,
+    expired: s.expired,
   };
 }

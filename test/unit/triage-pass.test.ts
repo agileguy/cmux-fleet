@@ -101,6 +101,21 @@ const DEFAULT_WINDOW_S = 300;
  */
 const clock = { at: T0 };
 
+/**
+ * The instant an in-flight fixture's sweep was dispatched — ISC-1168.
+ *
+ * The pass's OWN clock, so every fixture below is a sweep of age zero: plainly
+ * inside `sweepExpiryS`, and therefore still the skip each of these tests was
+ * written to assert. Dating them `null` would have compiled equally well and
+ * would have been worse — it would have converted the whole file into the
+ * "cannot be dated" case and quietly stopped exercising the dated path at all.
+ *
+ * A test that WANTS the expiry moves the clock forward with `deps({ now })`
+ * rather than back-dating the sweep, so the sweep stays fixed and the thing
+ * under test is the elapsed time.
+ */
+const DISPATCHED_NOW = new Date(T0).toISOString();
+
 function partition(): PartitionAssignment[] {
   return [
     { worker: SEATS[0], services: [SERVICES[0]] },
@@ -514,7 +529,7 @@ describe("the fan-out — every Phase 5 module has a production caller", () => {
 describe("tick or skip — §6.4, and a queue is never built", () => {
   test("a sweep in flight is SKIPPED: nothing is opened and nothing is dispatched", async () => {
     const spy = driver({
-      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate", dispatchedAt: DISPATCHED_NOW }),
     });
     const out = await triagePass(deps({ driver: spy.driver }));
     expect(out.kind).toBe("skipped");
@@ -525,9 +540,79 @@ describe("tick or skip — §6.4, and a queue is never built", () => {
     expect(spy.collated).toEqual([]);
   });
 
+  /**
+   * ISC-1168 — **the bound, and the three fixtures are one fact apart.**
+   *
+   * The sweep is identical in all three: same id, same `waitingOn`, same
+   * dispatch instant. Only the pass's clock moves. That is deliberate — a
+   * fixture set that also varied the sweep could pass while the code branched
+   * on the wrong one of the two, and the defect being fixed is precisely a
+   * predicate that reads everything about a sweep EXCEPT how long it has owed.
+   *
+   * 900 s is `max(max_consecutive_skips × cadence_s, 2 × sweep_deadline_s)` at
+   * the schema defaults — `max(3 × 300, 2 × 240)`.
+   */
+  test("a sweep past the expiry is NOT skipped: the console sweeps again", async () => {
+    const spy = driver({
+      inFlight: async () => ({
+        sweepId: "T-sweep-7",
+        waitingOn: "T-sweep-7-collate",
+        dispatchedAt: DISPATCHED_NOW,
+      }),
+    });
+    const out = await triagePass(deps({ driver: spy.driver, now: T0 + 901_000 }));
+    // The whole point: it swept rather than skipping, so the console recovered
+    // without an operator. Eleven consecutive skips on `T-sweep-127` is the
+    // measurement this replaces.
+    expect(out.kind).toBe("swept");
+    expect(spy.opened).toEqual(["T-sweep-1"]);
+    expect(out.expired).toEqual({
+      sweepId: "T-sweep-7",
+      waitingOn: "T-sweep-7-collate",
+      ageS: 901,
+    });
+  });
+
+  test("one second before the expiry it is still a skip, and nothing is dispatched", async () => {
+    const spy = driver({
+      inFlight: async () => ({
+        sweepId: "T-sweep-7",
+        waitingOn: "T-sweep-7-collate",
+        dispatchedAt: DISPATCHED_NOW,
+      }),
+    });
+    const out = await triagePass(deps({ driver: spy.driver, now: T0 + 899_000 }));
+    expect(out.kind).toBe("skipped");
+    expect(out.expired).toBeNull();
+    expect(spy.opened).toEqual([]);
+    expect(spy.dispatched).toEqual([]);
+  });
+
+  /**
+   * **A sweep that cannot be DATED is never expired**, however long the clock
+   * runs — the same refusal `resumableSweep` makes, and for the same reason.
+   *
+   * A year is used rather than a few minutes so the assertion cannot be read as
+   * "not expired yet". There is no elapsed time that expires an undated sweep;
+   * the bound is not a slower version of this answer, it is a different one.
+   */
+  test("a sweep whose envelope carries no dispatch instant is never expired", async () => {
+    const spy = driver({
+      inFlight: async () => ({
+        sweepId: "T-sweep-7",
+        waitingOn: "T-sweep-7-collate",
+        dispatchedAt: null,
+      }),
+    });
+    const out = await triagePass(deps({ driver: spy.driver, now: T0 + 365 * 24 * 3_600_000 }));
+    expect(out.kind).toBe("skipped");
+    expect(out.expired).toBeNull();
+    expect(spy.opened).toEqual([]);
+  });
+
   test("a skip advances the skip counter and NOT the sweep cursor", async () => {
     const spy = driver({
-      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate", dispatchedAt: DISPATCHED_NOW }),
     });
     const out = await triagePass(
       deps({ driver: spy.driver, cursor: { runs: {}, sweep_cursor: 7, consecutive_skips: 1 } }),
@@ -554,9 +639,27 @@ describe("tick or skip — §6.4, and a queue is never built", () => {
     expect(out.cursor.sweep_cursor).toBe(13);
   });
 
+  /**
+   * **This fixture is UNDATED, and after ISC-1168 it has to be.**
+   *
+   * The loop below advances the clock a cadence per pass, so a DATED sweep now
+   * crosses `sweepExpiryS` at the fourth pass and sweeps instead of skipping —
+   * which is the bound working, and is asserted three tests up. Six consecutive
+   * skips remain reachable in production for exactly one reason: a sweep whose
+   * envelope cannot be dated is never expired, however long it owes.
+   *
+   * So the dedup rule still has a real case to be tested against, and it is
+   * this one. The alternative — loosening the assertion to whatever the bound
+   * now produces — would have deleted [[ISC-673]]'s "288 into 1" coverage to
+   * make a red test green, which is the shape this file exists to refuse.
+   */
   test("ANTI: skips 4, 5 and 6 send nothing — exactly one notification, at the third", async () => {
     const spy = driver({
-      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+      inFlight: async () => ({
+        sweepId: "T-sweep-7",
+        waitingOn: "T-sweep-7-collate",
+        dispatchedAt: null,
+      }),
     });
     const wire = accepting();
     const records = store();
@@ -612,7 +715,7 @@ describe("tick or skip — §6.4, and a queue is never built", () => {
   test("ANTI: a restarted actor with an EMPTY record RESUMES the in-flight sweep and dispatches nothing", async () => {
     const spy = driver({
       highest: 12,
-      inFlight: async () => ({ sweepId: sweepTaskId(12), waitingOn: "T-sweep-12-collate" }),
+      inFlight: async () => ({ sweepId: sweepTaskId(12), waitingOn: "T-sweep-12-collate", dispatchedAt: DISPATCHED_NOW }),
     });
     const out = await triagePass(deps({ driver: spy.driver, cursor: freshCursor() }));
     // Nothing is opened, nothing is dispatched, nothing is collated: §12's
@@ -644,7 +747,7 @@ describe("tick or skip — §6.4, and a queue is never built", () => {
   test("after a resume the next sweep is minted from the RECORD even when the run tree reads 0", async () => {
     const skipping = driver({
       highest: 12,
-      inFlight: async () => ({ sweepId: sweepTaskId(12), waitingOn: "T-sweep-12-collate" }),
+      inFlight: async () => ({ sweepId: sweepTaskId(12), waitingOn: "T-sweep-12-collate", dispatchedAt: DISPATCHED_NOW }),
     });
     const first = await triagePass(deps({ driver: skipping.driver, cursor: freshCursor() }));
     expect(first.kind).toBe("skipped");
@@ -713,7 +816,7 @@ describe("tick or skip — §6.4, and a queue is never built", () => {
     };
     const records = store([firing]);
     const spy = driver({
-      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate", dispatchedAt: DISPATCHED_NOW }),
     });
     const out = await triagePass(deps({ driver: spy.driver, records }));
     expect(out.notifications.map((n) => n.kind)).not.toContain("recovered");
@@ -905,7 +1008,7 @@ describe("§13 task 6.4a: an abandoned sweep is carried to collation, and the ze
   test("a live in-flight sweep still skips, and the resumable read is never consulted", async () => {
     const spy = driver({
       highest: 7,
-      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate", dispatchedAt: DISPATCHED_NOW }),
       resumable: async () => {
         throw new Error("resumableSweep was consulted on a sweep a worker still owes");
       },
@@ -1583,7 +1686,7 @@ describe("the seventh kind — §6.8a's (saturated, unreachable) pair, computed 
   test("a SKIPPED pass says nothing about either half of the pair", async () => {
     const records = store();
     const spy = driver({
-      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate" }),
+      inFlight: async () => ({ sweepId: "T-sweep-7", waitingOn: "T-sweep-7-collate", dispatchedAt: DISPATCHED_NOW }),
     });
     const out = await triagePass(deps({ driver: spy.driver, records }));
     expect(out.kind).toBe("skipped");
