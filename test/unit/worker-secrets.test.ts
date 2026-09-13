@@ -21,6 +21,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { loadConfig, parseConfig, resolveWorker, ConfigError } from "../../src/config/load.ts";
+import { OBSERVER_K8S_ROLE } from "../../src/config/schema.ts";
 import {
   buildWorkerEnv,
   serializeEnvFile,
@@ -643,7 +644,7 @@ describe("the observer role's secrets ceiling (SRD-OBSERVER-001 §6.5, §13)", (
   const observerDoc = (allowlist: CeilingEntry[]) => ({
     secrets: { env_allowlist: allowlist },
     roles: {
-      observer: {
+      [OBSERVER_K8S_ROLE]: {
         secrets: [
           "CI_CD_TOKEN",
           "CI_CD_BASE_URL",
@@ -654,7 +655,7 @@ describe("the observer role's secrets ceiling (SRD-OBSERVER-001 §6.5, §13)", (
         ],
       },
     },
-    workers: [{ id: "obs-1", role: "observer" }],
+    workers: [{ id: "obs-1", role: OBSERVER_K8S_ROLE }],
   });
 
   const FULL_CEILING = [

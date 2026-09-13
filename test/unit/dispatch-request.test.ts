@@ -52,6 +52,7 @@ import {
   DEFAULT_TRIAGE_WORKERS,
 } from "../../src/backends/cmux/operations-plan.ts";
 import { parseConfig } from "../../src/config/load.ts";
+import { OBSERVER_K8S_ROLE } from "../../src/config/schema.ts";
 import { workerOutboxDir } from "../../src/run/paths.ts";
 import {
   collationTaskId,
@@ -1678,9 +1679,9 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
       ["tri-1", "triage"],
     ]);
     expect(TRIAGE_CONSOLE_ROSTER.reviewers.map((id) => [id, roles.get(id)])).toEqual([
-      ["obs-t1", "observer"],
-      ["obs-t2", "observer"],
-      ["obs-t3", "observer"],
+      ["obs-t1", OBSERVER_K8S_ROLE],
+      ["obs-t2", OBSERVER_K8S_ROLE],
+      ["obs-t3", OBSERVER_K8S_ROLE],
     ]);
 
     /*

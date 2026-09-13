@@ -111,6 +111,7 @@ import {
   triagePanes,
 } from "../../src/backends/cmux/operations-plan.ts";
 import { parseConfig } from "../../src/config/load.ts";
+import { OBSERVER_K8S_ROLE } from "../../src/config/schema.ts";
 import { ROOT, exampleConfig } from "../support/role-docs.ts";
 
 const REPO = "/repo";
@@ -448,9 +449,9 @@ describe("the seats the plan names are the seats the tracked config declares", (
      */
     expect([...DEFAULT_TRIAGE_WORKERS].map((id) => [id, roles.get(id)])).toEqual([
       ["tri-1", "triage"],
-      ["obs-t1", "observer"],
-      ["obs-t2", "observer"],
-      ["obs-t3", "observer"],
+      ["obs-t1", OBSERVER_K8S_ROLE],
+      ["obs-t2", OBSERVER_K8S_ROLE],
+      ["obs-t3", OBSERVER_K8S_ROLE],
     ]);
   });
 });
