@@ -42,11 +42,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { loadConfig } from "../../src/config/load.ts";
-import { writeCapableIn } from "../../src/config/schema.ts";
+import { OBSERVER_K8S_ROLE, writeCapableIn } from "../../src/config/schema.ts";
 import { roleGrant } from "../support/role-docs.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
-const ROLE = readFileSync(`${ROOT}roles/observer.md`, "utf8");
+const ROLE = readFileSync(`${ROOT}roles/${OBSERVER_K8S_ROLE}.md`, "utf8");
 
 /**
  * Wrapped prose, flattened the way `role-docs.ts` and `triage-role.test.ts`
@@ -73,7 +73,7 @@ describe("observer's resolved grant is the one this file's routing argument assu
     // (`render.ts`'s real `--exclude-tools` subtraction), and throws loudly if
     // `fleet.example.yaml` no longer declares an observer role at all — this
     // probe cannot check a role that is gone.
-    const tools = roleGrant(config, "observer");
+    const tools = roleGrant(config, OBSERVER_K8S_ROLE);
     expect(tools).toContain("submit_report");
     expect(
       tools,

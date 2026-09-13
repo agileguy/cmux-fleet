@@ -90,7 +90,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
 import { loadConfig } from "../../src/config/load.ts";
-import { writeCapableIn, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
+import { OBSERVER_K8S_ROLE, writeCapableIn, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
 import { ROOT, roleGrant } from "../support/role-docs.ts";
 
 /** See the file header for why this substring and not the full sentence. */
@@ -264,7 +264,7 @@ describe("the checker is reddenable, driven through resolution rather than throu
     const reviewerTools = roleGrant(config, "reviewer");
     expect(canWriteEnvelope(reviewerTools), "reviewer is expected to hold no write-capable verb").toBe(false);
 
-    const observerProse = readFileSync(`${ROOT}roles/observer.md`, "utf8");
+    const observerProse = readFileSync(`${ROOT}roles/${OBSERVER_K8S_ROLE}.md`, "utf8");
     expect(carriesParaphrase(observerProse), "observer.md is expected to carry the paraphrase").toBe(true);
 
     // THE RED CASE: reviewer's real grant, observer's real prose.
@@ -273,8 +273,8 @@ describe("the checker is reddenable, driven through resolution rather than throu
 
   test("the same prose paired back with its own role's real grant passes", async () => {
     const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
-    const observerTools = roleGrant(config, "observer");
-    const observerProse = readFileSync(`${ROOT}roles/observer.md`, "utf8");
+    const observerTools = roleGrant(config, OBSERVER_K8S_ROLE);
+    const observerProse = readFileSync(`${ROOT}roles/${OBSERVER_K8S_ROLE}.md`, "utf8");
 
     // THE GREEN CASE: the pairing corrected back to the real grant.
     expect(pairingIsConsistent(observerProse, observerTools)).toBe(true);
