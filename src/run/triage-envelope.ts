@@ -192,7 +192,7 @@ export function triageDocumentPath(
  * *"its own task id, not yours"* — **the wording MEASURED here, since reworded
  * away; the file now records the supersession rather than the instruction, at
  * *"against an earlier version of this line that said"*. Cited as history, not
- * as a live line**; `roles/observer.md:139` tells the observer to
+ * as a live line**; `roles/observer-k8s.md` tells the observer to
  * write *"in the directory named by the id you were dispatched under"*. Measured
  * 2026-09-07 on `T-sweep-1`: `tri-1` wrote `/outbox/T-sweep-1/files/` — its OWN
  * id, the one word its instruction excludes — and `obs-t1` believed the brief

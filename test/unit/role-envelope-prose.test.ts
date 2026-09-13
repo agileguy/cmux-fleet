@@ -250,7 +250,7 @@ describe(
 
 describe("the checker is reddenable, driven through resolution rather than through editing roles/*.md", () => {
   /**
-   * Neither `roles/observer.md` nor `roles/reviewer.md` is owned by this
+   * Neither `roles/observer-k8s.md` nor `roles/reviewer.md` is owned by this
    * round, and neither is touched here — both are read exactly as committed.
    * The mutation is entirely in which GRANT is paired with which document:
    * `reviewer`'s real, resolved, write-less grant stands in for a future

@@ -815,7 +815,7 @@ describe("submitReport — the delivery", () => {
   /**
    * §12: *"A second `submit_report` in one epoch overwrites and does not throw.
    * This asserts a deliberate non-refusal and is the criterion that stops
-   * someone 'fixing' it into an error."* `roles/observer.md:56-58` asks for
+   * someone 'fixing' it into an error."* `roles/observer-k8s.md` asks for
    * exactly this behaviour in prose — *"A first version on disk at call twenty
    * and a second at call forty is strictly better than one perfect version that
    * never lands"* — so a tool that punished it would be punishing the thing the

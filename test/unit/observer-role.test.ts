@@ -1,6 +1,6 @@
 /**
- * `roles/observer.md` says only things that are true about how it reports —
- * task 8.4 of Phase C prose.
+ * `roles/observer-k8s.md` says only things that are true about how it
+ * reports — task 8.4 of Phase C prose.
  *
  * ## Why this role's rewrite is not a copy of 8.1/8.2/8.3's
  *
@@ -11,9 +11,8 @@
  * have no write tool, call it" and be unconditionally true; that argument does
  * not apply here, because observer's `write` is real and does report-related
  * work of its own: it is how the `observer-ops.json`/`.md` pair reaches the
- * outbox (`skills/observer-ops/SKILL.md`, `roles/observer.md:26-34`,
- * `:144-152`). `submit_report` is still the only route for the envelope
- * itself.
+ * outbox (`skills/observer-ops/SKILL.md`, `roles/observer-k8s.md`).
+ * `submit_report` is still the only route for the envelope itself.
  *
  * `skills/pifleet-worker/SKILL.md`'s routing table settles the "both" case
  * explicitly: *"Call `submit_report`. The hand-written envelope stays
