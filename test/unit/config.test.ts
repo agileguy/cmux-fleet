@@ -194,7 +194,7 @@ describe("worked example", () => {
   test("fleet.example.yaml loads with all eight shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "triage", "verifier"].sort(),
+      ["engineer", OBSERVER_K8S_ROLE, "reviewer", "sre", "tester", "ticketing", "triage", "verifier"].sort(),
     );
     // Every worker resolves without error, and the SET is asserted rather than
     // its size. A bare `toHaveLength` fails on a number when a worker is added
@@ -538,7 +538,7 @@ describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.
     // different local model, and it does not any more. That deletion was this
     // test's own prescription — "the fix is to DELETE the three overrides, not
     // to loosen the test" — followed rather than argued with.
-    const observerRoleModel = loaded.config.roles["observer"]?.model;
+    const observerRoleModel = loaded.config.roles[OBSERVER_K8S_ROLE]?.model;
     expect(observerRoleModel).toBe(TRIAGE_MODEL);
     expect(loaded.config.roles["triage"]?.model).toBe(TRIAGE_MODEL);
 
@@ -2455,8 +2455,8 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
    */
   test("the observer's pairing warns, names the bash asymmetry, and still loads", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: { tools: OBSERVER_TOOLS } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { tools: OBSERVER_TOOLS } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const loaded = await writeAndLoad(doc); // zero errors, or this throws
     const found = submitReportWriteWorkers(loaded.config);
     expect(found).toEqual([{ id: "obs-1", bash: true }]);
@@ -2505,11 +2505,11 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
   test("a bash holder and a bash-less seat land in different buckets, in one document", async () => {
     const doc = baseDoc();
     doc["roles"] = {
-      observer: { tools: OBSERVER_TOOLS },
+      [OBSERVER_K8S_ROLE]: { tools: OBSERVER_TOOLS },
       reviewer: { tools: BASH_LESS_TOOLS },
     };
     doc["workers"] = [
-      { id: "obs-1", role: "observer" },
+      { id: "obs-1", role: OBSERVER_K8S_ROLE },
       { id: "rev-1", role: "reviewer" },
     ];
     const loaded = await writeAndLoad(doc);
@@ -3315,8 +3315,8 @@ describe("config validate CLI (ISC-58)", () => {
     await mkdir(join(dir, "repo"), { recursive: true });
     const doc = baseDoc();
     doc["run"] = { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } };
-    doc["roles"] = { observer: { tools: ["read", "write", "bash", "grep", "find", "ls", "submit_report"] } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { tools: ["read", "write", "bash", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const path = join(dir, "fleet.yaml");
     await writeFile(path, stringify(doc));
     const r = await runCli(["config", "validate", "--json", "--config", path]);
