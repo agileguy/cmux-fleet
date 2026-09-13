@@ -584,7 +584,7 @@ cloud:
   # It embeds NO credential — the exec plugin mints a token from the ADC the
   # supervisor injects at runtime, so this file is a SCOPE FENCE and not a
   # secret: what it grants is the set of contexts it names, and nothing else.
-  kubeconfig: /Users/de895996/.pifleet/kubeconfig-do-cluster.yaml
+  kubeconfig: ~/.pifleet/kubeconfig-do-cluster.yaml
   token_refresh: 45m
 
 secrets:
@@ -1110,7 +1110,9 @@ workers:
   # Different palettes so the two attended panes are tellable apart at a
   # glance (src/config/themes.ts). Pi ships only dark/light, and light paints
   # light-mode ink onto a dark terminal — it sets no page background.
-  - {id: obs-1,  role: observer, pane_mode: tui, theme: catppuccin-mocha}
+  # obs-1 ON omlx bf16, 2026-09-13 by operator. A per-seat override: the observer
+  # role (and so obs-2) stays on gabe.
+  - {id: obs-1,  role: observer, model: omlx/gemma-4-26b-a4b-it-bf16, pane_mode: tui, theme: catppuccin-mocha}
   - {id: obs-2,  role: observer}
   - {id: ver-1,  role: verifier}
   # ---- the `development` console's four seats ----
