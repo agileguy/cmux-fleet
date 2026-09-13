@@ -1049,10 +1049,10 @@ the generative probe tests the path a worker takes.
 #### 6.9.1 What the hardware is, and the measurement that decided the model
 
 ASUS Ascent GX10, NVIDIA GB10 Grace Blackwell, compute capability **12.1** (SM121), 20-core ARM64,
-**121 GiB unified memory**, Ubuntu 24.04.4, kernel 6.17.0-1021-nvidia, Docker 29.2.1 with the `nvidia`
-runtime, 683 GB free disk. Two LAN interfaces: **wired `enP7s7` at 1000 Mb/s holding `192.168.86.199`**
-(default route, metric 100) and Wi-Fi `wlP9s9` holding `192.168.86.213` (metric 600). Both are DHCP
-today. Tailscale is up at `100.126.91.107`, which **this fleet cannot use** — the fleet host is not on
+**121 GiB unified memory**, Ubuntu 24.04 on the vendor kernel, Docker with the `nvidia`
+runtime, 683 GB free disk. Two LAN interfaces: a **wired NIC at 1000 Mb/s holding `192.168.86.199`**
+(default route, metric 100) and Wi-Fi holding `192.168.86.213` (metric 600). Both are DHCP
+today. Tailscale is up on the host, and **this fleet cannot use it** — the fleet host is not on
 Tailscale (`infra_hosts`), which is why §6.9.3 dials the wired LAN address.
 
 **The dense-model option was killed by bandwidth, and the figure this plan first used was wrong.** The
@@ -1144,7 +1144,7 @@ on the account, and **the DNS record must be added in the dashboard** — the AP
 answers `Authentication error` on DNS.
 
 **The address is DHCP today and the plan depends on it not moving.** The reservation belongs on the
-**wired** NIC, MAC `30:c5:99:3e:f1:aa`.
+**wired** NIC, whose MAC the operator holds out of band.
 
 #### 6.9.4 The tool-call gate — the one thing that can refuse this outright
 
@@ -1891,7 +1891,7 @@ would be wasted. Phases 0-2 are reversible; Phase 3 is the first that touches a 
 
 | # | Phase | Touches production | Reversible |
 |---|---|---|---|
-| 0 | **Prerequisites (operator).** DHCP reservation on wired MAC `30:c5:99:3e:f1:aa` → `192.168.86.199`. Create the `inference2` DNS record in the Cloudflare **dashboard** — the API token cannot write DNS. | no | n/a |
+| 0 | **Prerequisites (operator).** DHCP reservation on gabe's wired NIC → `192.168.86.199`. Create the `inference2` DNS record in the Cloudflare **dashboard** — the API token cannot write DNS. | no | n/a |
 | 1 | **Snapshot for rollback.** `docker inspect rag-llm rag-embeddings` to a file. The three-week-old argv *is* the rollback; capture it before the first edit, not after the first failure. | no | n/a |
 | 2 | **Fetch bf16 weights on gabe.** `google/gemma-4-26B-A4B-it`, 51.6 GB into `/home/dan/models/`; gabe's HF token already returns 200 on the gated repo and 683 GB is free. **Keep the NVFP4 directory** — it is the rollback. | no | yes |
 | 3 | **Reconfigure.** Lower `rag-embeddings` to `--gpu-memory-utilization 0.08` **first**, then `rag-llm`: bf16 path, `0.55`, drop `--quantization modelopt` and `--moe-backend marlin`, add `--enable-auto-tool-choice --tool-call-parser gemma4` and `--api-key`, and **keep all three `--served-model-name` aliases**. | **yes** | yes, via Phase 1 |

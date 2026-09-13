@@ -426,7 +426,7 @@ llm:
       # name. Port 8001 is published on 127.0.0.1 and 192.168.86.199 only —
       # .213 is deliberately unbound, so this address is the single LAN door.
       #
-      # STILL DHCP as of 2026-09-12. The reservation on MAC 30:c5:99:3e:f1:aa
+      # STILL DHCP as of 2026-09-12. The reservation on the wired NIC's MAC
       # is owed; until it exists a lease move breaks this line and the
       # `egress.allow` entry below together.
       relay_upstream: 192.168.86.199:8001
