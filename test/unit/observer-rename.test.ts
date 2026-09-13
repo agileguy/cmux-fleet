@@ -15,11 +15,27 @@
  * was (§4.2, last row). This file excludes itself, because its detector cases
  * spell every form it refuses.
  *
- * ## Three traps the detectors are built around
+ * Every form in {@link FORMS} reads every scanned file, except the quoted
+ * literal, which reads `src/`, `test/` and `scripts/` only. The scripts are
+ * extensionless Bun TypeScript, so the scope is by directory, not extension.
+ *
+ * Two things are deliberately NOT guarded:
+ *
+ * - **English prose.** "The observer" in a comment, a role prompt or a skill is
+ *   §4.2's seat that looks. No form reads words; each one is an identifier
+ *   shape.
+ * - **Backtick spans.** The quoted-literal form covers `"` and `'` only.
+ *   Docblocks name the role in backticks dozens of times, and §4.2 lets English
+ *   and historical prose stay.
+ *
+ * ## Four traps the detectors are built around
  *
  * **Word boundaries.** `\b` after `observer` matches `observer-k8s`, because
  * `\b` sits between `r` and `-`. Every form ending in the bare name anchors
  * with `(?![-\w])` or a closing quote or backtick instead.
+ *
+ * **Newlines.** Swept text is a whole file, so `\s` crosses lines. Where a
+ * match must stay on one line it spells `[ \t]`.
  *
  * **Role indentation is structural.** `observer:` is also the `triage.json`
  * row field holding a worker id (`src/run/triage-document.ts`, §4.2), and test
@@ -30,16 +46,31 @@
  * `worker-secrets.test.ts`; §4.3's other forms reached them only through a
  * paired `role:` line in the same fixture.
  *
- * **Backtick spans are prose.** The quoted-literal form covers `"` and `'`
- * only. Docblocks name the role in backticks dozens of times, and §4.2 lets
- * English and historical prose stay.
+ * **A quoted key is not a quoted literal.** The same row field is a quoted key
+ * in JSON, as in `{"service": "api", "observer": "obs-t1"}`. The quoted-literal
+ * form lets a literal through when `:` follows its closing quote directly.
+ * The colon must be adjacent, so a ternary's spaced ` : ` still fires. A quoted
+ * ROLE key is still refused, by the role-key form, which reads structure
+ * instead of quotes.
  *
- * ## The exemptions are NAMED, not counted
+ * ## The exemptions are line shapes, NAMED per file
  *
- * Following `test/unit/triage-readonly.test.ts`'s `DISPATCH_PATH`: see
- * {@link PANE_TITLE_SITES}. A new file holding the literal names itself, with
- * its line, instead of moving a number. A named site that no longer holds the
- * literal fails too, so the list shrinks when its reason goes away.
+ * The operations console's pane title is the one quoted literal §4.2 keeps.
+ * {@link PANE_TITLE_SITES} names each file that may hold it and, within that
+ * file, the shapes of line that may. A shape is a whole-line regex, matched
+ * against the line with its indentation trimmed. A line it admits must also
+ * hold exactly one quoted literal, so an open tail cannot carry a second. Every
+ * other quoted literal in a named file fires, exactly as it would anywhere
+ * else.
+ *
+ * Following `test/unit/triage-readonly.test.ts`'s `DISPATCH_PATH`, the list is
+ * named, not counted. The grain is the shape, not the line: a further line of
+ * an allowed shape in its own file passes, and a new shape is an edit somebody
+ * has to justify. Shapes carry no line numbers, because line numbers rot.
+ *
+ * The check runs both ways. A shape that matches no line of its file fails, and
+ * so does a quoted literal in a named file that no shape of that file admits.
+ * The list shrinks when a reason goes away, and it cannot widen by accident.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -60,6 +91,17 @@ const SELF = relative(REPO, import.meta.path);
  */
 const OLD = "observer";
 const OLD_PROMPT = `roles/${OLD}.md`;
+/** The pane title as the named sites quote it. */
+const TITLE = `"${OLD}"`;
+
+/**
+ * A whole-line shape. The template is regex source for one line with its
+ * indentation trimmed, and each `${TITLE}` marks where the quoted title sits.
+ * The raw strings are used, so `\(` reaches the regex as written.
+ */
+function lineShape(source: TemplateStringsArray, ...titles: string[]): RegExp {
+  return new RegExp(`^${String.raw(source, ...titles)}$`);
+}
 
 /** §4.3 layer 2's scan list, in its order. Directories are walked; the two configs are files. */
 const SCAN_ROOTS = [
@@ -73,8 +115,11 @@ const SCAN_ROOTS = [
   "fleet.example.yaml",
 ];
 
+type TitleShape = { shape: RegExp; why: string };
+
 /**
- * **The only files that may hold a quoted `"observer"` literal, and why each may.**
+ * **The only lines that may hold a quoted `"observer"` literal: per file, their
+ * shapes, and why each may.**
  *
  * The operations console titles its first agent pane `observer`. That title is a
  * console concept, not the role (§4.2): it is a label an operator types, and
@@ -82,13 +127,45 @@ const SCAN_ROOTS = [
  * from it. Renaming it would change operator muscle memory for no behaviour
  * (§4.2, Q8). One file defines the title and three pin it.
  *
- * Adding a file here is an edit somebody has to justify in this comment.
+ * A shape admits a trimmed line holding exactly one quoted literal; see the
+ * header. Adding a file or a shape here is an edit somebody has to justify in
+ * its `why`.
  */
-const PANE_TITLE_SITES: Readonly<Record<string, string>> = {
-  "src/backends/cmux/operations-plan.ts": "defines the title: the `title:` of the first agent pane it plans",
-  "test/unit/operations-plan.test.ts": "pins the planned pane order and looks panes up by that title",
-  "test/unit/operations-workspace.test.ts": "pins the built workspace's pane titles",
-  "test/unit/console-restart.test.ts": "pins that a pane resolves by its title as well as its worker id",
+const PANE_TITLE_SITES: Readonly<Record<string, readonly TitleShape[]>> = {
+  "src/backends/cmux/operations-plan.ts": [
+    { why: "defines the title: the `title:` of the first agent pane it plans", shape: lineShape`title: ${TITLE},` },
+  ],
+  "test/unit/operations-plan.test.ts": [
+    {
+      why: "pins the planned pane order",
+      shape: lineShape`expect\(plan\(\)\.map\(\(p\) => p\.title\)\)\.toEqual\(\[${TITLE}, "monitor", "ticketing"\]\);`,
+    },
+    {
+      why: "walks the two single-worker panes by title",
+      shape: lineShape`for \(const t of \[${TITLE}, "ticketing"\]\) \{`,
+    },
+    {
+      why: "looks the planned pane up by that title, with or without plan options, and reads its split or command",
+      shape: lineShape`(?:expect\(|const cmd = )paneNamed\(${TITLE}(?:, \{ \w+: [^}]* \})?\)\.(?:split\)\.toBeNull\(\);|command(?:;|\)\.(?:not\.)?toContain\(.*))`,
+    },
+  ],
+  "test/unit/operations-workspace.test.ts": [
+    {
+      why: "pins the built workspace's pane titles",
+      shape: lineShape`expect\(titles\)\.toEqual\(\[${TITLE}, "monitor", "ticketing"\]\);`,
+    },
+  ],
+  "test/unit/console-restart.test.ts": [
+    { why: "pins that the operations plan has a pane of that title", shape: lineShape`expect\(titles\)\.toContain\(${TITLE}\);` },
+    {
+      why: "resolves the operations pane by its title",
+      shape: lineShape`(?:expect\(|const byTitle = )plannedPane\(OPERATIONS_SPEC, OPTS, ${TITLE}\)(?:;|\.command\)\.toContain\(.*)`,
+    },
+    {
+      why: "pins that the pane a worker id resolves to carries that title",
+      shape: lineShape`expect\(byWorker\.title\)\.toBe\(${TITLE}\);`,
+    },
+  ],
 };
 
 /**
@@ -140,9 +217,30 @@ function roleKeyLines(text: string): number[] {
   return hits.sort((a, b) => a - b);
 }
 
-const quotedLiteralLines = (text: string): number[] => matchLines(text, /(["'])observer\1/g);
+/** A quoted literal, unless `:` follows its closing quote directly (a JSON or YAML key). */
+const quotedLiteralLines = (text: string): number[] => matchLines(text, /(["'])observer\1(?!:)/g);
 
-type Form = { name: string; scope: (rel: string) => boolean; find: (text: string) => number[] };
+/**
+ * The quoted literals in `text` that `rel`'s shapes do not admit. A file with no
+ * entry in {@link PANE_TITLE_SITES} has no shapes, so every literal is reported.
+ */
+function unshapedLiteralLines(text: string, rel = ""): number[] {
+  const shapes = Object.hasOwn(PANE_TITLE_SITES, rel) ? PANE_TITLE_SITES[rel]! : [];
+  const lines = text.split("\n");
+  const found = quotedLiteralLines(text);
+  return found.filter((n) => {
+    const once = found.filter((m) => m === n).length === 1;
+    const line = lines[n - 1]!.trim();
+    return !(once && shapes.some(({ shape }) => shape.test(line)));
+  });
+}
+
+type Form = {
+  name: string;
+  scope: (rel: string) => boolean;
+  /** 1-based lines holding the form. `rel` is the file's repo-relative path; only quotedLiteral reads it. */
+  find: (text: string, rel?: string) => number[];
+};
 
 const everywhere = (): boolean => true;
 
@@ -178,12 +276,17 @@ const FORMS = {
     find: (t) => matchLines(t, /You are `observer`/g),
   },
   quotedLiteral: {
-    name: `a quoted "${OLD}" literal in src/ or test/ outside the named pane-title sites`,
-    scope: (rel) =>
-      (rel.startsWith("src/") || rel.startsWith("test/")) && !Object.hasOwn(PANE_TITLE_SITES, rel),
-    find: quotedLiteralLines,
+    name: `a quoted "${OLD}" literal in src/, test/ or scripts/ on no named pane-title line shape`,
+    scope: (rel) => ["src/", "test/", "scripts/"].some((root) => rel.startsWith(root)),
+    find: unshapedLiteralLines,
   },
 } satisfies Record<string, Form>;
+
+/** `file:line: text` for each line, the form every sweep failure names. */
+function located(rel: string, found: number[]): string[] {
+  const lines = TEXT.get(rel)!.split("\n");
+  return found.map((n) => `${rel}:${n}: ${lines[n - 1]!.trim().slice(0, 140)}`);
+}
 
 describe("§4.3 layer 2: nothing that means the role still says the old name", () => {
   test("the sweep read every root §4.3 names, nothing under Docs/, and not this file", () => {
@@ -195,20 +298,20 @@ describe("§4.3 layer 2: nothing that means the role still says the old name", (
 
   for (const form of Object.values(FORMS) as Form[]) {
     test(`no ${form.name}`, () => {
-      const hits = FILES.filter(form.scope).flatMap((rel) => {
-        const text = TEXT.get(rel)!;
-        const lines = text.split("\n");
-        return form.find(text).map((n) => `${rel}:${n}: ${lines[n - 1]!.trim().slice(0, 140)}`);
-      });
+      const hits = FILES.filter(form.scope).flatMap((rel) => located(rel, form.find(TEXT.get(rel)!, rel)));
       expect(hits, `found ${form.name}; each entry is file:line`).toEqual([]);
     });
   }
 
-  test("every named pane-title site still holds the literal, so no exemption outlives its reason", () => {
-    const stale = Object.keys(PANE_TITLE_SITES).filter(
-      (rel) => !TEXT.has(rel) || quotedLiteralLines(TEXT.get(rel)!).length === 0,
-    );
-    expect(stale, "PANE_TITLE_SITES entries with no quoted literal left; remove them").toEqual([]);
+  test("each named file's shapes and its quoted literals agree both ways, so no exemption outlives its reason", () => {
+    const named = Object.entries(PANE_TITLE_SITES);
+    const idle = named.flatMap(([rel, shapes]) => {
+      const lines = (TEXT.get(rel) ?? "").split("\n").map((line) => line.trim());
+      return shapes.filter(({ shape }) => !lines.some((line) => shape.test(line))).map(({ why }) => `${rel}: ${why}`);
+    });
+    expect(idle, "PANE_TITLE_SITES shapes matching no line of their file; remove them").toEqual([]);
+    const unshaped = named.flatMap(([rel]) => (TEXT.has(rel) ? located(rel, unshapedLiteralLines(TEXT.get(rel)!, rel)) : []));
+    expect(unshaped, "quoted literals in a named file that none of its shapes admits").toEqual([]);
   });
 });
 
@@ -229,6 +332,9 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `doc["roles"] = {\n  ${OLD}: { tools: OBSERVER_TOOLS },\n  reviewer: { tools: BASH_LESS_TOOLS },\n};`,
         `const doc = {\n  roles: {\n    // the read-only seat\n    ${OLD}: {\n` +
           `      secrets: [],\n    },\n  },\n};`,
+        // A QUOTED role key is this form's, not quotedLiteral's, which lets any quoted key through.
+        `roles:\n  "${OLD}":\n    tools: [read]\n`,
+        `{"roles": {"${OLD}": {}}}`,
       ],
       miss: [
         "roles:\n  observer-k8s:\n    tools: [read]\n",
@@ -261,8 +367,21 @@ describe("each detector fires on its form and stays quiet on the new name", () =
       miss: ["You are `observer-k8s`, the fleet's read-only diagnostic role for Kubernetes."],
     },
     quotedLiteral: {
-      hit: [`title: "${OLD}",`, `const r = '${OLD}';`],
-      miss: ['"observer-k8s"', `the \`${OLD}\` role`, "observerTuiWorkers(cfg)"],
+      hit: [
+        `title: "${OLD}",`,
+        `const r = '${OLD}';`,
+        // A ternary's colon is spaced, so the key carve-out does not reach it.
+        `const pick = k8s ? "${OLD}" : "sre";`,
+        `if (w.role === "${OLD}") return;`,
+      ],
+      miss: [
+        '"observer-k8s"',
+        `the \`${OLD}\` role`,
+        "observerTuiWorkers(cfg)",
+        // The triage.json row field holding a worker id (§4.2), as JSON and as YAML.
+        `{"service": "api", "${OLD}": "obs-t1"}`,
+        `'${OLD}': obs-t1`,
+      ],
     },
   };
 
@@ -284,6 +403,39 @@ describe("each detector fires on its form and stays quiet on the new name", () =
     expect(FORMS.roleKey.find(multiLine), "not also at the opener").toEqual([2]);
     const seats = `workers:\n  - {id: obs-1, role: sre}\n  - {id: obs-2, role: ${OLD}}\n`;
     expect(FORMS.roleValue.find(seats)).toEqual([3]);
+  });
+
+  test("quotedLiteral reaches src/, test/ and scripts/, the named pane-title files included", () => {
+    const reached = ["src/run/a.ts", "test/unit/b.test.ts", "scripts/operations", ...Object.keys(PANE_TITLE_SITES)];
+    expect(reached.filter((rel) => !FORMS.quotedLiteral.scope(rel)), "should be in scope").toEqual([]);
+    const prose = ["roles/triage.md", "skills/observer-ops/SKILL.md", ".claude/skills/fleet/SKILL.md", "fleet.yaml"];
+    expect(prose.filter((rel) => FORMS.quotedLiteral.scope(rel)), "should be out of scope").toEqual([]);
+  });
+
+  /**
+   * The exemption grain, pinned on text rather than on the tree: the tree only
+   * holds allowed lines, so the sweep stays green whether or not a shape is tight.
+   */
+  test("a named file admits a quoted title on a line of ITS allowed shapes and nowhere else", () => {
+    const restart = "test/unit/console-restart.test.ts";
+    const allowed = `expect(titles).toContain("${OLD}");`;
+    const restartText = [
+      `    ${allowed}`,
+      `    if (w.role === "${OLD}") return;`,
+      `    expect(roles.get("obs-1")).toBe("${OLD}");`,
+      `    ${allowed} // and "${OLD}"`,
+      // operations-plan.ts's shape, in the wrong file.
+      `      title: "${OLD}",`,
+    ].join("\n");
+    expect(FORMS.quotedLiteral.find(restartText, restart)).toEqual([2, 3, 4, 4, 5]);
+
+    // A shape with an open tail still admits exactly one literal per line.
+    const planTest = "test/unit/operations-plan.test.ts";
+    const tail = `    expect(paneNamed("${OLD}").command).toContain("up");\n` +
+      `    expect(paneNamed("${OLD}").command).toContain("${OLD}");`;
+    expect(FORMS.quotedLiteral.find(tail, planTest)).toEqual([2, 2]);
+
+    expect(FORMS.quotedLiteral.find(allowed, "test/unit/config.test.ts"), "an unnamed file").toEqual([1]);
   });
 });
 
