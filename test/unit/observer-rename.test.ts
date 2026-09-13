@@ -120,6 +120,7 @@
  * - Missed: destructuring `const { observer } = cfg.roles`, a member chain broken across lines, a union typed opener, a YAML anchor on `roles`.
  * - Missed: an inline object type in a typed opener, as in `const roles: { [k: string]: RoleDoc } = {`.
  * - False positive: a future bare `| observer |` docs cell for the triage row field.
+ * - False positive: a triage.json row field whose observer seat id does not start `obs-`, which the quoted-literal carve-out does not exempt.
  */
 
 import { describe, expect, test } from "bun:test";

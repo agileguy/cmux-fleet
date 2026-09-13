@@ -56,7 +56,7 @@
  * ## The anchor phrase, and what it would miss
  *
  * The four carrying role files word the sentence differently enough that no
- * exact substring spans all of it: the verb varies (`observer-k8s.md` reads
+ * exact substring spans all of it: the verb varies (`observer.md` reads
  * "an envelope you never **submitted**" as of commit 8d58068 — Phase 8.4
  * routed its report through `submit_report` and the prose was updated to
  * match; `ticketing.md`, `tester.md` and `verifier.md` still read "you never

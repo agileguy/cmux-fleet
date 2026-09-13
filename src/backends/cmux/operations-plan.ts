@@ -1247,7 +1247,7 @@ export const TRIAGE_WORKSPACE = "triage";
  * was one wide because the thing it fans out over is one wide, and that *"a
  * second observer seat is therefore not a worker line; it is that refusal being
  * lifted first"* — the refusal being `soleEnvironment`
- * (`src/cli/commands/triage.ts:915`), which quotes SRD-TRIAGE-CONSOLE §12: *"one
+ * (in `src/cli/commands/triage.ts`), which quotes SRD-TRIAGE-CONSOLE §12: *"one
  * sweep is ONE environment, and that is a limit rather than a law"*.
  *
  * That inference was wrong, and the reason is worth stating because it is the
