@@ -33,3 +33,13 @@ gha-creds-*.json
 # reference copy.
 fleet-development.yaml
 fleet-operations-local.yaml
+
+# ProjectManager run state — per-run working notes, not product. Untracked
+# 2026-09-13 before the repository was made public: the `-gabe` document
+# carried a wired MAC address, a Tailscale address and the operator's LAN
+# layout, none of which is rotatable and none of which any code reads. The
+# four variants have no reader at all; `project-manager-state.json` is opened
+# by `test/unit/pm-state.test.ts`, which guards on `exists()` and returns
+# early, so its absence degrades that check to a no-op rather than a failure.
+# The files stay on disk — `git rm --cached` only stops them being published.
+.claude/project-manager-state*.json
