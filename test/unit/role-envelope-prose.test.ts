@@ -16,8 +16,8 @@
  * The task that opened this file asserted `observer`, `sre`, `verifier` and
  * `collator` have no block in `fleet.example.yaml`. Verified directly by
  * parsing both files with `loadConfig` and diffing `Object.keys(config.roles)`:
- * that is true of `collator` alone. `observer`, `sre` and `verifier` all have
- * full blocks in the example and resolve identical grants from both files.
+ * that is true of `collator` alone. `observer-k8s`, `sre` and `verifier` all
+ * have full blocks in the example and resolve identical grants from both files.
  *
  * That correction does not change which file this probe should read, but the
  * REASON has changed and the old one is recorded because it was load-bearing.
@@ -56,7 +56,7 @@
  * ## The anchor phrase, and what it would miss
  *
  * The four carrying role files word the sentence differently enough that no
- * exact substring spans all of it: the verb varies (`observer.md` reads
+ * exact substring spans all of it: the verb varies (`observer-k8s.md` reads
  * "an envelope you never **submitted**" as of commit 8d58068 — Phase 8.4
  * routed its report through `submit_report` and the prose was updated to
  * match; `ticketing.md`, `tester.md` and `verifier.md` still read "you never
@@ -265,7 +265,7 @@ describe("the checker is reddenable, driven through resolution rather than throu
     expect(canWriteEnvelope(reviewerTools), "reviewer is expected to hold no write-capable verb").toBe(false);
 
     const observerProse = readFileSync(`${ROOT}roles/${OBSERVER_K8S_ROLE}.md`, "utf8");
-    expect(carriesParaphrase(observerProse), "observer.md is expected to carry the paraphrase").toBe(true);
+    expect(carriesParaphrase(observerProse), "observer-k8s.md is expected to carry the paraphrase").toBe(true);
 
     // THE RED CASE: reviewer's real grant, observer's real prose.
     expect(pairingIsConsistent(observerProse, reviewerTools)).toBe(false);

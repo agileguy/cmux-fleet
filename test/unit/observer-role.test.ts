@@ -4,8 +4,9 @@
  *
  * ## Why this role's rewrite is not a copy of 8.1/8.2/8.3's
  *
- * `fleet.example.yaml`'s `observer` is `tools: [read, write, bash, grep, find,
- * ls, submit_report]` — the only role Phase 8 has touched so far that holds a
+ * `fleet.example.yaml`'s `observer-k8s` is
+ * `tools: [read, write, bash, grep, find, ls, submit_report]` — the only role
+ * Phase 8 has touched so far that holds a
  * write-capable builtin AND `submit_report` at once. Reviewer and triage hold
  * `submit_report` with no write verb at all, so their prose could say "you
  * have no write tool, call it" and be unconditionally true; that argument does

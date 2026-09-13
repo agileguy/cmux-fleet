@@ -93,12 +93,12 @@ export const OPERATIONS_WORKSPACE = "operations";
  * `up` stands the ticketing worker up for the top-LEFT pane.
  *
  * `obs-1` is `fleet.yaml`'s console observer. It leads because the top-right is
- * the pane a human actually watches, and `observer` is the role whose work
+ * the pane a human actually watches, and `observer-k8s` is the role whose work
  * is worth watching in real time — a deploy being followed through a pipeline,
  * or a service being interrogated. `tick-1`, the previous default, does its
  * work in one burst and then has nothing to show.
  *
- * `obs-1` specifically, NOT the `observer` role: the role resolves to
+ * `obs-1` specifically, NOT the `observer-k8s` role: the role resolves to
  * `pane_mode: rpc` and must keep doing so, because `tui` allocates no epoch and
  * an observer watch is built on re-dispatching near-identical tasks (§7.5). The
  * override lives on this ONE worker, which is the console's and is not what the
@@ -1274,10 +1274,10 @@ export const TRIAGE_WORKSPACE = "triage";
  * shrank away from; this restores two of it, paired.
  *
  * `tri-1` RECONCILES AND `obs-t1` OBSERVES, which is the review console's
- * collator/reviewer shape reappearing over a different role pair
- * (the `triage:` and `observer:` keys of `fleet.example.yaml`'s `roles:` map).
+ * collator/reviewer shape reappearing over a different role pair (the
+ * `triage:` and `observer-k8s:` keys of `fleet.example.yaml`'s `roles:` map).
  * That is not a coincidence and it is already load-bearing elsewhere:
- * `ConsoleRoster` (`src/run/dispatch-request.ts:322`) was written over the two
+ * `ConsoleRoster` (in `src/run/dispatch-request.ts`) was written over the two
  * ROLES rather than over `col-1`, so `TRIAGE_CONSOLE_ROSTER` needed no schema
  * change, no new refusal and no branch — SRD-TRIAGE-CONSOLE D5's bet, collected
  * once already. **The seat count moving is the bet paying a second time**: a
@@ -1287,8 +1287,9 @@ export const TRIAGE_WORKSPACE = "triage";
  *
  * NEITHER SEAT IS ATTENDED, and that is the whole difference from `development`
  * and `review`. Both of those are four keyboards and therefore four runs; this
- * console is ONE run of `rpc` seats (`pifleet up --workers tri-1,obs-t1`,
- * spelled that way at `fleet.example.yaml:900`), because a console that
+ * console is ONE run of `rpc` seats
+ * (`pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3`, spelled that way in
+ * `fleet.example.yaml`'s "ONE RUN" comment), because a console that
  * dispatches on a clock — 96 sweeps a day at `triage/console.yaml`'s
  * `cadence_s: 900`, 288 at the schema default of 300 — cannot afford a `tui`
  * seat: `tui` allocates no epoch, so without the `already_completed` fence a
@@ -1299,7 +1300,7 @@ export const TRIAGE_WORKSPACE = "triage";
  * **THAT PARAGRAPH IS ABOUT THE TRACKED EXAMPLE, AND THE LIVE FLEET DISAGREES
  * WITH IT. Checked 2026-09-11 and recorded here so the next reader does not
  * re-litigate it.** In `fleet.example.yaml` neither seat carries a worker-level
- * override (`{id: tri-1,` at `:911`, `{id: obs-t1,` at `:939`), so both resolve to
+ * override (find `{id: tri-1,` and `{id: obs-t1,` by name), so both resolve to
  * `pane_mode: rpc` from their roles and the plan this file builds is genuinely
  * the unattended one described above. The operator's `fleet.yaml` — TRACKED
  * since 2026-09-12, so this divergence is now a diff rather than a report of one
@@ -1320,7 +1321,7 @@ export const TRIAGE_WORKSPACE = "triage";
  *
  * THE COST, stated as its two siblings state theirs — and it is the one line
  * here that got CHEAPER rather than merely shorter. One run at
- * `run.max_concurrent: 4` (`fleet.example.yaml:93`) is an admission budget of
+ * `run.max_concurrent: 4` (in `fleet.example.yaml`) is an admission budget of
  * four spent by FOUR seats, so this console fits exactly with nothing spare —
  * which is the size that key was raised for, not a size it has outgrown. Its own
  * comment says so: *"The triage console is the first run holding four seats, and

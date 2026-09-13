@@ -530,8 +530,8 @@ egress:
     # SCOPE, STATED PLAINLY: `egress.allow` is FLEET-WIDE. There is no per-role
     # allow list — `egress_access: true` buys a role the ROUTE and the
     # destinations are these. So this entry is reachable by every role that has
-    # that key, which today is `observer`, `tester` and `engineer`, not testers
-    # alone.
+    # that key, which today is `observer-k8s`, `tester` and `engineer`, not
+    # testers alone.
     - {host: cdn.playwright.dev, port: 443}     # playwright browser binaries
     # The relay's dial target — REQUIRED by `llm.relay_upstream`, and the second
     # of the two edits that decision deliberately takes: the relay is the single
@@ -543,8 +543,8 @@ egress:
     # stale entry here refuses the fleet at `up` rather than misrouting it.
     - {host: 104.21.70.27, port: 443}
 
-    # The do-cluster (DOKS) control plane, so `observer` can answer a question
-    # about a cluster rather than about its logs.
+    # The do-cluster (DOKS) control plane, so `observer-k8s` can answer a
+    # question about a cluster rather than about its logs.
     #
     # A HOSTNAME RATHER THAN AN IP, because the rule is WHATEVER kubectl DIALS
     # and not "always an IP". The CONNECT the proxy sees names whatever the
@@ -1291,9 +1291,9 @@ workers:
   #
   # NO `model:` OVERRIDE ON THE THREE OBSERVERS HERE, and the tracked
   # `fleet.example.yaml` DOES carry one. That difference is deliberate and it is
-  # the whole of §6.11's correction: this file's `observer` role already IS
+  # the whole of §6.11's correction: this file's `observer-k8s` role already IS
   # `gpt-oss-20b-MXFP4-Q8` by the 2026-09-03 decision, so inheriting it delivers
-  # the owner's 2026-09-06 arm-3 ruling exactly. The example's `observer` is
+  # the owner's 2026-09-06 arm-3 ruling exactly. The example's `observer-k8s` is
   # `Qwen3.5-35B-A3B-8bit`, so there the override is what pins the ruling. Same
   # decision, two spellings, because the two files disagree about the role.
   # rpc, NOT tui — the actor recycles this console itself (§6.6 layer 4) and a

@@ -340,7 +340,7 @@ secrets:
     - name: TICKET_PROJECT
       credential: false
     #
-    # `observer`'s own three pairs, added for the same delivery reason and
+    # `observer-k8s`'s own three pairs, added for the same delivery reason and
     # carrying the SAME trap one order of magnitude wider — three base URLs
     # instead of one. THE FAILURE THIS RECORDS: before the `credential: false`
     # erratum above existed, every `TICKET_BASE_URL` was granted as a bare
@@ -348,7 +348,7 @@ secrets:
     # legitimately NAME the endpoint they queried. Every `ticket-ops.json`
     # that did its job honestly was refused as leaking a credential, every
     # refusal was recorded as a discrepancy nothing caused, and every verdict
-    # clamped on evidence that was never a leak. `observer`'s reports are
+    # clamped on evidence that was never a leak. `observer-k8s`'s reports are
     # WORSE hit if this is not learned here: a build URL or a dashboard link
     # is close to the single most useful line in a deploy report, and this
     # role carries three base URLs rather than one. So the tokens are bare
@@ -411,7 +411,7 @@ egress:
     # match silently denies the destination it was written for.
     - {host: tickets.example.com, port: 443}
     #
-    # `observer`'s destination classes (§6.4) — one exact host, one port,
+    # `observer-k8s`'s destination classes (§6.4) — one exact host, one port,
     # exactly like the rule above; a host with any port is a tunnel, not an
     # allowance. FOUR new rules, not five: the fifth class in §6.4's table is
     # Google's own API endpoints (container/logging/monitoring/auth), and
@@ -570,8 +570,8 @@ roles:
     # measured all three reviewer models passing 16 384 bytes byte-exact, and a
     # census of 56 harvested reviewer envelopes puts the real maximum at 13 965 —
     # inside, but by 15% rather than by half, which is the margin and not a
-    # comfort. `observer` is NOT cleared on the same evidence (n = 1) and keeps
-    # its `write`.
+    # comfort. `observer-k8s` is NOT cleared on the same evidence (n = 1) and
+    # keeps its `write`.
     #
     # NO `bash`, and this refusal is untouched by any of the above. §12.1's
     # argument was never about writing: a shell is what turns a "read-only"
@@ -795,8 +795,9 @@ roles:
     #
     # THE TWO TRACKED FILES DISAGREE ABOUT THIS, and the disagreement is
     # RECORDED here rather than settled. THIS file declares `rpc` on both
-    # `triage` and `observer` and neither seat overrides it, so in the example
-    # the console is unattended. The tracked `triage/console.yaml` describes
+    # `triage` and `observer-k8s` and neither seat overrides it, so in the
+    # example the console is unattended.
+    # The tracked `triage/console.yaml` describes
     # seats that are `pane_mode: tui` and pays the stated price for it —
     # `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
     # which takes a tui seat down and cannot bring it back. The operator's
@@ -914,8 +915,8 @@ workers:
   # ---- the `triage` console's four seats — TWO PAIRS ----
   #
   # NO KEYBOARD IN THIS FILE, AND NO THEME EITHER. BOTH resolve to
-  # `pane_mode: rpc` from their roles — `triage` and `observer` both declare it
-  # — so no override belongs here, and a theme would be decoration on a pane
+  # `pane_mode: rpc` from their roles — `triage` and `observer-k8s` both declare
+  # it — so no override belongs here, and a theme would be decoration on a pane
   # nobody types at. Read the `triage` role's `pane_mode` note before relying on
   # that: the tracked `triage/console.yaml` describes `tui` seats instead, and
   # the two tracked files are an OPEN config decision, not one of them being
@@ -1004,7 +1005,7 @@ workers:
   #
   # Declared with no `model:`, no `pane_mode:` and no `theme:` for exactly the
   # reason `obs-t1` carries none: both resolve from their role, and this file's
-  # `observer` role already names the model the console runs. A worker-level
+  # `observer-k8s` role already names the model the console runs. A worker-level
   # override here would re-state a decision rather than make one.
   #
   # THIS WAS `tri-2` + `obs-t2`, A SECOND PAIR, FOR ONE DAY (2026-09-12). That
