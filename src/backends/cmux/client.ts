@@ -241,9 +241,9 @@ export function renameTabArgv(workspaceId: string, surfaceId: string, title: str
   // found` (probed live 2026-08-18), even though the identical id resolves
   // fine for `send`/`send-key`/`read-screen`, none of which are
   // workspace-scoped (`focus-pane` IS — see `focusPaneArgv`; re-probed
-  // 2026-09-13 from inside another workspace). Either UUID or ref form works once the context is
-  // supplied — the regression was the missing context, not the id spelling
-  // (see `respawnPaneArgv`).
+  // 2026-09-13 from inside another workspace). Either UUID or ref form works
+  // once the context is supplied — the regression was the missing context, not
+  // the id spelling (see `respawnPaneArgv`).
   return ["rename-tab", "--workspace", workspaceId, "--surface", surfaceId, "--title", title];
 }
 
@@ -261,8 +261,8 @@ export function respawnPaneArgv(workspaceId: string, surfaceId: string, command:
   // it outright; ref-vs-UUID spelling was never the actual variable, and
   // `read-screen`/`send`/`send-key` need no context at all because they aren't
   // workspace-scoped. (`focus-pane` was listed here too; it is scoped — see
-  // `focusPaneArgv` for the 2026-09-13 measurement.) A prior write-up in this project
-  // mis-attributed the failure to a UUID/ref addressing regression —
+  // `focusPaneArgv` for the 2026-09-13 measurement.) A prior write-up in this
+  // project mis-attributed the failure to a UUID/ref addressing regression —
   // corrected after this direct A/B test (see ISA.md).
   return ["respawn-pane", "--workspace", workspaceId, "--surface", surfaceId, "--command", command];
 }

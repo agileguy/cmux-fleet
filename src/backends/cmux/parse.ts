@@ -36,9 +36,9 @@ export class CmuxParseError extends Error {
  * resolution for those two verbs fails even on a surface id `new-split` just
  * returned, probed live against 0.64.22 on 2026-08-18 (see `respawnPaneArgv`),
  * and `focus-pane` resolves against the CALLER'S workspace when the flag is
- * omitted inside cmux (2026-09-13, see `focusPaneArgv`). The seam's `PaneRef` carries one
- * opaque string, so all three ids travel composed in it. A space is a safe
- * separator: no id cmux emits (UUID or `kind:N` ref) contains one.
+ * omitted inside cmux (2026-09-13, see `focusPaneArgv`). The seam's `PaneRef`
+ * carries one opaque string, so all three ids travel composed in it. A space is
+ * a safe separator: no id cmux emits (UUID or `kind:N` ref) contains one.
  */
 export function composePaneId(paneId: string, surfaceId: string, workspaceId: string): string {
   for (const [what, v] of [
@@ -67,10 +67,10 @@ export function composePaneId(paneId: string, surfaceId: string, workspaceId: st
  *
  * Missing fields are reported as `null` rather than fabricated, so the verb
  * that needs one can refuse BY NAME at its own call site — `attachViewer` for
- * a null workspace, `focus` for a null pane or a null workspace. That disposition is the point:
- * an opaque parse failure two layers down is what made the 1-field case
- * silently break every staged dispatch to a `tui` worker, since `sendText`
- * wanted only the surface the string already was.
+ * a null workspace, `focus` for a null pane or a null workspace. That
+ * disposition is the point: an opaque parse failure two layers down is what
+ * made the 1-field case silently break every staged dispatch to a `tui` worker,
+ * since `sendText` wanted only the surface the string already was.
  */
 export function splitPaneId(composed: string): {
   paneId: string | null;
