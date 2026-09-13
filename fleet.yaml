@@ -662,7 +662,7 @@ roles:
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
     append_system_prompt_file: ./roles/sre.md
-  observer:                               # read-only diagnostic role — REPLACES
+  observer-k8s:                           # read-only diagnostic role — REPLACES
                                           # `investigator` (SRD-OBSERVER-001 D2).
                                           # Deploy watches AND ad-hoc service
                                           # inquiries; `mode` picks the shape.
@@ -705,7 +705,7 @@ roles:
     pane_mode: rpc                        # the ROLE stays rpc — tui allocates no epoch, so a
                                           # re-dispatched watch pass would run twice. The console
                                           # worker overrides this on itself, below.
-    append_system_prompt_file: ./roles/observer.md
+    append_system_prompt_file: ./roles/observer-k8s.md
   verifier:                               # confirms a remediation actually worked
     model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
     toolchain: base
@@ -1112,8 +1112,8 @@ workers:
   # light-mode ink onto a dark terminal — it sets no page background.
   # obs-1 ON omlx bf16, 2026-09-13 by operator. A per-seat override: the observer
   # role (and so obs-2) stays on gabe.
-  - {id: obs-1,  role: observer, model: omlx/gemma-4-26b-a4b-it-bf16, pane_mode: tui, theme: catppuccin-mocha}
-  - {id: obs-2,  role: observer}
+  - {id: obs-1,  role: observer-k8s, model: omlx/gemma-4-26b-a4b-it-bf16, pane_mode: tui, theme: catppuccin-mocha}
+  - {id: obs-2,  role: observer-k8s}
   - {id: ver-1,  role: verifier}
   # ---- the `development` console's four seats ----
   #
@@ -1363,7 +1363,7 @@ workers:
   # different server answering the same question.
   # MOVED TO gabe 2026-09-12, same reasoning as tri-1 above: the worker's own
   # `model:` overrides the role's, so this line is what binds the seat to gabe.
-  - {id: obs-t1, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-dark}
+  - {id: obs-t1, role: observer-k8s, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-dark}
   # ---- THE SECOND AND THIRD OBSERVERS ----
   #
   # THIS WAS `tri-2` + `obs-t2`, A SECOND PAIR, FOR ONE DAY (2026-09-12), and the
@@ -1414,5 +1414,5 @@ workers:
   # `pane_mode: tui` on both, matching `obs-t1`, which is what keeps
   # `triage/console.yaml`'s `recycle_after_sweeps: 0` correct — a headless
   # recycle cannot rebuild a tui pane, and that trade is already recorded above.
-  - {id: obs-t2, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-light}
-  - {id: obs-t3, role: observer, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: everforest-dark}
+  - {id: obs-t2, role: observer-k8s, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-light}
+  - {id: obs-t3, role: observer-k8s, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: everforest-dark}

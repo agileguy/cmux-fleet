@@ -483,7 +483,7 @@ roles:
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
     append_system_prompt_file: ./roles/sre.md
-  observer:                               # read-only diagnostic role — replaces
+  observer-k8s:                           # read-only diagnostic role — replaces
                                            # `investigator` in this same change (D2);
                                            # deploy watches AND ad-hoc service inquiries,
                                            # one skill bundle, `mode` picks the shape
@@ -505,7 +505,7 @@ roles:
     pane_mode: rpc                        # tui allocates no epoch — a re-dispatched watch
                                            # pass would run twice; see the schema-level warning
                                            # this config would otherwise trip (SRD §6.2, §7.5)
-    append_system_prompt_file: ./roles/observer.md
+    append_system_prompt_file: ./roles/observer-k8s.md
   verifier:                               # confirms a remediation actually worked
     model: gemma-4-26b-a4b-it-bf16
     toolchain: base
@@ -840,8 +840,8 @@ workers:
   # deliberate choice here, not an oversight: it tunes its ink for a light
   # background, and a Pi theme sets no background of its own, so it only reads
   # well in a pane whose terminal is light. Chosen anyway.
-  - {id: obs-1,  role: observer, pane_mode: tui, theme: catppuccin-mocha}
-  - {id: obs-2,  role: observer}
+  - {id: obs-1,  role: observer-k8s, pane_mode: tui, theme: catppuccin-mocha}
+  - {id: obs-2,  role: observer-k8s}
   # Two, not one: observer is read-only, so a watch on one target can proceed
   # while an inquiry about another is answered (§6.2).
   - {id: ver-1,  role: verifier}
@@ -999,7 +999,7 @@ workers:
   # overrides, not to loosen the test" — and that is what happened: the guard
   # went red the moment the roles converged, and the file yielded to it rather
   # than the other way round.
-  - {id: obs-t1, role: observer}
+  - {id: obs-t1, role: observer-k8s}
   # ---- THE SECOND AND THIRD OBSERVERS ----
   #
   # Declared with no `model:`, no `pane_mode:` and no `theme:` for exactly the
@@ -1024,5 +1024,5 @@ workers:
   # the three observers after it, and `triagePanes` splits DOWN off pane 1 then
   # RIGHT along that row — collator full width on top, observers beneath. This
   # file only declares that the seats exist.
-  - {id: obs-t2, role: observer}
-  - {id: obs-t3, role: observer}
+  - {id: obs-t2, role: observer-k8s}
+  - {id: obs-t3, role: observer-k8s}

@@ -1942,7 +1942,7 @@ export function kubeconfigScopeWarning(workerIds: readonly string[]): string | n
  * every place that compares against the old string. Still `"observer"` until
  * that rename lands.
  */
-export const OBSERVER_K8S_ROLE = "observer";
+export const OBSERVER_K8S_ROLE = "observer-k8s";
 
 /**
  * Worker ids whose resolved role is `OBSERVER_K8S_ROLE` and whose resolved
