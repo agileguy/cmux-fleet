@@ -1275,7 +1275,7 @@ export const TRIAGE_WORKSPACE = "triage";
  *
  * `tri-1` RECONCILES AND `obs-t1` OBSERVES, which is the review console's
  * collator/reviewer shape reappearing over a different role pair
- * (`fleet.example.yaml`'s `roles:` map — `triage:` at `:630`, `observer:` at `:457`).
+ * (the `triage:` and `observer:` keys of `fleet.example.yaml`'s `roles:` map).
  * That is not a coincidence and it is already load-bearing elsewhere:
  * `ConsoleRoster` (`src/run/dispatch-request.ts:322`) was written over the two
  * ROLES rather than over `col-1`, so `TRIAGE_CONSOLE_ROSTER` needed no schema

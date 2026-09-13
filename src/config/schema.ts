@@ -2012,8 +2012,9 @@ export function observerTuiEpochWarning(workerIds: readonly string[]): string | 
  *
  * `bash` is CARRIED rather than filtered on, because it is what decides what
  * the operator should DO about the line, and the two answers are opposite.
- * `fleet.yaml:542` gives the observer `read, write, bash, grep, find, ls`:
- * dropping `write` there removes a tool and not a capability, because
+ * The observer role's `tools:` line in `fleet.yaml` gives it
+ * `[read, write, bash, grep, find, ls, submit_report]`: dropping `write` there
+ * removes a tool and not a capability, because
  * `cat > /outbox/...` is two seconds of shell (§6.8). The bash-less roles are
  * the opposite case: there `write` IS the capability, and it is the whole of
  * what §6.3's layer 1 takes away.
