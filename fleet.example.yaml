@@ -954,7 +954,7 @@ workers:
   #
   # A SECOND ENVIRONMENT IS STILL NEITHER A WORKER LINE NOR A `max_concurrent`
   # DECISION, and the second pair did NOT lift that refusal — it went around it.
-  # `soleEnvironment` (`src/cli/commands/triage.ts:915`) still refuses a targets
+  # `soleEnvironment` (in `src/cli/commands/triage.ts`) still refuses a targets
   # file declaring other than exactly one environment, and still should: an
   # environment token is a path segment under `~/.pifleet/triage/` and the scope
   # every incident is reported against, so two tokens for one cluster would make
