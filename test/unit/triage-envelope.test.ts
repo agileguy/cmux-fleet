@@ -45,7 +45,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { OUTBOX_FILES_DIR } from "../../src/harvest/outbox.ts";
-import { COVERAGE_RESULTS, OBSERVER_ASSESSMENTS } from "../../src/run/triage-verdict.ts";
+import {
+  COVERAGE_RESULTS,
+  EVIDENCE_GAPS,
+  OBSERVER_ASSESSMENTS,
+} from "../../src/run/triage-verdict.ts";
 import {
   runPaths,
   taskRecordPath,
@@ -95,6 +99,7 @@ import {
   CLUSTER_CALL_TIMEOUT_S,
   BOUNDED_CALLS_DEMAND,
   COVERAGE_VOCABULARY_DEMAND,
+  ROW_SHAPE_DEMAND,
   OBSERVER_CONTRACT_HEADING,
   composeObserverBrief,
   freshnessEchoDemand,
@@ -2353,6 +2358,7 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       childTaskId: CHILD,
     });
     expect(brief).toContain(freshnessEchoDemand(SWEEP, WINDOW));
+    expect(brief).toContain(ROW_SHAPE_DEMAND);
     expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
     expect(brief).toContain(BOUNDED_CALLS_DEMAND);
   });
@@ -2436,6 +2442,61 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
  * artifact. `unreachable` has always been in `COVERAGE_RESULTS`; nothing told the
  * observer how to REACH it, because an unbounded call does not fail, it hangs.
  */
+/**
+ * ISC-1166's follow-up — the row shape joins the host's authored contract.
+ *
+ * `T-sweep-120`: obs-t1 wrote its rows under `coverage` as
+ * `{service, workload, checks[]}` with all four graded fields absent, the
+ * collator could not carry them, and the sweep recorded every service unobserved.
+ * The shape was already documented in `skills/observer-ops/SKILL.md` and the
+ * observer READ it — `obs-t3` spent a whole deadline doing exactly that. So this
+ * is the shape taking its place in the one document the host guarantees the
+ * observer sees on every dispatch, not a second copy of a missing one.
+ */
+describe("ROW_SHAPE_DEMAND (ISC-1166 follow-up)", () => {
+  /**
+   * **THE GAP NAMES ARE NOT THE FIELD NAMES, and this is the test for it.**
+   *
+   * `EVIDENCE_GAPS` calls the fourth gap `ledger`; the field an observer writes
+   * is `evidence_ref`. A demand derived naively from that constant would order
+   * the observer to emit a field nothing reads — [[ISC-1131]]'s second-spelling
+   * defect arrived at from the opposite direction.
+   */
+  test("names a field for every graded gap, in the observer's spelling", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("`evidence_ref`");
+    expect(
+      ROW_SHAPE_DEMAND,
+      "the demand names the host's GAP name; an observer cannot write a field called `ledger`",
+    ).not.toContain("`ledger`");
+    for (const gap of EVIDENCE_GAPS) {
+      if (gap === "ledger") continue;
+      expect(ROW_SHAPE_DEMAND, `graded gap ${gap} is never named to the observer`).toContain(
+        `\`${gap}\``,
+      );
+    }
+  });
+
+  /**
+   * The exact confusion sweep 120 produced: `coverage` used as the ARRAY OF ROWS
+   * rather than as a field inside one. Naming the array is what distinguishes
+   * this demand from the schema block that was already being read.
+   */
+  test("says the rows live in a top-level services array, not under coverage", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("`services`");
+    expect(ROW_SHAPE_DEMAND).toContain("INSIDE");
+  });
+
+  /**
+   * The consequence, which is what makes the fields worth copying rather than a
+   * list to be skimmed: the host downgrades an unevidenced `healthy`, and three
+   * of those send a person to a cluster.
+   */
+  test("states the consequence the host actually applies", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("indeterminate");
+    expect(ROW_SHAPE_DEMAND).toContain("unobserved");
+  });
+});
+
 describe("BOUNDED_CALLS_DEMAND (ISC-1134, authored under ISC-1136)", () => {
   test("states the bound, at the constant's value", () => {
     expect(BOUNDED_CALLS_DEMAND).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);

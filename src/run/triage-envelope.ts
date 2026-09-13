@@ -106,6 +106,7 @@ import type { SweepCollation, SweepJoin, SweepOpen } from "./triage-pass.ts";
 import { TRIAGE_CHECKS, type TriageService } from "./triage-targets.ts";
 import {
   COVERAGE_RESULTS,
+  EVIDENCE_GAPS,
   OBSERVER_ASSESSMENTS,
   /*
    * Imported rather than re-spelled, and that is the point: `collate` now
@@ -115,6 +116,7 @@ import {
    * for what the merge would otherwise lose.
    */
   sweepIdEcho,
+  type EvidenceGap,
   type ObserverArtifact,
   type ObserverAssessment,
   type TriageDocument,
@@ -510,6 +512,61 @@ export const BOUNDED_CALLS_DEMAND: string =
   `inside your deadline; an artifact that never arrives tells the operator nothing at all.`;
 
 /**
+ * Each graded gap, in the spelling the OBSERVER writes rather than the one the
+ * host grades under.
+ *
+ * **The two are not the same word, and that is the whole reason this map exists.**
+ * {@link EVIDENCE_GAPS} calls the fourth gap `ledger`; the field an observer puts
+ * in `observer-ops.json` is `evidence_ref`. A demand derived naively from that
+ * constant would instruct the observer to emit a field nothing reads — the same
+ * class of defect as [[ISC-1131]]'s second spelling of an enum, arrived at from
+ * the opposite direction.
+ *
+ * A `Record` over the closed gap set rather than a hand-written list, so a fifth
+ * gap added to `evidenceGaps()` FAILS TO COMPILE here instead of going quietly
+ * undemanded. That is stronger than {@link COVERAGE_VOCABULARY_DEMAND}'s import
+ * can be, and it has to be: the observer cannot be graded on a field nobody asked
+ * it for, which is exactly what [[ISC-1125]] measured.
+ */
+const GRADED_ROW_FIELD: Record<EvidenceGap, string> = {
+  coverage: "`coverage` (a list of `{channel, result}` objects)",
+  selector: "`selector` (the one you actually matched on)",
+  window: "`window`",
+  ledger: "`evidence_ref` (a list naming what you read)",
+};
+
+/**
+ * The row shape, stated to the seat that writes it (ISC-1166's open follow-up).
+ *
+ * ## Why a fourth demand when the shape is already documented
+ *
+ * `skills/observer-ops/SKILL.md` has carried the full row since [[ISC-1125]], and
+ * the observer does read it — measured on `T-sweep-120`, where `obs-t3` spent its
+ * entire deadline doing exactly that and checked nothing. So this is NOT a second
+ * copy written because the first was missing. It is the row shape taking its place
+ * beside the other three demands in the one document the host guarantees the
+ * observer sees on EVERY dispatch, which is the division {@link
+ * composeObserverBrief} exists to make: the skill is reference the worker may or
+ * may not reach, and the brief is the contract it is answered against.
+ *
+ * ## What it is not claimed to do
+ *
+ * It will not make the observer deterministic. [[ISC-1121]] is this repository's
+ * standing record of asking prose to do that, and `T-sweep-120` is a second: the
+ * shape was documented, readable and read, and the report still came back with its
+ * rows under `coverage`. The collation brief's own repair is what BOUNDS that
+ * failure; this narrows how often it happens.
+ */
+export const ROW_SHAPE_DEMAND: string =
+  `Write one row per service in a top-level \`services\` array. \`coverage\` is a field INSIDE ` +
+  `each row and never the array of rows itself. Every row carries \`name\`, \`namespace\`, ` +
+  `\`assessment\`, and ${EVIDENCE_GAPS.map((g) => GRADED_ROW_FIELD[g]).join(", ")}. ` +
+  `Those last four are why a \`healthy\` is believed at all: the host downgrades any row missing ` +
+  `one of them to \`indeterminate\`, and three of those on one service opens an incident and ` +
+  `sends a person to a cluster. A report whose rows are shaped differently is not a smaller ` +
+  `report — it is one the collator cannot carry, and every service in it is recorded unobserved.`;
+
+/**
  * The heading that marks where the collator stops speaking and the host starts.
  *
  * The four repairs used to append their sentences onto the end of whatever
@@ -583,11 +640,16 @@ export function composeObserverBrief(input: {
     "",
     OBSERVER_CONTRACT_HEADING,
     "",
-    "These three paragraphs are written by the host on every dispatch, not by the collator",
+    "These four paragraphs are written by the host on every dispatch, not by the collator",
     "whose brief you just read. Where they and anything above disagree about a field name, a",
     "value it may take, or a bound on a call, these win.",
     "",
     freshnessEchoDemand(input.sweepId, window),
+    "",
+    // BEFORE the coverage vocabulary, deliberately: that demand is about a field
+    // INSIDE a row, and it reads as a rule about the document itself until the
+    // rows have been described. `T-sweep-120` is what happens when they are not.
+    ROW_SHAPE_DEMAND,
     "",
     COVERAGE_VOCABULARY_DEMAND,
     "",
