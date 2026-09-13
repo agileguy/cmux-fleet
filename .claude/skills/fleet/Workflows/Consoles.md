@@ -257,6 +257,43 @@ relay's whole configuration is their run ids. `triage` is **four** runs on the s
 rule, since 2026-09-12. Only runs holding that console's own workers are stopped — the other three
 consoles survive a rebuild.
 
+**A recreated console goes back into its sidebar group and keeps its colour.**
+Closing a workspace drops both: the rebuilt console is a DIFFERENT workspace, and
+cmux carries no memory that the old one was grouped or coloured. So `--recreate`
+reads the old workspace's `custom_color` BEFORE it builds the new one — the order
+matters, because after the close there is nothing left to read it from — and then,
+once the build has succeeded:
+
+```bash
+cmux workspace group list --json                            # pi-fleet -> workspace_group:N
+cmux workspace-group add --group <group> --workspace <new>
+cmux workspace-action --action set-color --color <hex> --workspace <new>
+```
+
+**The group is resolved by NAME on every rebuild, never stored.** A
+`workspace_group:N` ref renumbers and a UUID is machine-specific, so neither
+belongs in a tracked repo; `pi-fleet` is a name that means the same thing on any
+machine that has one. All four consoles go into `pi-fleet`.
+
+**Both steps are best-effort and neither can fail a rebuild.** A console outside
+its group, or wearing no colour, is a cosmetic fault; a console that refused to
+rebuild because a sidebar group was missing is an outage. The rebuild is the
+thing being protected.
+
+**Colour is CAPTURED, not declared.** No spec names a colour, so whatever the
+operator set by hand is what comes back, and a console that never had one stays
+uncoloured rather than acquiring a default nobody chose. Measured 2026-09-13:
+`operations` `#196F3D`, `triage` `#7D6608`, `review` `#6A1B9A`.
+
+**The group's anchor is not a console, and that is why this is safe.** cmux gives
+every group an anchor workspace whose sidebar row IS the group header — closing
+the anchor promotes the next member, and closing the LAST member removes the
+group entirely. `pi-fleet`'s anchor is the workspace titled `Group 1`, not
+`operations`, `triage` or `review`, so no console rebuild can dissolve the group.
+Note the two names differ on purpose: `workspace list` shows the anchor's
+`custom_title` (`Group 1`), while the sidebar shows the GROUP's name
+(`pi-fleet`), and only `cmux workspace group list` prints the latter.
+
 **Known defect:** it stops the runs *before* closing the workspace, and the
 close can then fail on a pinned workspace with
 `protected: Pinned workspaces can't be closed while pinned` — leaving the

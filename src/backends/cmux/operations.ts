@@ -45,15 +45,20 @@ import {
   respawnPaneArgv,
   workspaceCloseArgv,
   workspaceCreateArgv,
+  workspaceGroupAddArgv,
+  workspaceGroupListArgv,
   workspaceListArgv,
+  workspaceSetColorArgv,
 } from "./client.ts";
 import {
   findWorkspaceByTitle,
+  findWorkspaceGroupByName,
   parseListPanes,
   parseNewSplit,
   parsePaneGeometry,
   parsePaneSurfaces,
   parseWorkspaceCreate,
+  parseWorkspaceGroupList,
   parseWorkspaceList,
   type PaneListed,
 } from "./parse.ts";
@@ -499,6 +504,77 @@ export async function findOperations(client: CmuxClient): Promise<string | null>
 }
 
 /**
+ * The sidebar group every console belongs in.
+ *
+ * A NAME rather than an id, resolved on each rebuild — see
+ * {@link findWorkspaceGroupByName} for why neither a `workspace_group:N` ref
+ * nor a UUID can be written down here.
+ */
+export const FLEET_WORKSPACE_GROUP = "pi-fleet";
+
+/**
+ * Put a freshly built console back where the old one was: in its group, wearing
+ * its colour.
+ *
+ * ## Both halves are BEST-EFFORT, and that is the design
+ *
+ * Every call here goes through `client.run` rather than `runOk`, so a non-zero
+ * exit is read and dropped instead of thrown. A console sitting outside its
+ * sidebar group, or wearing no colour, is a cosmetic fault; a console that
+ * REFUSED TO REBUILD because a group had been renamed is an outage on the
+ * thing `--recreate` exists to repair. The rebuild is what is being protected,
+ * and it has already succeeded by the time this runs.
+ *
+ * ## The colour is passed in, not read here
+ *
+ * It has to be captured from the OLD workspace before that workspace is closed,
+ * which happens in {@link ensureWorkspace} — after the close there is nothing
+ * left to read it from. `null` means the operator never set one, and then
+ * nothing is applied: a console that had no colour must not acquire one from a
+ * rebuild.
+ */
+async function restoreWorkspacePresentation(
+  client: CmuxClient,
+  workspaceId: string,
+  color: string | null,
+): Promise<void> {
+  /*
+   * TWO separate guards, not one around both, so a group failure still leaves
+   * the colour restored and vice versa. They are independent repairs and there
+   * is no reason for one to cost the other.
+   *
+   * The `catch` is doing real work rather than being defensive noise:
+   * `parseWorkspaceGroupList` THROWS on output it does not recognise — that is
+   * `parse.ts`'s whole doctrine and it is correct for every other caller — and
+   * a cmux too old to know `workspace group` answers with exactly that. Without
+   * this, a presentation detail would take down a rebuild that had already
+   * succeeded, which is the opposite of what this function promises. Caught
+   * here rather than made lenient there, so the strictness keeps protecting the
+   * callers that want it.
+   */
+  try {
+    const listed = await client.run(workspaceGroupListArgv());
+    if (listed.code === 0) {
+      const group = findWorkspaceGroupByName(
+        parseWorkspaceGroupList(listed.stdout),
+        FLEET_WORKSPACE_GROUP,
+      );
+      if (group !== null) await client.run(workspaceGroupAddArgv(group.id, workspaceId));
+    }
+  } catch {
+    // Rebuilt, ungrouped. The operator can see that; a failed rebuild is worse.
+  }
+  try {
+    // `workspaceSetColorArgv` refuses anything but `#rrggbb`. The value came
+    // from cmux's own `custom_color` so it should always be one — but "should"
+    // is not a reason to let a rebuild die on a colour.
+    if (color !== null) await client.run(workspaceSetColorArgv(workspaceId, color));
+  } catch {
+    // Rebuilt, uncoloured.
+  }
+}
+
+/**
  * Create the workspace and the panes `spec` plans, in order.
  *
  * The first pane CONSUMES the surface `workspace create` opens with — leaving it
@@ -921,7 +997,13 @@ export async function ensureWorkspace(
    */
   guard?: (panes: readonly TitledPane[]) => string | null,
 ): Promise<EnsureResult> {
-  const existing = await findWorkspace(client, spec.name);
+  // The ROW, not just the id: `customColor` is only readable while the old
+  // workspace still exists, and it stops existing three lines below.
+  const previous = findWorkspaceByTitle(
+    parseWorkspaceList(await client.runOk(workspaceListArgv())),
+    spec.name,
+  );
+  const existing = previous?.id ?? null;
   if (existing !== null && !recreate) {
     /**
      * CHECKED BEFORE THE SELECT, not after. `selectWorkspaceArgv` raises
@@ -936,6 +1018,12 @@ export async function ensureWorkspace(
     return { created: false, workspaceId: existing };
   }
   const built = await createWorkspace(client, spec, opts);
+  // BEFORE the close, not after. The close is the step with a known failure
+  // mode — a pinned workspace refuses it — and if it does fail, the rebuilt
+  // console should already be in its group wearing its colour rather than
+  // stranded outside both. Nothing here depends on the old workspace still
+  // existing: its colour was read at the top of this function.
+  await restoreWorkspacePresentation(client, built.workspaceId, previous?.customColor ?? null);
   // By CAPTURED ID, never by a re-query: the only moment two workspaces share
   // this title is between these two lines, and resolving the name here is the
   // one thing that could close the console just built.

@@ -32,16 +32,21 @@ import {
   setStatusArgv,
   workspaceCloseArgv,
   workspaceCreateArgv,
+  workspaceGroupAddArgv,
+  workspaceGroupListArgv,
   workspaceListArgv,
+  workspaceSetColorArgv,
 } from "../../src/backends/cmux/client.ts";
 import {
   composePaneId,
   CmuxParseError,
   findWorkspaceByTitle,
+  findWorkspaceGroupByName,
   parseAccessMode,
   parseListPanes,
   parseNewSplit,
   parseWorkspaceCreate,
+  parseWorkspaceGroupList,
   parseWorkspaceList,
   shellQuote,
   splitPaneId,
@@ -120,6 +125,59 @@ describe("argv builders produce exactly the documented command line", () => {
   test("workspace create passes cwd when given", () => {
     expect(workspaceCreateArgv("pifleet-run", "/tmp/repo")).toContain("--cwd");
     expect(workspaceCreateArgv("pifleet-run", "/tmp/repo")).toContain("/tmp/repo");
+  });
+
+  /**
+   * The ONLY verb that prints a group's NAME. `workspace list` reports the
+   * group's anchor workspace instead — `Group 1` where the sidebar says
+   * `pi-fleet`, probed live 2026-09-13 — so a rebuild resolving the name
+   * against that listing finds nothing and leaves every console ungrouped
+   * while looking like it worked.
+   */
+  test("workspace group list asks for uuids", () => {
+    expect(workspaceGroupListArgv()).toEqual(["workspace", "group", "list", ...IDS]);
+  });
+
+  /**
+   * HYPHENATED at the top level. `workspace group <sub>` dispatches to the same
+   * place, but cmux documents these flags only under `workspace-group`.
+   */
+  test("workspace-group add names both the group and the workspace", () => {
+    expect(workspaceGroupAddArgv("workspace_group:1", "ws-uuid")).toEqual([
+      "workspace-group",
+      "add",
+      "--group",
+      "workspace_group:1",
+      "--workspace",
+      "ws-uuid",
+    ]);
+  });
+
+  test("set-color carries the hex and the workspace", () => {
+    expect(workspaceSetColorArgv("ws-uuid", "#7D6608")).toEqual([
+      "workspace-action",
+      "--action",
+      "set-color",
+      "--color",
+      "#7D6608",
+      "--workspace",
+      "ws-uuid",
+    ]);
+  });
+
+  /**
+   * HEX ONLY, though `set-color` also accepts sixteen colour NAMES. The only
+   * value this is ever handed is one cmux itself reported as `custom_color`,
+   * and that is always `#rrggbb`; accepting names would widen the surface to a
+   * spelling nothing in this repository produces.
+   *
+   * `assertCmuxValue` would refuse the leading `#` outright — it is not in
+   * `CMUX_VALUE_RE` — so what guards this value is the TEXT check plus the
+   * pattern, which is why a bad colour must still be refused rather than
+   * reaching the command line.
+   */
+  test.each(["Amber", "#7D660", "#GGGGGG", "", "-#7D6608"])("set-color refuses %j", (bad) => {
+    expect(() => workspaceSetColorArgv("ws-uuid", bad)).toThrow(/refusing/);
   });
 
   test("list-panes is scoped to a workspace", () => {
@@ -359,6 +417,69 @@ describe("output parsing tolerates cmux's two id spellings and refuses nonsense"
       JSON.stringify({ workspaces: [{ id: "w2", title: "something-else" }] }),
     );
     expect(findWorkspaceByTitle(list, "pifleet-run")).toBeNull();
+  });
+
+  /**
+   * `custom_color` is read so `--recreate` can put a console's colour back, and
+   * the absent case has to be `null` rather than `""` — a blank would reach the
+   * rebuild as `--color ""`.
+   */
+  test("workspace list carries custom_color, and absence is null", () => {
+    const list = parseWorkspaceList(
+      JSON.stringify({
+        workspaces: [
+          { id: "w1", custom_title: "triage", custom_color: "#7D6608" },
+          { id: "w2", custom_title: "review" },
+          { id: "w3", custom_title: "operations", custom_color: "" },
+        ],
+      }),
+    );
+    expect(list.map((w) => w.customColor)).toEqual(["#7D6608", null, null]);
+  });
+
+  /**
+   * A GROUP IS NOT A WORKSPACE, and this is the distinction the separate parser
+   * exists for. A group owns an anchor workspace, and the anchor is what
+   * `workspace list` reports — so the sidebar's `pi-fleet` shows up there as its
+   * anchor's `custom_title`, `Group 1`. Probed live 2026-09-13. Matching the
+   * name against the workspace listing therefore finds nothing at all.
+   */
+  test("workspace group list parses the groups array by NAME", () => {
+    const groups = parseWorkspaceGroupList(
+      JSON.stringify({
+        groups: [
+          { ref: "workspace_group:2", name: "daily" },
+          { ref: "workspace_group:1", name: "pi-fleet" },
+        ],
+      }),
+    );
+    // The decoy is FIRST: a "return the first group" bug would answer `daily`.
+    expect(findWorkspaceGroupByName(groups, "pi-fleet")?.id).toBe("workspace_group:1");
+    expect(findWorkspaceGroupByName(groups, "no-such-group")).toBeNull();
+  });
+
+  test("workspace group list parses the uuid spelling too", () => {
+    const groups = parseWorkspaceGroupList(
+      JSON.stringify({ groups: [{ id: "A812DFFA-2542-4642-8BFB-C680134DC6EB", name: "pi-fleet" }] }),
+    );
+    expect(findWorkspaceGroupByName(groups, "pi-fleet")?.id).toBe(
+      "A812DFFA-2542-4642-8BFB-C680134DC6EB",
+    );
+  });
+
+  /**
+   * A cmux too old to know `workspace group` answers with an empty string. The
+   * parser THROWS on it, in line with this file's whole doctrine — and
+   * `restoreWorkspacePresentation` catches it, so the rebuild survives. Both
+   * halves matter: strict here, forgiving at the one call site that has decided
+   * a sidebar detail is not worth an outage.
+   */
+  test.each([
+    ["", "an older cmux that does not know the verb"],
+    ["not json", "an unexpected dialect"],
+    ['{"workspaces":[]}', "the workspace listing, not the group listing"],
+  ])("workspace group list THROWS on %j (%s)", (raw) => {
+    expect(() => parseWorkspaceGroupList(raw)).toThrow(CmuxParseError);
   });
 
   test("list-panes carries the surface a viewer must address", () => {

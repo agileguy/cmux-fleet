@@ -91,6 +91,63 @@ export function workspaceCloseArgv(workspaceId: string): string[] {
   return ["workspace", "close", workspaceId];
 }
 
+/**
+ * `workspace group list` — the sidebar groups, by NAME.
+ *
+ * THE ONLY VERB THAT PRINTS A GROUP'S NAME, and that is the whole reason it
+ * exists. `workspace list` reports the group's ANCHOR workspace instead, whose
+ * `custom_title` is `Group 1` where the sidebar says `pi-fleet` — probed live
+ * 2026-09-13. A caller matching the name against `workspace list` therefore
+ * finds nothing, and rebuilds every console outside its group while looking
+ * like it worked.
+ */
+export function workspaceGroupListArgv(): string[] {
+  return ["workspace", "group", "list", ...JSON_IDS];
+}
+
+/**
+ * `workspace-group add` — put an EXISTING workspace into a group.
+ *
+ * Used rather than `workspace create --group`, which also exists, because
+ * `ensureWorkspace` builds the replacement BEFORE closing the old console and
+ * the group is a property of the finished workspace rather than of the act of
+ * creating one. Keeping them separate leaves that measured
+ * build-first-close-second order untouched.
+ *
+ * The top-level verb is HYPHENATED. `workspace group <sub>` dispatches to the
+ * same place, but cmux documents these flags only under `workspace-group`.
+ */
+export function workspaceGroupAddArgv(group: string, workspaceId: string): string[] {
+  assertCmuxValue("workspace group", group);
+  assertCmuxValue("workspace id", workspaceId);
+  return ["workspace-group", "add", "--group", group, "--workspace", workspaceId];
+}
+
+/** What cmux round-trips as `custom_color`; the sixteen colour NAMES never come back. */
+const CMUX_HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * `workspace-action --action set-color` — give a rebuilt console its colour back.
+ *
+ * HEX ONLY, though `set-color` also accepts sixteen colour names. The only
+ * value this is ever handed is one cmux itself reported as `custom_color`, and
+ * that is always `#rrggbb`; accepting names would widen the surface to a
+ * spelling nothing in this repository produces.
+ *
+ * {@link assertCmuxValue} would REFUSE the leading `#` — it is not in
+ * `CMUX_VALUE_RE` — so the text guard plus this pattern is what makes the value
+ * safe to put on a command line, rather than the identifier guard every other
+ * verb here uses.
+ */
+export function workspaceSetColorArgv(workspaceId: string, color: string): string[] {
+  assertCmuxValue("workspace id", workspaceId);
+  assertCmuxText("workspace color", color);
+  if (!CMUX_HEX_COLOR_RE.test(color)) {
+    throw new Error(`cmux: refusing workspace color ${JSON.stringify(color)} — expected #rrggbb`);
+  }
+  return ["workspace-action", "--action", "set-color", "--color", color, "--workspace", workspaceId];
+}
+
 export function listPanesArgv(workspaceId: string): string[] {
   assertCmuxValue("workspace id", workspaceId);
   // `--json` is accepted here despite not appearing in `list-panes --help`

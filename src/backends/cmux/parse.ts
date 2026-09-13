@@ -156,6 +156,19 @@ export interface WorkspaceListed {
   id: string;
   /** `custom_title` round-trips `--name` (SRD §4.1); `title` is derived and unstable. */
   customTitle: string | null;
+  /**
+   * `custom_color` — `#rrggbb`, or `null` when nobody ever set one.
+   *
+   * Read so `--recreate` can put a console's colour back. Closing a workspace
+   * takes the colour with it and the rebuilt console is a DIFFERENT workspace,
+   * which cmux has no reason to colour; capturing it before the close is the
+   * only moment it can still be read.
+   *
+   * `null` is the ordinary case and means *leave it uncoloured* — never *apply
+   * a default*. A console that never had a colour must not acquire one from a
+   * rebuild.
+   */
+  customColor: string | null;
 }
 
 /** `workspace list --json --id-format uuids` → `{window_id, workspaces:[{id, custom_title, …}]}`. */
@@ -172,7 +185,14 @@ export function parseWorkspaceList(stdout: string): WorkspaceListed[] {
     const id = pick(e, ["id", "ref"]);
     if (id === null) continue;
     const title = e["custom_title"];
-    out.push({ id, customTitle: typeof title === "string" ? title : null });
+    const color = e["custom_color"];
+    out.push({
+      id,
+      customTitle: typeof title === "string" ? title : null,
+      // Empty string reads as absent: cmux emits `null` for "no colour", and a
+      // blank would otherwise become a `--color ""` on the rebuild.
+      customColor: typeof color === "string" && color.length > 0 ? color : null,
+    });
   }
   return out;
 }
@@ -186,6 +206,57 @@ export function parseWorkspaceList(stdout: string): WorkspaceListed[] {
  */
 export function findWorkspaceByTitle(list: WorkspaceListed[], name: string): WorkspaceListed | null {
   return list.find((w) => w.customTitle === name) ?? null;
+}
+
+/** One sidebar group, from `workspace group list --json`. */
+export interface WorkspaceGroupListed {
+  /** A `workspace_group:N` ref, or a UUID under `--id-format uuids`. */
+  id: string;
+  /** The name the SIDEBAR shows — the one field no other verb prints. */
+  name: string | null;
+}
+
+/**
+ * `workspace group list --json` → `{groups:[{ref|id, name, …}]}`.
+ *
+ * A SEPARATE parser from {@link parseWorkspaceList}, because a group is not a
+ * workspace: it OWNS one — its anchor — and the anchor is what `workspace list`
+ * reports. Reusing that parser here would answer with the anchor's
+ * `custom_title` (`Group 1`) when the caller asked for the group's name
+ * (`pi-fleet`), which is a wrong answer that looks like a right one.
+ */
+export function parseWorkspaceGroupList(stdout: string): WorkspaceGroupListed[] {
+  const o = asObject("workspace group list output", stdout);
+  const list = o["groups"];
+  if (!Array.isArray(list)) {
+    throw new CmuxParseError("workspace group list output (no groups array)", stdout);
+  }
+  const out: WorkspaceGroupListed[] = [];
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    // Both spellings, for the same reason every accessor in this file tries
+    // both: `--id-format uuids` renames `ref` to `id`.
+    const id = pick(e, ["id", "ref"]);
+    if (id === null) continue;
+    const name = e["name"];
+    out.push({ id, name: typeof name === "string" ? name : null });
+  }
+  return out;
+}
+
+/**
+ * Find a sidebar group by the name the operator actually sees.
+ *
+ * Matched on `name` ONLY, and resolved on every rebuild rather than stored: a
+ * `workspace_group:N` ref renumbers as groups move, and a UUID belongs to one
+ * machine. Neither can be written down in a tracked repository, and a name can.
+ */
+export function findWorkspaceGroupByName(
+  list: WorkspaceGroupListed[],
+  name: string,
+): WorkspaceGroupListed | null {
+  return list.find((g) => g.name === name) ?? null;
 }
 
 export interface PaneListed {
