@@ -16,29 +16,33 @@
  * spell every form it refuses.
  *
  * Every form in {@link FORMS} reads every scanned file, with two exceptions.
- * The quoted literal reads `src/`, `test/` and `scripts/` only; the scripts are
- * extensionless Bun TypeScript, so the scope is by directory, not extension.
- * The docs form reads `skills/`, `roles/` and `.claude/skills/fleet/` only, the
- * worker and operator documents where §4.1 found the role named in markdown.
+ * The quoted literal reads `src/`, `test/` and `scripts/` only. `scripts/`
+ * holds extensionless Bun TypeScript beside `coverage-modules.ts`, so the scope
+ * is by directory, not extension. The docs form reads `skills/`, `roles/` and
+ * `.claude/skills/fleet/` only, the worker and operator documents where §4.1
+ * found the role named in markdown.
  *
- * The docs form reads three shapes, each the name used as an identifier and none
- * of them a sentence: the backticked name followed by `'s` or a hyphen
- * (`` `observer`'s ``, `` `observer`-specific ``); a table cell holding the name
- * alone, bare, bold or backticked; and a comma list with a role name beside it,
- * as in `(observer, verifier, ticketing)`. Role names are read off the prompts
- * in `roles/`, so an English list such as "one file per observer, read-only"
- * stays quiet.
+ * The docs form reads three shapes, each the name used as an identifier: the
+ * backticked name followed by `'s` or a hyphen (`` `observer`'s ``,
+ * `` `observer`-specific ``); a table cell holding the name alone, bare, bold or
+ * backticked; and a PARENTHESISED comma list in which the name is one whole item
+ * and a role name another, as in `(observer, verifier, ticketing)`. Role names
+ * are read off the prompts in `roles/` and compared as text. An English list
+ * stays quiet: "the observer, verifier and ticketing roles" has no parentheses,
+ * and in "(one file per observer, read-only)" the item is not the name alone.
  *
  * Three things are deliberately NOT guarded:
  *
  * - **English prose, the phrase "observer role" included.** "The observer" in a
  *   comment, a role prompt or a skill is §4.2's seat that looks, and §4.2 lets
  *   English stay. A form reading "observer role" would refuse legitimate future
- *   sentences, so no form reads words.
- * - **Backtick spans outside the docs form's shapes.** The quoted-literal form
- *   covers `"` and `'` only, and the index form reads a backticked index only.
- *   Docblocks and documents name the role in backticks as English dozens of
- *   times.
+ *   sentences, so no form reads running prose. Words are read in two places
+ *   only: the old prompt's opening "You are `observer`", and a parenthesised
+ *   list whose whole items are the name and a role name.
+ * - **Backtick spans outside the forms that name them.** The quoted-literal form
+ *   covers `"` and `'` only; the index and grant forms read a backticked index
+ *   or argument, and the docs form its own shapes. Docblocks and documents name
+ *   the role in backticks as English dozens of times.
  * - **One §4.1 row, the named residual.** On the pre-rename tree (909f817),
  *   `skills/observer-ops/SKILL.md:3` read "How the observer role writes …" and
  *   "Mounted for the observer role." Both are English, so nothing here catches
@@ -69,12 +73,15 @@
  * at depth one, so `{sre: {}, observer: {}}` fires and `{sre: {observer:
  * obs-t1}}` does not.
  *
- * **A quoted key is not a quoted literal.** The same row field is a quoted key
- * in JSON, as in `{"service": "api", "observer": "obs-t1"}`. The quoted-literal
- * form lets a literal through when `:` follows its closing quote directly.
- * The colon must be adjacent, so a ternary's spaced ` : ` still fires. A quoted
- * ROLE key is still refused, by the role-key form, which reads structure
- * instead of quotes.
+ * **One quoted key is not a quoted literal.** The same row field is a quoted
+ * key in JSON, as in `{"service": "api", "observer": "obs-t1"}`. The
+ * quoted-literal form lets a literal through only as that field: `:` directly
+ * after its closing quote, then on the same line an observer seat id such as
+ * `obs-t1`, quoted or bare. The value is read by the seat's shape, `obs-` and
+ * an id, because the worker-id grammar also admits a model name such as
+ * `gpt-oss-20b`. Every other quoted literal fires: a `case "observer":` label,
+ * a ternary's spaced ` : `, and a quoted role key in any map, whether or not a
+ * `roles` opener announces it.
  *
  * **A variable named for the seat is not the role.** `src/run/triage-verdict.ts`
  * holds a variable called `observer`, so a `role:` whose value is
@@ -99,6 +106,20 @@
  * The check runs both ways. A shape that matches no line of its file fails, and
  * so does a quoted literal in a named file that no shape of that file admits.
  * The list shrinks when a reason goes away, and it cannot widen by accident.
+ *
+ * ## Known limits
+ *
+ * None of these occurs in the tree today. A miss is a gap; a false positive
+ * fails loudly, naming its line.
+ *
+ * - Missed: a flow map whose keys continue onto the next line; only its first line is read.
+ * - Missed: a key after an escaped quote or a lone apostrophe in a flow-map string, which misplaces the span skip.
+ * - Missed: a key after an unbalanced `(` or `)` in a YAML plain scalar, which breaks the depth count.
+ * - False positive: a generic type span `<…>` running across the next parameter to a later `= {`.
+ * - False positive: a comment or prose line ending `roles:`, followed by a line starting `{`.
+ * - Missed: destructuring `const { observer } = cfg.roles`, a member chain broken across lines, a union typed opener, a YAML anchor on `roles`.
+ * - Missed: an inline object type in a typed opener, as in `const roles: { [k: string]: RoleDoc } = {`.
+ * - False positive: a future bare `| observer |` docs cell for the triage row field.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -319,8 +340,12 @@ function roleKeyLines(text: string): number[] {
   return hits.sort((a, b) => a - b);
 }
 
-/** A quoted literal, unless `:` follows its closing quote directly (a JSON or YAML key). */
-const quotedLiteralLines = (text: string): number[] => matchLines(text, /(["'])observer\1(?!:)/g);
+/**
+ * A quoted literal, unless it is the key of the triage.json row field: `:` directly
+ * after its closing quote, then on the same line an observer seat id, quoted or bare.
+ */
+const quotedLiteralLines = (text: string): number[] =>
+  matchLines(text, /(["'])observer\1(?!:[ \t]*(["']?)obs-[A-Za-z0-9]+\2(?![-\w.]))/g);
 
 /**
  * The quoted literals in `text` that `rel`'s shapes do not admit. A file with no
@@ -341,18 +366,32 @@ function unshapedLiteralLines(text: string, rel = ""): number[] {
 const ROLE_NAMES = FILES.flatMap((rel) => /^roles\/([^/]+)\.md$/.exec(rel)?.slice(1) ?? []);
 
 /**
- * The old name used as the role's name in a document, in three shapes; see the
- * header. Each is read within one line, and a line is reported once.
+ * Lines holding a parenthesised comma list in which the old name is one whole item
+ * and a role name another. An item is trimmed, loses a leading `and` or `or`, and
+ * loses backticks around it. Role names are compared as text, so no name is ever
+ * regex source.
  */
-function docsRoleNameLines(text: string): number[] {
-  const names = ROLE_NAMES.join("|");
-  const shapes = [
-    /`observer`(?:['’]s|-[A-Za-z])/g,
-    /(?<=\|)[ \t]*(\*\*|`)?observer\1[ \t]*(?=\|)/g,
-    new RegExp(String.raw`(?<![-\w])observer\x60?[ \t]*,[ \t]*(?:(?:and|or)[ \t]+)?\x60?(?:${names})(?![-\w])`, "g"),
-    new RegExp(String.raw`(?<![-\w])(?:${names})\x60?[ \t]*,[ \t]*(?:(?:and|or)[ \t]+)?\x60?observer(?![-\w])`, "g"),
-  ];
-  return [...new Set(shapes.flatMap((re) => matchLines(text, re)))].sort((a, b) => a - b);
+function parenListLines(text: string, roleNames: readonly string[]): number[] {
+  const item = (raw: string): string =>
+    raw.trim().replace(/^(?:and|or)[ \t]+/, "").replace(/^`([^`]*)`$/, "$1");
+  return text.split("\n").flatMap((line, i) => {
+    const lists = [...line.matchAll(/\(([^()]*)\)/g)].map((m) => m[1]!.split(",").map(item));
+    const named = lists.some(
+      (items) => items.includes(OLD) && items.some((it) => it !== OLD && roleNames.includes(it)),
+    );
+    return named ? [i + 1] : [];
+  });
+}
+
+/**
+ * The old name used as the role's name in a document, in three shapes; see the
+ * header. Each is read within one line, and a line is reported once. `roleNames`
+ * defaults to {@link ROLE_NAMES}; the detector cases pass their own.
+ */
+function docsRoleNameLines(text: string, roleNames: readonly string[] = ROLE_NAMES): number[] {
+  const shapes = [/`observer`(?:['’]s|-[A-Za-z])/g, /(?<=\|)[ \t]*(\*\*|`)?observer\1[ \t]*(?=\|)/g];
+  const found = [...shapes.flatMap((re) => matchLines(text, re)), ...parenListLines(text, roleNames)];
+  return [...new Set(found)].sort((a, b) => a - b);
 }
 
 type Form = {
@@ -376,14 +415,14 @@ const FORMS = {
     find: (t) => matchLines(t, /role["']?[ \t]*:[ \t]*["']?observer(?![-\w]|\??\.[A-Za-z_$])/g),
   },
   rolesIndex: {
-    name: `roles.${OLD} or roles["${OLD}"], in any quote and optionally chained`,
+    name: `roles.${OLD} or roles["${OLD}"], the index in ", ' or backticks, optionally non-null asserted (!) or chained (?.)`,
     scope: everywhere,
-    find: (t) => matchLines(t, /roles(?:\??\.observer(?![-\w])|(?:\?\.)?\[\s*(["'`])observer\1\s*\])/g),
+    find: (t) => matchLines(t, /roles!?(?:\??\.observer(?![-\w])|(?:\?\.)?\[\s*(["'`])observer\1\s*\])/g),
   },
   roleGrant: {
-    name: `roleGrant(…"${OLD}")`,
+    name: `roleGrant(…"${OLD}") with the name as its last argument, in ", ' or backticks`,
     scope: everywhere,
-    find: (t) => matchLines(t, /roleGrant\s*\([^)]*?(["'])observer\1\s*(?:,\s*)?\)/g),
+    find: (t) => matchLines(t, /roleGrant\s*\([^)]*?(["'`])observer\1\s*(?:,\s*)?\)/g),
   },
   promptPath: {
     name: `the path ${OLD_PROMPT}`,
@@ -401,9 +440,9 @@ const FORMS = {
     find: unshapedLiteralLines,
   },
   docsRoleName: {
-    name: `the role name ${OLD} in worker or operator docs as a backticked name, a table cell or a comma list of roles`,
+    name: `the role name ${OLD} in worker or operator docs as a backticked name, a table cell or an item of a parenthesised list of roles`,
     scope: (rel) => ["skills/", "roles/", ".claude/skills/fleet/"].some((root) => rel.startsWith(root)),
-    find: docsRoleNameLines,
+    find: (t) => docsRoleNameLines(t),
   },
 } satisfies Record<string, Form>;
 
@@ -494,7 +533,7 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `doc["roles"] = {\n  ${OLD}: { tools: OBSERVER_TOOLS },\n  reviewer: { tools: BASH_LESS_TOOLS },\n};`,
         `const doc = {\n  roles: {\n    // the read-only seat\n    ${OLD}: {\n` +
           `      secrets: [],\n    },\n  },\n};`,
-        // A QUOTED role key is this form's, not quotedLiteral's, which lets any quoted key through.
+        // A QUOTED role key. This form reads it by structure in every file; quotedLiteral reads code roots only.
         `roles:\n  "${OLD}":\n    tools: [read]\n`,
         `{"roles": {"${OLD}": {}}}`,
         // A flow map whose old key is not first, in YAML and in TS.
@@ -553,9 +592,14 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `roles?.${OLD}`,
         `roles?.["${OLD}"]`,
         `roles[\`${OLD}\`]`,
+        // TypeScript's non-null assertion before the access.
+        `cfg.roles!.${OLD}`,
+        `cfg.roles!["${OLD}"]`,
       ],
       miss: [
         'roles["observer-k8s"]',
+        'cfg.roles!["observer-k8s"]',
+        "cfg.roles![OBSERVER_K8S_ROLE]",
         "roles[OBSERVER_K8S_ROLE]",
         "roles.observer-k8s",
         `roles.${OLD}s`,
@@ -564,9 +608,15 @@ describe("each detector fires on its form and stays quiet on the new name", () =
       ],
     },
     roleGrant: {
-      hit: [`roleGrant(config, "${OLD}")`, `roleGrant(\n  config,\n  '${OLD}',\n)`, `roleGrant(config, "${OLD}",)`],
+      hit: [
+        `roleGrant(config, "${OLD}")`,
+        `roleGrant(\n  config,\n  '${OLD}',\n)`,
+        `roleGrant(config, "${OLD}",)`,
+        `roleGrant(config, \`${OLD}\`)`,
+      ],
       miss: [
         'roleGrant(config, "observer-k8s")',
+        "roleGrant(config, `observer-k8s`)",
         "roleGrant(config, OBSERVER_K8S_ROLE)",
         `roleGrant(config, "${OLD}", extra)`,
       ],
@@ -586,6 +636,12 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         // A ternary's colon is spaced, so the key carve-out does not reach it.
         `const pick = k8s ? "${OLD}" : "sre";`,
         `if (w.role === "${OLD}") return;`,
+        // A switch label: its colon is adjacent, and nothing on the line is a worker id.
+        `switch (w.role) {\n  case "${OLD}":\n    return X;\n}`,
+        `switch (w.role) {\n  case '${OLD}':\n    return X;\n}`,
+        // Quoted role keys in maps no `roles` opener announces, on one line and across lines.
+        `const MODEL_BY_ROLE = { "${OLD}": "gpt-oss-20b", sre: "qwen" };`,
+        `const EXPECTED = {\n  "sre": [],\n  "${OLD}": ["read"],\n};`,
       ],
       miss: [
         '"observer-k8s"',
@@ -602,7 +658,7 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `the \`${OLD}\`’s brief`,
         `| \`${OLD}\` | read-only |`,
         `a \`none\` role (sre, ${OLD})`,
-        `the ${OLD}, verifier and ticketing roles`,
+        `(${OLD}, verifier, ticketing)`,
         `| \`obs-9\` | ${OLD} | operations | \`base\` |`,
       ],
       miss: [
@@ -620,6 +676,12 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `| ONE entry per ${OLD}, all in ONE file | one entry for each seat |`,
         `\`/replies/<child-task-id>.json\`, one file per ${OLD}, read-only.`,
         `the ${OLD}, the collator and the reviewer`,
+        `(one file per ${OLD}, read-only)`,
+        // English lists of seats beside role names, with no parentheses around them.
+        `Each collator, ${OLD} and reviewer seat reads the same share.`,
+        `the triage, ${OLD} pair runs in one console`,
+        `ask the sre, ${OLD} or ticketing worker`,
+        `the ${OLD}, verifier and ticketing roles`,
         // The triage.json row field in a documented example.
         `      "${OLD}": "obs-t1",`,
       ],
@@ -664,8 +726,17 @@ describe("each detector fires on its form and stays quiet on the new name", () =
     expect(docs.filter((rel) => !FORMS.docsRoleName.scope(rel)), "should be in scope").toEqual([]);
     const code = ["src/run/a.ts", "test/unit/b.test.ts", "scripts/operations", "fleet.yaml", "Docs/SRD-OBSERVER-ROLES.md"];
     expect(code.filter((rel) => FORMS.docsRoleName.scope(rel)), "should be out of scope").toEqual([]);
-    expect(ROLE_NAMES, "the comma-list shape's role names, read off roles/*.md").toContain("observer-k8s");
+    expect(ROLE_NAMES, "the parenthesised list's role names, read off roles/*.md").toContain("observer-k8s");
     expect(ROLE_NAMES, "a role name the pre-rename list held beside the old one").toContain("verifier");
+  });
+
+  /** A role file such as `roles/sre.v2.md` must not turn its name into a pattern. Names are passed in, not read off roles/. */
+  test("docsRoleName reads role names as text, not as regex source", () => {
+    const dotted = ["sre.v2"];
+    expect(docsRoleNameLines(`a \`none\` role (${OLD}, sre.v2)`, dotted), "the dotted name itself").toEqual([1]);
+    expect(docsRoleNameLines(`a \`none\` role (${OLD}, sreXv2)`, dotted), "a dot is not a wildcard").toEqual([]);
+    expect(() => docsRoleNameLines(`a \`none\` role (${OLD}, sre)`, ["odd(name"]), "a name holding (").not.toThrow();
+    expect(docsRoleNameLines(`a \`none\` role (${OLD}, sre)`, ["odd(name", "sre"]), "beside a name holding (").toEqual([1]);
   });
 
   /**
