@@ -23,8 +23,14 @@
  * The first assertion in that block is therefore the ACCEPTING one.
  *
  * Hermetic: `PIFLEET_RUNS_DIR` is pointed at a temp directory so nothing reads
- * or writes the operator's own `~/.pifleet`, and no test loads `fleet.yaml`,
- * which is gitignored and absent on a clean checkout.
+ * or writes the operator's own `~/.pifleet`, and no test in this file loads a
+ * fleet config at all. The reason that used to be given for the second half —
+ * that `fleet.yaml` "is gitignored and absent on a clean checkout" — expired on
+ * 2026-09-12, when that file became tracked; it is now present everywhere, CI
+ * included. The hermetic property is unaffected, because it never rested on the
+ * file being missing: every fixture below is hand-built in the test, so the
+ * relay wiring is graded against a shape this file states rather than against
+ * whichever four workers the live console happens to seat.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";

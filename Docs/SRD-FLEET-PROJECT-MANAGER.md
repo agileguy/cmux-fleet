@@ -182,7 +182,7 @@ to matter. They are stated up front because each changes what a section downstre
 | **A** | **The integration mechanism already exists and is undocumented at the workflow level.** `up` registers `worker-<id>` as a git remote on the operator's own repository, pointing at that worker's clone (`worktree.ts:435`, `registerWorkerRemote` at `:465-470`), and `pifleet worktrees --json` reports each worker's branch, path, dirt and `commitsAhead` from the recorded `WorkerWorktree` (`cli/commands/worktrees.ts:33-45`). **Nothing in `~/.claude/skills/fleet/` mentions either.** The one line `Workflows/Observe.md:51-52` gives it — *"`worktrees` lists each worker's own git checkout"* — does not say the commits are fetchable. | Yes | §2.1, §6.2 |
 | **B** | **`/ProjectManager`'s "two engineers, one branch" is incoherent against `isolation: worktree` and would fail silently.** Each engineer writes `branch: "fleet/<run-id>/<worker-id>"` into its own envelope (the `"branch"` field of `skills/pifleet-worker/SKILL.md`'s envelope example) regardless of what the brief said. A brief naming `phase-3-relay-actor` produces two workers that either ignore it or create that branch inside their own clone, where it is invisible to the other. Nothing goes red. | Yes | §1.2, §6.2 |
 | **C** | **A collated review is journalled, so a lens lost to a failed harvest never re-enters that collation.** This is ISC-517's hazard and it is the one a ProjectManager loop is most likely to mis-read, because a 2-of-3 collation is a valid `pifleet.collation/v1` document with a `reported: false` row in it and a `success` verdict on the collator's own task. `roles/collator.md:248` is explicit that the collator's status is *"about YOUR collation, never about how many lenses reported"*. **A loop that branches on the collator's verdict is therefore branching on the wrong number.** §7.5 makes coverage a separate gate. | Yes | §7.5, §9.4 |
-| **D** | **`grep -rln rev-1 test/` returns SEVENTEEN files, of which SIX are functional and eleven are arbitrary fixture ids that must NOT be renamed.** *(v0.1 said "two real pins"; v0.3 said five test files. Both were undercounts, and this is the third round in which this number has grown — so the classification below is by MECHANISM rather than by count.)* **Hard-fail** — `config.test.ts:119` and `cli-exit-codes.test.ts:238` assert against the tracked `fleet.example.yaml`, and `operations-console.test.ts:112`/`:206` drive the real console scripts. **Stale-but-passing** — `development-plan.test.ts` asserts the roster literally, and `status-runs.test.ts:38` and `console-restart.test.ts` model the console with hand-written fixtures that keep passing while describing a console that no longer exists. **The eleven others define `rev-1` inline** and are unaffected; `up-wiring.test.ts:3743-3763` must be left alone deliberately, because its probe's whole value is that the worker id and the role differ. **`fleet.yaml` is gitignored (`.gitignore:9`)**, so the live seat change produces no diff and cannot be dispatched to a worker without tripping ISC-93. | Yes, on the first `bun test` after the rename | §6.1, §13 Phase 1 |
+| **D** | **`grep -rln rev-1 test/` returns SEVENTEEN files, of which SIX are functional and eleven are arbitrary fixture ids that must NOT be renamed.** *(v0.1 said "two real pins"; v0.3 said five test files. Both were undercounts, and this is the third round in which this number has grown — so the classification below is by MECHANISM rather than by count.)* **Hard-fail** — `config.test.ts:119` and `cli-exit-codes.test.ts:238` assert against the tracked `fleet.example.yaml`, and `operations-console.test.ts:112`/`:206` drive the real console scripts. **Stale-but-passing** — `development-plan.test.ts` asserts the roster literally, and `status-runs.test.ts:38` and `console-restart.test.ts` model the console with hand-written fixtures that keep passing while describing a console that no longer exists. **The eleven others define `rev-1` inline** and are unaffected; `up-wiring.test.ts:3743-3763` must be left alone deliberately, because its probe's whole value is that the worker id and the role differ. **`fleet.yaml` was gitignored**, so the live seat change produced no diff and could not be dispatched to a worker without tripping ISC-93. **[SUPERSEDED 2026-09-12 — it is TRACKED now, so that change is an ordinary diff and is dispatchable.]** | Yes, on the first `bun test` after the rename | §6.1, §13 Phase 1 |
 | **E** | **There is already a `/ProjectManager` state file in this repository, and its shape has outgrown the skill that writes it.** `.claude/project-manager-state.json` on `feature/harvest-recovery` carries `branch_model: "long-lived"`, an `integration` block naming a console and a workspace id, an `answered_questions` map, per-phase commit lists, `out_of_band_commits`, and `pr_policy: "Do NOT open a PR"`. The skill's documented schema (`SKILL.md:240-252`) has none of those. **The skill is behind its own practice**, and §7.6 specifies the shape that practice already reached rather than the one the skill documents. | Observed | §2.7, §7.6 |
 
 ### 0.7 The dependency on PR #147 is satisfied — it merged as `d70acf4`
@@ -296,7 +296,7 @@ five-surface edit (§13); the review round's trigger was under-specified (§6.5)
 | *"Testers cannot run this repository's `bun` suite."* | **False, and v0.1 repeated the same error from a stale config comment.** `docker/Dockerfile:145` is `FROM toolchain-node AS toolchain-python` and `:118` installs bun in the node stage, so `python` is a strict superset of `node`. Changed by `2ccf851`, *"Every toolchain includes node (ISC-405)"*, on 2026-09-04. §0.5 correction 5 states it and §6.8 is corrected |
 **One finding this author initially rejected and then confirmed, recorded because the mistake is
 instructive.** The claim that the tracked `fleet.example.yaml` has `tester` at `node` while the
-gitignored `fleet.yaml` says `python` is **TRUE** — `fleet.example.yaml:489` is `toolchain: node`,
+live `fleet.yaml` (gitignored then, tracked since 2026-09-12) says `python` is **TRUE** — `fleet.example.yaml:489` is `toolchain: node`,
 `fleet.yaml:656` is `toolchain: python`, and the tracked surface never received the switch. A draft
 of this section rejected it as false **before the verification it claimed had returned**. That is the
 same defect as §7.5's: asserting a check rather than performing one. It is left in the record rather
@@ -2716,13 +2716,22 @@ correction 1.
 > `grep` missed four of them because it was gitignore-aware and silently skipped `fleet.yaml`,
 > `fleet-development.yaml` and the extensionless `scripts/development`.
 
-**And one interaction that is not obvious and bites this very phase.** `fleet.yaml` is **gitignored**
-(`.gitignore:9`); `fleet.example.yaml` is the only tracked config. So an engineer dispatched to "edit
-`fleet.yaml`" produces **no diff** — and a task with a `success` claim and an empty diff is graded
+**And one interaction that is not obvious and bites this very phase.** `fleet.yaml` **was
+gitignored**, and `fleet.example.yaml` was the only tracked config. So an engineer dispatched to "edit
+`fleet.yaml`" produced **no diff** — and a task with a `success` claim and an empty diff is graded
 `failed` under ISC-93 as a fabrication. **The live config must be edited by the operator by hand, and
 only `fleet.example.yaml` may be given to a worker.** Task 1.1 is split on that line.
 
-- **1.1a** *(operator, not dispatchable)* In the untracked live `fleet.yaml`: replace the `rev-1`
+> **SUPERSEDED 2026-09-12 — and the split above is left standing deliberately.** Both configs are
+> tracked now, so the MECHANICAL reason for the split is gone: an engineer editing `fleet.yaml`
+> produces a real diff and no longer trips ISC-93. What is NOT settled is whether the live config
+> should still be operator-only, which was always a second, independent question about blast radius —
+> the file names the operator's own hosts, endpoints and egress allowances. That question has not
+> been re-decided, so the task stays split until someone decides it rather than inheriting the
+> decision from an ignore rule that no longer exists.
+
+- **1.1a** *(operator, not dispatchable — see the superseded note above: `fleet.yaml` is TRACKED as
+  of 2026-09-12, so "not dispatchable" no longer follows from the ignore)* In the live `fleet.yaml`: replace the `rev-1`
   worker entry (`:727`) with `tst-2` on `role: tester`, `pane_mode: tui`, `theme: nord`, and correct
   the stale `reviewer` role comment at `:551` and the stale toolchain comment at `:656-658`
   (§0.5 correction 5). Touches: `fleet.yaml`, `fleet-development.yaml:129`.
@@ -2746,8 +2755,10 @@ only `fleet.example.yaml` may be given to a worker.** Task 1.1 is split on that 
   as `tui`) and `:206`.
   *Note the mechanism at `:206`, because it is not obvious: it passes
   `--workers eng-1,eng-2,tst-1,rev-1` to `scripts/review` as a stand-in roster, and that works ONLY
-  because the example config declares those four. The review console's real seats exist only in the
-  untracked `fleet.yaml`, so under `--config fleet.example.yaml` they degrade to non-attended and the
+  because the example config declares those four. The review console's real seats exist only in
+  `fleet.yaml` — gitignored when this was written, TRACKED since 2026-09-12, so they are readable
+  from any checkout now but are still absent from the EXAMPLE, which is the fact this note turns
+  on — so under `--config fleet.example.yaml` they degrade to non-attended and the
   assertion's value cannot be produced. If `rev-1` leaves the example without this line changing,
   worker resolution throws, `scripts/development:130-139` swallows it, panes go non-attended, and the
   test fails on a missing `--workspace-name` rather than on anything about rosters.*

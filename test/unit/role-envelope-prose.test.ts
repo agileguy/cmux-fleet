@@ -19,12 +19,18 @@
  * that is true of `collator` alone. `observer`, `sre` and `verifier` all have
  * full blocks in the example and resolve identical grants from both files.
  *
- * That correction does not change which file this probe should read, though —
- * `fleet.yaml` is gitignored (`.gitignore:9`) and CI never creates it
- * (`ci.yml`'s unit-test step is a plain checkout + `bun test test/unit`, no
- * step that writes it), so a probe that resolved against it unconditionally
- * would be red on every clean checkout and pass on the operator's machine only
- * by accident. `test/support/role-docs.ts`'s `exampleConfig()` states the
+ * That correction does not change which file this probe should read, but the
+ * REASON has changed and the old one is recorded because it was load-bearing.
+ * It read: `fleet.yaml` is gitignored and CI never creates it (`ci.yml`'s
+ * unit-test step is a plain checkout + `bun test test/unit`, no step that writes
+ * it), so a probe resolving against it unconditionally would be red on every
+ * clean checkout. **The `ci.yml` description is still accurate; the conclusion
+ * stopped following on 2026-09-12, when `fleet.yaml` became TRACKED and the
+ * checkout began supplying it.** The `.gitignore:9` citation is dropped rather
+ * than repointed — that entry no longer exists, and line 9 is now `coverage/`.
+ *
+ * What survives is a better reason: this arm grades the SHIPPED reference, so it
+ * measures what the project publishes rather than what one machine runs. `test/support/role-docs.ts`'s `exampleConfig()` states the
  * identical reasoning for the identical reason, and `review-plan.test.ts`
  * documents the failure mode this caused there: a TOP-LEVEL `await
  * loadConfig("fleet.yaml")` took its whole file down (`0 pass, 1 error`) on a
@@ -36,11 +42,16 @@
  * `roleGrant`/`writeCapableIn` resolution for the same file and the
  * same reason. `collator` is the one role this cannot check by resolution — it
  * is checked directly for the prose half of the invariant only (see below) —
- * and, where the operator's own untracked `fleet.yaml` happens to be present
- * (it is, on this machine), a second, `skipIf`-gated block re-runs the same
- * check against it for full nine-role coverage including `collator`,
- * mirroring `review-plan.test.ts`'s `HAVE_CONFIG` pattern so its absence never
- * fails CI.
+ * and a second block re-runs the same check against the operator's own
+ * `fleet.yaml` for full nine-role coverage including `collator`.
+ *
+ * **That block was `skipIf`-gated on the file "happening to be present", which
+ * it no longer does — `fleet.yaml` is TRACKED as of 2026-09-12, so it is present
+ * in every checkout and in CI.** The gate has been retired by inversion (the
+ * check asserts the file's presence instead of skipping on its absence), which
+ * matters here more than anywhere else in the suite: this is the only place
+ * `collator`'s real grant is graded, and ISC-1161 called that "local-only
+ * evidence that skips in CI". It is neither any more.
  *
  * ## The anchor phrase, and what it would miss
  *
@@ -186,23 +197,37 @@ describe("task 8.6 — the envelope-removes-you-from-grading paraphrase implies 
 });
 
 /**
- * The operator's own `fleet.yaml` — READ ONLY WHERE IT EXISTS, following
- * `review-plan.test.ts`'s pattern exactly: `existsSync` gates a
- * `describe.skipIf`, and `loadConfig` runs inside a `test`, never at module
- * scope, so a clean checkout without the file skips this block instead of
- * failing the whole file at import time.
+ * The operator's own `fleet.yaml`, read UNCONDITIONALLY as of 2026-09-12.
  *
- * This is the only place `collator`'s actual grant is checked against its
- * prose, because `fleet.yaml` is the only tracked-or-untracked config that
- * declares a `collator` block at all.
+ * It followed `review-plan.test.ts`'s pattern exactly — `existsSync` gating a
+ * `describe.skipIf`, with `loadConfig` inside a `test` rather than at module
+ * scope — and that pattern was right while the file was gitignored and absent
+ * from CI. The file is TRACKED now, so the gate's condition is always true: it
+ * skipped nowhere while still reading as conditional, which is a test that has
+ * stopped being able to tell you anything about its own coverage.
+ *
+ * **This block is the one that mattered most**, which is why the gate is retired
+ * rather than left as harmless decoration. `collator` has no block in
+ * `fleet.example.yaml`, so this is the only place its actual grant is checked
+ * against its prose — ISC-1161 graded that coverage "local-only evidence that
+ * skips in CI". It is neither of those things any more, and a gate claiming
+ * otherwise would keep that grade looking honest.
+ *
+ * `loadConfig` stays inside the `test` for the reason that never depended on the
+ * ignore: a throw at module scope takes the whole file down, including the four
+ * assertions that need no config.
  */
 const LIVE_CONFIG_PATH = `${ROOT}fleet.yaml`;
 const HAVE_LIVE_CONFIG = existsSync(LIVE_CONFIG_PATH);
 
-describe.skipIf(!HAVE_LIVE_CONFIG)(
+describe(
   "task 8.6, against the operator's own fleet.yaml (nine roles, collator included)",
   () => {
     test("every role in the live config satisfies the invariant, collator included", async () => {
+      expect(
+        HAVE_LIVE_CONFIG,
+        `${LIVE_CONFIG_PATH} is missing — fleet.yaml is tracked, so this is a broken checkout`,
+      ).toBe(true);
       const { config } = await loadConfig(LIVE_CONFIG_PATH);
       expect(
         Object.keys(config.roles),

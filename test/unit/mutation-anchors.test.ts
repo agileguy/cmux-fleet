@@ -626,11 +626,20 @@ describe("every mutation battery still anchors to the code it claims to mutate",
           continue;
         }
         /**
-         * A TARGET GIT DOES NOT TRACK IS SKIPPED, NOT FAILED — and `fleet.yaml`
-         * is the reason. It is gitignored by house rule, and a battery that
-         * mutates the fleet config is anchoring to a file that by design has no
-         * committed form. Failing on it would make this guard demand that a
-         * deliberate .gitignore entry be reversed.
+         * A TARGET GIT DOES NOT TRACK IS SKIPPED, NOT FAILED. `fleet.yaml` was
+         * the reason this rule was written and is NO LONGER AN EXAMPLE OF IT:
+         * it was gitignored by house rule until 2026-09-12, when the operator
+         * decided to track it, so it now has a committed form like any other
+         * target and this guard CHECKS its anchors instead of passing over
+         * them. That is a coverage gain nobody asked for — `collation-contract`
+         * mutations R18, R19 and RV17 all anchor into `fleet.yaml`, and all
+         * three were invisible here until that decision. They match at HEAD,
+         * measured 2026-09-12.
+         *
+         * The skip remains because the RULE is still right for any target that
+         * genuinely has no committed form; it simply no longer has this file as
+         * its motivating case. Failing on such a target would make this guard
+         * demand that a deliberate ignore be reversed.
          *
          * Skips are COUNTED below so the check cannot go vacuous: a battery all
          * of whose targets stopped being tracked would otherwise pass while

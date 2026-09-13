@@ -41,8 +41,10 @@ land, and under D7 a declared-but-unused provider creates no network and opens n
 
 ### Deployed assignment, 2026-09-03
 
-Recorded here rather than only in `fleet.yaml`, which is git-ignored: the probe evidence below is the
-justification for three model choices and would otherwise exist only on one machine.
+Recorded here rather than only in `fleet.yaml` — which was git-ignored when this was written and has
+been TRACKED since 2026-09-12: the probe evidence below is the justification for three model choices
+and would otherwise exist only on one machine. (The duplication is still worth keeping: a config
+value and the measurement that chose it are different artifacts on different clocks.)
 
 | Role | Workers | Model | `probeNativeToolCalls` on `https://ollama.com/v1` |
 |---|---|---|---|
@@ -1914,8 +1916,13 @@ wrong on its own terms: it would have broken LightRAG. Passing both is strictly 
 today — it is reachable only because it is bound to loopback. Binding it to the LAN without the key
 added in Phase 3 publishes an unauthenticated inference endpoint to the subnet, and the tunnel in
 Phase 6 would publish it to the internet. The existing shared value — the one `OMLX_API_KEY` carries,
-named here rather than quoted, because `fleet.yaml` is gitignored precisely so operator credentials
-stay out of this repository and a document that IS tracked must not undo that — is guessable and is
+named here rather than quoted, because `fleet.yaml` WAS gitignored precisely so operator credentials
+stayed out of this repository and a document that IS tracked must not undo that — **and that
+safeguard is GONE as of 2026-09-12, which is the one consequence of tracking `fleet.yaml` that is a
+security change rather than a documentation change. Both files are now committed, so "keep it in
+`fleet.yaml` instead" no longer keeps anything out of the repository. Any secret in the live config
+is in git history. This wants a deliberate decision — `*_env` indirection, or a secrets store — and
+it has not been made; it is flagged here rather than quietly re-worded.** The value itself — is guessable and is
 already an accepted risk for `inference.agileguy.ca` (`reference_inference_tunnel`); reusing it here
 extends that acceptance to a second endpoint rather than making a fresh decision, and should be
 chosen rather than defaulted into.

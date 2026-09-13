@@ -62,6 +62,7 @@ import {
   DEVELOPMENT_WORKSPACE,
   OPERATIONS_TOP_FRACTION,
   OPERATIONS_WORKSPACE,
+  REVIEW_REVIEWER_WIDTH_FRACTION,
   REVIEW_TOP_FRACTION,
   REVIEW_WORKSPACE,
   TRIAGE_OBSERVER_WIDTH_FRACTION,
@@ -155,21 +156,28 @@ export const DEVELOPMENT_SPEC: WorkspaceSpec = {
 };
 
 /**
- * The multi-model review console: a collator top-left, three reviewers around
- * it, each reviewer on a different vendor's model.
+ * The multi-model review console: ONE collator across the top, three reviewers
+ * in a row beneath it, each reviewer on a different vendor's model.
  *
  * The THIRD value in this file rather than a third builder, which is the point
  * {@link WorkspaceSpec} was written to make: adding a console is a value here,
  * so the BUILD-FIRST-CLOSE-SECOND order in `ensureWorkspace` — a measured
  * lesson that cost a destroyed console once — is stated in exactly one place
  * and cannot be got backwards a third time.
+ *
+ * **IT WAS A 2x2 WITH THE COLLATOR TOP-LEFT UNTIL 2026-09-13, and both
+ * fractions below were `null` because of it.** The operator asked for this
+ * console to match `triage`, and the entire cost of that here was two values —
+ * no branch, no fifth builder, no new argument. That is the bet
+ * {@link WorkspaceSpec} was written to win, collected a second time.
  */
 export const REVIEW_SPEC: WorkspaceSpec = {
   name: REVIEW_WORKSPACE,
   panes: reviewPanes,
   topFraction: REVIEW_TOP_FRACTION,
-  // A 2x2, as `development` is, and asked for as "four equally sized panes".
-  bottomWidthFraction: null,
+  // A row of THREE reviewers, which halving gives as 50/25/25 rather than
+  // thirds. See {@link REVIEW_REVIEWER_WIDTH_FRACTION}.
+  bottomWidthFraction: REVIEW_REVIEWER_WIDTH_FRACTION,
 };
 
 /**
@@ -185,8 +193,12 @@ export const REVIEW_SPEC: WorkspaceSpec = {
  * that cost a destroyed console once — is stated in exactly one place and cannot
  * be got backwards a fourth time.
  *
- * **BOTH FRACTIONS ARE NUMBERS HERE, AND THIS IS THE ONLY SPEC WHERE EITHER
- * SECOND ONE IS.** That is what the shape bought and what it costs: a console of
+ * **BOTH FRACTIONS ARE NUMBERS HERE.** This was the ONLY spec carrying a second
+ * one until 2026-09-13, when `review` was asked to take the same shape and
+ * became the other — so the sentence that used to sit here ("the only spec
+ * where either second one is") lasted exactly one day, which is worth recording
+ * as a caution about uniqueness claims rather than quietly deleting. That is
+ * what the shape bought and what it costs: a console of
  * one full-width row over a row of three is the first layout in this repository
  * that `new-split` cannot produce correctly on its own. Halving gives 50/50
  * vertically and 50/25/25 horizontally, and neither is what this console means —

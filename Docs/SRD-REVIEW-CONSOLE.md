@@ -185,12 +185,18 @@ What is there: `REVIEW_WORKSPACE`/`REVIEW_TOP_FRACTION`/`reviewPanes` and a `REV
 (`operations-plan.ts:766`, `:822`, `:831`; `operations.ts:122-125`), an extracted
 `agentSquarePanes(opts, workers, label)` shared with `development`, `scripts/review`,
 `test/unit/review-plan.test.ts`, `roles/collator.md`, three aspect files under `roles/review/`, and a
-`collator` role plus four workers in `fleet.yaml` — **which is untracked, so `git status` does not show
-it changing.**
+`collator` role plus four workers in `fleet.yaml` — **which was untracked when this was written, so
+`git status` did not show it changing. SUPERSEDED 2026-09-12: `fleet.yaml` is TRACKED, and an edit to
+it is now an ordinary diff.**
 
 **It converges on every decision §0.2 and §4.3 argue for, independently.** `REVIEW_TOP_FRACTION` is
 `null` (§6.1's equal panes by omission); the square-pane plan is extracted rather than copied (D3's
-second half); the collator was `tools: [read, write, grep, find, ls]` with the no-`bash` argument
+second half) — **both SUPERSEDED 2026-09-13, when the operator asked this console to match `triage`:
+the fraction is now `1/3`, a second `REVIEW_REVIEWER_WIDTH_FRACTION` of `1/3` was added, and the
+square-pane plan is no longer this console's at all. It shares `collatorOverRowPanes` with `triage`
+— one collator across the top, three reviewers in a row beneath — and `agentSquarePanes` is left with
+`development` as its only caller. §6.1's "equal panes by omission" was a stated requirement, and it
+was withdrawn rather than refuted**; the collator was `tools: [read, write, grep, find, ls]` with the no-`bash` argument
 spelled out in the config itself — **SUPERSEDED 2026-09-10 by
 SRD-WORKER-DISPATCH-EXTENSION task 7.2**, which withdrew the `write` and replaced it with
 `submit_report` and `dispatch_request`; the no-`bash` half of the argument is the half that

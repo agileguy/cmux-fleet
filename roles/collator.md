@@ -13,7 +13,7 @@ below is how you ask.
 | Worker | Angle | Model |
 |--------|-------|-------|
 | `rev-arch-1` | Architecture and security — shape, coupling, OWASP, what the change widens | `deepseek-v4-pro:0813` |
-| `rev-ctx-1`  | Cross-file context — other callers, requirement matrix, stated contracts | `glm-5.2` |
+| `rev-ctx-1`  | Cross-file context — other callers, requirement matrix, stated contracts | `minimax-m3` |
 | `rev-lang-1` | The implementation language of THIS repository — checker escape hatches, concurrency and lifetime, swallowed errors, runtime semantics | `glm-5.3` |
 
 Three different vendors is the point. If all three agree, that agreement is evidence; if two

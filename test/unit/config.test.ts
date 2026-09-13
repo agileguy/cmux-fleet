@@ -277,10 +277,16 @@ describe("worked example", () => {
    * concatenated (`src/config/load.ts`), so the chain drops the role file the
    * moment a future edit removes the role rather than widens it.
    *
-   * The `review` console's real workers exist only in the untracked
-   * `fleet.yaml` (SRD §13, 1.5's note) — `fleet.example.yaml` never declares
-   * `rev-arch-1`/`rev-ctx-1`/`rev-lang-1` — so this resolves a fixture shaped
-   * like that console instead of the shipped example.
+   * The `review` console's real workers exist only in `fleet.yaml` — and the
+   * word this sentence used to carry, "untracked", is now wrong: that file has
+   * been TRACKED since 2026-09-12 by operator decision, so it is on every clean
+   * checkout and in CI along with everything else. What has NOT changed is the
+   * half that actually forces the fixture: `fleet.example.yaml` still never
+   * declares `rev-arch-1`/`rev-ctx-1`/`rev-lang-1` (SRD §13, 1.5's note), and
+   * the example is the config this whole file grades. So this resolves a fixture
+   * shaped like that console rather than reaching for the live file — the
+   * fixture is what keeps the assertion about the RESOLUTION CHAIN rather than
+   * about which seats the operator's fleet happens to hold this week.
    */
   test("ISC-526: roles/reviewer.md still reaches three workers", async () => {
     const roleFile = join(REPO_ROOT, "roles", "reviewer.md");
@@ -397,11 +403,24 @@ describe("worked example", () => {
  * a list this file NAMES — and the seats' presence is checked before their
  * properties are. A filter that never narrows anything survives every mutation.
  *
- * Everything runs against the TRACKED `fleet.example.yaml`. The operator's live
- * `fleet.yaml` is gitignored and CI has no copy, so it cannot be read here; the
- * two files agree at the resolved level and disagree at the role level, and
- * which of those this block can see is the reason the override test below is
- * written the way it is.
+ * Everything runs against `fleet.example.yaml`. The reason given here used to be
+ * that the operator's live `fleet.yaml` "is gitignored and CI has no copy, so it
+ * cannot be read here" — THAT REASON IS DEAD as of 2026-09-12, when `fleet.yaml`
+ * became tracked by operator decision, and it is named rather than quietly
+ * deleted because a reader who takes it at face value will conclude this block
+ * cannot do something it now plainly can.
+ *
+ * The choice survives on a different argument, which was always the better one:
+ * `fleet.example.yaml` is the annotated reference copy — the artifact this
+ * repository SHIPS and the one a new operator copies — so a suite that grades it
+ * is asserting something about the product, where a suite grading the live file
+ * would be asserting something about one machine's current fleet. The two files
+ * still agree at the resolved level and disagree at the role level (the live one
+ * reaches its weights through `gabe/`, the example through the bare oMLX ids),
+ * and which of those this block can see is still the reason the override test
+ * below is written the way it is. What changed is that the disagreement is now a
+ * reviewable DIFF between two tracked files rather than an invisible drift —
+ * which is precisely what tracking `fleet.yaml` was for.
  */
 describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
   /**
@@ -486,12 +505,23 @@ describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.
    *
    * §6.11 says the three observers take the `observer` role's model unchanged,
    * with a worker-level override "only if arm 1 or 2 is taken" — and arm 3 was
-   * taken. That sentence is written against the operator's untracked
-   * `fleet.yaml`, where `observer` IS the 20b, so inheriting there delivers arm
-   * 3 exactly. In THIS file the same role carries a different local model, so
-   * inheriting here would deliver something else, and the override is what
-   * makes the tracked example show the decision rather than a model that merely
-   * shares its posture.
+   * taken. That sentence is written against the operator's live `fleet.yaml`,
+   * where `observer` and `triage` name the SAME local model, so inheriting there
+   * delivers arm 3 exactly. In THIS file the same role carried a different local
+   * model, so inheriting here would have delivered something else, and the
+   * override was what made the tracked example show the decision rather than a
+   * model that merely shares its posture.
+   *
+   * TWO THINGS THIS PARAGRAPH USED TO SAY ARE WRONG, named here rather than
+   * overwritten. It called `fleet.yaml` "untracked": that file has been TRACKED
+   * since 2026-09-12, so both configs are on every checkout and in CI, and the
+   * role-level difference between them is a reviewable diff rather than drift
+   * only the operator's machine could see. And it identified the live `observer`
+   * model as "the 20b", which stopped being true on 2026-09-09 when every oMLX
+   * seat moved to Gemma-4-26B — the same move `TRIAGE_MODEL`'s own note at the
+   * head of this file records. Neither correction touches the argument: the
+   * example is still the file this test reads, for the reason the block header
+   * gives, and the override is still gone for the reason stated below.
    *
    * IF THIS FAILS BECAUSE THE EXAMPLE'S `observer` ROLE BECAME THE 20b, the fix
    * is to DELETE the three overrides, not to loosen the test: the two files
@@ -2596,18 +2626,29 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
  * ## What this can reach, and what it provably cannot
  *
  * §13's probe reads *"`resolveWorker` for `triage`, `collator`, `reviewer`"*,
- * and exactly ONE of those three is reachable that way from a tracked file:
+ * and exactly ONE of those three is reachable that way from THE CONFIG THIS
+ * BLOCK READS. That qualifier used to say "from a tracked file", which was a
+ * true sentence while `fleet.yaml` was ignored and is a false one now: the live
+ * file has been tracked since 2026-09-12 and declares seats for all three. The
+ * scoping that actually holds is narrower, and was always the real one — every
+ * assertion below goes through `example()`, which loads `fleet.example.yaml`,
+ * because the example is the shipped reference this suite grades:
  *
  * - **`triage`** has a role and a seat (`tri-1`), so it resolves. It is also
  *   the one still holding `write`, because task 7.3 has not landed.
- * - **`reviewer`** has a role and **no seat** — the `review` console's four
- *   workers are declared only in the operator's gitignored `fleet.yaml`. The
- *   ROLE arm below is its whole coverage, and the worker arm structurally
- *   cannot provide any.
- * - **`collator`** is in neither. Task 7.2 says so in as many words and is
- *   marked as producing no tracked diff for precisely this reason. Nothing here
- *   can assert a thing about it; the last test is what makes its ARRIVAL a
- *   failure rather than a silence.
+ * - **`reviewer`** has a role and **no seat IN THE EXAMPLE** — the `review`
+ *   console's four workers are declared only in `fleet.yaml`, which is tracked
+ *   as of 2026-09-12 but is still not the file this block loads. The ROLE arm
+ *   below is its whole coverage here, and the worker arm structurally cannot
+ *   provide any without pointing the block at a different config.
+ * - **`collator`** is in neither the example's roles nor its workers, so
+ *   nothing here can assert a thing about it; the last test is what makes its
+ *   ARRIVAL a failure rather than a silence. Task 7.2 is marked as producing
+ *   "no tracked diff" for this reason, and THAT half has expired: `fleet.yaml`
+ *   declares both the `collator` role and `col-1`, and since 2026-09-12 an edit
+ *   there is a reviewable diff like any other. The coverage gap described here
+ *   is unchanged, because it was never about trackability — it is about the
+ *   example being the file this block reads.
  *
  * A block written against the worker arm alone would therefore be one third of
  * itself while reading as the whole criterion — which is the ISC-572 shape, and

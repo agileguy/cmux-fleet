@@ -67,8 +67,10 @@ Both seats run a **local** `gemma-4-26b-a4b-it-bf16`. The model has moved twice 
 `gpt-oss-20b-MXFP4-Q8` under the 2026-09-03 decision, then a hosted trial on
 `obs-t1` that was taken and withdrawn on the same day — but D1 has not moved: it
 is about whether an observer's context may leave the machine, not about speed.
-`fleet.yaml` is gitignored, so **read the model out of it rather than out of
-here.**
+**Read the model out of `fleet.yaml` rather than out of here.** The reason is no
+longer that the file is unreadable from a commit — it has been tracked since
+2026-09-12 — but the older one that outlives the ignore: this is prose, and that
+file is what the console actually loads.
 
 **On a fresh create the actor is deliberately not started**, the same as review:
 the `up`s have not finished when the script returns, so there is no run to point
@@ -205,6 +207,9 @@ actor holds …/triage-relay.lock"*. The lock file names its pid; a lock held by
 DEAD pid is taken over automatically, so the remedy after a crash is to run the
 script again rather than delete a file.
 
-**`fleet.yaml` is gitignored.** Changing the triage seats' `pane_mode` or model
-is a local edit that no commit will carry to another machine — say so rather than
-reporting it as a change that landed.
+**`fleet.yaml` IS TRACKED, as of 2026-09-12** — this paragraph said the exact
+opposite until then, and the instruction it gave is now wrong. Changing the
+triage seats' `pane_mode` or model is an ordinary working-tree edit: it appears
+in `git status`, and it reaches another machine once it is committed and pushed.
+Report it as uncommitted if it is uncommitted. Do not report it, as this file
+used to require, as a change no commit can ever carry.

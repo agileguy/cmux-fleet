@@ -1633,9 +1633,22 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
   });
 
   /**
-   * The anti-drift pin, and it is against the TRACKED config for CI's reason:
-   * `fleet.yaml` is gitignored, so a probe reading it is red on a clean
-   * checkout (`reviewer-role.test.ts:354-359`).
+   * The anti-drift pin, and it is against `fleet.example.yaml` — but NOT for
+   * the reason this docblock used to give. It said `fleet.yaml` "is gitignored,
+   * so a probe reading it is red on a clean checkout", and cited
+   * `reviewer-role.test.ts:354-359` for it. Both halves are wrong now. The live
+   * file has been tracked since 2026-09-12, so a probe reading it would be red
+   * nowhere; and the citation has rotted — lines 354-359 of that file are a
+   * docblock about the reviewer's report ROUTE, while the CI argument being
+   * pointed at sits near its line 631 and is itself written against the old
+   * ignore.
+   *
+   * What the pin rests on instead: `fleet.example.yaml` is the annotated
+   * reference this repository ships, so grading the roster against it measures
+   * the artifact rather than whichever seats the operator's fleet holds today.
+   * Both files declare all four triage seats, so the choice costs no coverage
+   * here — which is exactly why it should be made on the shipped-artifact
+   * argument and not on an availability one that no longer exists.
    *
    * Without this the roster is a second, private spelling of the console's
    * membership. Rename a seat in `fleet.example.yaml` and not here and the

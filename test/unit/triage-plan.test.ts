@@ -1,45 +1,66 @@
 /**
- * The `triage` console's plan — a reconciler and an observer, and NOT ONE
+ * The `triage` console's plan — ONE collator over THREE observers, and NOT ONE
  * keyboard between them.
+ *
+ * **THIS HEADER DESCRIBED A TWO-SEAT CONSOLE UNTIL 2026-09-13 and is corrected
+ * here rather than quietly replaced**, because how it rotted is the more useful
+ * half. It said "a reconciler and an observer", "the two seats are `tri-1`,
+ * `obs-t1`", "all three square consoles share `agentSquarePanes`" and
+ * "`TRIAGE_TOP_FRACTION` is `null`". Every one of those was true when written.
+ * The console then grew to four seats, left the square, and took a fraction —
+ * and the describe blocks below were all updated while this header was not,
+ * because nothing a header says is executable. A file's prose is the part with
+ * no test.
  *
  * ## What this file is for that `review-plan.test.ts` is not
  *
- * All three square consoles share their pane builder outright
- * (`agentSquarePanes`), so the 2x2 split table is decided once, there. What is
- * THIS console's alone is everything the shared builder cannot see, and on this
- * console that list is different from `review`'s in one way that matters:
+ * The two consoles share their pane builder outright — `collatorOverRowPanes`,
+ * since `review` took this shape on 2026-09-13 — so the one-over-N split table
+ * is decided once, there. What is THIS console's alone is everything the shared
+ * builder cannot see:
  *
- *  - **The two seats are `tri-1`, `obs-t1`.** Asserted by
- *    NAME and in ORDER, never as a count. "Two panes" passes on the wrong two,
- *    and the wrong two here is not hypothetical — the three square consoles are
- *    one function call apart and differ only in the constant they name.
+ *  - **The four seats are `tri-1`, `obs-t1`, `obs-t2`, `obs-t3`.** Asserted by
+ *    NAME and in ORDER, never as a count. "Four panes" passes on the wrong four,
+ *    and the wrong four here is not hypothetical — the consoles are one function
+ *    call apart and differ only in the constant they name.
  *  - **The plan defaults to NO KEYBOARD.** `development` and `review` are four
- *    attended panes and therefore four runs; this console is one run of two
- *    `rpc` seats, because `tui` allocates no epoch and a console that dispatches
+ *    attended panes and therefore four runs; this console is one run of `rpc`
+ *    seats, because `tui` allocates no epoch and a console that dispatches
  *    288 times a day cannot afford a sweep that runs twice
  *    (SRD-TRIAGE-CONSOLE §2.3). `tuiWorkers` is a CALLER's argument, so the plan
  *    cannot enforce that — what it owns, and what is pinned below, is the
- *    default with none named.
+ *    default with none named. This is the one item on this list that still
+ *    separates it from `review`, which is four keyboards.
  *  - **A fourth distinct workspace name.** Adoption is an exact title match, so
  *    four consoles that shared a name would each adopt the others.
- *  - **`TRIAGE_TOP_FRACTION` is `null`** for an argument that is not
- *    `REVIEW_TOP_FRACTION`'s. See that constant's docblock: a fraction moves the
- *    border between the two ROWS, and `tri-1` shares its row with `obs-t1`.
+ *  - **`TRIAGE_TOP_FRACTION` is `1/3`**, and so is
+ *    `TRIAGE_OBSERVER_WIDTH_FRACTION`. Both were `null` while the collator
+ *    shared its row; a fraction moves the border between two ROWS, and there was
+ *    no second row to move. There is now, and `review` carries the same pair for
+ *    the same reason.
  *
- * ## The anti-vacuity pin, and why it is a cross-console comparison
+ * ## The anti-vacuity pin, and why a cross-console comparison is not enough
  *
- * `triagePanes` is three lines delegating to `agentSquarePanes`, and the value
- * of that — SRD-TRIAGE-CONSOLE D5's bet that a fourth console is a DATA addition
- * — is entirely in the delegation. A hand-rolled copy of the split table here
- * would be INDISTINGUISHABLE from the delegation on the day it was written and
- * would pass every literal assertion in this file.
+ * `triagePanes` is one line delegating to `collatorOverRowPanes`, and the value
+ * of that — SRD-TRIAGE-CONSOLE D5's bet that a console is a DATA addition — is
+ * entirely in the delegation. A hand-rolled copy of the split table here would
+ * be INDISTINGUISHABLE from the delegation on the day it was written and would
+ * pass every literal assertion in this file.
  *
- * So the shape is asserted against `reviewPanes` AT RUNTIME, on one shared
- * worker set, rather than against a literal. That is the assertion a copy fails:
- * not on the day it is made, but on the day `agentSquarePanes`' table moves and
- * only one of the two consoles follows it. The literal assertions stay too — the
- * cross-console one alone would be satisfied by two consoles that are equally
- * wrong.
+ * So the shape is asserted BOTH ways: as a literal anchor table, and against a
+ * sibling AT RUNTIME on one shared worker set. The runtime comparison is the one
+ * a copy fails — not on the day it is made, but on the day the shared table
+ * moves and only one console follows it.
+ *
+ * **WHICH sibling is the part that had to change, and the lesson is general.**
+ * That comparison pointed at `reviewPanes` and asserted agreement; then, for one
+ * day, disagreement; it now asserts agreement again, because `review` came back
+ * to this shape through a different builder. A "does this match that console"
+ * probe is a claim about a NEIGHBOUR and inverts whenever the neighbour moves,
+ * while telling you nothing about whether this console is still right. So the
+ * LITERAL table is the load-bearing assertion here, and the runtime comparison
+ * that still detects a re-delegation to the square is aimed at `development` —
+ * the one console that has not changed shape.
  *
  * **THAT LIMIT IS MEASURED, not assumed, and it is stated here so nobody reads
  * this block as stronger than it is.** Two mutations, 2026-09-06:
@@ -56,13 +77,22 @@
  * off its predecessor rather than off pane 2, which silently yields a 3+1 column
  * — is red immediately.
  *
- * ## The asymmetric fixture, written before the battery rather than after it
+ * ## The asymmetric fixture, and why it is now the whole guarantee
  *
  * Every probe below that could be satisfied by `reviewPanes` is checked on a
  * fixture where the two consoles DISAGREE — the default worker sets, and the
  * console name inside the refusals. A file whose every fixture made the two
  * plans agree would survive a mutation that swapped one for the other, which is
- * the exact mutation this console's three-line plan invites.
+ * the exact mutation this console's one-line plan invites.
+ *
+ * **This was belt-and-braces when it was written and is LOAD-BEARING now.** The
+ * two consoles share a builder again, so on any shared worker set they produce
+ * byte-identical panes: `triagePanes` replaced outright by `reviewPanes(opts)`
+ * is invisible to every shape assertion in this file. The ONLY things that still
+ * catch it are the default worker sets (`tri-1, obs-t*` versus `col-1, rev-*`,
+ * with no seat in common) and the label inside the refusal. Both are asserted
+ * explicitly below rather than left implicit in the seat names, precisely
+ * because they are now the last line of defence rather than a second one.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -76,6 +106,7 @@ import {
   REVIEW_WORKSPACE,
   TRIAGE_TOP_FRACTION,
   TRIAGE_WORKSPACE,
+  developmentPanes,
   reviewPanes,
   triagePanes,
 } from "../../src/backends/cmux/operations-plan.ts";
@@ -249,15 +280,31 @@ describe("the triage console is a collator across the top, its observers beneath
  * second half, so pane 1 can never be full width, and no shorter or longer
  * worker list changes that. The shape differs, not merely the count.
  *
- * **The guard is still needed, pointed the other way.** The old equality was
- * what stopped a silent copy; with the equality gone, the same vacuity returns
- * unless something pins this console's OWN table. So these assertions now name
- * the collator-over-observers anchors explicitly AND assert the two consoles
- * DISAGREE — which is what catches a future edit that quietly re-delegates
- * `triagePanes` to `agentSquarePanes` and puts `tri-1` back in a quarter of the
- * screen.
+ * **THIS GUARD HAS NOW BEEN POINTED THREE WAYS IN ONE DAY, and the sequence is
+ * the finding.** It asserted the two consoles AGREE, while both delegated to
+ * `agentSquarePanes`. It was inverted to assert they DISAGREE, when
+ * `triagePanes` took its own table on 2026-09-13. It is inverted BACK here,
+ * because `review` was asked to take this console's shape later the same day and
+ * both now delegate to `collatorOverRowPanes`.
+ *
+ * **Every one of the three was true when it was written.** None was a mistake,
+ * and nothing reddened at either inversion until the assertion itself went red.
+ * That is the defect worth naming: an assertion of the form *"this console does
+ * / does not match that one"* is a claim about a NEIGHBOUR. It flips whenever
+ * the neighbour moves, and in neither direction does it tell you whether THIS
+ * console is still right — `tri-1` could stop spanning the width and a
+ * disagreement probe would stay happily green.
+ *
+ * So the load-bearing assertion below is the ANCHOR TABLE, written as a literal:
+ * the collator full width, its observers in one row beneath it. That is what an
+ * operator would notice breaking, and it does not move when `review` changes its
+ * mind. The cross-console comparisons are kept but demoted to what they can
+ * honestly do — one documents that the sharing is real, and one is re-aimed at
+ * `development`, which did NOT change shape and therefore still catches a
+ * re-delegation to the square. Anti-vacuity is carried by the asymmetric-defaults
+ * probe further down, which never depended on the two consoles differing at all.
  */
-describe("the triage plan builds its own shape, NOT the shared square", () => {
+describe("the triage plan anchors a full-width collator over one row of observers", () => {
   /**
    * ONE WORKER SET, BOTH CONSOLES — kept from the version this replaces, and
    * for a reason that survived the inversion: with the defaults removed from the
@@ -266,8 +313,21 @@ describe("the triage plan builds its own shape, NOT the shared square", () => {
    */
   const SHARED = ["w-1", "w-2", "w-3", "w-4"] as const;
 
-  it("does NOT produce the review console's panes, on the very set that used to match", () => {
-    expect(triagePanes({ ...BASE, workers: SHARED })).not.toEqual(
+  it("produces the review console's panes on a shared set, because they share a builder", () => {
+    /*
+     * INVERTED BACK on 2026-09-13, hours after being inverted TO `not.toEqual`.
+     * For one day `triagePanes` carried its own copy of the table and the two
+     * consoles could not be made to match; `review` was then asked to take this
+     * shape, the table moved into `collatorOverRowPanes`, and they are equal
+     * again on any set where the defaults are out of the picture.
+     *
+     * **This assertion can no longer catch a re-delegation to
+     * `agentSquarePanes`, and it does not pretend to** — that job belongs to the
+     * literal table in the next test, and to the `development` comparison
+     * beside it. What this one still buys is that the sharing is REAL rather
+     * than incidental: give either console its own table again and this reddens.
+     */
+    expect(triagePanes({ ...BASE, workers: SHARED })).toEqual(
       reviewPanes({ ...BASE, workers: SHARED }),
     );
   });
@@ -295,11 +355,23 @@ describe("the triage plan builds its own shape, NOT the shared square", () => {
       ["right", 1],
       ["right", 2],
     ]);
-    // …and the square's table, read at RUNTIME, is a different one. If someone
-    // re-delegates this plan to `agentSquarePanes`, the literal above and this
-    // line stop disagreeing and both reds point at the same edit.
+    /*
+     * …and the SQUARE's table, read at runtime, is still a different one.
+     *
+     * RE-AIMED 2026-09-13 from `reviewPanes` to `developmentPanes`. It pointed
+     * at `review` while that console was the square; `review` has since taken
+     * THIS console's shape, so the two now agree and the comparison could no
+     * longer detect anything. `development` did not move, and it is the only
+     * remaining console on `agentSquarePanes` — which makes it the right
+     * neighbour for this probe and, incidentally, the reason that builder still
+     * exists.
+     *
+     * This is what catches a re-delegation of `triagePanes` to the square: the
+     * literal table above and this line stop disagreeing together, and both
+     * reds point at the same edit.
+     */
     expect(shape(triagePanes({ ...BASE, workers: SHARED }))).not.toEqual(
-      shape(reviewPanes({ ...BASE, workers: SHARED })),
+      shape(developmentPanes({ ...BASE, workers: SHARED })),
     );
   });
 
@@ -329,8 +401,10 @@ describe("the triage plan builds its own shape, NOT the shared square", () => {
   });
 
   it("names its own console, not the review console, in a refusal", () => {
-    // The other half of the asymmetry. `agentSquarePanes` takes the label as an
-    // argument, so a swapped constant shows up here and nowhere in the layout.
+    // The other half of the asymmetry, and the shared builder makes it MORE
+    // valuable rather than less: `collatorOverRowPanes` takes the label as an
+    // argument and BOTH consoles now pass through it, so a swapped constant
+    // shows up here and nowhere in the layout — the layouts are identical.
     expect(() => triagePanes({ ...BASE, workers: [] })).toThrow(/^triage:/);
     expect(() => triagePanes({ ...BASE, workers: [] })).not.toThrow(/^review:/);
   });
@@ -341,10 +415,18 @@ describe("the triage plan builds its own shape, NOT the shared square", () => {
  *
  * `review-plan.test.ts` gates its equivalent block on `existsSync(fleet.yaml)`,
  * because none of `col-1`, `rev-arch-1`, `rev-ctx-1` or `rev-lang-1` is declared
- * in the tracked example and `fleet.yaml` is gitignored. **This console has the
- * opposite problem and therefore no gate at all**: both triage seats ARE in
- * `fleet.example.yaml`, so the pane plan can be checked against the config on
- * every clean checkout and in CI, with no skip and no machine dependency.
+ * in `fleet.example.yaml` — those seats exist only in the live `fleet.yaml`.
+ * HALF of that gate's original reason is now gone: `fleet.yaml` was gitignored
+ * when the gate was written and has been TRACKED since 2026-09-12, so the
+ * `existsSync` is satisfied on every clean checkout and in CI, and the block it
+ * guards no longer skips anywhere. The gate is vestigial rather than wrong, and
+ * retiring it belongs to that file, not to this one.
+ *
+ * **This console needs no gate at all, and for a reason that never depended on
+ * the ignore**: all four triage seats ARE in `fleet.example.yaml`, so the pane
+ * plan can be checked against the shipped reference config itself — no skip, no
+ * machine dependency, and nothing that has to be true of the operator's live
+ * fleet for this file to mean what it says.
  *
  * Without this, `DEFAULT_TRIAGE_WORKERS` is a second spelling of the console's
  * membership and the two drift silently: the plan decides which two workers

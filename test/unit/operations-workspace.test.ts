@@ -320,13 +320,20 @@ describe("creating the workspace", () => {
  * ONE `list-panes` where operations issued two — and that count, not a constant
  * read back, was how the fraction was pinned.
  *
- * It is now the console with the MOST correction: `topFraction` is `1/3` and it
- * is the only spec with a `bottomWidthFraction`, because a collator over three
- * observers is the one layout `new-split` cannot produce — halving gives 50/50
- * vertically and 50/25/25 horizontally. So it issues THREE `list-panes`: the
- * focus lookup, the height pass, and the width pass. The probe is the same
- * behavioural one, counting up instead of down — a spec that dropped either
- * fraction reddens here.
+ * It is now a console with the MOST correction: `topFraction` is `1/3` and it
+ * carries a `bottomWidthFraction`, because a collator over three observers is a
+ * layout `new-split` cannot produce — halving gives 50/50 vertically and
+ * 50/25/25 horizontally. So it issues THREE `list-panes`: the focus lookup, the
+ * height pass, and the width pass. The probe is the same behavioural one,
+ * counting up instead of down — a spec that dropped either fraction reddens
+ * here.
+ *
+ * **"THE ONLY SPEC WITH A `bottomWidthFraction`" LASTED ONE DAY.** This docblock
+ * said that until 2026-09-13, when `review` was asked to take the same shape and
+ * became the second. Nothing here reddened, because a uniqueness claim about
+ * OTHER specs is not a property of the console under test — the same expiry
+ * `triagePanes`' own docblock now warns about at greater length. The verb counts
+ * below are unaffected: they are assertions about the calls THIS spec makes.
  */
 describe("the triage console is built from its own spec", () => {
   test("an existing triage workspace is adopted, and nothing is created or respawned", async () => {

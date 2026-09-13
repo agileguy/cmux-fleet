@@ -744,17 +744,27 @@ export function developmentPanes(opts: OperationsPlanOptions): OperationsPane[] 
 }
 
 /**
- * A 2x2 of attended agent panes — the shape BOTH `development` and `review`
- * are, built once.
+ * A 2x2 of attended agent panes — `development`'s shape, and since 2026-09-13
+ * ONLY `development`'s.
  *
- * Extracted when the second such console arrived, and the extraction is not
- * tidiness. The split TABLE below is the part that breaks: a 2x2 cannot be
- * built from "always split the previous pane", pane 4 has to name pane 2 as its
- * anchor, and `operationsPanes` already learned that lesson separately at its
- * git pane. A copied table is a second place to get that backwards, and the two
- * copies would be identical on the day they were written and only diverge
- * afterwards — which is exactly the drift the Dockerfile's `toolchain-full`
- * stage was carrying when it was folded into its siblings.
+ * **IT WAS EXTRACTED BECAUSE `review` SHARED IT, AND `review` HAS SINCE LEFT**
+ * for {@link collatorOverRowPanes}, so this function now has exactly one caller.
+ * That is recorded here rather than left for a reader to discover by grepping
+ * and finding a "shared" builder shared with nobody. It is KEPT rather than
+ * inlined because the argument below is about where a fragile table lives, and
+ * that argument does not depend on the number of callers — but if `development`
+ * ever changes shape too, this should be deleted rather than left standing as a
+ * builder nothing builds with.
+ *
+ * The original extraction argument, which still explains the table's shape:
+ * a 2x2 cannot be built from "always split the previous pane", pane 4 has to
+ * name pane 2 as its anchor, and `operationsPanes` already learned that lesson
+ * separately at its git pane. A copied table is a second place to get that
+ * backwards, and the two copies would be identical on the day they were written
+ * and only diverge afterwards — which is exactly the drift the Dockerfile's
+ * `toolchain-full` stage was carrying when it was folded into its siblings.
+ * {@link collatorOverRowPanes} was extracted on that same reasoning the moment
+ * `review` became the second console of ITS shape.
  *
  * `label` is the console's name and appears ONLY in the refusals, because a
  * refusal that does not say which console refused sends the operator to check
@@ -812,6 +822,92 @@ export function agentSquarePanes(
       workspaceName: opts.workspaceName,
     })}`,
     ...(i === 0 ? { split: null } : shape[i - 1]!),
+  }));
+}
+
+/**
+ * A COLLATOR ACROSS THE TOP with its workers in ONE ROW beneath — the shape
+ * BOTH `triage` and `review` are, built once.
+ *
+ * ```
+ * +-----------------------------------+
+ * |              pane 1               |
+ * +----------+-----------+------------+
+ * |  pane 2  |  pane 3   |   pane 4   |
+ * +----------+-----------+------------+
+ * ```
+ *
+ * **Extracted 2026-09-13, when `review` became the second console of this
+ * shape** — which is the trigger {@link agentSquarePanes} names for extracting
+ * over copying, applied to a different shape. `triage` reached it first and
+ * carried the only implementation for a day; a hand copy into `reviewPanes`
+ * would have been identical on the day it was written and free to diverge
+ * afterwards.
+ *
+ * **This is NOT {@link agentSquarePanes} with a shorter list, and that is the
+ * whole reason it exists.** The square's table is `[right, down·from0,
+ * down·from1]`, which makes pane 2 the top row's second half — so pane 1 can
+ * never span the container. A collator over N workers needs the first split to
+ * go DOWN off pane 1 and every later one to go RIGHT along the row that split
+ * created. The two tables are not a parameterisation of each other; they are
+ * different consoles.
+ *
+ * The anchor discipline is the part that actually breaks under copying, so it
+ * is explicit here: every entry after the first names the pane it divides via
+ * `splitFrom`, rather than relying on creation order meaning "the previous
+ * one". That is the lesson `operationsPanes` learned at its git pane and the
+ * square states at its own table.
+ *
+ * `label` appears ONLY in the refusals, because a refusal that does not say
+ * which console refused sends the operator to check the wrong `--workers` flag.
+ */
+export function collatorOverRowPanes(
+  opts: OperationsPlanOptions,
+  defaultWorkers: readonly string[],
+  label: string,
+): OperationsPane[] {
+  const repoRoot = opts.repoRoot;
+  const workers = opts.workers ?? defaultWorkers;
+  const backend = opts.backend ?? "headless";
+  const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
+
+  if (workers.length === 0) {
+    throw new Error(`${label}: refusing an empty --workers set — name at least one worker`);
+  }
+  if (workers.length > SQUARE_MAX_PANES) {
+    throw new Error(
+      `${label}: refusing ${workers.length} workers — the console holds at most ` +
+        `${SQUARE_MAX_PANES}: one collator and its workers`,
+    );
+  }
+  for (const w of workers) assertPlainValue("worker id", w);
+  assertPlainValue("backend", backend);
+
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
+
+  return workers.map((worker, i) => ({
+    title: worker,
+    worker,
+    command: `${envPreamble()} ${agentPaneCommand({
+      repoRoot,
+      worker,
+      backend,
+      configPath,
+      attach: tuiWorkers.has(worker),
+      workspaceName: opts.workspaceName,
+    })}`,
+    /*
+     * Pane 1 takes the initial surface. Pane 2 splits DOWN off it, creating the
+     * bottom row; panes 3 and 4 split RIGHT off the pane before them, walking
+     * along that row. Anchored by index rather than by "the previous pane" for
+     * the reason the square's table states: creation order is what gets read
+     * backwards.
+     */
+    ...(i === 0
+      ? { split: null }
+      : i === 1
+        ? { split: "down" as const, splitFrom: 0 }
+        : { split: "right" as const, splitFrom: i - 1 }),
   }));
 }
 
@@ -954,18 +1050,25 @@ export const REVIEW_WORKSPACE = "review";
  * The four workers the review console stands up, in PANE ORDER.
  *
  * ```
- * +---------------+---------------+
- * |     col-1     |   rev-arch-1  |
- * +---------------+---------------+
- * |   rev-ctx-1   |   rev-lang-1  |
- * +---------------+---------------+
+ * +-------------------------------------------+
+ * |                   col-1                   |
+ * +---------------+-------------+-------------+
+ * |   rev-arch-1  |  rev-ctx-1  |  rev-lang-1 |
+ * +---------------+-------------+-------------+
  * ```
+ *
+ * **THIS WAS A 2x2 UNTIL 2026-09-13**, and the diagram above replaced one. The
+ * console was changed to match `triage` on the operator's request — one
+ * collator across the top, its three workers in a row beneath — and the two
+ * now share {@link collatorOverRowPanes} rather than each carrying a table.
  *
  * THE COLLATOR IS PANE 1, and that placement is the contract rather than a
  * preference: pane 1 consumes the workspace's initial surface and is where the
  * operator lands. This console is driven by talking to the collator — it writes
  * the three briefs and reads the three reports back — so the seat the keyboard
- * arrives in is the one seat a person actually types into.
+ * arrives in is the one seat a person actually types into. The new shape
+ * STRENGTHENS that: the collator is no longer one quarter in a corner, it is
+ * the row the eye starts on.
  *
  * THE THREE REVIEWERS RUN THREE DIFFERENT VENDORS, which is the whole product
  * of the console and not a detail of it. `rev-arch-1` is on `deepseek-v4-pro`,
@@ -992,29 +1095,75 @@ export const DEFAULT_REVIEW_WORKERS: readonly string[] = [
 ];
 
 /**
- * The review console's panes are EQUAL, and `null` says so.
+ * The collator's row gets one third of the container's height.
  *
- * Same reasoning as {@link DEVELOPMENT_TOP_FRACTION}, and the stated
- * requirement here is stronger: this console was asked for as "four equally
- * sized panes in a square". `new-split` halves, so two columns each split once
- * are already four quarters, and `null` skips the resize rather than asking for
- * a fraction of `1/2` and relying on the sub-pixel guard to make it a no-op.
+ * **THIS WAS `null`, AND THE DOCBLOCK ARGUING FOR IT IS REPLACED RATHER THAN
+ * PATCHED, because what changed is the REQUIREMENT and not the arithmetic.**
+ * The old text rested on a stated ask — *"four equally sized panes in a
+ * square"* — and reasoned correctly from it: `new-split` halves, two columns
+ * each split once are already four quarters, so `null` skipped a resize that
+ * would have been a no-op. Every step of that held. The operator asked for a
+ * different console on 2026-09-13, so the premise is withdrawn, not refuted.
  *
- * There is also nothing to favour. The collator has three reports to show and
- * each reviewer has one; that is not a difference in HEIGHT, it is a difference
- * in how often you scroll.
+ * That is the distinction worth keeping: a value can stop being right because
+ * somebody changed their mind about the goal, and a docblock that reads as if
+ * the old argument were WRONG teaches the next reader to distrust reasoning
+ * that was sound. It was not wrong. It is superseded.
+ *
+ * **The number is defensible only while {@link reviewPanes} builds one
+ * full-width row over another** — the same standing condition
+ * {@link TRIAGE_TOP_FRACTION} states about itself, and for the same reason. If
+ * the collator ever shares its row again, this goes back to `null`.
+ *
+ * ## Why a third, when the old text said there was nothing to favour
+ *
+ * The old docblock's observation survives and now cuts the other way. It noted
+ * the collator has three reports to show and each reviewer has one, and
+ * concluded that is "not a difference in HEIGHT, it is a difference in how
+ * often you scroll." True of four equal quarters. Once the collator owns a full
+ * row on its own, the comparison is no longer collator-versus-reviewer, it is
+ * ONE settled document against THREE reviews being written at once — and three
+ * panes of live work want the room. Same asymmetry {@link TRIAGE_TOP_FRACTION}
+ * names between its collator and its observers.
  */
-export const REVIEW_TOP_FRACTION: number | null = null;
+export const REVIEW_TOP_FRACTION: number | null = 1 / 3;
 
 /**
- * The review console's panes, in creation order.
+ * How much of the container's WIDTH each pane in the reviewer row gets.
  *
- * The same 2x2 as {@link developmentPanes} and built by the same function —
- * see {@link agentSquarePanes} for why the split table is shared rather than
- * copied. Only the default worker set and the name in a refusal differ.
+ * One fraction applied per pane rather than a per-pane table, for the reason
+ * {@link TRIAGE_OBSERVER_WIDTH_FRACTION} states at length: the requirement is
+ * EQUALITY rather than a chosen distribution, and a table of three numbers that
+ * must keep summing to one is a thing the first edit adding a fourth reviewer
+ * would leave summing to more.
+ *
+ * The three reviewers run three different vendors and are read side by side —
+ * the whole product of this console is the DISAGREEMENT between them — so a row
+ * where one lens is wider than another invites reading it as the important one.
+ */
+export const REVIEW_REVIEWER_WIDTH_FRACTION: number | null = 1 / 3;
+
+/**
+ * The review console's panes, in creation order: the collator across the top,
+ * its three reviewers in a row beneath.
+ *
+ * **Stopped being a 2x2 on 2026-09-13** and stopped sharing
+ * {@link agentSquarePanes} with it, on the operator's request that this console
+ * match `triage` visually. It now shares {@link collatorOverRowPanes} with
+ * `triage` instead — which was extracted in the same change, because this is
+ * the second console of that shape and copying `triagePanes`' table would have
+ * been the drift the square's own docblock warns about.
+ *
+ * **One consequence worth stating rather than leaving to be discovered:
+ * {@link agentSquarePanes} now has exactly ONE caller,
+ * {@link developmentPanes}.** It was extracted precisely because a second
+ * console shared its shape, and that justification is now gone. It is kept
+ * because `development` genuinely is a 2x2 and the anchor lesson in its table
+ * is worth keeping in one place — but a reader wondering why a "shared" builder
+ * is shared with nobody deserves the answer here.
  */
 export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
-  return agentSquarePanes(opts, DEFAULT_REVIEW_WORKERS, "review");
+  return collatorOverRowPanes(opts, DEFAULT_REVIEW_WORKERS, "review");
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,8 +1278,9 @@ export const TRIAGE_WORKSPACE = "triage";
  * re-litigate it.** In `fleet.example.yaml` neither seat carries a worker-level
  * override (`{id: tri-1,` at `:911`, `{id: obs-t1,` at `:939`), so both resolve to
  * `pane_mode: rpc` from their roles and the plan this file builds is genuinely
- * the unattended one described above. The operator's gitignored `fleet.yaml`
- * overrides both to `tui`, and the TRACKED `triage/console.yaml` says so in its
+ * the unattended one described above. The operator's `fleet.yaml` — TRACKED
+ * since 2026-09-12, so this divergence is now a diff rather than a report of one
+ * — overrides both to `tui`, and `triage/console.yaml` says so in its
  * own words and pays the stated price — `recycle_after_sweeps: 0`, because
  * §6.6's recycle is a headless `up` that takes a `tui` seat down and cannot
  * bring it back. **Do not reconcile this docblock against the live file.** What
@@ -1280,73 +1430,45 @@ export const TRIAGE_OBSERVER_WIDTH_FRACTION: number | null = 1 / 3;
  * `[right, down·from0, down·from1]`, which makes pane 2 the top row's second
  * half — so pane 1 can never be full width. A collator over N observers needs
  * the first split to go DOWN off pane 1 and every later one to go RIGHT along
- * the row that split created. Delegating would have produced a 2x2 with `tri-1`
- * in a quarter of the screen and `obs-t3` under `obs-t1`, which is a different
- * console from the one the operator asked for.
+ * the row that split created. Delegating to the square would have produced a
+ * 2x2 with `tri-1` in a quarter of the screen and `obs-t3` under `obs-t1`,
+ * which is a different console from the one the operator asked for.
  *
- * **The docblock this replaces argued the opposite and was right at the time**,
- * so the reversal is recorded rather than quietly dropped. It said a hand copy
- * "would have had to be edited when this console went from four seats to two"
- * and that the delegation "absorbed it… and this function did not change at
- * all". That held while triage was a subset of the square — one row of it, then
- * all four cells of it. It stops holding the moment the SHAPE differs rather
- * than the COUNT, and a shared table read with a shorter list cannot produce a
- * full-width row at any length.
+ * **AND ON THE SAME DAY IT STARTED SHARING AGAIN — {@link collatorOverRowPanes},
+ * with `review`.** That is not a reversal of the paragraph above; it is the
+ * distinction that paragraph was drawing, arriving in code. What triage could
+ * never share was the SQUARE. What it always could share is a builder for its
+ * own shape, and the moment `review` was asked to take that shape there were two
+ * consoles needing one table. So the table moved out of this function rather
+ * than being copied into that one.
  *
- * What is NOT copied is the part that actually breaks. The anchor discipline —
- * that a split names the pane it divides rather than "the previous one" — is the
- * lesson `operationsPanes` learned at its git pane and `agentSquarePanes` states
- * at its own table; this table obeys it explicitly (`splitFrom` on every entry
- * after the first) instead of relying on creation order.
+ * **THREE CLAIMS ABOUT SHARING HAVE NOW BEEN TRUE HERE IN TWENTY-FOUR HOURS**,
+ * and the sequence is worth more than any one of them. It read "shares the
+ * square, and a hand copy would have had to be edited when this console went
+ * from four seats to two" — true while triage was a SUBSET of the square. Then
+ * "shares nothing; the shape differs rather than the count" — true for one day,
+ * while it was the only console of its shape. Now "shares `collatorOverRowPanes`
+ * with `review`". Every one of the three was correct when written and none of
+ * them was wrong later; what changed underneath each was the set of consoles in
+ * this file. **A docblock about what a function SHARES is a claim about its
+ * siblings, not about itself, so it expires when a sibling moves and nothing in
+ * this function will redden.** Check the caller list before believing this
+ * paragraph: `grep -n 'collatorOverRowPanes' src/`.
+ *
+ * The anchor discipline — that a split names the pane it divides rather than
+ * "the previous one" — moved out with the table and is stated at
+ * {@link collatorOverRowPanes}. It is the lesson `operationsPanes` learned at
+ * its git pane, and it is the part that actually breaks under copying, which is
+ * why it now lives in exactly one place for both consoles.
  *
  * `triage-plan.test.ts` pinned the SHARING structurally, comparing this plan's
- * split table against `reviewPanes`' at runtime on a shared four-worker set.
- * That premise is now false by design, and the test is re-pinned to this table's
- * own shape — the collator full width, the observers in one row beneath it —
- * which is the property an operator would notice breaking.
+ * split table against `reviewPanes`' at runtime. That pin was inverted on
+ * 2026-09-13 to assert the two do NOT match, and is now inverted BACK, because
+ * they match again through a different builder. It has therefore flipped twice
+ * in a day — which is the strongest argument available that the property worth
+ * pinning is **this console's own shape**, the collator full width over one row
+ * of observers, rather than its agreement with a neighbour that is free to move.
  */
 export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
-  const repoRoot = opts.repoRoot;
-  const workers = opts.workers ?? DEFAULT_TRIAGE_WORKERS;
-  const backend = opts.backend ?? "headless";
-  const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
-
-  if (workers.length === 0) {
-    throw new Error("triage: refusing an empty --workers set — name at least one worker");
-  }
-  if (workers.length > SQUARE_MAX_PANES) {
-    throw new Error(
-      `triage: refusing ${workers.length} workers — the console holds at most ` +
-        `${SQUARE_MAX_PANES}: one collator and its observers`,
-    );
-  }
-  for (const w of workers) assertPlainValue("worker id", w);
-  assertPlainValue("backend", backend);
-
-  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
-
-  return workers.map((worker, i) => ({
-    title: worker,
-    worker,
-    command: `${envPreamble()} ${agentPaneCommand({
-      repoRoot,
-      worker,
-      backend,
-      configPath,
-      attach: tuiWorkers.has(worker),
-      workspaceName: opts.workspaceName,
-    })}`,
-    /*
-     * Pane 1 takes the initial surface. Pane 2 splits DOWN off it, creating the
-     * observer row; panes 3 and 4 split RIGHT off the pane before them, walking
-     * along that row. Anchored by index rather than by "the previous pane" for
-     * the reason the square's table states: creation order is what gets read
-     * backwards.
-     */
-    ...(i === 0
-      ? { split: null }
-      : i === 1
-        ? { split: "down" as const, splitFrom: 0 }
-        : { split: "right" as const, splitFrom: i - 1 }),
-  }));
+  return collatorOverRowPanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
 }

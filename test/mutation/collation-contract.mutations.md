@@ -53,8 +53,12 @@ were rewritten under it.
 
 **It has two blind spots, and both have already hidden a dead case here.** It
 reads `HEAD`, so an UNTRACKED target returns null and is SKIPPED rather than
-reported — `fleet.yaml` is gitignored, which leaves R18, R19 and RV17 checked by
-nothing but this battery. And until `0ac906e` the guard could not see a case whose
+reported. **`fleet.yaml` used to be the example of that and stopped being one on
+2026-09-12**, when it was tracked: R18, R19 and RV17 anchor into it, were checked
+by nothing but this battery, and are now compared against committed source like
+every other anchor (measured the same day — 11 pass, 0 fail, with those three
+newly under the guard). The blind spot itself is unchanged for any target that
+genuinely has no committed form. And until `0ac906e` the guard could not see a case whose
 docblock sat between `file:` and `find:`, which is how RV15's anchor stayed dead
 through task 7.1 while reporting green-as-expected on every run: it matched
 nothing, so the replacer rewrote nothing, and an unmutated suite passed.
@@ -71,17 +75,25 @@ path:
 | Wire tags and file names | **By construction**, against the schema constants | — |
 | Tone, judgement, review advice | **Not checked**, deliberately — see U8/U9 | Everything |
 
-**Both configs are in the mutable set, and which one is which matters.**
-`fleet.example.yaml` is TRACKED and is what CI grades against, so the two
-capability mutations on the tracked side (RV15, RV16) target it and
-`reviewer-role.test.ts` grades them through `grantedTools`. `fleet.yaml` is
-gitignored and copied into the worktree, and it carries THREE cases, not one:
-RV17, R18 and R19 — the seat configuration this console actually runs from, which
-the example declares none of. A mutation in the gitignored file proves nothing
-about a clean checkout, so those three are graded by a suite that says so:
-`review-plan.test.ts`'s `describe.skipIf(!HAVE_CONFIG)` block, which SKIPS on a
-machine without the file. The battery copies the operator's `fleet.yaml` in, so
-the block runs here and nowhere else.
+**Both configs are in the mutable set, and which one is which matters — though
+less than it used to.** `fleet.example.yaml` is the SHIPPED REFERENCE and is what
+CI grades the project by, so the two capability mutations on that side (RV15,
+RV16) target it and `reviewer-role.test.ts` grades them through `grantedTools`.
+`fleet.yaml` is the live definition and carries THREE cases, not one: RV17, R18
+and R19 — the seat configuration this console actually runs from, which the
+example declares none of.
+
+**BOTH FILES ARE TRACKED as of 2026-09-12, and three claims in this paragraph
+died with the ignore.** It said `fleet.yaml` was gitignored and had to be copied
+into the worktree; a worktree now carries it. It said "a mutation in the
+gitignored file proves nothing about a clean checkout"; a clean checkout has one,
+so it proves exactly as much as a mutation in the example. And it said those
+three cases are graded only by `review-plan.test.ts`'s
+`describe.skipIf(!HAVE_CONFIG)` block "which SKIPS on a machine without the
+file" — that gate has been retired by inversion, so the block runs everywhere and
+asserts the file's presence instead. The distinction that survives is audience,
+not availability: the example is what the project publishes, the live file is
+what this machine runs.
 
 **The two halves of the grant are pinned independently**, because a probe that
 merely noticed "the tools list changed" would be satisfied by either and RV15
@@ -214,7 +226,7 @@ language fixed in config is wrong for every target but one.
 | R16 | The seat stops having to say which language it settled on | A determination nobody states is one nobody can find wrong. |
 | R17 | The angle collapses with no defect classes | A reviewer told to "consider the language" is worthless next to one told what to look for; the four classes are the floor on specificity. |
 | R18 | The config points back at the TypeScript aspect file | The other half. A fix to the document alone leaves the console loading the old angle. |
-| R19 | `toolchain: node` returns to the seat | It pins a language-specific image onto the one seat whose job is not to assume the language — and the seat has no `bash`, so it could never invoke a toolchain anyway. **`fleet.yaml` is gitignored, so this is an UNTRACKED target: the anchors guard skips it by design and this battery is the only thing that checks it.** |
+| R19 | `toolchain: node` returns to the seat | It pins a language-specific image onto the one seat whose job is not to assume the language — and the seat has no `bash`, so it could never invoke a toolchain anyway. **`fleet.yaml` WAS gitignored, making this an untracked target the anchors guard skipped by design — so this battery was the only thing checking it. SUPERSEDED 2026-09-12: the file is tracked, `atHead` returns a committed body, and `mutation-anchors.test.ts` now compares this anchor like any other (11 pass / 0 fail with R18, R19 and RV17 newly under it).** |
 | R20 | The sibling aspect files still call seat three a TypeScript seat | Each reviewer reads only its own aspect file, so a stale cross-reference in the other two is invisible to everything else. |
 
 #### `file` is a path, not a sentence

@@ -6,7 +6,7 @@ The four standing cmux workspaces.
 |---------|--------|-------|
 | operations | `./scripts/operations` | `obs-1` agent, `pifleet monitor`, `tick-1` agent |
 | development | `./scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` — four equal agent panes |
-| review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — four equal agent panes, **plus a host process** |
+| review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — **four** agent panes: the collator full width on top, its three reviewers along the bottom, **plus a host process** (a 2x2 until 2026-09-13, when it was changed to match `triage`) |
 | triage | `./scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3` — **four** agent panes: the collator full width on top, its three observers along the bottom, **plus a host process** |
 
 The development console's fourth seat is `tst-2` on `role: tester`; `rev-1` is
@@ -42,7 +42,8 @@ moved on, in whichever direction the code went.
 **"No keyboard" came off that row with them, because it depends on which config
 you mean.** All four triage seats inherit `pane_mode: rpc` from their roles in the
 tracked `fleet.example.yaml`, and `scripts/triage` reads the mode from the config
-rather than hard-coding it. But the operator's gitignored `fleet.yaml` overrides
+rather than hard-coding it. But the operator's `fleet.yaml` — tracked since
+2026-09-12, not gitignored as this line used to say — overrides
 BOTH seats to `pane_mode: tui` with themes, on a 2026-09-07 decision recorded in
 the file — *"the operator watches these panes, and a console nobody can see is a
 console nobody trusts"* — and tracked `triage/console.yaml` corroborates it in

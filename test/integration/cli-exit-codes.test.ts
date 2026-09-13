@@ -23,10 +23,29 @@ import { spawnCli } from "../support/spawn-cli.ts";
  * Every other file gets `spawnCli`'s hermetic default cwd, so an ambient
  * `fleet.yaml` cannot reach it (ISC-296). This file cannot: it names
  * `fleet.example.yaml` by RELATIVE path on the argv, so the CLI has to run
- * where that file is. That is safe here precisely because the path is
- * explicit — every case passes `-c`, so config DISCOVERY never runs and the
- * gitignored `fleet.yaml` beside it is never consulted. The cwd is stated
- * rather than inherited, which is the difference that matters.
+ * where that file is.
+ *
+ * THIS DOCBLOCK USED TO JUSTIFY THAT WITH A SENTENCE THAT WAS WRONG WHEN IT WAS
+ * WRITTEN AND IS LOAD-BEARING NOW, so it is corrected here rather than softened.
+ * It said "every case passes `-c`, so config DISCOVERY never runs and the
+ * gitignored `fleet.yaml` beside it is never consulted". Two errors:
+ *
+ *  1. **Not every case passes `-c`.** "an unknown command exits nonzero without
+ *     a stack trace" runs `["no-such-command"]` with no config flag at all. It
+ *     is nonetheless safe, for a reason the old sentence never gave: the
+ *     program is built with `.exitOverride()` (`src/cli/index.ts`), and
+ *     commander rejects an unrecognised subcommand during PARSE — before any
+ *     command's action body runs, and config resolution lives in the action
+ *     bodies. Nothing is discovered because nothing gets that far.
+ *  2. **`fleet.yaml` is no longer gitignored.** It has been tracked since
+ *     2026-09-12, so the repo root holds one on EVERY checkout, CI included,
+ *     rather than only on the operator's machine. The old phrasing implied the
+ *     hazard was laptop-shaped; it is uniform now, which makes the explicit
+ *     `-c` on the ten cases that DO reach config resolution matter more than it
+ *     did, not less.
+ *
+ * The cwd is stated rather than inherited, which is still the difference that
+ * matters.
  */
 const REPO_ROOT = new URL("../../", import.meta.url).pathname;
 

@@ -60,9 +60,15 @@ const XFILE = `${W}/roles/review/cross-file-contracts.md`;
  */
 const LANGFILE = `${W}/roles/review/implementation-language.md`;
 /**
- * The TRACKED config, which is the one CI grades against and therefore the one a
- * capability probe must be mutated in. `fleet.yaml` is gitignored, so a mutation
- * there proves nothing about a clean checkout.
+ * The SHIPPED REFERENCE config, which is the one CI grades against and therefore
+ * the one a capability probe must be mutated in.
+ *
+ * The reason used to be that `fleet.yaml` was gitignored, "so a mutation there
+ * proves nothing about a clean checkout". That is void as of 2026-09-12 — the
+ * live file is tracked and a clean checkout has one. The surviving reason is
+ * about AUDIENCE rather than presence: this file is what the project publishes
+ * and what a reader copies, so a capability mutation here measures the artifact
+ * rather than one machine's configuration.
  */
 const EXAMPLE = `${W}/fleet.example.yaml`;
 /** The operator's own, copied in and restored like the rest. */
@@ -78,12 +84,16 @@ const TESTFILES = [
    * back onto `rev-lang-1`. Without it that mutation would be applied and
    * reported green for want of anything looking.
    *
-   * It is GATED on `fleet.yaml` existing (`describe.skipIf`), and the battery
-   * copies the operator's own into the worktree, so the guarded block runs here.
-   * On a machine with no `fleet.yaml` those assertions skip and the mutations
-   * that depend on them would report green — which is the same gap the anchors
-   * guard records for untracked targets, and is why `FLEET` mutations are
-   * declared as such rather than trusted.
+   * It WAS gated on `fleet.yaml` existing (`describe.skipIf`), and the battery
+   * copied the operator's own into the worktree so the guarded block would run.
+   * **Both halves of that are obsolete as of 2026-09-12/13**: the file is
+   * tracked, so a worktree carries it without copying and the gate has been
+   * retired by inversion — the block now runs unconditionally and asserts the
+   * file's presence rather than skipping on its absence.
+   *
+   * The hazard the old note described was real while it lasted: assertions that
+   * skip silently let the mutations depending on them report green. It is simply
+   * no longer reachable for THIS file.
    */
   "test/unit/review-plan.test.ts",
 ];
@@ -986,10 +996,17 @@ const MUTATIONS: M[] = [
   /**
    * THE CONFIG HALF, and it is mutated in `fleet.yaml` rather than
    * `fleet.example.yaml` because the example declares none of this console's
-   * seats — `review-plan.test.ts` says so in its own header. That makes this an
-   * UNTRACKED target: the anchors guard skips it by design, and the battery is
-   * the only thing that checks it. Recorded here so the gap is named rather than
-   * discovered.
+   * seats — `review-plan.test.ts` says so in its own header.
+   *
+   * **THE GAP THIS COMMENT NAMED IS CLOSED, and it closed without anybody
+   * touching this file.** It said `fleet.yaml` was an UNTRACKED target, that the
+   * anchors guard skipped it by design, and that this battery was the only
+   * thing checking it. All three stopped being true on 2026-09-12, when the
+   * operator decided to track `fleet.yaml`: `atHead` now returns its committed
+   * body, so `mutation-anchors.test.ts` compares this anchor like any other.
+   * Verified 2026-09-12 — the guard runs 11 pass / 0 fail with R18, R19 and
+   * RV17 newly under it. The battery still grades the MUTATION; it is no longer
+   * the only thing grading the ANCHOR.
    */
   {
     id: "R18",
@@ -1187,14 +1204,19 @@ const MUTATIONS: M[] = [
    * **The two halves are graded by DIFFERENT suites, and that is the point of
    * keeping both.** RV16 mutates the TRACKED `fleet.example.yaml`, which
    * `reviewer-role.test.ts` parses with `grantedTools` and CI therefore grades.
-   * RV17 mutates the operator's gitignored `fleet.yaml`, which only
-   * `review-plan.test.ts`'s `describe.skipIf(!HAVE_CONFIG)` block reads — it
-   * resolves the three `rev-*` seats through `resolveWorker`, and none of them
-   * declares its own `tools:`, so the role's grant is what they inherit. That
-   * block SKIPS on a machine without the file, which is why RV17 was invisible
-   * rather than merely dead: `atHead` returns null for an untracked target and
-   * the anchors guard skips it instead of reporting it. The battery copies the
-   * operator's `fleet.yaml` into the worktree, so it runs here.
+   * RV17 mutates the operator's `fleet.yaml`, which `review-plan.test.ts`
+   * reads — it resolves the three `rev-*` seats through `resolveWorker`, and
+   * none of them declares its own `tools:`, so the role's grant is what they
+   * inherit.
+   *
+   * **THE INVISIBILITY THIS PARAGRAPH DESCRIBED IS GONE, 2026-09-12.** It read:
+   * that block skips on a machine without the file, "which is why RV17 was
+   * invisible rather than merely dead: `atHead` returns null for an untracked
+   * target and the anchors guard skips it instead of reporting it." Tracking
+   * `fleet.yaml` closed both halves at once — the gate has been retired, and
+   * `atHead` now returns a committed body, so `mutation-anchors.test.ts` checks
+   * this anchor like any other. Verified 2026-09-12: 11 pass / 0 fail with R18,
+   * R19 and RV17 under the guard for the first time.
    */
   {
     id: "RV16",

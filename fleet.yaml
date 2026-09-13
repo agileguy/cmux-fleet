@@ -324,6 +324,30 @@ llm:
         # it was invented. A cross-file lens that cannot carry a line number
         # between two files is not doing this seat's job.
         - glm-5.2
+        # ADDED 2026-09-13 by owner decision, taking `rev-ctx-1` from `glm-5.2`.
+        #
+        # IT RESTORES THE THIRD VENDOR. `rev-ctx-1` ran `glm-5.2` beside
+        # `rev-lang-1` on `glm-5.3` — the seat comment below calls that out:
+        # "two of the three lenses are now one vendor a minor apart, and the
+        # three-vendor argument for this console is weaker until a third is
+        # found". MiniMax is the third, so DeepSeek / MiniMax / Zhipu are three
+        # independent lineages and agreement between two lenses is evidence
+        # again.
+        #
+        # THE WHOLE CATALOGUE WAS MEASURED to pick it (2026-09-13, /api/show).
+        # Seven models serve 1,048,576 — `deepseek-v4-pro:0813`,
+        # `deepseek-v4-flash:0731`, `deepseek-v4.1-flash`, `glm-5.3`,
+        # `glm-5.3-flash`, `glm-5.2`, `kimi-k3` — and six of them are DeepSeek or
+        # Zhipu, the two vendors already here. The seventh is `kimi-k3`, refused
+        # as a reviewer model by the standing decision at `rev-lang-1` below.
+        # **1M, tool support and a third vendor cannot all be had at once.**
+        # `minimax-m3` at 512,000 is the widest third-vendor option there is.
+        #
+        # THE COST lands on the widest reader: 512,000 against 1,048,576, so this
+        # seat keeps just under half its window. That is 3.3x the 152,447 tokens
+        # at which `rev-arch-1` auto-compacted and died losing a finished review,
+        # so it is a trade rather than a repeat of that failure.
+        - minimax-m3
       # Each model's REAL context window, measured against THIS provider on
       # 2026-09-04. Without them Pi registers every model with its own default of
       # 128,000, so `deepseek-v4-pro:0813` and `kimi-k3` ran at 12% of what this
@@ -346,6 +370,12 @@ llm:
         # 2026-09-08, GET /api/show: glm5.2.context_length 1048576 — the same
         # window `glm-5.3` serves, and 4x what `gemma4:31b` had in this slot.
         glm-5.2: 1048576
+        # 2026-09-13, GET /api/show: minimax.context_length 512000, capabilities
+        # [completion, tools, thinking, vision]. Measured with the exact command
+        # this block documents above, not assumed. It is the provider's maximum
+        # and the narrowest window in this table — the allowlist entry above
+        # carries why that trade was taken.
+        minimax-m3: 512000
       # Ollama's ENTIRE catalogue is tag-style — `gpt-oss:120b`, `qwen3.5:397b`
       # — so `:thinking` suffix stripping must be off here or a tag that happens
       # to be spelled like a thinking level is silently eaten and produces a
@@ -802,8 +832,11 @@ roles:
     # the EXTENSION's file access, not the model's grant), and why closing the
     # old route buys something rather than being tidying (a hand-written
     # envelope meets no schema until the harvester parses it minutes later).
-    # This file is gitignored, so the example is the copy that survives; keep
-    # them agreeing.
+    # BOTH files are tracked — this one since 2026-09-12 — so neither is "the
+    # copy that survives", which is what this comment claimed while the ignore
+    # was still in place. Keep them agreeing on the standing reason instead:
+    # the example is the annotated reference a reader learns the shape from,
+    # and this file is what the console actually loads.
     #
     # WHAT THIS COST WHEN IT WAS ONLY A CONFIG CHANGE, measured on the first
     # cycle under the narrowed grant (2026-09-08, T-rv-152). `roles/reviewer.md`
@@ -1207,11 +1240,17 @@ workers:
   #
   # Third model in this seat in one evening. `qwen3.5:397b` lost it to a settle
   # race 1.8s wide, `gemma4:31b` to fabricated citations; both are one-cycle
-  # judgements and so is this. Note what it costs: `rev-lang-1` runs `glm-5.3`,
-  # so two of the three lenses are now one vendor a minor apart, and the
-  # three-vendor argument for this console is weaker until a third is found.
+  # judgements and so was `glm-5.2`.
+  #
+  # THE WEAKNESS THAT PARAGRAPH NAMED IS NOW FIXED, 2026-09-13. It read: "Note
+  # what it costs: `rev-lang-1` runs `glm-5.3`, so two of the three lenses are
+  # now one vendor a minor apart, and the three-vendor argument for this console
+  # is weaker until a third is found." `minimax-m3` is that third — DeepSeek,
+  # MiniMax, Zhipu. What it costs instead is WINDOW: 512,000 against `glm-5.2`'s
+  # 1,048,576, on the seat this file calls the widest reader. The allowlist entry
+  # above records why no 1M model could do both.
   - {id: rev-ctx-1,  role: reviewer, pane_mode: tui, theme: everforest-dark,
-     model: ollama-cloud/glm-5.2,
+     model: ollama-cloud/minimax-m3,
      append_system_prompt_file: ./roles/review/cross-file-contracts.md}
   # IMPLEMENTATION-LANGUAGE SPECIALIST on glm-5.3, owner-assigned 2026-09-04.
   # `kimi-k3` held this seat and is REFUSED as a reviewer model by owner

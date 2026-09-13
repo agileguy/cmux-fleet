@@ -109,7 +109,13 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | `obs-t1`, `obs-t2`, `obs-t3` | **observer** | triage | `base` | three seats under the one collator, each handed a share of the environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
-is gitignored. The tracked `fleet.example.yaml` differs in three ways worth
+is **TRACKED** — since 2026-09-12, by operator decision recorded in `.gitignore`
+itself. It was gitignored for most of this project's life, and that is why so
+much of the surrounding documentation still argues from its absence; the ignore
+was dropped because the live config had drifted from the example with no
+diffable record of how, which is exactly the cost an ignore buys. An edit to it
+is now an ordinary working-tree change that shows in `git status` and travels by
+commit. The tracked `fleet.example.yaml` differs in three ways worth
 knowing before it is used to reason about this one: its `tester` role declares no
 `egress_access` and its `egress.allow` names no package registry, so **"egress to
 the registries" is false there**; its development seats run local oMLX models

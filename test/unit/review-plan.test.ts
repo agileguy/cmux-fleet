@@ -3,10 +3,19 @@
  *
  * ## What this file is for that `development-plan.test.ts` is not
  *
- * The two consoles now share their pane builder outright (`agentSquarePanes`),
- * so the 2x2 split table is checked once, there, and re-asserting it here would
- * be a second copy of an assertion rather than a second assertion. What is THIS
- * console's alone is everything the shared builder cannot see:
+ * This console shares its pane builder outright — `collatorOverRowPanes`, with
+ * `triage` as of 2026-09-13 — so the one-collator-over-N split table is checked
+ * once, there, and re-asserting it here would be a second copy of an assertion
+ * rather than a second assertion.
+ *
+ * **That sentence used to name `agentSquarePanes` and "the 2x2", and the
+ * SUBSTANCE of it survived the console changing shape**, which is why it is
+ * re-pointed rather than rewritten: the argument was never about squares, it
+ * was about not re-asserting a shared table in the file of one of its sharers.
+ * The neighbour changed from `development` to `triage` and the reasoning did
+ * not move at all.
+ *
+ * What is THIS console's alone is everything the shared builder cannot see:
  *
  *  - **The collator is pane 1.** Pane 1 consumes the workspace's initial
  *    surface and is where the operator lands. This console is driven by talking
@@ -31,6 +40,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import {
   DEFAULT_REVIEW_WORKERS,
+  REVIEW_REVIEWER_WIDTH_FRACTION,
   REVIEW_TOP_FRACTION,
   REVIEW_WORKSPACE,
   DEVELOPMENT_WORKSPACE,
@@ -40,17 +50,25 @@ import {
 import { loadConfig, resolveWorker } from "../../src/config/load.ts";
 
 /**
- * The operator's own `fleet.yaml` — READ ONLY WHERE IT EXISTS, and the whole
- * of this block is about the fact that it usually does not.
+ * The operator's own `fleet.yaml` — which, since 2026-09-12, is TRACKED and
+ * present in every checkout. This block used to be about the fact that it
+ * usually was not.
  *
- * ## What was wrong, and why the audit could not see it
+ * ## What was wrong in August, and why the audit could not see it
  *
- * This was a TOP-LEVEL `await loadConfig(...)`. `fleet.yaml` is gitignored
- * (`.gitignore:9`; `git ls-files --error-unmatch fleet.yaml` errors), so on any
- * clean checkout the await threw at IMPORT time and the file reported `0 pass,
- * 1 fail, 1 error` — taking all thirteen tests down, including the eight that
- * need no config at all. A machine dependency should cost the assertions that
- * depend on the machine, never the whole file.
+ * Stated in the PAST TENSE deliberately: it is a record of a real defect, and
+ * the mechanism is still worth knowing even though this particular file can no
+ * longer trigger it. This was a TOP-LEVEL `await loadConfig(...)`, and
+ * `fleet.yaml` was gitignored at the time, so on any clean checkout the await
+ * threw at IMPORT time and the file reported `0 pass, 1 fail, 1 error` — taking
+ * all thirteen tests down, including the eight that needed no config at all. A
+ * machine dependency should cost the assertions that depend on the machine,
+ * never the whole file.
+ *
+ * The `.gitignore:9` citation this paragraph used to carry has been removed
+ * rather than repointed: there is no such entry any more, and line 9 of that
+ * file is now `coverage/`. A citation that survives the thing it cites is worse
+ * than no citation, because it sends the next reader somewhere plausible.
  *
  * **This is the fourth machine dependency in `test/unit`, and it is the mirror
  * of the twenty-two `6f35f0d` removed.** That sweep enumerated three
@@ -91,7 +109,7 @@ import { loadConfig, resolveWorker } from "../../src/config/load.ts";
  * at the same time.
  */
 const CONFIG_PATH = new URL("../../fleet.yaml", import.meta.url).pathname;
-/** `roles/collator.md` is TRACKED, unlike `fleet.yaml` — resolved the same way regardless. */
+/** `roles/collator.md` is TRACKED — as, since 2026-09-12, is `fleet.yaml`. */
 const COLLATOR_DOC = new URL("../../roles/collator.md", import.meta.url).pathname;
 const HAVE_CONFIG = existsSync(CONFIG_PATH);
 
@@ -110,7 +128,7 @@ function fourAttended() {
   return reviewPanes({ ...BASE, tuiWorkers: DEFAULT_REVIEW_WORKERS });
 }
 
-describe("the review console is a 2x2 with the collator in the landing seat", () => {
+describe("the review console is a collator across the top, its reviewers beneath", () => {
   it("is a distinct workspace from both other consoles", () => {
     expect(REVIEW_WORKSPACE).toBe("review");
     expect(REVIEW_WORKSPACE).not.toBe(DEVELOPMENT_WORKSPACE);
@@ -146,8 +164,39 @@ describe("the review console is a 2x2 with the collator in the landing seat", ()
     ]);
   });
 
-  it("leaves the halves alone — four equally sized panes is the requirement", () => {
-    expect(REVIEW_TOP_FRACTION).toBeNull();
+  it("puts the collator in a full-width row, not a corner of a square", () => {
+    /*
+     * THE SHAPE, asserted on the plan rather than on the builder. Pane 2 must
+     * split DOWN off pane 1 — that is what makes pane 1 span the container —
+     * and panes 3 and 4 must walk RIGHT along the row pane 2 created. A square
+     * would send pane 2 `right`, and every other assertion in this block (four
+     * panes, right titles, collator first, all attended) would still pass.
+     */
+    const panes = fourAttended();
+    expect(panes.map((p) => p.split)).toEqual([null, "down", "right", "right"]);
+    expect(panes.map((p) => p.splitFrom)).toEqual([undefined, 0, 1, 2]);
+  });
+
+  it("gives the collator a third of the height and each reviewer a third of the width", () => {
+    /*
+     * BOTH were `null` until 2026-09-13, under a stated requirement of "four
+     * equally sized panes in a square". The operator asked for this console to
+     * match `triage`, so the requirement was withdrawn and these two values
+     * followed it.
+     *
+     * Asserted as NUMBERS rather than as "not null", because the quantity is
+     * the decision. `new-split` already halves, so a `1/2` here would be a
+     * no-op wearing the costume of a choice — and the reason it is a third is
+     * that one settled document does not need the room three reviews being
+     * written at once do.
+     *
+     * The width fraction is the one that cannot be reached by halving at any
+     * depth: a `right` split chain gives 50/25/25, which renders `rev-arch-1`
+     * at twice its siblings and reads as a lead reviewer and two helpers. This
+     * console's whole product is that the three are independent and equal.
+     */
+    expect(REVIEW_TOP_FRACTION).toBeCloseTo(1 / 3, 10);
+    expect(REVIEW_REVIEWER_WIDTH_FRACTION).toBeCloseTo(1 / 3, 10);
   });
 
   it("gives every pane a keyboard", () => {
@@ -176,8 +225,26 @@ describe("the review console is a 2x2 with the collator in the landing seat", ()
  * looking at a console and noticing nothing was wrong — which is the failure
  * mode the whole console exists to defend against, applied to itself.
  */
-describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors", () => {
+describe("the three reviewers run three different vendors", () => {
   beforeAll(async () => {
+    /*
+     * THE GATE THAT USED TO BE HERE IS AN ASSERTION NOW, 2026-09-12.
+     *
+     * `describe.skipIf(!HAVE_CONFIG)` was correct while `fleet.yaml` was
+     * gitignored: the file was absent in CI, and skipping by name was better
+     * than failing a whole suite over a machine difference. The file is tracked
+     * now, so the condition is always true and the gate skipped nowhere while
+     * still reading as conditional — which is the silent-vacuity shape this
+     * repository counts skips elsewhere to avoid.
+     *
+     * Retired by INVERSION rather than deletion. The same fact is checked; a
+     * checkout missing a tracked file is a broken checkout, and it now says so
+     * instead of quietly measuring nothing.
+     */
+    expect(
+      HAVE_CONFIG,
+      `${CONFIG_PATH} is missing — fleet.yaml is tracked, so this is a broken checkout`,
+    ).toBe(true);
     LOADED = await loadConfig(CONFIG_PATH);
   });
   /*
@@ -321,11 +388,22 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
      * `bash`, which is the one thing this block exists to refuse.
      *
      * **THIS BLOCK READS THE OPERATOR'S LIVE `fleet.yaml`, so it is also the
-     * tripwire for 7.1's other half.** Task 7.1 touches two files and only one of
-     * them is tracked; `fleet.yaml` is gitignored and is edited by hand. Until
-     * that edit is made this assertion is RED on the operator's machine and
-     * SKIPPED in CI, which is the correct way round: the machine that runs the
-     * console is the machine that must notice the console has not been narrowed.
+     * tripwire for 7.1's other half.** Task 7.1 touches two files, and the note
+     * here used to say only one of them was tracked — that `fleet.yaml` was
+     * gitignored and edited by hand, so until the edit was made this assertion
+     * was "RED on the operator's machine and SKIPPED in CI, which is the correct
+     * way round".
+     *
+     * **BOTH HALVES OF THAT ARE NOW FALSE, 2026-09-12/13**, and they are worth
+     * naming rather than trimming because together they made a claim about WHERE
+     * COVERAGE LIVES. `fleet.yaml` is tracked, so it is not hand-edited in the
+     * sense that mattered and it is present in CI; and the gate this block sat
+     * behind has been retired, so nothing skips anywhere. The narrowing it was
+     * waiting on has landed, so it is red on no machine.
+     *
+     * What survives is the tripwire itself: this is still the assertion that
+     * notices the live console drifting from the narrowed grant — it just does
+     * so everywhere now instead of on one laptop.
      */
     const col = resolveWorker(loaded(), "col-1");
     expect(col.tools, "the collator still holds the tool submit_report replaced").not.toContain(

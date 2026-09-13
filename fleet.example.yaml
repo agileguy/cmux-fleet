@@ -61,8 +61,15 @@ run:
   # written for a repository you thought about would cover every one you did
   # not. An echoed URL cannot transfer, and a wrong echo refuses and prints both.
   #
-  # It lives in the gitignored `fleet.yaml`, never here — a consent committed to
-  # a shared example is a consent nobody chose.
+  # It lives in `fleet.yaml`, never here. The reason printed here used to be
+  # that `fleet.yaml` was kept out of git; since 2026-09-12 it is TRACKED, so
+  # that reason is gone and the real one has to carry the weight on its own. It
+  # does: this file is the shared annotated reference, copied by people who do
+  # not run this fleet, and a consent committed HERE is a consent nobody
+  # chose — it would arrive pre-echoed in every copy, naming a repository the
+  # copier never looked at. `fleet.yaml` is one machine's live definition,
+  # where the echo is an act by the operator who owns that machine. Whether
+  # the file is committed was never the point; who chose the consent is.
   # hosted_repo_consent: <the exact remote you mean to send>
   # RAISED to 4 for the triage console (SRD-TRIAGE-CONSOLE Q3/task 0.4). It
   # bounds each RUN, not the host, and until the triage console existed every
@@ -222,7 +229,10 @@ cloud:
   # An OBVIOUS EXAMPLE VALUE, on the same rule `egress.allow` states below:
   # a copy of this file that is never edited must fail closed rather than
   # bill or scope against someone else's project. Your real project id
-  # belongs in `fleet.yaml`, which is gitignored.
+  # belongs in `fleet.yaml` — not because that file is kept out of git (it has
+  # been TRACKED since 2026-09-12), but because it is one machine's live
+  # definition, while this is the reference copy everyone else starts from and
+  # every value in it has to fail closed for a copier who never edits it.
   #
   # It must also belong to the ADC identity the fleet inherits — the two move
   # together, and a quota project from a different account is refused at the
@@ -373,10 +383,26 @@ egress:
     # reserved for documentation and resolves nowhere, so a copy of this file
     # that is never edited fails closed instead of reaching a real host.
     #
-    # Your real hostname belongs in `fleet.yaml`, which is gitignored. It does
-    # not belong here: this file is committed to a public repository, and an
-    # internal hostname is an infrastructure disclosure that no amount of
-    # later editing takes back.
+    # Your real hostname belongs in `fleet.yaml` rather than here, but READ WHY,
+    # because the reason this comment gave until 2026-09-12 was wrong and is
+    # corrected rather than quietly trimmed. It said `fleet.yaml` was an ignored
+    # file, which implied the hostname stayed out of git altogether. It does not.
+    # `fleet.yaml` is TRACKED now, by the operator decision recorded in
+    # `.gitignore`, so a hostname written there is committed to this repository
+    # exactly as this line is. The ignore is not buying secrecy any more and
+    # nothing here should be read as if it were.
+    #
+    # What still separates the two files is scope and audience, and that alone
+    # decides where the value goes. This file is the shared annotated reference,
+    # read and copied by people who do not run this fleet, so every value in it
+    # must be one that fails closed for a copier who never edits it, and an
+    # internal hostname sitting here is an infrastructure disclosure to an
+    # audience that no amount of later editing takes back. `fleet.yaml` is one
+    # machine's live definition, read by the people already running it. A
+    # hostname that is merely internal belongs in the live definition for that
+    # reason. A hostname that is genuinely secret belongs in NEITHER — since
+    # 2026-09-12 there is no ignored file left to hide it in, and that is a
+    # repository-visibility problem to solve somewhere other than a comment.
     #
     # A placeholder like `<TICKET_HOST>` is NOT an option — `egressRuleHost`
     # validates every rule at load time with the same predicate the matcher
@@ -774,11 +800,13 @@ roles:
     # seats that are `pane_mode: tui` and pays the stated price for it —
     # `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
     # which takes a tui seat down and cannot bring it back. The operator's
-    # gitignored `fleet.yaml` overrides both seats to `tui` and agrees with
-    # `console.yaml`, not with this line. `operations-plan.ts:1006-1017` records
-    # the same split and says in as many words not to reconcile the plan against
-    # the live file. Which console this repository means to ship is a config
-    # decision for whoever owns these files; a comment cannot make it.
+    # `fleet.yaml` — TRACKED since 2026-09-12, so the split is three files wide
+    # and diffable now rather than two files and one report of a third —
+    # overrides both seats to `tui` and agrees with `console.yaml`, not with
+    # this line. `operations-plan.ts:1006-1017` records the same split and says
+    # in as many words not to reconcile the plan against the live file. Which
+    # console this repository means to ship is a config decision for whoever
+    # owns these files; a comment cannot make it.
     pane_mode: rpc
     append_system_prompt_file: ./roles/triage.md
 
@@ -856,19 +884,23 @@ workers:
   #
   # So this console goes from three bash seats to four. NOT an egress change
   # here: neither `reviewer` nor `tester` declares `egress_access` in this
-  # file. In the operator's own untracked `fleet.yaml` the `tester` role DOES
-  # carry `egress_access: true`, so the same swap there widens egress as well,
-  # from one routed seat to two — a difference between the two configs worth
-  # knowing before this example is used to reason about that one.
+  # file. In the operator's own `fleet.yaml` — TRACKED since 2026-09-12, so
+  # this difference is diffable now rather than asserted from memory — the
+  # `tester` role DOES carry `egress_access: true`, so the same swap there
+  # widens egress as well, from one routed seat to two — a difference between
+  # the two configs worth knowing before this example is used to reason about
+  # that one.
   #
   # It is a deliberate trade: review moved to a separate `review` console,
   # which this example does not declare — its four seats (col-1, rev-arch-1,
-  # rev-ctx-1, rev-lang-1) exist only in the untracked `fleet.yaml`, and its
-  # three lenses are `shared-ro` and read the INTEGRATED tree. This console
-  # gains a second seat that can run a suite. The cost is that nothing here
-  # reviews in-loop any more — a defect eng-1 writes is not read by a
-  # reviewer until the end of the phase, after the host has merged it. Stated
-  # because it is a real gap, not because it is fixed.
+  # rev-ctx-1, rev-lang-1) exist only in `fleet.yaml`, which has been TRACKED
+  # since 2026-09-12 — so those seats can be read there rather than taken on
+  # trust from this comment — and its three lenses are `shared-ro` and read
+  # the INTEGRATED tree. This console gains a second seat that can run a
+  # suite. The cost is that nothing here reviews in-loop any more — a defect
+  # eng-1 writes is not read by a reviewer until the end of the phase, after
+  # the host has merged it. Stated because it is a real gap, not because it
+  # is fixed.
   - {id: tst-2,  role: tester,   pane_mode: tui, theme: nord}
   # One, not two. A second concurrent writer against the same ticket system is
   # a way to interleave two workers' edits on one object, and nothing in the

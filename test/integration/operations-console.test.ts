@@ -168,12 +168,21 @@ describe("the development console's four panes", () => {
  *
  * ## THE REVIEW CONSOLE NEEDS A ROSTER OVERRIDE, and the reason is a fixture fact
  *
- * `fleet.example.yaml` — the TRACKED config, used here because the operator's
- * `fleet.yaml` is gitignored (`test/unit/review-plan.test.ts` records what a
- * test that reads an untracked config costs in CI) — declares `sre-1, sre-2,
- * obs-1, obs-2, ver-1, eng-1, eng-2, tst-1, tst-2, tick-1`. It declares NONE
- * of the review console's own workers: no `col-1`, no `rev-arch-1`,
- * `rev-ctx-1` or `rev-lang-1`.
+ * `fleet.example.yaml` — the shipped reference config, which is what these
+ * scripts are pointed at here — declares `sre-1, sre-2, obs-1, obs-2, ver-1,
+ * eng-1, eng-2, tst-1, tst-2, tick-1`. It declares NONE of the review console's
+ * own workers: no `col-1`, no `rev-arch-1`, `rev-ctx-1` or `rev-lang-1`.
+ *
+ * The parenthetical that used to sit inside that sentence said the example was
+ * used "because the operator's `fleet.yaml` is gitignored", pointing at
+ * `test/unit/review-plan.test.ts` for what reading an untracked config costs in
+ * CI. That is no longer the reason and cannot be: `fleet.yaml` has been tracked
+ * since 2026-09-12 and is on every checkout, CI included. The reason that
+ * survives is the one this block actually needs — the example is the config the
+ * console scripts ship against, and the fixture fact below is a fact ABOUT THE
+ * EXAMPLE. Reading the live file instead would make this test pass or fail on
+ * whether the operator currently seats a review console, which is the opposite
+ * of what a plumbing test wants.
  *
  * With its default roster, then, `scripts/review` correctly degrades — "could
  * not read pane_mode from the config … the panes will tail their logs" — every
