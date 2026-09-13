@@ -1,11 +1,11 @@
 ---
 name: observer-ops
-description: How the observer role writes its result — the observer-ops.json/.md artifact pair, the deploy and inquiry task shapes, and where the fuller procedural content (target resolution, channel reconciliation, the degradation ladder) belongs. Mounted for the observer role.
+description: How the observer-k8s role writes its result — the observer-ops.json/.md artifact pair, the deploy and inquiry task shapes, and where the fuller procedural content (target resolution, channel reconciliation, the degradation ladder) belongs. Mounted for the observer-k8s role.
 ---
 
 # observer-ops
 
-**Scope of this file, stated up front.** This bundle exists so `observer`'s `fleet.yaml` entry
+**Scope of this file, stated up front.** This bundle exists so `observer-k8s`'s `fleet.yaml` entry
 names a real, mounted skill directory rather than a bundle that is not there — the shape
 `fleet.example.yaml`'s own comment on `sre`/`tdd`/`diagnose` warns against, restated here in the
 other direction: the DIRECTORY exists, and inventing the channel-reconciliation content it will
@@ -20,7 +20,7 @@ and the config surface already depend on: the artifact contract. The rest — ta
 Read `mode` before anything else. `mode: deploy` watches a merged change through its pipeline
 into a running system, checked against a baseline taken before the merge. `mode: inquiry`
 answers a bounded question about a system nobody just changed, and is the default when `mode`
-is absent — an envelope written with no `observer`-specific fields at all still runs as an
+is absent — an envelope written with no `observer-k8s`-specific fields at all still runs as an
 inquiry (Docs/SRD-DEPLOY-OPS.md §6.1, §7.1).
 
 ## The artifact pair
@@ -231,7 +231,7 @@ kubectl get pods -n <ns> -l <selector> -o name                      # enumerate 
   Re-run it bounded, once, and if it truncates again say so in the artifact and move
   on rather than fetching a third time.
 
-**Write the pair at fifty calls, whatever you have.** `roles/observer.md` says twenty,
+**Write the pair at fifty calls, whatever you have.** `roles/observer-k8s.md` says twenty,
 and twenty was sized for the unbounded dumps this section forbids - when one `logs`
 call could eat a whole turn's budget, stopping early was the only way to get an
 artifact at all. Bounded reads change the arithmetic: `--tail=200` against one

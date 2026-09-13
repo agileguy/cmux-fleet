@@ -99,14 +99,14 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 
 | Worker | Role | Console | Toolchain | Notes |
 |--------|------|---------|-----------|-------|
-| `obs-1` | observer | operations | `base` | read-only cluster/log questions; has cloud access |
+| `obs-1` | observer-k8s | operations | `base` | read-only cluster/log questions; has cloud access |
 | `tick-1` | ticketing | operations | `base` | Rally via `TICKET_*` secrets; egress to `rally1.rallydev.com` |
 | `eng-1`, `eng-2` | engineer | development | `node` | hosted model, own git checkout, no egress |
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
 | `col-1` | collator | review | `base` | writes the fan-out request; does not review |
 | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | reviewer | review | `base` | three vendors, read-only, `shared-ro` |
 | `tri-1` | triage | triage | `base` | THE collator, and there is exactly one. Its envelope names every declared service and all three observer seats; it DIVIDES the environment between them (§6.5's ⌈N/3⌉ — the partition is the worker's judgement, not the host's arithmetic), then collates all three replies into ONE document. **`gabe/gemma-4-26b-a4b-it`** (LAN, `hosted: false`); `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
-| `obs-t1`, `obs-t2`, `obs-t3` | **observer** | triage | `base` | three seats under the one collator, each handed a share of the environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `obs-t1`, `obs-t2`, `obs-t3` | **observer-k8s** | triage | `base` | three seats under the one collator, each handed a share of the environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
 is **TRACKED** — since 2026-09-12, by operator decision recorded in `.gitignore`

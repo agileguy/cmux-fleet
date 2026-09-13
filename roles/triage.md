@@ -260,7 +260,7 @@ Then tell the observer how to report, because the failure is silent in every dir
   verdict covering a batch is a schema violation rather than a style complaint.
 - **Both files, every time.** A run that writes only the `.md` clamps to `failed`.
 
-`roles/observer.md` and the `observer-ops` skill already carry most of this, and the observer
+`roles/observer-k8s.md` and the `observer-ops` skill already carry most of this, and the observer
 has both. **Say it anyway.** These failures produce no error and change no status — the report
 simply is not there — so it is worth two copies rather than one.
 
