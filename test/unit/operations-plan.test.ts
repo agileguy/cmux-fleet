@@ -30,6 +30,7 @@ import {
   OPERATIONS_TOP_FRACTION,
   OPERATIONS_WORKSPACE,
   monitorPaneCommand,
+  pathPreamble,
   operationsPanes,
   pifleetCommand,
 } from "../../src/backends/cmux/operations-plan.ts";
@@ -480,6 +481,29 @@ describe("the monitor pane — the eleven assertions that survived the merge", (
     expect(source).not.toContain("export function statusWatchCommand");
     expect(source).not.toContain("export function gitWatchCommand");
     expect(source).not.toContain("function redrawOnChange");
+  });
+
+  test("puts the fleet's binaries on PATH before the monitor starts, and sources no ~/.env", () => {
+    /*
+     * MEASURED 2026-09-13: every container up, and the monitor painting
+     * `docker unavailable: Executable not found in $PATH: "docker"` beneath
+     * them. The agent panes had carried `envPreamble`'s PATH since 2026-09-12;
+     * this pane was built without it and ran on launchd's four entries.
+     *
+     * The claim is ORDERING — the export precedes `'monitor'` — for the reason
+     * `development-plan.test.ts` gives for not using `startsWith`.
+     */
+    const cmd = monitorCmd();
+    expect(pathPreamble()).not.toBe("");
+    expect(cmd).toContain(pathPreamble());
+    expect(cmd.indexOf("export PATH=")).toBeLessThan(cmd.indexOf("'monitor'"));
+    expect(cmd).not.toContain("$HOME/.env");
+  });
+
+  test("pathPreamble prepends what it is given and says nothing for an empty list", () => {
+    expect(pathPreamble(["/a", "/b c"])).toBe(`export PATH='/a:/b c':"$PATH"; `);
+    expect(pathPreamble([])).toBe("");
+    expect(pathPreamble([""])).toBe("");
   });
 });
 

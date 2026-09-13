@@ -594,7 +594,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        * governs — how quickly the pane reflects a change — is the same, which
        * is why it keeps the name instead of being retired.
        */
-      command: `${monitorPaneCommand(repoRoot, poll)}; exec $SHELL -i`,
+      command: `${pathPreamble()}${monitorPaneCommand(repoRoot, poll)}; exec $SHELL -i`,
       /*
        * DOWN off the OBSERVER, and SECOND in creation order — which is what
        * makes it span the WHOLE bottom rather than a column of it.
@@ -987,15 +987,38 @@ export function envPreamble(
    * {@link pifleetCommand}'s interpreter argument. An empty list means "say
    * nothing", which keeps a bare `PATH=` out of a pane.
    */
-  pathPrefix: readonly string[] = [
-    dirname(process.execPath),
-    ...(Bun.which("docker") === null ? [] : [dirname(Bun.which("docker") as string)]),
-  ],
+  pathPrefix: readonly string[] = fleetBinDirs(),
 ): string {
+  return `${pathPreamble(pathPrefix)}set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
+}
+
+/**
+ * The directories holding `bun` and `docker`, resolved in the LAUNCHING shell.
+ * {@link envPreamble}'s parameter docblock is the argument for both halves.
+ */
+function fleetBinDirs(): string[] {
+  const docker = Bun.which("docker");
+  return [dirname(process.execPath), ...(docker === null ? [] : [dirname(docker)])];
+}
+
+/**
+ * The `PATH` half of {@link envPreamble} on its own, for a pane that needs the
+ * fleet's binaries and nothing from `~/.env`.
+ *
+ * The monitor pane is that pane. It runs `docker ps` on every container refresh,
+ * and it was the one pane built without a preamble — so it ran on launchd's
+ * four-entry PATH and painted `docker unavailable: Executable not found in
+ * $PATH: "docker"` beneath a fleet whose containers were all up. MEASURED
+ * 2026-09-13. It takes the PATH and not the `~/.env` source because it reads no
+ * credential, and a process that needs a directory list should not be handed
+ * the operator's secrets file to get one.
+ *
+ * Ends in a space so it prefixes a command directly; an empty list says nothing,
+ * which keeps a bare `PATH=` out of a pane.
+ */
+export function pathPreamble(pathPrefix: readonly string[] = fleetBinDirs()): string {
   const dirs = pathPrefix.filter((d) => d !== "");
-  const exportPath =
-    dirs.length === 0 ? "" : `export PATH=${shellQuote([dirs.join(":")])}:"$PATH"; `;
-  return `${exportPath}set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
+  return dirs.length === 0 ? "" : `export PATH=${shellQuote([dirs.join(":")])}:"$PATH"; `;
 }
 
 
