@@ -1,0 +1,1043 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bounding the Boundary</title>
+<style>
+  @page { size: 13.333in 7.5in; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
+    background: #0d1117;
+    color: #e6edf3;
+  }
+  .slide {
+    width: 13.333in;
+    height: 7.5in;
+    padding: 0.62in 0.78in;
+    page-break-after: always;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: #0d1117;
+  }
+  .slide:last-child { page-break-after: auto; }
+
+  .eyebrow {
+    font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: #7d8590; font-weight: 600; margin-bottom: 10px;
+  }
+  h1 { font-size: 52px; line-height: 1.08; letter-spacing: -0.02em; font-weight: 700; }
+  h2 { font-size: 31px; line-height: 1.15; letter-spacing: -0.015em; font-weight: 680; margin-bottom: 4px; }
+  .sub { font-size: 17px; color: #a8b3bf; margin-top: 8px; max-width: 10.4in; }
+  .rule { height: 3px; width: 68px; background: #d29922; margin: 14px 0 20px; }
+  .body { flex: 1; min-height: 0; }
+
+  .num { color: #d29922; font-variant-numeric: tabular-nums; font-weight: 700; }
+  .mono { font-family: "SF Mono", Menlo, Consolas, monospace; }
+  code {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.88em; background: #161b22; color: #a5d6ff;
+    padding: 1px 5px; border-radius: 3px;
+  }
+  em.q { color: #d2a8ff; font-style: italic; }
+
+  .cols { display: flex; gap: 26px; }
+  .col { flex: 1; }
+
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 7px;
+    padding: 15px 17px; margin-bottom: 11px;
+  }
+  .card h3 { font-size: 16px; margin-bottom: 6px; color: #e6edf3; font-weight: 650; }
+  .card p { font-size: 13.5px; color: #a8b3bf; line-height: 1.42; }
+  .card.accent { border-left: 3px solid #d29922; }
+  .card.warn { border-left: 3px solid #f85149; }
+  .card.good { border-left: 3px solid #3fb950; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th {
+    text-align: left; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: #7d8590; font-weight: 600; padding: 0 10px 7px 0; border-bottom: 1px solid #30363d;
+  }
+  td { padding: 7px 10px 7px 0; border-bottom: 1px solid #21262d; vertical-align: top; color: #c9d1d9; }
+  td.k { font-family: "SF Mono", Menlo, Consolas, monospace; color: #a5d6ff; white-space: nowrap; font-size: 12.5px; }
+  td.v { font-family: "SF Mono", Menlo, Consolas, monospace; color: #d29922; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+
+  ul { list-style: none; }
+  li { font-size: 15px; color: #c9d1d9; padding-left: 20px; position: relative; margin-bottom: 9px; line-height: 1.4; }
+  li::before { content: "▸"; position: absolute; left: 0; color: #d29922; }
+
+  .kpi { display: flex; gap: 20px; margin: 6px 0 16px; }
+  .kpi div { flex: 1; background: #161b22; border: 1px solid #30363d; border-radius: 7px; padding: 14px 16px; }
+  .kpi .n { font-size: 34px; font-weight: 700; color: #d29922; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .kpi .l { font-size: 12px; color: #8b949e; margin-top: 3px; line-height: 1.3; }
+
+  .foot {
+    position: absolute; bottom: 0.34in; left: 0.78in; right: 0.78in;
+    display: flex; justify-content: space-between;
+    font-size: 10.5px; color: #6e7681; border-top: 1px solid #21262d; padding-top: 7px;
+  }
+  .cite { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: #6e7681; }
+
+  .title-slide { justify-content: center; }
+  .title-slide h1 { max-width: 10.6in; }
+  .big { font-size: 25px; line-height: 1.35; color: #e6edf3; max-width: 10.2in; font-weight: 500; }
+  .big strong { color: #d29922; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- 1 -->
+<section class="slide title-slide">
+  <div class="eyebrow">Internal technical briefing · 13 September 2026</div>
+  <h1>Bounding the boundary</h1>
+  <div class="rule"></div>
+  <div class="big" style="margin-top:4px">
+    Running a <strong>local agent fleet</strong> under a token budget, and letting it
+    triage production <strong>without a human in the loop</strong>.
+  </div>
+  <div class="sub" style="margin-top:26px">
+    Dan Elliott · a working system, not a proposal — 18 seats, 4 consoles, 993 graded criteria
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="slide">
+  <div class="eyebrow">The problem</div>
+  <h2>Agentic coding is a context-throughput problem long before it is a cost problem</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="big" style="margin-bottom:22px">
+      One agent burns context. A <strong>fleet</strong> multiplies it — and the multiplier
+      lands on whatever crosses the host↔worker boundary.
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card accent">
+          <h3>The naive fleet</h3>
+          <p>Every worker gets the whole repo, the whole ticket history, the whole previous
+          transcript. N workers, N × the context, and no bound anywhere on what one worker
+          can hand back.</p>
+        </div>
+        <div class="card">
+          <h3>What actually fails first</h3>
+          <p>Not the bill — the <em>turn</em>. An oversized brief doesn't run slowly, it runs
+          out: the agent produces a complete module, never wires it to a caller, stops
+          mid-sentence, and reports success.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>So the design question is not "which model"</h3>
+          <p>It is: <em class="q">what is the maximum number of bytes that may cross this
+          boundary, and what happens at the limit?</em> Answer that and the model choice
+          becomes a routing decision.</p>
+        </div>
+        <div class="card good">
+          <h3>The claim this deck defends</h3>
+          <p>Bound the boundary in <strong>bytes</strong>, route the bulk of the work to
+          <strong>local</strong> models, and confine paid inference to the two jobs that
+          demonstrably need it.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>2</span></div>
+</section>
+
+<!-- 3 -->
+<section class="slide">
+  <div class="eyebrow">The system</div>
+  <h2>cmux-fleet — containerised agents, four consoles, one host</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="kpi">
+      <div><div class="n">18</div><div class="l">worker seats declared</div></div>
+      <div><div class="n">10</div><div class="l">on local models</div></div>
+      <div><div class="n">8</div><div class="l">on paid hosted models</div></div>
+      <div><div class="n">3</div><div class="l">inference providers</div></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <table>
+          <tr><th>Console</th><th>Seats</th><th>Job</th></tr>
+          <tr><td class="k">operations</td><td>obs-1/2, sre-1/2, tick-1</td><td>read-only cluster work, ticketing</td></tr>
+          <tr><td class="k">development</td><td>eng-1/2, tst-1/2</td><td>write code, run suites</td></tr>
+          <tr><td class="k">review</td><td>col-1, rev-arch/ctx/lang-1</td><td>three-lens review + collation</td></tr>
+          <tr><td class="k">triage</td><td>tri-1, obs-t1/t2/t3</td><td>autonomous production sweeps</td></tr>
+        </table>
+      </div>
+      <div class="col">
+        <div class="card accent">
+          <h3>Triage is the one with no keyboard</h3>
+          <p>The other three consoles are driven by a person at a terminal. Triage has a
+          <strong>host-side actor</strong> that is both its clock and its fan-out performer —
+          it runs unattended, on a cadence, indefinitely.</p>
+        </div>
+        <div class="card">
+          <h3>Every seat is a container</h3>
+          <p>uid 10001, <code>--cap-drop ALL</code>, <code>--read-only</code> root,
+          <code>no-new-privileges</code>, pids/memory/cpu capped, and an
+          <strong>internal</strong> Docker network with no route off the host.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>3</span></div>
+</section>
+
+<!-- 4 -->
+<section class="slide">
+  <div class="eyebrow">The thesis</div>
+  <h2>Bound the boundary, not the model</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="big" style="margin-bottom:20px">
+      Four constants decide how much context this system can possibly spend per exchange.
+      They are enforced in code, pinned by tests, and <strong>mirrored inside the container image</strong>.
+    </div>
+    <div class="cols">
+      <div class="col">
+        <table>
+          <tr><th>Constant</th><th>Direction</th><th>Value</th></tr>
+          <tr><td class="k">MAX_DISPATCH_TEXT</td><td>brief out</td><td class="v">32 KiB</td></tr>
+          <tr><td class="k">MAX_DISPATCH_POLICY_BYTES</td><td>drop to worker</td><td class="v">256 KiB</td></tr>
+          <tr><td class="k">MAX_REPLY_ARTIFACT_BYTES</td><td>per file back</td><td class="v">64 KiB</td></tr>
+          <tr><td class="k">MAX_REPLY_INLINE_BYTES</td><td>per reply back</td><td class="v">256 KiB</td></tr>
+        </table>
+        <div class="cite" style="margin-top:10px">
+          src/run/dispatch-request.ts:239 · dispatch-policy.ts:176 · relay.ts:269,293
+        </div>
+      </div>
+      <div class="col">
+        <div class="card good">
+          <h3>Outbound refuses. Inbound truncates.</h3>
+          <p>An oversized brief is <strong>rejected whole</strong> with a named code, before
+          anything is written. An oversized reply is cut — but never silently.</p>
+        </div>
+        <div class="card accent">
+          <h3>The return leg is the same number on purpose</h3>
+          <p>256 KiB out, 256 KiB back. And <code>64 × 4 = 256</code> is pinned by an
+          assertion, so the per-file cap cannot drift away from the per-reply cap.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>4</span></div>
+</section>
+
+<!-- 5 -->
+<section class="slide">
+  <div class="eyebrow">The detail that makes it fair</div>
+  <h2>Enumeration order must not decide which review survives</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card warn">
+          <h3>The naive truncation</h3>
+          <p>Walk the artifacts in order, inline until the budget runs out, drop the rest.
+          Reviewer three loses its entire review because it happened to be enumerated last —
+          and nothing in the output says so.</p>
+        </div>
+        <div class="card good">
+          <h3>What it actually does</h3>
+          <p><strong>Max–min fair allocation.</strong> Every artifact gets an equal share of
+          the 256 KiB; anything under its share is paid in full, and the surplus is
+          redistributed to the ones over.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>And the cut is named</h3>
+          <p>Each truncated artifact is reported <em>in the collation brief</em> with both
+          byte counts, so the collator is told which review was cut and by how much —
+          rather than quietly reading a short one as a brief one.</p>
+        </div>
+        <div class="card accent">
+          <h3>The escape valve is designed, not accidental</h3>
+          <p>A long review is written to a file and declared as a <code>report</code>, not
+          pasted inline. The host inlines it under the two caps. The reviewer's own prompt
+          tells it the cap in bytes.</p>
+        </div>
+      </div>
+    </div>
+    <div class="cite" style="margin-top:6px">src/run/relay.ts:326 — <em class="q">"ENUMERATION ORDER CANNOT DECIDE WHICH REVIEW SURVIVES"</em></div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>5</span></div>
+</section>
+
+<!-- 6 -->
+<section class="slide">
+  <div class="eyebrow">Token budget</div>
+  <h2>Local-first routing, and a ceiling that halts dispatch rather than the world</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <table>
+          <tr><th>Provider</th><th>Hosted</th><th>Seats</th></tr>
+          <tr><td class="k">omlx</td><td>no — LAN tunnel</td><td class="v">4</td></tr>
+          <tr><td class="k">gabe</td><td>no — LAN box</td><td class="v">6</td></tr>
+          <tr><td class="k">ollama-cloud</td><td><strong>yes — billed</strong></td><td class="v">8</td></tr>
+        </table>
+        <div class="card accent" style="margin-top:14px">
+          <h3><code>hosted</code> is declared, never inferred</h3>
+          <p>The local tunnel is HTTPS on a public address — every heuristic would
+          misclassify it as hosted. So the schema <strong>requires</strong> the flag and
+          refuses to guess.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>Paid inference is confined to two jobs</h3>
+          <p>Code generation and review. Observation, triage, ticketing and SRE work — the
+          high-frequency, unattended traffic — all run on local weights.</p>
+        </div>
+        <div class="card good">
+          <h3>Admission control, not a kill switch</h3>
+          <p><code>tokens_ceiling: 6,000,000</code> per run. Crossing it halts
+          <strong>dispatch</strong> — artifacts are still harvested, so a budget trip cannot
+          destroy the evidence of what the tokens bought.</p>
+        </div>
+        <div class="card">
+          <h3>Reservations, not optimism</h3>
+          <p>Admission projects <em>spend + all outstanding reservations + this reserve</em>,
+          because two tasks admitted back-to-back would each individually fit and jointly
+          overshoot.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>6</span></div>
+</section>
+
+<!-- 7 -->
+<section class="slide">
+  <div class="eyebrow">Roles · 1 of 5</div>
+  <h2>Triage — the collator that cannot touch anything</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card accent">
+          <h3>Grant</h3>
+          <p class="mono" style="color:#a5d6ff">read · grep · find · ls · submit_report · dispatch_request</p>
+          <p style="margin-top:8px"><strong>No bash. No write.</strong> <code>isolation: none</code> —
+          no code mount at all. No cloud access. No egress.</p>
+        </div>
+        <div class="card">
+          <h3>What it does</h3>
+          <p>Receives the whole declared service list, <strong>divides it</strong> across the
+          three observer seats, briefs each one, and on a second dispatch reconciles the three
+          replies into one document.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card good">
+          <h3>Why it has <code>dispatch_request</code> at all</h3>
+          <p>Withdrawing <code>write</code> broke the console silently: two sweeps settled
+          <code>status: success</code> with the summary <em class="q">"Dispatched sweep to
+          obs-t1"</em> — having written no request at all.</p>
+          <p style="margin-top:7px">A role whose product is a file needs a verb that writes
+          that file. The tool exists because removing the capability produced a
+          <strong>confident, empty success</strong>.</p>
+        </div>
+        <div class="card">
+          <h3>From its prompt</h3>
+          <p><em class="q">"Even matters more than clever. Your observers are not three
+          readings of one thing — they are three workers looking at different services."</em></p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>7</span></div>
+</section>
+
+<!-- 8 -->
+<section class="slide">
+  <div class="eyebrow">Roles · 2 of 5</div>
+  <h2>Observer — the only seat with live cluster access</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card accent">
+          <h3>Grant</h3>
+          <p class="mono" style="color:#a5d6ff">read · write · bash · grep · find · ls · submit_report</p>
+          <p style="margin-top:8px"><code>cloud_access: true</code> — but read verbs only, enforced
+          by a wrapper that refuses every mutating verb not on an allowlist.</p>
+        </div>
+        <div class="card">
+          <h3>It runs only the checks its brief names</h3>
+          <p>Then writes a JSON/Markdown pair. The JSON carries three document-level gates and
+          four per row. Writing only the Markdown clamps the result to <code>failed</code>.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card warn">
+          <h3>Its dominant instruction is a turn budget</h3>
+          <p><em class="q">"Around twenty tool calls in, stop investigating and write what
+          you have."</em></p>
+          <p style="margin-top:7px">Because an observer once made <span class="num">150</span>
+          <code>kubectl</code> calls against exactly the right namespaces — and then ended its
+          turn with an empty outbox.</p>
+        </div>
+        <div class="card">
+          <h3>The lesson generalises</h3>
+          <p>An unattended agent's failure mode is not doing the wrong thing. It is doing the
+          right thing until it runs out of turn.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>8</span></div>
+</section>
+
+<!-- 9 -->
+<section class="slide">
+  <div class="eyebrow">Roles · 3 of 5</div>
+  <h2>Ticketing — a live write credential, and a rule about scale</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card accent">
+          <h3>Grant</h3>
+          <p class="mono" style="color:#a5d6ff">read · write · bash · grep · find · ls · submit_report</p>
+          <p style="margin-top:8px">Four secrets, delivered as <code>*_FILE</code> paths.
+          <code>egress_access: true</code>, scoped to the ticket host. No cloud access.</p>
+        </div>
+        <div class="card good">
+          <h3>Every write is verified by re-fetch</h3>
+          <p>The agent does not trust its own success report. It re-reads the object it
+          claims to have changed.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card warn">
+          <h3>From its prompt</h3>
+          <p><em class="q">"Ask the server the question. Never download a collection and
+          search it yourself."</em></p>
+          <p style="margin-top:7px">Measured: a run that enumerated
+          <span class="num">59,616</span> objects and grepped locally reported that a user
+          with thirty open tickets had <strong>none</strong>.</p>
+        </div>
+        <div class="card">
+          <h3>Why this is a context lesson, not a correctness one</h3>
+          <p>The agent was not wrong about the API. It was wrong about what fits. Server-side
+          filtering is a <em>context</em> control that happens to also be correct.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>9</span></div>
+</section>
+
+<!-- 10 -->
+<section class="slide">
+  <div class="eyebrow">Roles · 4 of 5</div>
+  <h2>Collator — the only one who saw all three</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card accent">
+          <h3>Grant</h3>
+          <p class="mono" style="color:#a5d6ff">read · grep · find · ls · submit_report · dispatch_request</p>
+          <p style="margin-top:8px"><code>read_only: true</code>, <code>isolation: shared-ro</code>.
+          No bash, no write. It reads replies through a read-only mount.</p>
+        </div>
+        <div class="card">
+          <h3>It does not review</h3>
+          <p>It writes three briefs, is dispatched a second time, and turns three reports into
+          one record.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card good">
+          <h3>The two rules that define the job</h3>
+          <p><em class="q">"Never average them. Your value is in being the only one who saw
+          all three."</em></p>
+          <p style="margin-top:9px"><em class="q">"You cannot both pre-judge the change and be
+          the one who says the agreement was independent."</em></p>
+        </div>
+        <div class="card">
+          <h3>Why independence is structural</h3>
+          <p>The collator is forbidden from forming its own verdict first, because a collator
+          with an opinion turns three independent reviews into one review with three
+          witnesses.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>10</span></div>
+</section>
+
+<!-- 11 -->
+<section class="slide">
+  <div class="eyebrow">Roles · 5 of 5</div>
+  <h2>Reviewer — three lenses, three vendors, deliberately</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <table>
+          <tr><th>Seat</th><th>Lens</th></tr>
+          <tr><td class="k">rev-arch-1</td><td>architecture &amp; security</td></tr>
+          <tr><td class="k">rev-ctx-1</td><td>cross-file contract coverage</td></tr>
+          <tr><td class="k">rev-lang-1</td><td>implementation language</td></tr>
+        </table>
+        <div class="card accent" style="margin-top:14px">
+          <h3>Identical config except two fields</h3>
+          <p>All three are <code>read_only</code>, <code>shared-ro</code>, same grant. They
+          differ only in <strong>model</strong> and <strong>briefing file</strong>.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card good">
+          <h3>Three vendors is a pinned invariant</h3>
+          <p><em class="q">"Three seats on one model is one reviewer with three transcripts —
+          a shared training blind spot becomes invisible by construction, and independent
+          agreement stops being independent."</em></p>
+          <p style="margin-top:7px">A test fails if the three models ever collapse to one vendor.</p>
+        </div>
+        <div class="card">
+          <h3>"For every security finding, state the attacker"</h3>
+          <p>A finding with no reachable attacker is ranked below one with a path. That single
+          instruction removes most of the noise a security lens otherwise produces.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>11</span></div>
+</section>
+
+<!-- 12 -->
+<section class="slide">
+  <div class="eyebrow">Security · isolation</div>
+  <h2>What a worker can touch</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <table>
+          <tr><th>Mount</th><th>Mode</th></tr>
+          <tr><td class="k">/workspace</td><td>git worktree, rw — or <strong>:ro</strong></td></tr>
+          <tr><td class="k">/skills</td><td>:ro</td></tr>
+          <tr><td class="k">/policy/*</td><td>:ro, root-owned 0555</td></tr>
+          <tr><td class="k">/replies</td><td>:ro</td></tr>
+          <tr><td class="k">/secrets</td><td>:ro</td></tr>
+          <tr><td class="k">/outbox</td><td>rw — the only way out</td></tr>
+        </table>
+      </div>
+      <div class="col">
+        <div class="card accent">
+          <h3>Runtime flags</h3>
+          <p class="mono" style="font-size:12px;color:#a5d6ff;line-height:1.7">--user 10001:10001<br>
+          --cap-drop ALL<br>--security-opt no-new-privileges<br>--read-only<br>
+          --tmpfs /tmp:noexec,nosuid<br>--pids-limit 512 --memory 4g --cpus 2</p>
+        </div>
+        <div class="card good">
+          <h3>Zero <code>-e</code> flags, asserted</h3>
+          <p>Every environment value arrives via <code>--env-file</code> at mode 0600. A test
+          asserts the argv contains <strong>no</strong> inline env flags — so a secret cannot
+          reach the process table.</p>
+        </div>
+        <div class="card">
+          <h3>Guards run on the finished argv</h3>
+          <p>Not on source literals. Three mount spellings once walked past an earlier check —
+          so the guard now parses the actual command line.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>12</span></div>
+</section>
+
+<!-- 13 -->
+<section class="slide">
+  <div class="eyebrow">Security · egress</div>
+  <h2>Three layers, because the first two each have a hole</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <h3>1 · Internal bridge</h3>
+          <p>Docker <code>--internal</code> network. The host <strong>refuses to adopt</strong> a
+          pre-existing network of the same name that is not internal, and re-inspects after
+          creation rather than trusting the exit code.</p>
+        </div>
+        <div class="card warn">
+          <h3>2 · Gateway firewall — the hole in layer 1</h3>
+          <p><code>--internal</code> is a FORWARD-chain rule, so the <strong>bridge gateway is
+          still reachable</strong>. Measured: a container pulled an SSH banner off the gateway.
+          Closed with an explicit DROP.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>3 · Relay + CONNECT proxy</h3>
+          <p>A dual-homed relay carrying only literal host:port pairs, plus a CONNECT proxy
+          that matches on <strong>label boundaries</strong> and default-denies.</p>
+        </div>
+        <div class="card good">
+          <h3>The proxy decides before it resolves</h3>
+          <p>No DNS lookup and no socket is opened before the policy verdict. A denied host is
+          <code>403</code> naming the rule — it is never contacted at all.</p>
+        </div>
+        <div class="card accent">
+          <h3>It refuses the run rather than degrade</h3>
+          <p>If the firewall rule cannot be <em>verified</em>, the run is refused. There is no
+          override flag.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>13</span></div>
+</section>
+
+<!-- 14 -->
+<section class="slide">
+  <div class="eyebrow">Security · credentials</div>
+  <h2>Files, not environment values — and an honest limit</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card good">
+          <h3>Delivery</h3>
+          <p>Secrets are files under <code>/secrets:ro</code>. The environment holds only a
+          <strong>pointer</strong>: <code>NAME_FILE=/secrets/NAME</code>. Writes are verified by
+          read-back — size, mode, type.</p>
+        </div>
+        <div class="card">
+          <h3>Scoping is an intersection</h3>
+          <p>A fleet-wide allowlist is the ceiling; a role's list is a draw against it. Five
+          distinct refusals, including reserved namespaces and every proxy variable spelling.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>Redaction scrubs the serialised line</h3>
+          <p>Not known fields — the whole JSON — so a new event shape cannot leak silently. It
+          matches leading prefixes too, because a real incident ended in
+          <code>… | head -c 20</code>: the model truncated the secret <em>because it had been
+          told not to echo it</em>.</p>
+        </div>
+        <div class="card warn">
+          <h3>The limit, stated in the source</h3>
+          <p><em class="q">"A worker can still cat the file, and anything it cats lands in the
+          same transcript. That is a narrower blast radius, <strong>not a seal</strong>."</em></p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>14</span></div>
+</section>
+
+<!-- 15 -->
+<section class="slide">
+  <div class="eyebrow">Security · cloud verbs</div>
+  <h2>The verbgate — every cloud verb through one shim</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="big" style="font-size:19px;margin-bottom:15px">
+      <code>gcloud</code>, <code>kubectl</code>, <code>helm</code>, <code>gsutil</code> and
+      <code>bq</code> on <code>PATH</code> are <strong>not the real binaries</strong> — those are moved
+      to <code>/usr/local/libexec/&lt;name&gt;.real</code>. Every invocation, permitted or refused, is
+      classified and appended to a ledger.
+    </div>
+    <div class="cols">
+      <div class="col">
+        <table>
+          <tr><th>Check, in order</th><th>Outcome</th></tr>
+          <tr><td class="k">policy writable</td><td><strong>exit 78</strong> — refuses <em>every</em> verb</td></tr>
+          <tr><td class="k">read verb</td><td>exec the real binary · <code>allow_read</code></td></tr>
+          <tr><td class="k">on cloud_allow[]</td><td>exec · <code>allow_listed</code></td></tr>
+          <tr><td class="k">anything else</td><td><strong>exit 77</strong> · <code>refuse</code></td></tr>
+        </table>
+        <div class="card warn" style="margin-top:13px">
+          <h3>What it grants today: nothing</h3>
+          <p><code>cloud_allow[]</code> is designed but <strong>not built</strong>. The policy file is
+          written empty and never rewritten, so every mutating cloud verb is refused — and the config
+          layer <em>rejects</em> the key rather than let an operator believe otherwise.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card accent">
+          <h3>A control the subject can reconfigure is not a control</h3>
+          <p>Paths are constants, not environment. They used to be overridable, which made the gate
+          self-service: one variable supplied its own policy file, another pointed the ledger at
+          <code>/dev/null</code> and discarded the evidence.</p>
+        </div>
+        <div class="card accent">
+          <h3>A policy the subject can edit is not a policy</h3>
+          <p>Five surfaces are checked <em>before</em> classification, so no path consults a tampered
+          allow-list. A file is tested directly <strong>and through its parent</strong> — a writable
+          <code>/policy</code> replaces a 0444 file wholesale.</p>
+        </div>
+        <div class="card">
+          <h3>Matching is on verb tokens, never the command line</h3>
+          <p>Flags are excluded entirely. A substring match over the whole line is defeated by
+          reordering the flags.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>15</span></div>
+</section>
+
+<!-- 16 -->
+<section class="slide">
+  <div class="eyebrow">Security · cloud verbs</div>
+  <h2>Five ways it failed open — every one found by writing the attack down</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card warn">
+          <h3>A positional outvoted the verb</h3>
+          <p><code>gcloud compute instances delete real-vm list</code> classified as a <strong>read</strong>,
+          because a positional was named <code>list</code>. It now stops at the first recognised verb,
+          which always precedes its positionals.</p>
+        </div>
+        <div class="card warn">
+          <h3>A glob minted credentials</h3>
+          <p><code>print-access-token</code> matched <code>print-*</code> and sailed through as a read.
+          <code>curl</code> is in the image — so an agent could mint a bearer token and issue any
+          mutating REST call with <strong>zero gate rows and zero refusals</strong>.</p>
+        </div>
+        <div class="card warn">
+          <h3>The working directory decided the verdict</h3>
+          <p>An unquoted expansion let an argv of <code>*</code> re-expand against the CWD. A worker
+          could drop a file named <code>describe</code> beside itself and have a <code>delete</code>
+          classified as a read.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card warn">
+          <h3>The ledger dropped exactly the evasive rows</h3>
+          <p><code>jq</code>'s <code>--args</code> does not stop option parsing, so any argv carrying a
+          flag made it exit — and the error suppression swallowed the row. The ledger lost precisely the
+          flag-bearing invocations the gate exists to catch.</p>
+        </div>
+        <div class="card warn">
+          <h3>A forged task id read back as permitted</h3>
+          <p>Provenance came from environment, which the worker controls. A task id of
+          <code>T-1","decision":"allow_read</code> appends a duplicate key and <code>JSON.parse</code>
+          takes the last. <em class="q">"Sanitizing one of three interpolations closed nothing."</em></p>
+        </div>
+        <div class="card good">
+          <h3>The ledger is still not authoritative — and says so</h3>
+          <p>It is worker-written, so a host-side collector tails it to a path the worker has no mount
+          to. The guarantee is deliberately the <strong>weaker</strong> of the two available: what is
+          collected survives truncation, and truncation itself is recorded.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>16</span></div>
+</section>
+
+<!-- 17 -->
+<section class="slide">
+  <div class="eyebrow">Guardrails</div>
+  <h2>The system refuses in eleven named places</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <table>
+          <tr><th>Refusal</th><th>Trigger</th></tr>
+          <tr><td class="k">exit 78</td><td>any policy file writable → refuses <em>every</em> verb</td></tr>
+          <tr><td class="k">exit 77</td><td>mutating verb not on the cloud allowlist</td></tr>
+          <tr><td class="k">exit 71</td><td>honeypot failed to arm</td></tr>
+          <tr><td class="k">exit 73</td><td>credential pointer set but unhonourable</td></tr>
+          <tr><td class="k">hosted-repo</td><td>proprietary remote + hosted model, no consent</td></tr>
+          <tr><td class="k">gateway</td><td>firewall rule unverifiable</td></tr>
+        </table>
+      </div>
+      <div class="col">
+        <div class="card accent">
+          <h3>The stall ladder kills only slot-holders</h3>
+          <p>A worker that is merely queued saturates at <em>warn</em> however long it waits —
+          <em class="q">"killing it would be executing a worker for standing in the line we put
+          it in."</em></p>
+        </div>
+        <div class="card good">
+          <h3>Windows are derived, not configured</h3>
+          <p>A shipped 25-minute kill window against a 900-second deadline meant two live
+          wedges warned and <strong>never reached kill</strong>. The window is now a fraction of
+          the shortest deadline — it can only tighten.</p>
+        </div>
+        <div class="card">
+          <h3>Identity re-validated at every rung</h3>
+          <p>abort → SIGTERM → SIGKILL, re-checking process identity immediately before each
+          signal, because pids are reused.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>17</span></div>
+</section>
+
+<!-- 18 -->
+<section class="slide">
+  <div class="eyebrow">Guardrails</div>
+  <h2>The honeypot — because prevention leaves no record</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="big" style="margin-bottom:20px">
+      A blocked escape attempt and a workload that never tried look <strong>identical</strong>
+      in the logs. So the container binds a listener where the Docker socket would be.
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card accent">
+          <h3>It accepts, records, and destroys</h3>
+          <p>Without reading a byte. <em class="q">"A detector that answered would be a
+          capability."</em></p>
+        </div>
+        <div class="card">
+          <h3>Three states, not two</h3>
+          <p><code>armed, 0 attempts</code> is a different fact from <code>not armed</code>.
+          Collapsing them would report an unarmed detector as a clean run.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card good">
+          <h3>Its death is fatal to the worker</h3>
+          <p>No config switch, no opt-out. If the detector dies, the seat dies — otherwise the
+          absence of attempts stops meaning anything.</p>
+        </div>
+        <div class="card">
+          <h3>What this buys</h3>
+          <p>Evidence that the isolation is doing work, rather than an assumption that it is.
+          That distinction is the whole argument for running agents unattended.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>18</span></div>
+</section>
+
+<!-- 19 -->
+<section class="slide">
+  <div class="eyebrow">Autonomous secure triage</div>
+  <h2>One sweep, end to end</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <ul>
+          <li><strong>Actor takes a lock</strong> — refuses if another holds it, so two actors
+          cannot sweep one control plane</li>
+          <li><strong>Mint a sweep id</strong> — re-derived from the run tree, never from the
+          record alone; no id is ever reused</li>
+          <li><strong>tri-1 partitions</strong> the declared services across three observers —
+          the host validates the partition covers each service <em>exactly once</em></li>
+          <li><strong>Fan out concurrently</strong> against one deadline, so the sweep costs the
+          largest share rather than the sum</li>
+          <li><strong>Join, collate, assess</strong> — then announce</li>
+        </ul>
+      </div>
+      <div class="col">
+        <div class="card warn">
+          <h3>Concurrency is an anti-criterion</h3>
+          <p>Serial dispatch once meant two observers received nothing before the pass ended —
+          and the sweep reported two services it <em class="q">"could not see"</em>, pointing an
+          operator at a cluster that was healthy.</p>
+          <p style="margin-top:7px"><em class="q">"The cost of getting this wrong is not
+          throughput, it is COVERAGE."</em></p>
+        </div>
+        <div class="card good">
+          <h3>An incomplete partition refuses the whole sweep</h3>
+          <p>A service in no request, or in two, and <strong>nothing is dispatched</strong>. A
+          partial sweep that looks complete is worse than no sweep.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>19</span></div>
+</section>
+
+<!-- 20 -->
+<section class="slide">
+  <div class="eyebrow">Autonomous secure triage</div>
+  <h2>Three gates that make an unattended verdict trustworthy</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card good">
+          <h3>1 · One row per <em>declared</em> service</h3>
+          <p>Not per row the worker wrote. A service the agent omitted still appears —
+          as <code>indeterminate</code>. A service it invented cannot appear at all.</p>
+        </div>
+        <div class="card good">
+          <h3>2 · An unevidenced "healthy" is downgraded</h3>
+          <p>There is <strong>no exported path</strong> that hands a caller the worker's raw
+          <code>healthy</code>. The claim must carry evidence or it becomes
+          <code>indeterminate</code>.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card good">
+          <h3>3 · Coverage is counted host-side</h3>
+          <p>From the run tree — never from the worker's own account of what it did.</p>
+        </div>
+        <div class="card accent">
+          <h3>And the worker's prose is fenced</h3>
+          <p>The one worker-authored string that reaches a notification is wrapped in banners
+          and line-prefixed, so no agent output can be read as a host statement.</p>
+        </div>
+        <div class="card">
+          <h3>The shape of the idea</h3>
+          <p>The agent is treated as an <strong>untrusted reporter</strong>. Everything
+          structural is recomputed from facts the host owns.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>20</span></div>
+</section>
+
+<!-- 21 -->
+<section class="slide">
+  <div class="eyebrow">What we refuse to measure</div>
+  <h2>There is no dollar figure in this system, and that is deliberate</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="big" style="margin-bottom:20px">
+      A local model has no price table. An unpriced run reports <code>usd: 0</code> with
+      <strong><code>priced: false</code></strong> — not a measured zero.
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card accent">
+          <h3>The flag is the point</h3>
+          <p>It is what stops a downstream reader averaging <strong>$0.00</strong> into a spend
+          report as though it were an observation. The only money figure in the repository is
+          this anti-measurement.</p>
+        </div>
+        <div class="card">
+          <h3>Tokens are the real ceiling</h3>
+          <p><code>usd_ceiling</code> was removed outright rather than left parsed-and-unread.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card warn">
+          <h3>The honest caveat</h3>
+          <p><strong>8 of 18 seats are billed</strong>, and the system says so in prose while
+          attaching no number: <em class="q">"Four panes generating at once … is not a free
+          console to leave open."</em></p>
+        </div>
+        <div class="card good">
+          <h3>What I would claim to a finance partner</h3>
+          <p>Not a saving. A <strong>bound</strong>: a hard cap on bytes per exchange, a token
+          ceiling per run, and 10 of 18 seats that cost electricity rather than API credit.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>21</span></div>
+</section>
+
+<!-- 22 -->
+<section class="slide">
+  <div class="eyebrow">Known gaps</div>
+  <h2>Four things I would fix before anyone relied on this</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <div class="cols">
+      <div class="col">
+        <div class="card warn">
+          <h3>1 · The triage console's token ceiling cannot trip</h3>
+          <p>Its accounting reads a state field that <strong>nothing ever writes</strong>, so it
+          sums zeros across four seats. The ceiling is real everywhere else and structurally
+          inert here.</p>
+        </div>
+        <div class="card warn">
+          <h3>2 · <code>run_timeout</code> has no reader</h3>
+          <p>Declared, validated, shipped as <code>2h</code>, consumed by nothing. Today that is
+          load-bearing — it is why a standing console is possible at all — which makes it a
+          tripwire rather than a bug.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card warn">
+          <h3>3 · Egress is per-fleet, not per-role</h3>
+          <p>The grant buys a <em>route</em>, not a destination set. Two workers with egress
+          reach the same hosts. A fleet needing one worker to reach a host another must not
+          <strong>cannot express that</strong>.</p>
+        </div>
+        <div class="card warn">
+          <h3>4 · No retry cap</h3>
+          <p>Re-dispatch is bounded by an epoch fence, not a counter — and that fence does not
+          exist on the attended path.</p>
+        </div>
+      </div>
+    </div>
+    <div class="card good" style="margin-top:4px">
+      <h3>Why the gaps are on a slide</h3>
+      <p>Every one of these was found by the system's own criteria file or by a review lens, and
+      each is written down at the point in the source where it would mislead. A guardrail
+      inventory that lists only the working guardrails is marketing.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>22</span></div>
+</section>
+
+<!-- 23 -->
+<section class="slide">
+  <div class="eyebrow">What transfers</div>
+  <h2>Five things I would take to any agent platform</h2>
+  <div class="rule"></div>
+  <div class="body">
+    <ul style="font-size:17px">
+      <li><strong>Bound the boundary in bytes, and decide the overflow policy per direction.</strong>
+      Refuse outbound, truncate inbound — fairly, and say what was cut.</li>
+      <li><strong>Make the agent an untrusted reporter.</strong> Recompute every structural fact
+      host-side: coverage, membership, evidence. Accept prose; never accept counts.</li>
+      <li><strong>Declare capability, never infer it.</strong> <code>hosted</code> is required
+      because every heuristic got it wrong. The same applies to trust, egress and write access.</li>
+      <li><strong>Instrument the absence.</strong> Prevention leaves no record — so build the
+      detector that turns "nothing happened" into evidence.</li>
+      <li><strong>Delete config nothing reads.</strong> A parsed-and-unread field advertises a
+      control you do not have, and that is worse than no control.</li>
+    </ul>
+    <div class="card accent" style="margin-top:10px">
+      <h3>The one-line version</h3>
+      <p style="font-size:15px">A local fleet is affordable because of what it is
+      <strong>forbidden</strong> to send, not because of what it is asked to do.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Bounding the boundary</span><span>23</span></div>
+</section>
+
+<!-- 24 -->
+<section class="slide title-slide">
+  <div class="eyebrow">Discussion</div>
+  <h1 style="font-size:44px">Where would you push on this?</h1>
+  <div class="rule"></div>
+  <div class="cols" style="margin-top:10px">
+    <div class="col">
+      <div class="card"><h3>Per-role egress</h3><p>Worth the config surface, or is fleet-level the right granularity?</p></div>
+      <div class="card"><h3>Three-vendor review</h3><p>Real blind-spot insurance, or expensive theatre?</p></div>
+    </div>
+    <div class="col">
+      <div class="card"><h3>Unattended triage</h3><p>What would you need to see before it pages someone?</p></div>
+      <div class="card"><h3>Refusing to price</h3><p>Defensible, or a gap dressed as a principle?</p></div>
+    </div>
+  </div>
+  <div class="sub" style="margin-top:18px">Dan Elliott · cmux-fleet</div>
+</section>
+
+</body>
+</html>

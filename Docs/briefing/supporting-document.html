@@ -1,0 +1,772 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cmux-fleet — Architecture, Security and Guardrails</title>
+<style>
+  @page { size: 8.5in 11in; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: "Charter", "Georgia", "Times New Roman", serif;
+    font-size: 10.2pt; line-height: 1.40; color: #1a1a1a; background: #fff;
+  }
+  .page {
+    width: 8.5in; min-height: 11in; padding: 0.68in 0.9in 0.62in;
+    page-break-after: always; position: relative; background: #fff;
+  }
+  .page:last-child { page-break-after: auto; }
+
+  h1 { font-size: 25pt; line-height: 1.1; letter-spacing: -0.01em; font-weight: 700; margin-bottom: 8px; }
+  h2 {
+    font-size: 13.5pt; font-weight: 700; margin: 17px 0 6px;
+    padding-bottom: 4px; border-bottom: 1.5px solid #c9a227; letter-spacing: -0.005em;
+  }
+  h2:first-of-type { margin-top: 0; }
+  h3 { font-size: 10.8pt; font-weight: 700; margin: 12px 0 4px; color: #1a1a1a; }
+  h4 { font-size: 9.8pt; font-weight: 700; margin: 10px 0 3px; color: #444; font-style: italic; }
+  p { margin-bottom: 7px; text-align: justify; hyphens: auto; }
+  ul, ol { margin: 0 0 8px 19px; }
+  li { margin-bottom: 4px; }
+
+  .eyebrow {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 8pt; letter-spacing: 0.16em; text-transform: uppercase;
+    color: #8a6d1f; font-weight: 700; margin-bottom: 8px;
+  }
+  .lede { font-size: 12pt; line-height: 1.48; color: #333; margin-bottom: 14px; }
+  .meta { font-size: 9pt; color: #666; margin-top: 26px; font-family: "Helvetica Neue", Arial, sans-serif; }
+
+  code, .mono {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.6pt; background: #f4f4f2; padding: 1px 4px; border-radius: 2px; color: #7a3e00;
+  }
+  pre {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8pt; line-height: 1.42; background: #f7f7f5;
+    border-left: 3px solid #c9a227; padding: 7px 11px; margin: 7px 0;
+    white-space: pre-wrap; color: #2a2a2a;
+  }
+  blockquote {
+    margin: 8px 0 8px 2px; padding: 2px 0 2px 13px;
+    border-left: 3px solid #d8d2bd; color: #444; font-style: italic;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 8.8pt; margin: 8px 0 9px;
+          font-family: "Helvetica Neue", Arial, sans-serif; }
+  th { text-align: left; font-size: 7.6pt; letter-spacing: 0.09em; text-transform: uppercase;
+       color: #666; font-weight: 700; padding: 0 8px 4px 0; border-bottom: 1.5px solid #333; }
+  td { padding: 4px 8px 4px 0; border-bottom: 1px solid #e4e4e0; vertical-align: top; }
+  td.k { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 8.2pt; color: #7a3e00; white-space: nowrap; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .box { border: 1px solid #ddd9cc; background: #fbfaf6; padding: 9px 13px; margin: 9px 0; border-radius: 3px; }
+  .box h4 { margin-top: 0; font-style: normal; color: #8a6d1f; }
+  .box.gap { border-left: 3px solid #b3261e; background: #fdf6f5; }
+  .box.gap h4 { color: #b3261e; }
+  .box.key { border-left: 3px solid #c9a227; }
+
+  .cite { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 7.8pt; color: #777; }
+  .foot { position: absolute; bottom: 0.36in; left: 0.9in; right: 0.9in;
+          border-top: 1px solid #e0e0dc; padding-top: 6px;
+          font-family: "Helvetica Neue", Arial, sans-serif; font-size: 8pt; color: #888;
+          display: flex; justify-content: space-between; }
+  .toc li { margin-bottom: 7px; }
+  .toc .num { font-family: "SF Mono", Menlo, monospace; color: #8a6d1f; font-weight: 700; margin-right: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ============ COVER ============ -->
+<section class="page">
+  <div class="eyebrow">Supporting technical document · 13 September 2026</div>
+  <h1>cmux-fleet</h1>
+  <h1 style="font-size:17pt;font-weight:600;color:#555;margin-top:-4px">Architecture, security and guardrails for an unattended local agent fleet</h1>
+  <div style="height:3px;width:70px;background:#c9a227;margin:16px 0 18px"></div>
+
+  <div class="lede">
+    This document accompanies the briefing <em>Bounding the boundary</em>. It sets out how a
+    fleet of containerised coding and operations agents is bounded in context, isolated from
+    the host and from each other, and permitted to triage production without a human in the
+    loop — together with the places where that design is currently incomplete.
+  </div>
+
+  <div class="box key">
+    <h4>Scope and honesty note</h4>
+    <p style="margin-bottom:0">Every quantitative claim here was read from the source tree at
+    commit <code>1959b76</code> rather than recalled. Where a control is asserted by a test,
+    that is stated. Where a control is <em>declared but not enforced</em>, that is stated too —
+    there are four such cases and they are collected in §11 rather than scattered.</p>
+  </div>
+
+  <h2>Contents</h2>
+  <ol class="toc" style="list-style:none;margin-left:0">
+    <li><span class="num">1</span>The problem and the thesis</li>
+    <li><span class="num">2</span>System shape: consoles, seats, providers</li>
+    <li><span class="num">3</span>The bounded boundary</li>
+    <li><span class="num">4</span>Token budget and admission control</li>
+    <li><span class="num">5</span>Container isolation</li>
+    <li><span class="num">6</span>Egress control</li>
+    <li><span class="num">7</span>Credential handling</li>
+    <li><span class="num">8</span>The verbgate</li>
+    <li><span class="num">9</span>The five roles</li>
+    <li><span class="num">10</span>Autonomous triage: the sweep</li>
+    <li><span class="num">11</span>Known gaps and what they cost</li>
+    <li><span class="num">12</span>What transfers to other platforms</li>
+  </ol>
+
+  <div class="meta">Dan Elliott</div>
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>1</span></div>
+</section>
+
+<!-- ============ 1 ============ -->
+<section class="page">
+  <h2>1 · The problem and the thesis</h2>
+
+  <p>A single coding agent consumes context at a rate set by the task. A <em>fleet</em>
+  consumes it at a rate set by the fleet's size multiplied by whatever crosses the boundary
+  between the host that orchestrates and the workers that execute. The interesting control
+  point is therefore not the model, nor the prompt, but that boundary.</p>
+
+  <p>This matters for a reason that is easy to state and easy to miss in practice: an
+  oversized brief does not run slowly, it <em>runs out</em>. Measured repeatedly across this
+  fleet's own development, an agent handed too large a slice produces a complete, well-argued
+  module, never wires it to a caller, stops mid-sentence, and reports success. The context
+  ceiling lands on whatever is last in the queue — implement, then test, then integrate — so
+  what it consumes is always the integration, which is the part with no unit test of its own
+  to go red.</p>
+
+  <div class="box key">
+    <h4>The thesis</h4>
+    <p style="margin-bottom:0">Bound the boundary in <strong>bytes</strong>, with an overflow
+    policy chosen per direction; route the high-frequency traffic to <strong>local</strong>
+    models; and confine paid inference to the two jobs that demonstrably benefit from frontier
+    capability — code generation and review. Model selection then becomes a routing decision
+    rather than a budget decision.</p>
+  </div>
+
+  <h3>Why not simply "measure the cost"</h3>
+  <p>Because for this fleet the cost is not measurable, and pretending otherwise would be
+  worse than not measuring. Ten of eighteen seats run on local weights, which have no price
+  table. The system therefore reports <code>usd: 0</code> together with
+  <code>priced: false</code> — an explicit anti-measurement whose entire purpose is to stop a
+  downstream reader averaging <code>$0.00</code> into a spend report as though it were an
+  observation.</p>
+
+  <p>A <code>usd_ceiling</code> concept existed and was <em>removed</em> rather than left in
+  place unread, on the principle that a parsed-and-unread field advertises a control the
+  product does not implement. Tokens are the only real ceiling, and they are mandatory.</p>
+
+  <p>The honest position to take to a finance partner is therefore not a saving but a
+  <strong>bound</strong>: a hard cap on bytes per exchange, a token ceiling per run, and a
+  majority of seats that cost electricity rather than API credit. Eight seats genuinely are
+  billed, and the configuration says so in prose while attaching no number to it.</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>2</span></div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="page">
+  <h2>2 · System shape</h2>
+
+  <p>The fleet is eighteen declared worker seats across four consoles. A console is a
+  workspace of panes; the workers survive the window closing, so the console is a view rather
+  than the system.</p>
+
+  <table>
+    <tr><th>Console</th><th>Seats</th><th>Character</th></tr>
+    <tr><td class="k">operations</td><td>obs-1, obs-2, sre-1, sre-2, tick-1</td><td>read-only cluster work; ticketing holds a write credential</td></tr>
+    <tr><td class="k">development</td><td>eng-1, eng-2, tst-1, tst-2</td><td>own git worktrees; no egress for engineers</td></tr>
+    <tr><td class="k">review</td><td>col-1, rev-arch-1, rev-ctx-1, rev-lang-1</td><td>read-only, shared mount, three vendors</td></tr>
+    <tr><td class="k">triage</td><td>tri-1, obs-t1, obs-t2, obs-t3</td><td><strong>unattended</strong>; driven by a host-side actor</td></tr>
+  </table>
+
+  <h3>Providers and the local/hosted split</h3>
+  <table>
+    <tr><th>Provider</th><th>Hosted</th><th>Transport</th><th class="n">Seats</th></tr>
+    <tr><td class="k">omlx</td><td>no</td><td>HTTPS tunnel to a LAN host</td><td class="n">4</td></tr>
+    <tr><td class="k">gabe</td><td>no</td><td>plain HTTP, LAN literal</td><td class="n">6</td></tr>
+    <tr><td class="k">ollama-cloud</td><td><strong>yes</strong></td><td>HTTPS, billing credential</td><td class="n">8</td></tr>
+  </table>
+
+  <div class="box">
+    <h4><code>hosted</code> is required and never inferred</h4>
+    <p style="margin-bottom:0">The schema refuses to guess, and the reason is measured rather
+    than stylistic: the local oMLX endpoint is HTTPS, publicly resolvable, on a public address.
+    Every available heuristic would classify it as a hosted provider and therefore as a billing
+    and data-egress concern. The declaration is the only reliable signal, so the schema makes
+    it mandatory with an explicit error message.</p>
+  </div>
+
+  <p>The <code>gabe</code> provider is reached over plain HTTP rather than TLS, which is a
+  deliberate and documented decision: corporate TLS interception breaks the tunnel route from
+  inside the worker image. The traffic is confined to the LAN and the provider is declared
+  <code>hosted: false</code>, so the trade is visible in configuration rather than hidden in a
+  client.</p>
+
+  <h3>Attended versus unattended</h3>
+  <p>Three consoles are driven by a person at a terminal. Triage is not: a host-side actor is
+  both its clock and its fan-out performer, taking a per-console lock and running an unbounded
+  loop at a configured cadence. Everything in §5 through §7 exists because that loop runs
+  without anyone watching it.</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>3</span></div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="page">
+  <h2>3 · The bounded boundary</h2>
+
+  <p>Four constants determine the maximum context any single host↔worker exchange can consume.
+  They are enforced in the host, and <em>mirrored</em> inside the container image — the
+  worker-side extension cannot import host source, so each constant is re-declared there and a
+  test pins the two copies equal.</p>
+
+  <table>
+    <tr><th>Constant</th><th>Governs</th><th class="n">Value</th></tr>
+    <tr><td class="k">MAX_DISPATCH_TEXT</td><td>title and brief, per item</td><td class="n">32 KiB</td></tr>
+    <tr><td class="k">MAX_DISPATCH_REQUEST_ITEMS</td><td>items in one request</td><td class="n">8</td></tr>
+    <tr><td class="k">MAX_DISPATCH_REQUEST_BYTES</td><td>whole request file</td><td class="n">4 MiB</td></tr>
+    <tr><td class="k">MAX_DISPATCH_POLICY_BYTES</td><td>brief delivered to a worker</td><td class="n">256 KiB</td></tr>
+    <tr><td class="k">MAX_REPLY_ARTIFACT_BYTES</td><td>one returned file</td><td class="n">64 KiB</td></tr>
+    <tr><td class="k">MAX_REPLY_INLINE_BYTES</td><td>all artifacts in one reply</td><td class="n">256 KiB</td></tr>
+  </table>
+
+  <p>The worst case is computed rather than assumed, and asserted by a test:
+  <code>8 × 2 × 32,768 × 6 = 3.00 MiB</code> against the 4 MiB file cap — <em>"a document that
+  validates is a document that reads"</em>.</p>
+
+  <h3>Overflow policy differs by direction, deliberately</h3>
+
+  <h4>Outbound: refuse</h4>
+  <p>An oversized request or brief is rejected whole, with a named refusal code, before
+  anything is written to disk. A partially-delivered brief is a worse failure than a rejected
+  one, because the agent cannot tell that it received half a task.</p>
+
+  <h4>Inbound: truncate, fairly, and say so</h4>
+  <p>Replies are allocated under <strong>max–min fair allocation</strong>. Each artifact
+  receives an equal share of the 256 KiB envelope; any artifact under its share is paid in
+  full and the surplus is redistributed among those over. The reason is recorded in capitals
+  in the source:</p>
+
+  <blockquote>ENUMERATION ORDER CANNOT DECIDE WHICH REVIEW SURVIVES</blockquote>
+
+  <p>A naive "inline until the budget is gone" loop silently discards whichever reviewer was
+  enumerated last. Under fair allocation a long review is trimmed, a short one untouched, and
+  every trimmed artifact is <em>named in the collation brief</em> with both byte counts — so a
+  truncated review cannot be read as a terse one.</p>
+
+  <div class="box key">
+    <h4>The escape valve is designed</h4>
+    <p style="margin-bottom:0">A long review is written to a file and declared as a
+    <code>report</code> rather than pasted inline, and the host inlines it under the two caps.
+    The reviewer's own role prompt states the caps in bytes, so the constraint is visible to
+    the agent making the decision rather than only to the host enforcing it.</p>
+  </div>
+
+  <p>The file cap is also checked twice — once from <code>fstat</code> before the read, again
+  from the bytes read — because the worker owns the directory and can append between the two.</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>4</span></div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="page">
+  <h2>4 · Token budget and admission control</h2>
+
+  <p>Each run carries a token ceiling — shipped as <code>6,000,000</code> with a per-task
+  reserve of <code>400,000</code>. The ceiling is <em>required</em> with no default: its
+  absence means unbounded, and inventing a default would refuse work no operator ever
+  budgeted for.</p>
+
+  <h3>Admission is a reservation, not an estimate</h3>
+  <p>Before a task is dispatched, the budget manager projects
+  <em>spent + all outstanding reservations + this task's reserve</em> against the ceiling.
+  Projecting against spend alone is the classic double-book: two tasks admitted back to back
+  each individually fit and jointly overshoot. There are three named refusal reasons, checked
+  in order:</p>
+
+  <table>
+    <tr><th>Refusal</th><th>Condition</th></tr>
+    <tr><td class="k">budget_halted</td><td>the run is already halted; even a task that would fit is refused</td></tr>
+    <tr><td class="k">max_concurrent</td><td>in-flight count at the concurrency limit</td></tr>
+    <tr><td class="k">would_exceed</td><td>the projection crosses the ceiling</td></tr>
+  </table>
+
+  <h3>Crossing the ceiling halts dispatch, not the world</h3>
+  <p>When actuals are booked and the ceiling is crossed, the run is marked halted and exits
+  with a dedicated budget exit code — but <strong>artifacts are still harvested first</strong>.
+  The ceiling error is raised after harvest specifically so that a budget trip cannot destroy
+  the evidence of what the tokens bought. Reservations are dropped on restart while the halt
+  is carried forward, so a restarted actor cannot spend its way back over the line.</p>
+
+  <div class="box">
+    <h4>A consequence worth knowing</h4>
+    <p style="margin-bottom:0">Because the last <code>per_task_reserve_tokens</code> of the
+    ceiling can never be reserved, a run that uses its whole budget ends on an
+    <em>admission refusal</em> rather than a crossed ceiling. That is the intended shape: the
+    system declines to start work it cannot afford to finish, instead of discovering the
+    problem afterwards.</p>
+  </div>
+
+  <h3>Where usage is actually recorded</h3>
+  <p>Two sources were designed. One — a session-statistics RPC — is <strong>not wired</strong>,
+  and cannot be for attended seats, which have no control plane to send it on. The live source
+  is the transcript, folded per assistant message. For the ordinary dispatch path this works:
+  the transcript is discovered by suffix-matching the worker id, and a failed lookup returns
+  zero <em>with a degraded reason</em>, while the run's opening balance is floored at the last
+  published snapshot so a failure cannot refund spend.</p>
+
+  <p>For the triage console specifically, this is broken. See §11.</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>5</span></div>
+</section>
+
+<!-- ============ 5 ============ -->
+<section class="page">
+  <h2>5 · Container isolation</h2>
+
+  <p>Every worker is a container running as uid/gid <code>10001</code>, with PID 1 supplied by
+  <code>tini</code> and the agent binary pinned to an exact version in the image.</p>
+
+  <pre>--user 10001:10001   --cap-drop ALL   --security-opt no-new-privileges
+--read-only (root fs)   --pids-limit 512   --memory 4g   --cpus 2
+--tmpfs /tmp:rw,noexec,nosuid,size=256m   --tmpfs /run:…,size=1m
+--network &lt;internal bridge&gt;   --env-file &lt;mode 0600&gt;</pre>
+
+  <h3>The mount table is the capability model</h3>
+  <table>
+    <tr><th>Path</th><th>Mode</th><th>Notes</th></tr>
+    <tr><td class="k">/workspace</td><td>rw</td><td>a git <em>worktree</em> under the run directory</td></tr>
+    <tr><td class="k">/workspace</td><td><strong>ro</strong></td><td>when <code>isolation: shared-ro</code> — reviewers, collator</td></tr>
+    <tr><td class="k">(absent)</td><td>—</td><td>when <code>isolation: none</code> — triage has no code mount at all</td></tr>
+    <tr><td class="k">/skills</td><td>ro</td><td>staged per role</td></tr>
+    <tr><td class="k">/policy/*</td><td>ro</td><td>root-owned, 0555 — task provenance, allowlists, brief</td></tr>
+    <tr><td class="k">/replies</td><td>ro</td><td>the declared reply set</td></tr>
+    <tr><td class="k">/secrets</td><td>ro</td><td>one file per granted secret</td></tr>
+    <tr><td class="k">/outbox</td><td>rw</td><td><strong>the only writable route out</strong></td></tr>
+  </table>
+
+  <h3>Three details that are easy to get wrong</h3>
+
+  <h4>Guards run on the finished command line</h4>
+  <p>Mount assertions parse the actual argv, not source literals — three legitimate Docker mount
+  spellings once walked past a literal-based check. A second variant resolves symlinks, since a
+  link into the run directory is invisible in the unresolved path.</p>
+
+  <h4>No inline environment flags, asserted</h4>
+  <p>A test asserts the rendered argv contains zero <code>-e</code> flags and does contain
+  <code>--env-file</code>. This keeps secret material out of the host process table, where it
+  would be readable by any local user.</p>
+
+  <h4>Untrusted repository content cannot configure the agent</h4>
+  <p>Extensions, skills and context files are disabled <em>unconditionally</em> — a config key
+  exists for compatibility but the flags are passed regardless, so the protection cannot be
+  switched off. A scanner separately refuses repository state naming a program the
+  version-control tooling would execute.</p>
+
+  <div class="box gap">
+    <h4>Not present: a custom seccomp profile</h4>
+    <p style="margin-bottom:0">Containment rests on <code>--cap-drop ALL</code>,
+    <code>no-new-privileges</code> and the platform default profile. A tailored syscall filter
+    would be the next increment and is not currently implemented.</p>
+  </div>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>6</span></div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section class="page">
+  <h2>6 · Egress control</h2>
+
+  <p>Network containment is three layers, and the second exists because the first has a hole
+  that is not obvious from the documentation of the feature.</p>
+
+  <h3>Layer 1 — the internal bridge</h3>
+  <p>Workers attach to a Docker network created <code>--internal</code>. Two properties are
+  enforced rather than assumed: the host <strong>refuses to adopt</strong> a same-named network
+  that is not internal, and re-inspects after creation rather than trusting the exit status.</p>
+
+  <h3>Layer 2 — the gateway block</h3>
+  <p><code>--internal</code> is a FORWARD-chain restriction, so the bridge <em>gateway
+  address</em> stays reachable from inside the container. Not theoretical: a container on an
+  internal network was observed pulling an SSH banner off the gateway. Closed with an explicit
+  DROP rule.</p>
+
+  <div class="box key">
+    <h4>It refuses the run rather than degrading</h4>
+    <p style="margin-bottom:0">If the rule cannot be verified as installed, the run is refused.
+    There is no override flag — deliberately, because an override on a containment control is
+    the thing that gets used at three in the morning.</p>
+  </div>
+
+  <h3>Layer 3 — relay and CONNECT proxy</h3>
+  <p>A dual-homed relay carries only literal <code>host:port</code> pairs for model traffic and
+  runs an HTTP CONNECT proxy for everything else. The matcher is one implementation shared by
+  both runtimes: wildcards match on <strong>label boundaries</strong> (so
+  <code>evil-example.com</code> does not match <code>*.example.com</code>) and never match a bare
+  IP literal. The default verdict is deny.</p>
+
+  <table>
+    <tr><th>Response</th><th>Meaning</th></tr>
+    <tr><td class="k">403</td><td>policy denial, naming the rule</td></tr>
+    <tr><td class="k">405</td><td>non-CONNECT request — cleartext proxying is not offered</td></tr>
+    <tr><td class="k">400</td><td>no explicit port</td></tr>
+    <tr><td class="k">431</td><td>headers over 8 KiB</td></tr>
+    <tr><td class="k">502</td><td>allowed but unreachable</td></tr>
+  </table>
+
+  <p>The proxy decides <em>before</em> it resolves: no DNS lookup and no socket is opened until
+  the verdict is known, so a denied hostname is never contacted and never leaks into resolver
+  logs. The relay is itself read-only, capability-dropped, IP-forwarding disabled, digest-pinned.</p>
+
+  <div class="box gap">
+    <h4>The grant is a route, not a destination set</h4>
+    <p style="margin-bottom:0">A role's <code>egress_access</code> buys four proxy environment
+    variables. The reachable host set is fleet-wide, so two workers with egress reach the same
+    destinations. The source states the limitation directly: a fleet that needs one worker to
+    reach a host another must not <em>has no way to express that</em>. See §11.</p>
+  </div>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>7</span></div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section class="page">
+  <h2>7 · Credential handling</h2>
+
+  <p>Secrets are delivered as <strong>files</strong>, never as environment values. The
+  environment carries only a pointer.</p>
+
+  <pre>/secrets/TICKET_API_TOKEN          mode 0444, dir 0700
+TICKET_API_TOKEN_FILE=/secrets/TICKET_API_TOKEN</pre>
+
+  <p>Writes are verified by read-back — existence, type, exact length and mode — each failure
+  raising a distinct error. A stricter 0400 was rejected because the container uid cannot read
+  an operator-owned 0400 file; the tightening is bought one level up, on the directory.</p>
+
+  <h3>Scoping is an intersection with five refusals</h3>
+  <p>A fleet-wide allowlist is the ceiling and a role's declaration is a draw against it. The
+  refusals are explicit and throwing rather than filtering: not on the allowlist, missing from
+  the host, a reserved name, a pointer collision, and a value containing a newline. Reserved
+  namespaces cover the orchestrator's own prefixes and <em>every spelling</em> of the proxy
+  variables, so a secret declaration cannot redirect a worker's egress.</p>
+
+  <h3>Cloud credentials are short-lived and stdin-delivered</h3>
+  <p>Google credentials arrive as an access token written over <code>docker exec</code> with the
+  value on <strong>stdin, never argv</strong>, into a tmpfs under a restrictive umask. Absence of
+  a refresh token is <em>proved</em> by scanning all materials, and "no credential" is an explicit
+  value with a reason rather than a missing field — so absence is testable.</p>
+
+  <h3>Redaction scrubs the serialised line</h3>
+  <p>Not a list of known fields — the whole serialised event — precisely so that a new event
+  shape cannot leak silently. Two details are worth transferring:</p>
+  <ul>
+    <li><strong>Leading-prefix matching.</strong> A real incident ended with a model running
+    <code>echo $TOKEN | head -c 20</code> — it truncated the secret <em>because it had been
+    told not to echo it</em>. A whole-value matcher sees nothing; a prefix matcher catches it.</li>
+    <li><strong>The marker names the variable</strong>, so an operator reading
+    <code>[redacted:TICKET_API_TOKEN]</code> knows what to rotate.</li>
+  </ul>
+
+  <div class="box gap">
+    <h4>The limit, stated in the source rather than discovered</h4>
+    <blockquote style="margin-bottom:0">"A worker can still <code>cat</code> the file, and
+    anything it cats lands in exactly the same transcript. That is a narrower blast radius,
+    <strong>not a seal</strong>."</blockquote>
+  </div>
+
+  <p>This is the right way to hold the control: file delivery converts an <em>accidental</em>
+  disclosure into a <em>deliberate</em> one that must name the file. It does not prevent a
+  determined or confused agent from reading its own credentials into a transcript.</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>8</span></div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section class="page">
+  <h2>8 · The verbgate</h2>
+
+  <p>Credential scoping decides <em>which identity</em> a worker acts as; the verbgate decides
+  <em>which verbs</em> it may issue, logging each to a ledger a host-side collector tails beyond
+  the worker's reach. It is a set of shims on <code>PATH</code> ahead of the real binaries.</p>
+
+  <pre style="margin:5px 0">gcloud kubectl helm gsutil bq    -> the shim, first on PATH
+/usr/local/libexec/&lt;name&gt;.real   -> the binary it fronts</pre>
+
+  <table>
+    <tr><th>Check, in order</th><th>Outcome</th></tr>
+    <tr><td class="k">policy writable</td><td>exit 78 — refuses <em>every</em> verb, before classifying anything</td></tr>
+    <tr><td class="k">read verb</td><td>exec the real binary; ledger <code>allow_read</code></td></tr>
+    <tr><td class="k">token-prefix match</td><td>exec; ledger <code>allow_listed</code></td></tr>
+    <tr><td class="k">anything else</td><td>exit 77; ledger <code>refuse</code></td></tr>
+  </table>
+
+  <h3 style="margin-top:8px">Two principles the shim states about itself</h3>
+  <p><strong>A control the subject can reconfigure is not a control.</strong> The paths are
+  constants. They were once environment-overridable, which made the gate self-service: one
+  variable supplied a policy file of the worker's own choosing, another pointed the ledger at
+  <code>/dev/null</code> and discarded the evidence.</p>
+  <p><strong>A policy the subject can edit is not a policy.</strong> Five surfaces are checked
+  before classification. A file is tested directly <em>and through its parent</em>, because a
+  writable directory lets a worker replace a read-only file wholesale; a directory is tested
+  directly only. Matching is on verb tokens with flags excluded entirely — never a match against
+  the whole command line, which reordering the flags defeats.</p>
+
+  <h3 style="margin-top:8px">Every way it failed open is recorded in the source</h3>
+  <ul style="margin-bottom:4px">
+    <li>A <em>positional</em> outvoted the verb — <code>gcloud compute instances delete real-vm
+    list</code> classified as a read because an argument was named <code>list</code>.</li>
+    <li>A glob minted credentials: <code>print-access-token</code> matched <code>print-*</code>,
+    and <code>curl</code> is in the image — a bearer token buys any mutating REST call, ungated.</li>
+    <li>The working directory decided the verdict — an unquoted argv of <code>*</code> re-expanded
+    against the CWD, so a file named <code>describe</code> could reclassify a delete.</li>
+    <li>The ledger dropped precisely the evasive rows: the argument terminator was missing, so any
+    argv carrying a flag failed to serialise and the error suppression swallowed it.</li>
+    <li>Provenance was forgeable — the task id came from environment, and a crafted value appended
+    a duplicate <code>decision</code> key resolving in the worker's favour.</li>
+  </ul>
+
+  <div class="box key" style="margin:6px 0">
+    <h4>A capability that is refused is not the same as one silently unread</h4>
+    <p style="margin-bottom:0"><code>cloud_allow[]</code> is designed but not built: the policy
+    file is written empty and never rewritten, so every mutating cloud verb is refused today. The
+    configuration layer <em>throws</em> on the key rather than accepting it — the deliberate
+    opposite of §11's second gap, where a field is parsed and then consumed by nothing.</p>
+  </div>
+
+  <div class="box gap" style="margin:6px 0 0">
+    <h4>The limit, stated in the shim's own header</h4>
+    <blockquote style="margin-bottom:0">"This stops the <em>casual</em> destructive action — the
+    confused agent, the injected 'delete the failing deployment'. It does not stop a determined
+    one: bash can reach the <code>.real</code> path directly. Credential scoping is the stronger
+    control; this is defence-in-depth on top, <strong>not a substitute</strong>."</blockquote>
+  </div>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>9</span></div>
+</section>
+
+<!-- ============ 9 ============ -->
+<section class="page">
+  <h2>9 · The five roles</h2>
+
+  <p>Grants are declared per role and enforced at two points: the agent's tool registry is
+  constructed with only the granted tools, and the configuration parser refuses combinations
+  that contradict a declared <code>read_only</code> intent.</p>
+
+  <table>
+    <tr><th>Role</th><th>bash</th><th>write</th><th>Isolation</th><th>Distinctive grant</th></tr>
+    <tr><td class="k">triage</td><td>—</td><td>—</td><td>none</td><td><code>dispatch_request</code></td></tr>
+    <tr><td class="k">observer</td><td>yes</td><td>yes</td><td>none</td><td>cloud + egress</td></tr>
+    <tr><td class="k">ticketing</td><td>yes</td><td>yes</td><td>none</td><td>egress + 4 secrets</td></tr>
+    <tr><td class="k">collator</td><td>—</td><td>—</td><td>shared-ro</td><td><code>dispatch_request</code></td></tr>
+    <tr><td class="k">reviewer</td><td>—</td><td>—</td><td>shared-ro</td><td><code>submit_report</code> only</td></tr>
+  </table>
+
+  <p>Only the three bash-less roles genuinely forfeit write capability. A role holding
+  <code>bash</code> can redirect to a file regardless, so removing <code>write</code> from
+  a tester takes away a tool rather than a capability — the source says so explicitly, which
+  is the kind of candour that makes the rest of the model trustworthy.</p>
+
+  <h3>Triage — and the lesson of the empty success</h3>
+  <p>Triage holds no bash, no write, and has no code mount. Its product is a dispatch request
+  file. When <code>write</code> was withdrawn without providing a verb to produce that file,
+  the console broke <em>silently</em>: sweeps settled with <code>status: success</code> and the
+  summary "Dispatched sweep to obs-t1" — having written nothing at all. The
+  <code>dispatch_request</code> tool exists because removing a capability produced a
+  confident, empty success rather than a failure.</p>
+
+  <h3>Observer — a turn budget, not a method</h3>
+  <p>The observer is the only seat with live cluster access, restricted to read verbs by a
+  wrapper that refuses any mutating verb not on an allowlist. Its dominant instruction is
+  about <em>stopping</em>: "around twenty tool calls in, stop investigating and write what you
+  have" — written after an observer made 150 correct calls against the right namespaces and
+  ended its turn with an empty outbox.</p>
+
+  <h3>Ticketing — ask the server the question</h3>
+  <p>It holds a live write credential and must verify every write by re-fetching the object.
+  Its sharpest rule is about scale: never download a collection and search it locally. A run
+  that enumerated 59,616 objects and grepped reported that a user with thirty open tickets
+  had none.</p>
+
+  <h3>Collator and reviewer — manufactured independence</h3>
+  <p>Three reviewer seats share an identical configuration and differ in exactly two fields:
+  model and briefing file. Three <em>different vendors</em> is pinned by a test, because three
+  seats on one model is one reviewer with three transcripts — a shared training blind spot
+  becomes invisible by construction and independent agreement stops being independent. The
+  collator may not form its own verdict first: "you cannot both pre-judge the change and be the
+  one who says the agreement was independent."</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>10</span></div>
+</section>
+
+<!-- ============ 10 ============ -->
+<section class="page">
+  <h2>10 · Autonomous triage: the sweep</h2>
+
+  <p>The triage console runs unattended on a cadence. One pass is called a sweep, and it is the
+  clearest worked example of the whole design.</p>
+
+  <ol>
+    <li><strong>Lock.</strong> The actor takes a per-console lock and refuses if another holds
+    it — two actors sweeping one control plane is precisely the overload the console exists to
+    detect.</li>
+    <li><strong>Mint.</strong> A sweep id is <code>max(record, run tree)</code>, run tree
+    authoritative. No id is reused; a resumed actor re-deriving a dispatched id is refused.</li>
+    <li><strong>Partition.</strong> The collator receives the <em>whole</em> declared service list
+    and divides it; the host validates the union covers each service <strong>exactly once</strong>.</li>
+    <li><strong>Fan out.</strong> Observers dispatch <em>concurrently</em> against one deadline, so
+    a sweep costs the largest share rather than the sum.</li>
+    <li><strong>Join, collate, assess, announce.</strong></li>
+  </ol>
+
+  <div class="box key">
+    <h4>Concurrency is an anti-criterion, not a preference</h4>
+    <p style="margin-bottom:0">Serial dispatch once meant one observer received its slice and
+    the other two received nothing before the pass ended. The sweep then reported two services
+    it "could not see", pointing an operator at a cluster that was healthy and reachable.
+    <em>The cost of getting this wrong is not throughput, it is coverage.</em></p>
+  </div>
+
+  <p>An incomplete or duplicated partition refuses the <strong>whole</strong> sweep — nothing is
+  dispatched. A partial sweep that presents as complete is worse than no sweep, because it
+  produces a clean report for services nobody looked at.</p>
+
+  <h3>Three gates that make an unattended verdict trustworthy</h3>
+  <ul>
+    <li><strong>One row per declared service</strong>, not per row the worker wrote. A service
+    the agent omitted still appears, marked indeterminate; a service it invented cannot appear
+    at all.</li>
+    <li><strong>An unevidenced "healthy" is downgraded</strong> to indeterminate. There is no
+    exported code path that hands a caller the worker's raw health claim.</li>
+    <li><strong>Coverage is counted host-side</strong> from the run tree, never from the
+    worker's account of what it did.</li>
+  </ul>
+
+  <p>The single worker-authored string reaching a notification is fenced between banners and
+  line-prefixed, so no agent output can be mistaken for a host statement. The agent is an
+  <strong>untrusted reporter</strong> throughout: its prose is accepted, its counts never are.</p>
+
+  <h3>A worked failure, and its fix</h3>
+  <p>The in-flight predicate asked whether a sweep had <em>settled</em> and never how long it had
+  <em>owed</em>. A collator whose turn died mid-work left a sweep permanently "in flight", and the
+  actor skipped eleven consecutive passes over nearly three hours until the console was rebuilt by
+  hand. The console <em>did</em> report itself — a skip alarm fired at the third skip and then
+  deduplicated into silence, which is right for a service that is down and wrong for the monitor
+  being dead.</p>
+
+  <p>The fix separates fact from policy: the predicate reports <em>when</em> the sweep was
+  dispatched; the pass, which already holds the clock and the configuration, decides what is too
+  old. The bound is <code>max(max_consecutive_skips × cadence, 2 × sweep_deadline)</code>, keeping
+  the existing alarm as the early warning rather than silently retiring it. A sweep whose envelope
+  cannot be dated is never expired.</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>11</span></div>
+</section>
+
+<!-- ============ 11 ============ -->
+<section class="page">
+  <h2>11 · Known gaps and what they cost</h2>
+
+  <p>These are collected rather than scattered, and each is recorded in the source at the point
+  where it would otherwise mislead a reader.</p>
+
+  <div class="box gap">
+    <h4>1 · The triage console's token ceiling cannot trip</h4>
+    <p>Its per-seat accounting reads a worker-state usage field, to avoid pulling the harvest
+    module into a deliberately narrow import closure. Nothing ever writes that field, so the
+    accounting sums zeros across four seats and the ceiling is structurally unreachable here.
+    Worse, a readable-but-default state file returns zero rather than "unknown", so the seat is
+    not flagged degraded and the floor-at-last-snapshot protection never engages.</p>
+    <p style="margin-bottom:0"><strong>Cost:</strong> the one console that runs unattended and
+    indefinitely is the one whose budget ceiling does not apply. <strong>Fix:</strong> read the
+    transcript here as the dispatch path already does.</p>
+  </div>
+
+  <div class="box gap">
+    <h4>2 · <code>run_timeout</code> is declared and read by nothing</h4>
+    <p style="margin-bottom:0">Shipped as two hours, validated at parse time, consumed nowhere.
+    Today this is load-bearing in the wrong direction — a standing console is only possible
+    <em>because</em> nothing reads it — so it is best understood as a tripwire: if it ever gains
+    a reader, the triage console dies at two hours. The project's own precedent is to delete such
+    fields rather than leave them, on the grounds that a parsed-and-unread field advertises a
+    control that does not exist.</p>
+  </div>
+
+  <div class="box gap">
+    <h4>3 · Egress is fleet-wide, not per-role</h4>
+    <p style="margin-bottom:0">Documented in source and configuration. The blast radius of a
+    compromised or confused worker with egress is the whole allowlist, not its own slice of it.</p>
+  </div>
+
+  <div class="box gap">
+    <h4>4 · No retry cap</h4>
+    <p style="margin-bottom:0">Re-dispatch is bounded by an epoch fence rather than a counter,
+    and that fence is unreachable on the attended path — which is the path every console seat
+    actually runs on.</p>
+  </div>
+
+  <h3>Two smaller ones</h3>
+  <ul>
+    <li>The verb-gate ledger is writable by the worker it audits — evidence against a confused
+    agent, not a hostile one. The stronger control is credential scoping.</li>
+    <li>A training-detection guard fails <em>open</em>: if its process listing fails it produces
+    no matches and therefore no refusal.</li>
+  </ul>
+
+  <p>Listing these is not self-deprecation. A guardrail inventory containing only working
+  guardrails cannot be audited, because nothing distinguishes a control that was verified from
+  one that was assumed.</p>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>12</span></div>
+</section>
+
+<!-- ============ 12 ============ -->
+<section class="page">
+  <h2>12 · What transfers</h2>
+
+  <p>Five principles generalise beyond this codebase, and none of them depends on the choice of
+  model or vendor.</p>
+
+  <h3>Bound the boundary in bytes, and choose the overflow policy per direction</h3>
+  <p>Refuse outbound, because a half-delivered task is invisible to the agent receiving it.
+  Truncate inbound, because a partial result is still useful — but allocate fairly and report
+  what was cut, or enumeration order silently becomes an editorial decision.</p>
+
+  <h3>Treat the agent as an untrusted reporter</h3>
+  <p>Accept its prose; recompute every structural fact host-side. Coverage, membership,
+  evidence and identity should all be derived from state the host owns. This single decision is
+  what makes an unattended verdict worth acting on.</p>
+
+  <h3>Declare capability; never infer it</h3>
+  <p>The <code>hosted</code> flag is mandatory because every available heuristic misclassified a
+  local endpoint. The same argument applies to trust boundaries, egress grants and write access:
+  a declaration can be reviewed, and an inference cannot.</p>
+
+  <h3>Instrument the absence</h3>
+  <p>Prevention leaves no record — a blocked escape attempt and a workload that never tried are
+  indistinguishable in the logs. Build the detector that converts "nothing happened" into
+  evidence, make its three states distinct (armed-and-quiet is not the same as unarmed), and
+  make its death fatal rather than silent.</p>
+
+  <h3>Delete configuration nothing reads</h3>
+  <p>A field that parses and validates and is never consumed is worse than a missing feature,
+  because it reads as a control during review. Where such a field is load-bearing by its
+  absence, say so explicitly and treat it as a tripwire.</p>
+
+  <div class="box key" style="margin-top:20px">
+    <h4>The one-line version</h4>
+    <p style="margin-bottom:0; font-size:11pt">A local fleet is affordable because of what it is
+    <strong>forbidden to send</strong>, not because of what it is asked to do — and it is
+    trustworthy unattended because the host recomputes everything that matters rather than
+    believing the report.</p>
+  </div>
+
+  <div class="meta" style="margin-top:28px">
+    Dan Elliott · cmux-fleet · figures read from the source tree at commit <code>1959b76</code>
+  </div>
+
+  <div class="foot"><span>cmux-fleet — supporting document</span><span>13</span></div>
+</section>
+
+</body>
+</html>
