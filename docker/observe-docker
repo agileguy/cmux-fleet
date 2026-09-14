@@ -26,11 +26,23 @@ exist.
   verb   ps | inspect | logs | stats | top | events | info | version
 
 Exit 77 with "observe-ssh: refused before ssh ran" on stderr: the call was
-malformed and no ssh connection was attempted. Exit 77 without that line: the
-call reached the target, and the target's forced command refused it. Exit 78:
-the fleet did not deliver this worker's configuration. Exit 255: ssh's own
-failure (a host-key mismatch or a proxy refusal). Any other exit status is
-docker's own, returned from the target.
+malformed, and no ssh connection was attempted.
+
+Exit 77 with "not a recognised verb" on stderr: the target does not offer
+that verb. Any other exit 77: the target refused an argument.
+
+Exit 78: the fleet did not deliver this worker's configuration.
+
+Exit 126 or 127: docker did not run on the target at all.
+
+Exit 1 with one of these on stderr: docker could not reach its own daemon.
+  "failed to connect to the docker API"
+  "Cannot connect to the Docker daemon"
+  "permission denied while trying to connect to the"
+
+Exit 255: ssh's own failure (a host-key mismatch or a proxy refusal).
+
+Any other exit status is docker's own, returned from the target.
 EOF
 }
 
