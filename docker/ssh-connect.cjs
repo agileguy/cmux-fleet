@@ -30,6 +30,32 @@
  * `connect-proxy.cjs`'s `splitAuthority` splits that at its last `:`, and
  * bracketing it here would change the host string the egress policy judges.
  *
+ * WHAT `HTTPS_PROXY` MAY BE, AND WHAT OF IT IS EVER PRINTED. Only an
+ * `http://host:port` URL, the shape `src/run/worker-env.ts` sets. `https:` is
+ * refused because this client never speaks TLS to the proxy: it would send its
+ * CONNECT in plaintext to a port expecting a handshake. No other scheme names a
+ * proxy it can talk to. Both are refused before any lookup or connection. A
+ * value containing `@` is refused outright: no `http://host:port` has one, the
+ * fleet's proxy takes no credentials and this client sends none, and parsers
+ * disagree about where userinfo ends (`http://user:1234\@host` hides it from
+ * the WHATWG parser, which reads `user` as the host and `1234` as the port). A
+ * refusal never repeats the value or anything parsed from it: stderr reaches
+ * the worker's transcript, and a value that does not parse may carry
+ * credentials in a form no check here recognises. An IPv6 literal's brackets,
+ * which `URL.hostname` keeps, are removed before `net.connect`, which would
+ * otherwise look `[fd00::1]` up as a name.
+ *
+ * WHAT OPENS THE TUNNEL, AND WHY THE PROXY'S TEXT IS ESCAPED. Only a status
+ * line matching `^HTTP/1\.[01] 200( |$)` opens it. Anything else, a `200` in
+ * the wrong field included, is reported as a refusal. That report puts the
+ * proxy's own status line and body on ssh's stderr, and from there into the
+ * worker's transcript, so a broken or hostile proxy could otherwise write
+ * terminal escape sequences or a bare CR there. Every C0 control but tab and
+ * LF, DEL, and every C1 control is shown as `\xNN`. C1 is included because the
+ * response is decoded as latin1, which turns the bytes 0x80-0x9f, the 8-bit
+ * CSI among them, into those code points. An honest refusal is printable ASCII
+ * and prints unchanged.
+ *
  * THE THROWAWAY VERSION THIS REPLACES. `scripts/observe/characterise-ssh-transport`
  * (task 3.0) carries an inline `CONNECT_CLIENT` that measured the round trip
  * against a real proxy on 2026-09-14 (`test/fixtures/observe/ssh-transport-facts.json`,
@@ -100,8 +126,8 @@
  * rather than calling `process.exit()`: Node only exits once the event loop is
  * empty, which is exactly once every queued write has actually left the
  * process. A forced `process.exit()` here would truncate exactly the bytes
- * item 2 exists to deliver — the proxy's refusal line — or the tail of a
- * legitimate tunnel.
+ * this file exists to deliver when the proxy refuses (SRD-OBSERVER-ROLES §5.2)
+ * — the proxy's refusal line — or the tail of a legitimate tunnel.
  */
 
 const net = require("node:net");
@@ -127,30 +153,60 @@ const RESPONSE_TIMEOUT_MS = 30_000;
  */
 const HOST_SHAPE = /^[A-Za-z0-9:][A-Za-z0-9.:-]{0,252}$/;
 
+/** The only status lines that open the tunnel (see the docblock). */
+const TUNNEL_OPEN_STATUS = /^HTTP\/1\.[01] 200( |$)/;
+
 /** Write a diagnostic this script generated itself (not the proxy's own text). */
 function say(message) {
   process.stderr.write(`ssh-connect: ${message}\n`);
 }
 
 /**
- * `HTTPS_PROXY` as `src/run/worker-env.ts:1016` sets it: an `http://host:port`
- * URL. Returns `null` for anything that is not one, including an empty or
- * missing value — the caller reports WHY rather than letting `new
- * URL(undefined)` throw an uncaught `TypeError` with no context an operator
- * reading a stalled worker can act on.
+ * The proxy's own text, made safe for ssh's stderr: every C0 control but tab
+ * and LF, DEL, and every C1 control shown as `\xNN` (see the docblock).
+ */
+function printable(text) {
+  return text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
+/**
+ * `HTTPS_PROXY` as `src/run/worker-env.ts` sets it: an `http://host:port` URL.
+ * Returns `{ hostname, port }`, or `{ refusal }` naming what is wrong without
+ * repeating the value (see the docblock), including for an empty or missing
+ * one, so the caller never lets `new URL(undefined)` throw an uncaught
+ * `TypeError` an operator reading a stalled worker cannot act on.
  */
 function parseProxyUrl(raw) {
-  if (raw === undefined || raw === "") return null;
+  if (raw === undefined || raw === "") {
+    return { refusal: "HTTPS_PROXY is not set; it must be an http://host:port URL" };
+  }
+  if (raw.includes("@")) {
+    return {
+      refusal:
+        "HTTPS_PROXY must not carry credentials (anything before an '@'): this client sends none and the " +
+        "fleet's proxy takes none. The value is not repeated here",
+    };
+  }
   let url;
   try {
     url = new URL(raw);
   } catch {
-    return null;
+    return { refusal: "HTTPS_PROXY must be an http://host:port URL, and its value does not parse as a URL" };
   }
-  if (url.hostname === "") return null;
-  const port = url.port === "" ? (url.protocol === "https:" ? 443 : 80) : Number(url.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-  return { hostname: url.hostname, port };
+  if (url.protocol !== "http:") {
+    return {
+      refusal:
+        "HTTPS_PROXY must be an http:// URL, and its scheme is not http:. https: is not supported: this client " +
+        "never speaks TLS to the proxy, so it would send its CONNECT in plaintext to a port expecting a TLS handshake",
+    };
+  }
+  const bracketed = url.hostname.startsWith("[") && url.hostname.endsWith("]");
+  const hostname = bracketed ? url.hostname.slice(1, -1) : url.hostname;
+  const port = url.port === "" ? 80 : Number(url.port);
+  if (hostname === "" || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return { refusal: "HTTPS_PROXY must be an http://host:port URL with a host and a port in 1..65535" };
+  }
+  return { hostname, port };
 }
 
 /**
@@ -212,8 +268,8 @@ function main() {
     return;
   }
   const proxy = parseProxyUrl(process.env.HTTPS_PROXY);
-  if (proxy === null) {
-    say(`HTTPS_PROXY must be an http(s) URL with a host, got ${JSON.stringify(process.env.HTTPS_PROXY ?? null)}`);
+  if ("refusal" in proxy) {
+    say(proxy.refusal);
     process.exitCode = 1;
     return;
   }
@@ -267,8 +323,8 @@ function main() {
    * reached, deadline) prints it, and `teardown()`'s `torn` makes that once.
    */
   const endRefusal = (note) => {
-    const statusLine = head.subarray(0, headerEnd - 4).toString("latin1").split("\r\n")[0] ?? "";
-    const body = head.subarray(headerEnd).toString("latin1");
+    const statusLine = printable(head.subarray(0, headerEnd - 4).toString("latin1").split("\r\n")[0] ?? "");
+    const body = printable(head.subarray(headerEnd).toString("latin1"));
     process.stderr.write(`${statusLine}\n`);
     if (body.length > 0) process.stderr.write(body.endsWith("\n") ? body : `${body}\n`);
     if (note !== undefined) say(note);
@@ -335,9 +391,8 @@ function main() {
 
       const headerText = head.subarray(0, end).toString("latin1");
       const statusLine = headerText.split("\r\n")[0] ?? "";
-      const status = statusLine.split(" ")[1];
 
-      if (status === "200") {
+      if (TUNNEL_OPEN_STATUS.test(statusLine)) {
         spliced = true;
         clearTimeout(deadline);
         // Anything the proxy wrote AFTER its header in the same read belongs

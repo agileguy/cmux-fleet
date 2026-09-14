@@ -13,7 +13,12 @@
  * `docker/connect-proxy.cjs`'s own `refuse()` is the model for the fake
  * server's refusal response: a status line, `Connection: close`, and a body
  * naming the rule (`connect-proxy.cjs:144-157`, `:257-265`) — because the
- * whole point of item 2 in this task is that text surviving to stderr.
+ * whole point of printing a refusal (SRD-OBSERVER-ROLES §5.2, task 3.1) is
+ * that text surviving to stderr.
+ *
+ * The same paths under the Node the worker image ships are in
+ * `test/integration/ssh-connect-node.test.ts`: the `node` these tests spawn is
+ * whatever is on PATH, which on a development Mac is Bun's wrapper.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -22,13 +27,76 @@ import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { gateBudget } from "../support/budget.ts";
 
-const SCRIPT = new URL("../../docker/ssh-connect.cjs", import.meta.url).pathname;
+/** `fileURLToPath`, not `.pathname`: a checkout path with a space or `%` stays percent-encoded in `.pathname`. */
+const SCRIPT = fileURLToPath(new URL("../../docker/ssh-connect.cjs", import.meta.url));
+
+/**
+ * Can this host listen on the IPv6 loopback? Probed once, before any test is
+ * defined, so the IPv6 test can skip itself by name on a host without `::1`
+ * and say so, rather than fail for a reason that has nothing to do with the
+ * script.
+ */
+async function ipv6LoopbackProbe(): Promise<string | null> {
+  const s = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      s.once("error", reject);
+      s.listen(0, "::1", () => resolve());
+    });
+    return null;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code ?? String(err);
+  } finally {
+    await new Promise<void>((res) => (s.listening ? s.close(() => res()) : res()));
+  }
+}
+const IPV6_UNAVAILABLE = await ipv6LoopbackProbe();
+if (IPV6_UNAVAILABLE !== null) {
+  console.warn(
+    `[skip] the IPv6 proxy-literal test needs an IPv6 loopback, and this host has none: ` +
+      `listening on ::1 failed with ${IPV6_UNAVAILABLE}.`,
+  );
+}
 
 let fake: Server;
 let fakePort = 0;
 let connections = 0;
+/** The same fake CONNECT server on `::1`, for the bracketed-literal test. Unset when the host has no IPv6 loopback. */
+let fake6: Server | undefined;
+let fake6Port = 0;
+let connections6 = 0;
+
+/**
+ * Status lines the fake server answers with, keyed by the host the client
+ * asks for, each followed by a blank line and `BANNER`, then a close. Only the
+ * `open` ones may start a tunnel: the script accepts exactly
+ * `^HTTP/1\.[01] 200( |$)`.
+ */
+const STATUS_LINES: Record<string, { line: string; open: boolean }> = {
+  "status-http10.test": { line: "HTTP/1.0 200 Connection established", open: true },
+  "status-nophrase.test": { line: "HTTP/1.1 200", open: true },
+  "status-xyz.test": { line: "XYZ 200 whatever", open: false },
+  "status-prefixed.test": { line: "XHTTP/1.1 200 OK", open: false },
+  "status-http2.test": { line: "HTTP/2 200 OK", open: false },
+  "status-http110.test": { line: "HTTP/1.10 200 OK", open: false },
+  "status-lower.test": { line: "http/1.1 200 OK", open: false },
+  "status-2000.test": { line: "HTTP/1.1 2000 OK", open: false },
+};
+
+/**
+ * A refusal carrying terminal controls in its status line and body, sent as
+ * these exact bytes: ESC sequences (a screen clear, a window-title set), BEL,
+ * CR, NUL, DEL and the 8-bit CSI byte, around a tab and a final LF, which are
+ * the two controls that pass through.
+ */
+const CONTROL_STATUS = "HTTP/1.1 403 Forbidden\x1b[2J\x07";
+const CONTROL_BODY = "egress denied\x1b]0;owned\x07 by rule\r default-deny\x00\x7f\x9b31m\ttabbed\n";
+/** What stderr must read for that refusal: every control but tab and LF shown as `\xNN`. */
+const CONTROL_STDERR =
+  "HTTP/1.1 403 Forbidden\\x1b[2J\\x07\n" + "egress denied\\x1b]0;owned\\x07 by rule\\x0d default-deny\\x00\\x7f\\x9b31m\ttabbed\n";
 /** The request line of the most recent CONNECT the fake server received. */
 let lastRequestLine = "";
 /** Server-side sockets still open, so a hung child's connection can be cut before it is killed. */
@@ -62,6 +130,8 @@ require(script);
 
 let workDir = "";
 let wrapper = "";
+/** A script that prints the sorted names of its environment, for the test that pins `childEnv`. */
+let envProbe = "";
 /**
  * What `node` actually is for the child. On this repo's development Macs it is
  * Bun's `node` wrapper; in CI and inside the worker image it is real Node, and
@@ -108,149 +178,200 @@ function startFakeServer(): Promise<void> {
   return new Promise((resolve) => {
     fake = createServer({ allowHalfOpen: true }, (socket: Socket) => {
       connections += 1;
-      let buf = Buffer.alloc(0);
-      let routed = false;
-
-      socket.on("error", () => {});
-      openSockets.add(socket);
-      socket.on("close", () => openSockets.delete(socket));
-
-      const onData = (chunk: Buffer) => {
-        if (routed) return;
-        buf = Buffer.concat([buf, chunk]);
-        const end = buf.indexOf("\r\n\r\n");
-        if (end === -1) return;
-        routed = true;
-
-        const requestLine = buf.subarray(0, buf.indexOf("\r\n")).toString("latin1");
-        lastRequestLine = requestLine;
-        const authority = requestLine.split(" ")[1] ?? "";
-
-        if (authority === "bigtunnel.test:2222") {
-          // A 200 and more than 8192 bytes of tunnel data in ONE write.
-          socket.write(`HTTP/1.1 200 Connection Established\r\n\r\n${BIG_PIPELINED}`);
-          socket.removeListener("data", onData);
-          socket.on("data", (d) => socket.write(`ECHO:${d.toString("latin1")}`));
-          socket.on("end", () => socket.end());
-          return;
-        }
-
-        if (authority === "bigheader.test:2222") {
-          // A 200 whose blank line lands past byte 8192, in one write: the
-          // header itself is over the cap even though it does terminate.
-          socket.write(`HTTP/1.1 200 Connection Established\r\nX-Pad: ${"a".repeat(9000)}\r\n\r\nSSH-2.0-fake\r\n`);
-          return;
-        }
-
-        if (authority === "hugebody.test:443") {
-          const body = `egress denied by rule default-deny\n${HUGE_BODY_FILLER}`;
-          socket.end(
-            `HTTP/1.1 403 Forbidden\r\n` +
-              `Proxy-Agent: fake-connect-proxy\r\n` +
-              `Content-Length: ${Buffer.byteLength(body)}\r\n` +
-              `Connection: close\r\n\r\n${body}`,
-          );
-          return;
-        }
-
-        if (authority === "tunnel.test:2222") {
-          // 200, with bytes pipelined in the SAME write — the target sshd
-          // answering fast enough to land in one TCP segment.
-          socket.write("HTTP/1.1 200 Connection Established\r\n\r\nPIPELINED-HELLO");
-          socket.removeListener("data", onData);
-          socket.on("data", (d) => socket.write(`ECHO:${d.toString("latin1")}`));
-          socket.on("end", () => socket.end());
-          return;
-        }
-
-        if (authority === "denied.test:443") {
-          const body = "egress denied by rule default-deny\n";
-          socket.end(
-            `HTTP/1.1 403 Forbidden\r\n` +
-              `Proxy-Agent: fake-connect-proxy\r\n` +
-              `Content-Length: ${Buffer.byteLength(body)}\r\n` +
-              `Connection: close\r\n\r\n${body}`,
-          );
-          return;
-        }
-
-        if (authority === "cap.test:1") {
-          // Never reaches a `\r\n\r\n` — the header-bound must stop this on
-          // its own rather than accumulate it forever.
-          socket.write("X".repeat(MAX_HEADER_TEST_FILLER));
-          return;
-        }
-
-        if (authority === "fin.test:2222") {
-          // A tunnel the far side closes cleanly, shortly after its banner.
-          socket.write(`HTTP/1.1 200 Connection Established\r\n\r\n${BANNER}`);
-          setTimeout(() => socket.end(), 100);
-          return;
-        }
-
-        if (authority === "bulk.test:2222") {
-          // Far more than one read's worth of tunnel data, then a FIN.
-          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-          socket.end(BULK);
-          return;
-        }
-
-        if (authority === "slowtunnel.test:2222") {
-          // A healthy tunnel that outlives the (scaled) response deadline.
-          socket.write(`HTTP/1.1 200 Connection Established\r\n\r\n${BANNER}`);
-          setTimeout(() => socket.end(), 1_500);
-          return;
-        }
-
-        if (authority === "stream.test:2222") {
-          // Tunnel data with no end, for as long as the reader keeps reading.
-          // One chunk per turn, capped, so a runtime whose `write()` never
-          // reports backpressure cannot spin this process.
-          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-          const chunk = Buffer.alloc(64 * 1024, 0x41);
-          let sent = 0;
-          const pump = () => {
-            if (socket.destroyed || sent >= 64 * 1024 * 1024) return;
-            sent += chunk.length;
-            if (socket.write(chunk)) setImmediate(pump);
-          };
-          socket.on("drain", pump);
-          pump();
-          return;
-        }
-
-        if (authority === "wedged.test:2222") {
-          // Accepts, reads the CONNECT, and never answers.
-          return;
-        }
-
-        if (authority === "keepalive407.test:443") {
-          // A complete refusal on a connection the proxy keeps open.
-          const body = "proxy authentication required by rule relay-auth\n";
-          socket.write(
-            `HTTP/1.1 407 Proxy Authentication Required\r\n` +
-              `Content-Length: ${Buffer.byteLength(body)}\r\n` +
-              `Connection: keep-alive\r\n\r\n${body}`,
-          );
-          return;
-        }
-
-        if (authority === "noclose403.test:443") {
-          // A refusal with no Content-Length on a connection that never closes:
-          // nothing in the response says where the body ends.
-          socket.write("HTTP/1.1 403 Forbidden\r\n\r\negress denied by rule default-deny\n");
-          return;
-        }
-
-        socket.end("HTTP/1.1 500 Internal Server Error\r\n\r\nunrecognised test authority\n");
-      };
-      socket.on("data", onData);
+      onFakeConnection(socket);
     });
     fake.listen(0, "127.0.0.1", () => {
       fakePort = (fake.address() as { port: number }).port;
       resolve();
     });
   });
+}
+
+/** The same handler on `::1`, counted separately so a test can tell which listener was reached. */
+function startFake6Server(): Promise<void> {
+  return new Promise((resolve) => {
+    const server = createServer({ allowHalfOpen: true }, (socket: Socket) => {
+      connections6 += 1;
+      onFakeConnection(socket);
+    });
+    fake6 = server;
+    server.listen(0, "::1", () => {
+      fake6Port = (server.address() as { port: number }).port;
+      resolve();
+    });
+  });
+}
+
+function onFakeConnection(socket: Socket): void {
+  let buf = Buffer.alloc(0);
+  let routed = false;
+
+  socket.on("error", () => {});
+  openSockets.add(socket);
+  socket.on("close", () => openSockets.delete(socket));
+
+  const onData = (chunk: Buffer) => {
+    if (routed) return;
+    buf = Buffer.concat([buf, chunk]);
+    const end = buf.indexOf("\r\n\r\n");
+    if (end === -1) return;
+    routed = true;
+
+    const requestLine = buf.subarray(0, buf.indexOf("\r\n")).toString("latin1");
+    lastRequestLine = requestLine;
+    const authority = requestLine.split(" ")[1] ?? "";
+
+    if (authority === "bigtunnel.test:2222") {
+      // A 200 and more than 8192 bytes of tunnel data in ONE write.
+      socket.write(`HTTP/1.1 200 Connection Established\r\n\r\n${BIG_PIPELINED}`);
+      socket.removeListener("data", onData);
+      socket.on("data", (d) => socket.write(`ECHO:${d.toString("latin1")}`));
+      socket.on("end", () => socket.end());
+      return;
+    }
+
+    if (authority === "bigheader.test:2222") {
+      // A 200 whose blank line lands past byte 8192, in one write: the
+      // header itself is over the cap even though it does terminate.
+      socket.write(`HTTP/1.1 200 Connection Established\r\nX-Pad: ${"a".repeat(9000)}\r\n\r\nSSH-2.0-fake\r\n`);
+      return;
+    }
+
+    if (authority === "hugebody.test:443") {
+      const body = `egress denied by rule default-deny\n${HUGE_BODY_FILLER}`;
+      socket.end(
+        `HTTP/1.1 403 Forbidden\r\n` +
+          `Proxy-Agent: fake-connect-proxy\r\n` +
+          `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+          `Connection: close\r\n\r\n${body}`,
+      );
+      return;
+    }
+
+    if (authority === "tunnel.test:2222") {
+      // 200, with bytes pipelined in the SAME write — the target sshd
+      // answering fast enough to land in one TCP segment.
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\nPIPELINED-HELLO");
+      socket.removeListener("data", onData);
+      socket.on("data", (d) => socket.write(`ECHO:${d.toString("latin1")}`));
+      socket.on("end", () => socket.end());
+      return;
+    }
+
+    if (authority === "denied.test:443") {
+      const body = "egress denied by rule default-deny\n";
+      socket.end(
+        `HTTP/1.1 403 Forbidden\r\n` +
+          `Proxy-Agent: fake-connect-proxy\r\n` +
+          `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+          `Connection: close\r\n\r\n${body}`,
+      );
+      return;
+    }
+
+    if (authority === "cap.test:1") {
+      // Never reaches a `\r\n\r\n` — the header-bound must stop this on
+      // its own rather than accumulate it forever.
+      socket.write("X".repeat(MAX_HEADER_TEST_FILLER));
+      return;
+    }
+
+    if (authority === "fin.test:2222") {
+      // A tunnel the far side closes cleanly, shortly after its banner.
+      socket.write(`HTTP/1.1 200 Connection Established\r\n\r\n${BANNER}`);
+      setTimeout(() => socket.end(), 100);
+      return;
+    }
+
+    if (authority === "bulk.test:2222") {
+      // Far more than one read's worth of tunnel data, then a FIN.
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      socket.end(BULK);
+      return;
+    }
+
+    if (authority === "slowtunnel.test:2222") {
+      // A healthy tunnel that outlives the (scaled) response deadline.
+      socket.write(`HTTP/1.1 200 Connection Established\r\n\r\n${BANNER}`);
+      setTimeout(() => socket.end(), 1_500);
+      return;
+    }
+
+    if (authority === "stream.test:2222") {
+      // Tunnel data with no end, for as long as the reader keeps reading.
+      // One chunk per turn, capped, so a runtime whose `write()` never
+      // reports backpressure cannot spin this process.
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      const chunk = Buffer.alloc(64 * 1024, 0x41);
+      let sent = 0;
+      const pump = () => {
+        if (socket.destroyed || sent >= 64 * 1024 * 1024) return;
+        sent += chunk.length;
+        if (socket.write(chunk)) setImmediate(pump);
+      };
+      socket.on("drain", pump);
+      pump();
+      return;
+    }
+
+    if (authority === "wedged.test:2222") {
+      // Accepts, reads the CONNECT, and never answers.
+      return;
+    }
+
+    if (authority === "keepalive407.test:443") {
+      // A complete refusal on a connection the proxy keeps open.
+      const body = "proxy authentication required by rule relay-auth\n";
+      socket.write(
+        `HTTP/1.1 407 Proxy Authentication Required\r\n` +
+          `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+          `Connection: keep-alive\r\n\r\n${body}`,
+      );
+      return;
+    }
+
+    if (authority === "noclose403.test:443") {
+      // A refusal with no Content-Length on a connection that never closes:
+      // nothing in the response says where the body ends.
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\negress denied by rule default-deny\n");
+      return;
+    }
+
+    const statusHost = authority.slice(0, -":2222".length);
+    if (authority.endsWith(":2222") && Object.hasOwn(STATUS_LINES, statusHost)) {
+      // A status line under test, a blank line, the banner, and a close.
+      socket.end(`${STATUS_LINES[statusHost]?.line}\r\n\r\n${BANNER}`);
+      return;
+    }
+
+    if (authority === "controls.test:443") {
+      // CONTROL_STATUS and CONTROL_BODY as exact bytes, complete by Content-Length.
+      socket.end(
+        Buffer.from(
+          `${CONTROL_STATUS}\r\nContent-Length: ${CONTROL_BODY.length}\r\nConnection: close\r\n\r\n${CONTROL_BODY}`,
+          "latin1",
+        ),
+      );
+      return;
+    }
+
+    if (authority === "chunked403.test:443") {
+      // A chunked refusal that also carries a Content-Length far shorter than
+      // its body. Transfer-Encoding overrides Content-Length (RFC 9112 §6.3),
+      // so the body runs to the close 200 ms later; honouring the length would
+      // cut the response off after two bytes, before the rule text.
+      const rule = "egress denied by rule default-deny\n";
+      socket.write(
+        `HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n` +
+          `${rule.length.toString(16)}\r\n${rule}\r\n0\r\n\r\n`,
+      );
+      setTimeout(() => socket.end(), 200);
+      return;
+    }
+
+    socket.end("HTTP/1.1 500 Internal Server Error\r\n\r\nunrecognised test authority\n");
+  };
+  socket.on("data", onData);
 }
 
 /** One byte over `MAX_HEADER_BYTES` (8192) in `ssh-connect.cjs`. */
@@ -307,9 +428,13 @@ beforeAll(async () => {
   writeFileSync(wrapper, WRAPPER_SOURCE);
   const runtimeProbe = join(workDir, "runtime.cjs");
   writeFileSync(runtimeProbe, `process.stdout.write(process.versions.bun ? "bun" : "node");\n`);
-  childRuntime = Bun.spawnSync(["node", runtimeProbe]).stdout.toString() === "bun" ? "bun" : "node";
+  childRuntime =
+    Bun.spawnSync(["node", runtimeProbe], { env: childEnv(null) }).stdout.toString() === "bun" ? "bun" : "node";
+  envProbe = join(workDir, "env-keys.cjs");
+  writeFileSync(envProbe, `process.stdout.write(JSON.stringify(Object.keys(process.env).sort()));\n`);
   startResetProxy();
   await startFakeServer();
+  if (IPV6_UNAVAILABLE === null) await startFake6Server();
 }, gateBudget([2_000]));
 
 afterAll(async () => {
@@ -317,6 +442,8 @@ afterAll(async () => {
   for (const s of resetSockets) s.terminate();
   resetProxy.stop(true);
   await new Promise<void>((res) => fake.close(() => res()));
+  const server6 = fake6;
+  if (server6 !== undefined) await new Promise<void>((res) => server6.close(() => res()));
   rmSync(workDir, { recursive: true, force: true });
 });
 
@@ -355,11 +482,15 @@ async function run(opts: {
   return { code, stdout, stderr };
 }
 
-/** The child's environment: this process's, with `HTTPS_PROXY` pointed at the fake server, replaced, or (`null`) removed. */
+/**
+ * The child's environment, built from nothing: `PATH`, so `node` and `bash`
+ * resolve, and `HTTPS_PROXY` pointed at the fake server, replaced, or (`null`)
+ * left out. Nothing else of this process's environment reaches the child, so
+ * a `NODE_OPTIONS`, `https_proxy` or anything else in the operator's shell
+ * cannot change what these tests observe.
+ */
 function childEnv(proxy: string | null | undefined): Record<string, string> {
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  delete env["HTTPS_PROXY"];
-  delete env["https_proxy"];
+  const env: Record<string, string> = { PATH: process.env["PATH"] ?? "/usr/bin:/bin" };
   if (proxy !== null) {
     env["HTTPS_PROXY"] = proxy ?? `http://127.0.0.1:${fakePort}`;
   }
@@ -448,7 +579,7 @@ describe("the 200 path (SRD-OBSERVER-ROLES 3.1)", () => {
   }, gateBudget([2_000]));
 });
 
-describe("what a refusal looks like on stderr (item 2)", () => {
+describe("what a refusal looks like on stderr (SRD-OBSERVER-ROLES §5.2, task 3.1)", () => {
   test("a 403 with a rule body: stderr carries both the status line and the rule text", async () => {
     const { code, stdout, stderr } = await run({ host: "denied.test", port: "443" });
 
@@ -459,7 +590,80 @@ describe("what a refusal looks like on stderr (item 2)", () => {
   }, gateBudget([2_000]));
 });
 
-describe("refused before any connection is attempted (item 3)", () => {
+describe("what the proxy's answer can put on stdout and stderr (SRD-OBSERVER-ROLES §5.2, task 3.1)", () => {
+  test.each(
+    Object.entries(STATUS_LINES)
+      .filter(([, c]) => !c.open)
+      .map(([host, c]) => [c.line, host] as const),
+  )("the status line '%s' is reported as a refusal, and nothing reaches stdout", async (line, host) => {
+    const { code, stdout, stderr } = await run({ host, port: "2222" });
+
+    expect(code).not.toBe(0);
+    expect(stdout).toBe("");
+    expect(stderr.startsWith(`${line}\n`)).toBe(true);
+  }, gateBudget([2_000]));
+
+  test.each(
+    Object.entries(STATUS_LINES)
+      .filter(([, c]) => c.open)
+      .map(([host, c]) => [c.line, host] as const),
+  )("the status line '%s' opens the tunnel", async (_line, host) => {
+    const { code, stdout, stderr } = await run({ host, port: "2222" });
+
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toBe(BANNER);
+  }, gateBudget([2_000]));
+
+  test("control characters in the proxy's status line and body reach stderr escaped, and tab and LF pass through", async () => {
+    const { code, stdout, stderr } = await run({ host: "controls.test", port: "443" });
+
+    expect(code).not.toBe(0);
+    expect(stdout).toBe("");
+    // No C0 control but tab and LF, no DEL and no C1 control, anywhere…
+    expect(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(stderr)).toBe(false);
+    // …and each one shown as `\xNN`, so the refusal is still readable.
+    expect(stderr).toBe(CONTROL_STDERR);
+  }, gateBudget([2_000]));
+});
+
+describe("a bracketed IPv6 proxy literal (SRD-OBSERVER-ROLES §5.2, task 3.1)", () => {
+  // WHATWG `URL.hostname` keeps an IPv6 literal's brackets, and `net.connect`
+  // given `[::1]` looks it up as a name. The connection must reach a proxy
+  // listening on `::1` itself. Skips, with a warning at load, only on a host
+  // with no IPv6 loopback.
+  test.skipIf(IPV6_UNAVAILABLE !== null)("http://[::1]:<port> reaches the proxy on ::1 and the tunnel round-trips", async () => {
+    const before = connections6;
+    const { code, stdout, stderr } = await run({
+      host: "tunnel.test",
+      port: "2222",
+      stdin: "PING",
+      proxy: `http://[::1]:${fake6Port}`,
+    });
+
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("ECHO:PING");
+    expect(connections6).toBe(before + 1);
+  }, gateBudget([2_000]));
+});
+
+describe("the environment these tests give the child", () => {
+  test("is PATH and HTTPS_PROXY alone, whatever this process's environment holds", async () => {
+    process.env["SSH_CONNECT_TEST_CANARY"] = "leaked";
+    try {
+      const proc = Bun.spawn(["node", envProbe], { env: childEnv(undefined), stdout: "pipe", stderr: "pipe" });
+      const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+
+      expect(code).toBe(0);
+      expect(JSON.parse(out)).toEqual(["HTTPS_PROXY", "PATH"]);
+    } finally {
+      delete process.env["SSH_CONNECT_TEST_CANARY"];
+    }
+  }, gateBudget([2_000]));
+});
+
+describe("refused before any connection is attempted (SRD-OBSERVER-ROLES §5.2, task 3.1)", () => {
   test.each([
     ["a missing host", { host: "", port: "22" }, "missing host"],
     ["a non-integer port", { host: "tunnel.test", port: "abc" }, "port must be an integer"],
@@ -481,6 +685,71 @@ describe("refused before any connection is attempted (item 3)", () => {
     expect(stderr).toContain("HTTPS_PROXY");
     expect(connections).toBe(before);
   }, gateBudget([2_000]));
+
+  // Only `http:`. This client never speaks TLS to the proxy, so an `https:`
+  // proxy would be sent a plaintext CONNECT on its TLS port, and no other
+  // scheme names a proxy it can talk to.
+  test.each([["https"], ["ftp"], ["socks5"]] as const)(
+    "an HTTPS_PROXY with the %s: scheme is refused, naming http:// and why https: is not supported, and the fake server sees no connection",
+    async (scheme) => {
+      const before = connections;
+      const { code, stdout, stderr } = await run({
+        host: "tunnel.test",
+        port: "2222",
+        proxy: `${scheme}://127.0.0.1:${fakePort}`,
+      });
+
+      expect(code).not.toBe(0);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("must be an http:// URL");
+      expect(stderr).toContain("https: is not supported");
+      expect(stderr).toContain("TLS");
+      expect(connections).toBe(before);
+    },
+    gateBudget([2_000]),
+  );
+
+  test("a non-http scheme is refused before its host is looked up", async () => {
+    // `.invalid` never resolves (RFC 6761), so a lookup would end in a
+    // `getaddrinfo` failure on stderr in place of the scheme refusal.
+    const { code, stderr } = await run({ host: "tunnel.test", port: "2222", proxy: "ftp://proxy.invalid:3128" });
+
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("must be an http:// URL");
+    expect(stderr).not.toContain("getaddrinfo");
+    expect(stderr).not.toContain("proxy connection failed");
+  }, gateBudget([2_000]));
+
+  // Credentials are refused, and nothing on stderr repeats them: stderr
+  // reaches the worker's transcript. Any `@` refuses the value, because no
+  // `http://host:port` has one and parsers disagree about where userinfo ends;
+  // a `\` hides it from the WHATWG parser, which reads what follows as a path.
+  test.each([
+    ["a user and password", "http://user:s3cret-pw@127.0.0.1:PORT"],
+    ["a user alone", "http://s3cret-user@127.0.0.1:PORT"],
+    ["a password alone", "http://:s3cret-pw@127.0.0.1:PORT"],
+    ["credentials on an https: URL", "https://user:s3cret-pw@127.0.0.1:PORT"],
+    ["credentials in a value that does not parse", "http://user:s3cret-pw@[::1"],
+    ["credentials a backslash hides from the parser", "http://s3cret:1234\\@127.0.0.1"],
+    ["credentials and no '//'", "s3cret:pw@127.0.0.1:PORT"],
+  ] as const)(
+    "an HTTPS_PROXY with %s is refused, repeats none of it, and the fake server sees no connection",
+    async (_label, template) => {
+      const before = connections;
+      const { code, stdout, stderr } = await run({
+        host: "tunnel.test",
+        port: "2222",
+        proxy: template.replace("PORT", String(fakePort)),
+      });
+
+      expect(code).not.toBe(0);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("HTTPS_PROXY");
+      expect(stderr).not.toContain("s3cret");
+      expect(connections).toBe(before);
+    },
+    gateBudget([2_000]),
+  );
 
   // The host is interpolated into the CONNECT request line and the Host
   // header, so anything outside `observe-ssh`'s own `is_host` shape could add
@@ -521,10 +790,19 @@ describe("refused before any connection is attempted (item 3)", () => {
   }, gateBudget([2_000]));
 });
 
-describe("bounds on the proxy's own response (item 4)", () => {
+describe("bounds on the proxy's own response (SRD-OBSERVER-ROLES §5.2, task 3.1)", () => {
+  test("a Transfer-Encoding overrides a Content-Length, so the rule text is read to the close rather than cut at the length", async () => {
+    const { code, stdout, stderr } = await run({ host: "chunked403.test", port: "443" });
+
+    expect(code).not.toBe(0);
+    expect(stdout).toBe("");
+    expect(stderr.startsWith("HTTP/1.1 403 Forbidden\n")).toBe(true);
+    expect(stderr).toContain("egress denied by rule default-deny");
+  }, gateBudget([2_000]));
+
   test("a 200 whose blank line lands past byte 8192 is refused, even in one read", async () => {
-    // Guards the P2 fix from the other side: moving the terminator search
-    // ahead of the cap must not let an oversized header through.
+    // Guards the terminator-first search from the other side: looking for the
+    // blank line before judging size must not let an oversized header through.
     const { code, stdout, stderr } = await run({ host: "bigheader.test", port: "2222" });
 
     expect(code).not.toBe(0);

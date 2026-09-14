@@ -977,7 +977,27 @@ jobs:
           # RUNS with it open, so the collection total moves and the pass total
           # does not. A new row that ran here with the gate closed would be a
           # row that does not need the daemon and does not belong in this job.
-          TOTAL_EXPECTED: "160"
+          #
+          # 2026-09-14, 160 -> 170: ssh-connect-node.test.ts, SRD-OBSERVER-ROLES
+          # §5.2 task 3.1. It runs docker/ssh-connect.cjs under
+          # node:24-bookworm-slim by the digest RELAY_IMAGE pins, which the
+          # "Pull the relay image" step above already pulls, so it needs no
+          # pull of its own. All ten of its probes need a daemon, and nothing
+          # else pins that script's runtime: test/unit/ssh-connect.test.ts
+          # spawns whatever `node` is on PATH, which the fast `test` job never
+          # pins and which on a development Mac is Bun's wrapper.
+          #
+          # DERIVED BY THE HAND METHOD, the eighteen listed paths plus this one
+          # with every gate variable UNSET (bun 1.3.11, no listener on :8000),
+          # not by adding 10 to 160:
+          #
+          #   -> 8 pass, 162 skip, 0 fail. Ran 170 tests across 19 files.
+          #
+          # The eighteen without it, re-measured the same day, read 8 pass,
+          # 152 skip, 0 fail, Ran 160 tests across 18 files: ten more skips and
+          # the pass count unmoved at 8, the shape ten Docker-gated probes must
+          # have.
+          TOTAL_EXPECTED: "170"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -1160,7 +1180,8 @@ jobs:
               test/integration/mount-preflight-remote.test.ts \
               test/integration/relay-provider-containment.test.ts \
               test/integration/report-tools-image.test.ts \
-              test/integration/extension-declarations-image.test.ts
+              test/integration/extension-declarations-image.test.ts \
+              test/integration/ssh-connect-node.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
