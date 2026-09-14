@@ -1,6 +1,8 @@
 #!/bin/sh
 # vm-forced-command — the whole of what the observer-vm credential can do
-# this round (SRD-OBSERVER-ROLES §6.2-6.4; Phase 5 task 5.1).
+# (SRD-OBSERVER-ROLES §6.2-6.4; Phase 5 task 5.1 landed `uptime`, `os`,
+# `system`, `failed`, `unit`, `disk` and `memory`; task 5.3 adds `journal`
+# and `kernel`).
 #
 # Installed root-owned, mode 0755, at a path the enrolled account cannot
 # write, and named as the `command=` in that account's one `authorized_keys`
@@ -26,9 +28,8 @@
 # argument might carry a newline that would forge a second, fake log line).
 # It follows `scripts/observe/docker-forced-command`'s pattern.
 #
-# ## Verbs THIS ROUND (SRD §6.4 — `journal` and `kernel` are task 5.3, not
-# this round; until then they are refused exactly like any other unknown
-# verb, by the same catch-all case below)
+# ## Verbs (SRD §6.4 — this is the final grammar; every verb the role is
+# granted is enabled)
 #
 #   uptime  (no arguments)
 #             -> cat /proc/uptime /proc/loadavg
@@ -44,19 +45,27 @@
 #             -> systemctl list-units --state=failed --no-legend --plain --no-pager
 #   unit    <unit>  (exactly one argument, a unit name)
 #             -> systemctl show <unit> --no-pager --property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus
+#   journal since=<N>s lines=<M>  (both required, M <= 500)
+#           [unit=<unit>] [priority=<0-7>]  (both optional)
+#             -> journalctl --no-pager --output=short-iso --lines=<M> --since=-<N>s [--unit=<unit>] [--priority=<P>]
+#   kernel  since=<N>s lines=<M>  (both required, M <= 500; no other key)
+#             -> journalctl --no-pager --dmesg --output=short-iso --lines=<M> --since=-<N>s
 #   disk    (no arguments)
 #             -> df -P -k
 #   memory  (no arguments)
 #             -> cat /proc/meminfo
 #
-# Every other verb — `journal`, `kernel` (both deferred to task 5.3),
-# `shutdown`, `reboot`, `poweroff`, `halt`, any `systemctl` verb other than
-# the two above (`start`, `stop`, `restart`, `reload`, `enable`, `disable`,
-# `mask`, `kill`, `isolate`, `daemon-reload`, `set-property`, ...), `kill`,
-# any package manager, `sudo`, any free-form path read, and a `unit`
-# sub-verb such as `unit restart nginx.service` (two arguments after `unit`,
-# refused on the argument count before any grammar check runs) — exits 77
-# naming the verb and runs nothing at all (SRD §6.4).
+# Every other verb — `shutdown`, `reboot`, `poweroff`, `halt`, any
+# `systemctl` verb other than the two above (`start`, `stop`, `restart`,
+# `reload`, `enable`, `disable`, `mask`, `kill`, `isolate`, `daemon-reload`,
+# `set-property`, ...), any `journalctl` flag other than the closed set
+# `journal`/`kernel` build below (`--vacuum-*`, `--rotate`, `--flush`,
+# `--sync`, `--root`, `--file`, `--image`, `--directory`, ...), `kill`, any
+# package manager, `sudo`, and any free-form path read — exits 77 naming the
+# verb (or, for a bad `journal`/`kernel` argument, the verb plus a grammar
+# reason) and runs nothing at all (SRD §6.4). A `unit` sub-verb such as
+# `unit restart nginx.service` (two arguments after `unit`) is refused on the
+# argument count before any grammar check runs, the same as task 5.1 left it.
 #
 # ## The unit-name grammar (SRD §6.3, tightened)
 #
@@ -70,6 +79,64 @@
 #      `docker-forced-command`'s name grammar applies to a container name).
 #   2. The length is capped at 255 bytes, so one argument cannot grow the
 #      argv without bound.
+#
+# `journal`'s optional `unit=<unit>` reuses this exact grammar and cap.
+#
+# ## The `journal`/`kernel` argument grammar (SRD §6.4, tightened)
+#
+# Both verbs take zero or more `key=value` tokens, in ANY order. Every
+# tightening below is this implementation's choice, stated here because the
+# SRD leaves the exact grammar to the implementation:
+#
+#   1. A token that does not contain '=' at all, a token whose key (the text
+#      before the first '=') is not one this verb recognises, or a key given
+#      more than once — each is refused outright, before any other check
+#      runs. This is a case-pattern dispatch on the WHOLE token
+#      (`since=*`, `lines=*`, ...), not a split-then-validate on the key
+#      substring, so an unrecognised or malformed token is never echoed
+#      anywhere: the refusal reason is always a fixed string (see the header
+#      above on why an unvalidated byte is never repeated back). This is
+#      also what makes a `--vacuum-time=1s`-shaped token refused as an
+#      unrecognised key rather than reaching `journalctl`'s argv: nothing
+#      here treats a leading `--` specially, or appends an unmatched token
+#      to the target command's argv — every token must match one of the
+#      named `key=*` patterns to contribute anything at all.
+#   2. `since=<N>s`: `N` is 1 to 9 ASCII digits, no leading zero UNLESS `N`
+#      is exactly the one digit `0` (a single digit is never "leading"),
+#      immediately followed by the literal letter `s` — nothing else. No
+#      shell arithmetic (`$(( ))`) ever touches `N`: an expression like
+#      `$((08))` would misread a leading zero as an octal digit, so every
+#      check here is a character class or a length compare
+#      (`${#value}`), never a numeric one.
+#   3. `lines=<M>`: `M` is ASCII digits only, no leading zero (so `M` is
+#      never `0` either — `lines=0` is refused, `lines=00` too), and its
+#      value must be 1 to 500 inclusive. The upper bound is enforced by
+#      CASE-PATTERN matching against a 3-digit candidate (`[1-4][0-9][0-9]`
+#      or the literal `500`), the same "compare digit strings, never
+#      `$(( ))`" reasoning as `N` above — not `[ "$M" -le 500 ]`, even
+#      though POSIX `test`'s own numeric comparison would read a
+#      leading-zero digit string as decimal rather than octal (as
+#      `docker-forced-command` notes of its own, more permissive `tail=`):
+#      this script's `M` grammar refuses every leading zero before any
+#      numeric question could arise, so no numeric operator is needed or
+#      used.
+#   4. `priority=<P>` (`journal` only): `P` is exactly one digit `0`-`7` —
+#      the syslog priority range `journalctl --priority` also accepts a
+#      symbolic name for, but this credential's grammar takes only the
+#      digit.
+#   5. `unit=<unit>` (`journal` only): the unit-name grammar above, unchanged.
+#   6. `kernel` does not accept `unit=` or `priority=` at all: either key,
+#      for `kernel`, is refused exactly like any other key `kernel` does not
+#      recognise (choice 1), not with a bespoke message — `kernel` reads the
+#      dmesg ring buffer, which has no per-unit or per-priority journal
+#      fields to filter on the way `journal` does.
+#   7. The SINCE SPELLING `--since=-<N>s` is MEASURED, not chosen here:
+#      `test/fixtures/observe/vm-tool-shapes.json` -> `.since.chosen`,
+#      confirmed to parse on both the oldest and the current target systemd
+#      this project tracks (systemd 239 and systemd 255) and to actually
+#      bound the query window (`.since.bound`). A re-measurement that picks
+#      a different spelling is a deliberate edit to the literal `s` below,
+#      not a guess.
 #
 # ## Exit codes
 #
@@ -150,6 +217,122 @@ is_unit() {
   only_chars "$1" "${UNIT_CHARS}" && first_in "$1" "${ALNUM}" && [ "${#1}" -le "${UNIT_MAX}" ]
 }
 
+# `since=<N>s`'s `N`: decimal digits only, 1 to 9 of them, no leading zero
+# unless `N` is exactly the one digit `0` (header choice 2). Never `$(( ))`:
+# the digit-count bound and the leading-zero check are both a character
+# class or a length compare, nothing numeric.
+is_since_n() {
+  only_chars "$1" "${DIGIT}" || return 1
+  case ${#1} in
+    1) return 0 ;;
+    2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) first_in "$1" "123456789" ;;
+    *) return 1 ;;
+  esac
+}
+
+# `lines=<M>`: decimal digits only, no leading zero (so never `0` either),
+# value 1 to 500 inclusive (header choice 3). The upper bound is a CASE
+# pattern against a 3-digit candidate, not a numeric comparison: a leading
+# `1`-`4` is always under 500 regardless of the other two digits, and the
+# one 3-digit exception at the boundary is matched literally.
+is_lines() {
+  only_chars "$1" "${DIGIT}" || return 1
+  first_in "$1" "123456789" || return 1
+  case ${#1} in
+    1 | 2) return 0 ;;
+    3)
+      case $1 in
+        [1-4][0-9][0-9]) return 0 ;;
+        500) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# `priority=<P>` (`journal` only): exactly one digit `0`-`7` (header choice
+# 4). A case pattern of a single bracket expression matches exactly one
+# character, so a longer value (e.g. "37") is refused by construction.
+is_priority() {
+  case $1 in
+    [0-7]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Parses the `key=value` arguments common to `journal` and `kernel` (header
+# section on their grammar) into the globals since_val, lines_val, unit_val,
+# priority_val (the raw text after each key's '=', ungrammar-checked until
+# after the loop) and seen_since/seen_lines/seen_unit/seen_priority (0 or
+# 1). Reads the global `verb` to name the refusal and to tell `journal` from
+# `kernel` (`kernel` does not recognise `unit=` or `priority=` at all —
+# header choice 6). Refuses immediately on: a token with no recognised
+# key, a key repeated, or (for `kernel`) `unit=`/`priority=` at all; after
+# the loop, on a missing `since=` or `lines=`, then on either value failing
+# its own grammar. Every refusal reason here is a fixed string — never the
+# token itself — because a case pattern selecting a branch does not prove
+# the token's bytes are safe to print (header choice 1).
+parse_journal_kernel_args() {
+  since_val=
+  lines_val=
+  unit_val=
+  priority_val=
+  seen_since=0
+  seen_lines=0
+  seen_unit=0
+  seen_priority=0
+  for arg in "$@"; do
+    case ${arg} in
+      since=*)
+        [ "${seen_since}" -eq 0 ] || refuse "${verb}" "since= may be given only once"
+        since_val=${arg#since=}
+        seen_since=1
+        ;;
+      lines=*)
+        [ "${seen_lines}" -eq 0 ] || refuse "${verb}" "lines= may be given only once"
+        lines_val=${arg#lines=}
+        seen_lines=1
+        ;;
+      unit=*)
+        [ "${verb}" = "journal" ] || refuse "${verb}" "unrecognised argument key"
+        [ "${seen_unit}" -eq 0 ] || refuse "${verb}" "unit= may be given only once"
+        unit_val=${arg#unit=}
+        seen_unit=1
+        ;;
+      priority=*)
+        [ "${verb}" = "journal" ] || refuse "${verb}" "unrecognised argument key"
+        [ "${seen_priority}" -eq 0 ] || refuse "${verb}" "priority= may be given only once"
+        priority_val=${arg#priority=}
+        seen_priority=1
+        ;;
+      *=*)
+        refuse "${verb}" "unrecognised argument key"
+        ;;
+      *)
+        refuse "${verb}" "every argument must be key=value"
+        ;;
+    esac
+  done
+  [ "${seen_since}" -eq 1 ] || refuse "${verb}" "since=<N>s is required"
+  [ "${seen_lines}" -eq 1 ] || refuse "${verb}" "lines=<M> is required"
+  case ${since_val} in
+    *s) since_n=${since_val%s} ;;
+    *) refuse "${verb}" "a since= value must be [0-9]{1,9} digits followed by 's'" ;;
+  esac
+  is_since_n "${since_n}" ||
+    refuse "${verb}" "a since= value must be [0-9]{1,9} digits, no leading zero unless it is just '0', followed by 's'"
+  is_lines "${lines_val}" ||
+    refuse "${verb}" "a lines= value must be 1-500, decimal digits only, no leading zero"
+  if [ "${seen_unit}" -eq 1 ]; then
+    is_unit "${unit_val}" ||
+      refuse "${verb}" "a unit name must match ^[a-zA-Z0-9][a-zA-Z0-9@._:-]*\$, max ${UNIT_MAX} bytes"
+  fi
+  if [ "${seen_priority}" -eq 1 ]; then
+    is_priority "${priority_val}" || refuse "${verb}" "a priority= value must be exactly one digit 0-7"
+  fi
+}
+
 # --- read SSH_ORIGINAL_COMMAND ------------------------------------------------
 
 original=${SSH_ORIGINAL_COMMAND:-}
@@ -204,6 +387,17 @@ case ${verb} in
       refuse "${verb}" "a unit name must match ^[a-zA-Z0-9][a-zA-Z0-9@._:-]*\$, max ${UNIT_MAX} bytes"
     exec systemctl show "${unit_name}" --no-pager --property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus
     ;;
+  journal)
+    parse_journal_kernel_args "$@"
+    set -- journalctl --no-pager --output=short-iso "--lines=${lines_val}" "--since=-${since_n}s"
+    [ "${seen_unit}" -eq 0 ] || set -- "$@" "--unit=${unit_val}"
+    [ "${seen_priority}" -eq 0 ] || set -- "$@" "--priority=${priority_val}"
+    exec "$@"
+    ;;
+  kernel)
+    parse_journal_kernel_args "$@"
+    exec journalctl --no-pager --dmesg --output=short-iso "--lines=${lines_val}" "--since=-${since_n}s"
+    ;;
   disk)
     [ "$#" -eq 0 ] || refuse "${verb}" "disk takes no arguments; got $#"
     exec df -P -k
@@ -213,6 +407,6 @@ case ${verb} in
     exec cat /proc/meminfo
     ;;
   *)
-    refuse "${verb}" "not a recognised verb; recognised verbs are uptime, os, system, failed, unit, disk and memory"
+    refuse "${verb}" "not a recognised verb; recognised verbs are uptime, os, system, failed, unit, journal, kernel, disk and memory"
     ;;
 esac

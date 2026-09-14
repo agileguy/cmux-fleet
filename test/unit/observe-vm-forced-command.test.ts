@@ -1,10 +1,8 @@
 /**
  * `scripts/observe/vm-forced-command` is the whole of what the
- * `observer-vm` credential can do this round (SRD-OBSERVER-ROLES §6.2-6.4;
- * Phase 5 task 5.1: `uptime`, `os`, `system`, `failed`, `unit`, `disk`,
- * `memory`). `journal` and `kernel` are task 5.3, next round — until then
- * they are refused like any other unrecognised verb, and this file asserts
- * that.
+ * `observer-vm` credential can do (SRD-OBSERVER-ROLES §6.2-6.4; Phase 5 task
+ * 5.1 landed `uptime`, `os`, `system`, `failed`, `unit`, `disk`, `memory`;
+ * task 5.3 adds `journal` and `kernel`, both covered below).
  *
  * sshd runs this script directly for the enrolled key
  * (`restrict,command="<installed path>"`, §6.2), with NO arguments of its
@@ -22,10 +20,16 @@
  * then its argv, NUL-separated so an element holding a space survives as
  * one record. "No invocation recorded" means that record file does not
  * exist — the atomic write-then-rename below is what makes that reliable
- * even against a process that never gets that far. `journalctl` is on PATH
- * as a recording fake for parity with the eventual task 5.3 addition, but
- * no verb in THIS round ever reaches it — nothing below expects a record
- * naming it.
+ * even against a process that never gets that far. `journal` and `kernel`
+ * are the first verbs to reach the `journalctl` fake; every other verb
+ * still never records anything naming it.
+ *
+ * The `journal`/`kernel` since-spelling tests never hand-type
+ * `--since=-<N>s`: they build it from
+ * `test/fixtures/observe/vm-tool-shapes.json` `.since.chosen`, the MEASURED
+ * spelling the real script's header cites (choice 7). If either the fixture
+ * or the script changes spelling, the mismatch turns those tests red
+ * instead of silently passing against a stale literal.
  *
  * ## Shell coverage
  *
@@ -43,6 +47,30 @@ const ROOT = join(import.meta.dir, "..", "..");
 /** The real script. Executed directly by every case — see the header. */
 const REAL_SCRIPT = join(ROOT, "scripts", "observe", "vm-forced-command");
 const SRC = readFileSync(REAL_SCRIPT, "utf8");
+
+/**
+ * MEASURED, never hand-typed: test/fixtures/observe/vm-tool-shapes.json.
+ * `.since.chosen` is the exact `--since=-{N}s` template the real script's
+ * header (choice 7) says it emits; `{N}` is replaced with the actual count
+ * by `sinceArg` below.
+ */
+const VM_TOOL_SHAPES = JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "observe", "vm-tool-shapes.json"), "utf8")) as {
+  since: { chosen: string };
+};
+const SINCE_TEMPLATE: string = VM_TOOL_SHAPES.since.chosen;
+
+/**
+ * MEASURED, never hand-typed: test/fixtures/observe/vm-forbidden-commands.json.
+ * Every `.entries[].command`, sent as SSH_ORIGINAL_COMMAND, must be refused.
+ */
+const VM_FORBIDDEN_COMMANDS = JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "observe", "vm-forbidden-commands.json"), "utf8")) as {
+  entries: Array<{ command: string; source: string }>;
+};
+
+/** Builds the `--since=-<n>s`-shaped argument from the fixture's measured template, never hand-typed. */
+function sinceArg(n: number): string {
+  return SINCE_TEMPLATE.replace("{N}", String(n));
+}
 
 /** One refusal message every case below can recognise, verb-agnostic. */
 const REFUSAL_PREFIX = 'vm-forced-command: refused';
@@ -80,6 +108,23 @@ function failedArgv(): string[] {
 }
 function unitArgv(unit: string): string[] {
   return ["systemctl", "show", unit, "--no-pager", "--property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus"];
+}
+/**
+ * `journal`'s expected argv (SRD §6.4, header choices 1-7). `sinceSeconds`
+ * builds its `--since=` element from the fixture's MEASURED spelling
+ * (`sinceArg`), never a hand-typed literal. `unit`/`priority` are omitted
+ * from the argv entirely when not given, in that order, matching the real
+ * script's own build order.
+ */
+function journalArgv(lines: number, sinceSeconds: number, opts: { unit?: string; priority?: number } = {}): string[] {
+  const argv = ["journalctl", "--no-pager", "--output=short-iso", `--lines=${lines}`, sinceArg(sinceSeconds)];
+  if (opts.unit !== undefined) argv.push(`--unit=${opts.unit}`);
+  if (opts.priority !== undefined) argv.push(`--priority=${opts.priority}`);
+  return argv;
+}
+/** `kernel`'s expected argv (SRD §6.4, header choices 1-3 and 7): no `unit`/`priority`, ever. */
+function kernelArgv(lines: number, sinceSeconds: number): string[] {
+  return ["journalctl", "--no-pager", "--dmesg", "--output=short-iso", `--lines=${lines}`, sinceArg(sinceSeconds)];
 }
 function diskArgv(): string[] {
   return ["df", "-P", "-k"];
@@ -257,6 +302,26 @@ for (let code = 0x21; code <= 0x7e; code++) {
 /** Allowed anywhere in a unit name, but refused as the FIRST character — this script's tightening #1 (header). */
 const UNIT_LEADING_ONLY_DISALLOWED = ["@", ".", "_", ":", "-"];
 
+describe("the forbidden-commands fixture is populated (test/fixtures/observe/vm-forbidden-commands.json)", () => {
+  // The fixture walk below is a `test.each` over `entries`, and a
+  // `test.each` over an empty or truncated array runs fewer tests than
+  // intended and still passes. These two guard against that: a fixture with
+  // 207 entries today must never regress to a handful, and the two
+  // specific entries below (the SRD's own revert-check payload, and a
+  // sub-verb that must be refused on argument count) must always be present.
+  test("has at least 200 entries", () => {
+    expect(VM_FORBIDDEN_COMMANDS.entries.length).toBeGreaterThanOrEqual(200);
+  });
+
+  test("includes the --vacuum-time=1s revert-check payload", () => {
+    expect(VM_FORBIDDEN_COMMANDS.entries.some((e) => e.command === "journal since=60s lines=10 --vacuum-time=1s")).toBe(true);
+  });
+
+  test("includes a unit sub-verb entry", () => {
+    expect(VM_FORBIDDEN_COMMANDS.entries.some((e) => e.command === "unit restart sshd.service")).toBe(true);
+  });
+});
+
 describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) => {
   describe("the exact target argv per verb (SRD §6.4)", () => {
     test("uptime: no arguments", () => {
@@ -288,6 +353,62 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       const r = runScript(shell, "unit nginx.service");
       expect(r.exitCode).toBe(0);
       expect(r.cmd).toEqual(unitArgv("nginx.service"));
+    });
+
+    test("journal: minimum form, since= and lines= only", () => {
+      const r = runScript(shell, "journal since=300s lines=5");
+      expect(r.stderr).toBe("");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 300));
+    });
+
+    test("journal: with unit=", () => {
+      const r = runScript(shell, "journal since=300s lines=5 unit=nginx.service");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 300, { unit: "nginx.service" }));
+    });
+
+    test("journal: with priority=", () => {
+      const r = runScript(shell, "journal since=300s lines=5 priority=3");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 300, { priority: 3 }));
+    });
+
+    test("journal: with both unit= and priority=", () => {
+      const r = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 300, { unit: "nginx.service", priority: 3 }));
+    });
+
+    test("journal: keys accepted in any order, argv is still built in the script's own order", () => {
+      const r = runScript(shell, "journal priority=3 unit=nginx.service lines=5 since=300s");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 300, { unit: "nginx.service", priority: 3 }));
+    });
+
+    test("journal: since=0s is a legitimate value (N is exactly '0', not a leading zero)", () => {
+      const r = runScript(shell, "journal since=0s lines=5");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 0));
+    });
+
+    test("journal: lines=500 is the accepted upper boundary", () => {
+      const r = runScript(shell, "journal since=60s lines=500");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(500, 60));
+    });
+
+    test("kernel: since= and lines= only", () => {
+      const r = runScript(shell, "kernel since=300s lines=5");
+      expect(r.stderr).toBe("");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(kernelArgv(5, 300));
+    });
+
+    test("kernel: keys accepted in either order", () => {
+      const r = runScript(shell, "kernel lines=5 since=300s");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(kernelArgv(5, 300));
     });
 
     test("disk: no arguments", () => {
@@ -364,9 +485,26 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       ["poweroff", "poweroff", "poweroff", "not a recognised verb"],
       ["halt", "halt", "halt", "not a recognised verb"],
       ["sudo", "sudo systemctl restart nginx.service", "sudo", "not a recognised verb"],
-      ["journal — task 5.3, not this round", "journal since=60s lines=10", "journal", "not a recognised verb"],
-      ["kernel — task 5.3, not this round", "kernel since=60s lines=10", "kernel", "not a recognised verb"],
       ["kill", "kill nginx.service", "kill", "not a recognised verb"],
+      ["journal: missing since=", "journal lines=10", "journal", "since=<N>s is required"],
+      ["journal: missing lines=", "journal since=60s", "journal", "lines=<M> is required"],
+      ["journal: lines=501, one over the cap", "journal since=60s lines=501", "journal", "a lines= value must be 1-500"],
+      ["journal: lines=0", "journal since=60s lines=0", "journal", "a lines= value must be 1-500"],
+      ["journal: a leading-zero N", "journal since=007s lines=10", "journal", "a since= value must be"],
+      ["journal: a leading-zero M", "journal since=60s lines=007", "journal", "a lines= value must be 1-500"],
+      ["journal: N without a trailing 's'", "journal since=60 lines=10", "journal", "a since= value must be"],
+      ["journal: a 10-digit N", `journal since=${"1".repeat(10)}s lines=10`, "journal", "a since= value must be"],
+      ["journal: priority=8, one over the range", "journal since=60s lines=10 priority=8", "journal", "priority= value must be exactly one digit"],
+      ["journal: unit= fails the unit-name grammar", "journal since=60s lines=10 unit=nginx!service", "journal", "a unit name must match"],
+      ["kernel: unit= is not a key kernel accepts", "kernel since=60s lines=10 unit=nginx.service", "kernel", "unrecognised argument key"],
+      ["kernel: priority= is not a key kernel accepts", "kernel since=60s lines=10 priority=3", "kernel", "unrecognised argument key"],
+      ["journal: a repeated key", "journal since=60s since=70s lines=10", "journal", "since= may be given only once"],
+      ["journal: a repeated lines=", "journal since=60s lines=10 lines=20", "journal", "lines= may be given only once"],
+      ["journal: a repeated unit=", "journal since=60s lines=10 unit=a.service unit=b.service", "journal", "unit= may be given only once"],
+      ["journal: a repeated priority=", "journal since=60s lines=10 priority=3 priority=4", "journal", "priority= may be given only once"],
+      ["journal: an unknown key", "journal since=60s lines=10 foo=bar", "journal", "unrecognised argument key"],
+      ["journal: a bare token without '='", "journal since=60s lines=10 bogus", "journal", "every argument must be key=value"],
+      ["journal: a --vacuum-time=1s token is refused as an unrecognised key, never appended to journalctl's argv", "journal since=60s lines=10 --vacuum-time=1s", "journal", "unrecognised argument key"],
       [
         "unit with a sub-verb (restart as a unit argument) — two arguments, refused on count before any grammar check",
         "unit restart nginx.service",
@@ -479,6 +617,22 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       const r = runScript(shell, "unit a-Z0@nginx.service:unit_9");
       expect(r.exitCode).toBe(0);
       expect(r.cmd).toEqual(unitArgv("a-Z0@nginx.service:unit_9"));
+    });
+  });
+
+  describe("the forbidden-commands fixture walk (test/fixtures/observe/vm-forbidden-commands.json)", () => {
+    // Every entry — every disallowed systemctl/journalctl verb and flag,
+    // every package manager, sudo, kill, shutdown/reboot/poweroff/halt, and
+    // every `unit`/`journal`/`kernel` sub-verb or stray flag SRD §6.4 names
+    // as forbidden — must be refused: exit 77, the refusal prefix, and no
+    // recorded invocation. This is the SRD's own revert check for
+    // journal/kernel's `--vacuum-time=1s` entries: letting a `--`-prefixed
+    // token reach journalctl's argv turns exactly those rows red.
+    test.each(VM_FORBIDDEN_COMMANDS.entries.map((e) => [e.command] as [string]))("%s is refused, no invocation recorded", (command) => {
+      const r = runScript(shell, command);
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr).toContain(REFUSAL_PREFIX);
+      expect(r.cmd).toBeNull();
     });
   });
 });
