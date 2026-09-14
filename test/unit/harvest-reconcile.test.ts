@@ -40,9 +40,10 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { MAX_ITEMS, MAX_SHORT } from "../../src/contracts.ts";
+import { MAX_ITEMS, MAX_SHORT, findCredentialLeaks } from "../../src/contracts.ts";
 import {
   closeOutboxScan,
+  safeForReport,
   scanOutboxFiles,
   type OutboxFileScan,
   type OutboxLocation,
@@ -1109,7 +1110,10 @@ function ticketOpsDoc(): string {
  * All claimed, so the reverse-direction pass stays silent and the only findings
  * are the ones under test.
  */
-async function reconcileFiles(entries: Record<string, string>): Promise<ArtifactReconciliation> {
+async function reconcileFiles(
+  entries: Record<string, string | Buffer>,
+  secrets?: readonly string[],
+): Promise<ArtifactReconciliation> {
   await rm(files, { recursive: true, force: true });
   for (const [rel, body] of Object.entries(entries)) {
     await mkdir(dirname(join(files, rel)), { recursive: true });
@@ -1120,6 +1124,7 @@ async function reconcileFiles(entries: Record<string, string>): Promise<Artifact
     scan,
     Object.keys(entries).map((rel) => ({ kind: "file" as const, path: `/outbox/T-1/files/${rel}` })),
     loc,
+    secrets === undefined ? {} : { secrets },
   );
 }
 
@@ -1280,4 +1285,282 @@ describe("reconcileArtifactClaims — an observer .md with no .json beside it cl
         "ticket system",
     );
   });
+});
+
+/**
+ * NOTHING FROM A GRANTED SECRET REACHES AN OBSERVER FINDING (Phase 2 fix round
+ * FP2-1, task A).
+ *
+ * Three holes, each measured at e8655f7 before the fix:
+ *
+ * 1. The sweep ran over the PARSED value only. A duplicate key whose later value
+ *    wins, a needle held as a number, and a body that will not parse at all all
+ *    carry the secret in the bytes the harvest publishes, and none of them was
+ *    reported as a credential.
+ * 2. The not-JSON finding quoted the parser's message, and Bun's message quotes
+ *    the offending token CUT SHORT: at the first `/ + - .`, or after 200
+ *    characters. Exact-match redaction cannot see a prefix, so the head of the
+ *    secret reached the report. `NEEDLE` above never showed it, because it is
+ *    identifier-shaped and short.
+ * 3. A path is worker-authored, and a directory named after the secret put the
+ *    secret into every observer finding that names the file.
+ *
+ * Every case is its own test, so a red run names the case rather than the first
+ * one a loop happened to reach. Every clamp sits beside a control through the
+ * same helper.
+ */
+
+/** The text an observer's secret must never reach: its findings and its clamp reason. */
+function observerText(r: ArtifactReconciliation): string {
+  return JSON.stringify({ discrepancies: r.discrepancies, reason: r.verdictCeilingReason });
+}
+
+/** Neither the needle nor its twelve-character head appears in `text`. */
+function expectNoNeedle(text: string, needle: string, label: string): void {
+  expect(text, `${label}: the whole needle`).not.toContain(needle);
+  expect(text, `${label}: the needle's head`).not.toContain(needle.slice(0, 12));
+}
+
+/** A synthetic numeric grant, for the needle a string sweep cannot see. */
+const NUMERIC_NEEDLE = "918273645501";
+
+describe("reconcileArtifactClaims — a secret in the bytes is a credential finding", () => {
+  const withNumber = (doc: Record<string, unknown>, field: string): string => {
+    firstRow(doc)[field] = Number(NUMERIC_NEEDLE);
+    return JSON.stringify(doc);
+  };
+  const duplicated = (doc: Record<string, unknown>): string => {
+    const clean = JSON.stringify(doc);
+    const body = clean.replace('"sweep_id":null', `"sweep_id":"${NEEDLE}","sweep_id":null`);
+    expect(body, "the duplicate key was spliced in").not.toBe(clean);
+    return body;
+  };
+
+  /**
+   * Parseable bodies. The PREMISE is asserted per case: the body holds the
+   * needle, the parse succeeds, and no string in the parsed value holds it, so
+   * the parsed sweep alone has nothing to find.
+   */
+  const parseable: Array<[string, string, () => string, string]> = [
+    ["a duplicate sweep_id whose later null wins", DOCKER_OPS, () => duplicated(dockerDoc()), NEEDLE],
+    ["a duplicate sweep_id whose later null wins", VM_OPS, () => duplicated(vmDoc()), NEEDLE],
+    ["a numeric grant written as restart_count", DOCKER_OPS, () => withNumber(dockerDoc(), "restart_count"), NUMERIC_NEEDLE],
+    ["a numeric grant written as uptime_s", VM_OPS, () => withNumber(vmDoc(), "uptime_s"), NUMERIC_NEEDLE],
+  ];
+  for (const [what, name, build, needle] of parseable) {
+    test(`${name}: ${what} clamps as a credential`, async () => {
+      const body = build();
+      expect(body, "premise: the bytes hold the needle").toContain(needle);
+      expect(findCredentialLeaks(JSON.parse(body), [needle]), "premise: the parsed value does not").toEqual([]);
+
+      expectClean(await reconcileNamed(name, body), "control: no needles supplied");
+
+      const r = await reconcileNamed(name, body, [needle]);
+      expectClamped(r, name, what);
+      expect(r.discrepancies[0], what).toContain("contains a credential");
+      expectNoNeedle(JSON.stringify(r), needle, what);
+    });
+  }
+
+  /** A body that is not JSON at all: a leading BOM before a leaky document. */
+  for (const [name, build] of [
+    [DOCKER_OPS, () => {
+      const d = dockerDoc();
+      firstRow(d)["evidence_ref"] = [`docker login used ${NEEDLE}`];
+      return d;
+    }],
+    [VM_OPS, () => {
+      const d = vmDoc();
+      firstRow(d)["failed_units"] = [NEEDLE];
+      return d;
+    }],
+  ] as const) {
+    test(`${name}: a leaky document behind a BOM clamps as a credential, not only as not-JSON`, async () => {
+      const body = `${String.fromCharCode(0xfeff)}${JSON.stringify(build())}`;
+      expect(() => JSON.parse(body), "premise: the BOM makes it unparseable").toThrow();
+
+      // The control: the same bytes with no needles are a plain not-JSON finding.
+      const control = await reconcileNamed(name, body);
+      expectClamped(control, name, "control: no needles supplied");
+      expect(control.discrepancies[0]).toContain("not parseable JSON");
+      expect(control.discrepancies[0]).not.toContain("credential");
+
+      const r = await reconcileNamed(name, body, [NEEDLE]);
+      expectClamped(r, name, "BOM");
+      expect(r.discrepancies[0]).toContain("not parseable JSON");
+      expect(r.discrepancies[0]).toContain("contains a credential");
+      expectNoNeedle(JSON.stringify(r), NEEDLE, "BOM");
+    });
+  }
+
+  /**
+   * THE PARSED SWEEP'S OWN FINDING SURVIVES. When the parse finds the leak, its
+   * finding names the PATH, and that is more useful than "somewhere in the
+   * bytes". `harvest-credential-sweep-wiring.test.ts` pins the same through
+   * `harvestTask`; this pins it at the module, where the ordering lives.
+   */
+  test("a leak the parsed sweep finds keeps its path-naming finding", async () => {
+    const leaky = dockerDoc();
+    firstRow(leaky)["evidence_ref"] = [`docker login used ${NEEDLE}`];
+    const r = await reconcileNamed(DOCKER_OPS, JSON.stringify(leaky), [NEEDLE]);
+    expectClamped(r, DOCKER_OPS, "evidence_ref leak");
+    expect(r.discrepancies[0]).toContain("contains a credential");
+    expect(r.discrepancies[0]).toContain("evidence_ref");
+    expectNoNeedle(JSON.stringify(r), NEEDLE, "evidence_ref leak");
+  });
+});
+
+describe("reconcileArtifactClaims — a not-JSON observer finding quotes nothing from the document", () => {
+  const cases: Array<[string, string]> = [
+    ["a needle containing /", "SynthKeyAlpha9Q/zz+TailBravo77"],
+    ["an identifier-only needle longer than 200 characters", `SynthLong${"Q".repeat(230)}`],
+  ];
+  for (const [what, needle] of cases) {
+    for (const name of [DOCKER_OPS, VM_OPS]) {
+      test(`${name}: ${what}`, async () => {
+        const body = `{"services": ${needle}}`;
+        // The premise, measured: the parser quotes the head and NOT the whole
+        // needle, so redacting the needle by exact match would leave the head.
+        let message = "";
+        try {
+          JSON.parse(body);
+        } catch (e) {
+          message = (e as Error).message;
+        }
+        expect(message, "premise: the parser quotes the head").toContain(needle.slice(0, 12));
+        expect(message, "premise: but not the whole needle").not.toContain(needle);
+
+        const r = await reconcileNamed(name, body, [needle]);
+        expectClamped(r, name, what);
+        expect(r.discrepancies[0]).toContain("not parseable JSON");
+        expectNoNeedle(JSON.stringify(r), needle, what);
+      });
+    }
+  }
+});
+
+/**
+ * EVERY OBSERVER FINDING LINE AND CLAMP REASON IS REDACTED WHOLE, path included.
+ *
+ * Asserted on the findings and the reason, NOT on the whole result:
+ * `artifacts[].path` keeps the raw path on purpose (`src/run/relay.ts` reads it),
+ * so a needle in a directory name is still in the inventory. Each arm has a
+ * control with no needles that shows the path DOES reach the finding, so the
+ * redaction is what removed it.
+ */
+describe("reconcileArtifactClaims — a secret in a directory name never reaches an observer finding", () => {
+  const malformed = (): string => {
+    const d = dockerDoc();
+    firstRow(d)["assessment"] = "failed";
+    return JSON.stringify(d);
+  };
+
+  test("the validation arm", async () => {
+    const rel = `${NEEDLE}/${DOCKER_OPS}`;
+    const control = await reconcileNamed(rel, malformed());
+    expect(control.discrepancies[0], "control: the path reaches the finding").toContain(NEEDLE);
+
+    const r = await reconcileNamed(rel, malformed(), [NEEDLE]);
+    expectClamped(r, DOCKER_OPS, "validation arm");
+    expect(r.discrepancies[0]).toContain("validation");
+    expectNoNeedle(observerText(r), NEEDLE, "validation arm");
+  });
+
+  test("the cap-refusal arm", async () => {
+    const rel = `${NEEDLE}/${VM_OPS}`;
+    const own = (r: ArtifactReconciliation) => r.discrepancies.filter((d) => d.startsWith(`${VM_OPS} artifact `));
+    const oversized = Buffer.alloc(MAX_ARTIFACT_BYTES + 1, 0x20);
+
+    const control = await reconcileNamed(rel, oversized);
+    expect(own(control)[0], "control: the path reaches the finding").toContain(NEEDLE);
+
+    const r = await reconcileNamed(rel, oversized, [NEEDLE]);
+    expect(own(r)).toHaveLength(1);
+    expect(own(r)[0]).toContain("declined to read");
+    expect(r.verdictCeiling).toBe("failed");
+    expectNoNeedle(JSON.stringify({ own: own(r), reason: r.verdictCeilingReason }), NEEDLE, "cap arm");
+  }, 30_000);
+
+  test("the orphaned-document arm", async () => {
+    const rel = `${NEEDLE}/${DOCKER_MD}`;
+    const control = await reconcileFiles({ [rel]: PROSE });
+    expect(control.discrepancies[0], "control: the path reaches the finding").toContain(NEEDLE);
+
+    const r = await reconcileFiles({ [rel]: PROSE }, [NEEDLE]);
+    expectOrphaned(r, DOCKER_MD, DOCKER_OPS, "docker host", "orphan in a needle directory");
+    expectNoNeedle(observerText(r), NEEDLE, "orphan arm");
+  });
+
+  /**
+   * REDACTED BEFORE IT IS TRUNCATED. `safeForReport` cuts a path at 256
+   * characters, so a needle straddling the cut arrives as a prefix, and a
+   * redaction applied only to the finished line cannot match a prefix. The
+   * needle starts 16 characters before the cut, so its twelve-character head
+   * survives the cut and only an earlier redaction removes it.
+   */
+  test("a needle straddling the report's truncation point", async () => {
+    const start = 240;
+    const pad = "p".repeat(start - files.length - 2);
+    expect(pad.length, "the padding directory is a legal name").toBeGreaterThan(0);
+    expect(pad.length).toBeLessThan(256);
+    const rel = `${pad}/${NEEDLE}/${DOCKER_MD}`;
+    const shown = safeForReport(join(files, rel));
+    expect(shown.indexOf(NEEDLE.slice(0, 12)), "premise: the head survives the cut").toBe(start);
+    expect(shown, "premise: the whole needle does not").not.toContain(NEEDLE);
+
+    const r = await reconcileFiles({ [rel]: PROSE }, [NEEDLE]);
+    expectOrphaned(r, DOCKER_MD, DOCKER_OPS, "docker host", "orphan past the cut");
+    expectNoNeedle(observerText(r), NEEDLE, "orphan past the cut");
+  });
+});
+
+/**
+ * THE BYTE BUDGET CANNOT SWITCH OBSERVER VALIDATION OFF (FP2-1, task B).
+ *
+ * When `MAX_RECONCILED_BYTES` stops the digest loop, an observer target artifact
+ * the loop never reached was neither parsed nor swept. At e8655f7 that returned
+ * out of the whole function: eight full-size files and one byte in front of a
+ * leaky document gave `verdictCeiling: null` and a single "stopped after" line.
+ *
+ * `ticket-ops.json` and `collation.json` have the same hole, which predates this
+ * phase and is left for the operator to decide. So this pins the observer
+ * artifacts only.
+ */
+describe("reconcileArtifactClaims — an observer artifact past the per-task budget still clamps", () => {
+  test("every unvisited observer target artifact is named and clamps", async () => {
+    const leaky = dockerDoc();
+    firstRow(leaky)["evidence_ref"] = [`docker login used ${NEEDLE}`];
+    const leakyBody = JSON.stringify(leaky);
+
+    // THE CONTROL: the same document alone clamps.
+    expectClamped(await reconcileNamed(DOCKER_OPS, leakyBody, [NEEDLE]), DOCKER_OPS, "control: alone");
+
+    expect(8 * MAX_ARTIFACT_BYTES, "premise: eight full-size files fill the budget").toBe(
+      MAX_RECONCILED_BYTES,
+    );
+    const entries: Record<string, string | Buffer> = {};
+    for (let i = 0; i < 8; i++) entries[`a${i}.bin`] = Buffer.alloc(MAX_ARTIFACT_BYTES, 0x63);
+    entries["b.txt"] = "x";
+    entries[DOCKER_OPS] = leakyBody;
+    entries[`${NEEDLE}/${VM_OPS}`] = JSON.stringify(vmDoc());
+    // Premise: both observer artifacts sort after the byte that tips the budget.
+    const sorted = Object.keys(entries).sort();
+    expect(sorted.indexOf("b.txt")).toBeLessThan(sorted.indexOf(DOCKER_OPS));
+    expect(sorted.indexOf("b.txt")).toBeLessThan(sorted.indexOf(`${NEEDLE}/${VM_OPS}`));
+
+    const r = await reconcileFiles(entries, [NEEDLE]);
+
+    expect(r.discrepancies.filter((d) => d.includes("per-task cap"))).toHaveLength(1);
+    for (const name of [DOCKER_OPS, VM_OPS]) {
+      const own = r.discrepancies.filter((d) => d.startsWith(`${name} artifact `));
+      expect(own, name).toHaveLength(1);
+      expect(own[0], name).toContain("could not be validated");
+      expect(own[0], name).not.toContain("ticket");
+    }
+    expect(r.verdictCeiling).toBe("failed");
+    expect(r.verdictCeilingReason).toContain("what the observer saw");
+    expect(r.verdictCeilingReason).not.toContain("ticket");
+    expectNoNeedle(observerText(r), NEEDLE, "budget");
+    expect(r.artifacts).toHaveLength(8);
+  }, 60_000);
 });
