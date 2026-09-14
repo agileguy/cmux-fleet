@@ -41,6 +41,14 @@
  * key-list check alone lets a widened template through unnoticed. The
  * EXPECTED_*_FORMAT constants are the one place in this file a template is
  * pinned as a full literal, on purpose.
+ *
+ * ## Shell coverage
+ *
+ * `shells()` runs every case under each POSIX shell it finds, deduplicated
+ * by realpath: `/bin/sh` (bash 3.2 in sh mode on macOS, dash on Debian) and
+ * `dash` where it is installed. busybox sh, the `/bin/sh` of `docker:dind`,
+ * is not run here; `observe-docker-forced-command-rendered.test.ts` reads
+ * back a real run of this script under it.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -80,6 +88,19 @@ const INSPECT_FORMAT = extractSingleQuoted("INSPECT_FORMAT");
 const INFO_FORMAT = extractSingleQuoted("INFO_FORMAT");
 const PS_FORMAT = extractSingleQuoted("PS_FORMAT");
 const JSON_FORMAT = extractSingleQuoted("JSON_FORMAT");
+
+/** Reads a `NAME=<digits>` bare (unquoted) shell assignment out of the real script. */
+function extractBareDigits(varName: string): string {
+  const match = SRC.match(new RegExp(`${varName}=([0-9]+)`));
+  const value = match?.[1];
+  if (value === undefined) {
+    throw new Error(`could not find ${varName}=<digits> in ${REAL_SCRIPT}`);
+  }
+  return value;
+}
+
+/** The digit-count cap on `since=<N>s` and `tail=<M>` (header, argument-grammar section, choice 3). */
+const DIGITS_MAX = extractBareDigits("DIGITS_MAX");
 
 /**
  * Hand-typed pins — see the header for why these three
@@ -421,6 +442,58 @@ test("at least one POSIX shell is available to run the script", () => {
   expect(shells().length).toBeGreaterThanOrEqual(1);
 });
 
+describe("the forbidden-verbs fixture is populated (test/fixtures/observe/docker-forbidden-verbs.json)", () => {
+  // The forbidden-verbs walk below is a `test.each` over `entries`, and a
+  // `test.each` over an empty array runs no tests and passes. These two fail
+  // on an empty or truncated fixture. NAMED_FORBIDDEN is SRD §5.4's list,
+  // where a bare `stats` is the streaming form.
+  const NAMED_FORBIDDEN = [
+    "run",
+    "create",
+    "start",
+    "stop",
+    "restart",
+    "kill",
+    "pause",
+    "unpause",
+    "rm",
+    "rmi",
+    "exec",
+    "attach",
+    "cp",
+    "export",
+    "save",
+    "commit",
+    "update",
+    "rename",
+    "pull",
+    "push",
+    "build",
+    "compose",
+    "network",
+    "volume",
+    "system",
+    "context",
+    "plugin",
+    "swarm",
+    "service",
+    "system dial-stdio",
+    "logs --follow",
+    "stats",
+  ];
+
+  test("every command SRD §5.4 names as forbidden is present in the fixture's entries", () => {
+    const commands = DOCKER_FORBIDDEN_VERBS.entries.map((e) => e.command);
+    for (const cmd of NAMED_FORBIDDEN) {
+      expect(commands).toContain(cmd);
+    }
+  });
+
+  test("entries holds more than the named set alone", () => {
+    expect(DOCKER_FORBIDDEN_VERBS.entries.length).toBeGreaterThan(NAMED_FORBIDDEN.length);
+  });
+});
+
 describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell) => {
   describe("the exact docker argv per verb and argument shape", () => {
     test("ps: no arguments", () => {
@@ -588,6 +661,10 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
   });
 
   describe("IFS: the caller's IFS never changes docker's argv", () => {
+    // busybox sh, dash and bash all ignore an IFS inherited from the
+    // environment (measured), so these two cannot go red if the script's IFS
+    // pin is removed; the static "pins IFS" invariant above guards the pin.
+    // These show end to end that docker's argv does not follow the caller's IFS.
     test("ps: all plus two filters produce the same argv whether or not IFS=: is inherited from the caller", () => {
       const withoutColonIfs = runScript(shell, "ps all name=web label=app=web");
       const withColonIfs = runScript(shell, "ps all name=web label=app=web", {}, scratch, { IFS: ":" });
@@ -649,66 +726,126 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
   });
 
   describe("refusals: exit 77, the verb named on stderr, and no docker invocation", () => {
-    // [label, SSH_ORIGINAL_COMMAND, substring stderr must contain]
-    const cases: Array<[string, string, string]> = [
-      ["an unknown verb", "restart web-1", "restart"],
-      ["a mutating verb from the illustrative forbidden list (SRD §5.4)", "rm web-1", "rm"],
-      ["another illustrative forbidden verb", "exec web-1", "exec"],
-      ["a disclosure-shaped verb refused on its own grounds (SRD §5.4)", "cp web-1", "cp"],
-      ["inspect with zero arguments", "inspect", "inspect"],
-      ["inspect with two arguments", "inspect web-1 web-2", "inspect"],
-      ["inspect: container fails Docker's name grammar (bad character)", "inspect web!1", "inspect"],
-      ["inspect: container fails Docker's name grammar (leading '-')", "inspect -web-1", "inspect"],
-      ["inspect: container longer than 128 bytes", `inspect ${"a".repeat(129)}`, "inspect"],
-      ["info with an argument", "info extra", "info"],
-      ["version with an argument", "version extra", "version"],
-      ["ps: an argument that is neither 'all' nor name=/label=", "ps foo", "ps"],
-      ["ps: a bare '-a' argument", "ps -a", "ps"],
-      ["ps: a name= value with a leading '-'", "ps name=-x", "ps"],
-      ["ps: a name= value that is empty", "ps name=", "ps"],
-      ["ps: a label= with no second '='", "ps label=onlykey", "ps"],
-      ["ps: a label= key with a leading '-'", "ps label=-k=v", "ps"],
-      ["ps: a label= value containing a second '='", "ps label=k=v=extra", "ps"],
-      ["logs: missing both since= and tail=", "logs web-1", "logs"],
-      ["logs: missing tail=", "logs web-1 since=60s", "logs"],
-      ["logs: missing since=", "logs web-1 tail=10", "logs"],
-      ["logs: since= repeated, tail= never given", "logs web-1 since=60s since=90s", "logs"],
-      ["logs: tail= repeated, since= never given", "logs web-1 tail=10 tail=20", "logs"],
-      ["logs: since= repeated, plus a valid tail=", "logs web-1 since=1s since=2s tail=5", "logs"],
-      ["logs: tail= repeated, plus a valid since=", "logs web-1 since=1s tail=5 tail=6", "logs"],
-      ["logs: an extra token after both keys (--follow)", "logs web-1 since=60s tail=10 --follow", "logs"],
-      ["logs: an extra token after both keys (follow=true)", "logs web-1 since=60s tail=10 follow=true", "logs"],
-      ["logs: tail= is not an integer", "logs web-1 since=60s tail=abc", "logs"],
-      ["logs: tail= exceeds the 500 cap", "logs web-1 since=60s tail=501", "logs"],
-      ["logs: since= is missing its trailing 's'", "logs web-1 since=60 tail=10", "logs"],
-      ["logs: since= digit string longer than the 9-digit cap", `logs web-1 since=${"1".repeat(10)}s tail=10`, "logs"],
-      ["logs: since=0s is refused — a zero-second lookback", "logs web-1 since=0s tail=10", "logs"],
-      ["logs: since=000s is refused — a zero-second lookback written with leading zeros", "logs web-1 since=000s tail=10", "logs"],
-      ["logs: container fails Docker's name grammar", "logs -web-1 since=60s tail=10", "logs"],
-      ["stats with zero arguments (a bare 'stats' would stream every container)", "stats", "stats"],
-      ["stats with two arguments", "stats web-1 web-2", "stats"],
-      ["stats: container fails Docker's name grammar", "stats -web-1", "stats"],
-      ["top with zero arguments", "top", "top"],
-      ["top with two arguments", "top web-1 web-2", "top"],
-      ["top: container fails Docker's name grammar", "top -web-1", "top"],
-      ["events: missing since=", "events container=web-1", "events"],
-      ["events: an unrecognised argument", "events since=60s foo", "events"],
-      ["events: container= fails Docker's name grammar", "events since=60s container=-web-1", "events"],
-      ["events: since= digit string longer than the 9-digit cap", `events since=${"1".repeat(10)}s`, "events"],
-      ["events: since=0s is refused — a zero-second lookback", "events since=0s", "events"],
-      ["events: since=000s is refused — a zero-second lookback written with leading zeros", "events since=000s", "events"],
-      ["events: since= given twice", "events since=60s since=120s", "events"],
-      ["events: container= given twice", "events since=60s container=web-1 container=web-2", "events"],
-      ["a verb with a leading '-'", "-V web-1", "(unrecognised)"],
-      ["a verb starting with a digit", "1ps web-1", "(unrecognised)"],
-      ["a verb longer than 32 characters", `${"p".repeat(33)} web-1`, "(unrecognised)"],
-      ["a verb holding an uppercase letter", "Inspect web-1", "(unrecognised)"],
+    // [label, SSH_ORIGINAL_COMMAND, verb stderr names, reason stderr contains].
+    // Exit 77 and the verb cannot tell which check refused a case, so a row
+    // could pass while exercising the wrong one; the reason pins the check.
+    // `logs` takes exactly three arguments, so a repeated key plus the other
+    // key is four tokens, refused on the count before any once-check runs.
+    const cases: Array<[string, string, string, string]> = [
+      ["an unknown verb", "restart web-1", "restart", "not a recognised verb"],
+      ["a mutating verb from the illustrative forbidden list (SRD §5.4)", "rm web-1", "rm", "not a recognised verb"],
+      ["another illustrative forbidden verb", "exec web-1", "exec", "not a recognised verb"],
+      ["a disclosure-shaped verb refused on its own grounds (SRD §5.4)", "cp web-1", "cp", "not a recognised verb"],
+      ["inspect with zero arguments", "inspect", "inspect", "inspect takes exactly one argument, a container name; got 0"],
+      ["inspect with two arguments", "inspect web-1 web-2", "inspect", "inspect takes exactly one argument, a container name; got 2"],
+      ["inspect: container fails Docker's name grammar (bad character)", "inspect web!1", "inspect", "the container argument must match"],
+      ["inspect: container fails Docker's name grammar (leading '-')", "inspect -web-1", "inspect", "the container argument must match"],
+      ["inspect: container longer than 128 bytes", `inspect ${"a".repeat(129)}`, "inspect", "the container argument must match"],
+      ["info with an argument", "info extra", "info", "info takes no arguments; got 1"],
+      ["version with an argument", "version extra", "version", "version takes no arguments; got 1"],
+      ["ps: an argument that is neither 'all' nor name=/label=", "ps foo", "ps", "arguments must be 'all', name=<n> or label=<k>=<v>"],
+      ["ps: a bare '-a' argument", "ps -a", "ps", "arguments must be 'all', name=<n> or label=<k>=<v>"],
+      ["ps: a name= value with a leading '-'", "ps name=-x", "ps", "a name= value must match"],
+      ["ps: a name= value that is empty", "ps name=", "ps", "a name= value must match"],
+      ["ps: a label= with no second '='", "ps label=onlykey", "ps", "a label= argument must be label=<key>=<value>"],
+      ["ps: a label= key with a leading '-'", "ps label=-k=v", "ps", "a label= key must match"],
+      ["ps: a label= value containing a second '='", "ps label=k=v=extra", "ps", "may not itself contain '='"],
+      ["logs: missing both since= and tail=", "logs web-1", "logs", "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got 1"],
+      ["logs: missing tail=", "logs web-1 since=60s", "logs", "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got 2"],
+      ["logs: missing since=", "logs web-1 tail=10", "logs", "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got 2"],
+      ["logs: since= repeated, tail= never given", "logs web-1 since=60s since=90s", "logs", "since=<N>s may be given only once"],
+      ["logs: tail= repeated, since= never given", "logs web-1 tail=10 tail=20", "logs", "tail=<M> may be given only once"],
+      [
+        "logs: since= repeated plus tail= (four tokens, refused on the count)",
+        "logs web-1 since=1s since=2s tail=5",
+        "logs",
+        "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got 4",
+      ],
+      [
+        "logs: tail= repeated plus since= (four tokens, refused on the count)",
+        "logs web-1 since=1s tail=5 tail=6",
+        "logs",
+        "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got 4",
+      ],
+      [
+        "logs: an extra token after both keys (--follow)",
+        "logs web-1 since=60s tail=10 --follow",
+        "logs",
+        "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got 4",
+      ],
+      [
+        "logs: an extra token after both keys (follow=true)",
+        "logs web-1 since=60s tail=10 follow=true",
+        "logs",
+        "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got 4",
+      ],
+      ["logs: tail= is not an integer", "logs web-1 since=60s tail=abc", "logs", `a tail= value must be [0-9]{1,${DIGITS_MAX}} digits`],
+      ["logs: tail= exceeds the 500 cap", "logs web-1 since=60s tail=501", "logs", "tail must be <= 500"],
+      ["logs: tail= has a leading '-' — not a digit string", "logs web-1 since=60s tail=-1", "logs", `a tail= value must be [0-9]{1,${DIGITS_MAX}} digits`],
+      ["logs: tail= has a leading '+' — not a digit string", "logs web-1 since=60s tail=+5", "logs", `a tail= value must be [0-9]{1,${DIGITS_MAX}} digits`],
+      ["logs: tail= is hex-shaped — not a digit string", "logs web-1 since=60s tail=0x10", "logs", `a tail= value must be [0-9]{1,${DIGITS_MAX}} digits`],
+      ["logs: tail= is empty", "logs web-1 since=60s tail=", "logs", `a tail= value must be [0-9]{1,${DIGITS_MAX}} digits`],
+      [
+        "logs: tail= digit string longer than the 9-digit cap",
+        `logs web-1 since=60s tail=${"1".repeat(10)}`,
+        "logs",
+        `a tail= value must be [0-9]{1,${DIGITS_MAX}} digits`,
+      ],
+      ["logs: since= is missing its trailing 's'", "logs web-1 since=60 tail=10", "logs", "arguments after the container must be since=<N>s or tail=<M>"],
+      [
+        "logs: since= digit string longer than the 9-digit cap",
+        `logs web-1 since=${"1".repeat(10)}s tail=10`,
+        "logs",
+        `a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'`,
+      ],
+      ["logs: since=0s is refused — a zero-second lookback", "logs web-1 since=0s tail=10", "logs", "a since= value must be at least 1 second"],
+      [
+        "logs: since=000s is refused — a zero-second lookback written with leading zeros",
+        "logs web-1 since=000s tail=10",
+        "logs",
+        "a since= value must be at least 1 second",
+      ],
+      ["logs: container fails Docker's name grammar", "logs -web-1 since=60s tail=10", "logs", "the container argument must match"],
+      [
+        "stats with zero arguments (a bare 'stats' would stream every container)",
+        "stats",
+        "stats",
+        "stats takes exactly one argument, a container name; got 0",
+      ],
+      ["stats with two arguments", "stats web-1 web-2", "stats", "stats takes exactly one argument, a container name; got 2"],
+      ["stats: container fails Docker's name grammar", "stats -web-1", "stats", "the container argument must match"],
+      ["top with zero arguments", "top", "top", "top takes exactly one argument, a container name; got 0"],
+      ["top with two arguments", "top web-1 web-2", "top", "top takes exactly one argument, a container name; got 2"],
+      ["top: container fails Docker's name grammar", "top -web-1", "top", "the container argument must match"],
+      ["events: missing since=", "events container=web-1", "events", "since=<N>s is required"],
+      ["events: an unrecognised argument", "events since=60s foo", "events", "arguments must be since=<N>s or container=<c>"],
+      ["events: container= fails Docker's name grammar", "events since=60s container=-web-1", "events", "a container= value must match"],
+      [
+        "events: since= digit string longer than the 9-digit cap",
+        `events since=${"1".repeat(10)}s`,
+        "events",
+        `a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'`,
+      ],
+      ["events: since=0s is refused — a zero-second lookback", "events since=0s", "events", "a since= value must be at least 1 second"],
+      [
+        "events: since=000s is refused — a zero-second lookback written with leading zeros",
+        "events since=000s",
+        "events",
+        "a since= value must be at least 1 second",
+      ],
+      ["events: since= given twice", "events since=60s since=120s", "events", "since=<N>s may be given only once"],
+      ["events: container= given twice", "events since=60s container=web-1 container=web-2", "events", "container=<c> may be given only once"],
+      ["a verb with a leading '-'", "-V web-1", "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
+      ["a verb starting with a digit", "1ps web-1", "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
+      ["a verb longer than 32 characters", `${"p".repeat(33)} web-1`, "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
+      ["a verb holding an uppercase letter", "Inspect web-1", "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
     ];
-    test.each(cases)("%s", (_label, cmd, expectSubstring) => {
+    test.each(cases)("%s", (_label, cmd, expectSubstring, reasonSubstring) => {
       const r = runScript(shell, cmd);
       expect(r.exitCode).toBe(77);
       expect(r.stderr).toContain(REFUSAL_PREFIX);
       expect(r.stderr).toContain(expectSubstring);
+      expect(r.stderr).toContain(reasonSubstring);
       expect(r.docker).toBeNull();
     });
   });
@@ -741,10 +878,23 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
   });
 
   describe("set -f: a literal '*' is refused by grammar, never glob-expanded", () => {
-    test("a name= value of '*', run where a matching filename exists, still refuses", () => {
+    // `set -f` matters at the unquoted re-split, before any grammar check.
+    // Without it, a token such as `web-*` becomes a matching filename from
+    // the script's cwd, which passes the grammar and reaches docker. Each
+    // test plants a file the whole token matches, so removing `set -f`
+    // turns it red.
+    test("inspect: a container value of 'web-*', run in a directory holding a file literally named 'web-1', still refuses", () => {
       const dir = mkdtempSync(join(scratch, "glob-cwd-"));
       writeFileSync(join(dir, "web-1"), "");
-      const r = runScript(shell, "ps name=*", {}, dir);
+      const r = runScript(shell, "inspect web-*", {}, dir);
+      expect(r.exitCode).toBe(77);
+      expect(r.docker).toBeNull();
+    });
+
+    test("ps: a name= value of 'web-*', run in a directory holding a file literally named 'name=web-1', still refuses", () => {
+      const dir = mkdtempSync(join(scratch, "glob-cwd-"));
+      writeFileSync(join(dir, "name=web-1"), "");
+      const r = runScript(shell, "ps name=web-*", {}, dir);
       expect(r.exitCode).toBe(77);
       expect(r.docker).toBeNull();
     });
