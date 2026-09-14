@@ -43,6 +43,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -63,12 +64,23 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..", "..");
 /** The real shim. Read by the pins, never executed: see the header. */
 const REAL_SHIM = join(ROOT, "docker", "observe-ssh");
+/** The other two files `measured_with` hashes. Read only, never executed. */
+const REAL_SSH_CONNECT = join(ROOT, "docker", "ssh-connect.cjs");
+const REAL_CONNECT_PROXY = join(ROOT, "docker", "connect-proxy.cjs");
 const FACTS_PATH = join(ROOT, "test", "fixtures", "observe", "ssh-transport-facts.json");
 
 /** The real shim's copy-location line, the one line the per-run copy rewrites. */
 const REAL_COPY_DIR_LINE = "COPY_DIR=/tmp";
 
 interface TransportFacts {
+  /** How the fixture was produced — read by the pins below, never by the shim. */
+  measured_with: {
+    repo_head: string | null;
+    uncommitted_changes_to_measured_files: string[] | null;
+    observe_ssh_sha256: string;
+    ssh_connect_sha256: string;
+    connect_proxy_sha256: string;
+  };
   key_delivery: {
     delivered_mode: string;
     accepted_at_delivered_mode: boolean;
@@ -358,6 +370,30 @@ describe("the measured transport facts this suite is wired to", () => {
     expect(FACTS.exit_codes.remote_exit_77).toBe(77);
     expect(FACTS.exit_codes.host_key_mismatch).toBe(255);
     expect(FACTS.exit_codes.proxy_refused).toBe(255);
+  });
+
+  test("were measured on a clean tree — a dirty measurement does not count", () => {
+    expect(FACTS.measured_with.uncommitted_changes_to_measured_files).toEqual([]);
+  });
+
+  test("still match the sha256 of the files they were measured against", () => {
+    // Each entry: the label a failure names, the real file the pin reads
+    // (never executed — see the header), and the hash `measured_with` recorded.
+    const measured: Array<[label: string, path: string, recorded: string]> = [
+      ["docker/observe-ssh", REAL_SHIM, FACTS.measured_with.observe_ssh_sha256],
+      ["docker/ssh-connect.cjs", REAL_SSH_CONNECT, FACTS.measured_with.ssh_connect_sha256],
+      ["docker/connect-proxy.cjs", REAL_CONNECT_PROXY, FACTS.measured_with.connect_proxy_sha256],
+    ];
+    const changed = measured.flatMap(([label, path, recorded]) => {
+      const actual = createHash("sha256").update(readFileSync(path)).digest("hex");
+      return actual === recorded ? [] : [`${label} (recorded ${recorded}, now ${actual})`];
+    });
+    expect(
+      changed,
+      changed.length === 0
+        ? undefined
+        : `re-run \`scripts/observe/characterise-ssh-transport --write\` and commit the refreshed fixture: ${changed.join("; ")}`,
+    ).toEqual([]);
   });
 });
 
