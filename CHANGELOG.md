@@ -4,6 +4,70 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-09-14
+
+This release is Phase 4 of `Docs/SRD-OBSERVER-ROLES.md` (observer-docker-role).
+
+The fleet can now describe a Docker host observer: a role, its skill, and the
+forced command an operator installs on the target. The live `fleet.yaml` does
+not carry the role yet (task 4.8 waits on a triage actor restart), and the
+worker image needs a rebuild before `observe-docker` is on any seat's PATH.
+
+### Added
+
+- **`scripts/observe/docker-forced-command`** is the whole of what the
+  observer-docker key can do on a target. sshd runs it for every session, and it
+  reads the request from `SSH_ORIGINAL_COMMAND`.
+  - Verbs: `ps`, `inspect`, `logs`, `stats`, `top`, `events`, `info` and
+    `version`. Everything else exits 77 and runs no `docker`.
+  - Arguments are `key=value` tokens checked against fixed character classes, so
+    no worker token can become a docker flag.
+  - `ps`, `inspect` and `info` use fixed templates. None returns a container's
+    environment, bind mounts or healthcheck output, or the daemon's proxy
+    settings.
+  - `logs` requires `since=` and `tail=` (at most 500). `events` is a bounded
+    window of container lifecycle and health events only, because every `exec_*`
+    event names the exec'd command line.
+- **`docker/observe-docker <target> <verb> [key=value ...]`** is the role's alias
+  for `observe-ssh docker`. `--help` alone prints usage and the exit contract.
+- **`skills/observer-docker-ops`** tells the worker how to call a target, read
+  each exit, and write the `observer-docker-ops.json`/`.md` artifact pair.
+- **The `observer-docker` role** in `fleet.example.yaml`, with seat `obs-d1`, one
+  egress rule and three multiline secrets.
+- **`scripts/observe/characterise-docker`** measures, against a throwaway dind
+  daemon, the Docker facts the forced command relies on. It also runs the forced
+  command itself for every verb, once per docker CLI version. Its fixtures back
+  the tests, and a test fails when the forced command changes without being
+  measured again on every version.
+
+### Fixed during review
+
+- `ps` no longer names `HealthStatus`, which docker CLIs before 29.5.0 lack; every
+  `ps` failed there. Health still shows in `Status`.
+- `inspect` narrows `state`, so a healthcheck's printed output no longer reaches
+  the worker. Its template reads `Health` through `index`, because a container
+  without a healthcheck otherwise fails to render.
+- `since=` takes 1 to 9 digits and at least one second.
+- The forced command no longer depends on the caller's `IFS`.
+- The skill routes a target's exit 77 by its refusal text. Only "not a recognised
+  verb" makes a channel `forbidden`; any other refusal is an argument to fix.
+- `characterise-docker` no longer leaves its dind container running when a signal
+  arrives just before the container starts.
+- An exit 1 because docker could not reach its daemon or socket now blocks the
+  task, rather than counting as an answer. The error text is measured on both
+  docker versions.
+- `events container=` matches a prefix of the container's id as well as its name,
+  so the skill tells the worker to keep only events for the name it asked about.
+- `characterise-docker` reports a dind container it could not remove, with the
+  label filter to find it.
+- `observe-docker --help` names every exit a call can return, including the verb
+  refusal and docker's own daemon errors.
+- Tests cover the argument grammar's edges (a newline between tokens, every
+  character outside a name's class, an octal-looking `tail=`), check that no
+  `events` filter prefix-matches an `exec_*` action, and keep the skill's verbs,
+  actions, limits, quoted refusal lines and exit-1 stderr text in step with the
+  scripts and the measured fixture.
+
 ## [1.0.3] — 2026-09-14
 
 This release is Phase 3 of `Docs/SRD-OBSERVER-ROLES.md` (observe-ssh-transport).
