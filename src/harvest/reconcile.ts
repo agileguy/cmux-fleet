@@ -84,6 +84,13 @@ import {
 } from "../run/collation.ts";
 import { censusFromRead } from "./collation-census.ts";
 import {
+  OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+  OBSERVER_VM_OPS_ARTIFACT_NAME,
+  parseObserverDockerOpsArtifact,
+  parseObserverVmOpsArtifact,
+  redactSecrets,
+} from "./observer-target-artifacts.ts";
+import {
   OUTBOX_FILES_DIR,
   artifactClaimToHost,
   resolvedWithin,
@@ -209,6 +216,45 @@ export const TICKET_OPS_DOCUMENT_NAME = `${basename(TICKET_OPS_ARTIFACT_NAME, ".
  * people share, and `partial` would assert more than the harvest can support.
  */
 const TICKET_OPS_FAILURE_CEILING: Verdict = "failed";
+
+/**
+ * The observer TARGET artifacts, selected by name exactly as
+ * `TICKET_OPS_ARTIFACT_NAME` is (SRD-OBSERVER-ROLES §5.6, §6.7).
+ *
+ * A table rather than one boolean per name, because each entry carries three
+ * things that must travel together: the name that selects, the one entry point
+ * that sweeps and parses, and the words the findings use for the target. A name
+ * added without its parse, or a parse reported in another target's words, is
+ * not a state this shape can express.
+ *
+ * KEPT APART FROM THE TICKET-OPS ARM rather than folded into one list with it.
+ * Every ticket-ops message and its ISC-332 reason are pinned byte for byte, and
+ * a shared renderer would have to reproduce them exactly or change them. Two
+ * short arms side by side cost less than that risk.
+ *
+ * `observer-ops.json` is deliberately absent. SRD §3.3 keeps the k8s observer's
+ * document out of harvest validation.
+ */
+const OBSERVER_TARGET_ARTIFACTS: ReadonlyArray<{
+  name: string;
+  parse: (raw: unknown, secrets: readonly string[]) => unknown;
+  target: string;
+}> = [
+  { name: OBSERVER_DOCKER_OPS_ARTIFACT_NAME, parse: parseObserverDockerOpsArtifact, target: "docker host" },
+  { name: OBSERVER_VM_OPS_ARTIFACT_NAME, parse: parseObserverVmOpsArtifact, target: "VM" },
+];
+
+/**
+ * The verdict a failed observer target validation clamps the task to.
+ *
+ * `failed`, on the argument `TICKET_OPS_FAILURE_CEILING` makes. The artifact is
+ * the observer's entire output. When it cannot be read, nothing is known about
+ * what the observer saw on its target, and `partial` would claim more than the
+ * harvest can support. `skills/observer-ops/SKILL.md` already grades an
+ * observer's turn this way: it clamps to `failed` "the same rule `ticketing`
+ * runs under".
+ */
+const OBSERVER_TARGET_FAILURE_CEILING: Verdict = "failed";
 
 /** Schema issues named in one finding before it is truncated. */
 const MAX_REPORTED_ISSUES = 6;
@@ -477,6 +523,42 @@ function validateTicketOps(body: Buffer, secrets: readonly string[]): string | n
     return null;
   } catch (e) {
     return `fails ${TICKET_OPS_ARTIFACT_NAME} validation (${describeSchemaFailure(e)})`;
+  }
+}
+
+/**
+ * Validate one observer target document, returning a finding or `null`.
+ *
+ * The sibling of `validateTicketOps`, with the same catch-and-report stance and
+ * one addition: every finding has the known secret values REDACTED before it
+ * leaves.
+ *
+ * The parse's own credential refusal already names paths only. What it cannot
+ * cover is the not-JSON branch. The JSON parser quotes the token it choked on,
+ * so a document that holds a bare token where a string belongs would echo that
+ * token into the report. Measured: `JSON.parse('{"a": ghp_x}')` says
+ * `Unexpected identifier "ghp_x"`. Redacting the whole finding closes that and
+ * any later message that quotes the document.
+ */
+function validateObserverTarget(
+  body: Buffer,
+  artifact: (typeof OBSERVER_TARGET_ARTIFACTS)[number],
+  secrets: readonly string[],
+): string | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body.toString("utf8"));
+  } catch (e) {
+    return redactSecrets(`is not parseable JSON (${describeSchemaFailure(e)})`, secrets);
+  }
+  try {
+    artifact.parse(raw, secrets);
+    return null;
+  } catch (e) {
+    return redactSecrets(
+      `fails ${artifact.name} validation (${describeSchemaFailure(e)})`,
+      secrets,
+    );
   }
 }
 
@@ -818,11 +900,33 @@ export async function reconcileArtifactClaims(
      * only place §6.8's three rules can be checked.
      */
     const isCollation = basename(f.path) === COLLATION_ARTIFACT_NAME;
+    /**
+     * An observer target artifact, selected on the raw basename for the same
+     * reason, and retained because its content is what gets validated.
+     */
+    const observerTarget =
+      OBSERVER_TARGET_ARTIFACTS.find((a) => a.name === basename(f.path)) ?? null;
     const outcome = await digestHeldArtifact(
       f,
       Math.min(MAX_ARTIFACT_BYTES, MAX_RECONCILED_BYTES - spent),
-      isTicketOps || isCollation,
+      isTicketOps || isCollation || observerTarget !== null,
     );
+    /**
+     * An observer target artifact the caps refused is a REPORTED gap and clamps,
+     * exactly as the ticket-ops arm below does and for its reason. A worker must
+     * not be able to switch validation off by choosing a file size.
+     */
+    if (observerTarget !== null && outcome.kind !== "ok") {
+      discrepancies.push(
+        `${observerTarget.name} artifact ${safeForReport(f.path)} could not be validated: ` +
+          `the harvester declined to read it (${outcome.kind})`,
+      );
+      clampTo(
+        OBSERVER_TARGET_FAILURE_CEILING,
+        `a ${observerTarget.name} artifact in the outbox could not be validated, so what the ` +
+          `observer saw on that ${observerTarget.target} cannot be read from its own report`,
+      );
+    }
     /**
      * A collation the caps refused is a REPORTED gap, not a pass — the same
      * suppression the ticket-ops arm below closes, and closed the same way. "Too
@@ -920,6 +1024,19 @@ export async function reconcileArtifactClaims(
               `a ${TICKET_OPS_ARTIFACT_NAME} artifact in the outbox failed validation, so what ` +
                 `the worker did to the ticket system cannot be read from its own report ` +
                 `(ISC-332)`,
+            );
+          }
+        }
+        if (observerTarget !== null && outcome.retained !== null) {
+          const problem = validateObserverTarget(outcome.retained, observerTarget, secrets);
+          if (problem !== null) {
+            discrepancies.push(
+              `${observerTarget.name} artifact ${safeForReport(f.path)} ${safeForReport(problem, 512)}`,
+            );
+            clampTo(
+              OBSERVER_TARGET_FAILURE_CEILING,
+              `a ${observerTarget.name} artifact in the outbox failed validation, so what the ` +
+                `observer saw on that ${observerTarget.target} cannot be read from its own report`,
             );
           }
         }

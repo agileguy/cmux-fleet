@@ -38,8 +38,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
+import { MAX_ITEMS, MAX_SHORT } from "../../src/contracts.ts";
 import {
   closeOutboxScan,
   scanOutboxFiles,
@@ -51,6 +52,7 @@ import {
   MAX_RECONCILED_BYTES,
   reconcileArtifactClaims,
   type ArtifactClaim,
+  type ArtifactReconciliation,
 } from "../../src/harvest/reconcile.ts";
 
 let tmp: string;
@@ -582,5 +584,418 @@ describe("reconcileArtifactClaims — the byte caps refuse by name", () => {
     // The line declares its own truncation, so the partial inventory above it
     // is not mistaken for the whole outbox.
     expect(r.discrepancies[0]).toContain("not digested");
+  }, 30_000);
+});
+
+/**
+ * THE OBSERVER TARGET ARTIFACTS (SRD-OBSERVER-ROLES §5.6, §6.7; Phase 2 tasks
+ * 2.1 and 2.2).
+ *
+ * `observer-docker-ops.json` and `observer-vm-ops.json` are held to the rule
+ * `ticket-ops.json` already is. Each is selected on the file's NAME and parsed
+ * through one entry point that pairs the schema with the credential sweep. Each
+ * clamps the task to `failed` when it will not parse, will not validate,
+ * carries a known secret, or is refused by a byte cap.
+ *
+ * The names are SPELLED here rather than imported, for the reason
+ * `harvest-ticket-ops-wiring.test.ts` gives. A test that imports the
+ * selector's own constant cannot tell a correct selection from a constant and
+ * a selection that drifted together.
+ *
+ * Every clamp is measured against a CONTROL through the same helper, and the
+ * control demonstrably reaches `verdictCeiling: null`. A "clamps to failed"
+ * assertion on a fixture that could never reach `null` would pin nothing.
+ */
+const DOCKER_OPS = "observer-docker-ops.json";
+const VM_OPS = "observer-vm-ops.json";
+
+/**
+ * An identifier-shaped secret, on purpose. The JSON parser quotes a bare
+ * identifier token in full in its error message, so this needle is one a
+ * not-JSON finding would echo if nothing redacted it.
+ */
+const NEEDLE = "ghp_obsNeedle7f3a9c2e41";
+
+/** §5.6's document, well formed, so each probe perturbs exactly one thing. */
+function dockerDoc(): Record<string, unknown> {
+  return {
+    schema: "pifleet.observer-docker-ops/v1",
+    worker: "obs-d1",
+    sweep_id: null,
+    window_opened_at: null,
+    services: [
+      {
+        name: "web-1",
+        namespace: "docker-host-a",
+        assessment: "healthy",
+        coverage: [
+          { channel: "state", result: "answered" },
+          { channel: "health", result: "answered" },
+          { channel: "logs", result: "answered" },
+          { channel: "stats", result: "not_attempted" },
+          { channel: "events", result: "forbidden" },
+        ],
+        selector: "name=web-1",
+        window: "300s",
+        evidence_ref: [
+          "observe-docker docker-host-a inspect web-1: State.Status=running, Health=healthy, RestartCount=0",
+        ],
+        container_id: "4f1c2b9d8e7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e",
+        image: "nginx:1.27",
+        restart_count: 0,
+      },
+    ],
+  };
+}
+
+/** §6.7's document, well formed. */
+function vmDoc(): Record<string, unknown> {
+  return {
+    schema: "pifleet.observer-vm-ops/v1",
+    worker: "obs-v1",
+    sweep_id: null,
+    window_opened_at: null,
+    services: [
+      {
+        name: "vm-1",
+        namespace: "vm-fleet-a",
+        assessment: "degraded",
+        coverage: [
+          { channel: "reachability", result: "answered" },
+          { channel: "system", result: "answered" },
+          { channel: "units", result: "answered" },
+          { channel: "logs", result: "answered" },
+          { channel: "resources", result: "unreachable" },
+          { channel: "cloud", result: "not_attempted" },
+        ],
+        selector: "host=vm-1.example.com",
+        window: "300s",
+        evidence_ref: ["observe-vm vm-fleet-a vm-1 systemctl --failed: 1 unit"],
+        uptime_s: 86_400.5,
+        system_state: "degraded",
+        failed_units: ["nginx.service"],
+      },
+    ],
+  };
+}
+
+/** The first row of a document, for a probe to perturb. */
+function firstRow(doc: Record<string, unknown>): Record<string, unknown> {
+  return (doc["services"] as Array<Record<string, unknown>>)[0]!;
+}
+
+/**
+ * Write `body` at `rel` under a FRESH `files/`, claim exactly that file, and
+ * reconcile.
+ *
+ * Fresh because several probes share one test. A file left over from the
+ * previous probe would be unclaimed by this one's envelope and add a finding
+ * that has nothing to do with the document under test.
+ */
+async function reconcileNamed(
+  rel: string,
+  body: string | Buffer,
+  secrets?: readonly string[],
+): Promise<ArtifactReconciliation> {
+  await rm(files, { recursive: true, force: true });
+  await mkdir(dirname(join(files, rel)), { recursive: true });
+  await writeFile(join(files, rel), body);
+  const scan = await scanHeld();
+  return reconcileArtifactClaims(
+    scan,
+    claims({ kind: "file", path: `/outbox/T-1/files/${rel}` }),
+    loc,
+    secrets === undefined ? {} : { secrets },
+  );
+}
+
+/** The control: the document passed, and the outbox's contents raised no ceiling. */
+function expectClean(r: ArtifactReconciliation, label: string): void {
+  expect(r.discrepancies, label).toEqual([]);
+  expect(r.verdictCeiling, label).toBeNull();
+  expect(r.verdictCeilingReason, label).toBeNull();
+}
+
+/**
+ * A clamp, attributed to ITS file and worded for an observer.
+ *
+ * The finding must open with the artifact's own name, so the name comes from
+ * the text and not from the path that happens to follow it. The reason must
+ * name the file and say what cannot be known. Neither may mention tickets:
+ * existing tests filter findings on `"ticket-ops"`, and an observer finding
+ * that matched would pollute them.
+ */
+function expectClamped(r: ArtifactReconciliation, name: string, label: string): void {
+  expect(r.discrepancies, label).toHaveLength(1);
+  expect(r.discrepancies[0]!.startsWith(`${name} artifact `), `${label}: ${r.discrepancies[0]}`).toBe(
+    true,
+  );
+  expect(r.discrepancies[0], label).not.toContain("ticket-ops");
+  expect(r.verdictCeiling, label).toBe("failed");
+  expect(r.verdictCeilingReason, label).toContain(name);
+  expect(r.verdictCeilingReason, label).toContain("what the observer saw");
+  expect(r.verdictCeilingReason, label).not.toContain("ticket");
+}
+
+describe("reconcileArtifactClaims — observer target artifacts are validated by name", () => {
+  test("a well-formed observer-docker-ops.json passes cleanly", async () => {
+    expectClean(await reconcileNamed(DOCKER_OPS, JSON.stringify(dockerDoc())), "full row");
+
+    // The three optional row fields really are optional.
+    const bare = dockerDoc();
+    for (const k of ["container_id", "image", "restart_count"]) delete firstRow(bare)[k];
+    expectClean(await reconcileNamed(DOCKER_OPS, JSON.stringify(bare)), "no optional fields");
+
+    // `sweep_id` and `window_opened_at` may carry a value as well as null.
+    const swept = dockerDoc();
+    swept["sweep_id"] = "sweep-17";
+    swept["window_opened_at"] = "2026-09-13T10:00:00.000Z";
+    expectClean(await reconcileNamed(DOCKER_OPS, JSON.stringify(swept)), "string sweep fields");
+  });
+
+  test("a well-formed observer-vm-ops.json passes cleanly", async () => {
+    expectClean(await reconcileNamed(VM_OPS, JSON.stringify(vmDoc())), "full row");
+
+    const bare = vmDoc();
+    for (const k of ["uptime_s", "system_state", "failed_units"]) delete firstRow(bare)[k];
+    expectClean(await reconcileNamed(VM_OPS, JSON.stringify(bare)), "no optional fields");
+  });
+
+  test("a malformed observer-docker-ops.json clamps to failed", async () => {
+    // THE CONTROL, FIRST: the same helper and the same name reach no ceiling.
+    expectClean(await reconcileNamed(DOCKER_OPS, JSON.stringify(dockerDoc())), "control");
+
+    const cases: Array<[string, (d: Record<string, unknown>) => void]> = [
+      ["assessment is a task status", (d) => (firstRow(d)["assessment"] = "failed")],
+      [
+        "a channel outside the five",
+        (d) => (firstRow(d)["coverage"] = [{ channel: "rollout", result: "answered" }]),
+      ],
+      [
+        "a coverage result outside the four",
+        (d) => (firstRow(d)["coverage"] = [{ channel: "state", result: "failed" }]),
+      ],
+      ["the VM twin's schema literal", (d) => (d["schema"] = "pifleet.observer-vm-ops/v1")],
+      ["the k8s observer's schema literal", (d) => (d["schema"] = "pifleet.observer-ops/v1")],
+      ["no schema literal", (d) => delete d["schema"]],
+      ["a missing sweep_id key", (d) => delete d["sweep_id"]],
+      ["a missing window_opened_at key", (d) => delete d["window_opened_at"]],
+      ["a worker that is not a worker id", (d) => (d["worker"] = "obs d1\n")],
+      ["no services", (d) => delete d["services"]],
+      ["a row with no evidence_ref", (d) => delete firstRow(d)["evidence_ref"]],
+      ["a row with no selector", (d) => delete firstRow(d)["selector"]],
+      ["a row with no coverage", (d) => delete firstRow(d)["coverage"]],
+      ["a negative restart_count", (d) => (firstRow(d)["restart_count"] = -1)],
+      ["a fractional restart_count", (d) => (firstRow(d)["restart_count"] = 1.5)],
+      ["an unbounded selector", (d) => (firstRow(d)["selector"] = "x".repeat(MAX_SHORT + 1))],
+      [
+        "more rows than MAX_ITEMS",
+        (d) => (d["services"] = Array.from({ length: MAX_ITEMS + 1 }, () => firstRow(dockerDoc()))),
+      ],
+    ];
+    for (const [label, perturb] of cases) {
+      const doc = dockerDoc();
+      perturb(doc);
+      const r = await reconcileNamed(DOCKER_OPS, JSON.stringify(doc));
+      expectClamped(r, DOCKER_OPS, label);
+      expect(r.discrepancies[0], label).toContain("validation");
+    }
+  });
+
+  test("a malformed observer-vm-ops.json clamps to failed", async () => {
+    expectClean(await reconcileNamed(VM_OPS, JSON.stringify(vmDoc())), "control");
+
+    const cases: Array<[string, (d: Record<string, unknown>) => void]> = [
+      ["assessment is a task status", (d) => (firstRow(d)["assessment"] = "failed")],
+      [
+        "a channel outside the six",
+        (d) => (firstRow(d)["coverage"] = [{ channel: "rollout", result: "answered" }]),
+      ],
+      ["the docker twin's schema literal", (d) => (d["schema"] = "pifleet.observer-docker-ops/v1")],
+      ["no schema literal", (d) => delete d["schema"]],
+      ["a missing sweep_id key", (d) => delete d["sweep_id"]],
+      ["a missing window_opened_at key", (d) => delete d["window_opened_at"]],
+      ["a row with no namespace", (d) => delete firstRow(d)["namespace"]],
+      ["a row with no window", (d) => delete firstRow(d)["window"]],
+      ["a negative uptime_s", (d) => (firstRow(d)["uptime_s"] = -1)],
+      ["a non-string system_state", (d) => (firstRow(d)["system_state"] = 42)],
+      ["a failed unit that is not a string", (d) => (firstRow(d)["failed_units"] = [7])],
+      ["failed_units that is not a list", (d) => (firstRow(d)["failed_units"] = "nginx.service")],
+    ];
+    for (const [label, perturb] of cases) {
+      const doc = vmDoc();
+      perturb(doc);
+      const r = await reconcileNamed(VM_OPS, JSON.stringify(doc));
+      expectClamped(r, VM_OPS, label);
+      expect(r.discrepancies[0], label).toContain("validation");
+    }
+  });
+
+  /**
+   * The two channel vocabularies are CLOSED PER TARGET, not pooled. A pooled
+   * enum would accept `units` from a docker observer, which has no systemd to
+   * ask, and grade a row on a channel that cannot exist there.
+   */
+  test("each target's channels are refused by the other target's document", async () => {
+    const dockerWithUnits = dockerDoc();
+    firstRow(dockerWithUnits)["coverage"] = [{ channel: "units", result: "answered" }];
+    expectClamped(
+      await reconcileNamed(DOCKER_OPS, JSON.stringify(dockerWithUnits)),
+      DOCKER_OPS,
+      "units in a docker document",
+    );
+
+    const vmWithUnits = vmDoc();
+    firstRow(vmWithUnits)["coverage"] = [{ channel: "units", result: "answered" }];
+    expectClean(await reconcileNamed(VM_OPS, JSON.stringify(vmWithUnits)), "units in a VM document");
+
+    const vmWithState = vmDoc();
+    firstRow(vmWithState)["coverage"] = [{ channel: "state", result: "answered" }];
+    expectClamped(
+      await reconcileNamed(VM_OPS, JSON.stringify(vmWithState)),
+      VM_OPS,
+      "state in a VM document",
+    );
+
+    const dockerWithState = dockerDoc();
+    firstRow(dockerWithState)["coverage"] = [{ channel: "state", result: "answered" }];
+    expectClean(
+      await reconcileNamed(DOCKER_OPS, JSON.stringify(dockerWithState)),
+      "state in a docker document",
+    );
+  });
+
+  test("an observer target artifact that is not JSON is reported, not thrown", async () => {
+    for (const name of [DOCKER_OPS, VM_OPS]) {
+      const r = await reconcileNamed(name, "{ this is not json");
+      expectClamped(r, name, `${name} not JSON`);
+      expect(r.discrepancies[0]).toContain("not parseable JSON");
+    }
+  });
+
+  /**
+   * SELECTION IS BY EXACT BASENAME, and `observer-ops.json` is not selected.
+   *
+   * SRD §3.3 keeps the k8s observer's document out of harvest validation, so
+   * the old name must stay silent. A name that merely CONTAINS a selected name
+   * must stay silent too. The subdirectory case is the other half: the scan
+   * walks `files/` recursively, so the basename decides, not the full path.
+   */
+  test("the same malformed body under another name is not validated", async () => {
+    const bad = dockerDoc();
+    firstRow(bad)["assessment"] = "failed";
+    const body = JSON.stringify(bad);
+
+    // Control: this body DOES clamp under the selected name.
+    expectClamped(await reconcileNamed(DOCKER_OPS, body), DOCKER_OPS, "control");
+
+    for (const other of [
+      "observer-ops.json",
+      "coverage.json",
+      "my-observer-docker-ops.json",
+      "observer-docker-ops.json.bak",
+      "observer-vm-ops.jsonl",
+    ]) {
+      expectClean(await reconcileNamed(other, body), other);
+    }
+
+    expectClamped(
+      await reconcileNamed(`nested/${DOCKER_OPS}`, body),
+      DOCKER_OPS,
+      "selected name in a subdirectory",
+    );
+  });
+
+  /**
+   * THE SWEEP RUNS INSIDE THE PARSE, and the finding never carries the value.
+   *
+   * The control is the same document with no needles, which passes. That shows
+   * the refusal comes from the sweep and not from some accident of the fixture.
+   */
+  test("a known secret inside an observer target artifact is refused without being repeated", async () => {
+    const leaky = dockerDoc();
+    firstRow(leaky)["evidence_ref"] = [`docker login used ${NEEDLE}`];
+    const body = JSON.stringify(leaky);
+
+    expectClean(await reconcileNamed(DOCKER_OPS, body), "control: no needles supplied");
+
+    const r = await reconcileNamed(DOCKER_OPS, body, [NEEDLE]);
+    expectClamped(r, DOCKER_OPS, "needle in evidence_ref");
+    expect(r.discrepancies[0]).toContain("credential");
+    expect(JSON.stringify(r)).not.toContain(NEEDLE);
+
+    const vmLeaky = vmDoc();
+    firstRow(vmLeaky)["failed_units"] = [NEEDLE];
+    const vr = await reconcileNamed(VM_OPS, JSON.stringify(vmLeaky), [NEEDLE]);
+    expectClamped(vr, VM_OPS, "needle in failed_units");
+    expect(JSON.stringify(vr)).not.toContain(NEEDLE);
+  });
+
+  /**
+   * THE PUBLISHED FILE IS EVERY BYTE, not the parsed subset.
+   *
+   * The schema strips a key it does not know, so a sweep over the PARSED value
+   * would never see a token sitting in an extra field. The file on disk still
+   * holds it, and the harvest digests and publishes that file whole.
+   */
+  test("a secret in a field the schema does not know is still refused", async () => {
+    const extra = dockerDoc();
+    firstRow(extra)["notes"] = `pasted ${NEEDLE} by mistake`;
+    const body = JSON.stringify(extra);
+
+    expectClean(await reconcileNamed(DOCKER_OPS, body), "control: the extra field is legal");
+
+    const r = await reconcileNamed(DOCKER_OPS, body, [NEEDLE]);
+    expectClamped(r, DOCKER_OPS, "needle in an unknown field");
+    expect(JSON.stringify(r)).not.toContain(NEEDLE);
+  });
+
+  /**
+   * A finding names PATHS, and a path is built from worker-authored keys. A
+   * document that uses the secret as a key as well as a value would put the
+   * secret into the path list, so the value has to be kept out of that too.
+   */
+  test("a secret used as a key is not repeated through the path it names", async () => {
+    const keyed = dockerDoc();
+    keyed[NEEDLE] = NEEDLE;
+    const r = await reconcileNamed(DOCKER_OPS, JSON.stringify(keyed), [NEEDLE]);
+    expectClamped(r, DOCKER_OPS, "needle as key and value");
+    expect(JSON.stringify(r)).not.toContain(NEEDLE);
+  });
+
+  test("a not-JSON document does not repeat a secret through the parser's message", async () => {
+    const body = `{"services": ${NEEDLE}}`;
+    // The premise, measured: the parser's own message carries the needle.
+    expect(() => JSON.parse(body)).toThrow(NEEDLE);
+
+    const r = await reconcileNamed(VM_OPS, body, [NEEDLE]);
+    expectClamped(r, VM_OPS, "needle in a not-JSON body");
+    expect(r.discrepancies[0]).toContain("not parseable JSON");
+    expect(JSON.stringify(r)).not.toContain(NEEDLE);
+  });
+
+  /**
+   * A cap refusal is a REPORTED gap and still clamps. Otherwise "make it
+   * bigger than the cap" would be the way to switch validation off. The
+   * well-formed controls above use the same names and reach no ceiling.
+   */
+  test("an observer target artifact refused by the per-artifact cap still clamps", async () => {
+    for (const name of [DOCKER_OPS, VM_OPS]) {
+      expectClean(
+        await reconcileNamed(name, JSON.stringify(name === DOCKER_OPS ? dockerDoc() : vmDoc())),
+        `${name} control`,
+      );
+
+      const r = await reconcileNamed(name, Buffer.alloc(MAX_ARTIFACT_BYTES + 1, 0x20));
+      const own = r.discrepancies.filter((d) => d.startsWith(`${name} artifact `));
+      expect(own, name).toHaveLength(1);
+      expect(own[0]).toContain("declined to read");
+      expect(own[0]).toContain("too_large");
+      expect(r.discrepancies.join("\n")).not.toContain("ticket-ops");
+      expect(r.verdictCeiling, name).toBe("failed");
+      expect(r.verdictCeilingReason, name).toContain(name);
+      expect(r.verdictCeilingReason, name).toContain("what the observer saw");
+      expect(r.verdictCeilingReason, name).not.toContain("ticket");
+    }
   }, 30_000);
 });
