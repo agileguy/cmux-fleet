@@ -356,6 +356,12 @@ COPY --chmod=0755 docker/ticket-cli /usr/local/bin/rally-cli
 # ships inert.
 COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh
 
+# The Docker role's entry-point alias (SRD-OBSERVER-ROLES §12 Phase 4, task
+# 4.2). A thin `exec observe-ssh docker "$@"` — it owns no validation of its
+# own, only being on PATH under the name `obs-d1` actually calls. On PATH as
+# `observe-docker`. No role calls it yet, so the phase ships inert.
+COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker
+
 # Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
 # (§5.3). Executing each one at build time is the difference between an image
 # that *contains* the tools and an image where they *run*: the relocation above
@@ -374,6 +380,7 @@ RUN set -eux; \
     /opt/pifleet/rally-cli/bin/rally-cli --version >/dev/null; \
     ssh -V; \
     observe-ssh --help >/dev/null; \
+    observe-docker --help 2>&1 | grep -qF 'observe-ssh: refused before ssh ran'; \
     pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.

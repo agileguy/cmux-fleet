@@ -1,0 +1,12 @@
+#!/bin/sh
+# observe-docker — the observer-docker role's only road to a Docker host
+# (SRD-OBSERVER-ROLES §5.2, §12 Phase 4 task 4.2).
+#
+#   observe-docker <target> <verb> [key=value ...]
+#
+# A thin alias for `observe-ssh docker "$@"`. Every argument passes through
+# unchanged — observe-ssh does ALL validation (the target-token grammar, the
+# verb shape, the argument grammar, and staging the ssh transport; see its own
+# header for the full account). This file owns nothing beyond being on PATH
+# under the name a worker actually calls.
+exec observe-ssh docker "$@"

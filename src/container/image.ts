@@ -161,6 +161,15 @@ export const BUILD_CONTEXT_ASSETS = [
   // weaker rule set while every other signal — the build succeeds, the tag
   // is unchanged — says nothing moved.
   "observe-ssh",
+  // The Docker role's entry-point alias (SRD-OBSERVER-ROLES §5.2; written and
+  // enrolled here by §12 Phase 4 task 4.2). A thin `exec observe-ssh docker
+  // "$@"` — it owns no validation of its own, only being on PATH under the
+  // name `obs-d1` actually calls. A stale copy is the same silent-regression
+  // shape as `observe-ssh` above: the binary a worker calls could point at a
+  // different kind, drop an argument on the way through, or otherwise diverge
+  // from what this repository ships, while the build still succeeds and the
+  // tag stays put.
+  "observe-docker",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 

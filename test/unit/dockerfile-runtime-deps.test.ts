@@ -72,6 +72,25 @@ export function aptPackages(dockerfile: string): Set<string> {
 const DOCKERFILE = readFileSync(dockerfilePath(), "utf8");
 const REPO = new URL("../../", import.meta.url).pathname;
 
+/** Anchors the smoke `RUN` block; `gcloud version` appears nowhere else. */
+const SMOKE_ANCHOR = "RUN set -eux; \\\n    gcloud version";
+
+/**
+ * The smoke RUN block's text, up to the blank line that ends it. Hoisted out
+ * of the observe-ssh describe block below (SRD-OBSERVER-ROLES task 4.2) so
+ * the observe-docker block that follows it can read the same block without
+ * retyping the anchor — a second, independently-typed anchor string is
+ * exactly the kind of thing that drifts from the first one silently.
+ */
+function smokeBlock(): string {
+  const start = DOCKERFILE.indexOf(SMOKE_ANCHOR);
+  expect(start, "expected the smoke RUN block (gcloud version …) in docker/Dockerfile").toBeGreaterThan(
+    -1,
+  );
+  const end = DOCKERFILE.indexOf("\n\n", start);
+  return DOCKERFILE.slice(start, end === -1 ? undefined : end);
+}
+
 describe("the image ships what pifleet itself spawns", () => {
   test("the sweep finds the base image's packages, so it is not vacuous", () => {
     const found = aptPackages(DOCKERFILE);
@@ -144,19 +163,6 @@ describe("observe-ssh's ssh dependency (SRD-OBSERVER-ROLES task 3.3)", () => {
  * instead of left to the first Docker build to find it.
  */
 describe("observe-ssh is exercised at build time (SRD-OBSERVER-ROLES task 3.3)", () => {
-  /** Anchors the smoke `RUN` block; `gcloud version` appears nowhere else. */
-  const SMOKE_ANCHOR = "RUN set -eux; \\\n    gcloud version";
-
-  /** The smoke RUN block's text, up to the blank line that ends it. */
-  function smokeBlock(): string {
-    const start = DOCKERFILE.indexOf(SMOKE_ANCHOR);
-    expect(start, "expected the smoke RUN block (gcloud version …) in docker/Dockerfile").toBeGreaterThan(
-      -1,
-    );
-    const end = DOCKERFILE.indexOf("\n\n", start);
-    return DOCKERFILE.slice(start, end === -1 ? undefined : end);
-  }
-
   test("the smoke RUN block runs `ssh -V`", () => {
     expect(smokeBlock()).toContain("ssh -V;");
   });
@@ -170,6 +176,55 @@ describe("observe-ssh is exercised at build time (SRD-OBSERVER-ROLES task 3.3)",
       "COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh",
     );
     expect(copyIdx, "expected observe-ssh's COPY line in docker/Dockerfile").toBeGreaterThan(-1);
+    const runIdx = DOCKERFILE.indexOf(SMOKE_ANCHOR);
+    expect(runIdx, "expected the smoke RUN block (gcloud version …) in docker/Dockerfile").toBeGreaterThan(
+      -1,
+    );
+    // A COPY placed after the RUN that runs it would fail the real build.
+    expect(copyIdx).toBeLessThan(runIdx);
+  });
+});
+
+/**
+ * `observe-docker` is exercised at build time too (SRD-OBSERVER-ROLES task
+ * 4.2), same reasoning as the observe-ssh block above: a presence check does
+ * not prove the alias still resolves `observe-ssh` on PATH, and a COPY placed
+ * after the RUN block that calls it would fail the real build unobserved by
+ * any unit test.
+ *
+ * `observe-docker --help` IS NOT THE SAME SHAPE as `observe-ssh --help`.
+ * `observe-ssh`'s own `--help` branch fires only when ITS first argument is
+ * literally `--help` (task 3.2); `observe-docker` always prepends `docker`
+ * ahead of whatever it is given, so `observe-docker --help` calls
+ * `observe-ssh docker --help` — two arguments, and neither one is `--help` in
+ * the position `observe-ssh` checks. MEASURED (this shim pair, run locally,
+ * no `OBSERVER_DOCKER_*`/`OBSERVER_VM_*` variables set): that call exits 77,
+ * not 0, with `observe-ssh: refused before ssh ran: expected <docker|vm>
+ * <target> <verb> [argument ...], got 2 argument(s); ...` on stderr. A smoke
+ * line mirroring observe-ssh's exactly (`observe-docker --help >/dev/null;`)
+ * would therefore abort every build under `set -eux`.
+ *
+ * The line below instead pipes the refusal into `grep -qF`, the same
+ * non-pipefail idiom this Dockerfile's ticket-cli install already uses
+ * (`rally-cli --version | grep -qF "version ${TICKET_CLI_VERSION}"`,
+ * `docker/Dockerfile:343`): under `/bin/sh` (no `pipefail`), a pipeline's
+ * exit status is its LAST command's, so the line succeeds exactly when grep
+ * finds the match — which happens if and only if `observe-docker` is on
+ * PATH, really execs into `observe-ssh`, and gets refused for the expected
+ * reason, all with no secrets delivered.
+ */
+describe("observe-docker is exercised at build time (SRD-OBSERVER-ROLES task 4.2)", () => {
+  test("the smoke RUN block runs observe-docker --help through observe-ssh's refusal", () => {
+    expect(smokeBlock()).toContain(
+      "observe-docker --help 2>&1 | grep -qF 'observe-ssh: refused before ssh ran';",
+    );
+  });
+
+  test("the shim's COPY precedes the RUN block that executes it", () => {
+    const copyIdx = DOCKERFILE.indexOf(
+      "COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker",
+    );
+    expect(copyIdx, "expected observe-docker's COPY line in docker/Dockerfile").toBeGreaterThan(-1);
     const runIdx = DOCKERFILE.indexOf(SMOKE_ANCHOR);
     expect(runIdx, "expected the smoke RUN block (gcloud version …) in docker/Dockerfile").toBeGreaterThan(
       -1,

@@ -122,6 +122,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "pi-extensions/report-tools.ts",
         "ssh-connect.cjs",
         "observe-ssh",
+        "observe-docker",
       ]),
     );
   });
@@ -170,6 +171,14 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // calls would validate against an older, possibly weaker rule set
       // while build success and an unchanged tag say nothing moved.
       "observe-ssh",
+      // Added 2026-09-14 (SRD-OBSERVER-ROLES task 4.2). The Docker role's
+      // entry-point alias — a thin `exec observe-ssh docker "$@"` that owns no
+      // validation of its own. A stale copy is the same silent-regression
+      // shape as `observe-ssh` above: the binary `obs-d1` actually calls could
+      // point at a different kind, drop an argument, or otherwise diverge from
+      // what this repository ships, while build success and an unchanged tag
+      // say nothing moved.
+      "observe-docker",
     ]);
   });
 
@@ -432,6 +441,27 @@ describe("observe-ssh is installed executable and on PATH (SRD-OBSERVER-ROLES ta
   test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-ssh", () => {
     expect(DOCKERFILE).toContain(
       "COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh",
+    );
+  });
+});
+
+/**
+ * `observe-docker`'s `COPY` is pinned exactly — mode and destination together
+ * — the same shape as `observe-ssh`'s pin above (SRD-OBSERVER-ROLES task 4.2).
+ *
+ * SAME TWO FAILURE MODES. `--chmod=0644` instead of `0755` leaves the alias
+ * present but not executable — the smoke block's `observe-docker --help`
+ * pipe (`test/unit/dockerfile-runtime-deps.test.ts`) would still catch it,
+ * so this is the second half of that guard, the way the observe-ssh pin
+ * above is the second half of its own smoke check. A destination outside
+ * `/usr/local/bin` leaves the file on disk, correctly hashed, and
+ * unreachable by name to `obs-d1` — nothing about the image tag or the
+ * build succeeding says so.
+ */
+describe("observe-docker is installed executable and on PATH (SRD-OBSERVER-ROLES task 4.2)", () => {
+  test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-docker", () => {
+    expect(DOCKERFILE).toContain(
+      "COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker",
     );
   });
 });
