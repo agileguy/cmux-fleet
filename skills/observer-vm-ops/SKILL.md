@@ -86,9 +86,6 @@ Every no-argument verb (`uptime`, `os`, `system`, `failed`, `disk`, `memory`) re
 argument at all — one extra token and the whole call is refused with exit 77. `unit` takes
 exactly one argument; zero, two, or more are refused the same way.
 
-**A target whose forced command predates `journal` and `kernel` refuses them exactly like any
-other unrecognised verb** — `not a recognised verb`, exit 77 — until that target is upgraded.
-
 **Refused with exit 77, never reaching a shell:** `shutdown`, `reboot`, `poweroff`, `halt`;
 `systemctl` with any verb other than `is-system-running` and `show` (`start`, `stop`, `restart`,
 `reload`, `enable`, `disable`, `mask`, `kill`, `isolate`, `daemon-reload`, `set-property`, and
