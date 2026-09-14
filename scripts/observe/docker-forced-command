@@ -70,16 +70,16 @@
 # `health` reads `{{with index .State "Health"}}`, never `{{if .State.Health}}`.
 # `.Id` is a raw inspect JSON key, so the docker CLI renders this template
 # against the raw JSON map, where a missing key is an error: the `if` form
-# fails with `map has no entry for key "Health"` on every container without a
-# healthcheck. `index` returns nil for a missing key instead. Both forms were
-# measured on docker 29.7.2 and 28.5.2, on running and exited containers with
-# and without a healthcheck.
+# fails with `map has no entry for key "Health"` on a container without a
+# healthcheck, and `index` returns nil for a missing key instead (MEASURED on
+# docker 29.7.2 and 28.5.2: .inspect_health_forms in
+# test/fixtures/observe/docker-forced-command-rendered.json).
 #
 # `docker info` can include a configured proxy URL WITH CREDENTIALS in it
 # (`.HttpProxy`, `.HttpsProxy`, `.NoProxy`), plus `.RegistryConfig`, `.Labels`
 # and swarm cluster details. `info` selects only version, OS, kernel,
 # architecture, CPU count, total memory, container and image counts, storage
-# driver and cgroup driver — the PM decision SRD §12 task 4.1 records.
+# driver and cgroup driver.
 #
 # `docker ps --format '{{json .}}'` (Docker's own default full-JSON row) also
 # carries `Mounts` (a bind mount's HOST SOURCE PATH — the same disclosure
@@ -103,8 +103,10 @@
 # narrowed further: every `exec_*` action names the exec'd command line, so
 # EVENTS_FILTERS lets through only container lifecycle and health events (both
 # measured against a real daemon). A label still arrives as an event's actor
-# attribute, as `inspect` returns it. `top` still lists each process's command
-# line.
+# attribute, as `inspect` returns it. `top` lists every process's command
+# line, a running `docker exec` included: dropping `exec_*` events keeps an
+# exec's command line out of the event history, not out of `top` while that
+# exec is still running.
 #
 # ## Argument grammar (conservative on purpose)
 #
@@ -132,9 +134,9 @@
 #   all        the literal word, nothing else, toggles `docker ps --all`.
 #   since=<N>s (logs, events)
 #              `N` is 1 to DIGITS_MAX ASCII digits, immediately followed by
-#              the literal letter `s` — nothing else. This round's three
-#              choices, made here because the SRD leaves them to the
-#              implementation (§12 task 4.3):
+#              the literal letter `s` — nothing else. Three choices are made
+#              here, because the SRD leaves them to the implementation (§12
+#              task 4.3):
 #                1. For `logs`, `since=` and `tail=` may appear in EITHER
 #                   order; the script always emits `--since` before `--tail`
 #                   to docker regardless of the order the caller used, so
@@ -198,9 +200,11 @@ set -f
 # IFS is pinned to the POSIX default (space, tab, newline), because the
 # unquoted `${filters}` and `${EVENTS_FILTERS}` expansions below split on it.
 # busybox sh, dash and bash all ignore an IFS in the environment they start
-# with (measured), so the pin only matters under a shell that does not. The
-# newline is written literally, because command substitution strips trailing
-# newlines and `$(printf '\n')` would lose it.
+# with, so the pin only matters under a shell that does not (MEASURED: the
+# `IFS=:` cases in test/unit/observe-docker-forced-command.test.ts under sh and
+# dash, and the `IFS=:` case in docker-forced-command-rendered.json under
+# busybox sh). The newline is written literally, because command substitution
+# strips trailing newlines and `$(printf '\n')` would lose it.
 POSIX_IFS="$(printf ' \t')
 "
 IFS="${POSIX_IFS}"
@@ -221,9 +225,8 @@ DIGITS_MAX=9
 # See the header for which fields, and why, for each format below.
 INSPECT_FORMAT='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"created":{{json .Created}},"state":{"status":{{json .State.Status}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"oom_killed":{{json .State.OOMKilled}},"dead":{{json .State.Dead}},"exit_code":{{json .State.ExitCode}},"error":{{json .State.Error}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"health":{{with index .State "Health"}}{"status":{{json .Status}},"failing_streak":{{json .FailingStreak}}}{{else}}null{{end}}},"restart_count":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}'
 INFO_FORMAT='{"version":{{json .ServerVersion}},"os":{{json .OperatingSystem}},"kernel":{{json .KernelVersion}},"architecture":{{json .Architecture}},"cpus":{{json .NCPU}},"mem_total":{{json .MemTotal}},"containers":{{json .Containers}},"images":{{json .Images}},"storage_driver":{{json .Driver}},"cgroup_driver":{{json .CgroupDriver}}}'
-# The fixed `ps` template (round 2, PM decision) — see the header's
-# disclosure-boundary section for why the default `{{json .}}` row is not
-# used here.
+# The fixed `ps` template — see the header's disclosure-boundary section for
+# why the default `{{json .}}` row is not used here.
 PS_FORMAT='{"ID":{{json .ID}},"Names":{{json .Names}},"Image":{{json .Image}},"Command":{{json .Command}},"CreatedAt":{{json .CreatedAt}},"RunningFor":{{json .RunningFor}},"State":{{json .State}},"Status":{{json .Status}},"Ports":{{json .Ports}},"Labels":{{json .Labels}},"Networks":{{json .Networks}}}'
 # `stats` and `version` both just want the object docker already builds, in
 # full — see the header for why that is safe for these two verbs.
@@ -240,8 +243,13 @@ EVENTS_UNTIL_BOUND=0s
 # else (MEASURED: test/fixtures/observe/docker-cli-shapes.json ->
 # .events.action_allowlist.filters). Every exec_* action names the exec'd
 # command line, a healthcheck's included, and an operator's `docker exec` can
-# carry a secret there, so no exec_* action is in the list. Every word is a
-# whitespace-free literal; the events case splits this on purpose.
+# carry a secret there, so no exec_* action is in the list. With
+# `event=health_status` in the list the daemon matches `event=` values as
+# prefixes: `event=exec` alone matched nothing, and beside it matched
+# exec_create, exec_start and exec_die (MEASURED: .events_prefix_match in
+# docker-forced-command-rendered.json). So no value may be a prefix of an
+# exec_* action either. Every word is a whitespace-free literal; the events
+# case splits this on purpose.
 EVENTS_FILTERS='--filter type=container --filter event=create --filter event=start --filter event=restart --filter event=stop --filter event=die --filter event=kill --filter event=oom --filter event=pause --filter event=unpause --filter event=destroy --filter event=health_status'
 
 # $1 names the verb this refusal is about, or one of the two fixed

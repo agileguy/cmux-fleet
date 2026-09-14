@@ -1,8 +1,8 @@
 /**
  * `scripts/observe/docker-forced-command` is the whole of what the
- * `observer-docker` credential can do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4
- * task 4.1 landed `ps`, `inspect`, `info` and `version`; round 2 task 4.3
- * adds `logs`, `stats`, `top` and `events`, plus the fixed `ps` template).
+ * `observer-docker` credential can do (SRD-OBSERVER-ROLES §5.2, §5.4; task
+ * 4.1 landed `ps`, `inspect`, `info` and `version`; task 4.3 adds `logs`,
+ * `stats`, `top` and `events`, plus the fixed `ps` template).
  *
  * sshd runs this script directly for the enrolled key
  * (`restrict,command="<installed path>"`, §5.7), with NO arguments of its
@@ -21,11 +21,11 @@
  * write-then-rename below is what makes that reliable even against a
  * process that never gets that far.
  *
- * Both fixed templates that predate this round (`INSPECT_FORMAT`,
- * `INFO_FORMAT`) and the one this round adds (`PS_FORMAT`) are read out of
- * the real script's own source, never retyped here: the "exact argv" tests
- * below build their expectations from the same strings the script runs, so
- * a wording change to a template shows up as a disclosure-assertion failure
+ * All three fixed templates (`INSPECT_FORMAT`, `INFO_FORMAT` and
+ * `PS_FORMAT`) are read out of the real script's own source, never retyped
+ * here: the "exact argv" tests below build their expectations from the same
+ * strings the script runs, so a wording change to a template shows up as a
+ * disclosure-assertion failure
  * (if it adds a forbidden field) rather than a silent pass against a stale
  * copy. The `events` terminating bound is read from the MEASURED fixture
  * (`test/fixtures/observe/docker-cli-shapes.json`), never typed by hand, so
@@ -120,7 +120,7 @@ const DOCKER_CLI_SHAPES = JSON.parse(readFileSync(join(ROOT, "test", "fixtures",
   ps: { key_set: string[] };
   events: { terminating_bound: string[]; action_allowlist: { filters: string[] } };
 };
-/** The exact `["--until", "<value>"]` pair this round's `events` verb must carry. */
+/** The exact `["--until", "<value>"]` pair the `events` verb must carry. */
 const EVENTS_TERMINATING_BOUND: string[] = DOCKER_CLI_SHAPES.events.terminating_bound;
 /** The lifecycle-and-health `--filter` words, measured to keep every `exec_*` command line out. */
 const EVENTS_ACTION_FILTERS: string[] = DOCKER_CLI_SHAPES.events.action_allowlist.filters;
@@ -353,7 +353,7 @@ describe("the fixed templates (SRD §0.3, §5.4) — the disclosure assertion", 
   });
 });
 
-describe("the fixed ps template (round 2 PM decision) — the disclosure assertion", () => {
+describe("the fixed ps template — the disclosure assertion", () => {
   const EXPECTED_PS_KEYS = ["ID", "Names", "Image", "Command", "CreatedAt", "RunningFor", "State", "Status", "Ports", "Labels", "Networks"];
 
   test("the ps template's key list equals exactly the eleven named keys", () => {
@@ -494,6 +494,27 @@ describe("the forbidden-verbs fixture is populated (test/fixtures/observe/docker
   });
 });
 
+describe("events filter prefix safety", () => {
+  // With `event=health_status` among the filters, the daemon matches `event=`
+  // values as prefixes: `event=exec` alone matched nothing, and beside
+  // `event=health_status` it matched exec_create, exec_start and exec_die
+  // (docker 28.5.2 and 29.7.2, .events_prefix_match in
+  // docker-forced-command-rendered.json). The per-shell exec_* check below only
+  // sees a value that starts `event=exec_`, so this rejects any value that is a
+  // prefix of an exec_* action, the empty value included.
+  test("no event= value in EVENTS_FILTERS is a prefix of exec_create, exec_start, exec_die or exec_detach", () => {
+    const EXEC_ACTIONS = ["exec_create", "exec_start", "exec_die", "exec_detach"];
+    const values = EVENTS_FILTERS.split(" ")
+      .filter((w) => w.startsWith("event="))
+      .map((w) => w.slice("event=".length));
+    for (const value of values) {
+      for (const action of EXEC_ACTIONS) {
+        expect(action.startsWith(value)).toBe(false);
+      }
+    }
+  });
+});
+
 describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell) => {
   describe("the exact docker argv per verb and argument shape", () => {
     test("ps: no arguments", () => {
@@ -579,6 +600,12 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       const r = runScript(shell, "logs web-1 since=007s tail=007");
       expect(r.exitCode).toBe(0);
       expect(r.docker).toEqual(logsArgv("web-1", "007", "007"));
+    });
+
+    test("logs: tail=08 is compared as decimal, not octal, and passed through as given", () => {
+      const r = runScript(shell, "logs web-1 since=60s tail=08");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "60", "08"));
     });
 
     test("logs: a since= digit string at the 9-digit cap is accepted", () => {
@@ -835,6 +862,28 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       ],
       ["events: since= given twice", "events since=60s since=120s", "events", "since=<N>s may be given only once"],
       ["events: container= given twice", "events since=60s container=web-1 container=web-2", "events", "container=<c> may be given only once"],
+      [
+        "ps: a newline between two valid tokens does not split them",
+        "ps all\nname=web",
+        "ps",
+        "arguments must be 'all', name=<n> or label=<k>=<v>",
+      ],
+      ["inspect: container holding '/', outside the name grammar", "inspect web/1", "inspect", "the container argument must match"],
+      ["ps: a name= value holding ':', outside the name grammar", "ps name=web:1", "ps", "a name= value must match"],
+      ["ps: a label= key holding '@', outside the name grammar", "ps label=we@b=v", "ps", "a label= key must match"],
+      ["ps: a label= value holding '+', outside the name grammar", "ps label=k=v+1", "ps", "a label= value must match"],
+      [
+        "events: a container= value holding '/', outside the name grammar",
+        "events since=60s container=web/1",
+        "events",
+        "a container= value must match",
+      ],
+      [
+        "logs: tail=0600 is compared as decimal and exceeds the 500 cap",
+        "logs web-1 since=60s tail=0600",
+        "logs",
+        "tail must be <= 500",
+      ],
       ["a verb with a leading '-'", "-V web-1", "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
       ["a verb starting with a digit", "1ps web-1", "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
       ["a verb longer than 32 characters", `${"p".repeat(33)} web-1`, "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],

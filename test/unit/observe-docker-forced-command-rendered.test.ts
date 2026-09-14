@@ -4,9 +4,9 @@
  * `test/fixtures/observe/docker-forced-command-rendered.json`.
  *
  * `observe-docker-forced-command.test.ts` runs the script against a fake `docker` and pins the argv it
- * builds. That cannot see a template a real CLI refuses to render. The `ps` template once named
- * `HealthStatus`, which docker CLIs before 29.5.0 do not have, and every `ps` on such a target exited 1
- * while all of those tests passed. This file reads what real CLIs did with the real script.
+ * builds — it cannot see a template a real CLI refuses to render, such as a field a given docker
+ * version's `ps` formatter does not have (`HealthStatus`, absent before 29.5.0, exits 1 rather than
+ * rendering null). This file guards against that: it reads what real CLIs did with the real script.
  *
  * The fixture is MEASURED by `scripts/observe/characterise-docker --write-rendered` and never edited by
  * hand. Each run records the sha256 of the forced command it ran, so any edit to that file fails here
@@ -159,6 +159,14 @@ for (const [version, run] of runs) {
     test("events returned only allowlisted actions, and container= kept to that container", () => {
       for (const c of cases("events")) for (const action of c.actions ?? []) expect(ALLOWED_ACTIONS).toContain(action);
       expect(one("events since=120s container=char-hc").containers_seen).toEqual(["char-hc"]);
+    });
+
+    test("every events case recorded start and health_status actions", () => {
+      // The allowlist check above walks `c.actions ?? []`, so an empty array would pass it.
+      for (const c of cases("events")) {
+        expect(c.actions).toContain("start");
+        expect(c.actions).toContain("health_status");
+      }
     });
 
     test("ran under busybox sh, the shell this fixture covers", () => {

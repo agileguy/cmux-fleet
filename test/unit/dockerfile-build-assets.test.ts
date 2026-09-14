@@ -171,9 +171,9 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // calls would validate against an older, possibly weaker rule set
       // while build success and an unchanged tag say nothing moved.
       "observe-ssh",
-      // Added 2026-09-14 (SRD-OBSERVER-ROLES task 4.2). The Docker role's
-      // entry-point alias — a thin `exec observe-ssh docker "$@"` that owns no
-      // validation of its own. A stale copy is the same silent-regression
+      // The Docker role's entry-point alias (SRD-OBSERVER-ROLES task 4.2) — a
+      // thin `exec observe-ssh docker "$@"` that owns no validation of its
+      // own. A stale copy is the same silent-regression
       // shape as `observe-ssh` above: the binary `obs-d1` actually calls could
       // point at a different kind, drop an argument, or otherwise diverge from
       // what this repository ships, while build success and an unchanged tag
