@@ -108,7 +108,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
     // the Dockerfile is clean and when the parse silently matched nothing, and
     // only one of those two is evidence.
     const sources = buildContextSources(DOCKERFILE);
-    expect(sources.length).toBeGreaterThanOrEqual(8);
+    expect(sources.length).toBeGreaterThanOrEqual(9);
 
     const names = new Set(sources.map((s) => assetNameOf(s.source)));
     expect(names).toEqual(
@@ -121,6 +121,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "pi-extensions/truncation-recovery.ts",
         "pi-extensions/report-tools.ts",
         "ssh-connect.cjs",
+        "observe-ssh",
       ]),
     );
   });
@@ -162,6 +163,13 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // `kex_exchange_identification` failure, so a copy that mishandles a
       // refusal hides the proxy's rule name from the operator reading it.
       "ssh-connect.cjs",
+      // Added 2026-09-14 (SRD-OBSERVER-ROLES task 3.3). The argv-safety shim
+      // on PATH as `observe-ssh` — it refuses every malformed or hostile
+      // argument BEFORE `ssh` ever runs. A stale copy under an unmoved tag is
+      // a silent regression of that refusal: the binary a worker actually
+      // calls would validate against an older, possibly weaker rule set
+      // while build success and an unchanged tag say nothing moved.
+      "observe-ssh",
     ]);
   });
 
@@ -357,5 +365,73 @@ describe("the tag moves when an enrolled file's bytes move (ISC-270 acceptance)"
       .update(readFileSync(buildContextPath(ASSET), "utf8").replace(/\r\n/g, "\n"))
       .digest("hex");
     expect(buildContextDigests()[ASSET]).toBe(onDisk);
+  });
+});
+
+/**
+ * The Dockerfile's `COPY docker/ssh-connect.cjs` destination is the same path
+ * `observe-ssh`'s `PROXY_COMMAND` invokes (SRD-OBSERVER-ROLES task 3.3).
+ *
+ * NEITHER HALF ABOVE CATCHES THIS. Enrolment (this file's earlier blocks)
+ * proves the SOURCE `docker/ssh-connect.cjs` is hashed; it says nothing about
+ * where the Dockerfile puts it. `observe-ssh.test.ts` proves the shim builds
+ * the right `ssh` argv; it does not read the Dockerfile at all. The two files
+ * only agree by convention — `observe-ssh` hard-codes
+ * `node /opt/pifleet/ssh-connect.cjs %h %p` and the Dockerfile separately
+ * hard-codes the `COPY` destination — and nothing before this test compared
+ * them. MEASURED: renaming the `COPY` destination alone to
+ * `/opt/pifleet/ssh-connect.js` left every existing build-assets,
+ * runtime-deps and observe-ssh test at 158 pass / 0 fail. The renamed proxy
+ * script would be unreachable — `observe-ssh` would `exec ssh` with a
+ * `ProxyCommand` pointing at a file the image never puts there — and every
+ * SSH call would fail with OpenSSH's opaque `kex_exchange_identification`,
+ * silently, at runtime, on the very path this whole transport exists for.
+ *
+ * BOTH SIDES ARE DERIVED FROM THE REAL FILES, not retyped as literals: a copy
+ * of the path pasted into this test would drift from the real files exactly
+ * the way the two real files drifted from each other.
+ */
+describe("docker/ssh-connect.cjs's COPY destination agrees with observe-ssh's PROXY_COMMAND", () => {
+  test("the Dockerfile COPY destination is the exact path observe-ssh's PROXY_COMMAND invokes", () => {
+    const copyMatch = /COPY\s+(?:--\S+\s+)*docker\/ssh-connect\.cjs\s+(\S+)/.exec(DOCKERFILE);
+    expect(copyMatch, "expected a COPY of docker/ssh-connect.cjs in docker/Dockerfile").not.toBeNull();
+    const dockerfileDest = copyMatch![1] ?? "";
+    expect(dockerfileDest.length).toBeGreaterThan(0);
+
+    const observeSsh = readFileSync(buildContextPath("observe-ssh"), "utf8");
+    const proxyMatch = /PROXY_COMMAND=(['"])node (\S+) %h %p\1/.exec(observeSsh);
+    expect(
+      proxyMatch,
+      "expected observe-ssh's PROXY_COMMAND to read 'node <path> %h %p'",
+    ).not.toBeNull();
+    const proxyPath = proxyMatch![2] ?? "";
+    expect(proxyPath.length).toBeGreaterThan(0);
+
+    expect(dockerfileDest).toBe(proxyPath);
+  });
+});
+
+/**
+ * `observe-ssh`'s `COPY` is pinned exactly — mode and destination together —
+ * mirroring the precedent at `test/unit/ticket-cli.test.ts:99`, which pins
+ * `docker/ticket-cli`'s `COPY` line the same way (SRD-OBSERVER-ROLES task
+ * 3.3, round-2 follow-up).
+ *
+ * TWO FAILURE MODES, both silent otherwise. `--chmod=0644` instead of
+ * `0755` leaves the binary present but not executable — the smoke block
+ * would still run `observe-ssh --help` (task 3.3's own build-time check),
+ * so this is really the second half of that guard: without it, ONLY a real
+ * `docker build` catches the permission error, and it catches it as an
+ * opaque "permission denied" rather than as a change to this line. A
+ * destination outside `/usr/local/bin` (`/opt/pifleet/observe-ssh`, say)
+ * leaves the file on disk, correctly hashed, and unreachable by name to
+ * `observe-docker`/`observe-vm` — nothing about the image tag or the build
+ * succeeding says so.
+ */
+describe("observe-ssh is installed executable and on PATH (SRD-OBSERVER-ROLES task 3.3)", () => {
+  test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-ssh", () => {
+    expect(DOCKERFILE).toContain(
+      "COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh",
+    );
   });
 });

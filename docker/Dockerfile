@@ -46,7 +46,7 @@ ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 # `IdentityReadError`, which wears `EXIT.BACKEND_UNAVAILABLE` — so the failure
 # arrives as exit 3 from an unrelated command rather than as a missing binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg procps \
+      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg procps openssh-client \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
@@ -347,6 +347,15 @@ RUN set -eux; \
 # paragraph in the skill.
 COPY --chmod=0755 docker/ticket-cli /usr/local/bin/rally-cli
 
+# The SSH transport shim (SRD-OBSERVER-ROLES §12 Phase 3, task 3.3). Turns
+# one enrolled target token into a fixed `ssh` argv. Per the file's own "Who
+# owns what": it owns ARGV SAFETY, refusing every argument it cannot validate
+# before `ssh` ever runs; the target's own forced command owns the verb
+# allowlist, because only the target can enforce a rule the worker cannot
+# step around. On PATH as `observe-ssh`. No role calls it yet, so the phase
+# ships inert.
+COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh
+
 # Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
 # (§5.3). Executing each one at build time is the difference between an image
 # that *contains* the tools and an image where they *run*: the relocation above
@@ -363,6 +372,8 @@ RUN set -eux; \
     fd --version >/dev/null; \
     fdfind --version >/dev/null; \
     /opt/pifleet/rally-cli/bin/rally-cli --version >/dev/null; \
+    ssh -V; \
+    observe-ssh --help >/dev/null; \
     pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.

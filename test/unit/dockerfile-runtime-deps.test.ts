@@ -98,3 +98,83 @@ describe("the image ships what pifleet itself spawns", () => {
     expect(aptPackages(DOCKERFILE).has("procps")).toBe(true);
   });
 });
+
+/**
+ * `ssh` does not fit the table above honestly (SRD-OBSERVER-ROLES task 3.3).
+ *
+ * `RUNTIME_BINARIES`'s check is `source.includes('"${bin}"')` — built for the
+ * TypeScript call sites above, where the binary is a quoted string literal
+ * passed to a spawn helper. `ssh` is spawned by `docker/observe-ssh`, POSIX
+ * `sh`, not by anything under `src/`, and its own call site is unquoted —
+ * `exec ssh \` (SRD-OBSERVER-ROLES §5.2 task 3.2) — so the literal `"ssh"`
+ * this table demands never appears there. Forcing it into the table would
+ * either fail on an honest shim or have to be satisfied by rewriting the shim
+ * to suit the test, which is backwards. `ssh` gets its own pair of
+ * assertions instead, in the same shape as the `procps` check above: that
+ * `observe-ssh` really does invoke it, and that `openssh-client` — the
+ * package that provides it — is installed.
+ */
+describe("observe-ssh's ssh dependency (SRD-OBSERVER-ROLES task 3.3)", () => {
+  const OBSERVE_SSH = readFileSync(`${REPO}docker/observe-ssh`, "utf8");
+
+  test("docker/observe-ssh really execs ssh, so the claim below is checkable", () => {
+    expect(OBSERVE_SSH).toMatch(/\bexec ssh\b/);
+  });
+
+  test("openssh-client is installed in the base image", () => {
+    expect(aptPackages(DOCKERFILE)).toContain("openssh-client");
+  });
+
+  test("the sweep reports a base image that dropped openssh-client", () => {
+    const stripped = DOCKERFILE.replace(" openssh-client ", " ");
+    expect(aptPackages(stripped).has("openssh-client")).toBe(false);
+    expect(aptPackages(DOCKERFILE).has("openssh-client")).toBe(true);
+  });
+});
+
+/**
+ * The shim is actually exercised at build time, not just present on disk
+ * (SRD-OBSERVER-ROLES task 3.3, round-2 follow-up). Presence checks — the
+ * COPY exists, the package is installed — do not prove either smoke command
+ * still runs: a `RUN set -eux; \` block is a hand-maintained list, and a line
+ * dropped from it is silent everywhere else, the same fail-open ISC-270
+ * documents for `BUILD_CONTEXT_ASSETS`. It also does not prove the COPY runs
+ * BEFORE the block that calls it — a COPY placed after that RUN fails the
+ * real build, which no unit test observes, so the ordering is asserted here
+ * instead of left to the first Docker build to find it.
+ */
+describe("observe-ssh is exercised at build time (SRD-OBSERVER-ROLES task 3.3)", () => {
+  /** Anchors the smoke `RUN` block; `gcloud version` appears nowhere else. */
+  const SMOKE_ANCHOR = "RUN set -eux; \\\n    gcloud version";
+
+  /** The smoke RUN block's text, up to the blank line that ends it. */
+  function smokeBlock(): string {
+    const start = DOCKERFILE.indexOf(SMOKE_ANCHOR);
+    expect(start, "expected the smoke RUN block (gcloud version …) in docker/Dockerfile").toBeGreaterThan(
+      -1,
+    );
+    const end = DOCKERFILE.indexOf("\n\n", start);
+    return DOCKERFILE.slice(start, end === -1 ? undefined : end);
+  }
+
+  test("the smoke RUN block runs `ssh -V`", () => {
+    expect(smokeBlock()).toContain("ssh -V;");
+  });
+
+  test("the smoke RUN block runs `observe-ssh --help`", () => {
+    expect(smokeBlock()).toContain("observe-ssh --help >/dev/null;");
+  });
+
+  test("the shim's COPY precedes the RUN block that executes it", () => {
+    const copyIdx = DOCKERFILE.indexOf(
+      "COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh",
+    );
+    expect(copyIdx, "expected observe-ssh's COPY line in docker/Dockerfile").toBeGreaterThan(-1);
+    const runIdx = DOCKERFILE.indexOf(SMOKE_ANCHOR);
+    expect(runIdx, "expected the smoke RUN block (gcloud version …) in docker/Dockerfile").toBeGreaterThan(
+      -1,
+    );
+    // A COPY placed after the RUN that runs it would fail the real build.
+    expect(copyIdx).toBeLessThan(runIdx);
+  });
+});

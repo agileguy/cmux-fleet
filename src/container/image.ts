@@ -151,6 +151,14 @@ export const BUILD_CONTEXT_ASSETS = [
   // an operator needs, and does so silently: the dispatch just fails, with
   // nothing in reach explaining why.
   "ssh-connect.cjs",
+  // The argv-safety shim (SRD-OBSERVER-ROLES §5.2 task 3.3), installed on
+  // PATH as `observe-ssh`. It is what refuses every malformed or hostile
+  // argument BEFORE `ssh` ever runs (task 3.4's injection table). A stale
+  // copy under an unmoved tag is a silent regression of that refusal: the
+  // binary a worker actually calls would validate against an older, possibly
+  // weaker rule set while every other signal — the build succeeds, the tag
+  // is unchanged — says nothing moved.
+  "observe-ssh",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 
