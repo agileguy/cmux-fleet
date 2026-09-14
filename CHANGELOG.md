@@ -4,6 +4,123 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-09-14
+
+This release is Phase 3 of `Docs/SRD-OBSERVER-ROLES.md` (observe-ssh-transport).
+
+The worker image now carries the SSH path that the `observer-docker` and
+`observer-vm` roles will use to reach a Docker host or a VM through the fleet's
+CONNECT proxy. No role calls it yet, so nothing changes in production until
+Phases 4 and 5 add those roles.
+
+### Added
+
+- **`docker/observe-ssh <docker|vm> <target> <verb> [argument ...]`** turns an
+  enrolled target token into the fixed §5.2 `ssh` command, built from the
+  worker's delivered `OBSERVER_<KIND>_*` secret files.
+  - Anything it cannot validate is refused with exit 77, and the message says
+    the shim refused before ssh ran. Missing configuration exits 78.
+  - It hands ssh a 0600 key copy in `/tmp` that always ends in a newline, and
+    refuses (78) when something other than a regular file is already there.
+  - The argv carries `-n`, `ConnectTimeout=10`, `ServerAliveInterval=15` and
+    `ServerAliveCountMax=3`, so a quiet command survives and a silent path ends.
+  - It `exec`s ssh, so ssh's own exit status reaches the caller unchanged.
+- **`docker/ssh-connect.cjs`** is the ProxyCommand. It sends one CONNECT to
+  `HTTPS_PROXY`, joins stdin and stdout to the tunnel on a `200`, and on any
+  other status prints the proxy's status line and body to stderr. OpenSSH
+  itself reports only `kex_exchange_identification`, so this is where an
+  operator sees the rule name.
+  - It exits when the far side closes the tunnel, even while ssh holds its
+    stdin open.
+  - A refusal reaches stderr however its connection ends: a close, a reset, a
+    satisfied `Content-Length`, or a 30 s response deadline that also bounds a
+    proxy that never answers.
+  - An EPIPE on stdout exits 1 with one line.
+  - `HTTPS_PROXY` must be a bare `http://host:port` URL: no userinfo, path,
+    query or fragment. Another scheme, any `@`, or a value that does not parse
+    is refused, and the refusal never repeats the value. A port-less URL means
+    port 80. IPv6 literals work.
+  - Only an `HTTP/1.0` or `HTTP/1.1` `200` status line opens the tunnel.
+    Control characters and every byte above 0x7e in the proxy's reply are
+    escaped, so what reaches stderr is ASCII.
+- **`multiline: true`** on a `secrets.env_allowlist` entry lets that secret's
+  value span lines. Only marked names may carry a newline; a carriage return is
+  refused for every name. The value is delivered byte for byte. The harvest
+  credential sweep and the event-log redactor both match each secret line of
+  such a value, and neither matches PEM armor.
+- **`scripts/observe/characterise-ssh-transport`** measures the transport in
+  the real worker posture: secrets delivered through `buildWorkerEnv`, the shim
+  and ProxyCommand installed by the Dockerfile's own COPY lines, the real
+  CONNECT proxy and the production run flags, on an internal Docker network. It
+  writes `test/fixtures/observe/ssh-transport-facts.json`, stamped with the
+  sha256 of the shim, ProxyCommand, proxy and egress policy it measured, and
+  refuses to measure while any file it depends on has uncommitted changes. A
+  unit test fails when any of the four has changed since. The script also
+  refuses to run unless the shim's `exec ssh` sets exactly its nine `-o`
+  options, once each.
+  - OpenSSH refuses the key at its delivered mode 0444, and refuses a key with
+    no trailing newline; the shim's copy fixes both.
+  - A remote exit 77 comes back as 77. A host-key mismatch and a proxy refusal
+    both exit 255, and the refusal's rule name reaches stderr.
+  - A 130 s silent command completes through the shim; raw ssh without
+    keepalives is cut at 120 s by the proxy's idle timeout. A paused target
+    ends the session about 51 s after the pause.
+- **The worker image** installs `openssh-client`, puts `observe-ssh` on PATH and
+  `ssh-connect.cjs` at `/opt/pifleet`, and runs `ssh -V` and
+  `observe-ssh --help` in the build smoke block. Both files are in the image
+  hash, so editing either one changes the image tag.
+
+### Fixed
+
+- **The event-log redactor** scrubbed a multi-line value only whole or by its
+  first 12 characters. A single leaked line of a key went through, and honest
+  text naming a key's armor line was redacted. It now works line by line.
+- **The event-log redactor** could leave the tail of a value holding `"` or `\`
+  past its first 12 characters in the log. It now replaces the longest match at
+  each position, and a replacement never starts or ends inside a JSON escape or
+  a surrogate pair, so the line still parses and holds no replacement character.
+- **The event-log redactor** could cut a secret inside a JSON document carried
+  in an event as a string, halfway through one of that document's escapes. The
+  event line still parsed, but the document inside it did not. A cut there now
+  ends where one of the document's characters ends.
+- **The event-log redactor** scrubbed `credential: false` secrets such as a
+  targets list, so host names and target tokens vanished from the log.
+  `PIFLEET_SECRET_NAMES` now leaves out every `credential: false` name. That
+  includes grants that already shipped, such as `TICKET_BASE_URL`,
+  `TICKET_WORKSPACE`, `TICKET_PROJECT`, `CI_CD_BASE_URL`, `CI_BUILD_BASE_URL`
+  and `GRAFANA_BASE_URL` in `fleet.example.yaml`, whose values now appear in
+  `events.jsonl` unredacted. Delivery is unchanged.
+
+### Testing
+
+- 6284 pass, 0 fail across 227 files (`bun test test/unit`); `bun run typecheck`
+  clean.
+- `observe-ssh` runs under both `/bin/sh` and `dash`, with a recording fake
+  `ssh`, against a table of hostile arguments. The tests run a per-run copy of
+  the shim, so they never write `/tmp`.
+- `ssh-connect.cjs` lifecycle tests hold stdin open the way ssh does.
+  A Docker-gated test (`PIFLEET_DOCKER=1`) also runs it under real Node 24 in
+  the digest-pinned relay image, which sees TCP resets that Bun does not; CI's
+  container job lists it. Its IPv6 scenario enables loopback IPv6 in the
+  container, so it no longer depends on the host's default.
+- Each behaviour was checked by mutation: disabling it turned its tests red.
+- Three review iterations, each followed by a fix round.
+
+### Known gaps
+
+- The images have not been rebuilt; that is host task 3.H1.
+- Key ownership was measured on macOS (Colima) only, not on a Linux host.
+- A bare IPv6 target produces an unbracketed CONNECT authority. How the egress
+  policy should name IPv6 hosts is still open.
+- The redactor cannot be built for a single-line secret of about 30,000
+  characters or more: its truncation pattern is too deeply nested, and
+  `buildRedactor` throws a `RangeError`. This predates 1.0.3.
+- When an event carries a JSON document as a string, redacting a secret inside
+  it can leave that inner document unparseable in two cases: a match that
+  starts inside one of the document's escapes, or a value holding a quote that
+  lines up with the document's closing quote. The event line itself always
+  parses, and no leading run of the secret survives.
+
 ## [1.0.2] — 2026-09-13
 
 This release is Phase 2 of `Docs/SRD-OBSERVER-ROLES.md` (observer-target-artifacts).
