@@ -979,6 +979,85 @@ describe("the longest match wins at every position, and never ends inside an esc
     expect(() => JSON.parse(out)).not.toThrow();
     expect(out).toBe(line);
   });
+
+  /**
+   * The test above places a hit at ONE offset inside an escaped U+0001, and a look-back
+   * that stopped two characters short of the backslash passed it. A hit can
+   * start on any of the five characters after the backslash, so this places
+   * one on each: values beginning `u001f`, `001f`, `01f`, `1f` and `f`, each
+   * followed by a tail past the floor, against a record holding U+001F and
+   * then that tail. None of them is a leading run of the value.
+   *
+   * Measured with the look-back shortened to `pos - 2`, the record came back
+   * as `a\u0[redacted:T]`, `a\u00[redacted:T]` and `a\u001[redacted:T]`, and
+   * none of those lines parses.
+   */
+  test("a match never starts at any offset inside a unicode escape", () => {
+    const US = String.fromCharCode(0x1f);
+    const tail = "ghijklmnopqrst-fake-tail";
+    expect(tail.length).toBeGreaterThanOrEqual(TRUNCATION_FLOOR);
+    const line = escaped(`a${US}${tail}`);
+    expect(line).toContain(`a\\u001f${tail}`);
+    for (const head of ["u001f", "001f", "01f", "1f", "f"]) {
+      const out = one(`${head}${tail}`, "T").redact(line);
+      expect(out, head).toBe(line);
+      expect(() => JSON.parse(out), head).not.toThrow();
+    }
+  });
+
+  /**
+   * The double-escaped form used to truncate one token OF THE LINE at a time,
+   * and one escape of an embedded document is several of those: the document's
+   * escaped quote is an escaped backslash and then an escaped quote in the line.
+   * A truncated match could stop between the two and take half of the
+   * document's escape with it. The line still parsed; the document inside it
+   * did not.
+   *
+   * Measured on 1b9c932 and 640eb1e with the value below, in a record whose
+   * embedded document holds the value cut just after its quote, then a quote
+   * and `C`, then the whole value, then its first eight characters: the marker
+   * swallowed the backslash of the record's own escaped quote, and the embedded
+   * string was no longer JSON.
+   */
+  test("a double-escaped truncation never ends inside an escape of the embedded document", () => {
+    const TAB = String.fromCharCode(9);
+    const BACKSLASH = String.fromCharCode(0x5c);
+    const value = `5ejk${BACKSLASH}h9r/m"${TAB}a28w81`;
+    const text = `${value.slice(0, 11)}"C${value}${value.slice(0, 8)}`;
+    const out = buildRedactor([["S0", value]]).redact(JSON.stringify({ b: JSON.stringify({ x: text }) }));
+    const embedded = (JSON.parse(out) as { b: string }).b;
+
+    expect(() => JSON.parse(embedded), embedded).not.toThrow();
+    // The quote after the cut is the record's, and it survives beside the
+    // marker. The last eight characters are under the floor in every form.
+    expect(embedded).toBe(JSON.stringify({ x: `[redacted:S0]"C[redacted:S0]${value.slice(0, 8)}` }));
+  });
+
+  /**
+   * Two armed values whose forms are the same TEXT but not the same TOKENS. Y
+   * is X with its tab written out as a backslash and a `t`, so Y's escaped form
+   * is X's double-escaped form character for character. For X that backslash
+   * and `t` are one escape of an embedded document; for Y they are two
+   * characters of raw text. The redactor keys what it compiles on the pattern,
+   * not the text, so both are kept. Keyed on the text, X's pattern stands in
+   * for Y's, and since it truncates by the document's tokens, a cut of Y
+   * ending on its backslash (twelve characters, a real leading run) passes
+   * through untouched. On 640eb1e every pattern stepped the line's tokens, and
+   * Y's double-escaped form replaced the run.
+   */
+  test("a value whose escaped form is another's double-escaped form is still matched by its own tokens", () => {
+    const BACKSLASH = String.fromCharCode(0x5c);
+    const TAB = String.fromCharCode(9);
+    const x = `abcdefghijk${TAB}lmnop-fake-value`;
+    const y = `abcdefghijk${BACKSLASH}tlmnop-fake-value`;
+    expect(JSON.stringify(y)).toBe(JSON.stringify(JSON.stringify(x).slice(1, -1)));
+
+    const out = buildRedactor([
+      ["X", x],
+      ["Y", y],
+    ]).redact(escaped(`${y.slice(0, 12)}Z`));
+    expect(out).toBe(escaped("[redacted:Y]Z"));
+  });
 });
 
 /**
@@ -1358,5 +1437,129 @@ describe("a seeded property: every cut of an escaping value is scrubbed whole, a
       for (const line of lines) check(r, line, ["[redacted:ML]"], `case=${i}`, tally);
     }
     assertHeld(tally, 5_000, 500);
+  });
+
+  /**
+   * EMBEDDED DOCUMENTS. A record carries a JSON document as a string, built
+   * from context and cuts of the armed values, as an object and as an array.
+   * Every line must parse, and no raw leading run of a value whose
+   * double-escaped form reaches the floor may survive in a document that
+   * parses. `values` picks the alphabet; context between cuts holds anything,
+   * a double quote and a backslash included.
+   */
+  function embeddedCuts(seed: number, alphabet: readonly string[]) {
+    const rand = prng(seed);
+    const pick = <T,>(from: readonly T[]): T => from[Math.floor(rand() * from.length)] as T;
+    const ch = (n: number) => String.fromCharCode(n);
+    const CONTEXT = [..."ABC xyz/{}", '"', ch(0x5c), ch(10), ch(9), ch(1), ch(0x1f), ASTRAL[1] as string];
+    const makeOne = (): string =>
+      Array.from({ length: 10 + Math.floor(rand() * 22) }, () => pick(alphabet)).join("");
+    const context = (): string => Array.from({ length: Math.floor(rand() * 3) }, () => pick(CONTEXT)).join("");
+    /** The shortest raw leading run whose double-escaped form reaches the floor, or null. */
+    const shortestRun = (v: string): string | null => {
+      for (let k = 1; k <= v.length; k++) {
+        if (isHighSurrogate(v.charCodeAt(k - 1))) continue;
+        if (jsonInner(jsonInner(v.slice(0, k))).length >= TRUNCATION_FLOOR) return v.slice(0, k);
+      }
+      return null;
+    };
+    const tally = { records: 0, changed: 0, cutsBeforeAnEscape: 0, unparsed: [] as string[], failures: [] as string[] };
+
+    for (let i = 0; i < 3000; i++) {
+      const values = Array.from({ length: 1 + Math.floor(rand() * 2) }, makeOne);
+      const r = buildRedactor(values.map((v, k) => [`S${k}`, v] as [string, string]));
+      let text = "";
+      const cuts: Array<[string, number]> = [];
+      for (let k = 0; k < 3; k++) {
+        text += context();
+        const v = pick(values);
+        const cut = v.slice(0, 1 + Math.floor(rand() * v.length));
+        text += cut;
+        cuts.push([cut, text.length]);
+      }
+      text += context();
+      // Not vacuous: cuts long enough to truncate, followed by a character the document escapes.
+      for (const [cut, end] of cuts) {
+        if (end >= text.length || jsonInner(jsonInner(cut)).length < TRUNCATION_FLOOR) continue;
+        const next = String.fromCodePoint(text.codePointAt(end) as number);
+        if (jsonInner(next).length > next.length) tally.cutsBeforeAnEscape++;
+      }
+      const docs: Array<[string, string, (d: unknown) => string]> = [
+        ["object", JSON.stringify({ x: text }), (d) => (d as { x: string }).x],
+        ["array", JSON.stringify(["k", text, 1]), (d) => (d as string[])[1] as string],
+      ];
+      for (const [how, doc, read] of docs) {
+        tally.records++;
+        const record = JSON.stringify({ b: doc });
+        const out = r.redact(record);
+        if (out !== record) tally.changed++;
+        const where = `seed=${seed} case=${i} ${how} values=${JSON.stringify(values)} text=${JSON.stringify(text)}`;
+        let embedded: string;
+        try {
+          embedded = (JSON.parse(out) as { b: string }).b;
+        } catch {
+          tally.failures.push(`${where}: the line does not parse -> ${out}`);
+          continue;
+        }
+        let raw: string;
+        try {
+          raw = read(JSON.parse(embedded));
+        } catch {
+          tally.unparsed.push(`${where}: the embedded document does not parse -> ${embedded}`);
+          continue;
+        }
+        for (const v of values) {
+          const run = shortestRun(v);
+          if (run !== null && raw.includes(run)) {
+            tally.failures.push(`${where}: a leading run of the floor or more survived -> ${embedded}`);
+          }
+        }
+      }
+    }
+    return tally;
+  }
+
+  /**
+   * The double-escaped form truncates by the EMBEDDED DOCUMENT's tokens, so a
+   * match never ends inside one of the document's escapes.
+   *
+   * The values need escaping (control characters) and hold neither a double
+   * quote nor a backslash, which isolates that form's truncation. Measured on
+   * 640eb1e at this seed, before the fix: 138 of 6,000 records came back with
+   * an embedded document that did not parse, and no leading run survived in
+   * any of them.
+   */
+  test("an embedded document built from cuts still parses, and keeps no leading run", () => {
+    const ch = (n: number) => String.fromCharCode(n);
+    const escaping = [9, 8, 12, 13, 0, 1, 0x1b, 0x1f].map(ch);
+    const alphabet = [...PLAIN, ...escaping, ...escaping, ...ASTRAL];
+    const t = embeddedCuts(SEED + 3, alphabet);
+    const summary = `${t.unparsed.length} unparsed and ${t.failures.length} failures over ${t.records} records (${t.changed} changed, ${t.cutsBeforeAnEscape} cuts before an escape)`;
+    expect(t.unparsed.length, `${summary}\n${t.unparsed.slice(0, 3).join("\n")}`).toBe(0);
+    expect(t.failures.length, `${summary}\n${t.failures.slice(0, 3).join("\n")}`).toBe(0);
+    expect(t.records).toBe(6_000);
+    expect(t.changed, summary).toBeGreaterThan(5_000);
+    expect(t.cutsBeforeAnEscape, summary).toBeGreaterThan(1_000);
+  });
+
+  /**
+   * The same generator with a double quote and a backslash in the VALUES, which
+   * is where truncating by the document's tokens could have let a leading run
+   * survive: none does, and every line parses.
+   *
+   * What is NOT asserted here is that every embedded document parses. A value
+   * holding a quote or a backslash can line its single-escaped form up with the
+   * document's own closing quote or escape, and that match is replaced whole;
+   * the module header's residual section says why that is still open.
+   */
+  test("values holding a quote or a backslash: every line parses, and no leading run survives", () => {
+    const ch = (n: number) => String.fromCharCode(n);
+    const escaping = ['"', ch(0x5c), ch(9), ch(1), ch(0x1f)];
+    const alphabet = [...PLAIN, ...escaping, ...escaping, ...ASTRAL];
+    const t = embeddedCuts(SEED + 4, alphabet);
+    const summary = `${t.failures.length} failures over ${t.records} records (${t.changed} changed, ${t.unparsed.length} unparsed)`;
+    expect(t.failures.length, `${summary}\n${t.failures.slice(0, 3).join("\n")}`).toBe(0);
+    expect(t.records).toBe(6_000);
+    expect(t.changed, summary).toBeGreaterThan(5_000);
   });
 });

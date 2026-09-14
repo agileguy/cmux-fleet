@@ -115,6 +115,22 @@
  * leading run of anything and is passed over. Either kind of cut used to leave
  * a lone backslash in the line or change the character after the marker.
  *
+ * One level down, for a JSON document embedded in a record as a string, the
+ * double-escaped form truncates by the DOCUMENT's tokens rather than the
+ * line's (see `truncationSource`), so a truncated match of it never ends
+ * inside one of the document's escapes.
+ *
+ * THE RESIDUAL, SAID OUT LOUD: a replacement can still leave an embedded
+ * document that no longer parses, in two ways older than that fix. A hit can
+ * start inside one of the document's escapes. And a value holding a quote or a
+ * backslash can line its SINGLE-escaped form up with the document's own
+ * closing quote or escape, which then goes with the match. The line itself
+ * always parses. Neither is closed here, because the same bytes also read as
+ * raw text, where that match is a real leading run: stopping it short leaves
+ * the rest of the value in the log, and widening it takes characters that are
+ * not the value's. Telling the two readings apart means parsing the string
+ * the hit sits in.
+ *
  * ## Cost
  *
  * This runs on EVERY event, including a `stderr_line` flood — ISC-158's
@@ -221,7 +237,14 @@ export interface Redactor {
   readonly unresolved: readonly string[];
   /** Where the values came from. */
   readonly source: RedactorSource;
-  /** Scrub every occurrence of every armed value out of a serialised record. */
+  /**
+   * Scrub every occurrence of every armed value out of a serialised record.
+   *
+   * `serialised` must be `JSON.stringify` output, as it is at the only caller,
+   * `appendJsonl`'s transform, because the escape checks read the parity of a
+   * backslash run and in raw text would pass over a secret that follows an odd
+   * run of backslashes.
+   */
   redact(serialised: string): string;
 }
 
@@ -405,17 +428,37 @@ function escapeContaining(text: string, pos: number, from: number): number {
  * value, so its escaped form always ends on a boundary. For a form with no
  * escapes every token is one character and the pattern is byte-for-byte what
  * it was.
+ *
+ * ## Whose tokens: the escaped form's, for BOTH forms
+ *
+ * `tokens` is the escaped form split into its tokens, and for the
+ * double-escaped form, each of those tokens double-escaped as a unit. This used
+ * to tokenise the double-escaped text itself, which steps the LINE's tokens,
+ * and one escape of a document embedded in the record is several of those:
+ * the document's escaped quote is an escaped backslash and then an escaped
+ * quote in the line. A truncation could stop between the two. The line still
+ * parsed and the embedded document did not. A reviewer's fuzz measured it on
+ * 640eb1e: 192 of 40,000 records, with no stem left behind in any of them.
+ *
+ * Stepping the document's tokens ends every truncation where one of the
+ * document's characters ends. A real fragment loses nothing, for the reason
+ * above one level down: its double-escaped form ends on a document boundary.
+ * Every document boundary is also a line boundary, so the pattern matches a
+ * subset of what it did. What it no longer matches is text that shares a
+ * value's first characters and then DIFFERS inside one escape of the document,
+ * where the old pattern took the shared run together with half that escape.
+ * The shared run is a raw leading run under the floor in that form, which is
+ * the same answer the escaped form already gave inside its own escapes.
  */
-function truncationSource(form: string, floor: number): string {
-  const tokens = jsonTokens(form);
+function truncationSource(tokens: readonly string[], floor: number): string {
   let stemTokens = 0;
-  let stemLength = 0;
-  while (stemLength < floor) stemLength += (tokens[stemTokens++] as string).length;
+  let stem = "";
+  while (stem.length < floor) stem += tokens[stemTokens++] as string;
   let tail = "";
   for (let i = tokens.length - 1; i >= stemTokens; i--) {
     tail = `(?:${escapeRe(tokens[i] as string)}${tail})?`;
   }
-  return escapeRe(form.slice(0, stemLength)) + tail;
+  return escapeRe(stem) + tail;
 }
 
 /**
@@ -454,12 +497,15 @@ export function buildRedactor(
   const armed: string[] = [];
   const skipped: string[] = [];
 
-  /** Compile `text`'s escaped and double-escaped forms under one marker. */
+  /**
+   * Compile `text`'s escaped and double-escaped forms under one marker, both
+   * truncating by the escaped form's tokens (see `truncationSource`).
+   */
   const addForms = (text: string, marker: string, truncatable: boolean): void => {
-    const inner = jsonInner(text);
-    for (const form of [inner, jsonInner(inner)]) {
-      if (form.length < MIN_REDACTABLE_LENGTH || seen.has(form)) continue;
-      seen.add(form);
+    const escaped = jsonTokens(jsonInner(text));
+    for (const tokens of [escaped, escaped.map(jsonInner)]) {
+      const form = tokens.join("");
+      if (form.length < MIN_REDACTABLE_LENGTH) continue;
       /*
        * `min` and not `TRUNCATION_FLOOR` outright: a secret SHORTER than the
        * floor gets whole-value matching and no fragment matching at all. That
@@ -468,7 +514,15 @@ export function buildRedactor(
        * matches ordinary text eats the log it was meant to protect.
        */
       const floor = truncatable ? Math.min(TRUNCATION_FLOOR, form.length) : form.length;
-      forms.push({ src: truncationSource(form, floor), marker, len: form.length });
+      const src = truncationSource(tokens, floor);
+      /*
+       * Keyed on the PATTERN, not the form's text. One value's escaped form can
+       * be another's double-escaped form, the same text tokenised two ways, and
+       * each pattern matches leading runs the other does not.
+       */
+      if (seen.has(src)) continue;
+      seen.add(src);
+      forms.push({ src, marker, len: form.length });
     }
   };
 
