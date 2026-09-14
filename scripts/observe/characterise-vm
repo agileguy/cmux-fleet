@@ -1,0 +1,531 @@
+#!/usr/bin/env bun
+/**
+ * `scripts/observe/characterise-vm` — SRD-OBSERVER-ROLES task 5.0.
+ *
+ * Measures, rather than assumes, the systemd facts §6.4's forced command is
+ * built on, and writes them to two fixtures. The forced command's tests wire
+ * those fixtures; they do not re-derive them.
+ *
+ *  - `test/fixtures/observe/vm-tool-shapes.json`: which `journalctl` relative
+ *    `--since` spelling parses on the oldest systemd in scope AND on the target,
+ *    and whether it really bounds the window; what `journal`'s and `kernel`'s
+ *    argv print (a header line or not, the timestamp form); the output of
+ *    `systemctl show --property=…` for a failed, an active and a missing unit
+ *    (the property order, the exit status); `list-units --state=failed --plain`
+ *    rows; and `is-system-running` on a degraded system.
+ *  - `test/fixtures/observe/vm-forbidden-commands.json`: every `systemctl` verb
+ *    either version's help lists, minus `is-system-running`, `list-units` and
+ *    `show`, as a top-level verb and as a `unit` sub-verb; every flag in
+ *    `journalctl`'s `Commands:` section and every option taking a path,
+ *    appended to a `journal` and a `kernel` request; and the forms §6.4 names
+ *    that no help page prints. Each entry is an `SSH_ORIGINAL_COMMAND` string.
+ *
+ * ## Where it runs, and what it touches
+ *
+ * Everything goes over SSH to an operator-supplied Linux host that runs Docker.
+ * On that host the script reads help pages and parses timestamps with the host's
+ * own systemd, and runs `show` against one unit every systemd has; it writes
+ * nothing there and stores none of the host's log or unit text, only shapes.
+ * The oldest systemd in scope (§6.4, principal decision 2026-09-14: RHEL/Rocky 8,
+ * systemd 239) runs in a throwaway container this script starts on that host,
+ * `--privileged` with no network and systemd as PID 1, so a failed unit and a
+ * log marker can be made inside it. The container and its anonymous volumes are
+ * removed on exit, on success, on failure, or on SIGINT, SIGTERM or SIGHUP; the
+ * host's other containers are never listed, inspected or touched.
+ *
+ * The target's address and account are not written to either fixture.
+ *
+ * ## Usage
+ *
+ *   scripts/observe/characterise-vm --target <user@host>            # measure and print
+ *   scripts/observe/characterise-vm --target <user@host> --write    # also write both fixtures
+ *   scripts/observe/characterise-vm --target <user@host> --image <tag>
+ *
+ * The image must already be on the target. The default is `rockylinux:8`. SSH
+ * runs with BatchMode, so the target must accept a key without a prompt.
+ */
+
+import { randomBytes } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+
+const REPO = resolve(import.meta.dir, "../..");
+const SCRIPT = "scripts/observe/characterise-vm";
+const SHAPES_FIXTURE = join(REPO, "test/fixtures/observe/vm-tool-shapes.json");
+const FORBIDDEN_FIXTURE = join(REPO, "test/fixtures/observe/vm-forbidden-commands.json");
+const RUN_TIMEOUT_MS = 120_000;
+
+/** The three `systemctl` verbs §6.4's grammar runs. Every other verb a help page lists is forbidden. */
+export const ALLOWED_SYSTEMCTL = ["is-system-running", "list-units", "show"];
+
+/** §6.4's `unit` properties, in the order the forced command asks for them. */
+export const UNIT_PROPERTIES = ["Id", "LoadState", "ActiveState", "SubState", "Result", "NRestarts", "ActiveEnterTimestamp", "ExecMainStatus"];
+
+const SYSTEM_ARGV = ["systemctl", "is-system-running"];
+const FAILED_ARGV = ["systemctl", "list-units", "--state=failed", "--no-legend", "--plain", "--no-pager"];
+const showArgv = (unit: string): string[] => ["systemctl", "show", unit, "--no-pager", `--property=${UNIT_PROPERTIES.join(",")}`];
+/** §6.4's `journal` and `kernel` argv, less the since bound. */
+const journalArgv = (lines: number): string[] => ["journalctl", "--no-pager", "--output=short-iso", `--lines=${lines}`];
+const kernelArgv = (lines: number): string[] => ["journalctl", "--no-pager", "--dmesg", "--output=short-iso", `--lines=${lines}`];
+
+/** Relative `--since` spellings worth trying, `{N}` standing for a count of seconds. */
+export const SINCE_CANDIDATES = ["--since=-{N}s", "--since=-{N}sec", "--since=-{N}seconds", "--since={N}s ago"];
+/** Second counts each candidate must parse: none, one, §6.3's default window, and a day. */
+const SINCE_COUNTS = [0, 1, 300, 86400];
+/** Spellings no systemd parses. If one of these is accepted, acceptance proves nothing. */
+const SINCE_CONTROLS = ["--since=garbage-time", "--since=-5 bogus"];
+
+/** §6.4's `systemctl` examples. Each must be a verb both versions list, or §6.4 describes a different systemd. */
+const SRD_FORBIDDEN_SYSTEMCTL = ["start", "stop", "restart", "reload", "enable", "disable", "mask", "kill", "isolate", "daemon-reload", "set-property"];
+/** §6.4's `journalctl` maintenance flags. Each must appear in both versions' help. */
+const SRD_FORBIDDEN_JOURNAL = ["--vacuum-size", "--vacuum-files", "--vacuum-time", "--rotate", "--flush", "--sync"];
+/** Top-level forms §6.4 refuses that no help page prints. */
+const SRD_NAMED_FORMS = [
+  { command: "shutdown", why: "powers the VM off" },
+  { command: "reboot", why: "restarts the VM" },
+  { command: "poweroff", why: "powers the VM off" },
+  { command: "halt", why: "halts the VM" },
+  { command: "kill 1", why: "signals a process" },
+  { command: "sudo systemctl restart sshd.service", why: "sudo" },
+  { command: "systemctl restart sshd.service", why: "systemctl as a verb" },
+  { command: "dnf remove openssh-server", why: "a package manager" },
+  { command: "yum remove openssh-server", why: "a package manager" },
+  { command: "apt-get remove openssh-server", why: "a package manager" },
+  { command: "apt remove openssh-server", why: "a package manager" },
+  { command: "rpm -e openssh-server", why: "a package manager" },
+  { command: "zypper remove openssh", why: "a package manager" },
+  { command: "cat /etc/shadow", why: "a free-form path read" },
+];
+/** The request a forbidden `journalctl` flag is appended to: well-formed apart from that flag. */
+const JOURNAL_REQUEST = "journal since=60s lines=10";
+const KERNEL_REQUEST = "kernel since=60s lines=10";
+/** A sample value for a flag's placeholder, so an entry reads as a worker would send it. */
+const PLACEHOLDER_SAMPLE: Record<string, string> = { BYTES: "1K", INT: "1", TIME: "1s", FIELD: "_PID", PATH: "/etc/shadow", FILE: "/etc/shadow", DIR: "/etc", ROOT: "/", IMAGE: "/etc/shadow" };
+/** Placeholders that name something on the filesystem: an option taking one is a free-form path read. */
+const PATH_PLACEHOLDERS = new Set(["PATH", "FILE", "DIR", "ROOT", "IMAGE"]);
+
+type Run = { code: number; stdout: string; stderr: string; ms: number; timedOut: boolean };
+
+/** How long a timed-out process gets after SIGTERM before SIGKILL. */
+const KILL_GRACE_MS = 2_000;
+
+/** Run a local command as an argv array. Never through a local shell. */
+async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<Run> {
+  const started = Date.now();
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  let timedOut = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill();
+    killTimer = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
+  }, timeoutMs);
+  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  clearTimeout(timer);
+  clearTimeout(killTimer);
+  return { code, stdout, stderr, ms: Date.now() - started, timedOut };
+}
+
+/** One argument for the remote POSIX shell ssh hands the command to. */
+export function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A `user@host` with nothing ssh could read as an option or a second word. */
+export function validTarget(target: string): boolean {
+  return /^[A-Za-z0-9._-]+@[A-Za-z0-9._:-]+$/.test(target) && !target.startsWith("-");
+}
+
+function parseArgs(argv: string[]): { target: string; image: string; write: boolean } {
+  let target = "";
+  let image = "rockylinux:8";
+  let write = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--target") target = argv[++i] ?? "";
+    else if (argv[i] === "--image") image = argv[++i] ?? "";
+    else if (argv[i] === "--write") write = true;
+    else throw new Error(`unknown argument: ${argv[i]}`);
+  }
+  if (!validTarget(target)) throw new Error("--target takes user@host");
+  if (!/^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+$/.test(image)) throw new Error("--image takes a name:tag");
+  return { target, image, write };
+}
+
+/** Strip the terminal escapes newer systemd prints in its help headings even into a pipe. */
+export function stripAnsi(text: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape byte is the thing being removed.
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+}
+
+/**
+ * Every verb a `systemctl --help` page lists, from each section whose heading
+ * ends `Commands:`. A section ends at a blank line or an unindented line. Option
+ * lines start with `-` and wrapped descriptions are indented deeper, so neither
+ * reads as a verb.
+ */
+export function parseSystemctlVerbs(help: string): { verb: string; section: string }[] {
+  const verbs: { verb: string; section: string }[] = [];
+  let section: string | null = null;
+  for (const line of stripAnsi(help).split("\n")) {
+    const heading = /^((?:\S.* )?Commands):\s*$/.exec(line);
+    if (heading) {
+      section = heading[1]!;
+      continue;
+    }
+    if (line.trim() === "" || /^\S/.test(line)) {
+      section = null;
+      continue;
+    }
+    const entry = /^ {2}([a-z][a-z0-9-]*)(?: |$)/.exec(line);
+    if (section && entry) verbs.push({ verb: entry[1]!, section });
+  }
+  return verbs;
+}
+
+/**
+ * Every long option a `journalctl --help` page lists, with its section and its
+ * value placeholder. 239 files everything but the commands under one `Options:`
+ * heading; 255 splits them into several.
+ */
+export function parseJournalOptions(help: string): { flag: string; placeholder: string | null; section: string }[] {
+  const options: { flag: string; placeholder: string | null; section: string }[] = [];
+  let section = "";
+  for (const line of stripAnsi(help).split("\n")) {
+    const heading = /^(\S.*):\s*$/.exec(line);
+    if (heading) {
+      section = heading[1]!;
+      continue;
+    }
+    const entry = /^\s+(?:-[A-Za-z0-9]\s+)?(--[a-z][a-z0-9-]*)(?:\[?=\[?\+?\]?([A-Z][A-Z0-9_]*)\]?)?(?:\s|$)/.exec(line);
+    if (entry && section) options.push({ flag: entry[1]!, placeholder: entry[2] ?? null, section });
+  }
+  return options;
+}
+
+/** `key=value` lines, in the order printed. */
+export function propertyLines(stdout: string): [string, string][] {
+  return stdout
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => {
+      const eq = line.indexOf("=");
+      if (eq <= 0) throw new Error(`not a key=value line: ${JSON.stringify(line)}`);
+      return [line.slice(0, eq), line.slice(eq + 1)];
+    });
+}
+
+/** A value's shape with every digit written as 9, so a timestamp's form is kept and its moment is not. */
+function digitShape(value: string): string {
+  return value.replace(/[0-9]/g, "9");
+}
+
+/**
+ * What a journal read prints, without keeping any of what it read: journalctl's own `-- ` marker lines,
+ * and the shape of each entry's first word, which `short-iso` makes its timestamp.
+ */
+function journalShape(r: Run): Record<string, unknown> {
+  const lines = r.stdout.split("\n").filter((line) => line !== "");
+  const entries = lines.filter((line) => !line.startsWith("-- "));
+  return {
+    exit: r.code,
+    lines: lines.length,
+    marker_lines: lines.filter((line) => line.startsWith("-- ")).map(digitShape),
+    entry_lines: entries.length,
+    entry_first_word_shapes: [...new Set(entries.map((line) => digitShape(line.split(" ")[0]!)))].sort(),
+    stderr_first_line: digitShape(r.stderr.trim().split("\n")[0] ?? ""),
+  };
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const id = randomBytes(4).toString("hex");
+  const name = `pifleet-char-vm-${id}`;
+  const failUnit = `char-fail-${id}.service`;
+  const missingUnit = `char-nosuch-${id}.service`;
+  const tag = `pifleet-char-${id}`;
+
+  /** A command on the target, as an argv array quoted for its shell. */
+  const host = (argv: string[], timeoutMs?: number): Promise<Run> =>
+    run(
+      [
+        "ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+        args.target, argv.map(shellQuote).join(" "),
+      ],
+      timeoutMs,
+    );
+  const mustHost = async (argv: string[], what: string): Promise<Run> => {
+    const r = await host(argv);
+    if (r.timedOut || r.code !== 0) throw new Error(`${what} failed on the target (exit ${r.code}${r.timedOut ? ", timed out" : ""}): ${r.stderr.trim()}`);
+    return r;
+  };
+  /** A command inside the throwaway container. */
+  const box = (argv: string[]): Promise<Run> => host(["docker", "exec", name, ...argv]);
+  const mustBox = async (argv: string[], what: string): Promise<Run> => {
+    const r = await box(argv);
+    if (r.timedOut || r.code !== 0) throw new Error(`${what} failed in the container (exit ${r.code}): ${r.stderr.trim()}`);
+    return r;
+  };
+
+  // The same cleanup shape as characterise-docker: a signal and the `finally` share one run of it, and a
+  // signal landing while the container is being created waits for that create before removing it.
+  let starting: Promise<unknown> | undefined;
+  let stopping = false;
+  let cleaning: Promise<void> | undefined;
+  const cleanup = (): Promise<void> =>
+    (cleaning ??= (async () => {
+      await starting?.catch(() => undefined);
+      const removed = await host(["docker", "rm", "-f", "-v", name]);
+      if (removed.code !== 0 && !removed.stderr.includes("No such container")) {
+        process.stderr.write(
+          `could not remove ${name} on the target (exit ${removed.code}): ${removed.stderr.trim()}\n` +
+            `find it there with: docker ps -a --filter label=pifleet-char=${id}\n`,
+        );
+        process.exitCode = 1;
+      }
+    })());
+  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
+    process.on(signal, () => {
+      stopping = true;
+      void cleanup().then(() => process.exit(code));
+    });
+  }
+
+  try {
+    const head = (await run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"])).stdout.trim();
+    const dirty = await run(["git", "-C", REPO, "status", "--porcelain", "--", SCRIPT]);
+    const imageId = (await mustHost(["docker", "image", "inspect", "--format", "{{.Id}}", args.image], `inspect ${args.image}`)).stdout.trim();
+    const targetOs = (await mustHost(["sh", "-c", ". /etc/os-release && printf %s \"$PRETTY_NAME\""], "read the target's os-release")).stdout.trim();
+    const targetSystemd = (await mustHost(["systemctl", "--version"], "systemctl --version on the target")).stdout.split("\n")[0]!.trim();
+
+    if (stopping) throw new Error("stopped by a signal before the container was started");
+    // cgroupns=host and the cgroup mount are what let systemd 239 boot as PID 1 on a cgroup v2 host.
+    starting = mustHost(
+      [
+        "docker", "run", "-d", "--name", name, "--label", `pifleet-char=${id}`, "--network", "none", "--privileged",
+        "--cgroupns=host", "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw", args.image, "/usr/sbin/init",
+      ],
+      "start the container",
+    );
+    await starting;
+    let booted = "";
+    for (let i = 0; i < 60 && !["running", "degraded"].includes(booted); i++) {
+      booted = (await box(SYSTEM_ARGV)).stdout.trim();
+      if (!["running", "degraded"].includes(booted)) await Bun.sleep(1000);
+    }
+    if (!["running", "degraded"].includes(booted)) throw new Error(`systemd in ${name} never finished booting; is-system-running said "${booted}"`);
+    const oldestSystemd = (await mustBox(["systemctl", "--version"], "systemctl --version")).stdout.split("\n")[0]!.trim();
+
+    // --- the since spelling ---------------------------------------------------------------------------
+    const sinceFor = (candidate: string, n: number): string => candidate.replace("{N}", String(n));
+    const parses = async (where: "target" | "oldest", arg: string) => {
+      const r = await (where === "target" ? host : box)(["journalctl", arg, "--lines=1", "--no-pager", "--quiet"]);
+      return { exit: r.code, parse_error: /Failed to parse timestamp/.test(r.stderr) };
+    };
+    const controls: Record<string, unknown>[] = [];
+    for (const control of SINCE_CONTROLS) {
+      for (const where of ["target", "oldest"] as const) {
+        const p = await parses(where, control);
+        controls.push({ where, argument: control, ...p });
+        if (p.exit === 0 || !p.parse_error) throw new Error(`${where} accepted ${control}, so a spelling it accepts proves nothing`);
+      }
+    }
+    const candidates: Record<string, unknown>[] = [];
+    for (const candidate of SINCE_CANDIDATES) {
+      const results: Record<string, unknown>[] = [];
+      for (const n of SINCE_COUNTS) {
+        for (const where of ["target", "oldest"] as const) results.push({ where, seconds: n, ...(await parses(where, sinceFor(candidate, n))) });
+      }
+      candidates.push({ spelling: candidate, parses_everywhere: results.every((r) => r.exit === 0), results });
+    }
+    const chosen = candidates.find((c) => c.parses_everywhere)?.spelling as string | undefined;
+    if (!chosen) throw new Error(`no --since spelling parsed for every count on both systemd versions: ${JSON.stringify(candidates)}`);
+
+    // Parsing is not bounding. A marker logged inside the container must be outside a window shorter than
+    // its age and inside one longer than it.
+    const marker = `marker-${id}`;
+    await mustBox(["systemd-cat", "-t", tag, "echo", marker], "log the marker");
+    await Bun.sleep(4000);
+    const markerCount = async (seconds: number): Promise<number> => {
+      const r = await mustBox([...journalArgv(50), sinceFor(chosen, seconds), `SYSLOG_IDENTIFIER=${tag}`], `journal read, ${seconds}s`);
+      return r.stdout.split("\n").filter((line) => line.includes(marker)).length;
+    };
+    const bound = { marker_age_at_least_s: 4, within_1s: await markerCount(1), within_60s: await markerCount(60) };
+    if (bound.within_1s !== 0 || bound.within_60s !== 1) throw new Error(`${chosen} does not bound the window: ${JSON.stringify(bound)}`);
+
+    // --- journal and kernel, as §6.4 runs them -----------------------------------------------------------
+    const journal = {
+      argv: [...journalArgv(5), sinceFor(chosen, 300)],
+      oldest: journalShape(await box([...journalArgv(5), sinceFor(chosen, 300)])),
+      oldest_empty_window: journalShape(await box([...journalArgv(5), sinceFor(chosen, 0), `SYSLOG_IDENTIFIER=${tag}-none`])),
+      target: journalShape(await host([...journalArgv(5), sinceFor(chosen, 300)])),
+      unit_filter: {
+        argv: [...journalArgv(5), sinceFor(chosen, 300), `--unit=${failUnit}`],
+        oldest_exit: 0 as number,
+      },
+      priority_filter: {
+        argv: [...journalArgv(5), sinceFor(chosen, 300), "--priority=3"],
+        oldest_exit: (await box([...journalArgv(5), sinceFor(chosen, 300), "--priority=3"])).code,
+        target_exit: (await host([...journalArgv(5), sinceFor(chosen, 300), "--priority=3"])).code,
+      },
+    };
+    const kernel = {
+      argv: [...kernelArgv(5), sinceFor(chosen, 300)],
+      oldest: journalShape(await box([...kernelArgv(5), sinceFor(chosen, 300)])),
+      target: journalShape(await host([...kernelArgv(5), sinceFor(chosen, 300)])),
+    };
+
+    // --- systemctl show, list-units, is-system-running ---------------------------------------------------
+    await box(["systemd-run", `--unit=${failUnit}`, "/bin/false"]);
+    await Bun.sleep(2000);
+    journal.unit_filter.oldest_exit = (await box(journal.unit_filter.argv)).code;
+    // Property order as printed, which is not the order asked for. Values keep their words; digits become 9.
+    const showShape = (r: Run) => {
+      const props = propertyLines(r.stdout);
+      return {
+        exit: r.code,
+        property_order: props.map(([k]) => k),
+        values: Object.fromEntries(props.map(([k, v]) => [k, k === "Id" ? v.replace(id, "<id>") : digitShape(v)])),
+      };
+    };
+    const show = {
+      argv: showArgv("<unit>"),
+      oldest: {
+        failed: showShape(await box(showArgv(failUnit))),
+        active: showShape(await box(showArgv("systemd-journald.service"))),
+        missing: showShape(await box(showArgv(missingUnit))),
+      },
+      target: {
+        active: showShape(await host(showArgv("systemd-journald.service"))),
+        missing: showShape(await host(showArgv(missingUnit))),
+      },
+    };
+    for (const [where, shapes] of Object.entries(show)) {
+      if (where === "argv") continue;
+      for (const [what, s] of Object.entries(shapes as Record<string, ReturnType<typeof showShape>>)) {
+        if ([...s.property_order].sort().join(",") !== [...UNIT_PROPERTIES].sort().join(",")) {
+          throw new Error(`show on ${where} for the ${what} unit printed ${s.property_order.join(",")}, not the eight properties`);
+        }
+      }
+    }
+
+    const failedRows = (r: Run) => r.stdout.split("\n").filter((line) => line.trim() !== "").map((line) => line.trim().split(/\s+/));
+    const oldestFailed = await box(FAILED_ARGV);
+    const oldestFailRow = failedRows(oldestFailed).find((cols) => cols[0] === failUnit);
+    if (!oldestFailRow) throw new Error(`list-units --state=failed in the container has no ${failUnit} row`);
+    const targetFailed = await host(FAILED_ARGV);
+    const failed = {
+      argv: FAILED_ARGV,
+      oldest: {
+        exit: oldestFailed.code,
+        failed_unit_row_first_four: [oldestFailRow[0]!.replace(id, "<id>"), ...oldestFailRow.slice(1, 4)],
+        failed_unit_row_columns: oldestFailRow.length,
+        every_row_has_four_columns: failedRows(oldestFailed).every((cols) => cols.length >= 4),
+      },
+      target: {
+        exit: targetFailed.code,
+        rows: failedRows(targetFailed).length,
+        every_row_has_four_columns: failedRows(targetFailed).every((cols) => cols.length >= 4),
+      },
+    };
+
+    const oldestSystem = await box(SYSTEM_ARGV);
+    const targetSystem = await host(SYSTEM_ARGV);
+    const system = {
+      argv: SYSTEM_ARGV,
+      oldest: { stdout: oldestSystem.stdout.trim(), exit: oldestSystem.code },
+      target: { stdout: targetSystem.stdout.trim(), exit: targetSystem.code },
+    };
+    if (system.oldest.stdout !== "degraded" || system.oldest.exit === 0) {
+      throw new Error(`with a failed unit, is-system-running said "${system.oldest.stdout}" exit ${system.oldest.exit}, not a non-zero degraded`);
+    }
+
+    // --- the forbidden commands --------------------------------------------------------------------------
+    const helps = {
+      target: {
+        systemctl: (await mustHost(["systemctl", "--help", "--no-pager"], "systemctl --help")).stdout,
+        journalctl: (await mustHost(["journalctl", "--help", "--no-pager"], "journalctl --help")).stdout,
+      },
+      oldest: {
+        systemctl: (await mustBox(["systemctl", "--help", "--no-pager"], "systemctl --help")).stdout,
+        journalctl: (await mustBox(["journalctl", "--help", "--no-pager"], "journalctl --help")).stdout,
+      },
+    };
+    const versionOf = { target: targetSystemd, oldest: oldestSystemd };
+    const entries = new Map<string, { command: string; source: string }>();
+    const add = (command: string, source: string): void => {
+      if (!entries.has(command)) entries.set(command, { command, source });
+    };
+    for (const where of ["oldest", "target"] as const) {
+      const verbs = parseSystemctlVerbs(helps[where].systemctl);
+      if (verbs.length === 0) throw new Error(`parsed no verbs out of systemctl --help on ${versionOf[where]}; did its layout change?`);
+      const names = new Set(verbs.map((v) => v.verb));
+      const missingAllowed = ALLOWED_SYSTEMCTL.filter((v) => !names.has(v));
+      if (missingAllowed.length) throw new Error(`${versionOf[where]} does not list the allowed verbs ${missingAllowed.join(", ")}`);
+      const missingForbidden = SRD_FORBIDDEN_SYSTEMCTL.filter((v) => !names.has(v));
+      if (missingForbidden.length) throw new Error(`§6.4 forbids systemctl verbs ${versionOf[where]} does not have: ${missingForbidden.join(", ")}`);
+      for (const v of verbs) {
+        if (ALLOWED_SYSTEMCTL.includes(v.verb)) continue;
+        add(v.verb, `systemctl --help (${versionOf[where]}), ${v.section}`);
+        add(`unit ${v.verb} sshd.service`, `systemctl --help (${versionOf[where]}), ${v.section}, as a unit sub-verb`);
+      }
+
+      const options = parseJournalOptions(helps[where].journalctl);
+      const commands = options.filter((o) => o.section === "Commands");
+      if (commands.length === 0) throw new Error(`parsed no Commands: flags out of journalctl --help on ${versionOf[where]}`);
+      const flags = new Set(commands.map((o) => o.flag));
+      const missingJournal = SRD_FORBIDDEN_JOURNAL.filter((f) => !flags.has(f));
+      if (missingJournal.length) throw new Error(`§6.4 forbids journalctl flags ${versionOf[where]} does not list: ${missingJournal.join(", ")}`);
+      const pathOptions = options.filter((o) => o.placeholder !== null && PATH_PLACEHOLDERS.has(o.placeholder));
+      if (pathOptions.length === 0) throw new Error(`found no journalctl option taking a path on ${versionOf[where]}`);
+      for (const o of [...commands, ...pathOptions]) {
+        const spelled = o.placeholder ? `${o.flag}=${PLACEHOLDER_SAMPLE[o.placeholder] ?? "x"}` : o.flag;
+        const why = PATH_PLACEHOLDERS.has(o.placeholder ?? "") ? `, reads ${o.placeholder}` : "";
+        add(`${JOURNAL_REQUEST} ${spelled}`, `journalctl --help (${versionOf[where]}), ${o.section}${why}`);
+        add(`${KERNEL_REQUEST} ${spelled}`, `journalctl --help (${versionOf[where]}), ${o.section}${why}`);
+      }
+    }
+    for (const form of SRD_NAMED_FORMS) add(form.command, `SRD-OBSERVER-ROLES §6.4: ${form.why}`);
+
+    const measuredWith = {
+      script: SCRIPT,
+      git_head: head,
+      uncommitted_changes_to_measured_files: dirty.code === 0 ? dirty.stdout.split("\n").filter((l) => l.trim() !== "") : null,
+      target: "operator-supplied; address and account not recorded",
+      target_os: targetOs,
+      target_systemd: targetSystemd,
+      oldest_image: args.image,
+      oldest_image_id: imageId,
+      oldest_systemd: oldestSystemd,
+      measured_at: new Date().toISOString(),
+    };
+    const shapes = {
+      measured_with: measuredWith,
+      since: { candidates, controls, chosen, bound },
+      journal,
+      kernel,
+      show,
+      failed,
+      system,
+    };
+    const forbidden = {
+      measured_with: measuredWith,
+      allowed_systemctl: ALLOWED_SYSTEMCTL,
+      entries: [...entries.values()].sort((a, b) => a.command.localeCompare(b.command)),
+    };
+
+    const shapesText = `${JSON.stringify(shapes, null, 2)}\n`;
+    const forbiddenText = `${JSON.stringify(forbidden, null, 2)}\n`;
+    process.stdout.write(shapesText);
+    process.stdout.write(forbiddenText);
+    if (args.write) {
+      await mkdir(join(REPO, "test/fixtures/observe"), { recursive: true });
+      await writeFile(SHAPES_FIXTURE, shapesText);
+      await writeFile(FORBIDDEN_FIXTURE, forbiddenText);
+      process.stderr.write(`wrote ${SHAPES_FIXTURE}\nwrote ${FORBIDDEN_FIXTURE}\n`);
+    }
+  } finally {
+    await cleanup();
+  }
+}
+
+if (import.meta.main) await main();
