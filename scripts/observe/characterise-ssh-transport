@@ -80,7 +80,8 @@ const FIXTURE = join(REPO, "test/fixtures/observe/ssh-transport-facts.json");
 const SHIM = join(REPO, "docker/observe-ssh");
 const CONNECT = join(REPO, "docker/ssh-connect.cjs");
 const PROXY = join(REPO, "docker/connect-proxy.cjs");
-const { makeRule } = createRequire(import.meta.url)(join(REPO, "docker/egress-policy.cjs")) as {
+const EGRESS_POLICY = join(REPO, "docker/egress-policy.cjs");
+const { makeRule } = createRequire(import.meta.url)(EGRESS_POLICY) as {
   makeRule: (name: string, host: string, port: number) => { name: string; host: string; port: number };
 };
 
@@ -178,6 +179,81 @@ function capture(text: string, re: RegExp, what: string): string {
 }
 
 /**
+ * The shim's `exec ssh` invocation, from `exec ssh \` to the `-- ` that
+ * introduces the remote verb. Nothing past that boundary is an ssh option —
+ * it is the verb and its arguments — so this is the whole surface a `-o` can
+ * appear on.
+ */
+const SHIM_SSH_INVOCATION_RE = /(exec ssh \\[\s\S]*?\n\s*-- )/;
+
+/**
+ * Every `-o` `docker/observe-ssh` sets on its `exec ssh` line, in the order
+ * §5.2 gives them: ARGV/host-key safety, then the three timing options. A
+ * change to any one of these — added, removed, repeated, or a second
+ * assignment of an existing name tacked onto another option's line — is a
+ * change to the connection's behaviour and has to be measured again, not
+ * carried forward on the old fixture.
+ */
+const EXPECTED_SHIM_SSH_OPTION_NAMES = [
+  "BatchMode",
+  "IdentitiesOnly",
+  "StrictHostKeyChecking",
+  "UserKnownHostsFile",
+  "GlobalKnownHostsFile",
+  "ConnectTimeout",
+  "ServerAliveInterval",
+  "ServerAliveCountMax",
+  "ProxyCommand",
+];
+
+/** The three of EXPECTED_SHIM_SSH_OPTION_NAMES this script also times against. */
+const SHIM_SSH_TIMING_OPTION_NAMES = ["ConnectTimeout", "ServerAliveInterval", "ServerAliveCountMax"];
+
+/**
+ * Refuses, before any Docker or ssh-keygen work, unless `docker/observe-ssh`'s
+ * `exec ssh` invocation sets EXACTLY one `-o` for each name in
+ * EXPECTED_SHIM_SSH_OPTION_NAMES — no more, no fewer, none repeated. The scan
+ * is a single pass over the whole invocation for every `-o`, joined to its
+ * name or not, quoted or not, with `=` or ssh's space form, wherever on a
+ * line it sits, so an option appended after another one's
+ * `-o "ProxyCommand=..."` is caught exactly like one on its own line.
+ *
+ * A plain top-level export, not a Docker step, so it can be exercised
+ * directly against crafted strings without Docker — see the `import.meta.main`
+ * guard at the bottom of this file: importing this module does not run
+ * `main`.
+ *
+ * Returns `shim_ssh_options`: the shim's own `Name=value` spelling of the
+ * three timing options, read off the same invocation this just validated.
+ */
+export function verifyShimSshOptions(shimText: string): string[] {
+  const invocation = capture(
+    shimText,
+    SHIM_SSH_INVOCATION_RE,
+    "docker/observe-ssh's `exec ssh` invocation (from `exec ssh \\` to the `-- ` before the verb)",
+  );
+  const names = [...invocation.matchAll(/(?:^|\s)-o\s*['"]?([A-Za-z_][A-Za-z0-9_]*)[=\s]/g)].map((m) => m[1]!);
+  const counts = new Map<string, number>();
+  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
+  const exact =
+    counts.size === EXPECTED_SHIM_SSH_OPTION_NAMES.length &&
+    EXPECTED_SHIM_SSH_OPTION_NAMES.every((name) => counts.get(name) === 1);
+  if (!exact) {
+    throw new Error(
+      `expected docker/observe-ssh's \`exec ssh\` invocation to set exactly one -o for each of ${EXPECTED_SHIM_SSH_OPTION_NAMES.join(", ")}, found [${names.join(", ") || "none"}] — did the shim's ssh option set change?`,
+    );
+  }
+  return SHIM_SSH_TIMING_OPTION_NAMES.map((name) => {
+    const value = capture(
+      invocation,
+      new RegExp(`-o\\s+['"]?${name}=(\\d+)`),
+      `${name}'s value in docker/observe-ssh's \`exec ssh\` invocation`,
+    );
+    return `${name}=${value}`;
+  });
+}
+
+/**
  * The forced command on the throwaway target.
  *
  * `drop` kills its own session process from inside, which is the target closing
@@ -235,19 +311,7 @@ async function main(): Promise<void> {
     const idleTimeoutMs = Number(
       capture(proxyText, /const IDLE_TIMEOUT_MS = Number\(process\.env\.\w+ \|\| (\d+)\)/, "IDLE_TIMEOUT_MS from connect-proxy.cjs"),
     );
-    const shimSshOptions = [...shimText.matchAll(/^\s+-o (ConnectTimeout|ServerAliveInterval|ServerAliveCountMax)=(\d+) \\$/gm)].map(
-      (m) => `${m[1]}=${m[2]}`,
-    );
-    const EXPECTED_SHIM_SSH_OPTION_NAMES = ["ConnectTimeout", "ServerAliveInterval", "ServerAliveCountMax"];
-    const shimSshOptionNames = shimSshOptions.map((o) => o.split("=", 1)[0]);
-    if (
-      shimSshOptionNames.length !== EXPECTED_SHIM_SSH_OPTION_NAMES.length ||
-      !EXPECTED_SHIM_SSH_OPTION_NAMES.every((name) => shimSshOptionNames.includes(name))
-    ) {
-      throw new Error(
-        `expected docker/observe-ssh's -o lines to set exactly ${EXPECTED_SHIM_SSH_OPTION_NAMES.join(", ")}, found [${shimSshOptionNames.join(", ") || "none"}] — did the shim's "-o Name=value \\" line format change?`,
-      );
-    }
+    const shimSshOptions = verifyShimSshOptions(shimText);
     const installLines = dockerfile.split("\n").filter((l) => /^COPY --chmod=\d+ docker\/(observe-ssh|ssh-connect\.cjs) \S+$/.test(l));
     if (installLines.length !== 2) throw new Error(`expected the two COPY lines for observe-ssh and ssh-connect.cjs in docker/Dockerfile, found ${installLines.length}`);
     if (!/\bopenssh-client\b/.test(dockerfile)) throw new Error("docker/Dockerfile does not install openssh-client");
@@ -258,6 +322,7 @@ async function main(): Promise<void> {
       "docker/observe-ssh",
       "docker/ssh-connect.cjs",
       "docker/connect-proxy.cjs",
+      "docker/egress-policy.cjs",
       "src/run/worker-env.ts",
       "docker/Dockerfile",
       "src/config/schema.ts",
@@ -474,6 +539,7 @@ async function main(): Promise<void> {
         observe_ssh_sha256: sha256(Buffer.from(shimText)),
         ssh_connect_sha256: sha256(await readFile(CONNECT)),
         connect_proxy_sha256: sha256(Buffer.from(proxyText)),
+        egress_policy_sha256: sha256(await readFile(EGRESS_POLICY)),
         installed_by: installLines,
         secrets_delivered_by: "parseConfig -> buildWorkerEnv -> writeWorkerSecretFiles + writeWorkerEnvFile",
         allowlist: ALLOWLIST,
@@ -580,4 +646,9 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+// Guarded so this module can be imported elsewhere — to exercise
+// `verifyShimSshOptions` directly, without Docker — without also running the
+// whole Docker characterisation as a side effect of the import. Only
+// `bun scripts/observe/characterise-ssh-transport`, where this file is the
+// actual entry point, runs `main`.
+if (import.meta.main) await main();

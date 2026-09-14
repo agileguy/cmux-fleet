@@ -186,10 +186,11 @@ const shortStr = z.string().min(1).max(4096);
  *
  * These values are delivered through `GIT_CONFIG_VALUE_1`/`_2` in the
  * container's env FILE, and docker's `--env-file` has no escaping: a newline
- * does not escape, it terminates the declaration. `worker-env.ts:1199`
- * already refuses one, so nothing unsanitised has ever reached a container —
- * but it refuses at `up`, naming `GIT_CONFIG_VALUE_1`, the env key the value
- * landed in rather than `run.git_identity.name`, the line the operator wrote.
+ * does not escape, it terminates the declaration. `serializeEnvFile`
+ * (`worker-env.ts`) already refuses one, so nothing unsanitised has ever
+ * reached a container — but it refuses at `up`, naming `GIT_CONFIG_VALUE_1`,
+ * the env key the value landed in rather than `run.git_identity.name`, the
+ * line the operator wrote.
  * Tracing one to the other means knowing the `GIT_CONFIG_*` mapping by heart.
  *
  * Refusing here moves the same failure to `config validate`, where the field

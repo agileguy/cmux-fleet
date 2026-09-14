@@ -201,7 +201,7 @@ pairs: `test/unit/triage-plan.test.ts:449-454` and `test/unit/dispatch-request.t
 
 - **Network.** Workers sit on an `--internal` bridge (`src/security/network.ts:1-10`). The gateway is
   dropped, so host ports are unreachable (`src/security/gateway-block.ts:15-23`). A worker with
-  `egress_access: true` is handed `HTTPS_PROXY` (`src/run/worker-env.ts:971-979`) to a CONNECT proxy
+  `egress_access: true` is handed `HTTPS_PROXY` (`src/run/worker-env.ts:1020`) to a CONNECT proxy
   that allows exactly `egress.allow`'s host:port pairs (`docker/connect-proxy.cjs:30-40`). Any port
   from 1 to 65535 is a legal rule (`docker/egress-policy.cjs:46-50`). **The allowlist is fleet-wide:**
   every routed worker reaches every allowed destination (`fleet.yaml:530-534`,
@@ -1148,7 +1148,7 @@ refuses everything it cannot validate before `ssh` runs. No role uses it yet, so
   *Revert check: delete `-o StrictHostKeyChecking=yes` from the argv. The argv assertion goes red.*
 - **3.3** Install the transport in the image: add `openssh-client` to the base apt line
   (`docker/Dockerfile:48-49`), `COPY` `docker/observe-ssh` to `/usr/local/bin/observe-ssh`, add
-  `ssh -V` and `observe-ssh --help` to the build smoke block (`:356-366`), and enrol the shim in
+  `ssh -V` and `observe-ssh --help` to the build smoke block (`:365-377`), and enrol the shim in
   `BUILD_CONTEXT_ASSETS`. **Files:** `docker/Dockerfile`, `src/container/image.ts`,
   `test/unit/dockerfile-build-assets.test.ts`.
   *Acceptance: `bun test test/unit/dockerfile-build-assets.test.ts test/unit/dockerfile-runtime-deps.test.ts`.*
