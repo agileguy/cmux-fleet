@@ -70,7 +70,7 @@ on the target side rather than trusting the worker to leave those fields out.
 | How gcloud VM verbs classify | `docker/verbgate:356-399`, `:423-466` |
 | Harvest validates artifacts by FILENAME | `src/harvest/reconcile.ts:144-175`, `:743-801`, `:814` |
 | The shapes `docker` and `journalctl` emit | **Not established.** §12 makes this committed fixture work, done before engineers are briefed |
-| That OpenSSH works through the CONNECT proxy from a worker | **Not established.** Same treatment |
+| That OpenSSH works through the CONNECT proxy from a worker | Measured at §12 task 3.0, re-run at the Phase 3 review: `test/fixtures/observe/ssh-transport-facts.json`, written by `scripts/observe/characterise-ssh-transport` against a throwaway sshd (§5.2) |
 
 Nothing in this document was run against a cluster, a Docker host, a VM or the fleet.
 
@@ -456,12 +456,21 @@ Every hop has a precedent in the tree:
   keeps the rest of the list. `ConnectTimeout=10` bounds how long establishing the connection may take.
   `ServerAliveInterval=15` with `ServerAliveCountMax=3` ends a session whose path has gone silent for
   about 45 seconds. The keepalive is a protocol request sshd answers itself, so a command that is merely
-  quiet should not be cut off; the Phase 3 re-characterisation measures that rather than assuming it.
+  quiet is not cut off. Measured at the Phase 3 review: a 130-second silent command completed through
+  the shim, while raw `ssh` without the keepalive was cut at 120 seconds by the proxy's idle timeout. A
+  paused target ended the session 51 seconds after the pause, and a target that closed mid-session ended
+  it in under 1.5 seconds.
 
-**Not established, and made PM-owned pre-work (§12 Phase 3):** that OpenSSH accepts a private key
-delivered at the fleet's secret-file mode and ownership, and that the ProxyCommand round-trips through
-the live proxy. If the key must be copied to a `0600` file first, the shim does that, and the
-characterisation fixture records where.
+**Established by measurement (§12 task 3.0, re-run at the Phase 3 review):** the facts this section
+rests on are in `test/fixtures/observe/ssh-transport-facts.json`, written by
+`scripts/observe/characterise-ssh-transport`. That script delivers the secrets through `buildWorkerEnv`
+with this section's `multiline: true` allowlist, installs the shim and the ProxyCommand with the
+Dockerfile's own COPY lines, and runs every probe through `observe-ssh` and the real CONNECT proxy.
+OpenSSH refuses the key at its delivered mode `0444`, and also refuses a key with no trailing newline.
+So the shim copies the key to a `0600` file in `/tmp` that always ends in a newline. The fixture reads
+that location off the container. A remote exit 77 arrives as 77; a host-key mismatch and a proxy
+refusal both exit 255. Not measured: a Linux host's bind-mount ownership (the run was on Colima), and
+a rebuilt worker image (the client was the newest local image plus the two COPY lines).
 
 ### 5.3 Envelope inputs
 

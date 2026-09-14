@@ -1,28 +1,49 @@
 #!/usr/bin/env bun
 /**
- * `scripts/observe/characterise-ssh-transport` — SRD-OBSERVER-ROLES task 3.0.
+ * `scripts/observe/characterise-ssh-transport` — SRD-OBSERVER-ROLES task 3.0,
+ * re-run after the Phase 3 review.
  *
- * Measures, rather than assumes, the four facts the `observe-ssh` shim is built
- * on, and writes them to `test/fixtures/observe/ssh-transport-facts.json`. The
- * shim's engineers wire that fixture; they do not re-derive it.
+ * Measures, rather than assumes, the facts the `observe-ssh` shim is built on,
+ * and writes them to `test/fixtures/observe/ssh-transport-facts.json`. The
+ * shim's tests wire that fixture; they do not re-derive it.
  *
- *  1. Whether OpenSSH accepts a private key delivered the way the fleet delivers
- *     every secret: written by `writeWorkerSecretFiles` (mode 0444 in a 0755
- *     directory) and bind-mounted read-only at `/secrets`, read by uid 10001. If
- *     it does not, whether a 0600 copy works, and where a copy can be written.
- *  2. Whether `ProxyCommand node <client> %h %p` round-trips through the fleet's
- *     own CONNECT proxy (`docker/connect-proxy.cjs`, not a stand-in).
- *  3. `ssh`'s exit code when the host key does not match `known_hosts`, and when
- *     the proxy refuses the destination.
- *  4. That a remote exit 77 reaches the caller as 77.
+ * ## What is real here, and what stands in
+ *
+ * Real: the secret delivery (`buildWorkerEnv` over a config whose allowlist
+ * marks the multi-line names `multiline: true`, then `writeWorkerSecretFiles`
+ * and `writeWorkerEnvFile`), the shim (`docker/observe-ssh`) and the
+ * ProxyCommand (`docker/ssh-connect.cjs`), both installed by the Dockerfile's
+ * own COPY lines, the CONNECT proxy (`docker/connect-proxy.cjs`) at its default
+ * timeouts, and the worker's run flags.
+ *
+ * Stand-ins: the target, an Alpine sshd with a forced command, and the client
+ * image, which is the newest local worker image plus `openssh-client` and those
+ * two COPY lines rather than a full rebuild (that is host task 3.H1).
+ *
+ * The first version of this script built its secret plan by hand and ran a
+ * throwaway CONNECT client. So it never met the check in `buildWorkerEnv` that
+ * refused a multi-line key, and SRD §5.5's grants shipped undeliverable while
+ * the fixture said the key path worked. Nothing here is built beside the code
+ * it measures.
+ *
+ * ## What it measures
+ *
+ *  1. OpenSSH refuses the key at its delivered mode, and refuses a key with no
+ *     trailing newline. Both are raw `ssh` probes, because they are the reasons
+ *     the shim copies the key and appends a newline.
+ *  2. The shim round-trips through the real ProxyCommand and proxy, and where
+ *     its key copy lands, at what mode, is read off the container.
+ *  3. Exit codes through the shim: success, a remote 77, a host-key mismatch,
+ *     and a destination the proxy refuses.
+ *  4. Session lifetime: a target that closes mid-session; a command quieter
+ *     than the proxy's idle timeout, through the shim and through raw `ssh`
+ *     without keepalives; and a target that goes silent (paused).
  *
  * ## Nothing here touches an enrolled target
  *
  * Every container is throwaway and lives on an `--internal` Docker network this
- * script creates: an Alpine sshd with a forced command, the real proxy, and a
- * client built FROM the current worker image with `openssh-client` added (the
- * one thing task 3.3 will add). The client runs with the production flags from
- * `src/config/render.ts`. Everything is removed on exit, success or not.
+ * script creates. Everything is removed on exit, on success, on failure, or on
+ * SIGINT, SIGTERM or SIGHUP.
  *
  * ## Usage
  *
@@ -31,21 +52,34 @@
  *   scripts/observe/characterise-ssh-transport --image <worker image tag>
  *
  * Without `--image`, the newest local `pifleet/pi-worker:*-base-*` tag is used,
- * and the fixture records which.
+ * and the fixture records which. Run it from a checkout under $HOME: the proxy
+ * container bind-mounts `docker/`, and Colima shares only the home directory.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { stringify } from "yaml";
 
+import { parseConfig, resolveWorker } from "../../src/config/load.ts";
 import { makeWorkerAccessible } from "../../src/container/mounts.ts";
-import { SECRETS_MOUNT, writeWorkerSecretFiles, type WorkerEnvPlan } from "../../src/run/worker-env.ts";
+import {
+  buildWorkerEnv,
+  SECRETS_MOUNT,
+  secretPointerName,
+  serializeEnvFile,
+  writeWorkerEnvFile,
+  writeWorkerSecretFiles,
+} from "../../src/run/worker-env.ts";
 import { PROXY_LISTEN_ALIAS, PROXY_LISTEN_PORT } from "../../src/security/relay.ts";
 
 const REPO = resolve(import.meta.dir, "../..");
 const FIXTURE = join(REPO, "test/fixtures/observe/ssh-transport-facts.json");
+const SHIM = join(REPO, "docker/observe-ssh");
+const CONNECT = join(REPO, "docker/ssh-connect.cjs");
+const PROXY = join(REPO, "docker/connect-proxy.cjs");
 const { makeRule } = createRequire(import.meta.url)(join(REPO, "docker/egress-policy.cjs")) as {
   makeRule: (name: string, host: string, port: number) => { name: string; host: string; port: number };
 };
@@ -63,14 +97,28 @@ const KEY_NAME = "OBSERVER_DOCKER_SSH_KEY";
 const KEY_NONL_NAME = "OBSERVER_DOCKER_SSH_KEY_NO_TRAILING_NEWLINE";
 const KNOWN_HOSTS_NAME = "OBSERVER_DOCKER_KNOWN_HOSTS";
 const WRONG_KNOWN_HOSTS_NAME = "OBSERVER_DOCKER_KNOWN_HOSTS_WRONG";
+const TARGETS_NAME = "OBSERVER_DOCKER_TARGETS";
 const TARGET_HOST = "sshd-target.pifleet.test";
 const TARGET_USER = "observe";
+const TARGET_TOKEN = "char";
+const DENIED_TOKEN = "denied-port";
 const RUN_TIMEOUT_MS = 180_000;
+const SESSION_TIMEOUT_MS = 330_000;
 
-type Run = { code: number; stdout: string; stderr: string };
+/** SRD §5.5's allowlist shape: the key is a credential, the rest are not; all span lines. */
+const ALLOWLIST = [
+  { name: KEY_NAME, multiline: true },
+  { name: KEY_NONL_NAME, multiline: true },
+  { name: KNOWN_HOSTS_NAME, credential: false, multiline: true },
+  { name: WRONG_KNOWN_HOSTS_NAME, credential: false, multiline: true },
+  { name: TARGETS_NAME, credential: false, multiline: true },
+];
+
+type Run = { code: number; stdout: string; stderr: string; ms: number };
 
 /** Run a command as an argv array. Never through a shell. */
 async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<Run> {
+  const started = Date.now();
   const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   const [stdout, stderr, code] = await Promise.all([
@@ -79,7 +127,7 @@ async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<Run> {
     proc.exited,
   ]);
   clearTimeout(timer);
-  return { code, stdout, stderr };
+  return { code, stdout, stderr, ms: Date.now() - started };
 }
 
 async function must(argv: string[], what: string): Promise<Run> {
@@ -88,12 +136,16 @@ async function must(argv: string[], what: string): Promise<Run> {
   return r;
 }
 
-/** Lines of `text` worth keeping in the fixture, without the noise ssh prints about `~/.ssh`. */
+/** Lines of `text` worth keeping in the fixture, without ssh's `~/.ssh` noise or this script's markers. */
 function keyLines(text: string): string[] {
   return text
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l !== "" && !/Could not create directory|Failed to add the host/.test(l));
+    .filter((l) => l !== "" && !l.startsWith("COPY ") && !/Could not create directory|Failed to add the host/.test(l));
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function parseArgs(argv: string[]): { write: boolean; image: string | null } {
@@ -118,43 +170,32 @@ async function newestWorkerImage(): Promise<string> {
   return tags[0]!.split("\t")[1]!;
 }
 
-/** The minimal CONNECT client the ProxyCommand runs. Throwaway: task 3.1 ships the real one. */
-const CONNECT_CLIENT = `"use strict";
-const net = require("node:net");
-const [host, port] = process.argv.slice(2);
-const proxy = new URL(process.env.HTTPS_PROXY);
-const sock = net.connect(Number(proxy.port), proxy.hostname, () => {
-  sock.write("CONNECT " + host + ":" + port + " HTTP/1.1\\r\\nHost: " + host + ":" + port + "\\r\\n\\r\\n");
-});
-let head = Buffer.alloc(0);
-const onData = (chunk) => {
-  head = Buffer.concat([head, chunk]);
-  const end = head.indexOf("\\r\\n\\r\\n");
-  if (end === -1) return;
-  const lines = head.subarray(0, end).toString("latin1").split("\\r\\n");
-  if (lines[0].split(" ")[1] !== "200") {
-    process.stderr.write("proxy refused: " + lines[0] + " " + head.subarray(end + 4).toString("latin1"));
-    process.exit(1);
-  }
-  sock.removeListener("data", onData);
-  const rest = head.subarray(end + 4);
-  if (rest.length > 0) process.stdout.write(rest);
-  sock.pipe(process.stdout);
-  process.stdin.pipe(sock);
-};
-sock.on("data", onData);
-sock.on("error", (e) => { process.stderr.write("connect client: " + e.message + "\\n"); process.exit(1); });
-sock.on("close", () => process.exit(0));
-`;
+/** One capture from `text`, or a thrown error naming what was expected where. */
+function capture(text: string, re: RegExp, what: string): string {
+  const m = re.exec(text);
+  if (!m?.[1]) throw new Error(`could not read ${what}`);
+  return m[1];
+}
 
-/** The forced command on the throwaway target: one verb succeeds, everything else exits 77. */
-const FORCED_COMMAND = `#!/bin/sh
+/**
+ * The forced command on the throwaway target.
+ *
+ * `drop` kills its own session process from inside, which is the target closing
+ * the connection mid-session. It then sleeps and prints `not-dropped`, so a
+ * drop that failed shows up in the output instead of reading as a slow close.
+ */
+function forcedCommand(quietSeconds: number): string {
+  return `#!/bin/sh
 set -f
 case "$SSH_ORIGINAL_COMMAND" in
   ok) echo forced-ok; exit 0 ;;
+  quiet) sleep ${quietSeconds}; echo quiet-ok; exit 0 ;;
+  drop) echo before-drop; sleep 1; pkill -KILL -f 'observe@notty'; sleep 30; echo not-dropped; exit 0 ;;
+  hold) echo holding; sleep 600; exit 0 ;;
   *) echo "forced-refuse: $SSH_ORIGINAL_COMMAND" >&2; exit 77 ;;
 esac
 `;
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -164,20 +205,45 @@ async function main(): Promise<void> {
   const net = `pifleet-char-${id}`;
   const sshdImage = `pifleet-char-sshd:${id}`;
   const clientImage = `pifleet-char-client:${id}`;
+  const sshd = `pifleet-char-sshd-${id}`;
+  const proxy = `pifleet-char-proxy-${id}`;
   const containers: string[] = [];
+  let clientSeq = 0;
+  let cleaned = false;
   const cleanup = async (): Promise<void> => {
+    if (cleaned) return;
+    cleaned = true;
+    await run(["docker", "unpause", sshd]);
     for (const c of containers) await run(["docker", "rm", "-f", c]);
     await run(["docker", "network", "rm", net]);
     await run(["docker", "image", "rm", "-f", sshdImage, clientImage]);
     await rm(work, { recursive: true, force: true });
   };
-  process.on("SIGINT", () => void cleanup().then(() => process.exit(130)));
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => void cleanup().then(() => process.exit(130)));
+  }
 
   try {
     const workerImage = args.image ?? (await newestWorkerImage());
-    await mkdir(join(work, "sshd"), { recursive: true });
-    await mkdir(join(work, "client"), { recursive: true });
-    await mkdir(join(work, "bin"), { recursive: true });
+    for (const d of ["sshd", "client"]) await mkdir(join(work, d), { recursive: true });
+
+    // What is being measured, read from the files rather than restated here.
+    const shimText = await readFile(SHIM, "utf8");
+    const proxyText = await readFile(PROXY, "utf8");
+    const dockerfile = await readFile(join(REPO, "docker/Dockerfile"), "utf8");
+    const proxyCommand = capture(shimText, /^PROXY_COMMAND='([^']+)'$/m, "PROXY_COMMAND from docker/observe-ssh");
+    const idleTimeoutMs = Number(
+      capture(proxyText, /const IDLE_TIMEOUT_MS = Number\(process\.env\.\w+ \|\| (\d+)\)/, "IDLE_TIMEOUT_MS from connect-proxy.cjs"),
+    );
+    const shimSshOptions = [...shimText.matchAll(/^\s+-o (ConnectTimeout|ServerAliveInterval|ServerAliveCountMax)=(\d+) \\$/gm)].map(
+      (m) => `${m[1]}=${m[2]}`,
+    );
+    const installLines = dockerfile.split("\n").filter((l) => /^COPY --chmod=\d+ docker\/(observe-ssh|ssh-connect\.cjs) \S+$/.test(l));
+    if (installLines.length !== 2) throw new Error(`expected the two COPY lines for observe-ssh and ssh-connect.cjs in docker/Dockerfile, found ${installLines.length}`);
+    if (!/\bopenssh-client\b/.test(dockerfile)) throw new Error("docker/Dockerfile does not install openssh-client");
+    const quietSeconds = Math.ceil(idleTimeoutMs / 1000) + 10;
+    const head = await run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"]);
+    const dirty = await run(["git", "-C", REPO, "status", "--porcelain", "--", "docker/observe-ssh", "docker/ssh-connect.cjs", "docker/connect-proxy.cjs", "src/run/worker-env.ts"]);
 
     // Keys: the identity, and a second host key the mismatch probe pins instead of the real one.
     await must(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "char", "-f", join(work, "id")], "ssh-keygen identity");
@@ -186,7 +252,7 @@ async function main(): Promise<void> {
     const privateKey = await readFile(join(work, "id"), "utf8");
 
     // The target.
-    await writeFile(join(work, "sshd", "forced"), FORCED_COMMAND);
+    await writeFile(join(work, "sshd", "forced"), forcedCommand(quietSeconds));
     await writeFile(join(work, "sshd", "authorized_keys"), `restrict,command="/usr/local/bin/forced" ${pub}\n`);
     await writeFile(
       join(work, "sshd", "Dockerfile"),
@@ -206,26 +272,26 @@ async function main(): Promise<void> {
       .flatMap((k) => ["--build-arg", `${k}=${process.env[k]}`]);
     await must(["docker", "build", "-q", ...proxyArgs, "-t", sshdImage, join(work, "sshd")], "build sshd image");
 
-    // The client: the current worker image plus openssh-client, back to the worker uid.
+    // The client: the worker image, openssh-client, and the Dockerfile's own COPY lines for the two files.
+    await writeFile(join(work, "client", "observe-ssh"), shimText);
+    await writeFile(join(work, "client", "ssh-connect.cjs"), await readFile(CONNECT));
     await writeFile(
       join(work, "client", "Dockerfile"),
       [
         `FROM ${workerImage}`,
         "USER root",
         "RUN apt-get update && apt-get install -y --no-install-recommends openssh-client && rm -rf /var/lib/apt/lists/*",
+        ...installLines.map((l) => l.replace(" docker/", " ")),
         "USER 10001:10001",
       ].join("\n") + "\n",
     );
     await must(["docker", "build", "-q", ...proxyArgs, "-t", clientImage, join(work, "client")], "build client image");
-    await writeFile(join(work, "bin", "connect.cjs"), CONNECT_CLIENT);
 
     await must(["docker", "network", "create", "--internal", net], "network create");
 
-    const sshd = `pifleet-char-sshd-${id}`;
     containers.push(sshd);
     await must(["docker", "run", "-d", "--name", sshd, "--network", net, "--network-alias", TARGET_HOST, sshdImage], "start sshd");
 
-    const proxy = `pifleet-char-proxy-${id}`;
     containers.push(proxy);
     const policy = JSON.stringify({ rules: [makeRule("char-sshd", TARGET_HOST, 22)] });
     await must(
@@ -259,68 +325,148 @@ async function main(): Promise<void> {
       .join(" ");
     const wrongKey = (await readFile(join(work, "wrong_host.pub"), "utf8")).trim().split(" ").slice(0, 2).join(" ");
 
-    // The secrets, delivered by the fleet's own writer and made accessible exactly as materialize.ts does.
+    // The secrets, through the fleet's own config parser, env builder and writers.
+    const configPath = join(work, "fleet.yaml");
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "characterise-ssh",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: { model: "CharacteriseModel" },
+        secrets: { env_allowlist: ALLOWLIST },
+        roles: { dockerobs: { secrets: ALLOWLIST.map((e) => e.name) } },
+        workers: [{ id: "char-1", role: "dockerobs" }],
+      }),
+      configPath,
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "char-1"), {
+      [KEY_NAME]: privateKey,
+      [KEY_NONL_NAME]: privateKey.replace(/\n+$/, ""),
+      [KNOWN_HOSTS_NAME]: `${TARGET_HOST} ${hostKey}\n`,
+      [WRONG_KNOWN_HOSTS_NAME]: `${TARGET_HOST} ${wrongKey}\n`,
+      [TARGETS_NAME]: `# enrolled for this characterisation only\n${TARGET_TOKEN} ${TARGET_HOST} 22 ${TARGET_USER}\n${DENIED_TOKEN} ${TARGET_HOST} 2222 ${TARGET_USER}\n`,
+    });
+    if ("HTTPS_PROXY" in plan.vars) throw new Error("the worker env plan already sets HTTPS_PROXY; this script would override it");
     const secretsDir = join(work, "secrets");
-    const plan = {
-      secretFiles: [
-        { name: KEY_NAME, value: privateKey },
-        { name: KEY_NONL_NAME, value: privateKey.replace(/\n+$/, "") },
-        { name: KNOWN_HOSTS_NAME, value: `${TARGET_HOST} ${hostKey}\n` },
-        { name: WRONG_KNOWN_HOSTS_NAME, value: `${TARGET_HOST} ${wrongKey}\n` },
-      ],
-    } as unknown as WorkerEnvPlan; // writeWorkerSecretFiles reads only `secretFiles`.
     await writeWorkerSecretFiles(secretsDir, plan);
     await makeWorkerAccessible(secretsDir, false);
+    const envFile = join(work, "env");
+    await writeWorkerEnvFile(envFile, plan);
+    /** The env file with one pointer moved, written by the same serializer at the same mode. */
+    const envWith = async (label: string, pointer: string, path: string): Promise<string> => {
+      const p = join(work, `env-${label}`);
+      await writeFile(p, serializeEnvFile({ ...plan.vars, [pointer]: path }));
+      await chmod(p, 0o600);
+      return p;
+    };
 
-    const client = (cmd: string[]): Promise<Run> =>
-      run([
-        "docker", "run", "--rm", "--network", net, ...WORKER_RUN_FLAGS,
-        "-e", `HTTPS_PROXY=http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`,
-        "-v", `${secretsDir}:${SECRETS_MOUNT}:ro`,
-        "-v", `${join(work, "bin")}:/opt/char:ro`,
-        "--entrypoint", "",
-        clientImage, ...cmd,
-      ]);
+    const client = (cmd: string[], env = envFile, timeoutMs = RUN_TIMEOUT_MS): Promise<Run> => {
+      const name = `pifleet-char-client-${id}-${clientSeq++}`;
+      containers.push(name);
+      return run(
+        [
+          "docker", "run", "--rm", "--name", name, "--network", net, ...WORKER_RUN_FLAGS,
+          "--env-file", env,
+          "-e", `HTTPS_PROXY=http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`,
+          "-v", `${secretsDir}:${SECRETS_MOUNT}:ro`,
+          "--entrypoint", "",
+          clientImage, ...cmd,
+        ],
+        timeoutMs,
+      );
+    };
 
-    /** The §5.2 argv, with the key and known_hosts files and port as the probe needs. */
-    const sshArgv = (key: string, knownHosts: string, port: number, verb: string): string[] => [
-      "ssh", "-F", "/dev/null", "-T",
+    /** The shim, then every regular file it left in /tmp (the only writable path here), on stderr. */
+    const viaShim = (token: string, verb: string): string[] => [
+      "sh", "-c",
+      'observe-ssh docker "$1" "$2"; rc=$?; for f in /tmp/* /tmp/.[!.]*; do [ -f "$f" ] && stat -c "COPY %n %a %u" "$f" >&2; done; exit $rc',
+      "sh", token, verb,
+    ];
+    /**
+     * Raw `ssh`, for the two facts that explain the shim rather than test it,
+     * and for the no-keepalive control. The §5.2 options, minus keepalives when asked.
+     */
+    const kh = `${SECRETS_MOUNT}/${KNOWN_HOSTS_NAME}`;
+    const rawSsh = (key: string, verb: string, keepalive = true): string[] => [
+      "ssh", "-F", "/dev/null", "-n", "-T",
       "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-      "-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${knownHosts}`,
-      "-o", "GlobalKnownHostsFile=/dev/null",
-      "-o", "ProxyCommand=node /opt/char/connect.cjs %h %p",
-      "-i", key, "-p", String(port), "-l", TARGET_USER, TARGET_HOST, "--", verb,
+      "-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${kh}`,
+      "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
+      ...(keepalive ? shimSshOptions.filter((o) => o.startsWith("ServerAlive")).flatMap((o) => ["-o", o]) : []),
+      "-o", `ProxyCommand=${proxyCommand}`,
+      "-i", key, "-p", "22", "-l", TARGET_USER, TARGET_HOST, "--", verb,
     ];
     const asCopy = (from: string, argv: string[]): string[] => [
-      "sh", "-c", `umask 077 && cp "$1" /tmp/key && chmod 600 /tmp/key && shift && exec "$@"`, "sh", from, ...argv,
+      "sh", "-c", `umask 077 && cp "$1" /tmp/raw-key && chmod 600 /tmp/raw-key && shift && exec "$@"`, "sh", from, ...argv,
     ];
-    const kh = `${SECRETS_MOUNT}/${KNOWN_HOSTS_NAME}`;
     const key = `${SECRETS_MOUNT}/${KEY_NAME}`;
 
-    const stat = await client(["sh", "-c", `id -u; stat -c '%u %g %a' "$1"; ssh -V 2>&1`, "sh", key]);
-    const [workerUid, keyStat, clientSsh] = stat.stdout.trim().split("\n");
+    const stat = await client(["sh", "-c", `id -u; stat -c '%u %g %a' "$1"; ssh -V 2>&1; node --version`, "sh", key]);
+    const [workerUid, keyStat, clientSsh, clientNode] = stat.stdout.trim().split("\n");
     const [ownerUid, , deliveredMode] = (keyStat ?? "").split(" ");
 
-    const atDelivered = await client(sshArgv(key, kh, 22, "ok"));
-    const asCopied = await client(asCopy(key, sshArgv("/tmp/key", kh, 22, "ok")));
-    const noNewline = await client(asCopy(`${SECRETS_MOUNT}/${KEY_NONL_NAME}`, sshArgv("/tmp/key", kh, 22, "ok")));
-    const remote77 = await client(asCopy(key, sshArgv("/tmp/key", kh, 22, "refuse")));
-    const mismatch = await client(asCopy(key, sshArgv("/tmp/key", `${SECRETS_MOUNT}/${WRONG_KNOWN_HOSTS_NAME}`, 22, "ok")));
-    const refused = await client(asCopy(key, sshArgv("/tmp/key", kh, 2222, "ok")));
+    // 1. The reasons the shim copies the key and appends a newline.
+    const atDelivered = await client(rawSsh(key, "ok"));
+    const rawNoNewline = await client(asCopy(`${SECRETS_MOUNT}/${KEY_NONL_NAME}`, rawSsh("/tmp/raw-key", "ok")));
+
+    // 2 and 3. Through the shim.
+    const viaOk = await client(viaShim(TARGET_TOKEN, "ok"));
+    const copies = viaOk.stderr.split("\n").filter((l) => l.startsWith("COPY ")).map((l) => l.split(" "));
+    const keyCopy = copies.find((c) => /\/observe-ssh-docker\.key$/.test(c[1] ?? ""));
+    const shimNoNewline = await client(
+      viaShim(TARGET_TOKEN, "ok"),
+      await envWith("nonl", secretPointerName(KEY_NAME), `${SECRETS_MOUNT}/${KEY_NONL_NAME}`),
+    );
+    const remote77 = await client(viaShim(TARGET_TOKEN, "refuse"));
+    const mismatch = await client(
+      viaShim(TARGET_TOKEN, "ok"),
+      await envWith("wrong-hosts", secretPointerName(KNOWN_HOSTS_NAME), `${SECRETS_MOUNT}/${WRONG_KNOWN_HOSTS_NAME}`),
+    );
+    const refused = await client(viaShim(DENIED_TOKEN, "ok"));
+
+    // 4. Session lifetime. The two quiet runs share the proxy and run together.
+    const [quietShim, quietNoKeepalive] = await Promise.all([
+      client(viaShim(TARGET_TOKEN, "quiet"), envFile, SESSION_TIMEOUT_MS),
+      client(asCopy(key, rawSsh("/tmp/raw-key", "quiet", false)), envFile, SESSION_TIMEOUT_MS),
+    ]);
+    const drop = await client(viaShim(TARGET_TOKEN, "drop"));
+    const holdRun = client(viaShim(TARGET_TOKEN, "hold"), envFile, SESSION_TIMEOUT_MS);
+    await Bun.sleep(8_000);
+    await must(["docker", "pause", sshd], "pause sshd");
+    const pausedAt = Date.now();
+    const hold = await holdRun;
+    const afterPauseMs = Date.now() - pausedAt;
+    await run(["docker", "unpause", sshd]);
+
     // The server package carries sshd and no `ssh` client, so ask sshd itself.
     const serverSshRun = await run(["docker", "exec", sshd, "/usr/sbin/sshd", "-V"]);
     const serverSsh = `${serverSshRun.stdout}${serverSshRun.stderr}`.trim().split("\n")[0] ?? "";
     const dockerServer = (await run(["docker", "info", "--format", "{{.ServerVersion}} {{.OperatingSystem}}"])).stdout.trim();
 
-    const roundTrips = asCopied.code === 0 && asCopied.stdout.includes("forced-ok");
+    const roundTrips = viaOk.code === 0 && viaOk.stdout.includes("forced-ok");
     const facts = {
       schema: "pifleet.ssh-transport-facts/v1",
       measured_at: new Date().toISOString(),
       measured_by: "scripts/observe/characterise-ssh-transport",
+      measured_with: {
+        repo_head: head.code === 0 ? head.stdout.trim() : null,
+        uncommitted_changes_to_measured_files: dirty.code === 0 ? keyLines(dirty.stdout) : null,
+        observe_ssh_sha256: sha256(Buffer.from(shimText)),
+        ssh_connect_sha256: sha256(await readFile(CONNECT)),
+        connect_proxy_sha256: sha256(Buffer.from(proxyText)),
+        installed_by: installLines,
+        secrets_delivered_by: "parseConfig -> buildWorkerEnv -> writeWorkerSecretFiles + writeWorkerEnvFile",
+        allowlist: ALLOWLIST,
+        pointer_vars: Object.keys(plan.vars).filter((k) => k.startsWith("OBSERVER_")),
+        shim_ssh_options: shimSshOptions,
+        proxy_idle_timeout_ms: idleTimeoutMs,
+      },
       host: { platform: platform(), docker_server: dockerServer },
       client: {
         base_image: workerImage,
         openssh: clientSsh ?? null,
+        node: clientNode ?? null,
         run_flags: WORKER_RUN_FLAGS,
         https_proxy: `http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`,
       },
@@ -333,20 +479,23 @@ async function main(): Promise<void> {
         accepted_at_delivered_mode: atDelivered.code === 0,
         at_delivered_mode: { exit_code: atDelivered.code, stderr: keyLines(atDelivered.stderr) },
         copy_required: atDelivered.code !== 0 && roundTrips,
-        copy_dir: "/tmp",
-        copy_mode: "600",
+        copy_dir: keyCopy ? dirname(keyCopy[1]!) : null,
+        copy_mode: keyCopy?.[2] ?? null,
+        copy_owner_uid: keyCopy?.[3] === undefined ? null : Number(keyCopy[3]),
+        files_left_in_tmp: copies.map((c) => c[1]),
         accepted_as_copy: roundTrips,
-        accepted_without_trailing_newline: noNewline.code === 0,
-        without_trailing_newline: { exit_code: noNewline.code, stderr: keyLines(noNewline.stderr) },
+        accepted_without_trailing_newline: rawNoNewline.code === 0,
+        without_trailing_newline: { exit_code: rawNoNewline.code, stderr: keyLines(rawNoNewline.stderr) },
+        shim_accepts_key_without_trailing_newline: shimNoNewline.code === 0 && shimNoNewline.stdout.includes("forced-ok"),
       },
       proxy_command: {
-        argv_value: "node /opt/pifleet/ssh-connect.cjs %h %p",
+        argv_value: proxyCommand,
         round_trips: roundTrips,
-        exit_code: asCopied.code,
-        stdout: asCopied.stdout.trim(),
+        exit_code: viaOk.code,
+        stdout: viaOk.stdout.trim(),
       },
       exit_codes: {
-        success: asCopied.code,
+        success: viaOk.code,
         remote_exit_77: remote77.code,
         host_key_mismatch: mismatch.code,
         proxy_refused: refused.code,
@@ -355,16 +504,45 @@ async function main(): Promise<void> {
         host_key_mismatch: keyLines(mismatch.stderr),
         proxy_refused: keyLines(refused.stderr),
       },
+      session: {
+        target_closes_mid_session: {
+          exit_code: drop.code,
+          elapsed_ms: drop.ms,
+          saw_output_before_close: drop.stdout.includes("before-drop"),
+          drop_failed: drop.stdout.includes("not-dropped"),
+          stderr: keyLines(drop.stderr),
+        },
+        quiet_longer_than_proxy_idle_timeout: {
+          quiet_seconds: quietSeconds,
+          through_shim: { exit_code: quietShim.code, elapsed_ms: quietShim.ms, completed: quietShim.stdout.includes("quiet-ok"), stderr: keyLines(quietShim.stderr) },
+          raw_ssh_without_keepalive: { exit_code: quietNoKeepalive.code, elapsed_ms: quietNoKeepalive.ms, completed: quietNoKeepalive.stdout.includes("quiet-ok"), stderr: keyLines(quietNoKeepalive.stderr) },
+        },
+        target_goes_silent: {
+          paused_after_ms: 8_000,
+          session_started: hold.stdout.includes("holding"),
+          exit_code: hold.code,
+          ms_from_pause_to_exit: afterPauseMs,
+          stderr: keyLines(hold.stderr),
+        },
+      },
       not_measured: [
         "A Linux host's bind-mount ownership. This machine delivers through Colima, whose VM presents mounted files as owned by the container user; on Linux the file keeps the operator's uid. A 0600 copy owned by the worker uid does not depend on either.",
+        "The rebuilt worker image. The client is the newest local worker image plus openssh-client and the Dockerfile's two COPY lines; host task 3.H1 rebuilds the real images.",
       ],
     };
 
     const problems: string[] = [];
-    if (!roundTrips) problems.push("the ProxyCommand did not round-trip with a 0600 copy of the key");
+    if (!roundTrips) problems.push("the shim did not round-trip through the ProxyCommand and proxy");
+    if (!keyCopy) problems.push("the shim left no observe-ssh-docker.key copy in /tmp");
+    if (!facts.key_delivery.shim_accepts_key_without_trailing_newline) problems.push("the shim did not repair a key with no trailing newline");
     if (remote77.code !== 77) problems.push(`a remote exit 77 arrived as ${remote77.code}`);
     if (mismatch.code === 0) problems.push("a host-key mismatch was accepted");
     if (refused.code === 0) problems.push("a destination the proxy policy denies was reached");
+    if (drop.stdout.includes("not-dropped")) problems.push("the drop probe did not close the session, so nothing was measured");
+    else if (drop.ms > 20_000) problems.push(`a target closing mid-session left the chain running for ${drop.ms} ms`);
+    if (quietShim.code !== 0 || !quietShim.stdout.includes("quiet-ok")) problems.push(`a ${quietSeconds} s quiet command through the shim did not complete (exit ${quietShim.code})`);
+    if (!hold.stdout.includes("holding")) problems.push("the silent-target session never started, so nothing was measured");
+    else if (hold.code === 0 || afterPauseMs > 150_000) problems.push(`a silent target left the shim running ${afterPauseMs} ms after the pause (exit ${hold.code})`);
 
     const text = `${JSON.stringify(facts, null, 2)}\n`;
     process.stdout.write(text);

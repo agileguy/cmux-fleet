@@ -1,7 +1,57 @@
 {
   "schema": "pifleet.ssh-transport-facts/v1",
-  "measured_at": "2026-09-14T03:32:27.350Z",
+  "measured_at": "2026-09-14T13:23:48.498Z",
   "measured_by": "scripts/observe/characterise-ssh-transport",
+  "measured_with": {
+    "repo_head": "75d9119",
+    "uncommitted_changes_to_measured_files": [],
+    "observe_ssh_sha256": "93be035e99c97bd7ab4926975d3fa8d5c219b3867eb68de5c58a037b7c307c90",
+    "ssh_connect_sha256": "f8fe62631f8fc3ccb8ed44a9fb5a7d1606665bddec28c6539186e5541f070440",
+    "connect_proxy_sha256": "1044bd7803d6c763de27db7d506288e5a640106bd18c396e0c473726ff33f6a6",
+    "installed_by": [
+      "COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh",
+      "COPY --chmod=0444 docker/ssh-connect.cjs /opt/pifleet/ssh-connect.cjs"
+    ],
+    "secrets_delivered_by": "parseConfig -> buildWorkerEnv -> writeWorkerSecretFiles + writeWorkerEnvFile",
+    "allowlist": [
+      {
+        "name": "OBSERVER_DOCKER_SSH_KEY",
+        "multiline": true
+      },
+      {
+        "name": "OBSERVER_DOCKER_SSH_KEY_NO_TRAILING_NEWLINE",
+        "multiline": true
+      },
+      {
+        "name": "OBSERVER_DOCKER_KNOWN_HOSTS",
+        "credential": false,
+        "multiline": true
+      },
+      {
+        "name": "OBSERVER_DOCKER_KNOWN_HOSTS_WRONG",
+        "credential": false,
+        "multiline": true
+      },
+      {
+        "name": "OBSERVER_DOCKER_TARGETS",
+        "credential": false,
+        "multiline": true
+      }
+    ],
+    "pointer_vars": [
+      "OBSERVER_DOCKER_SSH_KEY_FILE",
+      "OBSERVER_DOCKER_SSH_KEY_NO_TRAILING_NEWLINE_FILE",
+      "OBSERVER_DOCKER_KNOWN_HOSTS_FILE",
+      "OBSERVER_DOCKER_KNOWN_HOSTS_WRONG_FILE",
+      "OBSERVER_DOCKER_TARGETS_FILE"
+    ],
+    "shim_ssh_options": [
+      "ConnectTimeout=10",
+      "ServerAliveInterval=15",
+      "ServerAliveCountMax=3"
+    ],
+    "proxy_idle_timeout_ms": 120000
+  },
   "host": {
     "platform": "darwin",
     "docker_server": "28.4.0 Ubuntu 24.04.2 LTS"
@@ -9,6 +59,7 @@
   "client": {
     "base_image": "pifleet/pi-worker:0.79.6-base-686856fc0004",
     "openssh": "OpenSSH_9.2p1 Debian-2+deb12u10, OpenSSL 3.0.20 7 Apr 2026",
+    "node": "v24.21.0",
     "run_flags": [
       "--user",
       "10001:10001",
@@ -48,15 +99,20 @@
     "copy_required": true,
     "copy_dir": "/tmp",
     "copy_mode": "600",
+    "copy_owner_uid": 10001,
+    "files_left_in_tmp": [
+      "/tmp/observe-ssh-docker.key"
+    ],
     "accepted_as_copy": true,
     "accepted_without_trailing_newline": false,
     "without_trailing_newline": {
       "exit_code": 255,
       "stderr": [
-        "Load key \"/tmp/key\": error in libcrypto",
+        "Load key \"/tmp/raw-key\": error in libcrypto",
         "observe@sshd-target.pifleet.test: Permission denied (publickey)."
       ]
-    }
+    },
+    "shim_accepts_key_without_trailing_newline": true
   },
   "proxy_command": {
     "argv_value": "node /opt/pifleet/ssh-connect.cjs %h %p",
@@ -89,12 +145,51 @@
       "Host key verification failed."
     ],
     "proxy_refused": [
-      "proxy refused: HTTP/1.1 403 Forbidden egress denied by rule default-deny",
+      "HTTP/1.1 403 Forbidden",
+      "egress denied by rule default-deny",
       "kex_exchange_identification: Connection closed by remote host",
       "Connection closed by UNKNOWN port 65535"
     ]
   },
+  "session": {
+    "target_closes_mid_session": {
+      "exit_code": 255,
+      "elapsed_ms": 1389,
+      "saw_output_before_close": true,
+      "drop_failed": false,
+      "stderr": [
+        "client_loop: send disconnect: Broken pipe"
+      ]
+    },
+    "quiet_longer_than_proxy_idle_timeout": {
+      "quiet_seconds": 130,
+      "through_shim": {
+        "exit_code": 0,
+        "elapsed_ms": 130341,
+        "completed": true,
+        "stderr": []
+      },
+      "raw_ssh_without_keepalive": {
+        "exit_code": 255,
+        "elapsed_ms": 120353,
+        "completed": false,
+        "stderr": [
+          "client_loop: send disconnect: Broken pipe"
+        ]
+      }
+    },
+    "target_goes_silent": {
+      "paused_after_ms": 8000,
+      "session_started": true,
+      "exit_code": 255,
+      "ms_from_pause_to_exit": 51316,
+      "stderr": [
+        "Timeout, server sshd-target.pifleet.test not responding."
+      ]
+    }
+  },
   "not_measured": [
-    "A Linux host's bind-mount ownership. This machine delivers through Colima, whose VM presents mounted files as owned by the container user; on Linux the file keeps the operator's uid. A 0600 copy owned by the worker uid does not depend on either."
+    "A Linux host's bind-mount ownership. This machine delivers through Colima, whose VM presents mounted files as owned by the container user; on Linux the file keeps the operator's uid. A 0600 copy owned by the worker uid does not depend on either.",
+    "The rebuilt worker image. The client is the newest local worker image plus openssh-client and the Dockerfile's two COPY lines; host task 3.H1 rebuilds the real images."
   ]
 }
