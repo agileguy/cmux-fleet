@@ -195,9 +195,10 @@ set -u
 # `docker/observe-ssh` both carry).
 set -f
 
-# IFS is pinned to the POSIX default (space, tab, newline). sshd hands a
-# forced command whatever environment it was given, and the unquoted
-# `${filters}` and `${EVENTS_FILTERS}` expansions below split on IFS. The
+# IFS is pinned to the POSIX default (space, tab, newline), because the
+# unquoted `${filters}` and `${EVENTS_FILTERS}` expansions below split on it.
+# busybox sh, dash and bash all ignore an IFS in the environment they start
+# with (measured), so the pin only matters under a shell that does not. The
 # newline is written literally, because command substitution strips trailing
 # newlines and `$(printf '\n')` would lose it.
 POSIX_IFS="$(printf ' \t')
