@@ -1,12 +1,12 @@
 {
   "schema": "pifleet.ssh-transport-facts/v1",
-  "measured_at": "2026-09-14T15:26:01.672Z",
+  "measured_at": "2026-09-14T15:49:49.580Z",
   "measured_by": "scripts/observe/characterise-ssh-transport",
   "measured_with": {
-    "repo_head": "aab6e66",
+    "repo_head": "fdaedff",
     "uncommitted_changes_to_measured_files": [],
     "observe_ssh_sha256": "afd96a12368591cf1fab896088ca3b162dce5c164ce156d9486ae18858f67a84",
-    "ssh_connect_sha256": "18342f6b0baf42c2facc1983988ca2709f1877d7a5a1b93f7a9dbeb499bb30ed",
+    "ssh_connect_sha256": "46a72ec5601c20bc4462bef4de988212c6f66f7e86d6939acd2eecc8c2b31df9",
     "connect_proxy_sha256": "1044bd7803d6c763de27db7d506288e5a640106bd18c396e0c473726ff33f6a6",
     "installed_by": [
       "COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh",
@@ -154,7 +154,7 @@
   "session": {
     "target_closes_mid_session": {
       "exit_code": 255,
-      "elapsed_ms": 1827,
+      "elapsed_ms": 1340,
       "saw_output_before_close": true,
       "drop_failed": false,
       "stderr": [
@@ -165,13 +165,13 @@
       "quiet_seconds": 130,
       "through_shim": {
         "exit_code": 0,
-        "elapsed_ms": 131234,
+        "elapsed_ms": 130366,
         "completed": true,
         "stderr": []
       },
       "raw_ssh_without_keepalive": {
         "exit_code": 255,
-        "elapsed_ms": 120285,
+        "elapsed_ms": 120378,
         "completed": false,
         "stderr": [
           "client_loop: send disconnect: Broken pipe"
@@ -182,7 +182,7 @@
       "paused_after_ms": 8000,
       "session_started": true,
       "exit_code": 255,
-      "ms_from_pause_to_exit": 51353,
+      "ms_from_pause_to_exit": 51655,
       "stderr": [
         "Timeout, server sshd-target.pifleet.test not responding."
       ]
