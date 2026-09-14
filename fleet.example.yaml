@@ -378,6 +378,17 @@ secrets:
     - name: OBSERVER_DOCKER_TARGETS        # "token host port user" per line
       credential: false
       multiline: true
+    #
+    # `observer-vm`'s three (§6.6) — the SSH twin of observer-docker's key,
+    # host keys and target inventory above. All three multiline, same reason.
+    - name: OBSERVER_VM_SSH_KEY            # credential: swept as a needle
+      multiline: true
+    - name: OBSERVER_VM_KNOWN_HOSTS        # public host keys
+      credential: false
+      multiline: true
+    - name: OBSERVER_VM_TARGETS            # "token host port user" per line
+      credential: false
+      multiline: true
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.
@@ -442,6 +453,10 @@ egress:
     # SSH port. Reaching it without the key buys a banner and nothing else;
     # the credential is delivered only to `observer-docker`.
     - {host: docker-host.example.com, port: 22}
+    #
+    # `observer-vm`'s one destination (§6.6) — the enrolled VM's SSH port,
+    # same as observer-docker's rule above.
+    - {host: vm-1.example.com, port: 22}
 
 # Which changed files count as the EXAM rather than the answer (§6.5, §8.2a). A
 # diff touching one caps the verdict at `unknown`: a worker that can rewrite the
@@ -551,6 +566,23 @@ roles:
     isolation: none                       # no repository; the outbox artifact is the whole output
     pane_mode: rpc                        # one seat, obs-d1, in no console — see Q10
     append_system_prompt_file: ./roles/observer-docker.md
+  observer-vm:                            # read-only diagnostic role for a VM — SRD-OBSERVER-ROLES
+                                           # §6; twin of observer-docker, reached via SSH only
+    model: gemma-4-26b-a4b-it-bf16        # same model as observer-docker
+    thinking: high
+    toolchain: base                       # observe-vm and observe-ssh live in the shared base layer
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox pair only
+    skills: [pifleet-worker, observer-vm-ops]
+    cloud_access: false                   # true only if Q2 enables the cloud channel
+    egress_access: true                   # a ROUTE to the CONNECT proxy; destinations are egress.allow
+    secrets:                              # an OpenSSH key, its target's host keys, its target
+                                           # inventory — §6.6; all three are multiline (below)
+      - OBSERVER_VM_SSH_KEY
+      - OBSERVER_VM_KNOWN_HOSTS
+      - OBSERVER_VM_TARGETS
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    pane_mode: rpc                        # one seat, obs-v1, in no console — see Q10
+    append_system_prompt_file: ./roles/observer-vm.md
   verifier:                               # confirms a remediation actually worked
     model: gemma-4-26b-a4b-it-bf16
     toolchain: base
@@ -892,6 +924,9 @@ workers:
   # One seat, obs-d1, in no console (§5.5, Q10) — a Docker host, reached
   # through the observer-docker credential rather than a cluster's RBAC.
   - {id: obs-d1, role: observer-docker}
+  # One seat, obs-v1, in no console (§6.6, Q10) — a VM, reached through
+  # the observer-vm credential over SSH rather than a cluster's RBAC.
+  - {id: obs-v1, role: observer-vm}
   - {id: ver-1,  role: verifier}
   # ---- the `development` console's four seats ----
   #

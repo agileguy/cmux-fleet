@@ -49,6 +49,7 @@ describe("the shipped example names only things that exist", () => {
       "engineer",
       "observer-docker",
       OBSERVER_K8S_ROLE,
+      "observer-vm",
       "reviewer",
       "sre",
       "tester",
