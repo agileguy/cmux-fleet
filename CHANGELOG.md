@@ -4,6 +4,67 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-09-13
+
+This release is Phase 1 of `Docs/SRD-OBSERVER-ROLES.md` (rename-observer-k8s), plus
+every change that was listed as unreleased since 1.0.0.
+
+The fleet's read-only diagnostic role is now `observer-k8s`. It is named for what it
+looks at, ahead of the `observer-docker` and `observer-vm` siblings that later phases
+add. The role grants the same access as before; only its name changes.
+
+### Changed
+
+- **The `observer` role is `observer-k8s`.** `OBSERVER_K8S_ROLE` in
+  `src/config/schema.ts` holds the one literal, and code and tests read it rather
+  than spelling the name.
+  - In `fleet.yaml` and `fleet.example.yaml`, the role key, every seat's `role:` and
+    the prompt path change together in one commit.
+  - `roles/observer.md` is renamed to `roles/observer-k8s.md`.
+  - The worker and operator documents name the new role: `skills/observer-ops`,
+    `skills/pifleet-worker` and the fleet skill.
+- **What deliberately keeps the word** (SRD §4.2):
+  - English prose about "the observer"
+  - the operations console's `observer` pane title
+  - the `observer` row field in `triage.json`, which holds a seat id
+  - the `pifleet/observer` ServiceAccount
+  - past-tense history and verbatim quotes
+- **Operators:** a running seat keeps the old role until it is restarted. A config
+  outside the repo that declares its own `roles:` block needs four edits, not two:
+  the role key, the prompt path, and each seat's `role:`.
+
+### Added
+
+- **`test/unit/observer-rename.test.ts`**, a guard that fails on any spelling of the
+  old name that means the role.
+  - **Where it reads:** `src/`, `test/`, `scripts/`, `roles/`, `skills/`, the fleet
+    skill and both configs.
+  - **What it reads:** role keys, including flow maps and typed openers; role values;
+    `roles` index and dot access; `roleGrant` arguments; the prompt path and its
+    opening line; quoted literals in code; and the role name in docs tables and
+    parenthesised role lists.
+  - **Pane titles:** exempted by named per-file line shapes, checked both ways, so a
+    stale exemption and an unexempted literal both fail.
+  - **Known limits:** listed in its header.
+
+### Fixed
+
+- **Comments that no longer matched the code:**
+  - `fleet.yaml`'s triage console block now opens with what is true today and keeps
+    its older account under a dated `[SUPERSEDED]` marker.
+  - Rotted `file:line` citations now name their targets.
+  - The egress scope note names every role that holds `egress_access`.
+
+### Testing
+
+- 5729 pass, 0 fail across 223 files (`bun test test/unit`); `bun run typecheck`
+  clean; `config validate` clean on both configs.
+- Three review iterations, each with a fix loop. Every guard fix was checked with
+  mutations: a stale spelling went red, and a §4.2 keep stayed green.
+
+The entries below were already queued under `[Unreleased]` before Phase 1 began, and
+predate `Docs/SRD-OBSERVER-ROLES.md`.
+
 ### Added
 
 - **A staged task now starts its own turn — no keystroke at all (ISC-460..ISC-466,
