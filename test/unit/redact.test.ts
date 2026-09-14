@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,8 +24,13 @@ import {
   SECRET_NAMES_VAR,
   TRUNCATION_FLOOR,
 } from "../../src/security/redact.ts";
-import { buildWorkerEnv, writeWorkerSecretFiles } from "../../src/run/worker-env.ts";
+import {
+  buildWorkerEnv,
+  writeWorkerEnvFile,
+  writeWorkerSecretFiles,
+} from "../../src/run/worker-env.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
+import { appendJsonl } from "../../src/util/jsonl.ts";
 import { stringify } from "yaml";
 
 const CANARY = "NOTAREALSECRET-pifleet-test-canary-000001";
@@ -401,5 +406,341 @@ describe("the names and the values travel in one file", () => {
     expect(plan.secretNames).toEqual(["TICKET_API_TOKEN"]);
     // The declaration carries NAMES only — never a value.
     expect(plan.vars[SECRET_NAMES_VAR]).not.toContain(CANARY);
+  });
+});
+
+/**
+ * A MULTI-LINE value, the kind `multiline: true` delivers (commit 8bcb1ed): an
+ * OpenSSH private key, a known_hosts list, a targets list.
+ *
+ * ## The two defects these probes were written against, both measured
+ *
+ * The redactor was built for single-line tokens. For a value spanning lines it
+ * compiled the whole value, escaped, as a truncatable stem of its first twelve
+ * characters. That fails in both directions at once.
+ *
+ * It MISSES a leak. Inside JSON the value's LF is `\n`, so the whole-value form
+ * is not a substring of a record that quotes one line of the key (`head -3`,
+ * an ssh error echoing a line). The stem does not help: it is the value's
+ * first twelve characters, which for a key are armor, not body.
+ *
+ * And it EATS honest text. That stem, `-----BEGIN O`, is public armor, the
+ * same in every key of the type, so a log line saying a BEGIN OPENSSH PRIVATE
+ * KEY block was rejected came back as a marker.
+ *
+ * ## The fixtures are synthetic, and say so
+ *
+ * The PEM body is base64 of fixture text, wrapped at 70 columns between armor
+ * lines with a trailing newline: the layout `ssh-keygen` writes, not its
+ * output. The known_hosts "keys" are base64 of fixture text too. Nothing here
+ * is key material and nothing reads the real environment.
+ */
+describe("a multi-line value is scrubbed line by line, and its armor is left alone", () => {
+  /** An invented base64-looking PEM body, wrapped at 70 columns. */
+  function fakeBody(seed: string): string[] {
+    return Buffer.from(
+      Array.from({ length: 9 }, (_, i) => `pifleet-redact-fixture-${seed}-not-a-key-${i};`).join(""),
+    )
+      .toString("base64")
+      .match(/.{1,70}/g)!;
+  }
+
+  function pemFake(label: string, seed: string): string {
+    return [`-----BEGIN ${label}-----`, ...fakeBody(seed), `-----END ${label}-----`, ""].join("\n");
+  }
+
+  const KEY_NAME = "OBSERVER_DOCKER_SSH_KEY";
+  const KEY = pemFake("OPENSSH PRIVATE KEY", "ssh");
+  const KEY_MARKER = `[redacted:${KEY_NAME}]`;
+
+  const KH_NAME = "OBSERVER_DOCKER_KNOWN_HOSTS";
+  // A blank and a whitespace-only line in the middle, as a hand-edited file has.
+  const KNOWN_HOSTS = [
+    `gw-1.example.invalid ssh-ed25519 ${Buffer.from("pifleet-fixture-hostkey-gw-1-not-real").toString("base64")}`,
+    "",
+    "   ",
+    `[bastion.example.invalid]:2222 ssh-ed25519 ${Buffer.from("pifleet-fixture-hostkey-bastion-not-real").toString("base64")}`,
+    "",
+  ].join("\n");
+
+  const TARGETS_NAME = "OBSERVER_DOCKER_TARGETS";
+  const TARGETS = "web-1 10.0.0.5 22 observer\nweb-1 10.0.0.5 22 observer-backup\n";
+
+  /**
+   * A line holding `"` and `\`, which JSON escapes. For base64 and host lines
+   * the escaped and double-escaped forms are the same string, so without this
+   * a probe of the double-escaped form could not tell the two apart.
+   */
+  const ESC_NAME = "SYNTHETIC_MULTILINE_ESCAPES";
+  const ESCAPING = 'first-line-no-escapes-0001\nlabel="edge\\west" host-a.example.invalid\n';
+
+  /**
+   * The test's OWN statement of a secret line, written from the brief rather
+   * than imported, so a helper that drifted would be caught rather than copied.
+   */
+  const TEST_ARMOR = /^-----(?:BEGIN|END) [A-Z0-9 ]+-----$/;
+  function secretLinesOf(value: string): string[] {
+    const lines = value
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "" && !TEST_ARMOR.test(l) && l.length >= MIN_REDACTABLE_LENGTH);
+    return [...new Set(lines)];
+  }
+
+  const CASES: Array<[string, string]> = [
+    [KEY_NAME, KEY],
+    [KH_NAME, KNOWN_HOSTS],
+    [ESC_NAME, ESCAPING],
+  ];
+
+  function jsonInner(s: string): string {
+    return JSON.stringify(s).slice(1, -1);
+  }
+
+  test("the fixtures have the shape they claim", () => {
+    const lines = KEY.split("\n");
+    expect(lines[0]).toBe("-----BEGIN OPENSSH PRIVATE KEY-----");
+    expect(lines.at(-2)).toBe("-----END OPENSSH PRIVATE KEY-----");
+    expect(lines.at(-1)).toBe("");
+    expect(secretLinesOf(KEY).length).toBeGreaterThanOrEqual(4);
+    expect(secretLinesOf(KNOWN_HOSTS)).toHaveLength(2);
+    expect(secretLinesOf(ESCAPING)).toHaveLength(2);
+    // The escaping line really is different once double-escaped.
+    const esc = secretLinesOf(ESCAPING)[1]!;
+    expect(jsonInner(jsonInner(esc))).not.toBe(jsonInner(esc));
+  });
+
+  test("each secret line is scrubbed when quoted whole, and the marker names the variable", () => {
+    for (const [name, value] of CASES) {
+      const r = one(value, name);
+      for (const line of secretLinesOf(value)) {
+        const out = r.redact(JSON.stringify({ text: `ssh said: ${line} (rejected)` }));
+        expect(out, `${name}: ${line.slice(0, 16)}`).toBe(
+          JSON.stringify({ text: `ssh said: [redacted:${name}] (rejected)` }),
+        );
+      }
+    }
+  });
+
+  /**
+   * Down to the floor, in the escaped AND the double-escaped form. A cut is a
+   * prefix of the RAW line, so its escaped form is a prefix of the line's
+   * escaped form; cuts are chosen so the next raw character is not a quote or a
+   * backslash, which keeps the expected record exact.
+   */
+  test("each secret line is scrubbed when TRUNCATED to the floor, escaped and double-escaped", () => {
+    for (const [name, value] of CASES) {
+      const r = one(value, name);
+      const marker = `[redacted:${name}]`;
+      for (const line of secretLinesOf(value)) {
+        const cuts = [...new Set([line.length, line.length - 1, 20, TRUNCATION_FLOOR])].filter(
+          (c) => c >= TRUNCATION_FLOOR && c <= line.length,
+        );
+        for (const cut of cuts) {
+          const frag = line.slice(0, cut);
+          const label = `${name} cut ${cut}: ${frag.slice(0, 16)}`;
+          expect(r.redact(JSON.stringify({ text: frag })), label).toBe(
+            JSON.stringify({ text: marker }),
+          );
+          expect(r.redact(JSON.stringify({ text: JSON.stringify({ line: frag }) })), label).toBe(
+            JSON.stringify({ text: JSON.stringify({ line: marker }) }),
+          );
+        }
+        // And below the floor, left alone, exactly as for a single-line value.
+        // The floor counts ESCAPED characters, so the cut is the longest raw
+        // prefix whose escaped form is still under it.
+        let k = 0;
+        while (jsonInner(line.slice(0, k + 1)).length < TRUNCATION_FLOOR) k++;
+        const short = JSON.stringify({ text: line.slice(0, k) });
+        expect(k).toBeGreaterThan(0);
+        expect(r.redact(short)).toBe(short);
+      }
+    }
+  });
+
+  test("the whole value quoted in full is ONE marker, not a marker per line", () => {
+    const r = one(KEY, KEY_NAME);
+    // Exact, so this also pins ordering: were the line forms tried first, the
+    // armor would survive between per-line markers.
+    expect(r.redact(JSON.stringify({ text: `$ cat key\n${KEY}` }))).toBe(
+      JSON.stringify({ text: `$ cat key\n${KEY_MARKER}` }),
+    );
+    expect(r.redact(JSON.stringify({ text: JSON.stringify({ key: KEY }) }))).toBe(
+      JSON.stringify({ text: JSON.stringify({ key: KEY_MARKER }) }),
+    );
+  });
+
+  test("a whole value missing its trailing newline still loses every secret line", () => {
+    // `cat` output a tool trimmed: the whole-value form no longer matches, so
+    // the per-line forms are what stands between the body and the log.
+    const trimmed = KEY.trimEnd();
+    const out = one(KEY, KEY_NAME).redact(JSON.stringify({ text: trimmed }));
+    for (const line of secretLinesOf(KEY)) expect(out).not.toContain(line);
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
+  /**
+   * Armor is public. A record whose ONLY overlap with the key is armor comes
+   * back byte-identical, for every common key type, including every leading
+   * run of the whole value that stops before twelve characters of body.
+   */
+  test("honest armor text is byte-identical, for every key type and every armor stem", () => {
+    const labels = [
+      "OPENSSH PRIVATE KEY",
+      "RSA PRIVATE KEY",
+      "EC PRIVATE KEY",
+      "DSA PRIVATE KEY",
+      "PRIVATE KEY",
+      "ENCRYPTED PRIVATE KEY",
+      "PGP PRIVATE KEY BLOCK",
+    ];
+    for (const label of labels) {
+      const value = pemFake(label, label.replaceAll(" ", "-"));
+      const r = one(value, KEY_NAME);
+      const begin = `-----BEGIN ${label}-----`;
+      const end = `-----END ${label}-----`;
+      const firstBody = value.split("\n")[1]!;
+      const texts = [
+        `sshd said: ${begin} block rejected`,
+        begin,
+        end,
+        `${begin}\n${end}`,
+        `${end}\n`,
+        // Every leading run of the whole value up to the body, plus a body
+        // fragment below the floor: the stems a truncated whole-value form
+        // would have matched.
+        ...Array.from({ length: begin.length + 1 }, (_, i) => value.slice(0, i + 1)),
+        `${begin}\n${firstBody.slice(0, TRUNCATION_FLOOR - 1)}`,
+      ];
+      for (const text of texts) {
+        for (const line of [
+          JSON.stringify({ text }),
+          JSON.stringify({ text: JSON.stringify({ text }) }),
+        ]) {
+          expect(r.redact(line), `${label}: ${JSON.stringify(text).slice(0, 40)}`).toBe(line);
+        }
+      }
+    }
+  });
+
+  test("a multi-line name is armed once, not once per line, beside a single-line one", () => {
+    const r = buildRedactor([
+      [KEY_NAME, KEY],
+      [KH_NAME, KNOWN_HOSTS],
+      ["TICKET_API_TOKEN", CANARY],
+    ]);
+    expect(r.armed).toEqual([KEY_NAME, KH_NAME, "TICKET_API_TOKEN"]);
+    expect(r.skipped).toEqual([]);
+    const body = secretLinesOf(KEY)[2]!;
+    const host = secretLinesOf(KNOWN_HOSTS)[1]!;
+    expect(r.redact(JSON.stringify({ a: body, b: host, c: CANARY }))).toBe(
+      JSON.stringify({ a: KEY_MARKER, b: `[redacted:${KH_NAME}]`, c: "[redacted:TICKET_API_TOKEN]" }),
+    );
+  });
+
+  test("LONGEST FIRST holds between lines: a line that begins with another leaves no tail", () => {
+    const r = one(TARGETS, TARGETS_NAME);
+    expect(r.redact(JSON.stringify({ text: "web-1 10.0.0.5 22 observer-backup" }))).toBe(
+      JSON.stringify({ text: `[redacted:${TARGETS_NAME}]` }),
+    );
+  });
+
+  /**
+   * THE COST, pinned so a change to it is deliberate. The redactor sees names
+   * and values, not `credential: false`, so a targets list is scrubbed like a
+   * key. Per-line matching means any leading run of twelve or more characters
+   * of a targets line is replaced, and that includes a DIFFERENT host that
+   * shares the first twelve characters.
+   */
+  test("the targets-file cost: any 12-character leading run of a target line is scrubbed", () => {
+    const r = one(TARGETS, TARGETS_NAME);
+    const m = `[redacted:${TARGETS_NAME}]`;
+    const cases: Array<[string, string]> = [
+      ["probe web-1 10.0.0.5 22 observer ok", `probe ${m} ok`],
+      ["ssh-connect: web-1 10.0.0.5 22 refused", `ssh-connect: ${m}refused`],
+      // The greedy tail takes the shared `.` too, so only the differing digit survives.
+      ["unrelated host web-1 10.0.0.7 is up", `unrelated host ${m}7 is up`],
+      // Under the floor, or not a leading run: untouched.
+      ["web-1 10.0. is short", "web-1 10.0. is short"],
+      ["10.0.0.5 22 observer", "10.0.0.5 22 observer"],
+    ];
+    for (const [input, expected] of cases) {
+      expect(r.redact(JSON.stringify({ text: input }))).toBe(JSON.stringify({ text: expected }));
+    }
+  });
+
+  /**
+   * END TO END, with no hand-built plan: a config whose allowlist entries say
+   * `multiline: true`, delivered by `buildWorkerEnv`, written by the two writers
+   * `materialize.ts` calls, armed by `redactorForWorkerEnv`, and applied by
+   * `appendJsonl` with the same `transform` the supervisor passes.
+   */
+  test("a key delivered through multiline: true is scrubbed line by line from events.jsonl", async () => {
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "redact-multiline-fleet",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: { model: "TestModel" },
+        secrets: {
+          env_allowlist: [
+            { name: KEY_NAME, multiline: true },
+            { name: KH_NAME, multiline: true },
+            { name: TARGETS_NAME, credential: false, multiline: true },
+          ],
+        },
+        roles: { dockerobs: { secrets: [KEY_NAME, KH_NAME, TARGETS_NAME] } },
+        workers: [{ id: "wd", role: "dockerobs" }],
+      }),
+      "/tmp/fleet.yaml",
+    );
+    const apiKeyEnv = loaded.config.llm.api_key_env;
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), {
+      [KEY_NAME]: KEY,
+      [KH_NAME]: KNOWN_HOSTS,
+      [TARGETS_NAME]: TARGETS,
+      [apiKeyEnv]: `omlx-${CANARY}`,
+    });
+
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-redact-multiline-"));
+    try {
+      const envPath = join(dir, "env");
+      const secretsDir = join(dir, "secrets");
+      const eventsPath = join(dir, "events.jsonl");
+      await writeWorkerSecretFiles(secretsDir, plan);
+      await writeWorkerEnvFile(envPath, plan);
+
+      const r = await redactorForWorkerEnv(envPath, secretsDir);
+      expect(r.source).toBe("store");
+      expect(r.unresolved).toEqual([]);
+      for (const name of [KEY_NAME, KH_NAME, TARGETS_NAME]) {
+        expect(r.armed.filter((n) => n === name), name).toHaveLength(1);
+      }
+
+      // `head -3 key`, then an ssh error quoting a known_hosts line.
+      const head3 = KEY.split("\n").slice(0, 3).join("\n");
+      const host = secretLinesOf(KNOWN_HOSTS)[0]!;
+      const record = {
+        ts: "2026-09-14T00:00:00.000Z",
+        type: "tool_execution_end",
+        result: { content: [{ type: "text", text: `${head3}\nssh: bad host line ${host}` }] },
+      };
+      await appendJsonl(eventsPath, record, { transform: (line) => r.redact(line) });
+
+      const onDisk = await readFile(eventsPath, "utf8");
+      // CONTROL: the fixture really did put key material in the record.
+      expect(JSON.stringify(record)).toContain(secretLinesOf(KEY)[0]!);
+      for (const line of [...secretLinesOf(KEY).slice(0, 2), host]) {
+        expect(onDisk).not.toContain(line);
+      }
+      const text = (JSON.parse(onDisk) as typeof record).result.content[0]!.text;
+      expect(text).toBe(
+        `-----BEGIN OPENSSH PRIVATE KEY-----\n${KEY_MARKER}\n${KEY_MARKER}\n` +
+          `ssh: bad host line [redacted:${KH_NAME}]`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

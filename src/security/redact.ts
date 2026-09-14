@@ -29,7 +29,8 @@
  * fourth shape, and it fails SILENTLY — a new event type leaks and every test
  * over the three known ones stays green. Scrubbing the JSON text cannot be
  * out-flanked that way: whatever the record's shape, the value is a substring
- * of the line or it is not in the line at all.
+ * of the line or it is not in the line at all. (For a value spanning lines,
+ * read "value" as "each secret line of it"; see the multi-line section below.)
  *
  * That choice sets the matching rule. Inside a JSON document a string appears
  * ESCAPED, so the needle is `JSON.stringify(v).slice(1,-1)` and not `v`. The
@@ -53,14 +54,57 @@
  * is `findCredentialLeaks`'s reasoning in `contracts.ts` applied to the
  * writing side rather than the reading side.
  *
+ * ## Multi-line values: matched line by line, and never by their armor
+ *
+ * A `multiline: true` grant (the observer roles' OpenSSH key, known_hosts list
+ * and targets list) leaks one line at a time far more often than whole: `head
+ * -3 key`, an ssh error echoing the line it choked on. Inside JSON the value's
+ * LF is `\n`, so the whole value is not a substring of a record quoting one
+ * line of it, and a redactor that compiled only the whole value let exactly
+ * that record through unchanged. So a value containing LF compiles:
+ *
+ *   - the WHOLE value, escaped and double-escaped, matched IN FULL only; and
+ *   - each SECRET LINE (trimmed, non-blank, not PEM armor, at least
+ *     `MIN_REDACTABLE_LENGTH`; see `security/secret-lines.ts`), escaped and
+ *     double-escaped, matched whole or truncated down to `TRUNCATION_FLOOR`
+ *     exactly as a single-line value is.
+ *
+ * The whole value does not truncate, and that is what keeps armor out. Its
+ * leading run is its first line, which for a key is `-----BEGIN OPENSSH
+ * PRIVATE KEY-----`: public, identical in every key of the type, and present
+ * in honest prose about keys. A twelve-character stem of it turned "sshd said:
+ * -----BEGIN OPENSSH PRIVATE KEY----- block rejected" into a marker. Dropping
+ * the truncation costs nothing a line form does not cover, because a truncated
+ * copy of the whole value is a run of whole lines ending in one cut line, and
+ * each secret line in it matches its own form down to the floor. Armor lines
+ * are never line forms. So for a well-formed key, nothing compiled from it
+ * matches text whose only overlap with the key is armor. A line that merely
+ * STARTS like armor but is not armor-shaped is matched like any other line.
+ *
+ * Full-only also sidesteps a flaw in truncation across the two forms. When
+ * both forms of one value can truncate, the double-escaped form is longer, so
+ * it sorts first. Its stem can then match a single-escaped record up to the
+ * first escape and win the alternation with the shorter match, cutting an
+ * escape sequence in half. A key's `\n` is such an escape. That flaw still
+ * applies to a truncatable form whose first `"` or `\` sits past the floor:
+ * any single-line value, or any secret line, that carries one.
+ *
+ * The line rules are shared with the harvest sweep (`harvest/needles.ts`) so
+ * the two cannot disagree about what a secret line is. The floors are not
+ * shared. A multi-line name is armed ONCE however many lines it contributes,
+ * and every form it compiles carries its one marker.
+ *
  * ## Cost
  *
  * This runs on EVERY event, including a `stderr_line` flood — ISC-158's
  * scenario emits thousands. So the alternation is compiled ONCE, at
- * construction, and a call is one `String.replace` over one pre-built regex.
+ * construction, however many lines a value contributes, and a call is one
+ * `String.replace` over one pre-built regex.
  * Nothing here allocates a `RegExp` per event, and a worker granted no secrets
  * gets an identity function rather than a regex that matches nothing.
  */
+
+import { secretLines } from "./secret-lines.ts";
 
 /**
  * Shortest value that is scrubbed. Below this the needle is more likely to be
@@ -85,9 +129,23 @@ export const MIN_REDACTABLE_LENGTH = 8;
  *
  * THE RESIDUAL, SAID OUT LOUD: a fragment shorter than this is NOT scrubbed,
  * and neither is a fragment taken from the middle or the END of a value
- * (`tail -c 20`). Only leading runs are matched. Covering arbitrary substrings
- * means a needle per window, which is the log-eating failure at scale and the
- * cost this whole module is shaped around avoiding.
+ * (`tail -c 20`). Only leading runs are matched: of a single-line value, and
+ * of each secret line of a multi-line one. Matching per line moves that
+ * boundary; it does not remove it. A multi-line value's middle and last LINES
+ * are covered (`sed -n 5p key`), which a leading-run-of-the-value rule could
+ * not do. The middle or end of any ONE line still is not (`tail -c 20 key`, a
+ * line a tool wrapped or cut partway), and neither is a line under
+ * `MIN_REDACTABLE_LENGTH`, nor an armor line, which is public by design.
+ * Covering arbitrary substrings means a needle per window, which is the
+ * log-eating failure at scale and the cost this whole module is shaped around
+ * avoiding.
+ *
+ * Per-line matching has a cost of its own, paid by any multi-line value that is
+ * not secret. The redactor sees names and values, not `credential: false`, so a
+ * targets list is scrubbed like a key. Any leading run of twelve or more
+ * characters of a targets line is replaced, including one naming a different
+ * host that shares those twelve characters: with `web-1 10.0.0.5 22 observer`
+ * granted, `web-1 10.0.0.7 is up` is logged as `[redacted:NAME]7 is up`.
  */
 export const TRUNCATION_FLOOR = 12;
 
@@ -238,13 +296,9 @@ export function buildRedactor(
   const armed: string[] = [];
   const skipped: string[] = [];
 
-  for (const [name, value] of secrets) {
-    if (typeof value !== "string" || value.length < MIN_REDACTABLE_LENGTH) {
-      skipped.push(name);
-      continue;
-    }
-    const marker = `[redacted:${name.replace(NAME_UNSAFE, "_")}]`;
-    const inner = jsonInner(value);
+  /** Compile `text`'s escaped and double-escaped forms under one marker. */
+  const addForms = (text: string, marker: string, truncatable: boolean): void => {
+    const inner = jsonInner(text);
     for (const form of [inner, jsonInner(inner)]) {
       if (form.length < MIN_REDACTABLE_LENGTH || seen.has(form)) continue;
       seen.add(form);
@@ -255,9 +309,27 @@ export function buildRedactor(
        * likelier a leading run of it is ordinary text, and a needle that
        * matches ordinary text eats the log it was meant to protect.
        */
-      const floor = Math.min(TRUNCATION_FLOOR, form.length);
+      const floor = truncatable ? Math.min(TRUNCATION_FLOOR, form.length) : form.length;
       forms.push({ src: truncationSource(form, floor), marker, len: form.length });
     }
+  };
+
+  for (const [name, value] of secrets) {
+    if (typeof value !== "string" || value.length < MIN_REDACTABLE_LENGTH) {
+      skipped.push(name);
+      continue;
+    }
+    const marker = `[redacted:${name.replace(NAME_UNSAFE, "_")}]`;
+    /*
+     * A value with no LF compiles exactly what it always did: its two forms,
+     * truncatable, and `secretLines` yields nothing for it. A value WITH one is
+     * matched whole only IN FULL, because its leading run is its first line and
+     * for a key that is public armor. Its secret lines carry the truncation
+     * instead. The module header's multi-line section says why that loses
+     * nothing.
+     */
+    addForms(value, marker, !value.includes("\n"));
+    for (const line of secretLines(value, MIN_REDACTABLE_LENGTH)) addForms(line, marker, true);
     armed.push(name);
   }
 

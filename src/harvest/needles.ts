@@ -81,6 +81,7 @@
  */
 
 import { readWorkerLaunch } from "../run/state.ts";
+import { secretLines } from "../security/secret-lines.ts";
 import { resolveGrantedSecretValues } from "../security/secret-values.ts";
 import type { WorkerPaths } from "../run/paths.ts";
 import { safeForReport } from "./outbox.ts";
@@ -104,13 +105,6 @@ import { safeForReport } from "./outbox.ts";
  * could not have graded it either way — it would have reported every harvest.
  */
 export const MIN_NEEDLE_BYTES = 8;
-
-/**
- * A PEM armor line: `-----BEGIN OPENSSH PRIVATE KEY-----`, `-----END RSA
- * PRIVATE KEY-----` and their kin. Public text, identical in every key of its
- * type, so never a needle.
- */
-const ARMOR_LINE = /^-----(?:BEGIN|END)[A-Z0-9 ]*-----$/;
 
 /** Whether a string may be a literal needle at all: not blank, and over the floor. */
 function usableNeedle(s: string): boolean {
@@ -137,25 +131,18 @@ function usableNeedle(s: string): boolean {
  * every artifact that says "the host rejected a BEGIN OPENSSH PRIVATE KEY
  * block", which is the false positive `credential: false` was written to end.
  *
- * Lines are TRIMMED before use. A trimmed line is a substring of the original,
- * so it catches strictly more, and delivery refuses CR, so a current run holds
- * no `\r` to strip anyway.
+ * ## Where the line rules live
  *
- * One cost is stated rather than hidden. An OpenSSH key's first body line
- * encodes a header that is the same for every unencrypted key of its type, so
- * it is not secret either. It is kept as a needle: the only artifact that
- * carries it is one quoting key material, and that is worth a finding.
+ * In `security/secret-lines.ts`, shared with the event-log redactor, which
+ * needs the same answer for the same values. That module trims each line, and
+ * it documents the one non-secret line it keeps on purpose (an OpenSSH key's
+ * first body line). The floor passed in is THIS module's `MIN_NEEDLE_BYTES`,
+ * never the redactor's. A value with no LF yields no lines, so a single-line
+ * value is exactly the one needle it always was.
  */
 function needlesFor(value: string): string[] {
   if (!usableNeedle(value)) return [];
-  const out = [value];
-  if (!value.includes("\n")) return out;
-  for (const raw of value.split("\n")) {
-    const line = raw.trim();
-    if (!usableNeedle(line) || ARMOR_LINE.test(line) || out.includes(line)) continue;
-    out.push(line);
-  }
-  return out;
+  return [value, ...secretLines(value, MIN_NEEDLE_BYTES)];
 }
 
 /** What one worker's grant resolved to. */
