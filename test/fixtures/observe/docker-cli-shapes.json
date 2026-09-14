@@ -1,0 +1,432 @@
+{
+  "measured_with": {
+    "script": "scripts/observe/characterise-docker",
+    "git_head": "ba1933c",
+    "uncommitted_changes_to_measured_files": [],
+    "dind_image": "docker:dind",
+    "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
+    "probe_image": "alpine:3",
+    "probe_image_id": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+    "client_version": "29.7.2",
+    "server_version": "29.7.2",
+    "server_api_version": "1.55",
+    "measured_at": "2026-09-14T17:02:25.770Z"
+  },
+  "ps": {
+    "argv": [
+      "ps",
+      "--no-trunc",
+      "--format",
+      "{{json .}}"
+    ],
+    "all_argv": [
+      "ps",
+      "--all",
+      "--no-trunc",
+      "--format",
+      "{{json .}}"
+    ],
+    "rows_measured": {
+      "running": 3,
+      "all": 4
+    },
+    "key_set": [
+      "Command",
+      "CreatedAt",
+      "HealthStatus",
+      "ID",
+      "Image",
+      "Labels",
+      "LocalVolumes",
+      "Mounts",
+      "Names",
+      "Networks",
+      "Platform",
+      "Ports",
+      "RunningFor",
+      "Size",
+      "State",
+      "Status"
+    ],
+    "value_types": {
+      "Command": "string",
+      "CreatedAt": "string",
+      "HealthStatus": "string",
+      "ID": "string",
+      "Image": "string",
+      "Labels": "string",
+      "LocalVolumes": "string",
+      "Mounts": "string",
+      "Names": "string",
+      "Networks": "string",
+      "Platform": "object",
+      "Ports": "string",
+      "RunningFor": "string",
+      "Size": "string",
+      "State": "string",
+      "Status": "string"
+    },
+    "bind_mount_row": {
+      "Mounts": "/tmp",
+      "Labels": "char.label=one"
+    },
+    "name_filter_matches": {
+      "name=char-plain": 1,
+      "name=char": 4
+    },
+    "label_filter_matches": {
+      "label=char.label=one": 1
+    }
+  },
+  "stats": {
+    "argv": [
+      "stats",
+      "--no-stream",
+      "--no-trunc",
+      "--format",
+      "{{json .}}",
+      "char-plain"
+    ],
+    "key_set": [
+      "BlockIO",
+      "CPUPerc",
+      "Container",
+      "ID",
+      "MemPerc",
+      "MemUsage",
+      "Name",
+      "NetIO",
+      "PIDs"
+    ],
+    "value_types": {
+      "BlockIO": "string",
+      "CPUPerc": "string",
+      "Container": "string",
+      "ID": "string",
+      "MemPerc": "string",
+      "MemUsage": "string",
+      "Name": "string",
+      "NetIO": "string",
+      "PIDs": "string"
+    }
+  },
+  "state_health": {
+    "without_healthcheck": {
+      "state_key_set": [
+        "Dead",
+        "Error",
+        "ExitCode",
+        "FinishedAt",
+        "OOMKilled",
+        "Paused",
+        "Pid",
+        "Restarting",
+        "Running",
+        "StartedAt",
+        "Status"
+      ],
+      "json_template": {
+        "template": "{{json .State.Health}}",
+        "value": null
+      },
+      "field_template": {
+        "template": "{{.State.Health.Status}}",
+        "exit": 1,
+        "stdout": "",
+        "stderr": "template parsing error: template: :1:8: executing \"\" at <.State.Health.Status>: map has no entry for key \"Health\""
+      },
+      "nil_safe_template": {
+        "template": "{{if .State.Health}}{{.State.Health.Status}}{{end}}",
+        "exit": 0,
+        "stdout": ""
+      }
+    },
+    "healthy": {
+      "statuses_seen_while_polling": [
+        "starting",
+        "healthy"
+      ],
+      "state_key_set": [
+        "Dead",
+        "Error",
+        "ExitCode",
+        "FinishedAt",
+        "Health",
+        "OOMKilled",
+        "Paused",
+        "Pid",
+        "Restarting",
+        "Running",
+        "StartedAt",
+        "Status"
+      ],
+      "health": {
+        "key_set": [
+          "FailingStreak",
+          "Log",
+          "Status"
+        ],
+        "value_types": {
+          "FailingStreak": "number",
+          "Log": "array",
+          "Status": "string"
+        }
+      },
+      "status": "healthy",
+      "log_entry": {
+        "key_set": [
+          "End",
+          "ExitCode",
+          "Output",
+          "Start"
+        ],
+        "value_types": {
+          "End": "string",
+          "ExitCode": "number",
+          "Output": "string",
+          "Start": "string"
+        }
+      }
+    },
+    "unhealthy": {
+      "statuses_seen_while_polling": [
+        "unhealthy"
+      ],
+      "state_key_set": [
+        "Dead",
+        "Error",
+        "ExitCode",
+        "FinishedAt",
+        "Health",
+        "OOMKilled",
+        "Paused",
+        "Pid",
+        "Restarting",
+        "Running",
+        "StartedAt",
+        "Status"
+      ],
+      "health": {
+        "key_set": [
+          "FailingStreak",
+          "Log",
+          "Status"
+        ],
+        "value_types": {
+          "FailingStreak": "number",
+          "Log": "array",
+          "Status": "string"
+        }
+      },
+      "status": "unhealthy",
+      "log_entry": {
+        "key_set": [
+          "End",
+          "ExitCode",
+          "Output",
+          "Start"
+        ],
+        "value_types": {
+          "End": "string",
+          "ExitCode": "number",
+          "Output": "string",
+          "Start": "string"
+        }
+      }
+    }
+  },
+  "events": {
+    "terminating_bound": [
+      "--until",
+      "0s"
+    ],
+    "probes": [
+      {
+        "argv": [
+          "events",
+          "--since",
+          "60s",
+          "--until",
+          "0s",
+          "--format",
+          "{{json .}}"
+        ],
+        "exit": 0,
+        "terminated_on_its_own": true,
+        "ms": 45,
+        "events": 43,
+        "char_events_actions": [
+          "create",
+          "attach",
+          "start",
+          "die",
+          "destroy"
+        ]
+      },
+      {
+        "argv": [
+          "events",
+          "--since",
+          "60s",
+          "--until",
+          "1789405333",
+          "--format",
+          "{{json .}}"
+        ],
+        "exit": 0,
+        "terminated_on_its_own": true,
+        "ms": 38,
+        "events": 43,
+        "char_events_actions": [
+          "create",
+          "attach",
+          "start",
+          "die",
+          "destroy"
+        ]
+      },
+      {
+        "argv": [
+          "events",
+          "--since",
+          "60s",
+          "--format",
+          "{{json .}}"
+        ],
+        "exit": 143,
+        "terminated_on_its_own": false,
+        "ms": 8056,
+        "events": 93,
+        "char_events_actions": [
+          "create",
+          "attach",
+          "start",
+          "die",
+          "destroy"
+        ]
+      }
+    ],
+    "key_sets": [
+      [
+        "Action",
+        "Actor",
+        "Type",
+        "scope",
+        "time",
+        "timeNano"
+      ]
+    ]
+  },
+  "top": {
+    "header": [
+      "PID",
+      "USER",
+      "TIME",
+      "COMMAND"
+    ]
+  },
+  "info": {
+    "argv": [
+      "info",
+      "--format",
+      "{{json .}}"
+    ],
+    "key_set": [
+      "Architecture",
+      "CDISpecDirs",
+      "CPUSet",
+      "CPUShares",
+      "CgroupDriver",
+      "CgroupVersion",
+      "ClientInfo",
+      "Containerd",
+      "ContainerdCommit",
+      "Containers",
+      "ContainersPaused",
+      "ContainersRunning",
+      "ContainersStopped",
+      "CpuCfsPeriod",
+      "CpuCfsQuota",
+      "Debug",
+      "DefaultRuntime",
+      "DockerRootDir",
+      "Driver",
+      "DriverStatus",
+      "ExperimentalBuild",
+      "FirewallBackend",
+      "GenericResources",
+      "HttpProxy",
+      "HttpsProxy",
+      "ID",
+      "IPv4Forwarding",
+      "Images",
+      "IndexServerAddress",
+      "InitBinary",
+      "InitCommit",
+      "Isolation",
+      "KernelVersion",
+      "Labels",
+      "LiveRestoreEnabled",
+      "LoggingDriver",
+      "MemTotal",
+      "MemoryLimit",
+      "NCPU",
+      "NEventsListener",
+      "NFd",
+      "NGoroutines",
+      "Name",
+      "NoProxy",
+      "OSType",
+      "OSVersion",
+      "OomKillDisable",
+      "OperatingSystem",
+      "PidsLimit",
+      "Plugins",
+      "ProductLicense",
+      "RegistryConfig",
+      "RuncCommit",
+      "Runtimes",
+      "SecurityOptions",
+      "ServerVersion",
+      "SwapLimit",
+      "Swarm",
+      "SystemTime",
+      "Warnings"
+    ]
+  },
+  "version": {
+    "argv": [
+      "version",
+      "--format",
+      "{{json .}}"
+    ],
+    "key_set": [
+      "Client",
+      "Server"
+    ],
+    "client_key_set": [
+      "ApiVersion",
+      "Arch",
+      "BuildTime",
+      "Context",
+      "DefaultAPIVersion",
+      "GitCommit",
+      "GoVersion",
+      "Os",
+      "Version"
+    ],
+    "server_key_set": [
+      "ApiVersion",
+      "Arch",
+      "BuildTime",
+      "Components",
+      "GitCommit",
+      "GoVersion",
+      "KernelVersion",
+      "MinAPIVersion",
+      "Os",
+      "Platform",
+      "Version"
+    ]
+  }
+}

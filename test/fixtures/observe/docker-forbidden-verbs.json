@@ -1,0 +1,991 @@
+{
+  "measured_with": {
+    "script": "scripts/observe/characterise-docker",
+    "git_head": "ba1933c",
+    "uncommitted_changes_to_measured_files": [],
+    "dind_image": "docker:dind",
+    "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
+    "probe_image": "alpine:3",
+    "probe_image_id": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+    "client_version": "29.7.2",
+    "server_version": "29.7.2",
+    "server_api_version": "1.55",
+    "measured_at": "2026-09-14T17:02:25.770Z"
+  },
+  "allowlist": [
+    "ps",
+    "inspect",
+    "logs",
+    "stats",
+    "top",
+    "events",
+    "info",
+    "version"
+  ],
+  "entries": [
+    {
+      "command": "attach",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "bake",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "build",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "builder",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "builder bake",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder build",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder create",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder dap",
+      "source": "docker builder --help, Management Commands"
+    },
+    {
+      "command": "builder dial-stdio",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder du",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder history",
+      "source": "docker builder --help, Management Commands"
+    },
+    {
+      "command": "builder imagetools",
+      "source": "docker builder --help, Management Commands"
+    },
+    {
+      "command": "builder inspect",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder ls",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder policy",
+      "source": "docker builder --help, Management Commands"
+    },
+    {
+      "command": "builder prune",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder rm",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder stop",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder use",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "builder version",
+      "source": "docker builder --help, Commands"
+    },
+    {
+      "command": "buildx",
+      "source": "docker --help, Management Commands (plugin)"
+    },
+    {
+      "command": "buildx bake",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx build",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx create",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx dap",
+      "source": "docker buildx --help, Management Commands"
+    },
+    {
+      "command": "buildx dial-stdio",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx du",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx history",
+      "source": "docker buildx --help, Management Commands"
+    },
+    {
+      "command": "buildx imagetools",
+      "source": "docker buildx --help, Management Commands"
+    },
+    {
+      "command": "buildx inspect",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx ls",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx policy",
+      "source": "docker buildx --help, Management Commands"
+    },
+    {
+      "command": "buildx prune",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx rm",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx stop",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx use",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "buildx version",
+      "source": "docker buildx --help, Commands"
+    },
+    {
+      "command": "checkpoint",
+      "source": "docker --help, Management Commands, listed only with no daemon reachable"
+    },
+    {
+      "command": "checkpoint create",
+      "source": "docker checkpoint --help, Commands"
+    },
+    {
+      "command": "checkpoint ls",
+      "source": "docker checkpoint --help, Commands"
+    },
+    {
+      "command": "checkpoint rm",
+      "source": "docker checkpoint --help, Commands"
+    },
+    {
+      "command": "commit",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "compose",
+      "source": "docker --help, Management Commands (plugin)"
+    },
+    {
+      "command": "compose attach",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose bridge",
+      "source": "docker compose --help, Management Commands"
+    },
+    {
+      "command": "compose build",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose commit",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose config",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose cp",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose create",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose down",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose events",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose exec",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose export",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose images",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose kill",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose logs",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose ls",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose pause",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose port",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose ps",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose publish",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose pull",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose push",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose restart",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose rm",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose run",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose scale",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose start",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose stats",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose stop",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose top",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose unpause",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose up",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose version",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose volumes",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose wait",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "compose watch",
+      "source": "docker compose --help, Commands"
+    },
+    {
+      "command": "config",
+      "source": "docker --help, Swarm Commands, listed only with no daemon reachable"
+    },
+    {
+      "command": "config create",
+      "source": "docker config --help, Commands"
+    },
+    {
+      "command": "config inspect",
+      "source": "docker config --help, Commands"
+    },
+    {
+      "command": "config ls",
+      "source": "docker config --help, Commands"
+    },
+    {
+      "command": "config rm",
+      "source": "docker config --help, Commands"
+    },
+    {
+      "command": "container",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "container attach",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container commit",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container cp",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container create",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container diff",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container exec",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container export",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container inspect",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container kill",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container logs",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container ls",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container pause",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container port",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container prune",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container rename",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container restart",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container rm",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container run",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container start",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container stats",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container stop",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container top",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container unpause",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container update",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "container wait",
+      "source": "docker container --help, Commands"
+    },
+    {
+      "command": "context",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "context create",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context export",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context import",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context inspect",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context ls",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context rm",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context show",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context update",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "context use",
+      "source": "docker context --help, Commands"
+    },
+    {
+      "command": "cp",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "create",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "diff",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "exec",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "export",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "history",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "image",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "image build",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image history",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image import",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image inspect",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image load",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image ls",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image prune",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image pull",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image push",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image rm",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image save",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "image tag",
+      "source": "docker image --help, Commands"
+    },
+    {
+      "command": "images",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "import",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "kill",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "load",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "login",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "logout",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "logs --follow",
+      "source": "SRD-OBSERVER-ROLES §5.4: an unbounded log stream"
+    },
+    {
+      "command": "logs web since=60s tail=10 --follow",
+      "source": "SRD-OBSERVER-ROLES §5.4: a bounded log request with a follow flag appended"
+    },
+    {
+      "command": "manifest",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "manifest annotate",
+      "source": "docker manifest --help, Commands"
+    },
+    {
+      "command": "manifest create",
+      "source": "docker manifest --help, Commands"
+    },
+    {
+      "command": "manifest inspect",
+      "source": "docker manifest --help, Commands"
+    },
+    {
+      "command": "manifest push",
+      "source": "docker manifest --help, Commands"
+    },
+    {
+      "command": "manifest rm",
+      "source": "docker manifest --help, Commands"
+    },
+    {
+      "command": "network",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "network connect",
+      "source": "docker network --help, Commands"
+    },
+    {
+      "command": "network create",
+      "source": "docker network --help, Commands"
+    },
+    {
+      "command": "network disconnect",
+      "source": "docker network --help, Commands"
+    },
+    {
+      "command": "network inspect",
+      "source": "docker network --help, Commands"
+    },
+    {
+      "command": "network ls",
+      "source": "docker network --help, Commands"
+    },
+    {
+      "command": "network prune",
+      "source": "docker network --help, Commands"
+    },
+    {
+      "command": "network rm",
+      "source": "docker network --help, Commands"
+    },
+    {
+      "command": "node",
+      "source": "docker --help, Swarm Commands, listed only with no daemon reachable"
+    },
+    {
+      "command": "node demote",
+      "source": "docker node --help, Commands"
+    },
+    {
+      "command": "node inspect",
+      "source": "docker node --help, Commands"
+    },
+    {
+      "command": "node ls",
+      "source": "docker node --help, Commands"
+    },
+    {
+      "command": "node promote",
+      "source": "docker node --help, Commands"
+    },
+    {
+      "command": "node ps",
+      "source": "docker node --help, Commands"
+    },
+    {
+      "command": "node rm",
+      "source": "docker node --help, Commands"
+    },
+    {
+      "command": "node update",
+      "source": "docker node --help, Commands"
+    },
+    {
+      "command": "pause",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "plugin",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "plugin create",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin disable",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin enable",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin inspect",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin install",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin ls",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin push",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin rm",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin set",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "plugin upgrade",
+      "source": "docker plugin --help, Commands"
+    },
+    {
+      "command": "port",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "pull",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "push",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "rename",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "restart",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "rm",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "rmi",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "run",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "save",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "search",
+      "source": "docker --help, Common Commands"
+    },
+    {
+      "command": "secret",
+      "source": "docker --help, Swarm Commands, listed only with no daemon reachable"
+    },
+    {
+      "command": "secret create",
+      "source": "docker secret --help, Commands"
+    },
+    {
+      "command": "secret inspect",
+      "source": "docker secret --help, Commands"
+    },
+    {
+      "command": "secret ls",
+      "source": "docker secret --help, Commands"
+    },
+    {
+      "command": "secret rm",
+      "source": "docker secret --help, Commands"
+    },
+    {
+      "command": "service",
+      "source": "docker --help, Swarm Commands, listed only with no daemon reachable"
+    },
+    {
+      "command": "service create",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service inspect",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service logs",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service ls",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service ps",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service rm",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service rollback",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service scale",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "service update",
+      "source": "docker service --help, Commands"
+    },
+    {
+      "command": "stack",
+      "source": "docker --help, Swarm Commands, listed only with no daemon reachable"
+    },
+    {
+      "command": "stack config",
+      "source": "docker stack --help, Commands"
+    },
+    {
+      "command": "stack deploy",
+      "source": "docker stack --help, Commands"
+    },
+    {
+      "command": "stack ls",
+      "source": "docker stack --help, Commands"
+    },
+    {
+      "command": "stack ps",
+      "source": "docker stack --help, Commands"
+    },
+    {
+      "command": "stack rm",
+      "source": "docker stack --help, Commands"
+    },
+    {
+      "command": "stack services",
+      "source": "docker stack --help, Commands"
+    },
+    {
+      "command": "start",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "stats",
+      "source": "SRD-OBSERVER-ROLES §5.4: `docker stats` without a container and without `--no-stream` streams every container"
+    },
+    {
+      "command": "stop",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "swarm",
+      "source": "docker --help, Swarm Commands"
+    },
+    {
+      "command": "swarm ca",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "swarm init",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "swarm join",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "swarm join-token",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "swarm leave",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "swarm unlock",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "swarm unlock-key",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "swarm update",
+      "source": "docker swarm --help, Commands"
+    },
+    {
+      "command": "system",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "system df",
+      "source": "docker system --help, Commands"
+    },
+    {
+      "command": "system dial-stdio",
+      "source": "SRD-OBSERVER-ROLES §5.4: how `docker -H ssh://` gets the full Engine API over SSH"
+    },
+    {
+      "command": "system events",
+      "source": "docker system --help, Commands"
+    },
+    {
+      "command": "system info",
+      "source": "docker system --help, Commands"
+    },
+    {
+      "command": "system prune",
+      "source": "docker system --help, Commands"
+    },
+    {
+      "command": "tag",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "unpause",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "update",
+      "source": "docker --help, Commands"
+    },
+    {
+      "command": "volume",
+      "source": "docker --help, Management Commands"
+    },
+    {
+      "command": "volume create",
+      "source": "docker volume --help, Commands"
+    },
+    {
+      "command": "volume inspect",
+      "source": "docker volume --help, Commands"
+    },
+    {
+      "command": "volume ls",
+      "source": "docker volume --help, Commands"
+    },
+    {
+      "command": "volume prune",
+      "source": "docker volume --help, Commands"
+    },
+    {
+      "command": "volume rm",
+      "source": "docker volume --help, Commands"
+    },
+    {
+      "command": "volume update",
+      "source": "docker volume --help, Commands"
+    },
+    {
+      "command": "wait",
+      "source": "docker --help, Commands"
+    }
+  ]
+}
