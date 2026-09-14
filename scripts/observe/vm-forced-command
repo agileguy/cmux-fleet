@@ -1,0 +1,218 @@
+#!/bin/sh
+# vm-forced-command — the whole of what the observer-vm credential can do
+# this round (SRD-OBSERVER-ROLES §6.2-6.4; Phase 5 task 5.1).
+#
+# Installed root-owned, mode 0755, at a path the enrolled account cannot
+# write, and named as the `command=` in that account's one `authorized_keys`
+# line (§6.2, following §5.7's pattern): `restrict,command="<installed path>"
+# ssh-ed25519 <key> pifleet-observer-vm`. sshd then runs THIS SCRIPT for
+# every session that key opens, with NO arguments of its own — whatever the
+# client asked for arrives only in SSH_ORIGINAL_COMMAND, which OpenSSH sets
+# to the client's argv joined with a single ASCII space between each element
+# (`docker/observe-ssh` sends `-- "<verb>" "$@"`, so the string here is
+# `<verb> [argument ...]`).
+#
+# ## Who owns what
+#
+# `docker/observe-ssh` owns ARGV SAFETY on the WORKER side and is a
+# courtesy: a worker that skips it and drives ssh directly can put anything
+# at all into SSH_ORIGINAL_COMMAND, including bytes no shell word ever holds
+# (an embedded newline, a leading '-', a NUL is impossible over the wire but
+# nothing else is). THIS script is the credential's only enforcement, on the
+# target, of a rule the worker cannot step around, and it is written to that
+# threat model: every character class below is spelled out, nothing is ever
+# `eval`ed, and no refusal message repeats back an attacker-controlled byte
+# that has not first passed one of those classes (an unvalidated verb or
+# argument might carry a newline that would forge a second, fake log line).
+# It follows `scripts/observe/docker-forced-command`'s pattern.
+#
+# ## Verbs THIS ROUND (SRD §6.4 — `journal` and `kernel` are task 5.3, not
+# this round; until then they are refused exactly like any other unknown
+# verb, by the same catch-all case below)
+#
+#   uptime  (no arguments)
+#             -> cat /proc/uptime /proc/loadavg
+#   os      (no arguments)
+#             -> cat /etc/os-release
+#   system  (no arguments)
+#             -> systemctl is-system-running
+#             Its exit status is never inspected here: a degraded system
+#             answers with output and a non-zero exit, and both reach the
+#             caller unchanged through `exec` (SRD §6.4). This script never
+#             interprets that exit code as its own.
+#   failed  (no arguments)
+#             -> systemctl list-units --state=failed --no-legend --plain --no-pager
+#   unit    <unit>  (exactly one argument, a unit name)
+#             -> systemctl show <unit> --no-pager --property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus
+#   disk    (no arguments)
+#             -> df -P -k
+#   memory  (no arguments)
+#             -> cat /proc/meminfo
+#
+# Every other verb — `journal`, `kernel` (both deferred to task 5.3),
+# `shutdown`, `reboot`, `poweroff`, `halt`, any `systemctl` verb other than
+# the two above (`start`, `stop`, `restart`, `reload`, `enable`, `disable`,
+# `mask`, `kill`, `isolate`, `daemon-reload`, `set-property`, ...), `kill`,
+# any package manager, `sudo`, any free-form path read, and a `unit`
+# sub-verb such as `unit restart nginx.service` (two arguments after `unit`,
+# refused on the argument count before any grammar check runs) — exits 77
+# naming the verb and runs nothing at all (SRD §6.4).
+#
+# ## The unit-name grammar (SRD §6.3, tightened)
+#
+# SRD §6.3's class for a unit name is `[a-zA-Z0-9@._:-]+`. This script adds
+# two tightenings, both stated here because they are this implementation's
+# choice, not the SRD's:
+#
+#   1. The FIRST character must be `[a-zA-Z0-9]`, narrower than the rest of
+#      the class. A leading '-' would otherwise reach `systemctl show` as an
+#      option rather than as the unit-name operand (the same reasoning
+#      `docker-forced-command`'s name grammar applies to a container name).
+#   2. The length is capped at 255 bytes, so one argument cannot grow the
+#      argv without bound.
+#
+# ## Exit codes
+#
+#   77  refused: an unrecognised verb, a missing or malformed
+#       SSH_ORIGINAL_COMMAND, or an argument that fails its grammar. Matches
+#       `docker-forced-command`'s convention, so an operator reads one code
+#       for "not authorised" across the fleet.
+#   127 the target command is not on PATH: the shell's own status when the
+#       final `exec` finds nothing to run.
+#   otherwise  the target command's own exit status, via `exec`: this script
+#       never inspects or reinterprets it, and its stdout/stderr are never
+#       touched either.
+#
+# Nothing here is ever `eval`ed, and no message interpolates a value that has
+# not already passed one of the character classes above.
+
+set -u
+# Globbing off for the whole script, before the one unquoted re-split below
+# (the SSH_ORIGINAL_COMMAND re-split). Without it a token of `*` would expand
+# against this process's working directory instead of staying the one word
+# it is (the lesson `docker-forced-command` and `docker/observe-ssh` both
+# carry).
+set -f
+
+# IFS is pinned to the POSIX default (space, tab, newline) as defence in
+# depth. Nothing depends on it: the re-split below sets its own IFS, and no
+# unquoted expansion after that holds anything but a single grammar-checked
+# word. The newline is written literally, because command substitution
+# strips trailing newlines and `$(printf '\n')` would lose it.
+POSIX_IFS="$(printf ' \t')
+"
+IFS="${POSIX_IFS}"
+
+LOWER=abcdefghijklmnopqrstuvwxyz
+UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+DIGIT=0123456789
+ALNUM="${LOWER}${UPPER}${DIGIT}"
+
+# SRD §6.3's unit-name class, plus the two tightenings the header documents.
+# The trailing '-' is literal in every bracket expression built from this.
+UNIT_CHARS="${ALNUM}@._:-"
+UNIT_MAX=255
+
+# $1 names the verb this refusal is about, or one of the two fixed
+# placeholders below when there is none yet — never a raw, unvalidated byte
+# string (see the header). $2 is the reason, also never interpolating an
+# unvalidated value.
+refuse() {
+  printf 'vm-forced-command: refused "%s": %s\n' "$1" "$2" >&2
+  exit 77
+}
+
+# True when $1 is non-empty and every character of it is in the set $2.
+# A '-' in a set must come last, where a bracket expression reads it literally.
+only_chars() {
+  [ -n "$1" ] || return 1
+  case $1 in
+    *[!$2]*) return 1 ;;
+  esac
+  return 0
+}
+
+# True when the first character of $1 is in the set $2.
+first_in() {
+  case $1 in
+    [$2]*) return 0 ;;
+  esac
+  return 1
+}
+
+is_verb() {
+  only_chars "$1" "${LOWER}${DIGIT}-" && first_in "$1" "${LOWER}" && [ "${#1}" -le 32 ]
+}
+
+# The unit-name grammar: SRD §6.3's class, first character narrowed to
+# alnum, length capped at 255 bytes (both tightenings, header explains why).
+is_unit() {
+  only_chars "$1" "${UNIT_CHARS}" && first_in "$1" "${ALNUM}" && [ "${#1}" -le "${UNIT_MAX}" ]
+}
+
+# --- read SSH_ORIGINAL_COMMAND ------------------------------------------------
+
+original=${SSH_ORIGINAL_COMMAND:-}
+[ -n "${original}" ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND is not set or is empty"
+
+# Re-split on whitespace, globbing off. ssh joins the client's argv with
+# spaces on the way over, so word boundaries are lost and must be rebuilt
+# here. Splitting on tab as well as space is defence in depth for a caller
+# that skipped the worker-side wrapper. Deliberately excludes newline, even
+# though IFS is pinned to include one above: an embedded newline inside one
+# token must stay inside that token, so the grammar below refuses it, rather
+# than silently becoming a token boundary that could split one hostile token
+# into two grammar-passing ones.
+tab=$(printf '\t')
+IFS=" ${tab}"
+# shellcheck disable=SC2086 # unquoted on purpose: this is the re-split.
+set -- ${original}
+# Back to the pinned constant, not an inherited value (defence in depth, as
+# above).
+IFS="${POSIX_IFS}"
+
+[ "$#" -ge 1 ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND held only whitespace"
+
+verb=$1
+shift
+
+# Checked before the verb is ever echoed anywhere: only a value that has
+# passed this class is safe to put in a message (the header explains why).
+is_verb "${verb}" || refuse "(unrecognised)" "the verb is not [a-z][a-z0-9-]{0,31}"
+
+case ${verb} in
+  uptime)
+    [ "$#" -eq 0 ] || refuse "${verb}" "uptime takes no arguments; got $#"
+    exec cat /proc/uptime /proc/loadavg
+    ;;
+  os)
+    [ "$#" -eq 0 ] || refuse "${verb}" "os takes no arguments; got $#"
+    exec cat /etc/os-release
+    ;;
+  system)
+    [ "$#" -eq 0 ] || refuse "${verb}" "system takes no arguments; got $#"
+    exec systemctl is-system-running
+    ;;
+  failed)
+    [ "$#" -eq 0 ] || refuse "${verb}" "failed takes no arguments; got $#"
+    exec systemctl list-units --state=failed --no-legend --plain --no-pager
+    ;;
+  unit)
+    [ "$#" -eq 1 ] || refuse "${verb}" "unit takes exactly one argument, a unit name; got $#"
+    unit_name=$1
+    is_unit "${unit_name}" ||
+      refuse "${verb}" "a unit name must match ^[a-zA-Z0-9][a-zA-Z0-9@._:-]*\$, max ${UNIT_MAX} bytes"
+    exec systemctl show "${unit_name}" --no-pager --property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus
+    ;;
+  disk)
+    [ "$#" -eq 0 ] || refuse "${verb}" "disk takes no arguments; got $#"
+    exec df -P -k
+    ;;
+  memory)
+    [ "$#" -eq 0 ] || refuse "${verb}" "memory takes no arguments; got $#"
+    exec cat /proc/meminfo
+    ;;
+  *)
+    refuse "${verb}" "not a recognised verb; recognised verbs are uptime, os, system, failed, unit, disk and memory"
+    ;;
+esac
