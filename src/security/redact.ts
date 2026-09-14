@@ -81,25 +81,46 @@
  * matches text whose only overlap with the key is armor. A line that merely
  * STARTS like armor but is not armor-shaped is matched like any other line.
  *
- * Full-only also sidesteps a flaw in truncation across the two forms. When
- * both forms of one value can truncate, the double-escaped form is longer, so
- * it sorts first. Its stem can then match a single-escaped record up to the
- * first escape and win the alternation with the shorter match, cutting an
- * escape sequence in half. A key's `\n` is such an escape. That flaw still
- * applies to a truncatable form whose first `"` or `\` sits past the floor:
- * any single-line value, or any secret line, that carries one.
+ * Full-only once also kept a key clear of a flaw in truncation across the two
+ * forms. The double-escaped form is the longer, so it sorted first, in an
+ * alternation that took the first match rather than the longest. Its stem
+ * could match a single-escaped record up to the first escape and win with the
+ * shorter match, cutting the escape in half and leaving the rest of the value
+ * beside the marker. That hit any truncatable form whose first `"` or `\` sits
+ * past the floor: a single-line value, or a secret line, carrying one. It no
+ * longer applies to any form; the next section says why.
  *
  * The line rules are shared with the harvest sweep (`harvest/needles.ts`) so
  * the two cannot disagree about what a secret line is. The floors are not
  * shared. A multi-line name is armed ONCE however many lines it contributes,
  * and every form it compiles carries its one marker.
  *
+ * ## Which match is replaced: the longest, and only between escapes
+ *
+ * Several forms can match at one position: a value's escaped and double-escaped
+ * forms, two values sharing a stem, two lines of one value. What is replaced
+ * there is the LONGEST match any of them produces, and on a tie the form that
+ * sorts first. Regex alternation cannot make that choice, because it takes the
+ * first alternative that matches. So `buildRedactor` uses the alternation only
+ * to find the next hit, then tries every form at that one position.
+ *
+ * A replacement never ends inside an escape sequence of the line, and never
+ * starts inside one. Truncation steps a whole token at a time (one character,
+ * or one escape such as `\n`), so a match that starts on a token boundary ends
+ * on one. A hit that starts inside an escape, on the `n` of `\n`, is not a
+ * leading run of anything and is passed over. Either kind of cut used to leave
+ * a lone backslash in the line or change the character after the marker.
+ *
  * ## Cost
  *
  * This runs on EVERY event, including a `stderr_line` flood — ISC-158's
- * scenario emits thousands. So the alternation is compiled ONCE, at
- * construction, however many lines a value contributes, and a call is one
- * `String.replace` over one pre-built regex.
+ * scenario emits thousands. So every regex is compiled ONCE, at construction,
+ * however many lines a value contributes: the alternation, and one sticky
+ * matcher per form. A line holding no secret costs one scan of the
+ * alternation, as it always did. Only a line with a hit pays more. Per hit,
+ * that is a backward look over at most the backslashes before it, and one
+ * sticky attempt per form, stopping at the first form too short to beat the
+ * best match so far.
  * Nothing here allocates a `RegExp` per event, and a worker granted no secrets
  * gets an identity function rather than a regex that matches nothing.
  */
@@ -153,8 +174,9 @@ export const TRUNCATION_FLOOR = 12;
  * What replaces a match when the redactor cannot name what it matched.
  *
  * Unreachable through `buildRedactor`, which always has a name for every form
- * it compiled; it exists so the replace callback has a total answer rather
- * than a `?? match` fallback that would re-emit the secret on a lookup miss.
+ * it compiled; it exists so the replace loop has a total answer rather than a
+ * fallback that leaves the match in the line and so re-emits the secret on a
+ * lookup miss.
  */
 export const UNNAMED_MARKER = "[redacted]";
 
@@ -219,9 +241,62 @@ function escapeRe(s: string): string {
   return s.replace(RE_META, "\\$&");
 }
 
+const BACKSLASH = 0x5c;
+const LOWER_U = 0x75;
+
 /**
- * A pattern matching any leading run of `value` at least `floor` long,
- * preferring the longest.
+ * Length of the JSON string token that starts at `i`: six for a unicode escape
+ * (a backslash, `u`, four hex digits), two for any other escape, one otherwise.
+ * `i` must itself be a token boundary.
+ */
+function tokenLength(text: string, i: number): number {
+  if (text.charCodeAt(i) !== BACKSLASH) return 1;
+  return text.charCodeAt(i + 1) === LOWER_U ? 6 : 2;
+}
+
+/** JSON string text split into its tokens: single characters and whole escapes. */
+function jsonTokens(inner: string): string[] {
+  const tokens: string[] = [];
+  for (let i = 0; i < inner.length; ) {
+    const n = tokenLength(inner, i);
+    tokens.push(inner.slice(i, i + n));
+    i += n;
+  }
+  return tokens;
+}
+
+/** How many backslashes end at index `end`, counting back no further than `from`. */
+function backslashesEndingAt(text: string, end: number, from: number): number {
+  let i = end;
+  while (i >= from && text.charCodeAt(i) === BACKSLASH) i--;
+  return end - i;
+}
+
+/**
+ * Where the escape that index `pos` falls strictly INSIDE begins, or -1 when
+ * `pos` sits on a boundary between the serialised line's tokens.
+ *
+ * `from` must be a known boundary at or before `pos`, and nothing before it is
+ * read. `redact` moves `from` past every hit it handles, so across one call
+ * these backward looks read each character of the line a constant number of
+ * times, however many hits it has. Serialised JSON holds a backslash only as the first character of an
+ * escape or the second character of `\\`, so the parity of the backslash run
+ * ending just before a position says whether that run's last backslash opened
+ * an escape.
+ */
+function escapeContaining(text: string, pos: number, from: number): number {
+  if (backslashesEndingAt(text, pos - 1, from) % 2 === 1) return pos - 1;
+  for (let start = pos - 2; start >= from && start >= pos - 5; start--) {
+    if (text.charCodeAt(start + 1) === LOWER_U && backslashesEndingAt(text, start, from) % 2 === 1) {
+      return start;
+    }
+  }
+  return -1;
+}
+
+/**
+ * A pattern matching any leading run of `form` at least `floor` long that ends
+ * on a token boundary, preferring the longest.
  *
  * ## The measurement that added this
  *
@@ -248,16 +323,35 @@ function escapeRe(s: string): string {
  *     abcdefghijkl(?:m(?:n(?:o)?)?)?
  *
  * — which the engine walks in a single linear pass, and which is greedy by
- * construction (`?` prefers to match), so the LONGEST surviving fragment is
- * what gets replaced rather than the shortest.
+ * construction (`?` prefers to match), so the pattern takes the LONGEST
+ * surviving fragment of THIS form rather than the shortest. Which form wins
+ * when several match at one position is a different question, and
+ * `buildRedactor` answers it.
+ *
+ * ## Why one TOKEN at a time and not one character
+ *
+ * `form` is JSON string text, so some of its runs are escapes: a backslash and
+ * a quote, two backslashes, `\n`, a unicode escape. A cut inside one is not a
+ * leading run of the value; it is half a character of JSON. Stepping one
+ * character at a time let a truncation end there, and the replacement took a
+ * lone backslash out of the record, which either stopped the line parsing or
+ * changed the character after the marker. So each optional adds one whole
+ * token, and the stem is widened to the first token boundary at or past
+ * `floor`. A real fragment loses nothing by that: it is a raw prefix of the
+ * value, so its escaped form always ends on a boundary. For a form with no
+ * escapes every token is one character and the pattern is byte-for-byte what
+ * it was.
  */
-function truncationSource(value: string, floor: number): string {
-  const stem = escapeRe(value.slice(0, floor));
+function truncationSource(form: string, floor: number): string {
+  const tokens = jsonTokens(form);
+  let stemTokens = 0;
+  let stemLength = 0;
+  while (stemLength < floor) stemLength += (tokens[stemTokens++] as string).length;
   let tail = "";
-  for (let i = value.length - 1; i >= floor; i--) {
-    tail = `(?:${escapeRe(value[i] as string)}${tail})?`;
+  for (let i = tokens.length - 1; i >= stemTokens; i--) {
+    tail = `(?:${escapeRe(tokens[i] as string)}${tail})?`;
   }
-  return stem + tail;
+  return escapeRe(form.slice(0, stemLength)) + tail;
 }
 
 /**
@@ -290,7 +384,7 @@ export function buildRedactor(
    */
   unresolved: readonly string[] = [],
 ): Redactor {
-  /** `(regex source, marker)` in compile order; one capture group each. */
+  /** Each form's regex source, marker and full length, in compile order. */
   const forms: Array<{ src: string; marker: string; len: number }> = [];
   const seen = new Set<string>();
   const armed: string[] = [];
@@ -338,14 +432,33 @@ export function buildRedactor(
   }
 
   /*
-   * LONGEST FIRST. Regex alternation is first-match-wins across alternatives,
-   * so two secrets where one begins with the other would otherwise leave the
-   * tail of the longer one in the log beside a marker — a partial credential
-   * and a false impression that it was handled.
+   * WHICH MATCH WINS: the longest at its position, and the earlier form on a
+   * tie.
+   *
+   * Regex alternation is first-match-wins, not longest-match-wins, so an
+   * alternation of every form cannot make that choice itself. It used to be
+   * asked to, sorted longest form first, and it failed whenever a longer FORM
+   * produced a shorter MATCH. The double-escaped form of a value holding a `"`
+   * past the stem matched a single-escaped record up to the quote, won, and
+   * left the rest of the value in the log beside the marker (measured on
+   * c9bcf33). Two values sharing a stem failed the same way, leaving a partial
+   * credential and a false impression that it was handled.
+   *
+   * So the work is split. `finder`, the alternation, only says WHERE the next
+   * hit is. It is the one scan a line holding no secret pays for, as before. At
+   * a hit, each form's sticky twin is tried at that one position and the
+   * longest match is replaced. Sorting longest form first still earns its
+   * place: a form no longer than the best match so far cannot beat it, so the
+   * loop stops there, and on a tie the earlier form's marker wins, as it did
+   * under the alternation. Both kinds of regex are built here, once.
    */
   forms.sort((a, b) => b.len - a.len);
-  const markers = forms.map((f) => f.marker);
-  const pattern = new RegExp(forms.map((f) => `(${f.src})`).join("|"), "g");
+  const finder = new RegExp(forms.map((f) => `(?:${f.src})`).join("|"), "g");
+  const compiled = forms.map((f) => ({
+    sticky: new RegExp(f.src, "y"),
+    marker: f.marker,
+    len: f.len,
+  }));
 
   return {
     armed,
@@ -353,14 +466,52 @@ export function buildRedactor(
     unresolved,
     source,
     redact(serialised: string): string {
-      return serialised.replace(pattern, (...args: unknown[]): string => {
-        // args = [match, g1..gN, offset, whole, (groups)]. Exactly one group
-        // participates in any match, and its index names the variable.
-        for (let i = 0; i < markers.length; i++) {
-          if (typeof args[i + 1] === "string") return markers[i] as string;
+      finder.lastIndex = 0;
+      let hit = finder.exec(serialised);
+      if (hit === null) return serialised;
+      let out = "";
+      /** Everything before this index is already in `out`. Always a token boundary. */
+      let kept = 0;
+      /** A token boundary at or before the next hit, so the escape check reads no further back. */
+      let boundary = 0;
+      while (hit !== null) {
+        const at = hit.index;
+        const inside = escapeContaining(serialised, at, boundary);
+        if (inside >= 0) {
+          /*
+           * The hit STARTS inside an escape, on the `n` of a `\n` for instance.
+           * The text from there is not a leading run of any value, and
+           * replacing from it would orphan the backslash. Resume after that
+           * escape.
+           */
+          boundary = inside + tokenLength(serialised, inside);
+          finder.lastIndex = boundary;
+        } else {
+          let best = 0;
+          let marker = UNNAMED_MARKER;
+          for (const form of compiled) {
+            if (form.len <= best) break;
+            form.sticky.lastIndex = at;
+            const m = form.sticky.exec(serialised);
+            if (m !== null && m[0].length > best) {
+              best = m[0].length;
+              marker = form.marker;
+            }
+          }
+          /*
+           * Unreachable: the finder matched here, so the sticky twin of the
+           * form that matched does too. Were it reached, the finder's own match
+           * is replaced under the unnamed marker rather than left in the line.
+           */
+          if (best === 0) best = hit[0].length;
+          out += serialised.slice(kept, at) + marker;
+          kept = at + best;
+          boundary = kept;
+          finder.lastIndex = kept;
         }
-        return UNNAMED_MARKER;
-      });
+        hit = finder.exec(serialised);
+      }
+      return out + serialised.slice(kept);
     },
   };
 }

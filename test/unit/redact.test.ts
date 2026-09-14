@@ -744,3 +744,331 @@ describe("a multi-line value is scrubbed line by line, and its armor is left alo
     }
   });
 });
+
+/**
+ * WHICH match is replaced when more than one compiled form matches at one spot.
+ *
+ * ## The defect these probes were written against, measured on c9bcf33
+ *
+ * Each value compiles an escaped form and a double-escaped one, and every
+ * truncatable form matches down to `TRUNCATION_FLOOR`. The forms were joined
+ * into one alternation, sorted longest first, and applied with one
+ * `String.replace`. Alternation is first-match-wins, not longest-match-wins.
+ * The double-escaped form is the longer, so it was tried first, and when the
+ * value held a `"` or `\` past the twelve-character stem that form still
+ * matched a SINGLE-escaped record: up to the escape, and one character into
+ * it. It won with the shorter match. `abcdefghijklmn"op-rest-of-fake-token`
+ * came back as `{"text":"[redacted:T]"op-rest-of-fake-token"}`, the tail in the
+ * log and the line no longer JSON. With a `\` in the same place the tail leaked
+ * and the line DID parse, which is the quieter of the two.
+ *
+ * The older escaping probe above passed only because its first escape sits at
+ * index 5, inside the stem, where the double-escaped form cannot match a
+ * single-escaped record at all.
+ *
+ * Every value here is synthetic.
+ */
+describe("the longest match wins at every position, and never ends inside an escape", () => {
+  const T = "[redacted:T]";
+  /** Control characters are built, not typed, so this source holds none. */
+  const SOH = String.fromCharCode(1);
+  const STX = String.fromCharCode(2);
+  const REPRODUCTIONS = [
+    'abcdefghijklmn"op-rest-of-fake-token',
+    "abcdefghijklmn\\op-rest-of-fake-token",
+    'abcde"fghijklmnop-rest-of-fake-token',
+  ];
+
+  const escaped = (s: string): string => JSON.stringify({ text: s });
+  const doubleEscaped = (s: string): string => JSON.stringify({ text: JSON.stringify({ v: s }) });
+
+  test("the three measured reproductions come out fully redacted and parse", () => {
+    for (const value of REPRODUCTIONS) {
+      const out = one(value, "T").redact(escaped(value));
+      expect(out, value).toBe(escaped(T));
+      expect(() => JSON.parse(out)).not.toThrow();
+    }
+  });
+
+  test("a head -c 20 of each, escaped and embedded double-escaped, is fully redacted", () => {
+    for (const value of REPRODUCTIONS) {
+      const frag = value.slice(0, 20);
+      const r = one(value, "T");
+      expect(r.redact(escaped(frag)), `escaped ${frag}`).toBe(escaped(T));
+      expect(r.redact(doubleEscaped(frag)), `double-escaped ${frag}`).toBe(doubleEscaped(T));
+    }
+  });
+
+  test("a multi-line value's secret line with a quote past the floor is fully redacted", () => {
+    const name = "SYNTHETIC_MULTILINE_QUOTE";
+    const line = 'abcdefghijklmn"op-second-line-rest-0002';
+    const r = one(`first-line-without-escapes-0001\n${line}\n`, name);
+    const marker = `[redacted:${name}]`;
+    for (const frag of [line, line.slice(0, 20)]) {
+      const text = (s: string) => `ssh said: ${s} (rejected)`;
+      expect(r.redact(escaped(text(frag))), frag).toBe(escaped(text(marker)));
+      expect(r.redact(doubleEscaped(text(frag))), frag).toBe(doubleEscaped(text(marker)));
+    }
+  });
+
+  /**
+   * The case LONGEST alone does not settle. The double-escaped form is the
+   * longest match here, because the cut holds an escape the single-escaped form
+   * cannot get past. The raw character after the cut needs escaping too, so the
+   * double-escaped form's next character is a backslash, and so is the record's:
+   * the start of the inner JSON's closing `\"`. A truncation that steps one
+   * character at a time takes that backslash and ends the replacement inside
+   * the escape, and the outer line stops parsing.
+   */
+  test("a truncation never takes a partial escape, even when it is the longest match", () => {
+    const cases: Array<[string, string]> = [
+      // [value, the raw character the cut stops just before]
+      ['ab"cdefghijklmnop"qrst-rest-of-fake', '"'],
+      ["ab\\cdefghijklmnop\\qrst-rest-of-fake", "\\"],
+      ['ab"cdefghijklmnop\tqrst-rest-of-fake', "\t"],
+      [`ab"cdefghijklmnop${SOH}qrst-rest-of-fake`, SOH],
+    ];
+    for (const [value, next] of cases) {
+      const frag = value.slice(0, value.indexOf(next, 3));
+      expect(frag.length, JSON.stringify(value)).toBe(17);
+      expect(one(value, "T").redact(doubleEscaped(frag)), JSON.stringify(value)).toBe(doubleEscaped(T));
+    }
+  });
+
+  test("a partial unicode escape is never taken when the record holds a different control character", () => {
+    // Fourteen characters of the value, then a DIFFERENT control character from
+    // the one the value holds. the fourteen are the leak; the U+0002 after
+    // them belongs to the record and must survive whole.
+    const value = `abcdefghijklmn${SOH}op-rest-of-fake-token`;
+    expect(one(value, "T").redact(escaped(`abcdefghijklmn${STX}op`))).toBe(escaped(`${T}${STX}op`));
+  });
+
+  test("between values sharing a stem, the longer MATCH wins, not the longer value", () => {
+    const longer = "SHAREDSTEM12-long-value-aaaaaaaaaaaaaaaaaaaaaaaa";
+    const shorter = "SHAREDSTEM12-bbbbbbbbbbbbbbbbbbbbbb";
+    const r = buildRedactor([
+      ["LONGER", longer],
+      ["SHORTER", shorter],
+    ]);
+    expect(r.redact(escaped(shorter))).toBe(escaped("[redacted:SHORTER]"));
+    expect(r.redact(escaped(longer))).toBe(escaped("[redacted:LONGER]"));
+  });
+
+  /**
+   * A PIN, green before the fix and after it: on a tie the marker is the one
+   * the alternation used to pick, the longer value's, so marker text does not
+   * change for anyone. Choosing longest-match could have flipped it silently,
+   * and a mutant that gave ties to the later form survived every other probe.
+   */
+  test("on a tie between two names, the longer value's marker wins, as before", () => {
+    const r = buildRedactor([
+      ["SHORTER", "SAMESTEM1234-bbbbbbbbbbbbbbbbb"],
+      ["LONGER", "SAMESTEM1234-aaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    ]);
+    // Both match the same thirteen characters and stop.
+    expect(r.redact(escaped("SAMESTEM1234-zz"))).toBe(escaped("[redacted:LONGER]zz"));
+  });
+
+  /**
+   * A match may only START where a JSON string's characters start. Here a value
+   * beginning `nn` lines up with a record holding LF and then the value minus
+   * its first character, so the pattern matches from the `n` of the `\n`
+   * escape. Replacing from there leaves a lone backslash and a line that does
+   * not parse. The record does not hold a leading run of the value, so nothing
+   * is replaced.
+   */
+  test("a match never starts inside an escape", () => {
+    const value = "nnabcdefghijklmnop-fake";
+    const line = escaped(`\n${value.slice(1)}`);
+    const out = one(value, "T").redact(line);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect(out).toBe(line);
+  });
+
+  /**
+   * The same rule for a UNICODE escape, which the backslash-parity check alone
+   * does not see: the match would start on a hex digit, four characters past
+   * the backslash. A value beginning `0001` lines up with a record holding
+   * U+0001 and then the value minus those four characters. Replacing from the
+   * `0` leaves `\u` and a marker, and the line stops parsing.
+   */
+  test("a match never starts inside a unicode escape", () => {
+    const value = "0001abcdefghijklmnop-fake-token";
+    const line = escaped(`ctl ${SOH}${value.slice(4)} end`);
+    const out = one(value, "T").redact(line);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect(out).toBe(line);
+  });
+});
+
+/**
+ * A SEEDED PROPERTY over values that need escaping, so the cases above are a
+ * sample of a rule rather than the rule.
+ *
+ * Values carry `"`, `\` and control characters at random positions, always
+ * with at least one PAST the floor, where the c9bcf33 defect lived. Every raw
+ * cut whose escaped form reaches `TRUNCATION_FLOOR` is embedded escaped and
+ * double-escaped, bare and inside prose. Each output must:
+ *
+ *   - parse as JSON;
+ *   - hold no leading run of the value's escaped or double-escaped form
+ *     `TRUNCATION_FLOOR` or more long; and
+ *   - be the record with the cut replaced by ONE marker that starts where the
+ *     cut starts. Greedy matching may also take context after the cut, where
+ *     that context continues the value, and nothing else.
+ *
+ * The third is stronger than the second. A replacement that stopped at the
+ * cut's first escape past the floor would leave no twelve-character leading run
+ * behind, and would still leave the rest of the cut in the log.
+ *
+ * LF is left out of the single-line alphabet on purpose: it makes a value
+ * multi-line, and a multi-line value's leading run past its first line is
+ * deliberately not a form. The second probe covers secret lines instead.
+ *
+ * The seed is fixed, so a failure prints a case that reproduces.
+ */
+describe("a seeded property: every cut of an escaping value is scrubbed whole, and parses", () => {
+  const SEED = 20260914;
+
+  /** mulberry32: small, deterministic, and enough to spread positions. */
+  function prng(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const PLAIN = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:";
+  const NEEDS_ESCAPE = ['"', "\\", "\t", "\r", "\b", "\f", ...[0x00, 0x01, 0x1b, 0x1f].map((c) => String.fromCharCode(c))];
+
+  function jsonInner(s: string): string {
+    return JSON.stringify(s).slice(1, -1);
+  }
+
+  function makeValue(rand: () => number, min: number, max: number): string {
+    const pick = (from: string | string[]): string => from[Math.floor(rand() * from.length)] as string;
+    const length = min + Math.floor(rand() * (max - min + 1));
+    const chars = Array.from({ length }, () => (rand() < 0.15 ? pick(NEEDS_ESCAPE) : pick(PLAIN)));
+    chars[TRUNCATION_FLOOR + Math.floor(rand() * (length - TRUNCATION_FLOOR))] = pick(NEEDS_ESCAPE);
+    return chars.join("");
+  }
+
+  /**
+   * `[label, split, construct]`. `split` gives the record as `[before, cut,
+   * after]` so the expected output is exact; `construct` builds the same record
+   * with plain `JSON.stringify`, which proves the split is honest.
+   */
+  const EMBEDDINGS: Array<
+    [string, (f: string) => [string, string, string], (f: string) => string]
+  > = [
+    ["escaped", (f) => ['{"text":"', jsonInner(f), '"}'], (f) => JSON.stringify({ text: f })],
+    [
+      "double-escaped",
+      (f) => ['{"text":"{\\"v\\":\\"', jsonInner(jsonInner(f)), '\\"}"}'],
+      (f) => JSON.stringify({ text: JSON.stringify({ v: f }) }),
+    ],
+    [
+      "escaped, in prose",
+      (f) => ['{"text":"$ echo ', jsonInner(f), ' | head"}'],
+      (f) => JSON.stringify({ text: `$ echo ${f} | head` }),
+    ],
+    [
+      "double-escaped, in prose",
+      (f) => ['{"text":"{\\"out\\":\\"got ', jsonInner(jsonInner(f)), ' back\\"}"}'],
+      (f) => JSON.stringify({ text: JSON.stringify({ out: `got ${f} back` }) }),
+    ],
+  ];
+
+  interface Tally {
+    records: number;
+    cutsWithEscapePastFloor: number;
+    failures: string[];
+  }
+
+  function check(
+    r: ReturnType<typeof buildRedactor>,
+    secret: string,
+    markers: readonly string[],
+    label: string,
+    tally: Tally,
+  ): void {
+    const heads = [jsonInner(secret), jsonInner(jsonInner(secret))].map((f) =>
+      f.slice(0, TRUNCATION_FLOOR),
+    );
+    for (let k = 1; k <= secret.length; k++) {
+      const frag = secret.slice(0, k);
+      if (jsonInner(frag).length < TRUNCATION_FLOOR) continue;
+      if ([...frag.slice(TRUNCATION_FLOOR)].some((c) => NEEDS_ESCAPE.includes(c))) {
+        tally.cutsWithEscapePastFloor++;
+      }
+      for (const [how, split, construct] of EMBEDDINGS) {
+        const [before, cut, after] = split(frag);
+        const record = before + cut + after;
+        tally.records++;
+        const problems: string[] = [];
+        if (record !== construct(frag)) problems.push("the fixture's split is wrong");
+        const out = r.redact(record);
+        try {
+          JSON.parse(out);
+        } catch {
+          problems.push("does not parse");
+        }
+        if (heads.some((h) => out.includes(h))) problems.push("a leading run of the floor or more survived");
+        const whole = markers.some(
+          (m) => out.startsWith(before + m) && after.endsWith(out.slice(before.length + m.length)),
+        );
+        if (!whole) problems.push("the cut was not replaced whole by one marker");
+        if (problems.length > 0) {
+          tally.failures.push(
+            `seed=${SEED} ${label} value=${JSON.stringify(secret)} cut=${k} ${how}: ` +
+              `${problems.join("; ")} -> ${out}`,
+          );
+        }
+      }
+    }
+  }
+
+  function assertHeld(tally: Tally, minRecords: number, minEscapedCuts: number): void {
+    expect(tally.failures.length, tally.failures.slice(0, 5).join("\n")).toBe(0);
+    // Not vacuous: many records, and many cuts that run past an escape beyond the floor.
+    expect(tally.records).toBeGreaterThan(minRecords);
+    expect(tally.cutsWithEscapePastFloor).toBeGreaterThan(minEscapedCuts);
+  }
+
+  test("single-line values, alone and beside a value sharing their leading run", () => {
+    const rand = prng(SEED);
+    const tally: Tally = { records: 0, cutsWithEscapePastFloor: 0, failures: [] };
+    for (let i = 0; i < 300; i++) {
+      const value = makeValue(rand, TRUNCATION_FLOOR + 2, 48);
+      const pairs: Array<[string, string]> = [["T", value]];
+      // Half the time a second value shares a leading run of the first, so the
+      // longest match has to be chosen across values as well as across forms.
+      if (rand() < 0.5) {
+        const shared = TRUNCATION_FLOOR + Math.floor(rand() * (value.length - TRUNCATION_FLOOR));
+        pairs.push(["DECOY", value.slice(0, shared) + makeValue(rand, TRUNCATION_FLOOR + 2, 24)]);
+      }
+      check(buildRedactor(pairs), value, ["[redacted:T]", "[redacted:DECOY]"], `case=${i}`, tally);
+    }
+    assertHeld(tally, 10_000, 1_000);
+  });
+
+  test("each secret line of a multi-line value", () => {
+    const rand = prng(SEED + 1);
+    const tally: Tally = { records: 0, cutsWithEscapePastFloor: 0, failures: [] };
+    for (let i = 0; i < 120; i++) {
+      const raw = Array.from({ length: 2 + Math.floor(rand() * 3) }, () =>
+        makeValue(rand, TRUNCATION_FLOOR + 2, 40),
+      );
+      const value = raw.join("\n") + (rand() < 0.5 ? "\n" : "");
+      const r = buildRedactor([["ML", value]]);
+      // This test's own statement of a secret line; no armor is generated.
+      const lines = new Set(raw.map((l) => l.trim()).filter((l) => l.length >= MIN_REDACTABLE_LENGTH));
+      for (const line of lines) check(r, line, ["[redacted:ML]"], `case=${i}`, tally);
+    }
+    assertHeld(tally, 5_000, 500);
+  });
+});
