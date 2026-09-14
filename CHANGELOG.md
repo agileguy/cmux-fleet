@@ -4,6 +4,61 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-09-13
+
+This release is Phase 2 of `Docs/SRD-OBSERVER-ROLES.md` (observer-target-artifacts).
+
+The harvest now checks the two report files that the `observer-docker` and
+`observer-vm` roles will write, the way it already checks `ticket-ops.json`. Nothing
+writes these files yet, so the change has no effect in production until Phases 4
+and 5 add the roles.
+
+### Added
+
+- **`src/harvest/observer-target-artifacts.ts`** holds the schemas for
+  `observer-docker-ops.json` (`pifleet.observer-docker-ops/v1`) and
+  `observer-vm-ops.json` (`pifleet.observer-vm-ops/v1`).
+  - They use the same document and row fields as `observer-ops.json`, with the
+    coverage channels closed per SRD §5.6 and §6.7.
+  - Each parse checks the raw document for the worker's granted credentials, in
+    values and in keys, before the schema runs.
+  - The check is bounded. It names at most five paths, caps each path's length,
+    and refuses a document nested more than 32,768 levels deep, so a hostile
+    document cannot drive the harvester's memory up.
+- **Harvest selects both files by name.** A file that fails validation, carries a
+  credential, cannot be read, or sits past the per-task byte budget clamps the task
+  to `failed`, with a reason naming the file and its target.
+- **A credential is caught wherever the file holds it.** Beyond the parsed value,
+  the harvest searches the file's bytes (a duplicate key's dropped value, a numeric
+  grant, a body that is not JSON) and decodes escaped string literals (a JSON
+  unicode escape standing in for a character of the secret, or `\/` for `/`). The
+  finding says which check found it.
+- **No part of a granted secret reaches an observer finding.** The not-JSON finding
+  no longer quotes the parser's message, and every observer finding line is
+  redacted before and after escaping, and before truncation.
+- **An orphaned `.md` clamps to `failed`.** An `observer-docker-ops.md` or
+  `observer-vm-ops.md` with no matching `.json` in the same directory now fails the
+  task, as `ticket-ops.md` already did. Each pair is matched only against its own
+  `.json`.
+
+### Testing
+
+- 5882 pass, 0 fail across 224 files (`bun test test/unit`); `bun run typecheck`
+  clean.
+- A `harvestTask`-level test proves the credential supplier reaches the docker
+  parse in production.
+- Each behaviour was checked by mutation: disabling it turned its tests red.
+- Three review iterations, each followed by a fix round.
+
+### Known gaps
+
+- `ticket-ops.json` still checks only the parsed document, so a credential used as a
+  key, and its parser message on a body that is not JSON, are not covered there.
+- A `ticket-ops.json` or `collation.json` past the per-task byte budget is still not
+  validated.
+- Lines the harvest writes for any artifact (unclaimed, empty, too large,
+  unreadable) still print the raw path of an observer file.
+
 ## [1.0.1] — 2026-09-13
 
 This release is Phase 1 of `Docs/SRD-OBSERVER-ROLES.md` (rename-observer-k8s), plus
