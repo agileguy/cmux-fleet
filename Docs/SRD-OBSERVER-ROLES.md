@@ -504,7 +504,7 @@ That is the flag-injection hazard `src/security/docker-names.ts:4-11` records fo
 
 | Verb | Accepted arguments | Runs |
 |---|---|---|
-| `ps` | `all`; zero or more `name=<n>` or `label=<k>=<v>` | `docker ps --no-trunc --format '<FIXED PS TEMPLATE>'` plus `--all` and one `--filter` per argument — template selects `ID, Names, Image, Command, CreatedAt, RunningFor, State, Status, Ports, Labels, Networks`, never `Mounts` (a bind mount's host source path), `LocalVolumes`, `Size` or `Platform`, and never a separate health column either: docker CLIs before 29.5.0 lack that `ps` field entirely and fail outright when it is requested, so the template leaves it out and a container's health rides inside `Status` instead |
+| `ps` | `all`; zero or more `name=<n>` or `label=<k>=<v>` | `docker ps --no-trunc --format '<FIXED PS TEMPLATE>'` plus `--all` and one `--filter` per argument — template selects `ID, Names, Image, Command, CreatedAt, RunningFor, State, Status, Ports, Labels, Networks`, never `Mounts` (a bind mount's host source path), `LocalVolumes`, `Size` or `Platform`, and never a separate health column either: docker CLIs before 29.5.0 lack that `ps` field entirely and fail outright when it is requested (measured: `.ps_healthstatus_template` in the rendered fixture), so the template leaves it out and a container's health rides inside `Status` instead |
 | `inspect` | `<container>` | `docker inspect --type container --format '<FIXED INSPECT TEMPLATE>' <container>` |
 | `logs` | `<container> since=<N>s tail=<M>`, both REQUIRED, `N` 1–9 digits and at least 1 (`since=0s` exits 77), `M <= 500` | `docker logs --timestamps --since <N>s --tail <M> <container>` |
 | `stats` | `<container>` | `docker stats --no-stream --no-trunc --format '{{json .}}' <container>` |
@@ -642,6 +642,10 @@ and confirms by declared kind (`src/harvest/reconcile.ts:165-173`):
   reason, and the caller fixes it and retries once. Only a shape the grammar has no form for at all
   (a followed log, `stats` for every container) is `forbidden` on its own. A container that has no
   health check is not a refusal: `health` is `answered` and the evidence says "no healthcheck defined".
+- **`docker` on the target failing to reach its own daemon is not a refusal either** (exit 1, stderr
+  naming a connection or permission failure — `.docker_errors` in the rendered fixture): every row it
+  leaves unanswered is `indeterminate` with coverage `not_attempted`, and the task status is `blocked`,
+  the same as when `docker` does not run on the target at all.
 - **`container_id`, `image` and `restart_count` are optional.**
 - **Harvest** validates the JSON by name, sweeps it for `OBSERVER_DOCKER_SSH_KEY`'s value, and clamps
   an orphaned `.md` to `failed` (Phase 2).
@@ -671,17 +675,26 @@ and confirms by declared kind (`src/harvest/reconcile.ts:165-173`):
    - `PermitUserEnvironment no` (the default). With it off, an `environment=` option on the
      `authorized_keys` line and the account's `~/.ssh/environment` file are both ignored, so neither
      can hand the forced command a variable behind `AcceptEnv`'s back.
-   - No `pam_env` setting for this account sets `PATH` or any `DOCKER_*` name — PAM can inject
-     environment before sshd ever consults `AcceptEnv`.
+   - No `user_readenv` in this account's PAM stack, so `~/.pam_environment` is never read, and step
+     2's root-owned home leaves the account nowhere to write one. A `PATH` that root sets through a
+     stock `pam_env` and `/etc/environment` is fine, as long as it resolves `docker`.
 
    The forced command inherits whatever survives all four. An accepted `PATH` can make `docker`
    resolve to another binary, and an accepted `DOCKER_*` variable (`DOCKER_HOST` foremost) can point
    its `docker` calls away from the local socket — so the account's own `PATH` must resolve `docker`
-   on its own, with nothing above able to override it. `IFS`, `ENV` and `BASH_ENV` stay hardening
-   rather than something this step must forbid on its own: the forced command pins its own `IFS`
-   before it parses `SSH_ORIGINAL_COMMAND`, so a caller's inherited `IFS` never reaches its argument
-   parsing — proven under `sh` and `dash` in the unit tests, and under busybox `sh` in the rendered
-   fixture's `IFS=:` case. `ENV` and `BASH_ENV` only matter to a shell that reads them at startup.
+   on its own, with nothing above able to override it. That `PATH` can come from sshd's own default,
+   from a root-owned `pam_env` directive, or from `/etc/environment` — never from the account itself.
+   `IFS`, `ENV` and `BASH_ENV` stay hardening rather than something this step must forbid on its own.
+   The forced command sets its own `IFS` before it splits `SSH_ORIGINAL_COMMAND`, so an inherited
+   `IFS` never reaches its argument parsing. The `IFS=:` cases in the unit tests and the rendered
+   fixture only show that sh, dash and busybox sh ignore an inherited `IFS`; they cannot fail on the
+   script. `ENV` and `BASH_ENV`
+   rely on step 1's `/bin/sh` login shell: a `bash` started as `bash -c` reads `BASH_ENV`, but a
+   `bash` started as `sh` (as `/bin/sh` may itself be) does not.
+
+   Verify afterward: `sshd -T -C user=<account>,host=<host>,addr=<addr>` for this account's effective
+   `AcceptEnv`, `SetEnv` and `PermitUserEnvironment`; `getent passwd <account>` showing `/bin/sh`; and
+   one `version` call through the key.
 5. Record the target's host key in the value of `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
    `token host port user` to `OBSERVER_DOCKER_TARGETS`.
 6. Add `{host, port}` to `egress.allow` in `fleet.yaml` (Q3), and add the three names to

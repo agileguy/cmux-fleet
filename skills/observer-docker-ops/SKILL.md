@@ -53,7 +53,12 @@ who refused what:
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
 | `126` or `127` | `docker` did not run on the target at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | `255` | ssh's own failure — a host-key mismatch or a proxy refusal | the target is `unreachable` |
+| `1` with `failed to connect to the docker API`, `Cannot connect to the Docker daemon`, or `permission denied while trying to connect to the` on stderr | `docker` on the target could not reach its own daemon — a stopped daemon, an account outside the socket's group, or `DOCKER_HOST` pointing elsewhere | the same as the `126`/`127` row: rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | anything else | docker's own exit, returned from the target (e.g. no such container) | the channel is `answered`, and the error text goes in `evidence_ref` |
+
+Measured on both docker versions: `.docker_errors` in the rendered fixture. A missing container
+(`.docker_errors.no_such_container`) also exits 1, with `No such container:` on stderr, and that is
+an answer.
 
 A shim-side 77 (the `observe-ssh` line) is not evidence about the target at all — it is a bug in the
 call you made, and retrying it once (fixed) costs less turn than reasoning about it as if the target
@@ -169,12 +174,14 @@ saying where it comes from:
   (measured per version: `.runs["<version>"].cases[].key_sets` in the rendered fixture). Key order is
   not a promise Docker or this target makes; read the object by key, never by position, and do not
   assume a key beyond the first six is there on every daemon.
-- **`events container=<c>` is a literal prefix match on the container name — not a substring, and
+- **`events container=<c>` matches a prefix of the container's name OR its id — not a substring, and
   not the `ps` regex.** `container=web` returns events for `web`, `web-2` and `webhook`, but not
-  `myweb`. `container=w.b` and `container=eb` return nothing at all, because neither is a prefix of
-  any real name — `.` is not a wildcard here the way it is in `ps`'s `name=`. Measured:
-  `.runs["<version>"].matching.events_container_filter` in the rendered fixture. Do not carry a `ps`
-  filtering habit over to `events`.
+  `myweb`. `container=w.b` returns nothing, because `.` is not a wildcard here the way it is in
+  `ps`'s `name=`. The first 12 characters of a container's id return that container too. So a name
+  made only of hex characters (`db`, `cafe`) can match another container's id: keep only the events
+  whose `Actor.Attributes.name` equals the container you asked about. Measured:
+  `.runs["<version>"].matching.events_container_filter` in the rendered fixture (it uses
+  `container=ebh`, because `eb` is itself hex).
 - **`events` returns container lifecycle and health events only:** `create`, `start`, `restart`,
   `stop`, `die`, `kill`, `oom`, `pause`, `unpause`, `destroy` and `health_status` — eleven actions,
   fixed on the target (`.events.action_allowlist.filters` in the shapes fixture). `health_status`'s
@@ -307,18 +314,25 @@ worker never runs any of it.
    - `PermitUserEnvironment no` (the default). With it off, an `environment=` option on the
      `authorized_keys` line and the account's `~/.ssh/environment` file are both ignored, so neither
      can hand the forced command a variable behind `AcceptEnv`'s back.
-   - No `pam_env` setting for this account sets `PATH` or any `DOCKER_*` name — PAM can inject
-     environment before sshd ever consults `AcceptEnv`.
+   - No `user_readenv` in this account's PAM stack, so `~/.pam_environment` is never read, and step
+     2's root-owned home leaves the account nowhere to write one. A `PATH` that root sets through a
+     stock `pam_env` and `/etc/environment` is fine, as long as it resolves `docker`.
 
    The forced command inherits whatever survives all four. An accepted `PATH` can make `docker`
    resolve to another binary, and an accepted `DOCKER_*` variable (`DOCKER_HOST` chief among them)
    can point its `docker` calls somewhere other than the local socket — so the account's own `PATH`
-   must resolve `docker` on its own, with nothing above able to override it. `IFS`, `ENV` and
-   `BASH_ENV` stay hardening rather than something this step must forbid on its own: the forced
-   command pins its own `IFS` before it parses `SSH_ORIGINAL_COMMAND`, so a caller's inherited `IFS`
-   never reaches its argument parsing — proven under `sh` and `dash` in the unit tests, and under
-   busybox `sh` in the rendered fixture's `IFS=:` case. `ENV` and `BASH_ENV` only matter to a shell
-   that reads them at startup.
+   must resolve `docker` on its own, with nothing above able to override it. That `PATH` can come
+   from sshd's own default, from a root-owned `pam_env` directive, or from `/etc/environment` — never
+   from the account itself. `IFS`, `ENV` and `BASH_ENV` stay hardening rather than something this step
+   must forbid on its own. The forced command sets its own `IFS` before it splits
+   `SSH_ORIGINAL_COMMAND`, so an inherited `IFS` never reaches its argument parsing. The `IFS=:` cases
+   in the unit tests and the rendered fixture only show that sh, dash and busybox sh ignore an
+   inherited `IFS`; they cannot fail on the script. `ENV` and `BASH_ENV` rely on step 1's `/bin/sh` login shell: a `bash` started as `bash -c`
+   reads `BASH_ENV`, but a `bash` started as `sh` (as `/bin/sh` may itself be) does not.
+
+   Verify afterward: `sshd -T -C user=<account>,host=<host>,addr=<addr>` for this account's effective
+   `AcceptEnv`, `SetEnv` and `PermitUserEnvironment`; `getent passwd <account>` showing `/bin/sh`; and
+   one `version` call through the key.
 5. Record the target's host key in `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
    `token host port user` to `OBSERVER_DOCKER_TARGETS`.
 6. Add `{host, port}` to `egress.allow` in `fleet.yaml`, and add the three secret names to
