@@ -237,17 +237,25 @@ const TICKET_OPS_FAILURE_CEILING: Verdict = "failed";
  * target, so a swapped `target` goes red there.
  *
  * KEPT APART FROM THE TICKET-OPS ARM rather than folded into one list with it.
- * The ticket-ops text is pinned unevenly. The orphan finding and reason are
- * pinned byte for byte by "the ticket-ops orphan finding and reason are
- * byte-identical" in `harvest-reconcile.test.ts`, and ISC-348's registered claim
- * pins a substring of that finding. The validation-arm finding and the ISC-332
- * reason are pinned by substrings only: "a malformed ticket-ops.json is reported
- * and the verdict degrades" in `harvest-ticket-ops-wiring.test.ts` asserts that
- * the finding contains `ticket-ops.json` and `validation`, and that `reasons`
- * contains `ISC-332`. No test pins the cap-arm finding. A shared renderer could
- * reword everything outside those substrings with nothing to notice, and the
- * observer arms redact every line where the ticket-ops arm does not. Two short
- * arms side by side cost less than that.
+ * The ticket-ops text is pinned unevenly, and a shared renderer would have to
+ * keep every pin below while changing the lines around them.
+ *
+ * - The orphan finding and reason are pinned byte for byte by "the ticket-ops
+ *   orphan finding and reason are byte-identical" in `harvest-reconcile.test.ts`,
+ *   and ISC-348's registered claim pins a substring of that finding.
+ * - `harvest-ticket-ops-wiring.test.ts` requires exactly one finding containing
+ *   `ticket-ops artifact`. For a malformed document that finding must contain
+ *   `ticket-ops.json` and `validation`, and `reasons` must contain `ISC-332`. For
+ *   a body that is not JSON it must contain `not parseable JSON`.
+ * - `harvest-credential-sweep-wiring.test.ts` filters the findings on
+ *   `ticket-ops`, requires one, and requires it to contain `contains a
+ *   credential` and the path `notes`.
+ *
+ * Outside those substrings nothing is pinned. No test pins the cap-arm finding
+ * at all, so a renderer could reword it, and the rest of the validation-arm
+ * finding and the ISC-332 reason, without any of these tests noticing. The
+ * observer arms also redact every line, where the ticket-ops arm does not. Two
+ * short arms side by side cost less than that.
  *
  * `observer-ops.json` is deliberately absent. SRD §3.3 keeps the k8s observer's
  * document out of harvest validation.
@@ -592,56 +600,139 @@ function decodeJsonLiteral(span: string): string | null {
   }
 }
 
+/** Which of `credentialInBody`'s two checks found a known secret. */
+type BodyCredential = "bytes" | "decoded";
+
+/** The characters JSON accepts after a backslash, besides `u` and four hex digits. */
+const SHORT_ESCAPES: ReadonlySet<number> = new Set(
+  ['"', "\\", "/", "b", "f", "n", "r", "t"].map((c) => c.charCodeAt(0)),
+);
+
+function isHexDigit(c: number): boolean {
+  return (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66);
+}
+
 /**
- * Whether a known secret is in an observer target document's body, by either of
- * the two checks `validateObserverTarget` describes.
+ * What the backslash at `text[i]` begins: an escape JSON decodes, one JSON
+ * refuses, or one the end of `text` cut short. Only a final lone backslash, or a
+ * final `\u` followed by fewer than four characters that are all hex digits, is
+ * cut short.
+ */
+function escapeAt(text: string, i: number): "decodes" | "refused" | "cut" {
+  if (i + 1 >= text.length) return "cut";
+  const e = text.charCodeAt(i + 1);
+  if (SHORT_ESCAPES.has(e)) return "decodes";
+  if (e !== 0x75) return "refused"; // Not `u`.
+  for (let j = i + 2; j < i + 6; j++) {
+    if (j >= text.length) return "cut";
+    if (!isHexDigit(text.charCodeAt(j))) return "refused";
+  }
+  return "decodes";
+}
+
+/**
+ * Which of the two checks `validateObserverTarget` describes finds a known
+ * secret in an observer target document's body, or `null` when neither does.
  *
  * Needles are filtered as `findCredentialLeaks` filters them: a blank one
  * matches everything.
  *
  * THE DECODED-LITERAL CHECK IS ONE LINEAR PASS over `text`, at most
- * `MAX_ARTIFACT_BYTES` of it. The loop tracks only whether it is inside a
- * literal and whether that literal has held a backslash, and only such a
- * literal is decoded, once, when it closes. MEASURED on this machine over 8 MiB
- * bodies: 7 ms with no escapes, and 96 ms at the worst shape tried, 1.6 million
- * tiny escaped literals. A regular expression for literals is not used: on an
- * unterminated literal an engine retries from every later quote, which is
- * quadratic in the body.
+ * `MAX_ARTIFACT_BYTES` of it. The loop tracks whether it is inside a literal,
+ * whether that literal holds an escape, and whether JSON would decode it. A
+ * literal is decoded once, when it closes, and only when it holds an escape and
+ * every character in it is one JSON accepts: no raw character below U+0020, and
+ * no backslash followed by anything but `" \ / b f n r t`, or `u` and four hex
+ * digits. Bun's `JSON.parse` was measured to draw the same line, over every
+ * UTF-16 code unit inside a literal and after a backslash, and over every
+ * four-character `\u` tail drawn from the hex digits, `g`, `G`, `x`, `X` and a
+ * space. So a literal JSON would refuse is never handed to it. A refused decode
+ * costs a throw, and the throws were the slow shapes.
+ *
+ * MEASURED on this machine over 8 MiB bodies, with one needle, as the time the
+ * scan adds to `reconcileArtifactClaims`: about 100 ms at the worst shape tried,
+ * two million tiny decodable literals (`"\n"` repeated), and about 10 ms for a
+ * body with no escapes. Each needle is searched for in each decoded literal, so
+ * sixteen needles took that worst shape to about 270 ms. Before literals JSON
+ * refuses were skipped, 8 MiB of `"\q"` literals took about 1100 ms, of
+ * `"\u00zz"` literals about 540 ms, and of `"\n"` literals that also held a raw
+ * newline about 830 ms. Each of those now takes about 10 ms.
+ *
+ * A regular expression for literals is not used: on an unterminated literal an
+ * engine retries from every later quote, which is quadratic in the body.
  *
  * Literal boundaries are found the way JSON finds them, so in a body that
  * parses every span is a real string literal and decodes. In a body that does
- * not parse, the boundaries are a best effort and a span that will not decode
- * is skipped. That body clamps as not-JSON whatever this returns; only the
+ * not parse, the boundaries are a best effort, and a literal JSON would refuse,
+ * such as one that also holds a raw newline or a `\q`, is skipped. One not-JSON
+ * shape is handled on purpose: a body that ends inside a literal holding an
+ * escape, which is what a crash mid-write leaves. What was written of that
+ * literal is decoded as if it closed there, less an escape the end cut short. A
+ * body that does not parse clamps as not-JSON whatever this returns; only the
  * credential label on its finding depends on it.
  */
-function credentialInBody(body: Buffer, text: string, secrets: readonly string[]): boolean {
+function credentialInBody(
+  body: Buffer,
+  text: string,
+  secrets: readonly string[],
+): BodyCredential | null {
   const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
-  if (needles.length === 0) return false;
-  if (needles.some((n) => body.includes(n))) return true;
+  if (needles.length === 0) return null;
+  if (needles.some((n) => body.includes(n))) return "bytes";
 
+  const holdsNeedle = (span: string): boolean => {
+    const decoded = decodeJsonLiteral(span);
+    return decoded !== null && needles.some((n) => decoded.includes(n));
+  };
   const QUOTE = 0x22;
   const BACKSLASH = 0x5c;
   let start = -1;
   let hasEscape = false;
+  let decodable = true;
+  /** Where the literal still open at the end stops: before an escape the end cut short. */
+  let end = text.length;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
     if (start === -1) {
       if (c === QUOTE) {
         start = i;
         hasEscape = false;
+        decodable = true;
       }
     } else if (c === BACKSLASH) {
+      const escape = escapeAt(text, i);
+      if (escape === "cut") {
+        end = i;
+        break;
+      }
       hasEscape = true;
+      if (escape === "refused") decodable = false;
       i++; // The escaped character cannot close the literal.
     } else if (c === QUOTE) {
-      if (hasEscape) {
-        const decoded = decodeJsonLiteral(text.slice(start, i + 1));
-        if (decoded !== null && needles.some((n) => decoded.includes(n))) return true;
-      }
+      if (hasEscape && decodable && holdsNeedle(text.slice(start, i + 1))) return "decoded";
       start = -1;
+    } else if (c < 0x20) {
+      decodable = false;
     }
   }
-  return false;
+  // The body ended inside an escaped literal, as a crash mid-write leaves it.
+  if (start !== -1 && hasEscape && decodable && holdsNeedle(`${text.slice(start, end)}"`)) {
+    return "decoded";
+  }
+  return null;
+}
+
+/**
+ * Where a known secret was found, in words that do not overstate it.
+ *
+ * "In its bytes" sends an operator to search the file for the token. When only
+ * the decoded-literal check found it, that search finds nothing, so the words
+ * say the bytes spell it only once a literal's escapes are decoded.
+ */
+function bodyCredentialWords(found: BodyCredential): string {
+  return found === "bytes"
+    ? "a credential in its bytes"
+    : "a credential that its bytes spell only once a string literal's JSON escapes are decoded";
 }
 
 /**
@@ -665,20 +756,24 @@ function credentialInBody(body: Buffer, text: string, secrets: readonly string[]
  * strings never visits, and in a body that is not JSON at all, such as a leading
  * BOM in front of a leaky document.
  *
- * The DECODED-LITERAL check decodes every string literal in the body that holds
- * a backslash, and searches the decoded values. It finds a secret the bytes do
+ * The DECODED-LITERAL check decodes the string literals in the body that hold
+ * an escape, and searches the decoded values. It finds a secret the bytes do
  * not spell because an escape stands in for one of its characters: `\u0067hp_…`
  * for `ghp_…`, or `\/` for `/`, which PHP's encoder writes. That matters where
  * the parse drops the literal, as a duplicate key's value or as a key inside a
- * dropped duplicate object. Where the parse keeps the literal, the parsed sweep
+ * dropped duplicate object, and where the body ends inside the literal, as a
+ * crash mid-write leaves it. Where the parse keeps the literal, the parsed sweep
  * sees the decoded string too.
  *
  * WHAT NEITHER REACHES. A grant written as a number in another form, such as
  * `9.18273645501e11`, parses to the same integer and is spelled nowhere in the
  * body. A secret in base64 or any other encoding is not the needle in any form
- * either. Both can sit in a document that passes. A body in UTF-16 does not
- * decode as UTF-8 JSON, so it clamps as not-JSON, and its finding carries no
- * credential label, because neither check reads UTF-16.
+ * either. Both can sit in a document that passes. In a body that is not JSON, an
+ * escaped secret in a literal JSON would refuse, one that also holds a raw
+ * newline or a `\q`, is not decoded, so that finding carries no credential
+ * label. A body in UTF-16 does not decode as UTF-8 JSON, so it clamps as
+ * not-JSON, and its finding carries no credential label, because neither check
+ * reads UTF-16.
  *
  * ## A credential in the body always gets the credential label
  *
@@ -686,8 +781,14 @@ function credentialInBody(body: Buffer, text: string, secrets: readonly string[]
  * whatever the throw was. The one throw kept as it is, is the sweep's own
  * refusal: it already says the document contains a credential, and it names the
  * path, which is more useful than "somewhere in the body". A `ZodError`, or any
- * other throw, such as the `RangeError` a deeply nested document raises inside
- * the sweep, gives way to the body finding.
+ * other throw, such as the `RangeError` the sweep throws for a document nested
+ * past its depth limit, gives way to the body finding.
+ *
+ * The label says which check found the secret, because the two send an operator
+ * to different places. "In its bytes" means a search of the file finds the
+ * token. A hit only the decoded-literal check made is worded as one the bytes
+ * spell only once a literal's escapes are decoded, because that search finds
+ * nothing.
  *
  * ## The not-JSON finding quotes nothing from the document
  *
@@ -713,27 +814,30 @@ function validateObserverTarget(
   secrets: readonly string[],
 ): string | null {
   const text = body.toString("utf8");
-  const credentialInDocument = credentialInBody(body, text, secrets);
+  const found = credentialInBody(body, text, secrets);
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
     return (
       `is not parseable JSON (the parser's message is withheld, because it quotes the document)` +
-      (credentialInDocument ? `, and it contains a credential in its bytes` : "")
+      (found === null ? "" : `, and it contains ${bodyCredentialWords(found)}`)
     );
   }
-  const inBytes = `the document contains a credential in its bytes that its parsed value does not show`;
+  const inBody = found === null ? null : `the document contains ${bodyCredentialWords(found)}`;
   try {
     artifact.parse(raw, secrets);
   } catch (e) {
     // The sweep's own refusal: not a schema failure, and already a credential finding.
     const sweepRefusal =
       !(e instanceof ZodError) && e instanceof Error && e.message.includes("contains a credential");
-    const why = credentialInDocument && !sweepRefusal ? inBytes : describeSchemaFailure(e);
+    const why = inBody !== null && !sweepRefusal ? inBody : describeSchemaFailure(e);
     return `fails ${artifact.name} validation (${why})`;
   }
-  return credentialInDocument ? `fails ${artifact.name} validation (${inBytes})` : null;
+  // The parse passed, sweep included, so the sweep of the parsed value did not find it.
+  return inBody === null
+    ? null
+    : `fails ${artifact.name} validation (${inBody}, which the sweep of its parsed value did not find)`;
 }
 
 /** The errno name, never the whole error: `String(err)` carries host paths. */
@@ -853,7 +957,9 @@ export async function reconcileArtifactClaims(
    * file unredacted: an unclaimed artifact, a claimed artifact that is present
    * but empty, a per-artifact cap refusal (`too_large`), an `unreadable`
    * descriptor, and the envelope-claim lines, which render the claimed path.
-   * Those are recorded as out of scope for the observer fix.
+   * This change leaves those unredacted. They are written for every artifact,
+   * ticket-ops and collation artifacts included, so redacting them would change
+   * lines those arms produce, and this phase keeps their text unchanged.
    *
    * THE LAYERS, in order, for one worker-authored span:
    *
