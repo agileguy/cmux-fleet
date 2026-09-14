@@ -1,16 +1,16 @@
 {
   "measured_with": {
     "script": "scripts/observe/characterise-docker",
-    "git_head": "f2038f1",
+    "git_head": "a2afa1f",
     "uncommitted_changes_to_measured_files": [],
-    "dind_image": "docker:dind",
+    "dind_image": "12e683a16182",
     "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
     "probe_image": "alpine:3",
     "probe_image_id": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
     "client_version": "29.7.2",
     "server_version": "29.7.2",
     "server_api_version": "1.55",
-    "measured_at": "2026-09-14T17:43:29.628Z"
+    "measured_at": "2026-09-14T18:37:51.035Z"
   },
   "ps": {
     "argv": [
@@ -27,8 +27,8 @@
       "{{json .}}"
     ],
     "rows_measured": {
-      "running": 3,
-      "all": 4
+      "running": 4,
+      "all": 5
     },
     "key_set": [
       "Command",
@@ -72,7 +72,7 @@
     },
     "name_filter_matches": {
       "name=char-plain": 1,
-      "name=char": 5
+      "name=char": 6
     },
     "label_filter_matches": {
       "label=char.label=one": 1
@@ -253,8 +253,9 @@
         ],
         "exit": 0,
         "terminated_on_its_own": true,
-        "ms": 46,
-        "events": 45,
+        "dropped_partial_last_line": false,
+        "ms": 41,
+        "events": 46,
         "char_events_actions": [
           "create",
           "attach",
@@ -269,14 +270,15 @@
           "--since",
           "60s",
           "--until",
-          "1789407794",
+          "1789411048",
           "--format",
           "{{json .}}"
         ],
         "exit": 0,
         "terminated_on_its_own": true,
-        "ms": 46,
-        "events": 45,
+        "dropped_partial_last_line": false,
+        "ms": 43,
+        "events": 46,
         "char_events_actions": [
           "create",
           "attach",
@@ -295,8 +297,9 @@
         ],
         "exit": 143,
         "terminated_on_its_own": false,
-        "ms": 8047,
-        "events": 91,
+        "dropped_partial_last_line": false,
+        "ms": 8052,
+        "events": 94,
         "char_events_actions": [
           "create",
           "attach",
@@ -309,7 +312,7 @@
     "until_current_second": {
       "seen_by_an_immediate_query": false,
       "seen_after_1100ms": true,
-      "event_ms_into_its_second": 309
+      "event_ms_into_its_second": 754
     },
     "action_allowlist": {
       "filters": [
@@ -376,6 +379,13 @@
           "start"
         ]
       }
+    },
+    "buffer": {
+      "exec_flood": 120,
+      "events_returned": 247,
+      "allowlisted_events_returned": 0,
+      "char_plain_start_returned": false,
+      "char_plain_start_returned_allowlisted": false
     },
     "key_sets": [
       [

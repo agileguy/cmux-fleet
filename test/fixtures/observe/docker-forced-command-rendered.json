@@ -1,0 +1,721 @@
+{
+  "description": "The forced command run for every verb against a throwaway daemon, one entry per docker CLI version. Written by scripts/observe/characterise-docker --write-rendered.",
+  "runs": {
+    "28.5.2": {
+      "measured_with": {
+        "script": "scripts/observe/characterise-docker",
+        "git_head": "a2afa1f",
+        "uncommitted_changes_to_measured_files": [],
+        "dind_image": "2a232a42256f",
+        "dind_image_id": "sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac",
+        "probe_image": "alpine:3",
+        "probe_image_id": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+        "client_version": "28.5.2",
+        "server_version": "28.5.2",
+        "server_api_version": "1.51",
+        "measured_at": "2026-09-14T18:38:21.469Z"
+      },
+      "forced_command": "scripts/observe/docker-forced-command",
+      "forced_command_sha256": "6c08b2a2986b230cfe2470a5861c3041f974dcf15d9806c2a003c00f2b45fd79",
+      "shell": "/bin/busybox",
+      "cases": [
+        {
+          "command": "ps",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 5,
+          "key_sets": [
+            [
+              "Command",
+              "CreatedAt",
+              "ID",
+              "Image",
+              "Labels",
+              "Names",
+              "Networks",
+              "Ports",
+              "RunningFor",
+              "State",
+              "Status"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "ps all name=char-plain label=char.label=one",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "Command",
+              "CreatedAt",
+              "ID",
+              "Image",
+              "Labels",
+              "Names",
+              "Networks",
+              "Ports",
+              "RunningFor",
+              "State",
+              "Status"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "inspect char-plain",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "created",
+              "id",
+              "image",
+              "labels",
+              "name",
+              "ports",
+              "restart_count",
+              "restart_policy",
+              "state"
+            ]
+          ],
+          "canaries_seen": [],
+          "state_keys": [
+            "dead",
+            "error",
+            "exit_code",
+            "finished_at",
+            "health",
+            "oom_killed",
+            "paused",
+            "restarting",
+            "running",
+            "started_at",
+            "status"
+          ],
+          "health": null
+        },
+        {
+          "command": "inspect char-hc",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "created",
+              "id",
+              "image",
+              "labels",
+              "name",
+              "ports",
+              "restart_count",
+              "restart_policy",
+              "state"
+            ]
+          ],
+          "canaries_seen": [],
+          "state_keys": [
+            "dead",
+            "error",
+            "exit_code",
+            "finished_at",
+            "health",
+            "oom_killed",
+            "paused",
+            "restarting",
+            "running",
+            "started_at",
+            "status"
+          ],
+          "health": {
+            "status": "healthy",
+            "failing_streak": 0
+          }
+        },
+        {
+          "command": "inspect char-exited",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "created",
+              "id",
+              "image",
+              "labels",
+              "name",
+              "ports",
+              "restart_count",
+              "restart_policy",
+              "state"
+            ]
+          ],
+          "canaries_seen": [],
+          "state_keys": [
+            "dead",
+            "error",
+            "exit_code",
+            "finished_at",
+            "health",
+            "oom_killed",
+            "paused",
+            "restarting",
+            "running",
+            "started_at",
+            "status"
+          ],
+          "health": null
+        },
+        {
+          "command": "logs char-logs since=600s tail=5",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 5,
+          "key_sets": null,
+          "canaries_seen": [],
+          "timestamp_prefix_bytes": 31
+        },
+        {
+          "command": "stats char-plain",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "BlockIO",
+              "CPUPerc",
+              "Container",
+              "ID",
+              "MemPerc",
+              "MemUsage",
+              "Name",
+              "NetIO",
+              "PIDs"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "top char-plain",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 2,
+          "key_sets": null,
+          "canaries_seen": []
+        },
+        {
+          "command": "events since=120s",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 20,
+          "key_sets": [
+            [
+              "Action",
+              "Actor",
+              "Type",
+              "from",
+              "id",
+              "scope",
+              "status",
+              "time",
+              "timeNano"
+            ]
+          ],
+          "canaries_seen": [],
+          "actions": [
+            "create",
+            "destroy",
+            "die",
+            "health_status",
+            "start"
+          ],
+          "containers_seen": [
+            "char-events",
+            "char-exited",
+            "char-hc",
+            "char-healthy",
+            "char-logs",
+            "char-plain",
+            "char-unhealthy"
+          ]
+        },
+        {
+          "command": "events since=120s container=char-hc",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 3,
+          "key_sets": [
+            [
+              "Action",
+              "Actor",
+              "Type",
+              "from",
+              "id",
+              "scope",
+              "status",
+              "time",
+              "timeNano"
+            ]
+          ],
+          "canaries_seen": [],
+          "actions": [
+            "create",
+            "health_status",
+            "start"
+          ],
+          "containers_seen": [
+            "char-hc"
+          ]
+        },
+        {
+          "command": "info",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "architecture",
+              "cgroup_driver",
+              "containers",
+              "cpus",
+              "images",
+              "kernel",
+              "mem_total",
+              "os",
+              "storage_driver",
+              "version"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "version",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "Client",
+              "Server"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "restart char-plain",
+          "exit": 77,
+          "timed_out": false,
+          "stderr_first_line": "docker-forced-command: refused \"restart\": not a recognised verb; recognised verbs are ps, inspect, logs, stats, top, events, info and version",
+          "lines": 0,
+          "key_sets": [],
+          "canaries_seen": []
+        }
+      ],
+      "matching": {
+        "containers": [
+          "web",
+          "web-2",
+          "webhook",
+          "myweb"
+        ],
+        "events_container_filter": {
+          "container=web": [
+            "web",
+            "web-2",
+            "webhook"
+          ],
+          "container=eb": []
+        },
+        "ps_name_filter": {
+          "name=web": [
+            "myweb",
+            "web",
+            "web-2",
+            "webhook"
+          ],
+          "name=w.b": [
+            "myweb",
+            "web",
+            "web-2",
+            "webhook"
+          ],
+          "name=eb": [
+            "myweb",
+            "web",
+            "web-2",
+            "webhook"
+          ]
+        }
+      }
+    },
+    "29.7.2": {
+      "measured_with": {
+        "script": "scripts/observe/characterise-docker",
+        "git_head": "a2afa1f",
+        "uncommitted_changes_to_measured_files": [],
+        "dind_image": "12e683a16182",
+        "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
+        "probe_image": "alpine:3",
+        "probe_image_id": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+        "client_version": "29.7.2",
+        "server_version": "29.7.2",
+        "server_api_version": "1.55",
+        "measured_at": "2026-09-14T18:37:51.035Z"
+      },
+      "forced_command": "scripts/observe/docker-forced-command",
+      "forced_command_sha256": "6c08b2a2986b230cfe2470a5861c3041f974dcf15d9806c2a003c00f2b45fd79",
+      "shell": "/bin/busybox",
+      "cases": [
+        {
+          "command": "ps",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 5,
+          "key_sets": [
+            [
+              "Command",
+              "CreatedAt",
+              "ID",
+              "Image",
+              "Labels",
+              "Names",
+              "Networks",
+              "Ports",
+              "RunningFor",
+              "State",
+              "Status"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "ps all name=char-plain label=char.label=one",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "Command",
+              "CreatedAt",
+              "ID",
+              "Image",
+              "Labels",
+              "Names",
+              "Networks",
+              "Ports",
+              "RunningFor",
+              "State",
+              "Status"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "inspect char-plain",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "created",
+              "id",
+              "image",
+              "labels",
+              "name",
+              "ports",
+              "restart_count",
+              "restart_policy",
+              "state"
+            ]
+          ],
+          "canaries_seen": [],
+          "state_keys": [
+            "dead",
+            "error",
+            "exit_code",
+            "finished_at",
+            "health",
+            "oom_killed",
+            "paused",
+            "restarting",
+            "running",
+            "started_at",
+            "status"
+          ],
+          "health": null
+        },
+        {
+          "command": "inspect char-hc",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "created",
+              "id",
+              "image",
+              "labels",
+              "name",
+              "ports",
+              "restart_count",
+              "restart_policy",
+              "state"
+            ]
+          ],
+          "canaries_seen": [],
+          "state_keys": [
+            "dead",
+            "error",
+            "exit_code",
+            "finished_at",
+            "health",
+            "oom_killed",
+            "paused",
+            "restarting",
+            "running",
+            "started_at",
+            "status"
+          ],
+          "health": {
+            "status": "healthy",
+            "failing_streak": 0
+          }
+        },
+        {
+          "command": "inspect char-exited",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "created",
+              "id",
+              "image",
+              "labels",
+              "name",
+              "ports",
+              "restart_count",
+              "restart_policy",
+              "state"
+            ]
+          ],
+          "canaries_seen": [],
+          "state_keys": [
+            "dead",
+            "error",
+            "exit_code",
+            "finished_at",
+            "health",
+            "oom_killed",
+            "paused",
+            "restarting",
+            "running",
+            "started_at",
+            "status"
+          ],
+          "health": null
+        },
+        {
+          "command": "logs char-logs since=600s tail=5",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 5,
+          "key_sets": null,
+          "canaries_seen": [],
+          "timestamp_prefix_bytes": 31
+        },
+        {
+          "command": "stats char-plain",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "BlockIO",
+              "CPUPerc",
+              "Container",
+              "ID",
+              "MemPerc",
+              "MemUsage",
+              "Name",
+              "NetIO",
+              "PIDs"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "top char-plain",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 2,
+          "key_sets": null,
+          "canaries_seen": []
+        },
+        {
+          "command": "events since=120s",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 20,
+          "key_sets": [
+            [
+              "Action",
+              "Actor",
+              "Type",
+              "scope",
+              "time",
+              "timeNano"
+            ]
+          ],
+          "canaries_seen": [],
+          "actions": [
+            "create",
+            "destroy",
+            "die",
+            "health_status",
+            "start"
+          ],
+          "containers_seen": [
+            "char-events",
+            "char-exited",
+            "char-hc",
+            "char-healthy",
+            "char-logs",
+            "char-plain",
+            "char-unhealthy"
+          ]
+        },
+        {
+          "command": "events since=120s container=char-hc",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 3,
+          "key_sets": [
+            [
+              "Action",
+              "Actor",
+              "Type",
+              "scope",
+              "time",
+              "timeNano"
+            ]
+          ],
+          "canaries_seen": [],
+          "actions": [
+            "create",
+            "health_status",
+            "start"
+          ],
+          "containers_seen": [
+            "char-hc"
+          ]
+        },
+        {
+          "command": "info",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "architecture",
+              "cgroup_driver",
+              "containers",
+              "cpus",
+              "images",
+              "kernel",
+              "mem_total",
+              "os",
+              "storage_driver",
+              "version"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "version",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 1,
+          "key_sets": [
+            [
+              "Client",
+              "Server"
+            ]
+          ],
+          "canaries_seen": []
+        },
+        {
+          "command": "restart char-plain",
+          "exit": 77,
+          "timed_out": false,
+          "stderr_first_line": "docker-forced-command: refused \"restart\": not a recognised verb; recognised verbs are ps, inspect, logs, stats, top, events, info and version",
+          "lines": 0,
+          "key_sets": [],
+          "canaries_seen": []
+        }
+      ],
+      "matching": {
+        "containers": [
+          "web",
+          "web-2",
+          "webhook",
+          "myweb"
+        ],
+        "events_container_filter": {
+          "container=web": [
+            "web",
+            "web-2",
+            "webhook"
+          ],
+          "container=eb": []
+        },
+        "ps_name_filter": {
+          "name=web": [
+            "myweb",
+            "web",
+            "web-2",
+            "webhook"
+          ],
+          "name=w.b": [
+            "myweb",
+            "web",
+            "web-2",
+            "webhook"
+          ],
+          "name=eb": [
+            "myweb",
+            "web",
+            "web-2",
+            "webhook"
+          ]
+        }
+      }
+    }
+  }
+}
