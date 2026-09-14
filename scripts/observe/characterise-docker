@@ -23,7 +23,10 @@
  *    entry per docker CLI version. Its templates are strings docker parses only
  *    at run time, so a test that reads them cannot see one that fails to
  *    render. Each entry records the sha256 of the file it ran, so an edit to
- *    the forced command is not covered until it is measured again.
+ *    the forced command is not covered until it is measured again. Each entry
+ *    also records, for that CLI: docker's own `ps` key set, how a healthcheck
+ *    reads in `ps`'s `Status`, both ways of reading an absent healthcheck next
+ *    to `.Id`, and whether an `event=` filter matches a prefix of an action.
  *
  * ## The daemon is a throwaway, and nothing else is touched
  *
@@ -117,7 +120,9 @@ const KILL_GRACE_MS = 2_000;
 
 /**
  * Run a command as an argv array, optionally with a file on stdin. Never through a shell. A process
- * this ends is reported `timedOut`, because its exit status alone (143) looks like a real one.
+ * this ends is reported `timedOut`, because its exit status alone (143) looks like a real one. The call
+ * still waits for the pipes to close, so a descendant that keeps stdout open holds it past the timeout;
+ * nothing this script runs leaves one behind.
  */
 async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS, stdinPath?: string): Promise<Run> {
   const started = Date.now();
@@ -364,6 +369,17 @@ async function main(): Promise<void> {
     const nilField = await dind(["inspect", "--type", "container", "--format", "{{.State.Health.Status}}", "char-plain"]);
     const nilSafeTemplate = "{{if .State.Health}}{{.State.Health.Status}}{{end}}";
     const nilSafe = await mustDind(["inspect", "--type", "container", "--format", nilSafeTemplate, "char-plain"]);
+    // The forced command's inspect template reads `.Id`. Both ways of reading a healthcheck that may be
+    // absent, each next to `.Id`, on a container without one.
+    const withId = async (health: string) => {
+      const template = `{{json .Id}} ${health}`;
+      const r = await dind(["inspect", "--type", "container", "--format", template, "char-plain"]);
+      return { template, exit: r.code, stderr_first_line: r.stderr.trim().split("\n")[0] ?? "" };
+    };
+    const inspectHealthForms = {
+      if_form: await withId("{{if .State.Health}}x{{end}}"),
+      index_form: await withId('{{with index .State "Health"}}x{{end}}'),
+    };
 
     // events: generate a known container's events, then try each bound.
     await mustDind(["run", "--rm", "--name", "char-events", probe, "true"]);
@@ -463,13 +479,21 @@ async function main(): Promise<void> {
     if (actionAllowlist.allowlisted_with_container_filter.containers_seen.join(",") !== "char-hc") {
       throw new Error(`container=char-hc with the allowlist listed: ${actionAllowlist.allowlisted_with_container_filter.containers_seen.join(", ")}`);
     }
+    // Whether an `event=` word matches only a whole action. A `health_status` action carries a suffix
+    // (`health_status: healthy`), so the word is tried alone and next to `event=health_status`. An allowlist
+    // word that is a prefix of an `exec_*` action would let that action's command line through.
+    const execWord = ["--filter", "type=container", "--filter", "event=exec"];
+    const eventsPrefixMatch = {
+      "event=exec": baseActions(await filteredEvents(execWord)),
+      "event=exec event=health_status": baseActions(await filteredEvents([...execWord, "--filter", "event=health_status"])),
+    };
 
     // The forced command itself, run as sshd would run it, under this image's /bin/sh, against this daemon.
     const installed = await run(["docker", "exec", "-i", dindName, "sh", "-c", "cat > /forced-command"], RUN_TIMEOUT_MS, forcedCommandCopy);
     if (installed.code !== 0) throw new Error(`installing the forced command in dind failed (exit ${installed.code}): ${installed.stderr.trim()}`);
     const dindShell = (await must(["docker", "exec", dindName, "readlink", "-f", "/bin/sh"], "resolve the dind /bin/sh")).stdout.trim();
-    const forced = (command: string): Promise<Run> =>
-      run(["docker", "exec", "-e", `SSH_ORIGINAL_COMMAND=${command}`, dindName, "timeout", "20", "sh", "/forced-command"]);
+    const forced = (command: string, env: string[] = []): Promise<Run> =>
+      run(["docker", "exec", "-e", `SSH_ORIGINAL_COMMAND=${command}`, ...env.flatMap((e) => ["-e", e]), dindName, "timeout", "20", "sh", "/forced-command"]);
     const forcedCanaries = [ENV_CANARY, EXEC_CANARY, HEALTHCHECK_CANARY, BIND_TARGET];
     const actorName = (e: Row): string => String((e.Actor as { Attributes?: Row } | undefined)?.Attributes?.name);
     /** Every line as a JSON object, or null when any line is not one (`top` and `logs` print text). */
@@ -483,9 +507,11 @@ async function main(): Promise<void> {
     const plainState = async (): Promise<string> =>
       (await mustDind(["inspect", "--type", "container", "--format", "{{.State.Running}} {{.RestartCount}} {{.State.StartedAt}}", "char-plain"])).stdout.trim();
     const plainBefore = await plainState();
-    const forcedCases: { command: string; exit: number }[] = [
+    const forcedCases: { command: string; env?: string[]; exit: number }[] = [
       { command: "ps", exit: 0 },
       { command: "ps all name=char-plain label=char.label=one", exit: 0 },
+      // The same request with the caller's IFS set to ':'. The result must not change.
+      { command: "ps all name=char-plain label=char.label=one", env: ["IFS=:"], exit: 0 },
       { command: "inspect char-plain", exit: 0 },
       { command: "inspect char-hc", exit: 0 },
       { command: "inspect char-exited", exit: 0 },
@@ -499,13 +525,16 @@ async function main(): Promise<void> {
       { command: "restart char-plain", exit: 77 },
     ];
     const rendered: Row[] = [];
+    /** The `Status` the forced command's `ps` gives the healthchecked container. */
+    let psHealthStatus = "";
     for (const c of forcedCases) {
-      const r = await forced(c.command);
+      const r = await forced(c.command, c.env);
       const rows = objectLines(r.stdout);
       const lines = r.stdout.split("\n").filter((line) => line.trim() !== "");
       const canariesSeen = forcedCanaries.filter((canary) => r.stdout.includes(canary) || r.stderr.includes(canary));
       const entry: Row = {
         command: c.command,
+        ...(c.env ? { env: c.env } : {}),
         exit: r.code,
         timed_out: r.timedOut,
         stderr_first_line: r.stderr.trim().split("\n")[0] ?? "",
@@ -519,8 +548,10 @@ async function main(): Promise<void> {
         entry.health = state && "health" in state ? state.health : "missing";
       }
       if (c.command.startsWith("logs")) entry.timestamp_prefix_bytes = (lines[0]?.indexOf(" ") ?? -1) + 1;
+      if (c.command === "ps" && rows) psHealthStatus = String(rows.find((row) => row.Names === "char-hc")?.Status ?? "");
       if (c.command.startsWith("events") && rows) {
         entry.actions = baseActions(rows);
+        entry.actions_raw = [...new Set(rows.map((e) => String(e.Action)))].sort();
         entry.containers_seen = [...new Set(rows.map(actorName))].sort();
       }
       rendered.push(entry);
@@ -529,6 +560,11 @@ async function main(): Promise<void> {
       }
       if (canariesSeen.length) throw new Error(`forced command "${c.command}" returned ${canariesSeen.join(", ")}`);
       if (c.command.startsWith("logs") && lines.length !== 5) throw new Error(`forced command "${c.command}" returned ${lines.length} lines, not 5`);
+    }
+    if (!psHealthStatus.includes("(healthy)")) throw new Error(`the forced command's ps gave char-hc the Status "${psHealthStatus}", with no (healthy)`);
+    const [plainPs, ifsPs] = rendered.filter((e) => e.command === "ps all name=char-plain label=char.label=one");
+    if (!plainPs || !ifsPs || plainPs.lines !== ifsPs.lines || JSON.stringify(plainPs.key_sets) !== JSON.stringify(ifsPs.key_sets)) {
+      throw new Error(`the caller's IFS changed the forced command's ps result: ${JSON.stringify({ plainPs, ifsPs })}`);
     }
     if ((await plainState()) !== plainBefore) throw new Error("char-plain changed state across the forced command cases, the refused restart included");
 
@@ -550,6 +586,7 @@ async function main(): Promise<void> {
       events_container_filter: {
         "container=web": await eventContainers("container=web"),
         "container=eb": await eventContainers("container=eb"),
+        "container=w.b": await eventContainers("container=w.b"),
       },
       ps_name_filter: {
         "name=web": await psNames("name=web"),
@@ -695,6 +732,10 @@ async function main(): Promise<void> {
       forced_command: FORCED_COMMAND,
       forced_command_sha256: forcedCommandSha256,
       shell: dindShell,
+      default_ps_key_set: sharedKeyShape([...psRunning, ...psAll], "docker ps").key_set,
+      ps_health_status: psHealthStatus,
+      inspect_health_forms: inspectHealthForms,
+      events_prefix_match: eventsPrefixMatch,
       cases: rendered,
       matching,
     };
