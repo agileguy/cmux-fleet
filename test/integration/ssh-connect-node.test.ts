@@ -301,15 +301,22 @@ async function observe(scenario: string): Promise<Observation> {
       name,
       "--network",
       "none",
-      // The ipv6 scenario's fake proxy listens on "::1", which is not
-      // guaranteed to exist in the container without this. Measured on
-      // Colima/Docker 28.4.0, three runs each against this same pinned image:
+      // Only the ipv6 scenario's fake proxy listens on "::1", and only that
+      // scenario gets this sysctl: a kernel with no
+      // net.ipv6.conf.lo.disable_ipv6 sysctl path exits `docker run` itself
+      // with 127 at init, which would fail every scenario, not just ipv6's,
+      // if this were passed unconditionally. Measured on Colima/Docker
+      // 28.4.0, three runs each against this same pinned image:
       // `net.ipv6.conf.lo.disable_ipv6=0` let
       // `net.createServer().listen(0, "::1")` succeed in 3 of 3, and `=1`
-      // failed it with EADDRNOTAVAIL in 3 of 3. Left unset was not measured,
-      // so it is set explicitly rather than assumed.
-      "--sysctl",
-      "net.ipv6.conf.lo.disable_ipv6=0",
+      // failed it with EADDRNOTAVAIL in 3 of 3. Left unset was re-measured in
+      // the Phase 3 review (`node -e` probing the same `listen(0, "::1")`
+      // against this pinned image, --network none, sysctl omitted, three
+      // separate `docker run` invocations): it also succeeded 3 of 3 on this
+      // same Colima/Docker 28.4.0 host, which is why every OTHER scenario
+      // below omits the sysctl rather than paying its portability risk for
+      // no behavioural difference.
+      ...(scenario === "ipv6" ? ["--sysctl", "net.ipv6.conf.lo.disable_ipv6=0"] : []),
       "-v",
       `${SCRIPT}:/opt/pifleet/ssh-connect.cjs:ro`,
       RELAY_IMAGE,

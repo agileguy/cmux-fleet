@@ -33,10 +33,14 @@
  * WHAT `HTTPS_PROXY` MAY BE, AND WHAT OF IT IS EVER PRINTED. Only a bare
  * `http://host:port` URL, the shape `src/run/worker-env.ts` sets: WHATWG's
  * parsed `pathname` must be `/`, and `search` and `hash` must be empty, so a
- * path, query or fragment — anything the parser turns into one, including a
- * lone backslash, which for this scheme it reads as `/` — is refused before
- * any lookup or connection, the value never repeated (it may itself be what
- * put the path there). `http:host:port`, with no `//`, is ACCEPTED: WHATWG
+ * path, query or fragment — anything the parser turns into one — is refused
+ * before any lookup or connection, the value never repeated (it may itself be
+ * what put the path there). A lone trailing backslash is not one of those:
+ * for this scheme WHATWG reads a bare `\` the same as no path at all, so
+ * `http://host:port\` parses to pathname `/` and is ACCEPTED (measured under
+ * both Bun and Node); only a backslash followed by more text becomes a path —
+ * `\x` reads as `/x` — and that IS refused. `http:host:port`, with no `//`, is
+ * ACCEPTED: WHATWG
  * parses it identically to `http://host:port`. A port-less `http://host` is
  * accepted too, and keeps defaulting to port 80, because WHATWG reports an
  * explicit default port (`http://host:80`) as the SAME empty `.port` as no
@@ -92,9 +96,18 @@
  * however many there are. Judging the whole read would refuse a healthy tunnel
  * for being fast. A non-`200` response's body is kept only to print, so it is
  * bounded too (`MAX_BODY_BYTES`), and the rest is never read. A response using
- * bare LF instead of CRLF never reaches that terminator either, so it is read
- * as an over-long header and its rule text is lost rather than printed;
- * `connect-proxy.cjs` always sends CRLF, so this is by design, not a gap.
+ * bare LF instead of CRLF never produces `\r\n\r\n`, so `headerEnd` never gets
+ * set from it, and which of three paths reports that depends on how the
+ * response ends — none of them prints the proxy's own text, because only
+ * `endRefusal()` does that and it never runs without a `headerEnd`. If the
+ * proxy closes before the accumulated bytes pass `MAX_HEADER_BYTES`, the
+ * `close` handler reports it closed before sending a complete header. If it
+ * neither closes nor exceeds that bound, `RESPONSE_TIMEOUT_MS` fires and is
+ * reported as no complete header having arrived in time. Only once the
+ * accumulation itself passes `MAX_HEADER_BYTES` without ever finding the
+ * terminator is it reported as an over-long header — the short-response case
+ * is NOT that path. `connect-proxy.cjs` always sends CRLF, so none of this is
+ * reachable from it; a bare-LF response can only come from something else.
  *
  * WHY THE RESPONSE IS ALSO BOUNDED IN TIME, AND WHY THAT BOUND HAS NO KNOB. A
  * byte bound does nothing about a proxy that sends no bytes: a relay that
@@ -215,7 +228,7 @@ function parseProxyUrl(raw) {
   }
   if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
     // Not repeated: the path itself may be attacker-chosen (see the docblock
-    // on why a lone backslash is enough to make one).
+    // on what does, and does not, turn a backslash into one).
     return {
       refusal:
         "HTTPS_PROXY must be a bare http://host:port URL, with no path, query or fragment. The value is not " +

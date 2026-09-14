@@ -67,16 +67,28 @@ if (IPV6_UNAVAILABLE !== null) {
  * message can pin the WHATWG default port; probed once, before any test is
  * defined, so that test can skip itself by name on a host where something
  * already listens, rather than fail for a reason that has nothing to do with
- * the script.
+ * the script. Bounded: this is a top-level `await`, so a host that silently
+ * drops a loopback :80 SYN (neither a connect nor an error, e.g. a firewall
+ * rule with no reset) would otherwise hang this file's collection forever. A
+ * timeout treats that the same as "occupied" — not confirmed empty — so the
+ * port-less test skips itself rather than run against an unknown port 80.
  */
 async function port80Probe(): Promise<boolean> {
   return new Promise((resolve) => {
     const s = connect({ host: "127.0.0.1", port: 80 });
+    const timer = setTimeout(() => {
+      s.destroy();
+      resolve(true);
+    }, 1_000);
     s.once("connect", () => {
+      clearTimeout(timer);
       s.destroy();
       resolve(true);
     });
-    s.once("error", () => resolve(false));
+    s.once("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
   });
 }
 const PORT_80_OCCUPIED = await port80Probe();
@@ -391,10 +403,31 @@ function onFakeConnection(socket: Socket): void {
       // check-free "last one wins" loop would produce here. With null, the
       // close (100 ms below) is what ends the read; a wrongly-trusted 2 would
       // end it after two body bytes and cut the rule text before it ever
-      // reaches stderr.
+      // reaches stderr. This scenario alone cannot catch a "first one wins"
+      // loop, though: the first value here already IS the correct one, so
+      // trusting it produces the same cutoff the real close would — see
+      // disagreeclrev.test below, which reverses the order.
       const body = "egress denied by rule default-deny\n";
       socket.write(
         `HTTP/1.1 403 Forbidden\r\nContent-Length: ${Buffer.byteLength(body)}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n${body}`,
+      );
+      setTimeout(() => socket.end(), 100);
+      return;
+    }
+
+    if (authority === "disagreeclrev.test:443") {
+      // The same disagreement as disagreecl.test, with the two headers in
+      // the opposite order: the wrong length (2) first, the correct one
+      // second. A "first one wins" loop (skip the disagreement check, keep
+      // only the first value seen) would trust 2 here and cut the rule text
+      // after two body bytes — the mismatch disagreecl.test's fixed ordering
+      // cannot expose. parseContentLength must return null regardless of
+      // order, so the close (100 ms below) is what ends the read, same as
+      // disagreecl.test. Together the two scenarios catch trusting either
+      // the first or the last disagreeing value.
+      const body = "egress denied by rule default-deny\n";
+      socket.write(
+        `HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
       );
       setTimeout(() => socket.end(), 100);
       return;
@@ -923,6 +956,19 @@ describe("bounds on the proxy's own response (SRD-OBSERVER-ROLES §5.2, task 3.1
 
   test("two disagreeing Content-Length headers, the second far shorter than the body, are trusted as neither: the whole rule text still reaches stderr", async () => {
     const { code, stdout, stderr } = await run({ host: "disagreecl.test", port: "443" });
+
+    expect(code).not.toBe(0);
+    expect(stdout).toBe("");
+    expect(stderr).toBe("HTTP/1.1 403 Forbidden\negress denied by rule default-deny\n");
+  }, gateBudget([2_000]));
+
+  test("two disagreeing Content-Length headers in the OPPOSITE order (short one first) are also trusted as neither: the whole rule text still reaches stderr", async () => {
+    // Falsifies a "first one wins" loop the way disagreecl.test's fixed
+    // ordering cannot: there, the first header IS the correct length, so
+    // trusting it happens to match the real (null, close-terminated) result.
+    // Here the first header is the wrong, short one, so a first-wins mutant
+    // cuts the body at 2 bytes and this assertion catches it.
+    const { code, stdout, stderr } = await run({ host: "disagreeclrev.test", port: "443" });
 
     expect(code).not.toBe(0);
     expect(stdout).toBe("");
