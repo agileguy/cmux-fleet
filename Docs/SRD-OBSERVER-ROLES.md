@@ -419,9 +419,10 @@ certificate for the Engine API is an unfiltered root credential. There is nothin
 worker (obs-d1, internal bridge)
   └─ observe-docker <target> <verb> [key=value …]              baked shim, docker/observe-docker (new)
        └─ observe-ssh docker <target> …                          baked shim, docker/observe-ssh (new)
-            └─ ssh -F /dev/null -T -o BatchMode=yes -o IdentitiesOnly=yes
+            └─ ssh -F /dev/null -n -T -o BatchMode=yes -o IdentitiesOnly=yes
                    -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<known_hosts file>
                    -o GlobalKnownHostsFile=/dev/null
+                   -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
                    -o ProxyCommand="node /opt/pifleet/ssh-connect.cjs %h %p"
                    -i <key file> -p <port> -l <user> <host> -- <verb> [key=value …]
                  └─ CONNECT <host>:<port> via HTTPS_PROXY          docker/connect-proxy.cjs, egress.allow
@@ -450,6 +451,12 @@ Every hop has a precedent in the tree:
 - **`ssh` joins its remote arguments with spaces,** so word boundaries are lost on the way. The forced
   command re-splits on whitespace with globbing off (`set -f`, the lesson at `docker/verbgate:39-43`),
   and the grammar forbids whitespace inside any argument. Nothing is ever `eval`ed.
+- **`-n`, `ConnectTimeout` and the keepalive** were added at the Phase 3 review (principal decision,
+  2026-09-14). `-n` gives ssh `/dev/null` as stdin, so a caller looping over a list on its own stdin
+  keeps the rest of the list. `ConnectTimeout=10` bounds how long establishing the connection may take.
+  `ServerAliveInterval=15` with `ServerAliveCountMax=3` ends a session whose path has gone silent for
+  about 45 seconds. The keepalive is a protocol request sshd answers itself, so a command that is merely
+  quiet should not be cut off; the Phase 3 re-characterisation measures that rather than assuming it.
 
 **Not established, and made PM-owned pre-work (§12 Phase 3):** that OpenSSH accepts a private key
 delivered at the fleet's secret-file mode and ownership, and that the ProxyCommand round-trips through
@@ -534,6 +541,12 @@ observer-docker:
 # workers:
 - {id: obs-d1, role: observer-docker}
 
+# secrets.env_allowlist, the fleet ceiling. All three values are one entry per line, so each entry is
+# marked multiline: true; without it buildWorkerEnv refuses the value at `up`.
+- {name: OBSERVER_DOCKER_SSH_KEY, multiline: true}
+- {name: OBSERVER_DOCKER_KNOWN_HOSTS, credential: false, multiline: true}
+- {name: OBSERVER_DOCKER_TARGETS, credential: false, multiline: true}
+
 # egress.allow (one exact host, one port per target, as fleet.example.yaml:378-379 requires):
 - {host: docker-host.example.com, port: 22}
 ```
@@ -557,6 +570,13 @@ Each field, with its reason:
   `docker-host.example.com:22`, and `fleet.yaml:530-534` names three such roles. Reaching port 22
   without the key buys a banner and nothing else. The key is delivered only to `observer-docker`.
 - **One seat.** `obs-d1`, rpc, in no console. See Q10.
+- **`multiline: true` on all three allowlist entries** (principal decision, 2026-09-14, Phase 3 review).
+  `buildWorkerEnv` refuses a newline in any granted value (`src/run/worker-env.ts`), because the ticket
+  secrets are concatenated into a single curl header line. An OpenSSH key, a known_hosts file and a
+  targets list are one entry per line, so their entries opt in. The mark permits LF only; a carriage
+  return is refused for every name, and every unmarked name stays refused. The credential sweep also
+  takes each line of a multi-line credential as a needle, PEM armor excluded, so a key leaked one line
+  at a time is still found.
 
 ### 5.6 The report artifact contract
 
@@ -722,6 +742,11 @@ observer-vm:
 
 # workers:
 - {id: obs-v1, role: observer-vm}
+
+# secrets.env_allowlist (marked multiline: true for the reason §5.5 gives):
+- {name: OBSERVER_VM_SSH_KEY, multiline: true}
+- {name: OBSERVER_VM_KNOWN_HOSTS, credential: false, multiline: true}
+- {name: OBSERVER_VM_TARGETS, credential: false, multiline: true}
 
 # egress.allow:
 - {host: vm-1.example.com, port: 22}
