@@ -1,7 +1,7 @@
 {
   "measured_with": {
     "script": "scripts/observe/characterise-docker",
-    "git_head": "ba1933c",
+    "git_head": "f2038f1",
     "uncommitted_changes_to_measured_files": [],
     "dind_image": "docker:dind",
     "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
@@ -10,7 +10,7 @@
     "client_version": "29.7.2",
     "server_version": "29.7.2",
     "server_api_version": "1.55",
-    "measured_at": "2026-09-14T17:02:25.770Z"
+    "measured_at": "2026-09-14T17:43:29.628Z"
   },
   "ps": {
     "argv": [
@@ -72,7 +72,7 @@
     },
     "name_filter_matches": {
       "name=char-plain": 1,
-      "name=char": 4
+      "name=char": 5
     },
     "label_filter_matches": {
       "label=char.label=one": 1
@@ -253,8 +253,8 @@
         ],
         "exit": 0,
         "terminated_on_its_own": true,
-        "ms": 45,
-        "events": 43,
+        "ms": 46,
+        "events": 45,
         "char_events_actions": [
           "create",
           "attach",
@@ -269,14 +269,14 @@
           "--since",
           "60s",
           "--until",
-          "1789405333",
+          "1789407794",
           "--format",
           "{{json .}}"
         ],
         "exit": 0,
         "terminated_on_its_own": true,
-        "ms": 38,
-        "events": 43,
+        "ms": 46,
+        "events": 45,
         "char_events_actions": [
           "create",
           "attach",
@@ -295,8 +295,8 @@
         ],
         "exit": 143,
         "terminated_on_its_own": false,
-        "ms": 8056,
-        "events": 93,
+        "ms": 8047,
+        "events": 91,
         "char_events_actions": [
           "create",
           "attach",
@@ -306,6 +306,77 @@
         ]
       }
     ],
+    "until_current_second": {
+      "seen_by_an_immediate_query": false,
+      "seen_after_1100ms": true,
+      "event_ms_into_its_second": 309
+    },
+    "action_allowlist": {
+      "filters": [
+        "--filter",
+        "type=container",
+        "--filter",
+        "event=create",
+        "--filter",
+        "event=start",
+        "--filter",
+        "event=restart",
+        "--filter",
+        "event=stop",
+        "--filter",
+        "event=die",
+        "--filter",
+        "event=kill",
+        "--filter",
+        "event=oom",
+        "--filter",
+        "event=pause",
+        "--filter",
+        "event=unpause",
+        "--filter",
+        "event=destroy",
+        "--filter",
+        "event=health_status"
+      ],
+      "unfiltered": {
+        "actions": [
+          "attach",
+          "connect",
+          "create",
+          "destroy",
+          "die",
+          "disconnect",
+          "exec_create",
+          "exec_die",
+          "exec_start",
+          "health_status",
+          "load",
+          "start"
+        ],
+        "command_text_seen": true
+      },
+      "allowlisted": {
+        "actions": [
+          "create",
+          "destroy",
+          "die",
+          "health_status",
+          "start"
+        ],
+        "command_text_seen": false
+      },
+      "allowlisted_with_container_filter": {
+        "filter": "container=char-hc",
+        "containers_seen": [
+          "char-hc"
+        ],
+        "actions": [
+          "create",
+          "health_status",
+          "start"
+        ]
+      }
+    },
     "key_sets": [
       [
         "Action",
