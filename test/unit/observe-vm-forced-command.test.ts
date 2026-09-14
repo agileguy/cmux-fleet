@@ -374,6 +374,18 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       expect(r.cmd).toEqual(journalArgv(5, 300, { priority: 3 }));
     });
 
+    test("journal: priority=0 is the accepted lower boundary", () => {
+      const r = runScript(shell, "journal since=300s lines=5 priority=0");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 300, { priority: 0 }));
+    });
+
+    test("journal: priority=7 is the accepted upper boundary", () => {
+      const r = runScript(shell, "journal since=300s lines=5 priority=7");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 300, { priority: 7 }));
+    });
+
     test("journal: with both unit= and priority=", () => {
       const r = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3");
       expect(r.exitCode).toBe(0);
@@ -386,10 +398,16 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       expect(r.cmd).toEqual(journalArgv(5, 300, { unit: "nginx.service", priority: 3 }));
     });
 
-    test("journal: since=0s is a legitimate value (N is exactly '0', not a leading zero)", () => {
-      const r = runScript(shell, "journal since=0s lines=5");
+    test("journal: lines=1 is the accepted lower boundary", () => {
+      const r = runScript(shell, "journal since=60s lines=1");
       expect(r.exitCode).toBe(0);
-      expect(r.cmd).toEqual(journalArgv(5, 0));
+      expect(r.cmd).toEqual(journalArgv(1, 60));
+    });
+
+    test("journal: lines=499 is accepted, one under the exact-500 boundary", () => {
+      const r = runScript(shell, "journal since=60s lines=499");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(499, 60));
     });
 
     test("journal: lines=500 is the accepted upper boundary", () => {
@@ -490,12 +508,22 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       ["journal: missing lines=", "journal since=60s", "journal", "lines=<M> is required"],
       ["journal: lines=501, one over the cap", "journal since=60s lines=501", "journal", "a lines= value must be 1-500"],
       ["journal: lines=0", "journal since=60s lines=0", "journal", "a lines= value must be 1-500"],
+      ["journal: lines=1000, a 4-digit value far over the cap", "journal since=60s lines=1000", "journal", "a lines= value must be 1-500"],
+      ["journal: lines=99999, a 5-digit value far over the cap", "journal since=60s lines=99999", "journal", "a lines= value must be 1-500"],
+      ["kernel: lines=1000, a 4-digit value far over the cap", "kernel since=60s lines=1000", "kernel", "a lines= value must be 1-500"],
+      ["kernel: lines=99999, a 5-digit value far over the cap", "kernel since=60s lines=99999", "kernel", "a lines= value must be 1-500"],
       ["journal: a leading-zero N", "journal since=007s lines=10", "journal", "a since= value must be"],
       ["journal: a leading-zero M", "journal since=60s lines=007", "journal", "a lines= value must be 1-500"],
       ["journal: N without a trailing 's'", "journal since=60 lines=10", "journal", "a since= value must be"],
       ["journal: a 10-digit N", `journal since=${"1".repeat(10)}s lines=10`, "journal", "a since= value must be"],
+      ["journal: since=0s, a lone zero is refused (an empty lookback reads as \"nothing happened\")", "journal since=0s lines=5", "journal", "a since= value must be"],
+      ["kernel: since=0s, a lone zero is refused (an empty lookback reads as \"nothing happened\")", "kernel since=0s lines=5", "kernel", "a since= value must be"],
       ["journal: priority=8, one over the range", "journal since=60s lines=10 priority=8", "journal", "priority= value must be exactly one digit"],
+      ["journal: priority=37, two digits", "journal since=60s lines=10 priority=37", "journal", "priority= value must be exactly one digit"],
+      ["journal: priority=3x, a digit followed by a non-digit", "journal since=60s lines=10 priority=3x", "journal", "priority= value must be exactly one digit"],
+      ["journal: priority=err, not a digit at all", "journal since=60s lines=10 priority=err", "journal", "priority= value must be exactly one digit"],
       ["journal: unit= fails the unit-name grammar", "journal since=60s lines=10 unit=nginx!service", "journal", "a unit name must match"],
+      ["journal: unit= with a leading '-' fails the unit-name grammar", "journal since=60s lines=10 unit=-x", "journal", "a unit name must match"],
       ["kernel: unit= is not a key kernel accepts", "kernel since=60s lines=10 unit=nginx.service", "kernel", "unrecognised argument key"],
       ["kernel: priority= is not a key kernel accepts", "kernel since=60s lines=10 priority=3", "kernel", "unrecognised argument key"],
       ["journal: a repeated key", "journal since=60s since=70s lines=10", "journal", "since= may be given only once"],

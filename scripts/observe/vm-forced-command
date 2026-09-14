@@ -101,12 +101,16 @@
 #      here treats a leading `--` specially, or appends an unmatched token
 #      to the target command's argv — every token must match one of the
 #      named `key=*` patterns to contribute anything at all.
-#   2. `since=<N>s`: `N` is 1 to 9 ASCII digits, no leading zero UNLESS `N`
-#      is exactly the one digit `0` (a single digit is never "leading"),
-#      immediately followed by the literal letter `s` — nothing else. No
-#      shell arithmetic (`$(( ))`) ever touches `N`: an expression like
-#      `$((08))` would misread a leading zero as an octal digit, so every
-#      check here is a character class or a length compare
+#   2. `since=<N>s`: `N` is 1 to 9 ASCII digits, first digit always `1`-`9`
+#      — no leading zero, and the lone digit `0` is refused too, not
+#      treated as a length-1 exception, so `since=0s` is refused for both
+#      `journal` and `kernel`: a zero-second lookback returns nothing, and
+#      an empty result reads like "nothing happened" when nothing was
+#      looked at, the reasoning `docker-forced-command` gives for refusing
+#      its own `since=0s`. Immediately followed by the literal letter `s` — nothing
+#      else. No shell arithmetic (`$(( ))`) ever touches `N`: an expression
+#      like `$((08))` would misread a leading zero as an octal digit, so
+#      every check here is a character class or a length compare
 #      (`${#value}`), never a numeric one.
 #   3. `lines=<M>`: `M` is ASCII digits only, no leading zero (so `M` is
 #      never `0` either — `lines=0` is refused, `lines=00` too), and its
@@ -217,15 +221,15 @@ is_unit() {
   only_chars "$1" "${UNIT_CHARS}" && first_in "$1" "${ALNUM}" && [ "${#1}" -le "${UNIT_MAX}" ]
 }
 
-# `since=<N>s`'s `N`: decimal digits only, 1 to 9 of them, no leading zero
-# unless `N` is exactly the one digit `0` (header choice 2). Never `$(( ))`:
-# the digit-count bound and the leading-zero check are both a character
-# class or a length compare, nothing numeric.
+# `since=<N>s`'s `N`: decimal digits only, 1 to 9 of them, first digit
+# always `1`-`9` — a lone `0` is refused, not treated as a length-1
+# exception (header choice 2). Never `$(( ))`: the digit-count bound and
+# the leading-zero check are both a character class or a length compare,
+# nothing numeric.
 is_since_n() {
   only_chars "$1" "${DIGIT}" || return 1
   case ${#1} in
-    1) return 0 ;;
-    2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) first_in "$1" "123456789" ;;
+    1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) first_in "$1" "123456789" ;;
     *) return 1 ;;
   esac
 }
@@ -256,7 +260,7 @@ is_lines() {
 # character, so a longer value (e.g. "37") is refused by construction.
 is_priority() {
   case $1 in
-    [0-7]) return 0 ;;
+    [01234567]) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -321,7 +325,7 @@ parse_journal_kernel_args() {
     *) refuse "${verb}" "a since= value must be [0-9]{1,9} digits followed by 's'" ;;
   esac
   is_since_n "${since_n}" ||
-    refuse "${verb}" "a since= value must be [0-9]{1,9} digits, no leading zero unless it is just '0', followed by 's'"
+    refuse "${verb}" "a since= value must be [1-9][0-9]{0,8} digits, no leading zero, followed by 's'"
   is_lines "${lines_val}" ||
     refuse "${verb}" "a lines= value must be 1-500, decimal digits only, no leading zero"
   if [ "${seen_unit}" -eq 1 ]; then
