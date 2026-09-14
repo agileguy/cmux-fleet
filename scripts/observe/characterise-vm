@@ -23,14 +23,21 @@
  * ## Where it runs, and what it touches
  *
  * Everything goes over SSH to an operator-supplied Linux host that runs Docker.
- * On that host the script reads help pages and parses timestamps with the host's
- * own systemd, and runs `show` against one unit every systemd has; it writes
- * nothing there and stores none of the host's log or unit text, only shapes.
+ * Reading help pages, parsing timestamps with the host's own systemd, and running
+ * `show` against one unit every systemd has writes nothing to the target and
+ * stores none of the host's log or unit text locally, only shapes.
+ *
  * The oldest systemd in scope (§6.4, principal decision 2026-09-14: RHEL/Rocky 8,
- * systemd 239) runs in a throwaway container this script starts on that host,
- * `--privileged` with no network and systemd as PID 1, so a failed unit and a
- * log marker can be made inside it. The container and its anonymous volumes are
- * removed on exit, on success, on failure, or on SIGINT, SIGTERM or SIGHUP; the
+ * systemd 239) needs somewhere real to boot as PID 1, and that is where this
+ * script DOES write to the target: it starts one throwaway container there,
+ * `--privileged --cgroupns=host`, no network, with the host's own
+ * `/sys/fs/cgroup` bind-mounted into it read-write and `/usr/sbin/init`
+ * (systemd) as PID 1 — so a failed unit and a log marker can be made inside it.
+ * While that container is alive, it can read and write the host's own cgroup
+ * tree; the whole of what undoes that is removing it. The container and its
+ * anonymous volumes are removed by name on exit, on success, on failure, and on
+ * SIGINT, SIGTERM or SIGHUP (its `pifleet-char=<id>` label is there so an
+ * operator can find one a SIGKILL left behind); the
  * host's other containers are never listed, inspected or touched.
  *
  * The target's address and account are not written to either fixture.
@@ -109,10 +116,25 @@ type Run = { code: number; stdout: string; stderr: string; ms: number; timedOut:
 /** How long a timed-out process gets after SIGTERM before SIGKILL. */
 const KILL_GRACE_MS = 2_000;
 
-/** Run a local command as an argv array. Never through a local shell. */
+/**
+ * Run a local command as an argv array. Never through a local shell.
+ *
+ * Spawned `detached`: on POSIX this calls `setsid()`, so the child leads its
+ * own process group instead of sitting in the terminal's. A Ctrl-C at the
+ * terminal sends SIGINT to the whole foreground process group at once — an
+ * `ssh` child left in that group would be killed there directly, the same
+ * instant this script's own `process.on("SIGINT", …)` handler runs, and
+ * `run()`'s promise would then settle because the LOCAL process died, not
+ * because the REMOTE command it was carrying (for example `docker run -d`)
+ * ever finished. `cleanup` trusts that settling as "the create is done, one
+ * way or the other" (see `starting` below); a child still reachable by the
+ * terminal's signal could falsify that on the exact command that matters
+ * most. Detached, this process is the only thing that decides when to stop
+ * waiting on a running child — a signal we handle stops us, not it.
+ */
 async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<Run> {
   const started = Date.now();
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
   let timedOut = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {

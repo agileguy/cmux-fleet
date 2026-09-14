@@ -123,10 +123,23 @@ const KILL_GRACE_MS = 2_000;
  * this ends is reported `timedOut`, because its exit status alone (143) looks like a real one. The call
  * still waits for the pipes to close, so a descendant that keeps stdout open holds it past the timeout;
  * nothing this script runs leaves one behind.
+ *
+ * Spawned `detached`: on POSIX this calls `setsid()`, so the child leads its own
+ * process group instead of sitting in the terminal's. A Ctrl-C at the terminal
+ * sends SIGINT to the whole foreground process group at once — a `docker`
+ * child left in that group would be killed there directly, the same instant
+ * this script's own `process.on("SIGINT", …)` handler runs, and `run()`'s
+ * promise would then settle because the LOCAL client died, not because the
+ * DAEMON's own work on the command it carried (for example `docker run -d`)
+ * ever finished. `cleanup` trusts that settling as "the create is done, one
+ * way or the other" (see `starting` below); a child still reachable by the
+ * terminal's signal could falsify that on the exact command that matters
+ * most. Detached, this process is the only thing that decides when to stop
+ * waiting on a running child — a signal we handle stops us, not it.
  */
 async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS, stdinPath?: string): Promise<Run> {
   const started = Date.now();
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: stdinPath ? Bun.file(stdinPath) : "ignore" });
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: stdinPath ? Bun.file(stdinPath) : "ignore", detached: true });
   let timedOut = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
