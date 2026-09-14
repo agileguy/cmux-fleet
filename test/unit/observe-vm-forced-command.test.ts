@@ -8,14 +8,14 @@
  * (`restrict,command="<installed path>"`, §6.2), with NO arguments of its
  * own — every case here spawns the REAL script file exactly that way, with
  * `SSH_ORIGINAL_COMMAND` set in its environment and nothing else, and
- * recording fakes for `systemctl`, `journalctl`, `df` and `cat` first on
- * `PATH`. The script has no mutable state and no fixed filesystem location
- * baked into it (it only ever reads an environment variable and execs one
- * of those four commands), so there is no per-run copy to make: the real
- * file is what every case below executes.
+ * recording fakes for `systemctl`, `journalctl`, `df`, `cat` and `timeout`
+ * first on `PATH`. The script has no mutable state and no fixed filesystem
+ * location baked into it (it only ever reads an environment variable and
+ * execs one of those five commands), so there is no per-run copy to make:
+ * the real file is what every case below executes.
  *
- * Only one of the four fakes ever actually runs per script invocation
- * (the script always ends in exactly one `exec`), so all four share one
+ * Only one of the five fakes ever actually runs per script invocation
+ * (the script always ends in exactly one `exec`), so all five share one
  * record file: each fake writes its OWN NAME as the first record element,
  * then its argv, NUL-separated so an element holding a space survives as
  * one record. "No invocation recorded" means that record file does not
@@ -126,8 +126,9 @@ function journalArgv(lines: number, sinceSeconds: number, opts: { unit?: string;
 function kernelArgv(lines: number, sinceSeconds: number): string[] {
   return ["journalctl", "--no-pager", "--dmesg", "--output=short-iso", `--lines=${lines}`, sinceArg(sinceSeconds)];
 }
+/** `disk`'s expected argv: SRD §6.4 at HEAD, principal decision 2026-09-14 — bounded by `timeout 20` ahead of `df` itself. */
 function diskArgv(): string[] {
-  return ["df", "-P", "-k"];
+  return ["timeout", "20", "df", "-P", "-k"];
 }
 function memoryArgv(): string[] {
   return ["cat", "/proc/meminfo"];
@@ -150,7 +151,7 @@ exit "\${FAKE_VM_EXIT:-0}"
 `;
 }
 
-const FAKE_BINARIES = ["cat", "systemctl", "df", "journalctl"];
+const FAKE_BINARIES = ["cat", "systemctl", "df", "journalctl", "timeout"];
 
 let scratch = "";
 let fakeBin = "";
@@ -442,6 +443,32 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
     });
   });
 
+  describe("IFS: the caller's IFS never changes vm-forced-command's parsing", () => {
+    // /bin/sh and dash both ignore an IFS inherited from the environment
+    // (measured on this machine: a shell spawned with IFS=":" exported
+    // still reports its own IFS as the POSIX default the instant it
+    // starts), so these cannot show the script's own top-of-file pin
+    // matters — only that the resplit's own local `IFS=" ${tab}"`
+    // assignment, set immediately before `set -- ${original}` runs, is
+    // what actually governs parsing, regardless of what the caller passed.
+    test("journal: unit= plus priority= produce the same argv whether or not IFS=: is inherited from the caller", () => {
+      const withoutColonIfs = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3");
+      const withColonIfs = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3", {}, scratch, { IFS: ":" });
+      expect(withoutColonIfs.exitCode).toBe(0);
+      expect(withColonIfs.exitCode).toBe(0);
+      expect(withColonIfs.cmd).toEqual(withoutColonIfs.cmd);
+      expect(withColonIfs.cmd).toEqual(journalArgv(5, 300, { unit: "nginx.service", priority: 3 }));
+    });
+
+    test("a colon-joined token such as 'unit:nginx.service' is still refused as one bad verb, never split into a valid verb and argument, even when IFS=: is inherited from the caller", () => {
+      const r = runScript(shell, "unit:nginx.service", {}, scratch, { IFS: ":" });
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr).toContain(REFUSAL_PREFIX);
+      expect(r.stderr).toContain("the verb is not [a-z][a-z0-9-]{0,31}");
+      expect(r.cmd).toBeNull();
+    });
+  });
+
   describe("the target command's own exit status and output reach the caller unchanged", () => {
     test("system: a non-zero exit (e.g. 'degraded') and its stdout both pass through exec, unreinterpreted", () => {
       const r = runScript(shell, "system", { exit: 1, stdout: "degraded\n" });
@@ -451,12 +478,27 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       expect(r.cmd).toEqual(systemArgv());
     });
 
-    test("disk: stdout, stderr and a non-zero exit code all pass through exec", () => {
-      const r = runScript(shell, "disk", { exit: 3, stdout: "hello-stdout\n", stderr: "hello-stderr\n" });
-      expect(r.exitCode).toBe(3);
+    test("disk: stdout, stderr and a non-zero exit code (124, a timeout) all pass through exec unchanged", () => {
+      // coreutils `timeout` exits 124 on expiry and passes a child's exit
+      // through unchanged (measured, Ubuntu 24.04) — this pins that exact
+      // code reaching the caller, not just "some non-zero exit".
+      const r = runScript(shell, "disk", { exit: 124, stdout: "hello-stdout\n", stderr: "hello-stderr\n" });
+      expect(r.exitCode).toBe(124);
       expect(r.stdout).toBe("hello-stdout\n");
       expect(r.stderr).toBe("hello-stderr\n");
       expect(r.cmd).toEqual(diskArgv());
+    });
+
+    test("journal: the target command's own non-zero exit status passes through exec unchanged", () => {
+      const r = runScript(shell, "journal since=300s lines=5", { exit: 3 });
+      expect(r.exitCode).toBe(3);
+      expect(r.cmd).toEqual(journalArgv(5, 300));
+    });
+
+    test("kernel: the target command's own non-zero exit status passes through exec unchanged", () => {
+      const r = runScript(shell, "kernel since=300s lines=5", { exit: 3 });
+      expect(r.exitCode).toBe(3);
+      expect(r.cmd).toEqual(kernelArgv(5, 300));
     });
 
     test("a 77 from the target command itself is not relabelled as this script's own refusal", () => {
@@ -562,6 +604,39 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       expect(r.stderr).toContain(REFUSAL_PREFIX);
       expect(r.stderr).toContain(expectSubstring);
       expect(r.stderr).toContain(reasonSubstring);
+      expect(r.cmd).toBeNull();
+    });
+  });
+
+  describe("journal/kernel: a refusal never echoes caller bytes, even one carrying an embedded newline followed by a forged-looking line", () => {
+    // Mirrors "an embedded newline inside the unit argument is refused and
+    // never echoed into stderr" below, but for the journal/kernel
+    // key=value argument grammar's own two refusal branches
+    // (parse_journal_kernel_args's `*=*` and final `*` cases) — today only
+    // the `unit` verb's newline case is covered. Each `arg` below carries an
+    // embedded newline (never a token boundary here — see the header on why
+    // the resplit excludes newline) followed by text made to look like a
+    // second, forged line of output.
+    //
+    // "foo=bar\nFORGED=1" contains an '=' (from "FORGED=1" itself), so it
+    // takes the `*=*` "unrecognised argument key" branch, same as the
+    // existing "an unknown key" case above, just with the forged line
+    // appended. "bogus\nFORGED" deliberately carries no '=' anywhere —
+    // appending "=1" here would flip it onto the `*=*` branch instead
+    // (measured) — so it stays on the bare-token "every argument must be
+    // key=value" branch, same as the existing "a bare token without '='"
+    // case above.
+    const cases: Array<[string, string, string]> = [
+      ["journal: an unknown key carrying an embedded newline and a forged line", "journal since=60s lines=10 foo=bar\nFORGED=1", "FORGED=1"],
+      ["journal: a bare token carrying an embedded newline and a forged line", "journal since=60s lines=10 bogus\nFORGED", "FORGED"],
+      ["kernel: an unknown key carrying an embedded newline and a forged line", "kernel since=60s lines=10 foo=bar\nFORGED=1", "FORGED=1"],
+      ["kernel: a bare token carrying an embedded newline and a forged line", "kernel since=60s lines=10 bogus\nFORGED", "FORGED"],
+    ];
+    test.each(cases)("%s", (_label, cmd, forged) => {
+      const r = runScript(shell, cmd);
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr).toContain(REFUSAL_PREFIX);
+      expect(r.stderr).not.toContain(forged);
       expect(r.cmd).toBeNull();
     });
   });

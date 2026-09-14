@@ -51,7 +51,7 @@
 #   kernel  since=<N>s lines=<M>  (both required, M <= 500; no other key)
 #             -> journalctl --no-pager --dmesg --output=short-iso --lines=<M> --since=-<N>s
 #   disk    (no arguments)
-#             -> df -P -k
+#             -> timeout 20 df -P -k
 #   memory  (no arguments)
 #             -> cat /proc/meminfo
 #
@@ -404,7 +404,7 @@ case ${verb} in
     ;;
   disk)
     [ "$#" -eq 0 ] || refuse "${verb}" "disk takes no arguments; got $#"
-    exec df -P -k
+    exec timeout 20 df -P -k
     ;;
   memory)
     [ "$#" -eq 0 ] || refuse "${verb}" "memory takes no arguments; got $#"
