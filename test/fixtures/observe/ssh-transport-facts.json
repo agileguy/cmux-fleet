@@ -1,0 +1,100 @@
+{
+  "schema": "pifleet.ssh-transport-facts/v1",
+  "measured_at": "2026-09-14T03:32:27.350Z",
+  "measured_by": "scripts/observe/characterise-ssh-transport",
+  "host": {
+    "platform": "darwin",
+    "docker_server": "28.4.0 Ubuntu 24.04.2 LTS"
+  },
+  "client": {
+    "base_image": "pifleet/pi-worker:0.79.6-base-686856fc0004",
+    "openssh": "OpenSSH_9.2p1 Debian-2+deb12u10, OpenSSL 3.0.20 7 Apr 2026",
+    "run_flags": [
+      "--user",
+      "10001:10001",
+      "--security-opt",
+      "no-new-privileges",
+      "--cap-drop",
+      "ALL",
+      "--read-only",
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,size=256m"
+    ],
+    "https_proxy": "http://egress.pifleet.internal:3128"
+  },
+  "server": {
+    "image": "alpine:3",
+    "openssh": "OpenSSH_10.3p1, OpenSSL 3.5.7 9 Jun 2026"
+  },
+  "key_delivery": {
+    "delivered_path": "/secrets/<NAME>",
+    "delivered_mode": "444",
+    "owner_uid_seen_in_container": 10001,
+    "worker_uid": 10001,
+    "accepted_at_delivered_mode": false,
+    "at_delivered_mode": {
+      "exit_code": 255,
+      "stderr": [
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+        "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @",
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+        "Permissions 0444 for '/secrets/OBSERVER_DOCKER_SSH_KEY' are too open.",
+        "It is required that your private key files are NOT accessible by others.",
+        "This private key will be ignored.",
+        "Load key \"/secrets/OBSERVER_DOCKER_SSH_KEY\": bad permissions",
+        "observe@sshd-target.pifleet.test: Permission denied (publickey)."
+      ]
+    },
+    "copy_required": true,
+    "copy_dir": "/tmp",
+    "copy_mode": "600",
+    "accepted_as_copy": true,
+    "accepted_without_trailing_newline": false,
+    "without_trailing_newline": {
+      "exit_code": 255,
+      "stderr": [
+        "Load key \"/tmp/key\": error in libcrypto",
+        "observe@sshd-target.pifleet.test: Permission denied (publickey)."
+      ]
+    }
+  },
+  "proxy_command": {
+    "argv_value": "node /opt/pifleet/ssh-connect.cjs %h %p",
+    "round_trips": true,
+    "exit_code": 0,
+    "stdout": "forced-ok"
+  },
+  "exit_codes": {
+    "success": 0,
+    "remote_exit_77": 77,
+    "host_key_mismatch": 255,
+    "proxy_refused": 255
+  },
+  "stderr": {
+    "host_key_mismatch": [
+      "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+      "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @",
+      "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+      "IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!",
+      "Someone could be eavesdropping on you right now (man-in-the-middle attack)!",
+      "It is also possible that a host key has just been changed.",
+      "The fingerprint for the ED25519 key sent by the remote host is",
+      "SHA256:wcBAwiVLaD+JxLrPKW1DWwLomWR7GTfMYFU/Q9t5Gng.",
+      "Please contact your system administrator.",
+      "Add correct host key in /secrets/OBSERVER_DOCKER_KNOWN_HOSTS_WRONG to get rid of this message.",
+      "Offending ED25519 key in /secrets/OBSERVER_DOCKER_KNOWN_HOSTS_WRONG:1",
+      "remove with:",
+      "ssh-keygen -f \"/secrets/OBSERVER_DOCKER_KNOWN_HOSTS_WRONG\" -R \"sshd-target.pifleet.test\"",
+      "Host key for sshd-target.pifleet.test has changed and you have requested strict checking.",
+      "Host key verification failed."
+    ],
+    "proxy_refused": [
+      "proxy refused: HTTP/1.1 403 Forbidden egress denied by rule default-deny",
+      "kex_exchange_identification: Connection closed by remote host",
+      "Connection closed by UNKNOWN port 65535"
+    ]
+  },
+  "not_measured": [
+    "A Linux host's bind-mount ownership. This machine delivers through Colima, whose VM presents mounted files as owned by the container user; on Linux the file keeps the operator's uid. A 0600 copy owned by the worker uid does not depend on either."
+  ]
+}
