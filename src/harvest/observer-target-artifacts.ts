@@ -161,9 +161,10 @@ export type ObserverVmOpsArtifact = z.infer<typeof ObserverVmOpsArtifactSchema>;
  *
  * Replacing needle by needle cannot hide overlaps. Once the first needle is
  * gone, a second needle that shared characters with it no longer matches, and
- * its tail stays visible: two overlapping 12-character needles came out as
- * `<redacted>` plus the last four characters of one of them. A needle that
- * overlaps its own next occurrence loses its tail the same way.
+ * its tail stays visible: the two 12-character needles in the overlap test
+ * below share a 4-character overlap, and the old per-needle replacement left
+ * `<redacted>` plus the last eight characters of the second one. A needle
+ * that overlaps its own next occurrence loses its tail the same way.
  *
  * So the matches of all needles are collected first, overlapping spans merge,
  * and each merged span becomes one `<redacted>`. A secret containing a shorter
@@ -172,7 +173,9 @@ export type ObserverVmOpsArtifact = z.infer<typeof ObserverVmOpsArtifactSchema>;
  *
  * The search steps one character past each match so overlaps are found. One
  * needle's overlapping matches fold into a single span as they are found, so a
- * long run of one repeated secret costs one span, not one per offset.
+ * long run of a SELF-OVERLAPPING repeated secret costs one span, not one per
+ * offset. A repeated secret that does not overlap itself still costs one
+ * span per occurrence, because consecutive copies only touch.
  */
 export function redactSecrets(text: string, secrets: readonly string[]): string {
   const spans: Array<[start: number, end: number]> = [];

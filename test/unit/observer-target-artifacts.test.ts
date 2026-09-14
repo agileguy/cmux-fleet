@@ -196,6 +196,14 @@ describe("the contract, member by member and field by field (SRD 2.1, 2.2)", () 
 });
 
 describe("the inner redaction layer, with no caller redacting after it", () => {
+  // Only the needle-as-key case below can actually catch a removed inner
+  // redaction. `findCredentialLeaks`'s reported paths are built from field
+  // NAMES, so the value and unknown-field cases never put the needle into
+  // the message in the first place — their `not.toContain(NEEDLE)`
+  // assertion holds even with `redactSecrets` deleted from the leak-message
+  // path. A needle used as a KEY is the one case where the path itself is
+  // built from the needle, so it is the one case this block is actually
+  // testing the redaction against.
   const cases: ReadonlyArray<[string, (d: Record<string, unknown>) => void, string[]]> = [
     [
       "a needle in a value",
@@ -245,6 +253,12 @@ describe("redactSecrets", () => {
     expect(redactSecrets(`a ${NEEDLE} b ${NEEDLE}`, [NEEDLE])).toBe("a <redacted> b <redacted>");
   });
 
+  test("two matches that only touch, with no gap and no overlap, stay two markers", () => {
+    // "WXYZ" ends exactly where "1234" begins: adjacent, not overlapping.
+    // Merging touching spans would collapse this to one marker.
+    expect(redactSecrets("WXYZ1234", ["WXYZ", "1234"])).toBe("<redacted><redacted>");
+  });
+
   test("a blank needle is skipped rather than matching everywhere", () => {
     expect(redactSecrets("nothing to hide", ["", "   "])).toBe("nothing to hide");
   });
@@ -270,26 +284,34 @@ describe("redactSecrets", () => {
 });
 
 describe("the module's imports", () => {
-  // Comments are masked first, so a docblock that names a filesystem API in
-  // prose cannot turn this red, and a real import cannot hide in one.
+  // Comments are masked first: a docblock that discusses "node:fs" or
+  // `Bun.write` in prose must not itself trip the checks below. (Masking
+  // blanks comment text only — it has no bearing on real code, which is
+  // never inside a comment to begin with.)
   const code = maskComments(
     readFileSync(join(import.meta.dir, "../../src/harvest/observer-target-artifacts.ts"), "utf8"),
   );
+
+  // Every static import/re-export (`from "x"`), bare `import "x"`, dynamic
+  // `import(...)`, and `require(...)` specifier — in any of the three quote
+  // styles, backtick template literals included.
   const specifiers = [
-    ...code.matchAll(/\b(?:from|import|require)\s*\(?\s*["']([^"']+)["']/g),
+    ...code.matchAll(/\b(?:from|import|require)\s*\(?\s*["'`]([^"'`]*)["'`]/g),
   ].map((m) => m[1]!);
 
+  // Held to exactly these two, so a `triage-*` specifier — of any form
+  // above — already fails this assertion. There is no separate "reaches
+  // the triage console" test: one that filtered this same specifier list
+  // could only go red when this one already had, which is not an
+  // independent check, and the extra test's name oversold it as one.
   test("are exactly zod and the contracts module", () => {
     expect([...new Set(specifiers)].sort()).toEqual(["../contracts.ts", "zod"]);
   });
 
-  test("name no filesystem API", () => {
+  test("name no filesystem or process API", () => {
     expect(code).not.toContain("node:fs");
-    expect(code).not.toMatch(/\bBun\.file\b/);
     expect(code).not.toMatch(/\bopen\s*\(/);
-  });
-
-  test("reach no triage console module", () => {
-    expect(specifiers.filter((s) => /triage-/.test(s))).toEqual([]);
+    expect(code).not.toMatch(/\bBun\.(?:file|write|spawnSync|spawn)\b/);
+    expect(code).not.toMatch(/\bBun\.\$/);
   });
 });
