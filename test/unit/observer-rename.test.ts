@@ -25,20 +25,31 @@
  * The docs form reads three shapes, each the name used as an identifier: the
  * backticked name followed by `'s` or a hyphen (`` `observer`'s ``,
  * `` `observer`-specific ``); a table cell holding the name alone, bare, bold or
- * backticked; and a PARENTHESISED comma list in which the name is one whole item
- * and a role name another, as in `(observer, verifier, ticketing)`. Role names
- * are read off the prompts in `roles/` and compared as text. An English list
- * stays quiet: "the observer, verifier and ticketing roles" has no parentheses,
- * and in "(one file per observer, read-only)" the item is not the name alone.
+ * backticked; and a PARENTHESISED list on one line in which the name is one whole
+ * item and a role name another, as in `(observer, verifier, ticketing)`. The
+ * group splits on `,` and on an `and` or `or` with a space or tab each side, and
+ * a leading `e.g.` or `i.e.` is dropped, so `(observer, verifier and ticketing)`,
+ * `(sre or observer)` and `(e.g. observer, sre)` fire too. Role names are read
+ * off the prompts in `roles/` and compared as text. An English list stays quiet:
+ * "the observer, verifier and ticketing roles" has no parentheses, and in
+ * "(one file per observer, read-only)" or "(the collator and the observer seat)"
+ * no item is the name alone.
  *
  * Three things are deliberately NOT guarded:
  *
  * - **English prose, the phrase "observer role" included.** "The observer" in a
  *   comment, a role prompt or a skill is §4.2's seat that looks, and §4.2 lets
  *   English stay. A form reading "observer role" would refuse legitimate future
- *   sentences, so no form reads running prose. Words are read in two places
- *   only: the old prompt's opening "You are `observer`", and a parenthesised
- *   list whose whole items are the name and a role name.
+ *   sentences, so no form is built to read running prose. Prose words still
+ *   meet a form in four places. The old prompt's opening "You are `observer`".
+ *   A parenthesised list whose whole items are the name and a role name. A
+ *   table cell, which reads the bare word, so
+ *   `| the collator hands a share to each | observer |` fires. And roleValue,
+ *   which reads every scanned file, docs included, so "Each triage seat has one
+ *   role:" followed by " observer, the seat that looks." fires. Everywhere else
+ *   the name is read only in an identifier's spelling: a key under a `roles`
+ *   opener, an index straight after `roles`, the old prompt's path, a
+ *   `roleGrant` argument, a quoted literal, or the docs form's backticked name.
  * - **Backtick spans outside the forms that name them.** The quoted-literal form
  *   covers `"` and `'` only; the index and grant forms read a backticked index
  *   or argument, and the docs form its own shapes. Docblocks and documents name
@@ -76,12 +87,16 @@
  * **One quoted key is not a quoted literal.** The same row field is a quoted
  * key in JSON, as in `{"service": "api", "observer": "obs-t1"}`. The
  * quoted-literal form lets a literal through only as that field: `:` directly
- * after its closing quote, then on the same line an observer seat id such as
- * `obs-t1`, quoted or bare. The value is read by the seat's shape, `obs-` and
- * an id, because the worker-id grammar also admits a model name such as
+ * after its closing quote, then nothing but spaces or tabs, then `obs-` and
+ * letters and digits, bare or inside a matching `"` or `'`, with no `-`, `.` or
+ * word character straight after the value. The value is read by the seat's
+ * shape because the worker-id grammar also admits a model name such as
  * `gpt-oss-20b`. Every other quoted literal fires: a `case "observer":` label,
- * a ternary's spaced ` : `, and a quoted role key in any map, whether or not a
- * `roles` opener announces it.
+ * a ternary's spaced ` : `, and a quoted role key in any map whose value is not
+ * such a seat id, whether or not a `roles` opener announces it. A quoted role
+ * key whose value IS one, as in a role-to-seat map `{ "observer": "obs-1" }`,
+ * reads exactly like the row field and passes this form. Under a `roles` opener
+ * the role-key form still catches it; anywhere else it is missed.
  *
  * **A variable named for the seat is not the role.** `src/run/triage-verdict.ts`
  * holds a variable called `observer`, so a `role:` whose value is
@@ -113,14 +128,18 @@
  * fails loudly, naming its line.
  *
  * - Missed: a flow map whose keys continue onto the next line; only its first line is read.
- * - Missed: a key after an escaped quote or a lone apostrophe in a flow-map string, which misplaces the span skip.
+ * - Missed: a flow-map key after an escaped quote or a lone apostrophe, but only when a LATER quote of the same kind on the line pairs with the stray one, so the span skip jumps the key: `roles: {sre: {note: "a \"b"}, observer: {}}` fires, and the same map with `, x: {note: "c"}` before its last `}` misses.
  * - Missed: a key after an unbalanced `(` or `)` in a YAML plain scalar, which breaks the depth count.
  * - False positive: a generic type span `<…>` running across the next parameter to a later `= {`.
  * - False positive: a comment or prose line ending `roles:`, followed by a line starting `{`.
  * - Missed: destructuring `const { observer } = cfg.roles`, a member chain broken across lines, a union typed opener, a YAML anchor on `roles`.
  * - Missed: an inline object type in a typed opener, as in `const roles: { [k: string]: RoleDoc } = {`.
  * - False positive: a future bare `| observer |` docs cell for the triage row field.
- * - False positive: a triage.json row field whose observer seat id does not start `obs-`, which the quoted-literal carve-out does not exempt.
+ * - False positive, in src/, test/ and scripts/: a quoted `"observer":` row field whose value is not `obs-` and letters and digits, quoted or bare, right after the colon on the same line. `null`, an id holding `.`, `_` or a second `-` (`obs-t1_b`, `obs-k8s-1`), a backticked value, a comment between the colon and the value, and any non-`obs-` seat all fire, though `SESSION_ID_RE` in `src/contracts.ts` admits some of them.
+ * - Missed: a role-to-seat map with no `roles` opener whose quoted role key holds an `obs-` seat id, as in `{ "observer": "obs-1" }`; it reads exactly like the row field.
+ * - Missed, parenthesised list: a nested group `(observer, verifier (the sre), ticketing)`; a list left unclosed or spanning lines; an item carrying trailing punctuation, emphasis or quotes (`(observer, verifier.)`, `(**observer**, verifier)`, `("observer", "verifier")`); a label prefix `(roles: observer, verifier)`; fullwidth parentheses; the same list in a table cell or in `[ … ]`.
+ * - False positive: a parenthesised English seat list whose words are role names, as in `the triage seats (collator, observer, reviewer)`.
+ * - Missed: roleGrant with an earlier argument that is itself a call (`roleGrant(load(p), "observer")`), which quotedLiteral still catches in src/, test/ and scripts/ unless the name is backticked; rolesIndex through a cast (`(cfg.roles as Roles).observer`) or a doubled `!!`, where quotedLiteral again catches only a quoted index in those roots; an NBSP beside an `and` or `or` that joins two words in a list item, or after a leading one.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -367,16 +386,21 @@ function unshapedLiteralLines(text: string, rel = ""): number[] {
 const ROLE_NAMES = FILES.flatMap((rel) => /^roles\/([^/]+)\.md$/.exec(rel)?.slice(1) ?? []);
 
 /**
- * Lines holding a parenthesised comma list in which the old name is one whole item
- * and a role name another. An item is trimmed, loses a leading `and` or `or`, and
- * loses backticks around it. Role names are compared as text, so no name is ever
- * regex source.
+ * Lines holding a parenthesised list in which the old name is one whole item and a
+ * role name another. The group is split on `,`; a piece loses a leading `e.g.` or
+ * `i.e.` and splits again on an `and` or `or` with a space or tab each side. An item
+ * is trimmed, loses a leading `and` or `or`, and loses backticks around it. Role
+ * names are compared as text, so no name is ever regex source.
  */
 function parenListLines(text: string, roleNames: readonly string[]): number[] {
-  const item = (raw: string): string =>
-    raw.trim().replace(/^(?:and|or)[ \t]+/, "").replace(/^`([^`]*)`$/, "$1");
+  const itemsOf = (piece: string): string[] =>
+    piece
+      .trim()
+      .replace(/^(?:e\.g\.|i\.e\.)[ \t]*/, "")
+      .split(/[ \t]+(?:and|or)[ \t]+/)
+      .map((raw) => raw.trim().replace(/^(?:and|or)[ \t]+/, "").replace(/^`([^`]*)`$/, "$1"));
   return text.split("\n").flatMap((line, i) => {
-    const lists = [...line.matchAll(/\(([^()]*)\)/g)].map((m) => m[1]!.split(",").map(item));
+    const lists = [...line.matchAll(/\(([^()]*)\)/g)].map((m) => m[1]!.split(",").flatMap(itemsOf));
     const named = lists.some(
       (items) => items.includes(OLD) && items.some((it) => it !== OLD && roleNames.includes(it)),
     );
@@ -416,12 +440,12 @@ const FORMS = {
     find: (t) => matchLines(t, /role["']?[ \t]*:[ \t]*["']?observer(?![-\w]|\??\.[A-Za-z_$])/g),
   },
   rolesIndex: {
-    name: `roles.${OLD} or roles["${OLD}"], the index in ", ' or backticks, optionally non-null asserted (!) or chained (?.)`,
+    name: `roles.${OLD} or roles["${OLD}"] straight after "roles", the index in ", ' or backticks, after at most one non-null "!" and an optional "?."`,
     scope: everywhere,
     find: (t) => matchLines(t, /roles!?(?:\??\.observer(?![-\w])|(?:\?\.)?\[\s*(["'`])observer\1\s*\])/g),
   },
   roleGrant: {
-    name: `roleGrant(…"${OLD}") with the name as its last argument, in ", ' or backticks`,
+    name: `roleGrant(…"${OLD}") with the name as its last argument, in ", ' or backticks, and no ")" before it in the call`,
     scope: everywhere,
     find: (t) => matchLines(t, /roleGrant\s*\([^)]*?(["'`])observer\1\s*(?:,\s*)?\)/g),
   },
@@ -661,6 +685,10 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `a \`none\` role (sre, ${OLD})`,
         `(${OLD}, verifier, ticketing)`,
         `| \`obs-9\` | ${OLD} | operations | \`base\` |`,
+        // A parenthesised list joined by "and" or "or" rather than commas alone, and one led by "e.g.".
+        `(${OLD}, verifier and ticketing)`,
+        `(sre or ${OLD})`,
+        `(e.g. ${OLD}, sre)`,
       ],
       miss: [
         PRE_RENAME_RESIDUAL,
@@ -678,6 +706,9 @@ describe("each detector fires on its form and stays quiet on the new name", () =
         `\`/replies/<child-task-id>.json\`, one file per ${OLD}, read-only.`,
         `the ${OLD}, the collator and the reviewer`,
         `(one file per ${OLD}, read-only)`,
+        // An "and" splits an item, but neither half is the name alone.
+        `(one file per ${OLD} and sre)`,
+        `the triage seats (the collator and the ${OLD} seat) share one deadline`,
         // English lists of seats beside role names, with no parentheses around them.
         `Each collator, ${OLD} and reviewer seat reads the same share.`,
         `the triage, ${OLD} pair runs in one console`,
