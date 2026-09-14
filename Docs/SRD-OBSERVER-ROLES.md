@@ -743,9 +743,9 @@ applies to a control plane.
 | `system` | — | `systemctl is-system-running` (a non-zero exit is passed through as data: `degraded` is an answer) |
 | `failed` | — | `systemctl list-units --state=failed --no-legend --plain --no-pager` |
 | `unit` | `<unit>` | `systemctl show <unit> --no-pager --property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus` |
-| `journal` | `since=<N>s lines=<M>`, both required, `M <= 500`; optional `unit=<unit>`, `priority=<0-7>` | `journalctl --no-pager --output=short-iso --lines=<M>` plus the since bound, `--unit` and `--priority` — the relative-since spelling is characterisation (§12 Phase 5) |
-| `kernel` | `since=<N>s lines=<M>` | `journalctl --no-pager --dmesg --output=short-iso …` |
-| `disk` | — | `df -P -k` |
+| `journal` | `since=<N>s lines=<M>`, both required, `N` 1–9 digits and at least 1 (`since=0s` exits 77, as `logs` does in §5.4), `M <= 500`; optional `unit=<unit>`, `priority=<0-7>` | `journalctl --no-pager --output=short-iso --lines=<M>` plus the since bound, `--unit` and `--priority` — the relative-since spelling is characterisation (§12 Phase 5) |
+| `kernel` | `since=<N>s lines=<M>`, both required, the same `N` and `M` grammar as `journal` | `journalctl --no-pager --dmesg --output=short-iso …` |
+| `disk` | — | `timeout 20 df -P -k` (a hung network mount would otherwise block `df` indefinitely; exit `124` is a timeout, not an answer. Decided 2026-09-14) |
 | `memory` | — | `cat /proc/meminfo` |
 
 **Refused with exit 77, never reaching a shell:** `shutdown`, `reboot`, `poweroff`, `halt`; `systemctl`
@@ -935,7 +935,7 @@ changes them. An answer is recorded here in place, with its date.
 | **Q11** | Rewrite `observer` in closed ISA criteria and historical SRDs? | **No.** They are records; this document is the erratum | Rewriting a closed criterion's text rewrites what was measured |
 | **Q12** | Rename the `observer-ops` skill to `observer-k8s-ops`? | **No** | Its name is a triage contract (`src/run/triage-envelope.ts:146`, `roles/triage.md:238`), and renaming it changes the one console this document leaves alone |
 | **Q13** | May an engineer edit the live `fleet.yaml`, or is it operator-applied? | **Engineer-editable for the rename (Phase 1); operator-applied for target enrolment (Phase 6)** | The rename is an exact string change. Enrolment writes real hostnames into a public file (Q3). SRD-TRIAGE-CONSOLE §13 Phase 1 records this as "not re-decided" |
-| **Q14** | Which VM operating systems? | **Linux with systemd** | The grammar is `systemctl`/`journalctl`-shaped. Others need their own grammar |
+| **Q14** | Which VM operating systems? | **Linux with systemd.** **Answered 2026-09-14: the oldest systemd in scope is RHEL/Rocky 8, systemd 239**, the floor task 5.0 characterised against (`239-78.el8` in `test/fixtures/observe/vm-tool-shapes.json`) | The grammar is `systemctl`/`journalctl`-shaped. Others need their own grammar |
 
 ---
 
