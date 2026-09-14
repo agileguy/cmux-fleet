@@ -504,12 +504,12 @@ That is the flag-injection hazard `src/security/docker-names.ts:4-11` records fo
 
 | Verb | Accepted arguments | Runs |
 |---|---|---|
-| `ps` | `all`; zero or more `name=<n>` or `label=<k>=<v>` | `docker ps --no-trunc --format '{{json .}}'` plus `--all` and one `--filter` per argument |
+| `ps` | `all`; zero or more `name=<n>` or `label=<k>=<v>` | `docker ps --no-trunc --format '<FIXED PS TEMPLATE>'` plus `--all` and one `--filter` per argument — template selects `ID, Names, Image, Command, CreatedAt, RunningFor, State, Status, HealthStatus, Ports, Labels, Networks`, never `Mounts` (a bind mount's host source path), `LocalVolumes`, `Size` or `Platform` |
 | `inspect` | `<container>` | `docker inspect --type container --format '<FIXED INSPECT TEMPLATE>' <container>` |
 | `logs` | `<container> since=<N>s tail=<M>`, both REQUIRED, `M <= 500` | `docker logs --timestamps --since <N>s --tail <M> <container>` |
 | `stats` | `<container>` | `docker stats --no-stream --no-trunc --format '{{json .}}' <container>` |
 | `top` | `<container>` | `docker top <container>` |
-| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s` with a terminating bound and `--format '{{json .}}'` — the exact bound flag is characterisation (§12 Phase 4) |
+| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}'` — `--until 0s` is the measured terminating bound (`test/fixtures/observe/docker-cli-shapes.json` → `.events.terminating_bound`) |
 | `info` | — | `docker info --format '<FIXED INFO TEMPLATE>'` |
 | `version` | — | `docker version --format '{{json .}}'` |
 

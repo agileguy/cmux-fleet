@@ -1,6 +1,8 @@
 #!/bin/sh
 # docker-forced-command — the whole of what the observer-docker credential can
-# do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4 task 4.1).
+# do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4 task 4.1 landed `ps`, `inspect`,
+# `info` and `version`; round 2 task 4.3 adds `logs`, `stats`, `top` and
+# `events`, and replaces the `ps` format with a fixed template — see below).
 #
 # Installed root-owned, mode 0755, at a path the enrolled account cannot write,
 # and named as the `command=` in that account's one `authorized_keys` line
@@ -24,43 +26,70 @@
 # passed one of those classes (an unvalidated verb or argument might carry a
 # newline that would forge a second, fake log line).
 #
-# ## Verbs (SRD §5.4; this round is task 4.1 of Phase 4 — round 2, task 4.3,
-# adds `logs`, `stats`, `top` and `events`)
+# ## Verbs (SRD §5.4 — this is the final grammar; every verb the role is
+# granted is enabled)
 #
 #   ps       [all] [name=<n> | label=<k>=<v>] ...
-#              -> docker ps --no-trunc --format '{{json .}}' [--all] [--filter ...]
+#              -> docker ps --no-trunc --format <FIXED PS TEMPLATE> [--all] [--filter ...]
 #   inspect  <container>
-#              -> docker inspect --type container --format <FIXED> <container>
+#              -> docker inspect --type container --format <FIXED INSPECT TEMPLATE> <container>
+#   logs     <container> since=<N>s tail=<M>   (both keys REQUIRED, M <= 500)
+#              -> docker logs --timestamps --since <N>s --tail <M> <container>
+#   stats    <container>
+#              -> docker stats --no-stream --no-trunc --format '{{json .}}' <container>
+#   top      <container>
+#              -> docker top <container>
+#   events   since=<N>s [container=<c>]
+#              -> docker events --since <N>s --until 0s --format '{{json .}}' [--filter container=<c>]
 #   info     (no arguments)
-#              -> docker info --format <FIXED>
+#              -> docker info --format <FIXED INFO TEMPLATE>
 #   version  (no arguments)
 #              -> docker version --format '{{json .}}'
 #
-# Every other verb — including `logs`, `stats`, `top` and `events`, which
-# SRD §5.4 grants the ROLE but not yet THIS round, and every mutating or
-# disclosure-shaped verb SRD §5.4 lists as illustrative (`run`, `exec`, `cp`,
-# `system dial-stdio`, ...) — exits 77 naming the verb and runs no `docker` at
-# all. The grammar below is an ALLOWLIST: that list is illustrative, not the
+# Every other verb — every mutating or disclosure-shaped verb SRD §5.4 lists
+# as illustrative (`run`, `exec`, `cp`, `system dial-stdio`, ...), plus a bare
+# `stats` (no container — streams every container) and `logs`/`--follow` in
+# any shape — exits 77 naming the verb and runs no `docker` at all. The
+# grammar below is an ALLOWLIST: that list is illustrative, not the
 # mechanism, exactly as SRD §5.4 says of its own table.
 #
 # ## The disclosure boundary (SRD §0.3, §5.4)
 #
-# The `inspect` and `info` formats are fixed HERE, not left to the worker,
-# because `docker inspect` includes a container's full environment
-# (`.Config.Env`) and bind mounts (`.Mounts`), and `docker info` can include a
-# configured proxy URL WITH CREDENTIALS in it (`.HttpProxy`, `.HttpsProxy`,
-# `.NoProxy`), plus `.RegistryConfig`, `.Labels` and swarm cluster details.
-# None of those fields is ever selected below. `inspect` selects id, name,
-# image, created time, `.State` (Health included, since Health lives inside
-# State), restart count, restart policy, labels and published ports — the
-# fields SRD §5.4 names and nothing past them. `info` selects only version,
-# OS, kernel, architecture, CPU count, total memory, container and image
-# counts, storage driver and cgroup driver — the PM decision SRD §12 task 4.1
-# records. Both are built with Docker's own `json` template function, one
-# field at a time, so the result is valid JSON without a `range`.
+# The `inspect`, `info` and `ps` formats are all fixed HERE, not left to the
+# worker.
 #
-# ## Argument grammar (conservative on purpose — SRD §12 task 4.1 asks this
-# round to choose one for `name=` and `label=` and say so here)
+# `docker inspect` includes a container's full environment (`.Config.Env`)
+# and bind mounts (`.Mounts`). None of those fields is ever selected below.
+# `inspect` selects id, name, image, created time, `.State` (Health included,
+# since Health lives inside State), restart count, restart policy, labels and
+# published ports — the fields SRD §5.4 names and nothing past them.
+#
+# `docker info` can include a configured proxy URL WITH CREDENTIALS in it
+# (`.HttpProxy`, `.HttpsProxy`, `.NoProxy`), plus `.RegistryConfig`, `.Labels`
+# and swarm cluster details. `info` selects only version, OS, kernel,
+# architecture, CPU count, total memory, container and image counts, storage
+# driver and cgroup driver — the PM decision SRD §12 task 4.1 records.
+#
+# `docker ps --format '{{json .}}'` (Docker's own default full-JSON row) also
+# carries `Mounts` (a bind mount's HOST SOURCE PATH — the same disclosure
+# `inspect` excludes above) and `LocalVolumes`; it additionally carries `Size`
+# and `Platform`, which this role has no use for. `ps` (round 2, PM decision)
+# selects `ID, Names, Image, Command, CreatedAt, RunningFor, State, Status,
+# HealthStatus, Ports, Labels, Networks` and never `Mounts`, `LocalVolumes`,
+# `Size` or `Platform`.
+#
+# All three are built with Docker's own `json` template function, one field
+# at a time, so the result is valid JSON without a `range`.
+#
+# `stats`, `top` and `events` are left at Docker's own shapes (`stats` and
+# `events` already go through `{{json .}}`; `top` has no `--format` at all).
+# None of the three returns a container's environment or mounts. They are not
+# free of disclosure, though: `top` lists each process's command line, and
+# `events` names the command in each `exec_create` action, a healthcheck's
+# included (measured against a real daemon). That is the same text `inspect`
+# already returns in `.State.Health.Log`.
+#
+# ## Argument grammar (conservative on purpose)
 #
 #   verb       [a-z][a-z0-9-]{0,31}
 #   container  Docker's own name grammar, ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$,
@@ -82,6 +111,42 @@
 #              everywhere a value reaches `docker`'s argv, at the cost of
 #              refusing a few label values a real deployment might use.
 #   all        the literal word, nothing else, toggles `docker ps --all`.
+#   since=<N>s (logs, events)
+#              `N` is 1 to DIGITS_MAX ASCII digits, immediately followed by
+#              the literal letter `s` — nothing else. This round's three
+#              choices, made here because the SRD leaves them to the
+#              implementation (§12 task 4.3):
+#                1. For `logs`, `since=` and `tail=` may appear in EITHER
+#                   order; the script always emits `--since` before `--tail`
+#                   to docker regardless of the order the caller used, so
+#                   docker's argv is deterministic either way.
+#                2. Leading zeros are accepted in both `since=<N>s` and
+#                   `tail=<M>` (`tail=007` means 7, same as `tail=7`) — POSIX
+#                   `test`'s numeric comparison reads a leading-zero digit
+#                   string as decimal, not octal, so this needs no extra
+#                   normalisation. `tail=0` is a legitimate value (zero
+#                   trailing lines) and is accepted.
+#                3. `N` (and, defensively, the raw digit string of `M`, even
+#                   though `M`'s numeric ceiling is enforced separately
+#                   below) is capped at DIGITS_MAX=10 digits. The SRD sets no
+#                   ceiling on `N` and this script is the only enforcement
+#                   point (the target has no other gate on argv length for a
+#                   single token), so an unbounded digit string is refused
+#                   rather than passed through — 10 digits is 9,999,999,999
+#                   seconds, far more lookback than any real use needs, while
+#                   still being a fixed, auditable bound.
+#   tail=<M>   (logs) `M` uses the digit grammar above, and its numeric value
+#              must additionally be <= 500 (SRD §5.4: an unbounded log pull
+#              hits the 50KB tool-output wall and is clipped from the front —
+#              `skills/observer-ops/SKILL.md:195-232`).
+#   container=<c> (events, optional)
+#              `c` uses the same grammar as `container` above.
+#
+# For `logs`, a REPEATED key (`since=` given twice, say) is refused: the verb
+# takes exactly three arguments (container, then exactly two more), so a
+# repeat of one key necessarily leaves the other key unfilled, which the
+# "both keys required" check below catches without any separate
+# duplicate-detection logic.
 #
 # Whitespace (an embedded newline included), every shell metacharacter and a
 # leading `-` are refused by construction, because none of them is in any
@@ -89,10 +154,10 @@
 #
 # ## Exit codes
 #
-#   77  refused: an unrecognised or not-yet-enabled verb, a missing or
-#       malformed SSH_ORIGINAL_COMMAND, or an argument that fails its
-#       grammar. Matches the verb gate's convention (`docker/verbgate:9`),
-#       so an operator reads one code for "not authorised" across the fleet.
+#   77  refused: an unrecognised verb, a missing or malformed
+#       SSH_ORIGINAL_COMMAND, or an argument that fails its grammar. Matches
+#       the verb gate's convention (`docker/verbgate:9`), so an operator
+#       reads one code for "not authorised" across the fleet.
 #   otherwise  `docker`'s own exit status, via `exec`: this script never
 #       inspects or reinterprets it, and `docker`'s stdout/stderr are never
 #       touched either.
@@ -114,14 +179,30 @@ UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
 DIGIT=0123456789
 ALNUM="${LOWER}${UPPER}${DIGIT}"
 
+# The bound on the digit string of `since=<N>s` (both `logs` and `events`)
+# and, defensively, on the raw digit string of `tail=<M>` (`logs`) — see the
+# header's argument-grammar section, choice 3.
+DIGITS_MAX=10
+
 # `{{json X}}` is Docker's own template function: it marshals X as JSON, so
 # assembling several of them with literal commas and braces produces one
 # valid JSON object without ever pulling in a field this script did not name.
-# See the header for which fields, and why, for each of the two below.
+# See the header for which fields, and why, for each format below.
 INSPECT_FORMAT='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"created":{{json .Created}},"state":{{json .State}},"restart_count":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}'
 INFO_FORMAT='{"version":{{json .ServerVersion}},"os":{{json .OperatingSystem}},"kernel":{{json .KernelVersion}},"architecture":{{json .Architecture}},"cpus":{{json .NCPU}},"mem_total":{{json .MemTotal}},"containers":{{json .Containers}},"images":{{json .Images}},"storage_driver":{{json .Driver}},"cgroup_driver":{{json .CgroupDriver}}}'
-# `ps` and `version` both just want the object docker already builds, in full.
+# The fixed `ps` template (round 2, PM decision) — see the header's
+# disclosure-boundary section for why the default `{{json .}}` row is not
+# used here.
+PS_FORMAT='{"ID":{{json .ID}},"Names":{{json .Names}},"Image":{{json .Image}},"Command":{{json .Command}},"CreatedAt":{{json .CreatedAt}},"RunningFor":{{json .RunningFor}},"State":{{json .State}},"Status":{{json .Status}},"HealthStatus":{{json .HealthStatus}},"Ports":{{json .Ports}},"Labels":{{json .Labels}},"Networks":{{json .Networks}}}'
+# `stats` and `version` both just want the object docker already builds, in
+# full — see the header for why that is safe for these two verbs.
 JSON_FORMAT='{{json .}}'
+
+# The terminating bound for `events` (SRD §5.4; MEASURED, not chosen here:
+# test/fixtures/observe/docker-cli-shapes.json -> .events.terminating_bound).
+# A re-measurement that changes this value is a deliberate edit to this
+# constant, not a guess.
+EVENTS_UNTIL_BOUND=0s
 
 # $1 names the verb this refusal is about, or one of the two fixed
 # placeholders below when there is none yet — never a raw, unvalidated byte
@@ -155,9 +236,15 @@ is_verb() {
 }
 
 # The one grammar the header promises for a container name, a `name=` value,
-# and each half of a `label=<k>=<v>` pair.
+# each half of a `label=<k>=<v>` pair, and a `container=` value.
 is_docker_name() {
   only_chars "$1" "${ALNUM}._-" && first_in "$1" "${ALNUM}" && [ "${#1}" -le 128 ]
+}
+
+# True when $1 is 1 to $2 ASCII digits, nothing else (used for `since=<N>s`
+# and `tail=<M>`; see the header's argument-grammar section).
+is_digit_string() {
+  only_chars "$1" "${DIGIT}" && [ "${#1}" -le "$2" ]
 }
 
 # --- read SSH_ORIGINAL_COMMAND ------------------------------------------------
@@ -197,7 +284,7 @@ case ${verb} in
         name=*)
           value=${arg#name=}
           is_docker_name "${value}" ||
-            refuse "${verb}" "a name= argument's value must be a whole container name, ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+            refuse "${verb}" "a name= value must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
           filters="${filters} --filter ${arg}"
           ;;
         label=*)
@@ -219,7 +306,7 @@ case ${verb} in
           ;;
       esac
     done
-    set -- docker ps --no-trunc --format "${JSON_FORMAT}"
+    set -- docker ps --no-trunc --format "${PS_FORMAT}"
     [ "${all}" = 1 ] && set -- "$@" --all
     # shellcheck disable=SC2086 # unquoted on purpose: every word in $filters
     # is whitespace-free by construction (is_docker_name and the literal
@@ -234,6 +321,93 @@ case ${verb} in
       refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
     exec docker inspect --type container --format "${INSPECT_FORMAT}" "${container}"
     ;;
+  logs)
+    [ "$#" -eq 3 ] ||
+      refuse "${verb}" "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    shift
+    since_val=
+    since_set=0
+    tail_val=
+    tail_set=0
+    for arg in "$@"; do
+      case ${arg} in
+        since=*s)
+          value=${arg#since=}
+          value=${value%s}
+          is_digit_string "${value}" "${DIGITS_MAX}" ||
+            refuse "${verb}" "a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'"
+          since_val=${value}
+          since_set=1
+          ;;
+        tail=*)
+          value=${arg#tail=}
+          is_digit_string "${value}" "${DIGITS_MAX}" ||
+            refuse "${verb}" "a tail= value must be [0-9]{1,${DIGITS_MAX}} digits"
+          [ "${value}" -le 500 ] ||
+            refuse "${verb}" "tail must be <= 500"
+          tail_val=${value}
+          tail_set=1
+          ;;
+        *)
+          refuse "${verb}" "arguments after the container must be since=<N>s or tail=<M>"
+          ;;
+      esac
+    done
+    [ "${since_set}" -eq 1 ] || refuse "${verb}" "since=<N>s is required"
+    [ "${tail_set}" -eq 1 ] || refuse "${verb}" "tail=<M> is required"
+    exec docker logs --timestamps --since "${since_val}s" --tail "${tail_val}" "${container}"
+    ;;
+  stats)
+    [ "$#" -eq 1 ] || refuse "${verb}" "stats takes exactly one argument, a container name; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    exec docker stats --no-stream --no-trunc --format "${JSON_FORMAT}" "${container}"
+    ;;
+  top)
+    [ "$#" -eq 1 ] || refuse "${verb}" "top takes exactly one argument, a container name; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    exec docker top "${container}"
+    ;;
+  events)
+    since_val=
+    since_set=0
+    container_val=
+    container_set=0
+    for arg in "$@"; do
+      case ${arg} in
+        since=*s)
+          value=${arg#since=}
+          value=${value%s}
+          is_digit_string "${value}" "${DIGITS_MAX}" ||
+            refuse "${verb}" "a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'"
+          [ "${since_set}" -eq 0 ] || refuse "${verb}" "since=<N>s may be given only once"
+          since_val=${value}
+          since_set=1
+          ;;
+        container=*)
+          value=${arg#container=}
+          is_docker_name "${value}" ||
+            refuse "${verb}" "a container= value must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+          [ "${container_set}" -eq 0 ] || refuse "${verb}" "container=<c> may be given only once"
+          container_val=${value}
+          container_set=1
+          ;;
+        *)
+          refuse "${verb}" "arguments must be since=<N>s or container=<c>"
+          ;;
+      esac
+    done
+    [ "${since_set}" -eq 1 ] || refuse "${verb}" "since=<N>s is required"
+    set -- docker events --since "${since_val}s" --until "${EVENTS_UNTIL_BOUND}" --format "${JSON_FORMAT}"
+    [ "${container_set}" -eq 1 ] && set -- "$@" --filter "container=${container_val}"
+    exec "$@"
+    ;;
   info)
     [ "$#" -eq 0 ] || refuse "${verb}" "info takes no arguments; got $#"
     exec docker info --format "${INFO_FORMAT}"
@@ -242,10 +416,7 @@ case ${verb} in
     [ "$#" -eq 0 ] || refuse "${verb}" "version takes no arguments; got $#"
     exec docker version --format "${JSON_FORMAT}"
     ;;
-  logs | stats | top | events)
-    refuse "${verb}" "not enabled this round (SRD-OBSERVER-ROLES Docs/SRD-OBSERVER-ROLES.md §12 task 4.3 adds it)"
-    ;;
   *)
-    refuse "${verb}" "not a recognised verb; this round implements ps, inspect, info and version"
+    refuse "${verb}" "not a recognised verb; recognised verbs are ps, inspect, logs, stats, top, events, info and version"
     ;;
 esac

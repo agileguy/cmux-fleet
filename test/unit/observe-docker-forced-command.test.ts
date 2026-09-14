@@ -1,7 +1,8 @@
 /**
  * `scripts/observe/docker-forced-command` is the whole of what the
- * `observer-docker` credential can do (SRD-OBSERVER-ROLES §5.2, §5.4;
- * Phase 4 task 4.1).
+ * `observer-docker` credential can do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4
+ * task 4.1 landed `ps`, `inspect`, `info` and `version`; round 2 task 4.3
+ * adds `logs`, `stats`, `top` and `events`, plus the fixed `ps` template).
  *
  * sshd runs this script directly for the enrolled key
  * (`restrict,command="<installed path>"`, §5.7), with NO arguments of its
@@ -20,12 +21,16 @@
  * write-then-rename below is what makes that reliable even against a
  * process that never gets that far.
  *
- * Both fixed templates (`INSPECT_FORMAT`, `INFO_FORMAT`) are read out of the
- * real script's own source, never retyped here: the "exact argv" tests
+ * Both fixed templates that predate this round (`INSPECT_FORMAT`,
+ * `INFO_FORMAT`) and the one this round adds (`PS_FORMAT`) are read out of
+ * the real script's own source, never retyped here: the "exact argv" tests
  * below build their expectations from the same strings the script runs, so
  * a wording change to a template shows up as a disclosure-assertion failure
  * (if it adds a forbidden field) rather than a silent pass against a stale
- * copy.
+ * copy. The `events` terminating bound is read from the MEASURED fixture
+ * (`test/fixtures/observe/docker-cli-shapes.json`), never typed by hand, so
+ * a re-measurement that changes the bound turns that test red instead of
+ * silently passing against a stale literal.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -51,12 +56,36 @@ function extractSingleQuoted(varName: string): string {
   return value;
 }
 
+/** The `"Key":{{json .Key}}` fields a fixed template selects, in the order they appear. */
+function templateKeys(template: string): string[] {
+  const keys: string[] = [];
+  const re = /"([A-Za-z]+)":\{\{json /g;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint: straightforward exec-loop over a global regex
+  while ((m = re.exec(template)) !== null) keys.push(m[1] as string);
+  return keys;
+}
+
 const INSPECT_FORMAT = extractSingleQuoted("INSPECT_FORMAT");
 const INFO_FORMAT = extractSingleQuoted("INFO_FORMAT");
+const PS_FORMAT = extractSingleQuoted("PS_FORMAT");
 const JSON_FORMAT = extractSingleQuoted("JSON_FORMAT");
 
+/** MEASURED, never hand-typed: test/fixtures/observe/docker-cli-shapes.json. */
+const DOCKER_CLI_SHAPES = JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "observe", "docker-cli-shapes.json"), "utf8")) as {
+  ps: { key_set: string[] };
+  events: { terminating_bound: string[] };
+};
+/** The exact `["--until", "<value>"]` pair this round's `events` verb must carry. */
+const EVENTS_TERMINATING_BOUND: string[] = DOCKER_CLI_SHAPES.events.terminating_bound;
+
+/** MEASURED, never hand-typed: test/fixtures/observe/docker-forbidden-verbs.json. */
+const DOCKER_FORBIDDEN_VERBS = JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "observe", "docker-forbidden-verbs.json"), "utf8")) as {
+  entries: Array<{ command: string; source: string }>;
+};
+
 function psArgv(extra: string[] = []): string[] {
-  return ["ps", "--no-trunc", "--format", JSON_FORMAT, ...extra];
+  return ["ps", "--no-trunc", "--format", PS_FORMAT, ...extra];
 }
 function inspectArgv(container: string): string[] {
   return ["inspect", "--type", "container", "--format", INSPECT_FORMAT, container];
@@ -66,6 +95,19 @@ function infoArgv(): string[] {
 }
 function versionArgv(): string[] {
   return ["version", "--format", JSON_FORMAT];
+}
+function logsArgv(container: string, since: string, tail: string): string[] {
+  return ["logs", "--timestamps", "--since", `${since}s`, "--tail", tail, container];
+}
+function statsArgv(container: string): string[] {
+  return ["stats", "--no-stream", "--no-trunc", "--format", JSON_FORMAT, container];
+}
+function topArgv(container: string): string[] {
+  return ["top", container];
+}
+function eventsArgv(since: string, container?: string): string[] {
+  const base = ["events", "--since", `${since}s`, ...EVENTS_TERMINATING_BOUND, "--format", JSON_FORMAT];
+  return container ? [...base, "--filter", `container=${container}`] : base;
 }
 
 const FAKE_DOCKER = `#!/bin/sh
@@ -160,9 +202,10 @@ function runScript(shell: string, sshOriginalCommand: string | undefined, opts: 
 }
 
 describe("the fixed templates (SRD §0.3, §5.4) — the disclosure assertion", () => {
-  test("both templates were found in the real script and use docker's json function", () => {
+  test("all three fixed templates were found in the real script and use docker's json function", () => {
     expect(INSPECT_FORMAT).toContain("{{json ");
     expect(INFO_FORMAT).toContain("{{json ");
+    expect(PS_FORMAT).toContain("{{json ");
     expect(JSON_FORMAT).toBe("{{json .}}");
   });
 
@@ -209,6 +252,30 @@ describe("the fixed templates (SRD §0.3, §5.4) — the disclosure assertion", 
   test("the info template never discloses HttpProxy, HttpsProxy, NoProxy, RegistryConfig, daemon Labels, or swarm details", () => {
     for (const forbidden of ["HttpProxy", "HttpsProxy", "NoProxy", "RegistryConfig", "Swarm", ".Labels"]) {
       expect(INFO_FORMAT).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("the fixed ps template (round 2 PM decision) — the disclosure assertion", () => {
+  const EXPECTED_PS_KEYS = ["ID", "Names", "Image", "Command", "CreatedAt", "RunningFor", "State", "Status", "HealthStatus", "Ports", "Labels", "Networks"];
+
+  test("the ps template's key list equals exactly the twelve named keys", () => {
+    expect(templateKeys(PS_FORMAT)).toEqual(EXPECTED_PS_KEYS);
+  });
+
+  test("every ps template key is in the fixture's measured ps key set (test/fixtures/observe/docker-cli-shapes.json → .ps.key_set)", () => {
+    for (const key of EXPECTED_PS_KEYS) {
+      expect(DOCKER_CLI_SHAPES.ps.key_set).toContain(key);
+    }
+  });
+
+  test("the ps template never discloses Mounts, LocalVolumes, Size or Platform", () => {
+    // REVERT CHECK: adding "Mounts" (or any of the other three) back to
+    // PS_FORMAT in the real script must turn this assertion red. Mounts in
+    // particular carries a bind mount's host source path — the same class
+    // of disclosure the inspect template above excludes.
+    for (const forbidden of ["Mounts", "LocalVolumes", "Size", "Platform"]) {
+      expect(PS_FORMAT).not.toContain(forbidden);
     }
   });
 });
@@ -293,6 +360,73 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       expect(r.exitCode).toBe(0);
       expect(r.docker).toEqual(versionArgv());
     });
+
+    test("logs: container, since=, tail= in written order", () => {
+      const r = runScript(shell, "logs web-1 since=60s tail=10");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "60", "10"));
+    });
+
+    test("logs: since= and tail= reversed still produce the same, canonically-ordered argv", () => {
+      const r = runScript(shell, "logs web-1 tail=10 since=60s");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "60", "10"));
+    });
+
+    test("logs: tail=0 is accepted", () => {
+      const r = runScript(shell, "logs web-1 since=60s tail=0");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "60", "0"));
+    });
+
+    test("logs: tail at the 500 cap is accepted", () => {
+      const r = runScript(shell, "logs web-1 since=60s tail=500");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "60", "500"));
+    });
+
+    test("logs: leading zeros in since= and tail= are accepted and passed through unnormalised", () => {
+      const r = runScript(shell, "logs web-1 since=007s tail=007");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "007", "007"));
+    });
+
+    test("logs: a since= digit string at the 10-digit cap is accepted", () => {
+      const since = "1".repeat(10);
+      const r = runScript(shell, `logs web-1 since=${since}s tail=10`);
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", since, "10"));
+    });
+
+    test("stats: one container", () => {
+      const r = runScript(shell, "stats web-1");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(statsArgv("web-1"));
+    });
+
+    test("top: one container", () => {
+      const r = runScript(shell, "top web-1");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(topArgv("web-1"));
+    });
+
+    test("events: since= only carries the measured terminating bound from the fixture", () => {
+      const r = runScript(shell, "events since=60s");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(eventsArgv("60"));
+    });
+
+    test("events: since= plus container=", () => {
+      const r = runScript(shell, "events since=60s container=web-1");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(eventsArgv("60", "web-1"));
+    });
+
+    test("events: container= before since= still produces the same, canonically-ordered argv", () => {
+      const r = runScript(shell, "events container=web-1 since=60s");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(eventsArgv("60", "web-1"));
+    });
   });
 
   describe("docker's own exit status and output reach the caller unchanged", () => {
@@ -343,10 +477,6 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       ["a mutating verb from the illustrative forbidden list (SRD §5.4)", "rm web-1", "rm"],
       ["another illustrative forbidden verb", "exec web-1", "exec"],
       ["a disclosure-shaped verb refused on its own grounds (SRD §5.4)", "cp web-1", "cp"],
-      ["logs — granted to the role but not enabled this round", "logs web-1 since=60s tail=10", "logs"],
-      ["stats — granted to the role but not enabled this round", "stats web-1", "stats"],
-      ["top — granted to the role but not enabled this round", "top web-1", "top"],
-      ["events — granted to the role but not enabled this round", "events since=60s", "events"],
       ["inspect with zero arguments", "inspect", "inspect"],
       ["inspect with two arguments", "inspect web-1 web-2", "inspect"],
       ["inspect: container fails Docker's name grammar (bad character)", "inspect web!1", "inspect"],
@@ -361,6 +491,30 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       ["ps: a label= with no second '='", "ps label=onlykey", "ps"],
       ["ps: a label= key with a leading '-'", "ps label=-k=v", "ps"],
       ["ps: a label= value containing a second '='", "ps label=k=v=extra", "ps"],
+      ["logs: missing both since= and tail=", "logs web-1", "logs"],
+      ["logs: missing tail=", "logs web-1 since=60s", "logs"],
+      ["logs: missing since=", "logs web-1 tail=10", "logs"],
+      ["logs: since= repeated, tail= never given", "logs web-1 since=60s since=90s", "logs"],
+      ["logs: tail= repeated, since= never given", "logs web-1 tail=10 tail=20", "logs"],
+      ["logs: an extra token after both keys (--follow)", "logs web-1 since=60s tail=10 --follow", "logs"],
+      ["logs: an extra token after both keys (follow=true)", "logs web-1 since=60s tail=10 follow=true", "logs"],
+      ["logs: tail= is not an integer", "logs web-1 since=60s tail=abc", "logs"],
+      ["logs: tail= exceeds the 500 cap", "logs web-1 since=60s tail=501", "logs"],
+      ["logs: since= is missing its trailing 's'", "logs web-1 since=60 tail=10", "logs"],
+      ["logs: since= digit string longer than the 10-digit cap", `logs web-1 since=${"1".repeat(11)}s tail=10`, "logs"],
+      ["logs: container fails Docker's name grammar", "logs -web-1 since=60s tail=10", "logs"],
+      ["stats with zero arguments (a bare 'stats' would stream every container)", "stats", "stats"],
+      ["stats with two arguments", "stats web-1 web-2", "stats"],
+      ["stats: container fails Docker's name grammar", "stats -web-1", "stats"],
+      ["top with zero arguments", "top", "top"],
+      ["top with two arguments", "top web-1 web-2", "top"],
+      ["top: container fails Docker's name grammar", "top -web-1", "top"],
+      ["events: missing since=", "events container=web-1", "events"],
+      ["events: an unrecognised argument", "events since=60s foo", "events"],
+      ["events: container= fails Docker's name grammar", "events since=60s container=-web-1", "events"],
+      ["events: since= digit string longer than the 10-digit cap", `events since=${"1".repeat(11)}s`, "events"],
+      ["events: since= given twice", "events since=60s since=120s", "events"],
+      ["events: container= given twice", "events since=60s container=web-1 container=web-2", "events"],
       ["a verb with a leading '-'", "-V web-1", "(unrecognised)"],
       ["a verb starting with a digit", "1ps web-1", "(unrecognised)"],
       ["a verb longer than 32 characters", `${"p".repeat(33)} web-1`, "(unrecognised)"],
@@ -383,6 +537,10 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       ["a ps label= key", "ps label=-k=v"],
       ["a ps label= value", "ps label=k=-v"],
       ["the inspect container", "inspect -web-1"],
+      ["the logs container", "logs -web-1 since=60s tail=10"],
+      ["the stats container", "stats -web-1"],
+      ["the top container", "top -web-1"],
+      ["an events container= value", "events since=60s container=-web-1"],
     ];
     test.each(cases)("%s", (_label, cmd) => {
       const r = runScript(shell, cmd);
@@ -417,5 +575,18 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
     const refused = runScript(shell, `inspect ${over}`);
     expect(refused.exitCode).toBe(77);
     expect(refused.docker).toBeNull();
+  });
+
+  describe("the forbidden-verbs fixture walk (test/fixtures/observe/docker-forbidden-verbs.json)", () => {
+    // Every entry — including the three that start with an allowed verb
+    // (`stats`, `logs --follow`, `logs web since=60s tail=10 --follow`) —
+    // must be refused by the grammar, exit 77, with no docker invocation.
+    // This is the SRD's revert check: adding a verb (e.g. `restart`) to the
+    // case statement turns the test named for that entry's command red.
+    test.each(DOCKER_FORBIDDEN_VERBS.entries.map((e) => [e.command] as [string]))("%s is refused, no docker invocation recorded", (command) => {
+      const r = runScript(shell, command);
+      expect(r.exitCode).toBe(77);
+      expect(r.docker).toBeNull();
+    });
   });
 });
