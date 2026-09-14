@@ -41,13 +41,17 @@ type Case = {
 
 type TemplateRun = { template: string; exit: number; stderr_first_line: string };
 
+type DockerError = { command: string; env?: string[]; user?: string; exit: number; timed_out: boolean; stderr_first_line: string };
+
 type RenderedRun = {
   measured_with: { client_version: string; uncommitted_changes_to_measured_files: string[] | null };
   forced_command_sha256: string;
   shell: string;
   default_ps_key_set: string[];
   ps_health_status: string;
+  ps_healthstatus_template: TemplateRun;
   inspect_health_forms: { if_form: TemplateRun; index_form: TemplateRun };
+  docker_errors: Record<"daemon_unreachable" | "socket_permission_denied" | "no_such_container", DockerError>;
   events_prefix_match: Record<string, string[]>;
   cases: Case[];
   matching: { events_container_filter: Record<string, string[]>; ps_name_filter: Record<string, string[]> };
@@ -147,6 +151,11 @@ for (const [version, run] of runs) {
     test("docker's own ps row has HealthStatus only from 29.5.0, so the template leaves it out and Status shows health", () => {
       const hasField = !olderThan(run.measured_with.client_version, PS_HEALTHSTATUS_ADDED_IN);
       expect(run.default_ps_key_set.includes("HealthStatus")).toBe(hasField);
+      const template = run.ps_healthstatus_template;
+      expect({ renders: template.exit === 0, no_such_field: template.stderr_first_line.includes("can't evaluate field HealthStatus") }).toEqual({
+        renders: hasField,
+        no_such_field: !hasField,
+      });
       expect(Object.keys(PS_SHAPE)).not.toContain("HealthStatus");
       expect(run.ps_health_status).toContain("(healthy)");
     });
@@ -168,6 +177,8 @@ for (const [version, run] of runs) {
       expect(if_form.exit).not.toBe(0);
       expect(if_form.stderr_first_line).toContain('map has no entry for key "Health"');
       expect({ exit: index_form.exit, stderr_first_line: index_form.stderr_first_line }).toEqual({ exit: 0, stderr_first_line: "" });
+      expect(if_form.template).toContain("{{if .State.Health}}");
+      expect(index_form.template).toContain('{{with index .State "Health"}}');
       expect(INSPECT_FORMAT).toContain('{{with index .State "Health"}}');
     });
 
@@ -189,6 +200,21 @@ for (const [version, run] of runs) {
       const logs = one("logs char-logs since=600s tail=5");
       expect(logs.lines).toBe(5);
       expect(logs.timestamp_prefix_bytes).toBe(31);
+    });
+
+    test("logs read tail=08 as decimal under busybox sh: eight lines", () => {
+      expect(one("logs char-logs since=600s tail=08").lines).toBe(8);
+    });
+
+    test("docker's own failures exit 1, and each probe hit the failure it is named for", () => {
+      const { daemon_unreachable, socket_permission_denied, no_such_container } = run.docker_errors;
+      for (const e of [daemon_unreachable, socket_permission_denied, no_such_container]) {
+        expect({ command: e.command, exit: e.exit, timed_out: e.timed_out }).toEqual({ command: e.command, exit: 1, timed_out: false });
+      }
+      expect(daemon_unreachable.stderr_first_line).toMatch(/failed to connect to the docker API|Cannot connect to the Docker daemon/);
+      expect(socket_permission_denied.user).toBe("nobody");
+      expect(socket_permission_denied.stderr_first_line).toContain("permission denied while trying to connect to the");
+      expect(no_such_container.stderr_first_line).toContain("No such container: char-nosuch");
     });
 
     test("events returned only allowlisted actions, and container= kept to that container", () => {
@@ -218,17 +244,19 @@ for (const [version, run] of runs) {
 
     // The skill tells a worker to check every returned name because neither filter is exact. `name=w.b`
     // matching all four names separates a regular expression from a substring match, which would match none;
-    // `container=w.b` matching none shows container= is not one.
-    test("events container= matches a name prefix, and ps name= an unanchored regular expression", () => {
+    // `container=w.b` matching none shows container= is not one, and an id prefix shows it also reads ids.
+    test("events container= matches a name or id prefix, and ps name= an unanchored regular expression over names", () => {
       expect(run.matching.events_container_filter).toEqual({
         "container=web": ["web", "web-2", "webhook"],
-        "container=eb": [],
+        "container=ebh": [],
         "container=w.b": [],
+        "container=<first 12 characters of web's id>": ["web"],
       });
       expect(run.matching.ps_name_filter).toEqual({
         "name=web": ["myweb", "web", "web-2", "webhook"],
         "name=w.b": ["myweb", "web", "web-2", "webhook"],
         "name=eb": ["myweb", "web", "web-2", "webhook"],
+        "name=<first 12 characters of web's id>": [],
       });
     });
   });

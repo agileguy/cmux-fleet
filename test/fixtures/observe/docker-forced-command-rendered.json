@@ -4,7 +4,7 @@
     "28.5.2": {
       "measured_with": {
         "script": "scripts/observe/characterise-docker",
-        "git_head": "5c1bbcf",
+        "git_head": "fbdb510",
         "uncommitted_changes_to_measured_files": [],
         "dind_image": "2a232a42256f",
         "dind_image_id": "sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac",
@@ -13,10 +13,10 @@
         "client_version": "28.5.2",
         "server_version": "28.5.2",
         "server_api_version": "1.51",
-        "measured_at": "2026-09-14T19:53:52.659Z"
+        "measured_at": "2026-09-14T20:38:01.246Z"
       },
       "forced_command": "scripts/observe/docker-forced-command",
-      "forced_command_sha256": "a475e6bde2290757926bef448d2cb6c692c23cbef8e48cb76d70c7d60527e2b7",
+      "forced_command_sha256": "7cdf8dc83f87bef2657784278325d9a3cf07cadd404468a9c7b8f6a062e39e82",
       "shell": "/bin/busybox",
       "default_ps_key_set": [
         "Command",
@@ -36,6 +36,11 @@
         "Status"
       ],
       "ps_health_status": "Up 2 seconds (healthy)",
+      "ps_healthstatus_template": {
+        "template": "{{json .HealthStatus}}",
+        "exit": 1,
+        "stderr_first_line": "failed to execute template: template: :1:7: executing \"\" at <.HealthStatus>: can't evaluate field HealthStatus in type *formatter.ContainerContext"
+      },
       "inspect_health_forms": {
         "if_form": {
           "template": "{{json .Id}} {{if .State.Health}}x{{end}}",
@@ -46,6 +51,30 @@
           "template": "{{json .Id}} {{with index .State \"Health\"}}x{{end}}",
           "exit": 0,
           "stderr_first_line": ""
+        }
+      },
+      "docker_errors": {
+        "daemon_unreachable": {
+          "command": "ps",
+          "env": [
+            "DOCKER_HOST=unix:///nonexistent.sock"
+          ],
+          "exit": 1,
+          "timed_out": false,
+          "stderr_first_line": "Cannot connect to the Docker daemon at unix:///nonexistent.sock. Is the docker daemon running?"
+        },
+        "socket_permission_denied": {
+          "command": "ps",
+          "user": "nobody",
+          "exit": 1,
+          "timed_out": false,
+          "stderr_first_line": "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.51/containers/json\": dial unix /var/run/docker.sock: connect: permission denied"
+        },
+        "no_such_container": {
+          "command": "inspect char-nosuch",
+          "exit": 1,
+          "timed_out": false,
+          "stderr_first_line": "Error response from daemon: No such container: char-nosuch"
         }
       },
       "events_prefix_match": {
@@ -249,6 +278,16 @@
           "timestamp_prefix_bytes": 31
         },
         {
+          "command": "logs char-logs since=600s tail=08",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 8,
+          "key_sets": null,
+          "canaries_seen": [],
+          "timestamp_prefix_bytes": 31
+        },
+        {
           "command": "stats char-plain",
           "exit": 0,
           "timed_out": false,
@@ -416,8 +455,11 @@
             "web-2",
             "webhook"
           ],
-          "container=eb": [],
-          "container=w.b": []
+          "container=ebh": [],
+          "container=w.b": [],
+          "container=<first 12 characters of web's id>": [
+            "web"
+          ]
         },
         "ps_name_filter": {
           "name=web": [
@@ -437,14 +479,15 @@
             "web",
             "web-2",
             "webhook"
-          ]
+          ],
+          "name=<first 12 characters of web's id>": []
         }
       }
     },
     "29.7.2": {
       "measured_with": {
         "script": "scripts/observe/characterise-docker",
-        "git_head": "5c1bbcf",
+        "git_head": "fbdb510",
         "uncommitted_changes_to_measured_files": [],
         "dind_image": "docker:dind",
         "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
@@ -453,10 +496,10 @@
         "client_version": "29.7.2",
         "server_version": "29.7.2",
         "server_api_version": "1.55",
-        "measured_at": "2026-09-14T19:53:22.472Z"
+        "measured_at": "2026-09-14T20:37:30.221Z"
       },
       "forced_command": "scripts/observe/docker-forced-command",
-      "forced_command_sha256": "a475e6bde2290757926bef448d2cb6c692c23cbef8e48cb76d70c7d60527e2b7",
+      "forced_command_sha256": "7cdf8dc83f87bef2657784278325d9a3cf07cadd404468a9c7b8f6a062e39e82",
       "shell": "/bin/busybox",
       "default_ps_key_set": [
         "Command",
@@ -477,6 +520,11 @@
         "Status"
       ],
       "ps_health_status": "Up 2 seconds (healthy)",
+      "ps_healthstatus_template": {
+        "template": "{{json .HealthStatus}}",
+        "exit": 0,
+        "stderr_first_line": ""
+      },
       "inspect_health_forms": {
         "if_form": {
           "template": "{{json .Id}} {{if .State.Health}}x{{end}}",
@@ -487,6 +535,30 @@
           "template": "{{json .Id}} {{with index .State \"Health\"}}x{{end}}",
           "exit": 0,
           "stderr_first_line": ""
+        }
+      },
+      "docker_errors": {
+        "daemon_unreachable": {
+          "command": "ps",
+          "env": [
+            "DOCKER_HOST=unix:///nonexistent.sock"
+          ],
+          "exit": 1,
+          "timed_out": false,
+          "stderr_first_line": "failed to connect to the docker API at unix:///nonexistent.sock; check if the path is correct and if the daemon is running: dial unix /nonexistent.sock: connect: no such file or directory"
+        },
+        "socket_permission_denied": {
+          "command": "ps",
+          "user": "nobody",
+          "exit": 1,
+          "timed_out": false,
+          "stderr_first_line": "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+        },
+        "no_such_container": {
+          "command": "inspect char-nosuch",
+          "exit": 1,
+          "timed_out": false,
+          "stderr_first_line": "Error response from daemon: No such container: char-nosuch"
         }
       },
       "events_prefix_match": {
@@ -690,6 +762,16 @@
           "timestamp_prefix_bytes": 31
         },
         {
+          "command": "logs char-logs since=600s tail=08",
+          "exit": 0,
+          "timed_out": false,
+          "stderr_first_line": "",
+          "lines": 8,
+          "key_sets": null,
+          "canaries_seen": [],
+          "timestamp_prefix_bytes": 31
+        },
+        {
           "command": "stats char-plain",
           "exit": 0,
           "timed_out": false,
@@ -851,8 +933,11 @@
             "web-2",
             "webhook"
           ],
-          "container=eb": [],
-          "container=w.b": []
+          "container=ebh": [],
+          "container=w.b": [],
+          "container=<first 12 characters of web's id>": [
+            "web"
+          ]
         },
         "ps_name_filter": {
           "name=web": [
@@ -872,7 +957,8 @@
             "web",
             "web-2",
             "webhook"
-          ]
+          ],
+          "name=<first 12 characters of web's id>": []
         }
       }
     }

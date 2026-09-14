@@ -1,7 +1,7 @@
 {
   "measured_with": {
     "script": "scripts/observe/characterise-docker",
-    "git_head": "5c1bbcf",
+    "git_head": "fbdb510",
     "uncommitted_changes_to_measured_files": [],
     "dind_image": "docker:dind",
     "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
@@ -10,7 +10,7 @@
     "client_version": "29.7.2",
     "server_version": "29.7.2",
     "server_api_version": "1.55",
-    "measured_at": "2026-09-14T19:53:22.472Z"
+    "measured_at": "2026-09-14T20:37:30.221Z"
   },
   "ps": {
     "argv": [
@@ -254,7 +254,7 @@
         "exit": 0,
         "terminated_on_its_own": true,
         "dropped_partial_last_line": false,
-        "ms": 46,
+        "ms": 42,
         "events": 46,
         "char_events_actions": [
           "create",
@@ -270,14 +270,14 @@
           "--since",
           "60s",
           "--until",
-          "1789415579",
+          "1789418226",
           "--format",
           "{{json .}}"
         ],
         "exit": 0,
         "terminated_on_its_own": true,
         "dropped_partial_last_line": false,
-        "ms": 43,
+        "ms": 37,
         "events": 46,
         "char_events_actions": [
           "create",
@@ -298,8 +298,8 @@
         "exit": 143,
         "terminated_on_its_own": false,
         "dropped_partial_last_line": false,
-        "ms": 8099,
-        "events": 100,
+        "ms": 8047,
+        "events": 99,
         "char_events_actions": [
           "create",
           "attach",
@@ -312,7 +312,7 @@
     "until_current_second": {
       "seen_by_an_immediate_query": false,
       "seen_after_1100ms": true,
-      "event_ms_into_its_second": 752
+      "event_ms_into_its_second": 833
     },
     "action_allowlist": {
       "filters": [
@@ -382,7 +382,7 @@
     },
     "buffer": {
       "exec_flood": 120,
-      "events_returned": 247,
+      "events_returned": 250,
       "allowlisted_events_returned": 0,
       "char_plain_start_returned": false,
       "char_plain_start_returned_allowlisted": false
