@@ -64,9 +64,9 @@ on the target side rather than trusting the worker to leave those fields out.
 | Claim | Rests on |
 |---|---|
 | Where the role identifier is load-bearing | `rg` over the tree, then every hit read at its line (§4.1 cites each) |
-| The honeypot occupies `/var/run/docker.sock` | `docker/Dockerfile:406-417`, `docker/honeypot.cjs:7-23` |
+| The honeypot occupies `/var/run/docker.sock` | `docker/Dockerfile:417-428`, `docker/honeypot.cjs:7-23` |
 | Workers cannot reach host ports | `src/security/gateway-block.ts:1-23`, `src/security/network.ts:1-10` |
-| Egress is one CONNECT proxy, fleet-wide, any port 1-65535 | `docker/connect-proxy.cjs:30-40`, `docker/egress-policy.cjs:46-50`, `src/run/worker-env.ts:955-975` |
+| Egress is one CONNECT proxy, fleet-wide, any port 1-65535 | `docker/connect-proxy.cjs:30-40`, `docker/egress-policy.cjs:46-50`, `src/run/worker-env.ts:959-979` |
 | How gcloud VM verbs classify | `docker/verbgate:356-399`, `:423-466` |
 | Harvest validates artifacts by FILENAME | `src/harvest/reconcile.ts:144-175`, `:743-801`, `:814` |
 | The shapes `docker` and `journalctl` emit | **Not established.** §12 makes this committed fixture work, done before engineers are briefed |
@@ -84,7 +84,7 @@ Nothing in this document was run against a cluster, a Docker host, a VM or the f
 2. **"A docker host" cannot mean the local colima daemon without reversing a stated invariant.** A
    worker has "NO Docker socket mount" (`docker/honeypot.cjs:9-10`, ISC-25/26/29/30). The path
    `/var/run/docker.sock` is a honeypot that records any connect as an escape attempt
-   (`docker/Dockerfile:406-417`). The host's own ports are dropped at the bridge gateway
+   (`docker/Dockerfile:417-428`). The host's own ports are dropped at the bridge gateway
    (`src/security/gateway-block.ts:15-23`). And the local daemon is the one running every worker, so
    reading it means reading the fleet's own relay and sibling containers. Q1 records the default.
 3. **`gcloud compute ssh` is not a route to a cloud VM.** `ssh` and `scp` are in the gate's mutating
@@ -201,7 +201,7 @@ pairs: `test/unit/triage-plan.test.ts:449-454` and `test/unit/dispatch-request.t
 
 - **Network.** Workers sit on an `--internal` bridge (`src/security/network.ts:1-10`). The gateway is
   dropped, so host ports are unreachable (`src/security/gateway-block.ts:15-23`). A worker with
-  `egress_access: true` is handed `HTTPS_PROXY` (`src/run/worker-env.ts:967-975`) to a CONNECT proxy
+  `egress_access: true` is handed `HTTPS_PROXY` (`src/run/worker-env.ts:971-979`) to a CONNECT proxy
   that allows exactly `egress.allow`'s host:port pairs (`docker/connect-proxy.cjs:30-40`). Any port
   from 1 to 65535 is a legal rule (`docker/egress-policy.cjs:46-50`). **The allowlist is fleet-wide:**
   every routed worker reaches every allowed destination (`fleet.yaml:530-534`,
@@ -215,7 +215,7 @@ pairs: `test/unit/triage-plan.test.ts:449-454` and `test/unit/dispatch-request.t
   `secrets:` (`src/config/schema.ts:246-260`). The value lands in a file, and the environment receives
   `<NAME>_FILE` (`Docs/SRD-DEPLOY-OPS.md:1156-1159`). Values are swept as leak needles unless marked
   `credential: false` (`:1168-1189`). The prefixes `PIFLEET_`, `GIT_CONFIG_`, `CLOUDSDK_` and `GOOGLE_`
-  are reserved (`src/run/worker-env.ts:469`).
+  are reserved (`src/run/worker-env.ts:473`).
 
 ### 2.4 What the harvest checks
 
@@ -336,7 +336,7 @@ the fleet's read-only diagnostic role."*
 | `skills/observer-ops/`, `observer-ops.json`/`.md`, `OBSERVER_ARTIFACT_FILE` (`src/run/triage-envelope.ts:146`), `roles/triage.md:238` | Skill and artifact names. They are triage contracts (§4.5). See Q12 |
 | `observer` in `triage.json` rows (`src/run/triage-document.ts:287`) | Holds the WORKER ID that produced a row |
 | `observer_blocked` (`src/run/triage-incident.ts:109`, `src/run/triage-notify.ts:83`) | An incident kind |
-| `observerTuiWorkers`, `observerTuiEpochWarning` (`src/config/schema.ts:1947`, `:1981`; `src/cli/commands/config.ts:15-16`) | Symbol names. They read as English and renaming them buys nothing |
+| `observerTuiWorkers`, `observerTuiEpochWarning` (`src/config/schema.ts:2009`, `:2043`; `src/cli/commands/config.ts:15-16`) | Symbol names. They read as English and renaming them buys nothing |
 | Worker ids `obs-1`, `obs-2`, `obs-t1`, `obs-t2`, `obs-t3` | Ids, and the triage roster's keys |
 | The ServiceAccount `pifleet/observer` (`fleet.yaml:565-567`) | A cluster-side object outside this repository |
 | "observer(s)" in prose: `roles/triage.md`, `.claude/skills/fleet/Workflows/Triage.md`, `Consoles.md`, `README.md:89`, `triage/console.yaml`, source docblocks | The triage console's concept of a seat that looks |
@@ -464,13 +464,16 @@ Every hop has a precedent in the tree:
 **Established by measurement (§12 task 3.0, re-run at the Phase 3 review):** the facts this section
 rests on are in `test/fixtures/observe/ssh-transport-facts.json`, written by
 `scripts/observe/characterise-ssh-transport`. That script delivers the secrets through `buildWorkerEnv`
-with this section's `multiline: true` allowlist, installs the shim and the ProxyCommand with the
-Dockerfile's own COPY lines, and runs every probe through `observe-ssh` and the real CONNECT proxy.
+with this section's `multiline: true` allowlist and installs the shim and the ProxyCommand with the
+Dockerfile's own COPY lines. Most probes run through `observe-ssh` and the real CONNECT proxy; three
+run raw `ssh` instead — the key at its delivered mode, the key with no trailing newline, and the
+no-keepalive control — because those measure the reasons the shim exists rather than the shim itself.
 OpenSSH refuses the key at its delivered mode `0444`, and also refuses a key with no trailing newline.
 So the shim copies the key to a `0600` file in `/tmp` that always ends in a newline. The fixture reads
 that location off the container. A remote exit 77 arrives as 77; a host-key mismatch and a proxy
 refusal both exit 255. Not measured: a Linux host's bind-mount ownership (the run was on Colima), and
-a rebuilt worker image (the client was the newest local image plus the two COPY lines).
+a rebuilt worker image (the client was the newest local image plus `openssh-client` and the two COPY
+lines).
 
 ### 5.3 Envelope inputs
 
@@ -571,7 +574,7 @@ Each field, with its reason:
   is no `edit`.
 - **`cloud_access: false`.** A Docker inquiry has no use for a Google identity, and granting one would
   also trip `kubeconfigScopeWarning` (`src/config/schema.ts:1901-1934`) for nothing.
-- **Secrets names** avoid every reserved prefix (`src/run/worker-env.ts:469`) and follow the
+- **Secrets names** avoid every reserved prefix (`src/run/worker-env.ts:473`) and follow the
   `credential: false` rule for values that legitimately appear in an artifact
   (`Docs/SRD-DEPLOY-OPS.md:1168-1193`). A report naming the host it looked at must not be refused as a
   leak.
@@ -883,7 +886,7 @@ changes them. An answer is recorded here in place, with its date.
 | **Q6** | `openssh-client` and the shims in the shared base layer, or a new toolchain? | **Shared base layer** | A new toolchain is a five-value enum change (`src/config/schema.ts:175`) plus a stage the toolchain-graph test must admit. `ssh` with no key and no route grants nothing to other roles |
 | **Q7** | A `docker`-group account behind a forced command is root-equivalent if the grammar has a bug. Accept it, or require a GET-only Engine API proxy on each target? | **Accept for v1, with the grammar tested exhaustively**; the proxy stays open. **Answered 2026-09-13: accepted** | The proxy is per-target infrastructure outside this repository, with its own allowlist to maintain |
 | **Q8** | Rename the operations pane title `observer`? | **No** | It is an operator-typed label, and `plannedPane` already accepts the worker id (`src/backends/cmux/operations.ts:402-409`) |
-| **Q9** | Should `observerTuiWorkers`'s warning cover the new roles? | **No** — `observer-k8s` only | Its hazard is repeated watch dispatch through `observer-ops` (`src/config/schema.ts:1940-1945`). The new roles are rpc and inquiry-only |
+| **Q9** | Should `observerTuiWorkers`'s warning cover the new roles? | **No** — `observer-k8s` only | Its hazard is repeated watch dispatch through `observer-ops` (`src/config/schema.ts:2002-2007`). The new roles are rpc and inquiry-only |
 | **Q10** | Seat ids and count for the new roles? | **`obs-d1` and `obs-v1`, one each, rpc, in no console** | Matches the `obs-` convention, and D4 |
 | **Q11** | Rewrite `observer` in closed ISA criteria and historical SRDs? | **No.** They are records; this document is the erratum | Rewriting a closed criterion's text rewrites what was measured |
 | **Q12** | Rename the `observer-ops` skill to `observer-k8s-ops`? | **No** | Its name is a triage contract (`src/run/triage-envelope.ts:146`, `roles/triage.md:238`), and renaming it changes the one console this document leaves alone |
@@ -991,7 +994,7 @@ literal.
   `test/unit/worker-secrets.test.ts:646`, `:657`. **Files:** those three. **Call site:** the pins read
   `DEFAULT_TRIAGE_WORKERS` and `TRIAGE_CONSOLE_ROSTER` against the parsed example.
   *Acceptance: `bun test test/unit/triage-plan.test.ts test/unit/dispatch-request.test.ts test/unit/worker-secrets.test.ts`.*
-- **1.4** Convert the prompt-reading tests. `test/unit/role-briefings.test.ts:49` uses the constant.
+- **1.4** Convert the prompt-reading tests. `test/unit/role-briefings.test.ts:50` uses the constant.
   `test/unit/observer-role.test.ts:49` reads `` `roles/${OBSERVER_K8S_ROLE}.md` `` and `:76` calls
   `roleGrant(config, OBSERVER_K8S_ROLE)`. `test/unit/role-envelope-prose.test.ts:267`, `:276` and
   `:277` do the same. **Files:** those three. **Call site:** `roleGrant`
@@ -1129,7 +1132,7 @@ refuses everything it cannot validate before `ssh` runs. No role uses it yet, so
   `BUILD_CONTEXT_ASSETS` (`src/container/image.ts:102`). **Files:** `docker/ssh-connect.cjs`,
   new `test/unit/ssh-connect.test.ts` (an in-process fake CONNECT server), `docker/Dockerfile`,
   `src/container/image.ts`, `test/unit/dockerfile-build-assets.test.ts` (the enrolled-name pin at
-  `:127`). Five files: over the line by one, because the pin must move with the array.
+  `:132`). Five files: over the line by one, because the pin must move with the array.
   **Call site:** the Dockerfile `COPY`, proven by `test/unit/dockerfile-build-assets.test.ts:98`.
   *Acceptance: `bun test test/unit/ssh-connect.test.ts test/unit/dockerfile-build-assets.test.ts`.*
   *Revert check: drop the asset from `BUILD_CONTEXT_ASSETS`. The test at `:98` goes red.*
@@ -1198,15 +1201,15 @@ and the only commands the credential can run are §5.4's, proven against a recor
 - **4.4** New `skills/observer-docker-ops/SKILL.md`: the brief inputs (§5.3), the verb grammar and
   forbidden list with reasons (§5.4), the artifact contract with a complete JSON example (§5.6), the
   bounded-read rule, and the operator enrolment line (§5.7) for reference. **Files:** the skill.
-  **Call site:** 4.5's role `skills:` list, proven by `test/unit/role-briefings.test.ts:59` ("every
+  **Call site:** 4.5's role `skills:` list, proven by `test/unit/role-briefings.test.ts:60` ("every
   skill a resolved worker asks for has a bundle directory").
   *Acceptance: `bun test test/unit/skill-frontmatter.test.ts`.*
 - **4.5** The role in `fleet.example.yaml` exactly as §5.5 (with `docker-host.example.com`), plus the
   three `secrets.env_allowlist` entries and seat `obs-d1`. New `roles/observer-docker.md`: the role's
   identity line, "read-only describes the TARGET, not your outbox" carried over from
   `roles/observer.md:10-37`, the call-budget rule, and the `submit_report` routing paragraph. Add
-  `observer-docker` to the lists at `test/unit/role-briefings.test.ts:47-56` and
-  `test/unit/config.test.ts:195-197`, and `obs-d1` to the worker set that follows. **Files:**
+  `observer-docker` to the lists at `test/unit/role-briefings.test.ts:48-57` and
+  `test/unit/config.test.ts:196-198`, and `obs-d1` to the worker set that follows. **Files:**
   `fleet.example.yaml`, `roles/observer-docker.md`, `test/unit/role-briefings.test.ts`,
   `test/unit/config.test.ts`. **Call site:** `loadConfig` and `resolveAllWorkers`.
   *Acceptance: `bun run src/cli/index.ts config validate --config fleet.example.yaml`;
@@ -1239,7 +1242,7 @@ and the only commands the credential can run are §5.4's, proven against a recor
 
 **Conflicts:** the forced-command script and its test in 4.1 / 4.3; `skills/observer-docker-ops/SKILL.md`
 in 4.4 / 4.6. **Ordering:** 4.4 must merge before or with 4.5, or the bundle-directory test at
-`test/unit/role-briefings.test.ts:59` is red.
+`test/unit/role-briefings.test.ts:60` is red.
 
 ---
 

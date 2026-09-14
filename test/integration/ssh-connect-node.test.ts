@@ -1,17 +1,18 @@
 /**
- * `docker/ssh-connect.cjs` under the Node the worker image ships
+ * `docker/ssh-connect.cjs` under real Node, via the relay's pinned image
  * (SRD-OBSERVER-ROLES §5.2, task 3.1).
  *
  * WHY THIS EXISTS ALONGSIDE `test/unit/ssh-connect.test.ts`. The unit file
  * spawns whatever `node` is on PATH. On a development Mac that is Bun's `node`
  * wrapper, which reports a TCP reset as a clean end and loses tunnel bytes
  * Node delivers; CI's `test` job installs Bun and pins no Node at all. So
- * nothing there pins what the script does under the runtime it actually runs
- * in. This file runs it under `node:24-bookworm-slim`, by the digest
- * `RELAY_IMAGE` pins, which is also the image CI's `container` job already
- * pulls for the relay. It covers the lifecycle paths where the two runtimes
- * were measured to differ, and the input handling that rests on Node's own URL
- * parser and socket layer.
+ * nothing there pins what the script does under real Node. This file runs it
+ * under `node:24-bookworm-slim`, by the digest `RELAY_IMAGE` pins — the same
+ * image CI's `container` job already pulls for the relay, and major version
+ * 24, but not necessarily the worker's own patch, which floats on
+ * `NODE_TAG` (`docker/Dockerfile`). It covers the lifecycle paths where the
+ * two runtimes were measured to differ, and the input handling that rests on
+ * Node's own URL parser and socket layer.
  *
  * THE SHAPE. One container per test, `--network none`, with the script
  * mounted read-only at `/opt/pifleet/ssh-connect.cjs`, where
