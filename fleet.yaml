@@ -604,6 +604,28 @@ secrets:
       credential: false
     - name: TICKET_PROJECT
       credential: false
+    # observer-docker's three (SRD-OBSERVER-ROLES §5.5, §5.7): an OpenSSH key,
+    # its target's host keys, and its target inventory. Each value spans
+    # lines, so each is marked multiline: true.
+    - name: OBSERVER_DOCKER_SSH_KEY
+      multiline: true
+    - name: OBSERVER_DOCKER_KNOWN_HOSTS
+      credential: false
+      multiline: true
+    - name: OBSERVER_DOCKER_TARGETS
+      credential: false
+      multiline: true
+    # observer-vm's three (SRD-OBSERVER-ROLES §6.6): an OpenSSH key, its
+    # target's host keys, and its target inventory. Each value spans lines,
+    # so each is marked multiline: true.
+    - name: OBSERVER_VM_SSH_KEY
+      multiline: true
+    - name: OBSERVER_VM_KNOWN_HOSTS
+      credential: false
+      multiline: true
+    - name: OBSERVER_VM_TARGETS
+      credential: false
+      multiline: true
 
 # Which changed files count as the EXAM rather than the answer (§8.2). A diff
 # touching one caps the verdict: a worker that can rewrite the suite cannot be
@@ -706,6 +728,40 @@ roles:
                                           # re-dispatched watch pass would run twice. The console
                                           # worker overrides this on itself, below.
     append_system_prompt_file: ./roles/observer-k8s.md
+  observer-docker:                        # read-only diagnostic role for a Docker host
+                                          # (SRD-OBSERVER-ROLES §5). The read-only boundary is
+                                          # the target's forced command, not this entry.
+    model: gabe/gemma-4-26b-a4b-it        # the same model as observer-k8s (§5.5)
+    thinking: high
+    toolchain: base                       # no docker CLI; observe-docker and ssh are in base
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox pair only
+    skills: [pifleet-worker, observer-docker-ops]
+    cloud_access: false                   # holds no Google identity
+    egress_access: true                   # a ROUTE to the proxy; no egress.allow rule here (Q13)
+    secrets:
+      - OBSERVER_DOCKER_SSH_KEY
+      - OBSERVER_DOCKER_KNOWN_HOSTS
+      - OBSERVER_DOCKER_TARGETS
+    isolation: none                       # no repository; the outbox pair is the whole output
+    pane_mode: rpc                        # one seat, obs-d1, in no console (Q10)
+    append_system_prompt_file: ./roles/observer-docker.md
+  observer-vm:                            # read-only diagnostic role for a VM
+                                          # (SRD-OBSERVER-ROLES §6). The read-only boundary is
+                                          # the target's forced command, not this entry.
+    model: gabe/gemma-4-26b-a4b-it        # the same model as observer-k8s and observer-docker
+    thinking: high
+    toolchain: base                       # observe-vm and observe-ssh are in base
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox pair only
+    skills: [pifleet-worker, observer-vm-ops]
+    cloud_access: false                   # Q2: the cloud channel is off
+    egress_access: true                   # a ROUTE to the proxy; no egress.allow rule here (Q13)
+    secrets:
+      - OBSERVER_VM_SSH_KEY
+      - OBSERVER_VM_KNOWN_HOSTS
+      - OBSERVER_VM_TARGETS
+    isolation: none                       # no repository; the outbox pair is the whole output
+    pane_mode: rpc                        # one seat, obs-v1, in no console (Q10)
+    append_system_prompt_file: ./roles/observer-vm.md
   verifier:                               # confirms a remediation actually worked
     model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
     toolchain: base
@@ -1114,6 +1170,10 @@ workers:
   # role (and so obs-2) stays on gabe.
   - {id: obs-1,  role: observer-k8s, model: omlx/gemma-4-26b-a4b-it-bf16, pane_mode: tui, theme: catppuccin-mocha}
   - {id: obs-2,  role: observer-k8s}
+  # One seat, in no console (SRD-OBSERVER-ROLES §5.5, Q10).
+  - {id: obs-d1, role: observer-docker}
+  # One seat, in no console (SRD-OBSERVER-ROLES §6.6, Q10).
+  - {id: obs-v1, role: observer-vm}
   - {id: ver-1,  role: verifier}
   # ---- the `development` console's four seats ----
   #
