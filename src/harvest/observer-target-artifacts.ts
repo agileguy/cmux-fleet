@@ -35,11 +35,12 @@
  * `node:fs/promises`. What the ISA pins for `reconcile.ts` (ISC-246, ISC-333)
  * is narrower, that the file itself names no filesystem API. The parse it
  * delegates here keeps that property. `test/unit/observer-target-artifacts.test.ts`
- * holds this file's import list to exactly those two modules.
+ * holds this file's import list to exactly those two modules, and its code to
+ * none of a list of runtime, process, network and filesystem globals.
  */
 
 import { z } from "zod";
-import { MAX_ITEMS, MAX_SHORT, findCredentialLeaks, workerId } from "../contracts.ts";
+import { MAX_ITEMS, MAX_SHORT, workerId } from "../contracts.ts";
 
 /** The same bound `contracts.ts` puts on a short field of `TicketOpsArtifactSchema`. */
 const shortStr = z.string().max(MAX_SHORT);
@@ -161,10 +162,12 @@ export type ObserverVmOpsArtifact = z.infer<typeof ObserverVmOpsArtifactSchema>;
  *
  * Replacing needle by needle cannot hide overlaps. Once the first needle is
  * gone, a second needle that shared characters with it no longer matches, and
- * its tail stays visible: the two 12-character needles in the overlap test
- * below share a 4-character overlap, and the old per-needle replacement left
- * `<redacted>` plus the last eight characters of the second one. A needle
- * that overlaps its own next occurrence loses its tail the same way.
+ * part of it stays visible. The overlap test in
+ * `test/unit/observer-target-artifacts.test.ts` uses two 12-character needles,
+ * `a` and `b`, that share four characters. The old per-needle replacement left
+ * `<redacted>` plus the last eight characters of `b` for the order `[a, b]`,
+ * and the first eight characters of `a` plus `<redacted>` for `[b, a]`. A
+ * needle that overlaps its own next occurrence loses its tail the same way.
  *
  * So the matches of all needles are collected first, overlapping spans merge,
  * and each merged span becomes one `<redacted>`. A secret containing a shorter
@@ -213,10 +216,182 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
 }
 
 /**
+ * How many levels deep the raw sweep walks. Objects and arrays count alike, and
+ * the document itself is level 1.
+ *
+ * A safety bound on hostile input. Past it, both walks throw `RangeError` with
+ * a fixed message that quotes nothing from the document and claims no
+ * credential; `reconcile.ts` catches it like any other throw and clamps the task
+ * to `failed`. The walks keep their own stack, so the bound is this number and
+ * not however much call stack the caller has left.
+ *
+ * It sits above what the recursive sweep this replaced survived. Measured at
+ * 1b9628e, in a bare script: about 13,900 nested arrays and 24,500 nested
+ * objects. So no document that sweep accepted is refused now. Bun 1.3.11's
+ * `JSON.parse` accepts 2,000,000 levels of either, so the bound is reachable.
+ */
+const MAX_SWEEP_DEPTH = 32_768;
+
+/** How many hits a refusal names. The rest are counted, not named. */
+const MAX_NAMED_LEAKS = 5;
+
+/**
+ * The longest a named hit may be, in characters, before it is cut.
+ *
+ * Not lower. `reconcile.ts` cuts its finding at 512 characters, and
+ * `harvest-reconcile.test.ts` proves that cut safe with a sweep path up to
+ * about 552 characters long. A path cut shorter here would stop that test
+ * exercising what it is there for.
+ */
+const MAX_LEAK_PATH = 1024;
+
+/** What follows a named hit that was cut. */
+const PATH_CUT = "…[path truncated]";
+
+/** One container the sweep is inside, and how far through its children it is. */
+type Frame = {
+  /** The key or index this container sits under. `null` for the document itself. */
+  seg: string | number | null;
+  /** The container, when it is an array. */
+  array: readonly unknown[] | null;
+  /** The container's `Object.entries`, taken once, when it is an object. */
+  entries: ReadonlyArray<[string, unknown]> | null;
+  /** The next child to visit. */
+  next: number;
+};
+
+/** Push a frame for `node`, refusing a document deeper than `MAX_SWEEP_DEPTH`. */
+function enter(stack: Frame[], node: object, seg: string | number | null, kind: string): Frame {
+  if (stack.length >= MAX_SWEEP_DEPTH) {
+    throw new RangeError(
+      `${kind} artifact is nested more than ${MAX_SWEEP_DEPTH} levels deep, past the depth the secret sweep walks`,
+    );
+  }
+  const frame: Frame = Array.isArray(node)
+    ? { seg, array: node, entries: null, next: 0 }
+    : { seg, array: null, entries: Object.entries(node), next: 0 };
+  stack.push(frame);
+  return frame;
+}
+
+/**
+ * The dotted path to child `last` of the innermost frame, or to the innermost
+ * frame itself when `last` is `null`. The spelling `findCredentialLeaks` uses,
+ * so `services[0].selector` reads the same as it always has.
+ *
+ * Called only for a hit the refusal will name. The walks never build a path
+ * for anything else.
+ */
+function spellPath(stack: readonly Frame[], last: string | number | null): string {
+  const parts: string[] = [];
+  let empty = true;
+  const add = (seg: string | number | null): void => {
+    if (seg === null) return;
+    if (typeof seg === "number") {
+      parts.push(`[${seg}]`);
+      empty = false;
+    } else if (empty) {
+      parts.push(seg);
+      empty = seg === "";
+    } else {
+      parts.push(`.${seg}`);
+    }
+  };
+  for (const f of stack) add(f.seg);
+  add(last);
+  return parts.join("");
+}
+
+/** The hits a refusal names, and how many more it only counts. */
+type Leaks = { named: string[]; more: number };
+
+/**
+ * A function that records one hit into `leaks`, given a way to spell it.
+ *
+ * The path is spelled only while the refusal still has room to name it, so a
+ * document with a million hits costs five paths. Named paths are deduplicated
+ * within one walk, as `findCredentialLeaks` and the old key sweep deduplicated
+ * theirs. Once the names are full a hit is counted without being spelled, so
+ * the count can include a hit whose path would repeat a named one.
+ */
+function recorder(leaks: Leaks): (spell: () => string) => void {
+  const seen = new Set<string>();
+  return (spell) => {
+    if (leaks.named.length >= MAX_NAMED_LEAKS) {
+      leaks.more++;
+      return;
+    }
+    const path = spell();
+    if (seen.has(path)) return;
+    seen.add(path);
+    leaks.named.push(path);
+  };
+}
+
+/**
+ * Where a known secret appears in a string VALUE of `raw`, recorded in document
+ * order, in the order and spelling `findCredentialLeaks` reports.
+ *
+ * ## Why not `findCredentialLeaks` itself
+ *
+ * `contracts.ts`'s walk spells a path for EVERY string before it looks at one,
+ * recurses, and returns every hit, and the refusal used to name them all. For a
+ * chain of objects `d` deep with a needle at each level and `L`-character keys,
+ * the paths total L·d²/2 characters. Measured at 1b9628e: a 562 KiB chain with
+ * d=4000 and L=100 cost +2,324 MiB RSS, 540 ms and an 807,810,053-character
+ * message. A 97 KiB document with 1000 needles under a spine 64 objects deep
+ * with 1000-character keys cost +185 MiB and a 64,069,943-character message.
+ * Ticket-ops still uses that function, on documents its schema has bounded.
+ *
+ * Here the walk keeps one frame per level and a cursor into each, spells a path
+ * only through `record`, and needs `needles` already filtered of blanks.
+ */
+function findSecretValues(
+  raw: unknown,
+  needles: readonly string[],
+  kind: string,
+  record: (spell: () => string) => void,
+): void {
+  const holds = (s: string): boolean => needles.some((n) => s.includes(n));
+  if (typeof raw === "string") {
+    if (holds(raw)) record(() => "<root>");
+    return;
+  }
+  if (raw === null || typeof raw !== "object") return;
+  const stack: Frame[] = [];
+  enter(stack, raw, null, kind);
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1]!;
+    const i = top.next++;
+    let seg: string | number;
+    let v: unknown;
+    if (top.array !== null) {
+      if (i >= top.array.length) {
+        stack.pop();
+        continue;
+      }
+      seg = i;
+      v = top.array[i];
+    } else {
+      if (i >= top.entries!.length) {
+        stack.pop();
+        continue;
+      }
+      [seg, v] = top.entries![i]!;
+    }
+    if (typeof v === "string") {
+      if (holds(v)) record(() => spellPath(stack, seg) || "<root>");
+    } else if (v !== null && typeof v === "object") {
+      enter(stack, v, seg, kind);
+    }
+  }
+}
+
+/**
  * Where a known secret appears as an object KEY in `raw`, named by the path of
  * the object that holds the key.
  *
- * `findCredentialLeaks` walks string VALUES only. `{"<secret>": "x"}` passes it,
+ * `findSecretValues` walks string VALUES only. `{"<secret>": "x"}` passes it,
  * the schema then strips the unknown key, and the parse succeeds. The file
  * still holds the key. The harvest inventories that file by path, bytes and
  * sha256, and `src/run/relay.ts` reads `harvest.derived.artifacts` back, up to
@@ -227,49 +402,91 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
  * and never the key, because the key is the secret. A parent path is built from
  * worker-authored keys too, so the caller still redacts it.
  *
- * Needles are filtered as `findCredentialLeaks` filters them: a blank needle
- * matches every key, which would refuse every document.
+ * `needles` must already be filtered of blanks: a blank needle matches every
+ * key, which would refuse every document.
  *
- * ## Only containers go on the stack
+ * ## The order is the one the old key sweep reported
  *
- * Keys live only in objects, so a scalar can hold none. Scalars are skipped
- * where they are found, with no stack entry and no path string. Pushing every
- * element used to hold one entry and one path per scalar at once. Measured on
- * a flat 8 MiB `[0,0,…]` document: RSS rose 171 → 951 MiB that way, and
- * 161 → 290 MiB this way.
+ * That sweep pushed every container child and popped the last one first, so it
+ * visited each object before its children and the children last to first. This
+ * walk counts each cursor DOWN to report hits in that same order.
  *
- * ## The explicit stack does not make the sweep safe against depth
+ * ## One frame per level, and no path until a hit is named
  *
- * This walk does not recurse, but `findCredentialLeaks` runs before it and
- * does. Measured: a document nested 200,000 objects deep parses as JSON and
- * then throws `RangeError` in that walk. The caller in `reconcile.ts` catches
- * the throw like any other refusal and clamps the task to `failed`.
+ * Keys live only in objects, so a scalar can hold none, and a scalar costs
+ * nothing here but a step of the cursor. The stack holds one frame per level of
+ * nesting, never one entry per waiting child, and a path is spelled only for a
+ * hit `record` still has room to name. The old sweep spelled a path for every
+ * container it pushed, which is the same L·d²/2 cost `findSecretValues`
+ * describes: measured at 1b9628e, a 555 KiB chain with a needle key at each of
+ * 4000 levels cost +2,324 MiB RSS and an 807,850,060-character message.
+ *
+ * ## Depth
+ *
+ * Neither walk recurses, so depth cannot exhaust the call stack. Both refuse a
+ * document deeper than `MAX_SWEEP_DEPTH` with a `RangeError`, and that
+ * constant's docblock says why the bound is where it is.
  */
-function findSecretKeys(raw: unknown, secrets: readonly string[]): string[] {
-  const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
-  if (needles.length === 0) return [];
-  const hits = new Set<string>();
-  const stack: Array<{ node: object; path: string }> = [];
-  if (raw !== null && typeof raw === "object") stack.push({ node: raw, path: "" });
-  while (stack.length > 0) {
-    const { node, path } = stack.pop()!;
-    if (Array.isArray(node)) {
-      for (let i = 0; i < node.length; i++) {
-        const v: unknown = node[i];
-        if (v !== null && typeof v === "object") stack.push({ node: v, path: `${path}[${i}]` });
-      }
-    } else {
-      for (const [k, v] of Object.entries(node)) {
-        if (needles.some((n) => k.includes(n))) {
-          hits.add(`a key under ${path === "" ? "<root>" : path}`);
-        }
-        if (v !== null && typeof v === "object") {
-          stack.push({ node: v, path: path === "" ? k : `${path}.${k}` });
-        }
-      }
+function findSecretKeys(
+  raw: unknown,
+  needles: readonly string[],
+  kind: string,
+  record: (spell: () => string) => void,
+): void {
+  if (raw === null || typeof raw !== "object") return;
+  const stack: Frame[] = [];
+  const visit = (node: object, seg: string | number | null): void => {
+    const frame = enter(stack, node, seg, kind);
+    if (frame.entries !== null && frame.entries.some(([k]) => needles.some((n) => k.includes(n)))) {
+      record(() => `a key under ${spellPath(stack, null) || "<root>"}`);
     }
+    frame.next = (frame.array ?? frame.entries!).length - 1;
+  };
+  visit(raw, null);
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1]!;
+    if (top.next < 0) {
+      stack.pop();
+      continue;
+    }
+    const i = top.next--;
+    let seg: string | number;
+    let v: unknown;
+    if (top.array !== null) {
+      seg = i;
+      v = top.array[i];
+    } else {
+      [seg, v] = top.entries![i]!;
+    }
+    if (v !== null && typeof v === "object") visit(v, seg);
   }
-  return [...hits];
+}
+
+/**
+ * The refusal message: at most `MAX_NAMED_LEAKS` paths, each at most
+ * `MAX_LEAK_PATH` characters plus `PATH_CUT`, then a count of the rest.
+ *
+ * ## A long path is redacted BEFORE it is cut
+ *
+ * A cut that lands inside a secret key leaves the secret's head, and
+ * exact-match redaction cannot find a head. Redacted first, the secret is
+ * already `<redacted>` wherever the cut lands. A path no longer than the cap is
+ * left as it is, so the one pass over the joined list below redacts it exactly
+ * as before.
+ *
+ * ## The joined list is redacted again
+ *
+ * That pass is the one the refusal always had. It also catches a secret that
+ * runs across the `, ` between two paths.
+ */
+function refusalMessage(kind: string, leaks: Leaks, secrets: readonly string[]): string {
+  const shown = leaks.named.map((path) => {
+    if (path.length <= MAX_LEAK_PATH) return path;
+    const redacted = redactSecrets(path, secrets);
+    return redacted.length <= MAX_LEAK_PATH ? redacted : `${redacted.slice(0, MAX_LEAK_PATH)}${PATH_CUT}`;
+  });
+  const more = leaks.more > 0 ? ` (and ${leaks.more} more)` : "";
+  return `${kind} artifact contains a credential at: ${redactSecrets(shown.join(", "), secrets)}${more}`;
 }
 
 /**
@@ -286,6 +503,14 @@ function findSecretKeys(raw: unknown, secrets: readonly string[]): string[] {
  *
  * Running it before the schema means a document that is both malformed and
  * leaky is refused for the leak. Its schema messages are then never produced.
+ *
+ * ## The sweep's cost follows the document's size, not its shape
+ *
+ * The raw document is worker-authored and has no schema bounding it yet. Both
+ * walks are iterative and bounded in depth, a path is spelled only for a hit
+ * that will be named, and at most `MAX_NAMED_LEAKS` are named. Each named path
+ * is built whole before it is redacted and cut, so the most a refusal builds is
+ * `MAX_NAMED_LEAKS` paths, each a small multiple of the document's length.
  *
  * ## A refusal is a finding, not a filter
  *
@@ -304,11 +529,12 @@ function sweepThenParse<T>(
   raw: unknown,
   secrets: readonly string[],
 ): T {
-  const leaks = [...findCredentialLeaks(raw, secrets), ...findSecretKeys(raw, secrets)];
-  if (leaks.length > 0) {
-    throw new Error(
-      `${kind} artifact contains a credential at: ${redactSecrets(leaks.join(", "), secrets)}`,
-    );
+  const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
+  if (needles.length > 0) {
+    const leaks: Leaks = { named: [], more: 0 };
+    findSecretValues(raw, needles, kind, recorder(leaks));
+    findSecretKeys(raw, needles, kind, recorder(leaks));
+    if (leaks.named.length > 0) throw new Error(refusalMessage(kind, leaks, secrets));
   }
   return schema.parse(raw);
 }

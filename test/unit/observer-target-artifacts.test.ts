@@ -37,7 +37,6 @@ import {
   redactSecrets,
 } from "../../src/harvest/observer-target-artifacts.ts";
 import { COVERAGE_RESULTS, OBSERVER_ASSESSMENTS } from "../../src/run/triage-verdict.ts";
-import { maskComments } from "../support/mask-comments.ts";
 
 const NEEDLE = "zz-synthetic-needle-0f9e8d7c6b5a";
 const NEEDLE_PREFIX = NEEDLE.slice(0, 12);
@@ -108,8 +107,9 @@ function firstRow(d: Record<string, unknown>): Record<string, unknown> {
 }
 
 type Parse = (raw: unknown, secrets?: readonly string[]) => unknown;
+type Target = { kind: string; doc: () => Record<string, unknown>; parse: Parse };
 
-const TARGETS: ReadonlyArray<{ kind: string; doc: () => Record<string, unknown>; parse: Parse }> = [
+const TARGETS: ReadonlyArray<Target> = [
   { kind: "observer-docker-ops", doc: dockerDoc, parse: parseObserverDockerOpsArtifact },
   { kind: "observer-vm-ops", doc: vmDoc, parse: parseObserverVmOpsArtifact },
 ];
@@ -197,13 +197,12 @@ describe("the contract, member by member and field by field (SRD 2.1, 2.2)", () 
 
 describe("the inner redaction layer, with no caller redacting after it", () => {
   // Only the needle-as-key case below can actually catch a removed inner
-  // redaction. `findCredentialLeaks`'s reported paths are built from field
-  // NAMES, so the value and unknown-field cases never put the needle into
-  // the message in the first place — their `not.toContain(NEEDLE)`
-  // assertion holds even with `redactSecrets` deleted from the leak-message
-  // path. A needle used as a KEY is the one case where the path itself is
-  // built from the needle, so it is the one case this block is actually
-  // testing the redaction against.
+  // redaction. The sweep's reported paths are built from field NAMES, so the
+  // value and unknown-field cases never put the needle into the message in the
+  // first place — their `not.toContain(NEEDLE)` assertion holds even with
+  // `redactSecrets` deleted from the leak-message path. A needle used as a KEY
+  // is the one case where the path itself is built from the needle, so it is
+  // the one case this block is actually testing the redaction against.
   const cases: ReadonlyArray<[string, (d: Record<string, unknown>) => void, string[]]> = [
     [
       "a needle in a value",
@@ -248,6 +247,202 @@ describe("the inner redaction layer, with no caller redacting after it", () => {
   }
 });
 
+/**
+ * THE RAW SWEEP'S REFUSAL AND COST ARE BOUNDED, WHATEVER THE DOCUMENT'S SHAPE
+ * (FP2-3 task A).
+ *
+ * At 1b9628e the raw sweep built a dotted path for every string and every
+ * container, recursed, and named every hit. Measured there, one fresh process
+ * per shape, with the hostile shapes below:
+ *   - the value chain, 562 KiB of JSON: +2,324 MiB RSS, 540 ms, and a refusal
+ *     807,810,053 characters long;
+ *   - the value leaf shape, 97 KiB: +185 MiB RSS and a 64,069,943-character
+ *     refusal.
+ *
+ * Every assertion here is a count, a length or an exact spelling. The one time
+ * bound is a generous backstop, never the thing that goes red first.
+ *
+ * The numbers are spelled, not imported: a test that reads the cap from the
+ * module accepts whatever cap the module happens to hold.
+ */
+const NAMED_CAP = 5;
+const PATH_CAP = 1024;
+const CUT = "…[path truncated]";
+const MESSAGE_BOUND = 8_192;
+const BACKSTOP_MS = 10_000;
+const DEPTH_CAP = 32_768;
+
+/**
+ * Parse `body` as the harvest does, sweep it under the needle, and read the
+ * refusal back into the paths it names and the count of the rest.
+ */
+function refusal(t: Target, body: string): { named: string[]; more: number; ms: number } {
+  const raw: unknown = JSON.parse(body);
+  const t0 = performance.now();
+  const e = thrown(() => t.parse(raw, [NEEDLE]));
+  const ms = performance.now() - t0;
+  expect(e).toBeInstanceOf(Error);
+  const message = (e as Error).message;
+  // Length first. A regressed sweep's message runs to hundreds of millions of
+  // characters, and every later assertion would scan or print it.
+  expect(message.length).toBeLessThan(MESSAGE_BOUND);
+  const prefix = `${t.kind} artifact contains a credential at: `;
+  expect(message.startsWith(prefix), message.slice(0, 200)).toBe(true);
+  expect(message).not.toContain(NEEDLE);
+  expect(message).not.toContain(NEEDLE_PREFIX);
+  const m = /^([\s\S]*?)(?: \(and (\d+) more\))?$/.exec(message.slice(prefix.length))!;
+  return { named: m[1]!.split(", "), more: m[2] === undefined ? 0 : Number(m[2]), ms };
+}
+
+/** `n` root fields, `f0` to `f<n-1>`, each holding the needle. */
+function needleFields(n: number): string {
+  return JSON.stringify(Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, NEEDLE])));
+}
+
+describe("the raw sweep names a bounded number of hits, each path capped", () => {
+  for (const t of TARGETS) {
+    describe(t.kind, () => {
+      test(`${NAMED_CAP} hits are all named, with no count after them`, () => {
+        const r = refusal(t, needleFields(NAMED_CAP));
+        expect(r.named).toEqual(["f0", "f1", "f2", "f3", "f4"]);
+        expect(r.more).toBe(0);
+      });
+
+      test(`hit ${NAMED_CAP + 1} is counted and not named`, () => {
+        const r = refusal(t, needleFields(NAMED_CAP + 1));
+        expect(r.named).toEqual(["f0", "f1", "f2", "f3", "f4"]);
+        expect(r.more).toBe(1);
+      });
+
+      // The floor under the cap. `harvest-reconcile.test.ts` rebuilds a secret
+      // out of a sweep path up to about 552 characters long, past its own cut at
+      // 512; a cap below that would stop that test exercising the rebuild.
+      test(`a path of exactly ${PATH_CAP} characters is named whole`, () => {
+        const key = "k".repeat(PATH_CAP);
+        expect(refusal(t, JSON.stringify({ [key]: NEEDLE })).named).toEqual([key]);
+      });
+
+      test(`a path of ${PATH_CAP + 1} characters is cut to ${PATH_CAP} and marked`, () => {
+        const key = "k".repeat(PATH_CAP + 1);
+        expect(refusal(t, JSON.stringify({ [key]: NEEDLE })).named).toEqual([
+          `${"k".repeat(PATH_CAP)}${CUT}`,
+        ]);
+      });
+
+      // Cut first, and the path below would keep the needle's first 24
+      // characters: exact-match redaction cannot find a head. Redacted first,
+      // the needle is already `<redacted>` when the cut lands.
+      test("a path is redacted before it is cut, so the cut leaves no head of the secret", () => {
+        const key = `${"k".repeat(1000)}${NEEDLE}${"k".repeat(100)}`;
+        const r = refusal(t, JSON.stringify({ [key]: { x: NEEDLE } }));
+        expect(r.named).toEqual([`${"k".repeat(1000)}<redacted>${"k".repeat(14)}${CUT}`, "a key under <root>"]);
+      });
+    });
+  }
+});
+
+describe("the raw sweep walks deep documents without the call stack", () => {
+  /** `depth` objects, each under `"a"`, with `bottom` as the innermost. */
+  const objects = (depth: number, bottom: string): string =>
+    `{"a":`.repeat(depth - 1) + bottom + "}".repeat(depth - 1);
+  /** `depth` arrays, with `bottom` as the innermost. */
+  const arrays = (depth: number, bottom: string): string => "[".repeat(depth - 1) + bottom + "]".repeat(depth - 1);
+
+  for (const t of TARGETS) {
+    describe(t.kind, () => {
+      // 32,768 is past where the old recursion overflowed: measured at
+      // 1b9628e in a bare script, about 13,900 nested arrays and 24,500 nested
+      // objects.
+      const swept: ReadonlyArray<[string, string, string]> = [
+        ["objects, a needle value at the bottom", objects(DEPTH_CAP, `{"a":"${NEEDLE}"}`), `${"a.".repeat(512)}${CUT}`],
+        ["arrays, a needle value at the bottom", arrays(DEPTH_CAP, `["${NEEDLE}"]`), `${"[0]".repeat(341)}[${CUT}`],
+        [
+          "objects, a needle key at the bottom",
+          objects(DEPTH_CAP, `{"${NEEDLE}":0}`),
+          `a key under ${"a.".repeat(506)}${CUT}`,
+        ],
+      ];
+      for (const [label, body, path] of swept) {
+        test(`${DEPTH_CAP} ${label}: swept to the bottom and named`, () => {
+          const r = refusal(t, body);
+          expect(r.named).toEqual([path]);
+          expect(r.more).toBe(0);
+        });
+      }
+
+      // A fixed depth, so the refusal no longer depends on how much stack the
+      // caller has left. `reconcile.ts` reports a throw that is not the
+      // credential refusal by its message, so the message must not claim one.
+      for (const [label, body] of [
+        ["objects", objects(DEPTH_CAP + 1, `{"a":"${NEEDLE}"}`)],
+        ["arrays", arrays(DEPTH_CAP + 1, `["${NEEDLE}"]`)],
+      ] as const) {
+        test(`${DEPTH_CAP + 1} ${label}: refused with a RangeError that claims no credential`, () => {
+          const raw: unknown = JSON.parse(body);
+          const e = thrown(() => t.parse(raw, [NEEDLE]));
+          expect(e).toBeInstanceOf(RangeError);
+          const message = (e as Error).message;
+          expect(message).toContain(`${t.kind} artifact is nested more than ${DEPTH_CAP} levels deep`);
+          expect(message).not.toContain("credential");
+          expect(message).not.toContain(NEEDLE_PREFIX);
+        });
+      }
+    });
+  }
+});
+
+describe("the raw sweep's cost on hostile shapes", () => {
+  const K100 = "k".repeat(100);
+  const K1000 = "k".repeat(1000);
+  /** `n` copies of `seg`, dotted, as the sweep spells a run of object keys. */
+  const dotted = (n: number, seg: string): string => Array.from({ length: n }, () => seg).join(".");
+  const first5 = (f: (i: number) => string): string[] => [0, 1, 2, 3, 4].map(f);
+
+  const shapes: ReadonlyArray<{ label: string; body: () => string; hits: number; named: string[] }> = [
+    {
+      // The paths total L·d²/2 characters: 800 million here.
+      label: "a chain 4000 objects deep, a needle value at every level, 100-character keys",
+      body: () => `{"v":"${NEEDLE}","${K100}":`.repeat(4000) + "0" + "}".repeat(4000),
+      hits: 4000,
+      named: first5((i) => (i === 0 ? "v" : `${dotted(i, K100)}.v`)),
+    },
+    {
+      label: "a chain 4000 objects deep, a needle key at every level, 100-character keys",
+      body: () => `{"${NEEDLE}":1,"${K100}":`.repeat(4000) + "0" + "}".repeat(4000),
+      hits: 4000,
+      named: first5((i) => `a key under ${i === 0 ? "<root>" : dotted(i, K100)}`),
+    },
+    {
+      // Each path is 64,000 characters, so each named one is cut.
+      label: "1000 needle values under a spine 64 objects deep, 1000-character keys",
+      body: () => `{"${K1000}":`.repeat(64) + `[${Array.from({ length: 1000 }, () => `"${NEEDLE}"`).join(",")}]` + "}".repeat(64),
+      hits: 1000,
+      named: first5(() => `${K1000}.${"k".repeat(23)}${CUT}`),
+    },
+    {
+      label: "1000 needle keys under a spine 64 objects deep, 1000-character keys",
+      body: () =>
+        `{"${K1000}":`.repeat(64) + `[${Array.from({ length: 1000 }, () => `{"${NEEDLE}":1}`).join(",")}]` + "}".repeat(64),
+      hits: 1000,
+      named: first5(() => `a key under ${K1000}.${"k".repeat(11)}${CUT}`),
+    },
+  ];
+
+  for (const t of TARGETS) {
+    describe(t.kind, () => {
+      for (const s of shapes) {
+        test(`${s.label}: a bounded refusal naming ${NAMED_CAP} hits and counting the rest`, () => {
+          const r = refusal(t, s.body());
+          expect(r.named).toEqual(s.named);
+          expect(r.more).toBe(s.hits - NAMED_CAP);
+          for (const p of r.named) expect(p.length).toBeLessThanOrEqual(PATH_CAP + CUT.length);
+          expect(r.ms, "a backstop only").toBeLessThan(BACKSTOP_MS);
+        }, 60_000);
+      }
+    });
+  }
+});
+
 describe("redactSecrets", () => {
   test("every separate occurrence is replaced", () => {
     expect(redactSecrets(`a ${NEEDLE} b ${NEEDLE}`, [NEEDLE])).toBe("a <redacted> b <redacted>");
@@ -283,35 +478,109 @@ describe("redactSecrets", () => {
   });
 });
 
-describe("the module's imports", () => {
-  // Comments are masked first: a docblock that discusses "node:fs" or
-  // `Bun.write` in prose must not itself trip the checks below. (Masking
-  // blanks comment text only — it has no bearing on real code, which is
-  // never inside a comment to begin with.)
-  const code = maskComments(
-    readFileSync(join(import.meta.dir, "../../src/harvest/observer-target-artifacts.ts"), "utf8"),
-  );
+/**
+ * THE MODULE'S IMPORTS AND APIS, READ THROUGH THE TRANSPILER (FP2-3 task B).
+ *
+ * These checks used to read `test/support/mask-comments.ts` output, and that
+ * masker guesses where a regex literal ends. A wrong guess blanks real code.
+ * Measured at 1b9628e: appending `return /[/*]/.test(s);` inside a function,
+ * then `import("node:fs")` and `Bun.write("x","y")`, left both checks green,
+ * because the masker read the `/*` inside the character class as a comment
+ * opener. The same insertion without the regex line turned both red.
+ *
+ * So the specifiers come from `Bun.Transpiler#scanImports`, which parses the
+ * source, and the API checks read `transformSync` output, which is the code with
+ * every comment dropped by that parser. The sample tests at the end feed each
+ * refused form to the same two readers, after that same regex literal, so the
+ * guard is shown catching what it says it catches.
+ *
+ * `Bun`, `process` and `require` are refused as whole words, which covers member
+ * access, a computed name and destructuring in one check: this module has no
+ * use for any of them. A word check reads string literals as well as code, so
+ * it refuses a little more than it must. It is a guard against a mistake, and
+ * not a sandbox: code written to assemble a global's name at runtime through
+ * something not listed here would get past it.
+ */
+describe("the module's imports and APIs, read through the transpiler", () => {
+  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const MODULE = readFileSync(join(import.meta.dir, "../../src/harvest/observer-target-artifacts.ts"), "utf8");
 
-  // Every static import/re-export (`from "x"`), bare `import "x"`, dynamic
-  // `import(...)`, and `require(...)` specifier — in any of the three quote
-  // styles, backtick template literals included.
-  const specifiers = [
-    ...code.matchAll(/\b(?:from|import|require)\s*\(?\s*["'`]([^"'`]*)["'`]/g),
-  ].map((m) => m[1]!);
+  /** Every specifier the parser finds: static, bare, re-exported, dynamic, `require`. */
+  const importSpecifiers = (src: string): string[] =>
+    [...new Set(transpiler.scanImports(src).map((i) => i.path))].sort();
 
-  // Held to exactly these two, so a `triage-*` specifier — of any form
-  // above — already fails this assertion. There is no separate "reaches
-  // the triage console" test: one that filtered this same specifier list
-  // could only go red when this one already had, which is not an
-  // independent check, and the extra test's name oversold it as one.
-  test("are exactly zod and the contracts module", () => {
-    expect([...new Set(specifiers)].sort()).toEqual(["../contracts.ts", "zod"]);
+  const REFUSED: ReadonlyArray<readonly [name: string, pattern: RegExp]> = [
+    ["Bun", /\bBun\b/],
+    ["process", /\bprocess\b/],
+    ["require", /\brequire\b/],
+    ["fetch", /\bfetch\b/],
+    ["Worker", /\bWorker\b/],
+    ["globalThis", /\bglobalThis\b/],
+    ["eval", /\beval\b/],
+    ["Function", /\bFunction\b/],
+    ["open(", /\bopen\s*\(/],
+    ["import(", /\bimport\s*\(/],
+    // Quoted, so a property named `node` is not read as a `node:` specifier.
+    ["a quoted node: specifier", /["'`]node:/],
+  ];
+
+  /** The names of the refused APIs that `src`'s code, comments dropped, mentions. */
+  const refusedApis = (src: string): string[] => {
+    const code = transpiler.transformSync(src);
+    return REFUSED.filter(([, pattern]) => pattern.test(code)).map(([name]) => name);
+  };
+
+  test("its import specifiers, as the transpiler scans them, are exactly zod and the contracts module", () => {
+    expect(importSpecifiers(MODULE)).toEqual(["../contracts.ts", "zod"]);
   });
 
-  test("name no filesystem or process API", () => {
-    expect(code).not.toContain("node:fs");
-    expect(code).not.toMatch(/\bopen\s*\(/);
-    expect(code).not.toMatch(/\bBun\.(?:file|write|spawnSync|spawn)\b/);
-    expect(code).not.toMatch(/\bBun\.\$/);
+  test("its code, with comments dropped by the transpiler, names none of the refused APIs", () => {
+    expect(refusedApis(MODULE)).toEqual([]);
   });
+
+  test("a comment naming refused APIs and modules is dropped, so prose is not refused", () => {
+    const prose =
+      '/** Bun.write("x", "y"), process.getBuiltinModule("fs"), require("node:fs"), fetch( */\n' +
+      '// new Worker("x.ts"), import("node:fs"), globalThis, eval, Function, open(\n' +
+      "export const ok = 1;\n";
+    expect(refusedApis(prose)).toEqual([]);
+    expect(importSpecifiers(prose)).toEqual([]);
+  });
+
+  /** The line that fooled the comment masker, ahead of every sample. */
+  const REGEX_TRAP = "export function slashStar(s: string): boolean {\n  return /[/*]/.test(s);\n}\n";
+
+  const API_SAMPLES: ReadonlyArray<readonly [form: string, code: string, refusedAs: string]> = [
+    ["Bun.file", 'Bun.file("x");', "Bun"],
+    ["Bun.write", 'Bun.write("x", "y");', "Bun"],
+    ["Bun.spawn", 'Bun.spawn(["x"]);', "Bun"],
+    ["Bun.spawnSync", 'Bun.spawnSync(["x"]);', "Bun"],
+    ["Bun.mmap", 'Bun.mmap("x");', "Bun"],
+    ["Bun.$", "Bun.$`x`;", "Bun"],
+    ["a computed Bun[...]", 'Bun["write"]("x", "y");', "Bun"],
+    ["destructuring from Bun", 'const { write } = Bun;\nwrite("x", "y");', "Bun"],
+    ["process.getBuiltinModule", 'process.getBuiltinModule("fs");', "process"],
+    ["fetch(", 'fetch("https://example.invalid/");', "fetch"],
+    ["new Worker(", 'new Worker("x.ts");', "Worker"],
+    ["require of an allowed module", 'require("zod");', "require"],
+    ["globalThis with a computed name", 'globalThis["B" + "un"];', "globalThis"],
+    ["open(", 'open("x");', "open("],
+  ];
+  for (const [form, code, refusedAs] of API_SAMPLES) {
+    test(`${form} is refused as ${refusedAs}, after a regex literal holding "/*"`, () => {
+      expect(refusedApis(`${REGEX_TRAP}${code}\n`)).toContain(refusedAs);
+    });
+  }
+
+  const SPECIFIER_SAMPLES: ReadonlyArray<readonly [form: string, code: string]> = [
+    ["a dynamic import", 'import("node:fs");'],
+    ["a require call", 'require("node:fs");'],
+    ["a re-export", 'export * from "node:fs";'],
+    ["a bare import", 'import "node:fs";'],
+  ];
+  for (const [form, code] of SPECIFIER_SAMPLES) {
+    test(`${form} of node:fs is scanned, after a regex literal holding "/*"`, () => {
+      expect(importSpecifiers(`${REGEX_TRAP}${code}\n`)).toContain("node:fs");
+    });
+  }
 });
