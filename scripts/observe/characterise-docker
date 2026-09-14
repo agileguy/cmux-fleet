@@ -200,7 +200,7 @@ function distinctKeySets(rows: Row[]): string[][] {
   const seen = new Map<string, string[]>();
   for (const row of rows) {
     const keys = Object.keys(row).sort();
-    seen.set(keys.join(" "), keys);
+    seen.set(keys.join("\u0000"), keys);
   }
   return [...seen.values()];
 }
@@ -240,6 +240,9 @@ async function main(): Promise<void> {
   // The `docker run -d` that creates the dind container, while it is in flight. A signal landing then
   // must not remove the container before it exists, or the create completes after the cleanup.
   let starting: Promise<unknown> | undefined;
+  // Set by a signal, and read in the same synchronous turn that starts the container: a signal before
+  // the start stops it happening, and one after it finds `starting` set.
+  let stopping = false;
   // One cleanup, shared: a signal and the `finally` below both await the same run of it, so neither
   // returns while the other's `docker rm` or `rm` is still going.
   let cleaning: Promise<void> | undefined;
@@ -251,7 +254,10 @@ async function main(): Promise<void> {
       await rm(work, { recursive: true, force: true });
     })());
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
-    process.on(signal, () => void cleanup().then(() => process.exit(code)));
+    process.on(signal, () => {
+      stopping = true;
+      void cleanup().then(() => process.exit(code));
+    });
   }
 
   /** The dind container's own `docker` CLI, against the dind daemon. */
@@ -281,6 +287,7 @@ async function main(): Promise<void> {
 
     // No TLS certificates and no TCP listener: the CLI inside the container is the only client. The
     // label lets an operator find a container a SIGKILL left behind: `docker ps -a --filter label=pifleet-char`.
+    if (stopping) throw new Error("stopped by a signal before the dind container was started");
     starting = must(
       [
         "docker", "run", "-d", "--name", dindName, "--label", `pifleet-char=${id}`, "--privileged", "--network", "none",
