@@ -87,9 +87,11 @@
 #
 #   - OpenSSH ignores the key at its delivered mode 0444, because inside the
 #     container the file is owned by the worker uid ("bad permissions").
-#   - A 0600 copy in /tmp is accepted. /tmp is the only writable path in the
-#     read-only worker that is not harvested: /workspace and /outbox are
-#     writable too, and what lands there is published with the worker's output.
+#   - A 0600 copy in /tmp is accepted. /tmp is always a noexec tmpfs
+#     (src/config/render.ts:390), not only when the worker's root is read-only
+#     (docker.read_only_root, src/config/render.ts:387), and it is not
+#     harvested: /workspace and /outbox are writable too, and what lands there
+#     is published with the worker's output.
 #   - A key without its trailing newline is refused ("error in libcrypto"), and
 #     a delivered secret file holds the raw value with no newline added.
 #

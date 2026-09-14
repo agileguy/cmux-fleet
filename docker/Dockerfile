@@ -474,7 +474,8 @@ COPY --chmod=0444 docker/pi-extensions/truncation-recovery.ts /opt/pifleet/trunc
 COPY --chmod=0444 docker/pi-extensions/report-tools.ts /opt/pifleet/report-tools.ts
 
 # The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2 task 3.1). `observe-ssh`
-# (task 3.2, inert until that phase ships) runs every observer SSH call as
+# (task 3.2, shipped and on PATH via task 3.3 above; no role calls it yet)
+# runs every observer SSH call as
 # `-o ProxyCommand="node /opt/pifleet/ssh-connect.cjs %h %p"`, because OpenSSH
 # has no native CONNECT support and this image carries no `nc`/`socat`
 # (`:48-49` above) — `node` is the one thing guaranteed present, since the

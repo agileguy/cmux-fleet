@@ -238,12 +238,31 @@ async function main(): Promise<void> {
     const shimSshOptions = [...shimText.matchAll(/^\s+-o (ConnectTimeout|ServerAliveInterval|ServerAliveCountMax)=(\d+) \\$/gm)].map(
       (m) => `${m[1]}=${m[2]}`,
     );
+    const EXPECTED_SHIM_SSH_OPTION_NAMES = ["ConnectTimeout", "ServerAliveInterval", "ServerAliveCountMax"];
+    const shimSshOptionNames = shimSshOptions.map((o) => o.split("=", 1)[0]);
+    if (
+      shimSshOptionNames.length !== EXPECTED_SHIM_SSH_OPTION_NAMES.length ||
+      !EXPECTED_SHIM_SSH_OPTION_NAMES.every((name) => shimSshOptionNames.includes(name))
+    ) {
+      throw new Error(
+        `expected docker/observe-ssh's -o lines to set exactly ${EXPECTED_SHIM_SSH_OPTION_NAMES.join(", ")}, found [${shimSshOptionNames.join(", ") || "none"}] — did the shim's "-o Name=value \\" line format change?`,
+      );
+    }
     const installLines = dockerfile.split("\n").filter((l) => /^COPY --chmod=\d+ docker\/(observe-ssh|ssh-connect\.cjs) \S+$/.test(l));
     if (installLines.length !== 2) throw new Error(`expected the two COPY lines for observe-ssh and ssh-connect.cjs in docker/Dockerfile, found ${installLines.length}`);
     if (!/\bopenssh-client\b/.test(dockerfile)) throw new Error("docker/Dockerfile does not install openssh-client");
     const quietSeconds = Math.ceil(idleTimeoutMs / 1000) + 10;
     const head = await run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"]);
-    const dirty = await run(["git", "-C", REPO, "status", "--porcelain", "--", "docker/observe-ssh", "docker/ssh-connect.cjs", "docker/connect-proxy.cjs", "src/run/worker-env.ts"]);
+    const dirty = await run([
+      "git", "-C", REPO, "status", "--porcelain", "--",
+      "docker/observe-ssh",
+      "docker/ssh-connect.cjs",
+      "docker/connect-proxy.cjs",
+      "src/run/worker-env.ts",
+      "docker/Dockerfile",
+      "src/config/schema.ts",
+      "scripts/observe/characterise-ssh-transport",
+    ]);
 
     // Keys: the identity, and a second host key the mismatch probe pins instead of the real one.
     await must(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "char", "-f", join(work, "id")], "ssh-keygen identity");
