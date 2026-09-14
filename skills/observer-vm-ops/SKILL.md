@@ -45,6 +45,7 @@ say who refused what:
 | `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
 | `77` with any other `vm-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all, that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
+| `124` or `125` from `disk` | `124`: `df` did not return inside the 20-second bound `disk` runs it under, most likely a hung network mount. `125`: `timeout` itself failed | the `resources` channel is `indeterminate`, never evidence of free space; any stderr goes in `evidence_ref` |
 | `126` or `127` | the target command did not run at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | `255` | ssh's own failure — a host-key mismatch or a proxy refusal | `reachability` is `unreachable`, and the row is `indeterminate` |
 | any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
@@ -58,6 +59,14 @@ cannot tell a down VM from a down route, so do not guess which one it is.
 **`system` exiting non-zero is an answer, not a failure.** `systemctl is-system-running` prints a
 state word (for example `degraded`) and can exit non-zero for it; that is `answered` coverage
 with the state word as evidence, not a reason to retry the call or mark it `unreachable`.
+
+**`disk`'s timeout, stated plainly.** `disk` runs `df` under a 20-second `timeout` (§6.4,
+principal decision 2026-09-14) so a hung network mount cannot block the call indefinitely.
+Measured on Ubuntu 24.04, coreutils' `timeout` exits `124` when it has to kill `df`, `125` when
+`timeout` itself fails, `126` when `df` cannot be executed and `127` when it is not found, and
+otherwise passes `df`'s own exit straight through. So `124` is the hung-mount case in the table
+above, `126`/`127` are the "did not run at all" row, and only an exit outside `124`-`127` is
+`df`'s own answer.
 
 ## Checks, and the verbs that answer them
 
@@ -81,7 +90,7 @@ with the state word as evidence, not a reason to retry the call or mark it `unre
 | `unit` | one unit name, `^[a-zA-Z0-9][a-zA-Z0-9@._:-]*$`, at most 255 bytes | `systemctl show <unit> --no-pager --property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus` |
 | `journal` | `since=<N>s lines=<M>`, both required, `M <= 500`; optional `unit=<unit>`, `priority=<0-7>` | `journalctl --no-pager --output=short-iso --lines=<M>` plus the since bound, `--unit` and `--priority` |
 | `kernel` | `since=<N>s lines=<M>`, both required, `M <= 500` | `journalctl --no-pager --dmesg --output=short-iso …` |
-| `disk` | none | `df -P -k` |
+| `disk` | none | `timeout 20 df -P -k` |
 | `memory` | none | `cat /proc/meminfo` |
 
 Every no-argument verb (`uptime`, `os`, `system`, `failed`, `disk`, `memory`) refuses any
