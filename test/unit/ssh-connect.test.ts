@@ -22,7 +22,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createServer, type Server, type Socket } from "node:net";
+import { connect, createServer, type Server, type Socket } from "node:net";
 import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -61,6 +61,29 @@ if (IPV6_UNAVAILABLE !== null) {
   );
 }
 
+/**
+ * Does something already answer on 127.0.0.1:80? The port-less-HTTPS_PROXY
+ * test relies on nothing being there, so Node's own connection-refused
+ * message can pin the WHATWG default port; probed once, before any test is
+ * defined, so that test can skip itself by name on a host where something
+ * already listens, rather than fail for a reason that has nothing to do with
+ * the script.
+ */
+async function port80Probe(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = connect({ host: "127.0.0.1", port: 80 });
+    s.once("connect", () => {
+      s.destroy();
+      resolve(true);
+    });
+    s.once("error", () => resolve(false));
+  });
+}
+const PORT_80_OCCUPIED = await port80Probe();
+if (PORT_80_OCCUPIED) {
+  console.warn(`[skip] the port-less HTTPS_PROXY test needs nothing on 127.0.0.1:80, and this host has something.`);
+}
+
 let fake: Server;
 let fakePort = 0;
 let connections = 0;
@@ -89,14 +112,20 @@ const STATUS_LINES: Record<string, { line: string; open: boolean }> = {
 /**
  * A refusal carrying terminal controls in its status line and body, sent as
  * these exact bytes: ESC sequences (a screen clear, a window-title set), BEL,
- * CR, NUL, DEL and the 8-bit CSI byte, around a tab and a final LF, which are
- * the two controls that pass through.
+ * CR, NUL, DEL, the 8-bit CSI byte and a byte in 0xa0-0xff (`\xdb`, outside
+ * the C1 range `\x9b` sits in), around a tab and a final LF, which are the
+ * two controls that pass through. `\xdb` matters on its own: decoded as
+ * latin1 it is the code point U+00DB, and escaping only the C1 range leaves
+ * it unescaped, so this script's own UTF-8 stderr write re-encodes it as the
+ * two bytes `c3 9b` — the second IS the 8-bit CSI this exists to keep off
+ * stderr.
  */
 const CONTROL_STATUS = "HTTP/1.1 403 Forbidden\x1b[2J\x07";
-const CONTROL_BODY = "egress denied\x1b]0;owned\x07 by rule\r default-deny\x00\x7f\x9b31m\ttabbed\n";
+const CONTROL_BODY = "egress denied\x1b]0;owned\x07 by rule\r default-deny\x00\x7f\xdb\x9b31m\ttabbed\n";
 /** What stderr must read for that refusal: every control but tab and LF shown as `\xNN`. */
 const CONTROL_STDERR =
-  "HTTP/1.1 403 Forbidden\\x1b[2J\\x07\n" + "egress denied\\x1b]0;owned\\x07 by rule\\x0d default-deny\\x00\\x7f\\x9b31m\ttabbed\n";
+  "HTTP/1.1 403 Forbidden\\x1b[2J\\x07\n" +
+  "egress denied\\x1b]0;owned\\x07 by rule\\x0d default-deny\\x00\\x7f\\xdb\\x9b31m\ttabbed\n";
 /** The request line of the most recent CONNECT the fake server received. */
 let lastRequestLine = "";
 /** Server-side sockets still open, so a hung child's connection can be cut before it is killed. */
@@ -490,11 +519,17 @@ async function run(opts: {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, code] = await Promise.all([
+  const [stdout, stderrBytes, code] = await Promise.all([
     new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    new Response(proc.stderr).arrayBuffer(),
     proc.exited,
   ]);
+  // latin1, not `.text()`'s UTF-8: stderr is the script's RAW bytes, and a
+  // proxy byte in 0xa0-0xff has to be pinned as that exact byte, not whatever
+  // a UTF-8 decode happens to read — including a UTF-8 decode of the script's
+  // OWN accidental re-encoding of it, which is precisely the bug this file
+  // exists to catch (see CONTROL_BODY).
+  const stderr = Buffer.from(stderrBytes).toString("latin1");
   return { code, stdout, stderr };
 }
 
@@ -804,6 +839,76 @@ describe("refused before any connection is attempted (SRD-OBSERVER-ROLES §5.2, 
     expect(connections).toBe(before + 1);
     expect(lastRequestLine).toBe(`CONNECT ${host}:22 HTTP/1.1`);
   }, gateBudget([2_000]));
+
+  // A path, query or fragment on HTTPS_PROXY: WHATWG parses `http:host:port`
+  // (no `//`) as exactly `http://host:port/`, so refusing anything whose
+  // parsed pathname is not `/`, or whose search or hash is non-empty, is not
+  // refusing that shorthand — it is refusing whatever the proxy would
+  // otherwise silently receive and ignore. Never repeated: the path itself
+  // may be attacker-chosen, as the backslash case shows (a lone `\` is a `/`
+  // to the WHATWG parser, so `PORT\<ESC>[31m` becomes a path, not garbage the
+  // parser rejects).
+  test.each([
+    ["a path", "http://127.0.0.1:PORT/xyz-path"],
+    ["a query string", "http://127.0.0.1:PORT/?xyz-query=1"],
+    ["a fragment", "http://127.0.0.1:PORT/#xyz-frag"],
+    ["a trailing backslash WHATWG turns into a path", "http://127.0.0.1:PORT\\\x1b[31m"],
+  ] as const)(
+    "an HTTPS_PROXY with %s is refused, repeats none of it, and the fake server sees no connection",
+    async (_label, template) => {
+      const before = connections;
+      const { code, stdout, stderr } = await run({
+        host: "tunnel.test",
+        port: "2222",
+        proxy: template.replace("PORT", String(fakePort)),
+      });
+
+      expect(code).not.toBe(0);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("HTTPS_PROXY must be a bare http://host:port URL");
+      expect(stderr).not.toContain("xyz-path");
+      expect(stderr).not.toContain("xyz-query");
+      expect(stderr).not.toContain("xyz-frag");
+      expect(connections).toBe(before);
+    },
+    gateBudget([2_000]),
+  );
+
+  // The two forms this refusal must NOT catch: `http:host:port` (no `//`),
+  // which WHATWG normalises to exactly `http://host:port/`, and a port-less
+  // `http://host`, which keeps defaulting to port 80 (WHATWG reports an
+  // explicit `:80` as the SAME empty `.port` as no port at all, so requiring
+  // one outright would also refuse that).
+  test("HTTPS_PROXY without '//' (http:host:port) is accepted and reaches the proxy the same as http://host:port", async () => {
+    const before = connections;
+    const { code, stdout, stderr } = await run({
+      host: "tunnel.test",
+      port: "2222",
+      stdin: "PING",
+      proxy: `http:127.0.0.1:${fakePort}`,
+    });
+
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("ECHO:PING");
+    expect(connections).toBe(before + 1);
+  }, gateBudget([2_000]));
+
+  test.skipIf(PORT_80_OCCUPIED)(
+    "a port-less HTTPS_PROXY is accepted, and the failed connection's own error names port 80",
+    async () => {
+      const { code, stdout, stderr } = await run({ host: "tunnel.test", port: "2222", proxy: "http://127.0.0.1" });
+
+      expect(code).not.toBe(0);
+      expect(stdout).toBe("");
+      // Accepted past parsing, not the "must be an http://host:port URL"
+      // refusal — the connection Node actually attempts is what names the
+      // port, proving 80 is what was parsed.
+      expect(stderr).not.toContain("must be an http://host:port URL");
+      expect(stderr).toContain("127.0.0.1:80");
+    },
+    gateBudget([2_000]),
+  );
 });
 
 describe("bounds on the proxy's own response (SRD-OBSERVER-ROLES §5.2, task 3.1)", () => {

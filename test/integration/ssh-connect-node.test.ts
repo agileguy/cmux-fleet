@@ -50,9 +50,17 @@ const LIMIT_MS = 10_000;
 /** The banner the fake target sshd sends straight after a `200`. */
 const BANNER = "SSH-2.0-fake\r\n";
 
-/** What stderr must read for the harness's `controls` refusal: every control but tab and LF shown as `\xNN`. */
+/**
+ * What stderr must read for the harness's `controls` refusal: every control
+ * but tab and LF shown as `\xNN`, along with `\xdb` — a byte in 0xa0-0xff,
+ * outside the C1 range `\x9b` sits in — because escaping only C1 leaves a
+ * byte like it to re-encode over this container's real stderr fd as `c3 9b`,
+ * the second byte of which IS the 8-bit CSI the whole scheme exists to keep
+ * off it.
+ */
 const CONTROL_STDERR =
-  "HTTP/1.1 403 Forbidden\\x1b[2J\\x07\n" + "egress denied\\x1b]0;owned\\x07 by rule\\x0d default-deny\\x00\\x7f\\x9b31m\ttabbed\n";
+  "HTTP/1.1 403 Forbidden\\x1b[2J\\x07\n" +
+  "egress denied\\x1b]0;owned\\x07 by rule\\x0d default-deny\\x00\\x7f\\xdb\\x9b31m\ttabbed\n";
 
 /**
  * The in-container harness. Plain CommonJS for Node, written with
@@ -161,7 +169,7 @@ const SCENARIOS = {
   controls: {
     target: ["denied.test", "443"],
     proxy: (s) => onRequest(s, () => {
-      const body = "egress denied\x1b]0;owned\x07 by rule\r default-deny\x00\x7f\x9b31m\ttabbed\n";
+      const body = "egress denied\x1b]0;owned\x07 by rule\r default-deny\x00\x7f\xdb\x9b31m\ttabbed\n";
       s.end(Buffer.from(
         "HTTP/1.1 403 Forbidden\x1b[2J\x07\r\nContent-Length: " + body.length + "\r\nConnection: close\r\n\r\n" + body,
         "latin1",
@@ -170,6 +178,10 @@ const SCENARIOS = {
   },
   credentials: {
     proxyUrl: "http://user:s3cret-pw@127.0.0.1:PORT",
+    proxy: (s) => onRequest(s, () => s.end(OK + BANNER)),
+  },
+  pathquery: {
+    proxyUrl: "http://127.0.0.1:PORT/xyz-blocked-path?xyz-leak=1",
     proxy: (s) => onRequest(s, () => s.end(OK + BANNER)),
   },
   https: {
@@ -288,15 +300,13 @@ async function observe(scenario: string): Promise<Observation> {
       name,
       "--network",
       "none",
-      // The ipv6 scenario's fake proxy listens on "::1". A container's
-      // loopback IPv6 state is set from the host's own default at namespace
-      // creation, not from anything `--network none` implies, so on a host
-      // that defaults it off, "::1" would not exist and every scenario using
-      // it would fail before the script under test runs at all. Setting it
-      // explicitly makes the container's own "::1" independent of that
-      // default. Measured on Colima/Docker 28.4.0: unset behaves however the
-      // host default says; `=0` always succeeds; `=1` always fails
-      // EADDRNOTAVAIL (`net.createServer().listen(0, "::1")`).
+      // The ipv6 scenario's fake proxy listens on "::1", which is not
+      // guaranteed to exist in the container without this. Measured on
+      // Colima/Docker 28.4.0, three runs each against this same pinned image:
+      // `net.ipv6.conf.lo.disable_ipv6=0` let
+      // `net.createServer().listen(0, "::1")` succeed in 3 of 3, and `=1`
+      // failed it with EADDRNOTAVAIL in 3 of 3. Left unset was not measured,
+      // so it is set explicitly rather than assumed.
       "--sysctl",
       "net.ipv6.conf.lo.disable_ipv6=0",
       "-v",
@@ -448,7 +458,7 @@ describe.skipIf(!DOCKER)("ssh-connect.cjs under node:24-bookworm-slim (SRD-OBSER
   );
 
   test(
-    "an HTTPS_PROXY carrying credentials is refused without connecting, and they never reach stderr",
+    "an HTTPS_PROXY carrying credentials, or a path/query, is refused without connecting, and neither reaches stderr",
     async () => {
       const r = await observe("credentials");
 
@@ -457,8 +467,20 @@ describe.skipIf(!DOCKER)("ssh-connect.cjs under node:24-bookworm-slim (SRD-OBSER
       expect(r.connections).toBe(0);
       expect(r.stderr).toContain("HTTPS_PROXY");
       expect(r.stderr).not.toContain("s3cret");
+
+      // A second observation in the same test, not a new `test()`: this
+      // file's count is pinned by CI's TOTAL_EXPECTED (ci.yml, not owned
+      // here), so the path/query refusal is pinned by extending this one.
+      const p = await observe("pathquery");
+
+      expect(p.hung).toBe(false);
+      expect(p.code).toBe(1);
+      expect(p.connections).toBe(0);
+      expect(p.stderr).toContain("HTTPS_PROXY");
+      expect(p.stderr).not.toContain("xyz-blocked-path");
+      expect(p.stderr).not.toContain("xyz-leak");
     },
-    containerBudget(2),
+    containerBudget(4),
   );
 
   test(

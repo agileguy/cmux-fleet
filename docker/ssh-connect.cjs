@@ -30,20 +30,34 @@
  * `connect-proxy.cjs`'s `splitAuthority` splits that at its last `:`, and
  * bracketing it here would change the host string the egress policy judges.
  *
- * WHAT `HTTPS_PROXY` MAY BE, AND WHAT OF IT IS EVER PRINTED. Only an
- * `http://host:port` URL, the shape `src/run/worker-env.ts` sets. `https:` is
+ * WHAT `HTTPS_PROXY` MAY BE, AND WHAT OF IT IS EVER PRINTED. Only a bare
+ * `http://host:port` URL, the shape `src/run/worker-env.ts` sets: WHATWG's
+ * parsed `pathname` must be `/`, and `search` and `hash` must be empty, so a
+ * path, query or fragment — anything the parser turns into one, including a
+ * lone backslash, which for this scheme it reads as `/` — is refused before
+ * any lookup or connection, the value never repeated (it may itself be what
+ * put the path there). `http:host:port`, with no `//`, is ACCEPTED: WHATWG
+ * parses it identically to `http://host:port`. A port-less `http://host` is
+ * accepted too, and keeps defaulting to port 80, because WHATWG reports an
+ * explicit default port (`http://host:80`) as the SAME empty `.port` as no
+ * port at all — requiring one outright would also refuse that. `https:` is
  * refused because this client never speaks TLS to the proxy: it would send its
  * CONNECT in plaintext to a port expecting a handshake. No other scheme names a
- * proxy it can talk to. Both are refused before any lookup or connection. A
- * value containing `@` is refused outright: no `http://host:port` has one, the
- * fleet's proxy takes no credentials and this client sends none, and parsers
- * disagree about where userinfo ends (`http://user:1234\@host` hides it from
- * the WHATWG parser, which reads `user` as the host and `1234` as the port). A
- * refusal never repeats the value or anything parsed from it: stderr reaches
- * the worker's transcript, and a value that does not parse may carry
- * credentials in a form no check here recognises. An IPv6 literal's brackets,
- * which `URL.hostname` keeps, are removed before `net.connect`, which would
- * otherwise look `[fd00::1]` up as a name.
+ * proxy it can talk to; every scheme refusal, too, happens before any lookup or
+ * connection. A value containing `@` is refused outright: no `http://host:port`
+ * has one, the fleet's proxy takes no credentials and this client sends none,
+ * and parsers disagree about where userinfo ends (`http://user:1234\@host`
+ * hides it from the WHATWG parser, which reads `user` as the host and `1234`
+ * as the port). A REFUSAL never repeats the value or anything parsed from it:
+ * stderr reaches the worker's transcript, and a value that does not parse may
+ * carry credentials in a form no check here recognises. That holds only up to
+ * the refusal, though: once a value clears every check above, a CONNECTION
+ * FAILURE against the parsed `{ hostname, port }` prints Node's own error
+ * message, and under real Node that message names the address it tried
+ * (`connect ECONNREFUSED 127.0.0.1:1`, measured) — not withheld, because
+ * nothing that reaches this point can still be hiding a credential. An IPv6
+ * literal's brackets, which `URL.hostname` keeps, are removed before
+ * `net.connect`, which would otherwise look `[fd00::1]` up as a name.
  *
  * WHAT OPENS THE TUNNEL, AND WHY THE PROXY'S TEXT IS ESCAPED. Only a status
  * line matching `^HTTP/1\.[01] 200( |$)` opens it. Anything else, a `200` in
@@ -51,22 +65,18 @@
  * proxy's own status line and body on ssh's stderr, and from there into the
  * worker's transcript, so a broken or hostile proxy could otherwise write
  * terminal escape sequences or a bare CR there. Every C0 control but tab and
- * LF, DEL, and every C1 control is shown as `\xNN`. C1 is included because the
- * response is decoded as latin1, which turns the bytes 0x80-0x9f, the 8-bit
- * CSI among them, into those code points. An honest refusal is printable ASCII
- * and prints unchanged.
+ * LF, DEL, and every byte 0x80-0xff is shown as `\xNN`. The response is
+ * decoded as latin1, which turns every byte 0x80-0xff into the code point of
+ * the same number one-for-one — C1 controls (0x80-0x9f) among them — and this
+ * script's own stderr write then re-encodes that string as UTF-8: escaping
+ * only the C1 ones let a proxy byte like 0xdb leave as the two bytes `c3 9b`,
+ * the second of which IS the 8-bit CSI this exists to keep off stderr, so
+ * every byte above 0x7f has to be escaped, not just the ones already a
+ * control code. An honest refusal is printable ASCII and prints unchanged.
  *
- * THE THROWAWAY VERSION THIS REPLACES. `scripts/observe/characterise-ssh-transport`
- * (task 3.0) carries an inline `CONNECT_CLIENT` that measured the round trip
- * against a real proxy on 2026-09-14 (`test/fixtures/observe/ssh-transport-facts.json`,
- * `proxy_command.round_trips: true`) and nothing else: no argument validation
- * (`new URL(undefined)` throws an uncaught, contextless `TypeError`), an
- * unbounded header read, and a refusal line written to stderr that never
- * reaches an operator because that script's whole container is thrown away
- * the moment it exits. This file keeps the measured round trip and adds every
- * refusal SSH itself cannot supply: OpenSSH turns ANY non-zero ProxyCommand
- * exit into the same opaque `kex_exchange_identification: Connection closed
- * by remote host`, so the rule name a `403` carries
+ * WHY EVERY REFUSAL MUST REACH STDERR HERE. OpenSSH turns ANY non-zero
+ * ProxyCommand exit into the same opaque `kex_exchange_identification:
+ * Connection closed by remote host`, so the rule name a `403` carries
  * (`docker/connect-proxy.cjs:257-265`) has to reach stderr HERE or it never
  * reaches anyone at all. That holds however the refusal's connection ends —
  * a close, a reset, or not at all — so every one of those paths prints it.
@@ -81,7 +91,10 @@
  * bytes can arrive in the same read as the header, and those are tunnel data,
  * however many there are. Judging the whole read would refuse a healthy tunnel
  * for being fast. A non-`200` response's body is kept only to print, so it is
- * bounded too (`MAX_BODY_BYTES`), and the rest is never read.
+ * bounded too (`MAX_BODY_BYTES`), and the rest is never read. A response using
+ * bare LF instead of CRLF never reaches that terminator either, so it is read
+ * as an over-long header and its rule text is lost rather than printed;
+ * `connect-proxy.cjs` always sends CRLF, so this is by design, not a gap.
  *
  * WHY THE RESPONSE IS ALSO BOUNDED IN TIME, AND WHY THAT BOUND HAS NO KNOB. A
  * byte bound does nothing about a proxy that sends no bytes: a relay that
@@ -163,10 +176,10 @@ function say(message) {
 
 /**
  * The proxy's own text, made safe for ssh's stderr: every C0 control but tab
- * and LF, DEL, and every C1 control shown as `\xNN` (see the docblock).
+ * and LF, DEL, and every byte 0x80-0xff shown as `\xNN` (see the docblock).
  */
 function printable(text) {
-  return text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+  return text.replace(/[\x00-\x08\x0b-\x1f\x7f-\xff]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
 /**
@@ -198,6 +211,15 @@ function parseProxyUrl(raw) {
       refusal:
         "HTTPS_PROXY must be an http:// URL, and its scheme is not http:. https: is not supported: this client " +
         "never speaks TLS to the proxy, so it would send its CONNECT in plaintext to a port expecting a TLS handshake",
+    };
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    // Not repeated: the path itself may be attacker-chosen (see the docblock
+    // on why a lone backslash is enough to make one).
+    return {
+      refusal:
+        "HTTPS_PROXY must be a bare http://host:port URL, with no path, query or fragment. The value is not " +
+        "repeated here",
     };
   }
   const bracketed = url.hostname.startsWith("[") && url.hostname.endsWith("]");
