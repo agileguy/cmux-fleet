@@ -355,6 +355,22 @@ function onFakeConnection(socket: Socket): void {
       return;
     }
 
+    if (authority === "disagreecl.test:443") {
+      // Two Content-Length headers that disagree, the second (2) far shorter
+      // than the body. parseContentLength must return null rather than trust
+      // either value — in particular not the last one seen, which a
+      // check-free "last one wins" loop would produce here. With null, the
+      // close (100 ms below) is what ends the read; a wrongly-trusted 2 would
+      // end it after two body bytes and cut the rule text before it ever
+      // reaches stderr.
+      const body = "egress denied by rule default-deny\n";
+      socket.write(
+        `HTTP/1.1 403 Forbidden\r\nContent-Length: ${Buffer.byteLength(body)}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n${body}`,
+      );
+      setTimeout(() => socket.end(), 100);
+      return;
+    }
+
     if (authority === "chunked403.test:443") {
       // A chunked refusal that also carries a Content-Length far shorter than
       // its body. Transfer-Encoding overrides Content-Length (RFC 9112 §6.3),
@@ -798,6 +814,14 @@ describe("bounds on the proxy's own response (SRD-OBSERVER-ROLES §5.2, task 3.1
     expect(stdout).toBe("");
     expect(stderr.startsWith("HTTP/1.1 403 Forbidden\n")).toBe(true);
     expect(stderr).toContain("egress denied by rule default-deny");
+  }, gateBudget([2_000]));
+
+  test("two disagreeing Content-Length headers, the second far shorter than the body, are trusted as neither: the whole rule text still reaches stderr", async () => {
+    const { code, stdout, stderr } = await run({ host: "disagreecl.test", port: "443" });
+
+    expect(code).not.toBe(0);
+    expect(stdout).toBe("");
+    expect(stderr).toBe("HTTP/1.1 403 Forbidden\negress denied by rule default-deny\n");
   }, gateBudget([2_000]));
 
   test("a 200 whose blank line lands past byte 8192 is refused, even in one read", async () => {

@@ -417,7 +417,7 @@ jobs:
           # named probe rather than making ten look broken.
           PIFLEET_DIND: "1"
           LABEL: container
-          # All ten PIFLEET_DOCKER-gated files, run ONCE by this step, which
+          # Every PIFLEET_DOCKER-gated file, run ONCE by this step, which
           # both prints their output and grades it. This used to be two
           # separate steps — a "probes" step that ran these files for
           # their own sake, and a "guard" step below it that ran the SAME

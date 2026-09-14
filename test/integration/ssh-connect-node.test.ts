@@ -191,6 +191,21 @@ if (sc === undefined) {
       s.on("close", () => sockets.delete(s));
       sc.proxy(s);
     });
+    // A listen failure (e.g. the ipv6 scenario's "::1" on a container whose
+    // loopback has IPv6 disabled) must not fall through to the hard stop's
+    // silent process.exit(3): that prints nothing, and the caller sees only
+    // "printed no report", which names no cause. Report it, with the error
+    // code, and exit at once.
+    server.once("error", (listenErr) => {
+      // Exits 0, same as a normal report below: the harness DID its job,
+      // reporting what happened, so the caller's docker-run-exit-code check
+      // is not what should catch this — the parsed report itself is what
+      // tells a listen failure apart from a completed scenario.
+      process.stdout.write(
+        JSON.stringify({ listenError: listenErr.code || listenErr.message }) + "\n",
+        () => process.exit(0),
+      );
+    });
     await new Promise((resolve) => server.listen(0, sc.listen || "127.0.0.1", resolve));
     const proxyUrl = (sc.proxyUrl || "http://127.0.0.1:PORT").replace("PORT", String(server.address().port));
     const target = sc.target || ["tunnel.test", "2222"];
@@ -250,6 +265,11 @@ interface Observation {
   resetControl?: string;
 }
 
+/** Printed instead of an `Observation` when the harness's own fake proxy could not `listen()`. */
+interface ListenFailure {
+  listenError: string;
+}
+
 /**
  * Run one harness scenario in a fresh container and return its report.
  *
@@ -268,6 +288,17 @@ async function observe(scenario: string): Promise<Observation> {
       name,
       "--network",
       "none",
+      // The ipv6 scenario's fake proxy listens on "::1". A container's
+      // loopback IPv6 state is set from the host's own default at namespace
+      // creation, not from anything `--network none` implies, so on a host
+      // that defaults it off, "::1" would not exist and every scenario using
+      // it would fail before the script under test runs at all. Setting it
+      // explicitly makes the container's own "::1" independent of that
+      // default. Measured on Colima/Docker 28.4.0: unset behaves however the
+      // host default says; `=0` always succeeds; `=1` always fails
+      // EADDRNOTAVAIL (`net.createServer().listen(0, "::1")`).
+      "--sysctl",
+      "net.ipv6.conf.lo.disable_ipv6=0",
       "-v",
       `${SCRIPT}:/opt/pifleet/ssh-connect.cjs:ro`,
       RELAY_IMAGE,
@@ -290,11 +321,17 @@ async function observe(scenario: string): Promise<Observation> {
     throw new Error(`docker run for scenario ${scenario} exited ${code}\nstdout: ${out}\nstderr: ${err}`);
   }
   const line = out.trim().split("\n").pop() ?? "";
-  let parsed: Observation;
+  let parsed: Observation | ListenFailure;
   try {
-    parsed = JSON.parse(line) as Observation;
+    parsed = JSON.parse(line) as Observation | ListenFailure;
   } catch {
     throw new Error(`scenario ${scenario} printed no report\nstdout: ${out}\nstderr: ${err}`);
+  }
+  if ("listenError" in parsed) {
+    // Named, rather than falling through to the generic assertions below
+    // and failing on `parsed.runtime` being `undefined` — the point of the
+    // harness reporting this at all is that the cause reaches here.
+    throw new Error(`scenario ${scenario}: the fake proxy failed to listen (${parsed.listenError})\nstdout: ${out}\nstderr: ${err}`);
   }
   expect(parsed.runtime).toBe("node");
   expect(parsed.node).toStartWith("v24.");
