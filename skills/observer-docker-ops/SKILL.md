@@ -41,20 +41,26 @@ enrolled on this fleet, read from the file named by `OBSERVER_DOCKER_TARGETS_FIL
 `observe-ssh docker <target> <verb> [key=value ...]`; it does not itself enforce the verb grammar
 below, the target's forced command does.
 
-Read the exit status before you write a row, and route it to the artifact this way:
+Read the exit status AND the stderr text before you write a row — the exit code alone does not say
+who refused what:
 
 | Exit | What it means | What the row says |
 |---|---|---|
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
-| `77` without that stderr line | the call reached the target, and the target's forced command refused it | that channel is `forbidden`, and the task status is `blocked` |
+| `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
+| `77` with any other `docker-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all (a followed log, `stats` for every container), that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
+| `126` or `127` | `docker` did not run on the target at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | `255` | ssh's own failure — a host-key mismatch or a proxy refusal | the target is `unreachable` |
 | anything else | docker's own exit, returned from the target (e.g. no such container) | the channel is `answered`, and the error text goes in `evidence_ref` |
 
-A shim-side 77 is not evidence about the target at all — it is a bug in the call you made, and
-retrying it once (fixed) costs less turn than reasoning about it as if the target had refused
-something.
+A shim-side 77 (the `observe-ssh` line) is not evidence about the target at all — it is a bug in the
+call you made, and retrying it once (fixed) costs less turn than reasoning about it as if the target
+had refused something. A target-side 77 is not one thing either: the stderr line names either the
+VERB the credential refuses outright, or an ARGUMENT its grammar refused — only the first is
+`forbidden`. A refused argument is still your call to fix, from the reason the line gives, unless
+what the task needs has no form the grammar accepts at all.
 
 ## The verb grammar — the whole of what the credential can do (§5.4)
 
@@ -77,6 +83,10 @@ flags, so no worker token can become a docker option.
 value outside that grammar is refused by the target — it is not truncated or escaped, the call
 fails. `name=<n>` has no separate grammar of its own beyond the container-name characters; what it
 does with the pattern it is given is a matching question, covered below, not a syntax one.
+
+**`top` returns every process's command line, unfiltered, while the call runs.** That includes any
+`docker exec` in progress inside the container: its command line is whatever the operator typed, the
+same disclosure `ps`'s `Command` field carries below.
 
 **Everything else exits 77 and runs no `docker` at all.** The grammar is an allowlist, so this
 list is illustrative rather than the mechanism: `run`, `create`, `start`, `stop`, `restart`,
@@ -108,26 +118,30 @@ carry embedded credentials), `RegistryConfig`, `Labels` or swarm details.
 
 ### Measured facts, so a result reads honest
 
-These are measured against real daemons (docker 29.7.2 and 28.5.2) by
-`scripts/observe/characterise-docker`, and recorded in `test/fixtures/observe/docker-cli-shapes.json`
-and `test/fixtures/observe/docker-forced-command-rendered.json`. None is assumed from Docker's
-documentation:
+Each claim below says what it rests on. Most are measured against real daemons (docker 29.7.2 and
+28.5.2) by `scripts/observe/characterise-docker`, and recorded in
+`test/fixtures/observe/docker-cli-shapes.json` and
+`test/fixtures/observe/docker-forced-command-rendered.json`. A few instead rest on Docker's own
+documentation or its CLI source, and say so where they appear — nothing here is asserted without
+saying where it comes from:
 
 - **`ps` returns one JSON object per container, one line each, from an 11-field template:**
   `ID`, `Names`, `Image`, `Command`, `CreatedAt`, `RunningFor`, `State`, `Status`, `Ports`,
   `Labels`, `Networks`. There is no `Mounts`, `LocalVolumes`, `Platform` or `Size`: a bind mount's
-  host path is the same disclosure `inspect` leaves out. There is also no separate health field —
-  docker CLIs before 29.5.0 lack that `ps` column entirely, and asking for it there made `ps` fail
-  outright, so the template leaves it out. Health still shows up: it rides inside `Status`, e.g.
-  `Up 2 seconds (healthy)` (measured on 28.5.2). `Command` is the container's full command line, so
-  do not quote it back into an artifact or a follow-up call without thinking about what it might
-  carry.
+  host path is the same disclosure `inspect` leaves out. There is also no separate health field:
+  Docker's own default `ps --format '{{json .}}'` carries `HealthStatus` on 29.7.2 and not on 28.5.2
+  (measured per version: `.runs["<version>"].default_ps_key_set` in the rendered fixture), and
+  `docker/cli` source puts the field's introduction at 29.5.0. Health still shows up: it rides
+  inside `Status`, e.g. `Up 2 seconds (healthy)` — the forced command's own `Status` value for a
+  healthchecked container, measured per version at `.runs["<version>"].ps_health_status`.
+  `Command` is the container's full command line, so do not quote it back into an artifact or a
+  follow-up call without thinking about what it might carry.
 - **`ps`'s `name=` filter is an unanchored regular expression on the name, not a substring and not
-  an exact match.** `name=web` lists `myweb`, `web`, `web-2` and `webhook` alike, and `name=w.b`
-  also lists `wxb`, because `.` matches any character. The grammar refuses `^` and `$`, so there is
-  no way to anchor the pattern from a worker call. **Always check `Names` in every returned row
-  yourself before reporting on a specific container** — the filter narrows the query, it does not
-  confirm the answer.
+  an exact match.** `name=web` lists `myweb`, `web`, `web-2` and `webhook` alike. `name=w.b` lists
+  the same four, because `.` matches any character and each of those names contains `web`. Measured: `.runs["<version>"].matching.ps_name_filter` in the rendered fixture.
+  The grammar refuses `^` and `$`, so there is no way to anchor the pattern from a worker call.
+  **Always check `Names` in every returned row yourself before reporting on a specific container** —
+  the filter narrows the query, it does not confirm the answer.
 - **`inspect`'s `state.health` is `null` for a container with no healthcheck defined.** That is
   the whole meaning of `null` here: "no healthcheck," not "unhealthy" and not "unknown." When a
   healthcheck exists, `state.health` is an object holding exactly `status` (`starting`, `healthy`
@@ -149,26 +163,32 @@ documentation:
 - **`events` needs `since=<N>s`, and `N` has the same grammar as `logs`'s: 1 to 9 digits, at least
   1.** The target adds `--until 0s`, so the call returns one bounded window and ends on its own; it
   is not a stream. Events from the current second are not returned: an event less than a second
-  old arrives on a later call, not this one. Each line is one JSON object with the keys `Type`,
-  `Action`, `Actor`, `scope`, `time` and `timeNano`, and the container's name is in
-  `Actor.Attributes.name`. Key order is not a promise Docker or this target makes; read the object by
-  key, never by position.
+  old arrives on a later call, not this one. Every event carries at least the keys `Type`, `Action`,
+  `Actor`, `scope`, `time` and `timeNano`, and the container's name is in `Actor.Attributes.name`.
+  Docker 28.x also sends three more, deprecated keys — `status`, `id` and `from` — that 29.x drops
+  (measured per version: `.runs["<version>"].cases[].key_sets` in the rendered fixture). Key order is
+  not a promise Docker or this target makes; read the object by key, never by position, and do not
+  assume a key beyond the first six is there on every daemon.
 - **`events container=<c>` is a literal prefix match on the container name — not a substring, and
   not the `ps` regex.** `container=web` returns events for `web`, `web-2` and `webhook`, but not
   `myweb`. `container=w.b` and `container=eb` return nothing at all, because neither is a prefix of
-  any real name — `.` is not a wildcard here the way it is in `ps`'s `name=`. Do not carry a `ps`
+  any real name — `.` is not a wildcard here the way it is in `ps`'s `name=`. Measured:
+  `.runs["<version>"].matching.events_container_filter` in the rendered fixture. Do not carry a `ps`
   filtering habit over to `events`.
 - **`events` returns container lifecycle and health events only:** `create`, `start`, `restart`,
-  `stop`, `die`, `kill`, `oom`, `pause`, `unpause`, `destroy` and `health_status` (whose action
-  reads like `health_status: healthy`) — eleven actions, fixed on the target. No `exec_*` action
-  ever comes back, because each one names the exec'd command line and an operator's `docker exec`
-  can carry a secret there.
+  `stop`, `die`, `kill`, `oom`, `pause`, `unpause`, `destroy` and `health_status` — eleven actions,
+  fixed on the target (`.events.action_allowlist.filters` in the shapes fixture). `health_status`'s
+  action text reads like `health_status: healthy`, measured per version at
+  `.runs["<version>"].cases[].actions_raw` in the rendered fixture. No `exec_*` action ever comes
+  back, because each one names the exec'd command line and an operator's `docker exec` can carry a
+  secret there.
 - **The daemon keeps a bounded buffer of past events, and it is smaller than it looks.** Measured
   (`.events.buffer` in the shapes fixture): after 120 `docker exec` calls against one container, an
   unfiltered query returned a few hundred events, that container's earlier `start` event was gone,
-  and the query with this target's action filter returned nothing at all. `docker exec` calls and
-  healthcheck probes fill the same buffer, even though the action filter hides every `exec_*`
-  action from what you see. **An empty or quiet-looking `events` result is not proof nothing happened in the
+  and the query with this target's action filter returned nothing at all. A healthcheck probe runs
+  as an exec too, so it likely fills the buffer the same way; only the `docker exec` flood was
+  measured.
+  **An empty or quiet-looking `events` result is not proof nothing happened in the
   window** — it can just as easily mean the buffer already rolled past it. Cross-check with
   `inspect`'s `started_at` and `restart_count` before reporting a window as quiet.
 
@@ -247,8 +267,10 @@ confirms it by that declared kind (`src/harvest/reconcile.ts`).
   `answered | unreachable | forbidden | not_attempted` and
   `healthy | degraded | unhealthy | indeterminate`. `failed` is a TASK status, never an
   `assessment` — a fifth token there voids the whole document, not just the row.
-- **A refused verb is `forbidden`, and the task status is `blocked`.** A container with no
-  healthcheck is not a refusal: `health` is `answered`, and the evidence says so.
+- **A refused VERB is `forbidden`, and the task status is `blocked`.** A refused ARGUMENT is not: fix
+  the call from the stderr reason and retry it once. When the task needs a shape the grammar has no
+  form for at all (a followed log, `stats` for every container), that channel is `forbidden` too. A
+  container with no healthcheck is not a refusal: `health` is `answered`, and the evidence says so.
 - **`container_id`, `image` and `restart_count` are optional.** Include them when `inspect`
   answered; leave them out rather than guess when it did not. `container_id` is the full,
   untruncated id `inspect` returns (64 hex characters), the same one `--no-trunc` and `.Id` give —
@@ -274,12 +296,29 @@ worker never runs any of it.
    reach or its own `authorized_keys` line.
 3. Add one `authorized_keys` line:
    `restrict,command="<installed path>" ssh-ed25519 <public key> pifleet-observer-docker`.
-4. In `sshd_config` for this account, `AcceptEnv` must pass nothing through — no `PATH`, `IFS`,
-   `ENV`, `BASH_ENV`, and no `DOCKER_*` name. The forced command inherits whatever environment
-   sshd hands it. An accepted `PATH` can make `docker` resolve to another binary, and an accepted
-   `DOCKER_*` variable (`DOCKER_HOST` chief among them) can point its `docker` calls somewhere other
-   than the local socket. `IFS`, `ENV` and `BASH_ENV` are hardening: the shells measured ignore an
-   inherited `IFS`, and `ENV`/`BASH_ENV` only matter to a shell that reads them at startup.
+4. Configure sshd so no environment reaches the forced command from the client — this is four
+   settings, not one, because `AcceptEnv` alone is not the whole path an environment variable takes:
+   - `AcceptEnv` passes nothing through for this account. Inside a `Match User` block, OpenSSH's
+     `AcceptEnv` directive itself needs at least one variable name to parse (checked with
+     `sshd -T` on OpenSSH 10.3p1) — name one no client ever sends, e.g. `OBSERVER_DOCKER_UNUSED`,
+     rather than a real one.
+   - No `SetEnv` for the account. `SetEnv` hands the forced command a value regardless of what the
+     client asks for, and does not go through `AcceptEnv` at all.
+   - `PermitUserEnvironment no` (the default). With it off, an `environment=` option on the
+     `authorized_keys` line and the account's `~/.ssh/environment` file are both ignored, so neither
+     can hand the forced command a variable behind `AcceptEnv`'s back.
+   - No `pam_env` setting for this account sets `PATH` or any `DOCKER_*` name — PAM can inject
+     environment before sshd ever consults `AcceptEnv`.
+
+   The forced command inherits whatever survives all four. An accepted `PATH` can make `docker`
+   resolve to another binary, and an accepted `DOCKER_*` variable (`DOCKER_HOST` chief among them)
+   can point its `docker` calls somewhere other than the local socket — so the account's own `PATH`
+   must resolve `docker` on its own, with nothing above able to override it. `IFS`, `ENV` and
+   `BASH_ENV` stay hardening rather than something this step must forbid on its own: the forced
+   command pins its own `IFS` before it parses `SSH_ORIGINAL_COMMAND`, so a caller's inherited `IFS`
+   never reaches its argument parsing — proven under `sh` and `dash` in the unit tests, and under
+   busybox `sh` in the rendered fixture's `IFS=:` case. `ENV` and `BASH_ENV` only matter to a shell
+   that reads them at startup.
 5. Record the target's host key in `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
    `token host port user` to `OBSERVER_DOCKER_TARGETS`.
 6. Add `{host, port}` to `egress.allow` in `fleet.yaml`, and add the three secret names to

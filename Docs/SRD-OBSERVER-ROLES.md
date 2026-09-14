@@ -427,7 +427,7 @@ worker (obs-d1, internal bridge)
                    -i <key file> -p <port> -l <user> <host> -- <verb> [key=value …]
                  └─ CONNECT <host>:<port> via HTTPS_PROXY          docker/connect-proxy.cjs, egress.allow
                       └─ sshd on the target: key line is  restrict,command="<forced command>"
-                           └─ observe-docker-forced-command reads SSH_ORIGINAL_COMMAND,
+                           └─ docker-forced-command reads SSH_ORIGINAL_COMMAND,
                               matches the grammar in §5.4, execs one fixed docker argv or exits 77
 ```
 
@@ -487,7 +487,7 @@ guessing.
 |---|---|---|
 | target | a target TOKEN from the enrolled inventory, `^[a-z0-9][a-z0-9-]{0,31}$` | none — if the inventory holds exactly one target the worker uses it and says so; otherwise the row is `indeterminate` |
 | containers | one or more container names, each matching Docker's name grammar `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` (the same grammar as `src/security/docker-names.ts:15`) | — |
-| selector | `label=<key>=<value>` or `name=<substring>`, used instead of names | if neither names nor a selector is given: every running container, `ps` only, and the row says so |
+| selector | `label=<key>=<value>` or `name=<pattern>` (an unanchored regular expression, checked against `Names`), used instead of names | if neither names nor a selector is given: every running container, `ps` only, and the row says so |
 | checks | a closed subset of `state`, `health`, `logs`, `stats`, `events` | `state, health, logs` |
 | window | seconds, e.g. `300s` | `300s` |
 | question | one sentence | "is it healthy" |
@@ -637,9 +637,11 @@ and confirms by declared kind (`src/harvest/reconcile.ts:165-173`):
 - **`coverage[].channel` is closed** to `state`, `health`, `logs`, `stats` and `events`.
   **`coverage[].result`** and **`assessment`** are the existing closed enums
   (`skills/observer-ops/SKILL.md:74-112`).
-- **A refused verb is `forbidden`, and the task status is `blocked`**, per SRD-OBSERVER-001 §9.3
-  (`Docs/SRD-DEPLOY-OPS.md:1580`, `:1592-1593`). A container that has no health check is not a
-  refusal: `health` is `answered` and the evidence says "no healthcheck defined".
+- **A refused VERB is `forbidden`, and the task status is `blocked`**, per SRD-OBSERVER-001 §9.3
+  (`Docs/SRD-DEPLOY-OPS.md:1580`, `:1592-1593`). A refused ARGUMENT is not: the grammar names the
+  reason, and the caller fixes it and retries once. Only a shape the grammar has no form for at all
+  (a followed log, `stats` for every container) is `forbidden` on its own. A container that has no
+  health check is not a refusal: `health` is `answered` and the evidence says "no healthcheck defined".
 - **`container_id`, `image` and `restart_count` are optional.**
 - **Harvest** validates the JSON by name, sweeps it for `OBSERVER_DOCKER_SSH_KEY`'s value, and clamps
   an orphaned `.md` to `failed` (Phase 2).
@@ -658,12 +660,28 @@ and confirms by declared kind (`src/harvest/reconcile.ts:165-173`):
    `restrict,command="<installed path>" ssh-ed25519 <public key> pifleet-observer-docker`.
    OpenSSH's `restrict` turns off port, agent and X11 forwarding and PTY allocation. The forced command
    replaces whatever the client asks to run.
-4. Configure sshd so this account's `AcceptEnv` passes nothing through — no `PATH`, `IFS`, `ENV`,
-   `BASH_ENV`, and no `DOCKER_*` name. The forced command inherits whatever environment sshd hands
-   it. An accepted `PATH` can make `docker` resolve to another binary, and an accepted `DOCKER_*`
-   variable (`DOCKER_HOST` foremost) can point its `docker` calls away from the local socket. `IFS`,
-   `ENV` and `BASH_ENV` are hardening: busybox sh, dash and bash all ignore an inherited `IFS`
-   (measured), and `ENV`/`BASH_ENV` only matter to a shell that reads them at startup.
+4. Configure sshd so no environment reaches the forced command from the client — four settings, not
+   one, because `AcceptEnv` alone is not the whole path an environment variable takes:
+   - This account's `AcceptEnv` passes nothing through. Inside a `Match User` block, OpenSSH's
+     `AcceptEnv` directive itself needs at least one variable name to parse (checked with
+     `sshd -T` on OpenSSH 10.3p1) — name one no client ever sends, e.g. `OBSERVER_DOCKER_UNUSED`,
+     rather than a real one.
+   - No `SetEnv` for the account. `SetEnv` hands the forced command a value regardless of what the
+     client asks for, and does not go through `AcceptEnv` at all.
+   - `PermitUserEnvironment no` (the default). With it off, an `environment=` option on the
+     `authorized_keys` line and the account's `~/.ssh/environment` file are both ignored, so neither
+     can hand the forced command a variable behind `AcceptEnv`'s back.
+   - No `pam_env` setting for this account sets `PATH` or any `DOCKER_*` name — PAM can inject
+     environment before sshd ever consults `AcceptEnv`.
+
+   The forced command inherits whatever survives all four. An accepted `PATH` can make `docker`
+   resolve to another binary, and an accepted `DOCKER_*` variable (`DOCKER_HOST` foremost) can point
+   its `docker` calls away from the local socket — so the account's own `PATH` must resolve `docker`
+   on its own, with nothing above able to override it. `IFS`, `ENV` and `BASH_ENV` stay hardening
+   rather than something this step must forbid on its own: the forced command pins its own `IFS`
+   before it parses `SSH_ORIGINAL_COMMAND`, so a caller's inherited `IFS` never reaches its argument
+   parsing — proven under `sh` and `dash` in the unit tests, and under busybox `sh` in the rendered
+   fixture's `IFS=:` case. `ENV` and `BASH_ENV` only matter to a shell that reads them at startup.
 5. Record the target's host key in the value of `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
    `token host port user` to `OBSERVER_DOCKER_TARGETS`.
 6. Add `{host, port}` to `egress.allow` in `fleet.yaml` (Q3), and add the three names to
