@@ -187,36 +187,44 @@ describe("observe-ssh is exercised at build time (SRD-OBSERVER-ROLES task 3.3)",
 
 /**
  * `observe-docker` is exercised at build time too (SRD-OBSERVER-ROLES task
- * 4.2), same reasoning as the observe-ssh block above: a presence check does
- * not prove the alias still resolves `observe-ssh` on PATH, and a COPY placed
- * after the RUN block that calls it would fail the real build unobserved by
- * any unit test.
+ * 4.2), same reasoning as the
+ * observe-ssh block above: a presence check does not prove the alias still
+ * resolves `observe-ssh` on PATH, and a COPY placed after the RUN block that
+ * calls it would fail the real build unobserved by any unit test.
  *
- * `observe-docker --help` IS NOT THE SAME SHAPE as `observe-ssh --help`.
- * `observe-ssh`'s own `--help` branch fires only when ITS first argument is
- * literally `--help` (task 3.2); `observe-docker` always prepends `docker`
- * ahead of whatever it is given, so `observe-docker --help` calls
- * `observe-ssh docker --help` — two arguments, and neither one is `--help` in
- * the position `observe-ssh` checks. MEASURED (this shim pair, run locally,
- * no `OBSERVER_DOCKER_*`/`OBSERVER_VM_*` variables set): that call exits 77,
- * not 0, with `observe-ssh: refused before ssh ran: expected <docker|vm>
- * <target> <verb> [argument ...], got 2 argument(s); ...` on stderr. A smoke
- * line mirroring observe-ssh's exactly (`observe-docker --help >/dev/null;`)
- * would therefore abort every build under `set -eux`.
+ * Two smoke lines, because `observe-docker` now behaves two different ways
+ * depending on argument count. `observe-docker --help`, with `--help` as the
+ * SOLE argument, is answered by the shim's own usage branch and exits 0 —
+ * mirroring observe-ssh's smoke line is correct for this call.
+ * `observe-docker --help extra`, with a second argument present, is NOT
+ * intercepted: the alias always prepends `docker` ahead of whatever it is
+ * given and forwards unchanged, so this call reaches `observe-ssh docker
+ * --help extra` — three arguments, none of them `--help` in the position
+ * `observe-ssh`'s own `--help` branch checks (task 3.2). MEASURED (this shim
+ * pair, run locally, no `OBSERVER_DOCKER_*`/`OBSERVER_VM_*` variables set):
+ * that call exits 77, not 0, with `observe-ssh: refused before ssh ran: the
+ * target is not an enrolled-token shape, ...` on stderr (`--help` fails
+ * observe-ssh's target-token grammar). A smoke line mirroring observe-ssh's
+ * exactly (`observe-docker --help extra >/dev/null;`) would therefore abort
+ * every build under `set -eux`.
  *
- * The line below instead pipes the refusal into `grep -qF`, the same
+ * The second line instead pipes the refusal into `grep -qF`, the same
  * non-pipefail idiom this Dockerfile's ticket-cli install already uses
  * (`rally-cli --version | grep -qF "version ${TICKET_CLI_VERSION}"`,
  * `docker/Dockerfile:343`): under `/bin/sh` (no `pipefail`), a pipeline's
  * exit status is its LAST command's, so the line succeeds exactly when grep
- * finds the match — which happens if and only if `observe-docker` is on
- * PATH, really execs into `observe-ssh`, and gets refused for the expected
- * reason, all with no secrets delivered.
+ * finds the match — which happens if and only if `observe-docker` still
+ * forwards a non-help-alone call to `observe-ssh` on PATH and gets refused
+ * for the expected reason, all with no secrets delivered.
  */
 describe("observe-docker is exercised at build time (SRD-OBSERVER-ROLES task 4.2)", () => {
-  test("the smoke RUN block runs observe-docker --help through observe-ssh's refusal", () => {
+  test("the smoke RUN block runs observe-docker --help on its own, exiting 0", () => {
+    expect(smokeBlock()).toContain("observe-docker --help >/dev/null;");
+  });
+
+  test("the smoke RUN block runs observe-docker --help extra through observe-ssh's refusal", () => {
     expect(smokeBlock()).toContain(
-      "observe-docker --help 2>&1 | grep -qF 'observe-ssh: refused before ssh ran';",
+      "observe-docker --help extra 2>&1 | grep -qF 'observe-ssh: refused before ssh ran';",
     );
   });
 

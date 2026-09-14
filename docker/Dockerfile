@@ -352,14 +352,13 @@ COPY --chmod=0755 docker/ticket-cli /usr/local/bin/rally-cli
 # owns what": it owns ARGV SAFETY, refusing every argument it cannot validate
 # before `ssh` ever runs; the target's own forced command owns the verb
 # allowlist, because only the target can enforce a rule the worker cannot
-# step around. On PATH as `observe-ssh`. No role calls it yet, so the phase
-# ships inert.
+# step around. On PATH as `observe-ssh`, and called by `observe-docker` below.
 COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh
 
 # The Docker role's entry-point alias (SRD-OBSERVER-ROLES §12 Phase 4, task
-# 4.2). A thin `exec observe-ssh docker "$@"` — it owns no validation of its
-# own, only being on PATH under the name `obs-d1` actually calls. On PATH as
-# `observe-docker`. No role calls it yet, so the phase ships inert.
+# 4.2), called by the `observer-docker` role. It answers `--help`/`-h` when that
+# is the sole argument and passes every other argv to `observe-ssh docker`
+# unchanged. On PATH as `observe-docker`.
 COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker
 
 # Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
@@ -380,7 +379,8 @@ RUN set -eux; \
     /opt/pifleet/rally-cli/bin/rally-cli --version >/dev/null; \
     ssh -V; \
     observe-ssh --help >/dev/null; \
-    observe-docker --help 2>&1 | grep -qF 'observe-ssh: refused before ssh ran'; \
+    observe-docker --help >/dev/null; \
+    observe-docker --help extra 2>&1 | grep -qF 'observe-ssh: refused before ssh ran'; \
     pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.

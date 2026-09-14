@@ -1,18 +1,23 @@
 /**
- * `docker/observe-docker` is `exec observe-ssh docker "$@"` and nothing else
- * (SRD-OBSERVER-ROLES §5.2; Phase 4 task 4.2).
+ * `docker/observe-docker` is a thin alias for `exec observe-ssh docker "$@"`,
+ * plus one branch: `--help`/`-h` as the SOLE argument prints its own usage to
+ * stdout and exits 0 without ever invoking observe-ssh (SRD-OBSERVER-ROLES
+ * §5.2; Phase 4 task 4.2). Passed on, `observe-ssh docker --help` would put
+ * `--help` where observe-ssh expects a target token and be refused, exit 77.
  *
  * Nothing about the Dockerfile's COPY, the build-asset enrolment or the smoke
- * line notices the alias handing observe-ssh the wrong kind, dropping an
+ * lines notices the alias handing observe-ssh the wrong kind, dropping an
  * argument, or splitting one: `observe-ssh vm "$@"` is refused at build time in
  * exactly the words `observe-ssh docker "$@"` is. So these run the real alias
  * under the host's POSIX shells with a recording fake `observe-ssh` first on
  * `PATH`, and read back the argv it was handed, NUL-separated so an element
- * holding a space or a newline survives as one record.
+ * holding a space or a newline survives as one record — except the help
+ * cases, which must show the fake was never invoked at all (the record file
+ * is absent).
  *
- * The last case runs the alias against the REAL `docker/observe-ssh` instead,
- * because the image's smoke line greps for the refusal text and a reworded
- * refusal would fail every build.
+ * The `--help extra` case runs the alias against the REAL `docker/observe-ssh`
+ * instead, because the image's second smoke line greps for the refusal text
+ * and a reworded refusal would fail every build.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -24,8 +29,11 @@ const REPO = new URL("../../", import.meta.url).pathname;
 const ALIAS = join(REPO, "docker/observe-docker");
 const REAL_SHIM = join(REPO, "docker/observe-ssh");
 
-/** The text the Dockerfile's smoke line greps `observe-docker --help` for. */
+/** The text the Dockerfile's second smoke line greps `observe-docker --help extra` for. */
 const SMOKE_REFUSAL = "observe-ssh: refused before ssh ran";
+
+/** The line the shim's own usage branch is expected to open with. */
+const USAGE_HEADER = "usage: observe-docker <target> <verb> [key=value ...]";
 
 /** Records its argv, one NUL-terminated element each, then exits with `FAKE_EXIT`. */
 const FAKE_OBSERVE_SSH = `#!/bin/sh
@@ -70,7 +78,7 @@ function runAlias(shell: string, bin: string, args: string[], fakeExit = 0) {
     stderr: "pipe",
   });
   const argv = existsSync(record) ? readFileSync(record, "utf8").split("\0").slice(0, -1) : null;
-  return { exitCode: proc.exitCode, stderr: proc.stderr.toString(), argv };
+  return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString(), argv };
 }
 
 for (const shell of shells()) {
@@ -90,19 +98,41 @@ for (const shell of shells()) {
       for (const code of [77, 78, 255]) expect(runAlias(shell, fakeBin, ["t", "ps"], code).exitCode).toBe(code);
     });
 
-    test("--help reaches the real observe-ssh as a target and is refused in the words the smoke line greps for", () => {
+    test("--help alone exits 0, prints usage to stdout, and never invokes observe-ssh", () => {
+      const r = runAlias(shell, fakeBin, ["--help"]);
+      expect(r.argv).toBeNull();
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain(USAGE_HEADER);
+    });
+
+    test("-h alone exits 0, prints usage to stdout, and never invokes observe-ssh", () => {
+      const r = runAlias(shell, fakeBin, ["-h"]);
+      expect(r.argv).toBeNull();
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain(USAGE_HEADER);
+    });
+
+    test("--help with another argument still reaches observe-ssh unchanged", () => {
+      const r = runAlias(shell, fakeBin, ["--help", "extra"]);
+      expect(r.argv).toEqual(["docker", "--help", "extra"]);
+      expect(r.exitCode).toBe(0);
+    });
+
+    test("--help extra reaches the real observe-ssh and is refused in the words the second smoke line greps for", () => {
       const realBin = mkdtempSync(join(scratch, "real-bin-"));
       copyFileSync(REAL_SHIM, join(realBin, "observe-ssh"));
       chmodSync(join(realBin, "observe-ssh"), 0o755);
-      const r = runAlias(shell, realBin, ["--help"]);
+      const r = runAlias(shell, realBin, ["--help", "extra"]);
       expect(r.exitCode).toBe(77);
       expect(r.stderr).toContain(SMOKE_REFUSAL);
     });
   });
 }
 
-test("the smoke line greps for the same refusal text these tests pin", () => {
-  expect(readFileSync(join(REPO, "docker/Dockerfile"), "utf8")).toContain(
-    `observe-docker --help 2>&1 | grep -qF '${SMOKE_REFUSAL}';`,
+test("the two smoke lines match what these tests pin", () => {
+  const dockerfile = readFileSync(join(REPO, "docker/Dockerfile"), "utf8");
+  expect(dockerfile).toContain("observe-docker --help >/dev/null;");
+  expect(dockerfile).toContain(
+    `observe-docker --help extra 2>&1 | grep -qF '${SMOKE_REFUSAL}';`,
   );
 });
