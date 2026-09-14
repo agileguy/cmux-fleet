@@ -674,8 +674,18 @@ describe("a multi-line value is scrubbed line by line, and its armor is left alo
    * `multiline: true`, delivered by `buildWorkerEnv`, written by the two writers
    * `materialize.ts` calls, armed by `redactorForWorkerEnv`, and applied by
    * `appendJsonl` with the same `transform` the supervisor passes.
+   *
+   * SRD-OBSERVER-ROLES §5.5 grants `OBSERVER_DOCKER_KNOWN_HOSTS` AND
+   * `OBSERVER_DOCKER_TARGETS` as `credential: false` — this fixture matches
+   * that grant exactly, where an earlier version of this test marked only
+   * the targets list that way and left the known_hosts list a credential.
+   * Measured against the corrected fixture: `OBSERVER_DOCKER_KNOWN_HOSTS`
+   * host keys and `OBSERVER_DOCKER_TARGETS` tokens were being scrubbed like
+   * the key, so `ssh: connect to host [redacted:...] port 22: refused` named
+   * the wrong thing to rotate, and `$ observe-ssh docker <token> ps` lost the
+   * very token it was diagnosing.
    */
-  test("a key delivered through multiline: true is scrubbed line by line from events.jsonl", async () => {
+  test("a key delivered through multiline: true is scrubbed line by line from events.jsonl, and a credential: false grant never is", async () => {
     const loaded = await parseConfig(
       stringify({
         version: 2,
@@ -686,7 +696,7 @@ describe("a multi-line value is scrubbed line by line, and its armor is left alo
         secrets: {
           env_allowlist: [
             { name: KEY_NAME, multiline: true },
-            { name: KH_NAME, multiline: true },
+            { name: KH_NAME, credential: false, multiline: true },
             { name: TARGETS_NAME, credential: false, multiline: true },
           ],
         },
@@ -714,34 +724,104 @@ describe("a multi-line value is scrubbed line by line, and its armor is left alo
       const r = await redactorForWorkerEnv(envPath, secretsDir);
       expect(r.source).toBe("store");
       expect(r.unresolved).toEqual([]);
-      for (const name of [KEY_NAME, KH_NAME, TARGETS_NAME]) {
-        expect(r.armed.filter((n) => n === name), name).toHaveLength(1);
-      }
+      // Only the CREDENTIAL is armed. `writeWorkerSecretFiles` above already
+      // proves KH_NAME and TARGETS_NAME were DELIVERED to the worker — this
+      // is the sweep-side of the contract: delivered, but never a needle.
+      expect(r.armed).toContain(KEY_NAME);
+      expect(r.armed).toContain(apiKeyEnv);
+      expect(r.armed.filter((n) => n === KEY_NAME)).toHaveLength(1);
+      expect(r.armed).not.toContain(KH_NAME);
+      expect(r.armed).not.toContain(TARGETS_NAME);
 
-      // `head -3 key`, then an ssh error quoting a known_hosts line.
+      // `head -3 key`; an ssh error quoting a known_hosts line the way
+      // `observe-ssh docker` would; and the targets token reviewers reported
+      // being eaten in `$ observe-ssh docker <token> ps`.
       const head3 = KEY.split("\n").slice(0, 3).join("\n");
       const host = secretLinesOf(KNOWN_HOSTS)[0]!;
+      const targetToken = secretLinesOf(TARGETS)[0]!.split(" ")[0]!;
       const record = {
         ts: "2026-09-14T00:00:00.000Z",
         type: "tool_execution_end",
-        result: { content: [{ type: "text", text: `${head3}\nssh: bad host line ${host}` }] },
+        result: {
+          content: [
+            {
+              type: "text",
+              text:
+                `${head3}\nssh: bad host line ${host}\n` +
+                `$ observe-ssh docker ${targetToken} ps`,
+            },
+          ],
+        },
       };
       await appendJsonl(eventsPath, record, { transform: (line) => r.redact(line) });
 
       const onDisk = await readFile(eventsPath, "utf8");
       // CONTROL: the fixture really did put key material in the record.
       expect(JSON.stringify(record)).toContain(secretLinesOf(KEY)[0]!);
-      for (const line of [...secretLinesOf(KEY).slice(0, 2), host]) {
+      // The KEY's own secret lines are still gone.
+      for (const line of secretLinesOf(KEY).slice(0, 2)) {
         expect(onDisk).not.toContain(line);
       }
+      // Neither of the credential: false grants left a marker behind.
+      expect(onDisk).not.toContain(`[redacted:${KH_NAME}]`);
+      expect(onDisk).not.toContain(`[redacted:${TARGETS_NAME}]`);
+      // THE CRITERION: the host name and the targets token SURVIVE, whole.
+      expect(onDisk).toContain(host);
+      expect(onDisk).toContain(targetToken);
       const text = (JSON.parse(onDisk) as typeof record).result.content[0]!.text;
       expect(text).toBe(
         `-----BEGIN OPENSSH PRIVATE KEY-----\n${KEY_MARKER}\n${KEY_MARKER}\n` +
-          `ssh: bad host line [redacted:${KH_NAME}]`,
+          `ssh: bad host line ${host}\n` +
+          `$ observe-ssh docker ${targetToken} ps`,
       );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * THE CONTRACT ITSELF, pinned directly on `buildWorkerEnv`'s output rather
+   * than through a live supervisor: `config/schema.ts`'s `credential: false`
+   * "says one thing and only one thing: do not use this value as a needle."
+   * `PIFLEET_SECRET_NAMES` (`SECRET_NAMES_VAR`) IS the redactor's needle
+   * list, so a name declared `credential: false` must never appear in it —
+   * while `secretNames` (what `up` reports) and `nonCredentialSecretNames`
+   * (what the harvest sweep reads) both stay exactly as wide as the grant,
+   * because this fix narrows ONE list, not the delivery.
+   */
+  test("a credential: false grant is delivered and reported, but PIFLEET_SECRET_NAMES excludes it", async () => {
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "redact-noncred-fleet",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: { model: "TestModel" },
+        secrets: {
+          env_allowlist: ["TICKET_API_TOKEN", { name: "TICKET_BASE_URL", credential: false }],
+        },
+        roles: { tick: { secrets: ["TICKET_API_TOKEN", "TICKET_BASE_URL"] } },
+        workers: [{ id: "t1", role: "tick" }],
+      }),
+      "/tmp/fleet.yaml",
+    );
+    const apiKeyEnv = loaded.config.llm.api_key_env;
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "t1"), {
+      TICKET_API_TOKEN: CANARY,
+      TICKET_BASE_URL: "https://tickets.example.com/api/v2",
+      [apiKeyEnv]: `omlx-${CANARY}`,
+    });
+
+    // DELIVERY IS UNTOUCHED: both names are still granted and reported, and
+    // the harvest-facing exclusion list still names the one that is not a
+    // credential.
+    expect(plan.secretNames.sort()).toEqual(["TICKET_API_TOKEN", "TICKET_BASE_URL"]);
+    expect(plan.nonCredentialSecretNames).toEqual(["TICKET_BASE_URL"]);
+
+    // THE FIX: the redactor's OWN needle list excludes the non-credential.
+    const names = (plan.vars[SECRET_NAMES_VAR] ?? "").split(",").filter(Boolean);
+    expect(names).toContain("TICKET_API_TOKEN");
+    expect(names).not.toContain("TICKET_BASE_URL");
   });
 });
 
@@ -902,6 +982,117 @@ describe("the longest match wins at every position, and never ends inside an esc
 });
 
 /**
+ * A truncation or a stem must never end BETWEEN the two halves of a UTF-16
+ * surrogate pair.
+ *
+ * ## The defect, measured
+ *
+ * `JSON.stringify` does not escape an astral character (anything outside the
+ * BMP, an emoji among other things) — it serialises the JS string's own two
+ * UTF-16 code units, a high surrogate immediately followed by its low
+ * surrogate, literally. `tokenLength` stepped one code unit at a time for
+ * anything that was not a backslash escape, so those two units became two
+ * INDEPENDENT optional tokens in `truncationSource`'s nested structure
+ * instead of one atomic one. A stem that needed only the high surrogate to
+ * reach `TRUNCATION_FLOOR` — or a greedy tail that walked as far as the high
+ * surrogate and no further — could then match ANY codepoint sharing that
+ * high surrogate, because every astral codepoint in the same 1,024-wide
+ * block shares it. The record's own, different low surrogate was left
+ * orphaned beside the marker: valid to `JSON.parse` (which accepts a lone
+ * surrogate), invalid the moment anything re-encodes the line to UTF-8, where
+ * it becomes U+FFFD (`EF BF BD`) — bytes with no relation to either
+ * codepoint.
+ *
+ * Every value below is synthetic. U+1F600, U+1F601 and U+1F602 (grinning
+ * faces sharing high surrogate D83D) and U+1F44D (thumbs up, ALSO D83D) are
+ * public Unicode codepoints, not secrets.
+ */
+describe("a truncation or a stem never splits a UTF-16 surrogate pair", () => {
+  const GRINNING = "\u{1f600}"; // D83D DE00 — the secret's own astral character
+  const SMILING = "\u{1f601}"; // D83D DE01 — same high surrogate, different low
+  const CRYING = "\u{1f602}"; // D83D DE02 — likewise
+  const THUMBS_UP = "\u{1f44d}"; // D83D DC4D — a NON-secret emoji, same high surrogate
+
+  /**
+   * The floor lands exactly on the pair: 11 ASCII characters is one short of
+   * `TRUNCATION_FLOOR`, so the required stem must take the WHOLE codepoint to
+   * reach it. Measured on 1b9c932: the old code required only the high
+   * surrogate, matched the record's DIFFERENT emoji up through D83D, and left
+   * a lone DE01 beside the marker.
+   */
+  test("a cut right at the floor: a different record emoji is left untouched, not split", () => {
+    const value = `abcdefghijk${GRINNING}-rest-of-fake-secret`;
+    const record = JSON.stringify({ text: `abcdefghijk${SMILING} tail` });
+    const out = one(value, "T").redact(record);
+
+    // The required stem needs the record's OWN low surrogate to match, and it
+    // does not have it, so nothing matches at all: the record — the record's
+    // own emoji included — comes back byte-identical.
+    expect(out).toBe(record);
+    expect(out.isWellFormed()).toBe(true);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect((JSON.parse(out) as { text: string }).text).toContain(SMILING);
+  });
+
+  /**
+   * The floor lands well before the pair (16 ASCII characters), so the
+   * codepoint sits in the OPTIONAL tail. Measured on 1b9c932: the old code
+   * greedily matched the shared ASCII run plus the shared high surrogate,
+   * then stopped one unit short of the record's own, different low
+   * surrogate — replacing "abcdefghijklmnop" + D83D and orphaning the
+   * record's DE02.
+   */
+  test("a cut past the stem: the shared ASCII run is redacted, the record's own emoji is not split", () => {
+    const value = `abcdefghijklmnop${GRINNING}-rest-of-fake-secret`;
+    const record = JSON.stringify({ text: `abcdefghijklmnop${CRYING}!` });
+    const out = one(value, "T").redact(record);
+
+    expect(out.isWellFormed()).toBe(true);
+    expect(() => JSON.parse(out)).not.toThrow();
+    const text = (JSON.parse(out) as { text: string }).text;
+    // The genuine shared prefix is gone, replaced by exactly one marker...
+    expect(text).toBe(`[redacted:T]${CRYING}!`);
+    // ...and the record's own emoji survived as ONE codepoint, not a lone
+    // low surrogate glued to whatever followed it.
+    expect([...text]).toContain(CRYING);
+    expect(text.codePointAt("[redacted:T]".length)).toBe(CRYING.codePointAt(0));
+  });
+
+  /**
+   * The NON-secret case: nothing about the record's own emoji is a leading
+   * run of the secret at all, only its high surrogate happens to coincide.
+   * Measured on 1b9c932: the thumbs-up came back mangled the same way as the
+   * "cut right at the floor" case above.
+   */
+  test("a non-secret emoji beside a matching stem is never mangled", () => {
+    const value = `ZZZZZZZZZZZ${GRINNING}-rest-of-fake-secret`;
+    const record = JSON.stringify({ text: `ZZZZZZZZZZZ${THUMBS_UP} looks good` });
+    const out = one(value, "T").redact(record);
+
+    expect(out).toBe(record);
+    expect(out.isWellFormed()).toBe(true);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect((JSON.parse(out) as { text: string }).text).toContain(THUMBS_UP);
+  });
+
+  test("the same three cases hold double-escaped", () => {
+    const cases: Array<[string, string]> = [
+      [`abcdefghijk${GRINNING}-rest-of-fake-secret`, `abcdefghijk${SMILING} tail`],
+      [`abcdefghijklmnop${GRINNING}-rest-of-fake-secret`, `abcdefghijklmnop${CRYING}!`],
+      [`ZZZZZZZZZZZ${GRINNING}-rest-of-fake-secret`, `ZZZZZZZZZZZ${THUMBS_UP} looks good`],
+    ];
+    for (const [value, recordText] of cases) {
+      const record = JSON.stringify({ text: JSON.stringify({ v: recordText }) });
+      const out = one(value, "T").redact(record);
+      expect(out.isWellFormed(), recordText).toBe(true);
+      expect(() => JSON.parse(out), recordText).not.toThrow();
+      const inner = JSON.parse((JSON.parse(out) as { text: string }).text) as { v: string };
+      expect(inner.v.isWellFormed(), recordText).toBe(true);
+    }
+  });
+});
+
+/**
  * A SEEDED PROPERTY over values that need escaping, so the cases above are a
  * sample of a rule rather than the rule.
  *
@@ -925,6 +1116,19 @@ describe("the longest match wins at every position, and never ends inside an esc
  * multi-line, and a multi-line value's leading run past its first line is
  * deliberately not a form. The second probe covers secret lines instead.
  *
+ * ASTRAL CHARACTERS are in the alphabet too (added alongside the surrogate
+ * fix above), each an ATOMIC array entry so `makeValue` itself never
+ * constructs one by slicing a raw string mid-codepoint — that would just
+ * reintroduce this file's own copy of the bug under test. A raw cut of the
+ * generated VALUE (`secret.slice(0, k)`, stepping one UTF-16 code unit at a
+ * time, below) can still land between an astral character's two halves; a cut
+ * there is skipped for the "replaced whole" and "no leading run survived"
+ * checks, because such a `k` is not a leading run of any codepoint and
+ * `JSON.stringify`'s own well-formed-string guarantee escapes the trailing
+ * lone surrogate specially, so `frag`'s serialised form is no longer a
+ * genuine prefix of the value's. It is NOT skipped for well-formedness: every
+ * generated record, split cut or not, must come back a well-formed string.
+ *
  * The seed is fixed, so a failure prints a case that reproduces.
  */
 describe("a seeded property: every cut of an escaping value is scrubbed whole, and parses", () => {
@@ -944,15 +1148,32 @@ describe("a seeded property: every cut of an escaping value is scrubbed whole, a
 
   const PLAIN = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:";
   const NEEDS_ESCAPE = ['"', "\\", "\t", "\r", "\b", "\f", ...[0x00, 0x01, 0x1b, 0x1f].map((c) => String.fromCharCode(c))];
+  /**
+   * Astral characters from TWO different high-surrogate blocks (D83D and
+   * D83E), so a shared-prefix decoy (below) sometimes shares only the
+   * high-surrogate VALUE and not the block, and sometimes shares neither.
+   * Each entry is a whole codepoint — two UTF-16 code units — picked as ONE
+   * array element, never assembled from separately-picked units.
+   */
+  const ASTRAL = ["\u{1f600}", "\u{1f601}", "\u{1f602}", "\u{1f44d}", "\u{1f929}", "\u{1f9e0}"];
 
   function jsonInner(s: string): string {
     return JSON.stringify(s).slice(1, -1);
   }
 
+  function isHighSurrogate(c: number): boolean {
+    return c >= 0xd800 && c <= 0xdbff;
+  }
+
   function makeValue(rand: () => number, min: number, max: number): string {
     const pick = (from: string | string[]): string => from[Math.floor(rand() * from.length)] as string;
     const length = min + Math.floor(rand() * (max - min + 1));
-    const chars = Array.from({ length }, () => (rand() < 0.15 ? pick(NEEDS_ESCAPE) : pick(PLAIN)));
+    const chars = Array.from({ length }, () => {
+      const r = rand();
+      if (r < 0.15) return pick(NEEDS_ESCAPE);
+      if (r < 0.3) return pick(ASTRAL);
+      return pick(PLAIN);
+    });
     chars[TRUNCATION_FLOOR + Math.floor(rand() * (length - TRUNCATION_FLOOR))] = pick(NEEDS_ESCAPE);
     return chars.join("");
   }
@@ -1002,7 +1223,17 @@ describe("a seeded property: every cut of an escaping value is scrubbed whole, a
     for (let k = 1; k <= secret.length; k++) {
       const frag = secret.slice(0, k);
       if (jsonInner(frag).length < TRUNCATION_FLOOR) continue;
-      if ([...frag.slice(TRUNCATION_FLOOR)].some((c) => NEEDS_ESCAPE.includes(c))) {
+      /*
+       * A cut landing strictly between an astral character's two UTF-16
+       * units is not a leading run of any codepoint (see the describe
+       * block's own header comment above). `JSON.stringify` escapes the
+       * orphaned high surrogate specially in THIS case, so `frag`'s own
+       * serialised form stops being a genuine prefix of the value's, and the
+       * two checks below that assume that prefix relationship do not apply.
+       * Well-formedness still does, unconditionally, a few lines down.
+       */
+      const splitsPair = isHighSurrogate(secret.charCodeAt(k - 1));
+      if (!splitsPair && [...frag.slice(TRUNCATION_FLOOR)].some((c) => NEEDS_ESCAPE.includes(c))) {
         tally.cutsWithEscapePastFloor++;
       }
       for (const [how, split, construct] of EMBEDDINGS) {
@@ -1017,11 +1248,16 @@ describe("a seeded property: every cut of an escaping value is scrubbed whole, a
         } catch {
           problems.push("does not parse");
         }
-        if (heads.some((h) => out.includes(h))) problems.push("a leading run of the floor or more survived");
-        const whole = markers.some(
-          (m) => out.startsWith(before + m) && after.endsWith(out.slice(before.length + m.length)),
-        );
-        if (!whole) problems.push("the cut was not replaced whole by one marker");
+        if (!out.isWellFormed()) problems.push("output is not well-formed UTF-16");
+        if (!splitsPair) {
+          if (heads.some((h) => out.includes(h))) {
+            problems.push("a leading run of the floor or more survived");
+          }
+          const whole = markers.some(
+            (m) => out.startsWith(before + m) && after.endsWith(out.slice(before.length + m.length)),
+          );
+          if (!whole) problems.push("the cut was not replaced whole by one marker");
+        }
         if (problems.length > 0) {
           tally.failures.push(
             `seed=${SEED} ${label} value=${JSON.stringify(secret)} cut=${k} ${how}: ` +
@@ -1054,6 +1290,58 @@ describe("a seeded property: every cut of an escaping value is scrubbed whole, a
       check(buildRedactor(pairs), value, ["[redacted:T]", "[redacted:DECOY]"], `case=${i}`, tally);
     }
     assertHeld(tally, 10_000, 1_000);
+  });
+
+  /**
+   * RANDOMIZED over the same shape as the three PINNED cases in "a
+   * truncation or a stem never splits a UTF-16 surrogate pair" above: an
+   * ASCII prefix shared between an armed secret and an HONEST record, each
+   * ending in a DIFFERENT astral codepoint from the SAME high-surrogate
+   * block. `check()`'s own fragments are always a true prefix of the secret,
+   * so they cannot exercise this — the defect needs a record that diverges
+   * from the secret exactly at the pair, which only a second, independent
+   * codepoint provides. `ASTRAL` carries two such blocks (D83D and D83E) for
+   * exactly this test.
+   */
+  test("a record's own astral codepoint, sharing a high surrogate with the secret's, is never split", () => {
+    const rand = prng(SEED + 2);
+    const blocks = new Map<string, string[]>();
+    for (const ch of ASTRAL) {
+      const hi = ch.slice(0, 1);
+      blocks.set(hi, [...(blocks.get(hi) ?? []), ch]);
+    }
+    const shareable = [...blocks.values()].filter((list) => list.length >= 2);
+    // CONTROL: the alphabet really has a block with more than one codepoint.
+    expect(shareable.length).toBeGreaterThan(0);
+
+    let checked = 0;
+    for (let i = 0; i < 200; i++) {
+      const block = shareable[Math.floor(rand() * shareable.length)]!;
+      const a = block[Math.floor(rand() * block.length)]!;
+      let b = a;
+      while (b === a) b = block[Math.floor(rand() * block.length)]!;
+      // Spans below, at, and above TRUNCATION_FLOOR, so the pair sometimes
+      // falls in the required stem and sometimes in the optional tail.
+      const prefixLen = 8 + Math.floor(rand() * 12);
+      const prefix = Array.from(
+        { length: prefixLen },
+        () => PLAIN[Math.floor(rand() * PLAIN.length)],
+      ).join("");
+      const value = `${prefix}${a}-rest-of-fake-secret-${Math.floor(rand() * 1e6)}`;
+      const recordText = `${prefix}${b} tail-${Math.floor(rand() * 1e6)}`;
+      const record = JSON.stringify({ text: recordText });
+      const out = one(value, "T").redact(record);
+      checked++;
+      const ctx = `prefix=${prefixLen} a=${a} b=${b}`;
+      expect(out.isWellFormed(), ctx).toBe(true);
+      expect(() => JSON.parse(out), ctx).not.toThrow();
+      const text = (JSON.parse(out) as { text: string }).text;
+      // The record's OWN codepoint always survives, whole, whatever else the
+      // shared ASCII prefix does.
+      expect(text, ctx).toContain(b);
+    }
+    // Not vacuous.
+    expect(checked).toBe(200);
   });
 
   test("each secret line of a multi-line value", () => {

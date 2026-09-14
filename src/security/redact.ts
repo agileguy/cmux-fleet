@@ -56,9 +56,13 @@
  *
  * ## Multi-line values: matched line by line, and never by their armor
  *
- * A `multiline: true` grant (the observer roles' OpenSSH key, known_hosts list
- * and targets list) leaks one line at a time far more often than whole: `head
- * -3 key`, an ssh error echoing the line it choked on. Inside JSON the value's
+ * A `multiline: true` CREDENTIAL grant — the observer roles' OpenSSH key is
+ * the shipped case (SRD-OBSERVER-ROLES §5.5 also marks that role's
+ * known_hosts list and targets list `multiline: true`, but both `credential:
+ * false`, so `worker-env.ts` never arms this module for them at all; see the
+ * `TRUNCATION_FLOOR` cost note below) — leaks one line at a time far more
+ * often than whole: `head -3 key`, an ssh error echoing the line it choked
+ * on. Inside JSON the value's
  * LF is `\n`, so the whole value is not a substring of a record quoting one
  * line of it, and a redactor that compiled only the whole value let exactly
  * that record through unchanged. So a value containing LF compiles:
@@ -161,12 +165,26 @@ export const MIN_REDACTABLE_LENGTH = 8;
  * log-eating failure at scale and the cost this whole module is shaped around
  * avoiding.
  *
- * Per-line matching has a cost of its own, paid by any multi-line value that is
- * not secret. The redactor sees names and values, not `credential: false`, so a
- * targets list is scrubbed like a key. Any leading run of twelve or more
- * characters of a targets line is replaced, including one naming a different
- * host that shares those twelve characters: with `web-1 10.0.0.5 22 observer`
- * granted, `web-1 10.0.0.7 is up` is logged as `[redacted:NAME]7 is up`.
+ * Per-line matching has a cost of its own, paid by any multi-line CREDENTIAL
+ * whose lines share a leading run. Any leading run of twelve or more
+ * characters of an armed line is replaced, including one that also matches a
+ * DIFFERENT armed line's own leading run, or an unrelated line of honest
+ * prose that happens to share it: `buildRedactor` sees only the `(name,
+ * value)` pairs it is handed, has no notion of `credential: false`, and pays
+ * this cost uniformly for whatever it is armed against — with
+ * `web-1 10.0.0.5 22 observer` armed, `web-1 10.0.0.7 is up` would log as
+ * `[redacted:NAME]7 is up`.
+ *
+ * WHICH NAMES REACH THIS MODULE ARMED AT ALL is decided one layer up, in
+ * `run/worker-env.ts`: a name the fleet declared `credential: false` never
+ * enters `PIFLEET_SECRET_NAMES`, so `buildRedactor` never receives it and the
+ * cost above is never paid for it. SRD-OBSERVER-ROLES §5.5's
+ * `OBSERVER_DOCKER_KNOWN_HOSTS` and `OBSERVER_DOCKER_TARGETS` are the shipped
+ * case — both `multiline: true` AND `credential: false` — so a known_hosts
+ * host key or a "token host port user" targets line is delivered to the
+ * worker and never scrubbed, whole or by line. Only a name that stayed a
+ * credential, such as the same role's OpenSSH key, pays this module's cost at
+ * all.
  */
 export const TRUNCATION_FLOOR = 12;
 
@@ -243,15 +261,61 @@ function escapeRe(s: string): string {
 
 const BACKSLASH = 0x5c;
 const LOWER_U = 0x75;
+const HIGH_SURROGATE_START = 0xd800;
+const HIGH_SURROGATE_END = 0xdbff;
+const LOW_SURROGATE_START = 0xdc00;
+const LOW_SURROGATE_END = 0xdfff;
+
+function isHighSurrogate(c: number): boolean {
+  return c >= HIGH_SURROGATE_START && c <= HIGH_SURROGATE_END;
+}
+
+function isLowSurrogate(c: number): boolean {
+  return c >= LOW_SURROGATE_START && c <= LOW_SURROGATE_END;
+}
 
 /**
  * Length of the JSON string token that starts at `i`: six for a unicode escape
- * (a backslash, `u`, four hex digits), two for any other escape, one otherwise.
- * `i` must itself be a token boundary.
+ * (a backslash, `u`, four hex digits), two for any other escape, TWO for an
+ * intact UTF-16 surrogate pair, one otherwise. `i` must itself be a token
+ * boundary.
+ *
+ * ## The measurement that added the surrogate case
+ *
+ * JSON.stringify does not escape an astral character (anything outside the
+ * BMP — an emoji, among other things): it serialises it as the two raw UTF-16
+ * code units the JS string already holds, a high surrogate immediately
+ * followed by its low surrogate. Before this, `tokenLength` returned 1 for
+ * BOTH of those units, so `jsonTokens` split one codepoint into two
+ * INDEPENDENT tokens. `truncationSource` then built a stem or an optional
+ * tail group that could end on the high surrogate alone — and every astral
+ * codepoint in the same 1,024-wide block shares that high surrogate, so a
+ * pattern truncated there matched ANY codepoint of that block, not only the
+ * secret's own. Measured: secret `…abcdefghijk` + U+1F600 (a grinning face,
+ * D83D DE00) armed a form whose 12-character floor landed exactly on D83D. A
+ * record holding the SAME 11 characters followed by a DIFFERENT emoji from
+ * the same block — U+1F601, D83D DE01 — matched up through D83D and stopped:
+ * the marker replaced the shared run, and the record's own DE01 was left
+ * behind with nothing before it. `JSON.parse` accepts a lone low surrogate,
+ * so the break was invisible until the line was re-encoded to UTF-8 and the
+ * orphan became U+FFFD (`EF BF BD`) — a byte sequence with no relation to
+ * either codepoint.
+ *
+ * A high surrogate immediately followed by its own low surrogate is now ONE
+ * token, exactly as a `\uXXXX` escape already was. `truncationSource` never
+ * sees the codepoint in pieces: a stem that needs part of it to reach
+ * `TRUNCATION_FLOOR` takes the WHOLE pair, and an optional tail group either
+ * matches the exact codepoint or does not match at all — it can no longer
+ * stop halfway through one. A lone (unpaired) surrogate — not preceded or
+ * followed by its other half — is not a pair and falls through to the
+ * ordinary one-unit case, which is correct: nothing here can turn an already
+ * malformed string well-formed, and nothing here is asked to.
  */
 function tokenLength(text: string, i: number): number {
-  if (text.charCodeAt(i) !== BACKSLASH) return 1;
-  return text.charCodeAt(i + 1) === LOWER_U ? 6 : 2;
+  const c = text.charCodeAt(i);
+  if (c === BACKSLASH) return text.charCodeAt(i + 1) === LOWER_U ? 6 : 2;
+  if (isHighSurrogate(c) && isLowSurrogate(text.charCodeAt(i + 1))) return 2;
+  return 1;
 }
 
 /** JSON string text split into its tokens: single characters and whole escapes. */

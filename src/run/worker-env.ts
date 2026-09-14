@@ -1187,8 +1187,42 @@ export function buildWorkerEnv(
    * the store under exactly this name. It used to be resolvable only through
    * that fallback, which is the path kept for run directories written by older
    * versions of this CLI.
+   *
+   * A `credential: false` NAME IS EXCLUDED HERE, and that exclusion is this
+   * list's whole point rather than an afterthought bolted on beside it.
+   * `config/schema.ts`'s contract for the flag is exact: "`credential: false`
+   * says one thing and only one thing: do not use this value as a needle."
+   * This list, once written to `PIFLEET_SECRET_NAMES`, IS the redactor's
+   * needle list (`security/redact.ts:redactorForWorkerEnv` arms itself with
+   * exactly the names found here) — so a name the operator declared not a
+   * secret must never reach it, on the same reasoning `SECRET_NAMES_VAR`'s own
+   * docstring already states for the opposite mistake: arming against a name
+   * whose value the redactor cannot see "reports itself as armed while
+   * scrubbing nothing". Arming against a name that is NOT a secret is the
+   * mirror failure — it reports itself protecting something while destroying
+   * something else. SRD-OBSERVER-ROLES §5.5 grants
+   * `OBSERVER_DOCKER_KNOWN_HOSTS` and `OBSERVER_DOCKER_TARGETS` exactly this
+   * way, both `multiline: true` and `credential: false`, and measuring
+   * against that grant is what caught this: every known_hosts host key and
+   * every "token host port user" targets line was being scrubbed like a key,
+   * so `ssh: connect to host [redacted:OBSERVER_DOCKER_KNOWN_HOSTS] port 22:
+   * refused` named the wrong thing to rotate on every call, and an
+   * `observe-ssh docker <token> ps` invocation lost the token it was
+   * diagnosing.
+   *
+   * `notCredentials`, already in scope from the intersection above, is the
+   * SAME set the `nonCredentialSecretNames` field a few lines down is built
+   * from — read here rather than recomputed, so the two cannot drift onto
+   * different answers for the same worker. Nothing else moves: `secretNames`
+   * itself, what `up` reports and what the launch record carries, is
+   * UNCHANGED — a `credential: false` grant is still delivered, still a 0444
+   * file, still on every reserved-name and allowlist check. Only this
+   * module's own needle list narrows.
    */
-  const redactable = [...(deliversApiKey ? [apiKeyEnvName] : []), ...secretNames];
+  const redactable = [
+    ...(deliversApiKey ? [apiKeyEnvName] : []),
+    ...secretNames.filter((n) => !notCredentials.has(n)),
+  ];
   vars[SECRET_NAMES_VAR] = redactable.join(",");
 
   return {
