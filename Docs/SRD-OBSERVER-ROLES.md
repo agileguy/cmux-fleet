@@ -504,19 +504,22 @@ That is the flag-injection hazard `src/security/docker-names.ts:4-11` records fo
 
 | Verb | Accepted arguments | Runs |
 |---|---|---|
-| `ps` | `all`; zero or more `name=<n>` or `label=<k>=<v>` | `docker ps --no-trunc --format '<FIXED PS TEMPLATE>'` plus `--all` and one `--filter` per argument — template selects `ID, Names, Image, Command, CreatedAt, RunningFor, State, Status, HealthStatus, Ports, Labels, Networks`, never `Mounts` (a bind mount's host source path), `LocalVolumes`, `Size` or `Platform` |
+| `ps` | `all`; zero or more `name=<n>` or `label=<k>=<v>` | `docker ps --no-trunc --format '<FIXED PS TEMPLATE>'` plus `--all` and one `--filter` per argument — template selects `ID, Names, Image, Command, CreatedAt, RunningFor, State, Status, Ports, Labels, Networks`, never `Mounts` (a bind mount's host source path), `LocalVolumes`, `Size` or `Platform`, and never a separate health column either: docker CLIs before 29.5.0 lack that `ps` field entirely and fail outright when it is requested, so the template leaves it out and a container's health rides inside `Status` instead |
 | `inspect` | `<container>` | `docker inspect --type container --format '<FIXED INSPECT TEMPLATE>' <container>` |
-| `logs` | `<container> since=<N>s tail=<M>`, both REQUIRED, `M <= 500` | `docker logs --timestamps --since <N>s --tail <M> <container>` |
+| `logs` | `<container> since=<N>s tail=<M>`, both REQUIRED, `N` 1–9 digits and at least 1 (`since=0s` exits 77), `M <= 500` | `docker logs --timestamps --since <N>s --tail <M> <container>` |
 | `stats` | `<container>` | `docker stats --no-stream --no-trunc --format '{{json .}}' <container>` |
 | `top` | `<container>` | `docker top <container>` |
-| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}' --filter type=container`, one `--filter event=` for each of `create, start, restart, stop, die, kill, oom, pause, unpause, destroy, health_status`, and `--filter container=<c>` when given. `--until 0s` is the measured terminating bound, and the action list keeps out every `exec_*` action, which names the exec'd command line (both measured, `test/fixtures/observe/docker-cli-shapes.json` → `.events`) |
+| `events` | `since=<N>s` (`N` 1–9 digits, at least 1, same grammar as `logs`), optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}' --filter type=container`, one `--filter event=` for each of `create, start, restart, stop, die, kill, oom, pause, unpause, destroy, health_status`, and `--filter container=<c>` when given. `--until 0s` is the measured terminating bound, and the action list keeps out every `exec_*` action, which names the exec'd command line (both measured, `test/fixtures/observe/docker-cli-shapes.json` → `.events`) |
 | `info` | — | `docker info --format '<FIXED INFO TEMPLATE>'` |
 | `version` | — | `docker version --format '{{json .}}'` |
 
 **The inspect template is fixed on the target and never includes `.Config.Env` or `.Mounts`.** It
-selects the id, name, image, created time, `.State` (including `.State.Health`), restart count,
-restart policy, labels and published ports. That is the disclosure boundary from §0.3 enforced where
-the worker cannot widen it.
+selects the id, name, image, created time, a narrowed `state`, restart count, restart policy,
+labels and published ports. `state` is narrowed to exactly `status`, `running`, `paused`,
+`restarting`, `oom_killed`, `dead`, `exit_code`, `error`, `started_at`, `finished_at` and `health`
+(`health` itself `null` with no healthcheck defined, else `{status, failing_streak}`) — Docker's
+healthcheck log, the probe command's own stdout, is not part of that set and is never returned.
+That is the disclosure boundary from §0.3 enforced where the worker cannot widen it.
 
 **`tail` is mandatory and capped** because an unbounded log pull hits the 50KB tool-output wall and
 is clipped from the front, exactly the window the question was about
@@ -644,16 +647,26 @@ and confirms by declared kind (`src/harvest/reconcile.ts:165-173`):
 ### 5.7 Enrolling a target — operator work outside the repository
 
 1. Create a non-root account on the target, a member of the `docker` group. **That is root-equivalent
-   on the target, and the forced command is the only thing between the key and that root** (Q7).
+   on the target, and the forced command is the only thing between the key and that root** (Q7). Its
+   login shell must be `/bin/sh`: sshd runs the forced command through the account's own shell, so
+   anything richer than `sh` is surface this role has no use for.
 2. Install `scripts/observe/docker-forced-command` root-owned, mode `0755`, at a path the account
-   cannot write.
+   cannot write. The account's home directory and its `~/.ssh` must be root-owned and not writable by
+   the account itself — an account that could write either could widen the forced command's reach or
+   rewrite its own `authorized_keys` line.
 3. Add one `authorized_keys` line:
    `restrict,command="<installed path>" ssh-ed25519 <public key> pifleet-observer-docker`.
    OpenSSH's `restrict` turns off port, agent and X11 forwarding and PTY allocation. The forced command
    replaces whatever the client asks to run.
-4. Record the target's host key in the value of `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
+4. Configure sshd so this account's `AcceptEnv` passes nothing through — no `PATH`, `IFS`, `ENV`,
+   `BASH_ENV`, and no `DOCKER_*` name. The forced command inherits whatever environment sshd hands
+   it. An accepted `PATH` can make `docker` resolve to another binary, and an accepted `DOCKER_*`
+   variable (`DOCKER_HOST` foremost) can point its `docker` calls away from the local socket. `IFS`,
+   `ENV` and `BASH_ENV` are hardening: busybox sh, dash and bash all ignore an inherited `IFS`
+   (measured), and `ENV`/`BASH_ENV` only matter to a shell that reads them at startup.
+5. Record the target's host key in the value of `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
    `token host port user` to `OBSERVER_DOCKER_TARGETS`.
-5. Add `{host, port}` to `egress.allow` in `fleet.yaml` (Q3), and add the three names to
+6. Add `{host, port}` to `egress.allow` in `fleet.yaml` (Q3), and add the three names to
    `secrets.env_allowlist`.
 
 ---

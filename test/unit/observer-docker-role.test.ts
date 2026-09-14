@@ -28,6 +28,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { loadConfig, resolveAllWorkers } from "../../src/config/load.ts";
+import { multilineSecretNames, nonCredentialSecretNames } from "../../src/config/schema.ts";
 import { roleGrant } from "../support/role-docs.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
@@ -108,5 +109,40 @@ describe("observer-docker's resolved grant (task 4.7)", () => {
     expect(new Set(worker.secrets)).toEqual(
       new Set(["OBSERVER_DOCKER_SSH_KEY", "OBSERVER_DOCKER_KNOWN_HOSTS", "OBSERVER_DOCKER_TARGETS"]),
     );
+  });
+
+  /**
+   * The `worker.secrets` set above pins WHICH names are granted; it says
+   * nothing about the `multiline`/`credential` marks each name carries on the
+   * fleet-wide `secrets.env_allowlist` (§5.5, principal decision
+   * 2026-09-14). Those marks live on the allowlist entry, not on the grant,
+   * so they are read off `config.secrets.env_allowlist` through the same
+   * `multilineSecretNames`/`nonCredentialSecretNames` helpers `up` and the
+   * harvester use (`src/run/worker-env.ts`) — never by regex-matching the
+   * YAML.
+   *
+   * `OBSERVER_DOCKER_SSH_KEY` is an OpenSSH private key: multiline, and left
+   * as a credential (the sweep must still catch it).
+   */
+  test("OBSERVER_DOCKER_SSH_KEY is multiline and a credential", async () => {
+    const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
+    const entries = config.secrets.env_allowlist;
+    expect(multilineSecretNames(entries)).toContain("OBSERVER_DOCKER_SSH_KEY");
+    expect(nonCredentialSecretNames(entries)).not.toContain("OBSERVER_DOCKER_SSH_KEY");
+  });
+
+  /**
+   * `OBSERVER_DOCKER_KNOWN_HOSTS` (public host keys) and `OBSERVER_DOCKER_TARGETS`
+   * (`token host port user` per line) are each legitimately multi-line AND
+   * legitimately not secret — an artifact that names the host it looked at
+   * must not be refused as leaking its own target list.
+   */
+  test("OBSERVER_DOCKER_KNOWN_HOSTS and OBSERVER_DOCKER_TARGETS are multiline and credential: false", async () => {
+    const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
+    const entries = config.secrets.env_allowlist;
+    for (const name of ["OBSERVER_DOCKER_KNOWN_HOSTS", "OBSERVER_DOCKER_TARGETS"]) {
+      expect(multilineSecretNames(entries)).toContain(name);
+      expect(nonCredentialSecretNames(entries)).toContain(name);
+    }
   });
 });

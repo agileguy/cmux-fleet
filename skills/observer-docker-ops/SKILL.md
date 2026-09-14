@@ -24,7 +24,7 @@ rather than guessing.
 |---|---|---|
 | target | a target TOKEN from the enrolled inventory, `^[a-z0-9][a-z0-9-]{0,31}$` | none — if the inventory holds exactly one target, use it and say so; otherwise the row is `indeterminate` |
 | containers | one or more container names, Docker's name grammar `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` | — |
-| selector | `label=<key>=<value>` or `name=<substring>`, used instead of names | if neither names nor a selector is given: every running container, `ps` only, and the row says so |
+| selector | `label=<key>=<value>` or `name=<pattern>`, used instead of names | if neither names nor a selector is given: every running container, `ps` only, and the row says so |
 | checks | a closed subset of `state`, `health`, `logs`, `stats`, `events` | `state, health, logs` |
 | window | seconds, e.g. `300s` | `300s` |
 | question | one sentence | "is it healthy" |
@@ -32,6 +32,29 @@ rather than guessing.
 
 `checks` is closed for the same reason `roles/observer-k8s.md` gives the k8s role: it bounds read
 volume, and a check nobody asked for spends turn the artifact needed.
+
+## Calling the target, and reading its exit
+
+The call form is `observe-docker <target> <verb> [key=value ...]`. `target` is one of the TOKENs
+enrolled on this fleet, read from the file named by `OBSERVER_DOCKER_TARGETS_FILE` — one
+`token host port user` per line. `observe-docker` is a thin alias for
+`observe-ssh docker <target> <verb> [key=value ...]`; it does not itself enforce the verb grammar
+below, the target's forced command does.
+
+Read the exit status before you write a row, and route it to the artifact this way:
+
+| Exit | What it means | What the row says |
+|---|---|---|
+| `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
+| `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
+| `77` without that stderr line | the call reached the target, and the target's forced command refused it | that channel is `forbidden`, and the task status is `blocked` |
+| `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
+| `255` | ssh's own failure — a host-key mismatch or a proxy refusal | the target is `unreachable` |
+| anything else | docker's own exit, returned from the target (e.g. no such container) | the channel is `answered`, and the error text goes in `evidence_ref` |
+
+A shim-side 77 is not evidence about the target at all — it is a bug in the call you made, and
+retrying it once (fixed) costs less turn than reasoning about it as if the target had refused
+something.
 
 ## The verb grammar — the whole of what the credential can do (§5.4)
 
@@ -41,13 +64,19 @@ flags, so no worker token can become a docker option.
 | Verb | Accepted arguments | Runs |
 |---|---|---|
 | `ps` | `all`; zero or more `name=<n>` or `label=<k>=<v>` | `docker ps --no-trunc --format <FIXED>` plus `--all` and one `--filter` per argument |
-| `inspect` | `<container>` | `docker inspect --type container --format <FIXED>` |
+| `inspect` | `<container>` | `docker inspect --type container --format <FIXED> <container>` |
 | `logs` | `<container> since=<N>s tail=<M>`, both REQUIRED, `M <= 500` | `docker logs --timestamps --since <N>s --tail <M> <container>` |
 | `stats` | `<container>` | `docker stats --no-stream --no-trunc --format '{{json .}}' <container>` |
 | `top` | `<container>` | `docker top <container>` |
-| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}'` with fixed lifecycle-and-health filters (below), plus `--filter container=<c>` when given |
+| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}' --filter type=container`, one `--filter event=` for each of the eleven lifecycle-and-health actions (below), plus `--filter container=<c>` when given |
 | `info` | — | `docker info --format <FIXED>` |
 | `version` | — | `docker version --format '{{json .}}'` |
+
+**`name=<n>` and `label=<k>=<v>` each have their own grammar.** A `label` key and value each match
+`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`, at most 128 bytes, and the value may not itself contain `=`. A
+value outside that grammar is refused by the target — it is not truncated or escaped, the call
+fails. `name=<n>` has no separate grammar of its own beyond the container-name characters; what it
+does with the pattern it is given is a matching question, covered below, not a syntax one.
 
 **Everything else exits 77 and runs no `docker` at all.** The grammar is an allowlist, so this
 list is illustrative rather than the mechanism: `run`, `create`, `start`, `stop`, `restart`,
@@ -68,51 +97,80 @@ list is illustrative rather than the mechanism: `run`, `create`, `start`, `stop`
 
 **The `inspect` template is fixed on the target, and it is not the whole of `docker inspect`.**
 It never includes `.Config.Env` or `.Mounts` — the disclosure boundary the role exists to hold —
-and it returns exactly these keys: `id`, `name`, `image`, `created`, `state` (Docker's own
-`.State`, `Health` included, since Health lives inside State), `restart_count`,
-`restart_policy`, `labels`, `ports`. `info`'s template is fixed the same way, to version, OS,
-kernel, architecture, CPU count, total memory, container and image counts, storage driver and
-cgroup driver — never `HttpProxy`/`HttpsProxy`/`NoProxy` (which can carry embedded credentials),
-`RegistryConfig`, `Labels` or swarm details.
+and it returns exactly these keys: `id`, `name`, `image`, `created`, `state`, `restart_count`,
+`restart_policy`, `labels`, `ports`. `state` is narrowed to exactly `status`, `running`, `paused`,
+`restarting`, `oom_killed`, `dead`, `exit_code`, `error`, `started_at`, `finished_at` and `health`.
+Docker's own `.State.Health` also carries a `Log` array holding what the healthcheck probe printed;
+the template leaves that array out, so the probe's output is never returned. `info`'s template is fixed
+the same way, to version, OS, kernel, architecture, CPU count, total memory, container and image
+counts, storage driver and cgroup driver — never `HttpProxy`/`HttpsProxy`/`NoProxy` (which can
+carry embedded credentials), `RegistryConfig`, `Labels` or swarm details.
 
 ### Measured facts, so a result reads honest
 
-These are measured against a real daemon (`test/fixtures/observe/docker-cli-shapes.json`,
-`scripts/observe/characterise-docker`), not assumed from Docker's documentation:
+These are measured against real daemons (docker 29.7.2 and 28.5.2) by
+`scripts/observe/characterise-docker`, and recorded in `test/fixtures/observe/docker-cli-shapes.json`
+and `test/fixtures/observe/docker-forced-command-rendered.json`. None is assumed from Docker's
+documentation:
 
-- **`ps` returns one JSON object per container, one line each,** built from a fixed field set:
-  `ID`, `Names`, `Image`, `Command`, `CreatedAt`, `RunningFor`, `State`, `Status`,
-  `HealthStatus`, `Ports`, `Labels`, `Networks`. There is no `Mounts`, `LocalVolumes`, `Platform`
-  or `Size`: a bind mount's host path is the same disclosure `inspect` leaves out. `HealthStatus`
-  is `none` for a container without a healthcheck.
-- **`name=` filters match as a SUBSTRING, not an exact name.** `name=web` also lists a container
-  named `myweb` (measured: `name=char` matched every container named `char-*`, and
-  `name=char-plain` matched one). Check `Names` in every returned row yourself before reporting on a
-  specific container — the filter narrowed the query, it did not confirm the answer.
-- **`inspect`'s `state.Health` is `null` for a container with no healthcheck defined.** That is
+- **`ps` returns one JSON object per container, one line each, from an 11-field template:**
+  `ID`, `Names`, `Image`, `Command`, `CreatedAt`, `RunningFor`, `State`, `Status`, `Ports`,
+  `Labels`, `Networks`. There is no `Mounts`, `LocalVolumes`, `Platform` or `Size`: a bind mount's
+  host path is the same disclosure `inspect` leaves out. There is also no separate health field —
+  docker CLIs before 29.5.0 lack that `ps` column entirely, and asking for it there made `ps` fail
+  outright, so the template leaves it out. Health still shows up: it rides inside `Status`, e.g.
+  `Up 2 seconds (healthy)` (measured on 28.5.2). `Command` is the container's full command line, so
+  do not quote it back into an artifact or a follow-up call without thinking about what it might
+  carry.
+- **`ps`'s `name=` filter is an unanchored regular expression on the name, not a substring and not
+  an exact match.** `name=web` lists `myweb`, `web`, `web-2` and `webhook` alike, and `name=w.b`
+  also lists `wxb`, because `.` matches any character. The grammar refuses `^` and `$`, so there is
+  no way to anchor the pattern from a worker call. **Always check `Names` in every returned row
+  yourself before reporting on a specific container** — the filter narrows the query, it does not
+  confirm the answer.
+- **`inspect`'s `state.health` is `null` for a container with no healthcheck defined.** That is
   the whole meaning of `null` here: "no healthcheck," not "unhealthy" and not "unknown." When a
-  healthcheck exists, `state.Health` is an object holding `Status` (`starting`, `healthy` or
-  `unhealthy`), `FailingStreak` (a number), and `Log`, an array of entries each holding `Start`,
-  `End`, `ExitCode` and `Output`. A container answering `state.Health: null` is reporting `health`
-  as `answered` — evidence says "no healthcheck defined" — not `not_attempted`.
-- **`stats` values are strings, not numbers.** `CPUPerc` and `MemPerc` are percentage strings,
-  `MemUsage`, `NetIO` and `BlockIO` are `"used / limit"` pairs as strings, and `PIDs` is a numeric
-  value carried as a string. Compare and threshold them as the strings they are, or parse them
-  yourself — the target does not hand back numbers.
+  healthcheck exists, `state.health` is an object holding exactly `status` (`starting`, `healthy`
+  or `unhealthy`) and `failing_streak` (a number) — nothing else; the probe's log output is not
+  part of this template (see above). A container answering `state.health: null` is reporting
+  `health` as `answered` — evidence says "no healthcheck defined" — not `not_attempted`.
+- **`stats` values are strings, not numbers, and the three paired fields are not all the same
+  pair.** `CPUPerc` and `MemPerc` are percentage strings and `PIDs` is a numeric value carried as a
+  string. Of the three two-part fields, only `MemUsage` is a used/limit pair; `NetIO` is
+  received/sent and `BlockIO` is written/read (Docker's own documentation defines all three this
+  way — reading `NetIO` or `BlockIO` as "used of a limit" is a wrong-field mistake, not a rounding
+  one). Compare and threshold them as the strings they are, or parse them yourself — the target
+  does not hand back numbers.
+- **`logs --timestamps` puts a fixed 31-byte prefix on every line**: a 30-byte RFC3339 timestamp
+  plus one space, before the log text itself.
 - **`logs` needs both `since=<N>s` and `tail=<M>`, and `M` is capped at 500.** Neither is
-  optional, the two may come in either order, and nothing else may follow the container. `N` is
-  one to ten digits, and `tail=0` is accepted.
-- **`events` needs `since=<N>s` and returns a bounded window, not a stream.** The target adds
-  `--until 0s`, so the call returns the window's events and ends on its own. Events from the current
-  second are not returned: an event less than a second old arrives on a later call, not this one.
-  Each line is one JSON object with keys `Type`, `Action`, `Actor`, `scope`, `time`, `timeNano`.
-  Key order is not a promise Docker or this target makes; read the object by key, never by position.
+  optional, the two may come in either order, and nothing else may follow the container. `N` is 1
+  to 9 digits and must be at least 1 — `since=0s` exits 77. `tail=0` is accepted.
+- **`events` needs `since=<N>s`, and `N` has the same grammar as `logs`'s: 1 to 9 digits, at least
+  1.** The target adds `--until 0s`, so the call returns one bounded window and ends on its own; it
+  is not a stream. Events from the current second are not returned: an event less than a second
+  old arrives on a later call, not this one. Each line is one JSON object with the keys `Type`,
+  `Action`, `Actor`, `scope`, `time` and `timeNano`, and the container's name is in
+  `Actor.Attributes.name`. Key order is not a promise Docker or this target makes; read the object by
+  key, never by position.
+- **`events container=<c>` is a literal prefix match on the container name — not a substring, and
+  not the `ps` regex.** `container=web` returns events for `web`, `web-2` and `webhook`, but not
+  `myweb`. `container=w.b` and `container=eb` return nothing at all, because neither is a prefix of
+  any real name — `.` is not a wildcard here the way it is in `ps`'s `name=`. Do not carry a `ps`
+  filtering habit over to `events`.
 - **`events` returns container lifecycle and health events only:** `create`, `start`, `restart`,
-  `stop`, `die`, `kill`, `oom`, `pause`, `unpause`, `destroy` and `health_status` (whose `Action`
-  reads like `health_status: healthy`). No `exec_*` action comes back, because each one names the
-  exec'd command line and an operator's `docker exec` can carry a secret there. A label still
-  arrives in each event's `Actor.Attributes`, as `inspect` returns it. So an empty result means no
-  lifecycle or health change in the window, not that nobody ran a command in the container.
+  `stop`, `die`, `kill`, `oom`, `pause`, `unpause`, `destroy` and `health_status` (whose action
+  reads like `health_status: healthy`) — eleven actions, fixed on the target. No `exec_*` action
+  ever comes back, because each one names the exec'd command line and an operator's `docker exec`
+  can carry a secret there.
+- **The daemon keeps a bounded buffer of past events, and it is smaller than it looks.** Measured
+  (`.events.buffer` in the shapes fixture): after 120 `docker exec` calls against one container, an
+  unfiltered query returned a few hundred events, that container's earlier `start` event was gone,
+  and the query with this target's action filter returned nothing at all. `docker exec` calls and
+  healthcheck probes fill the same buffer, even though the action filter hides every `exec_*`
+  action from what you see. **An empty or quiet-looking `events` result is not proof nothing happened in the
+  window** — it can just as easily mean the buffer already rolled past it. Cross-check with
+  `inspect`'s `started_at` and `restart_count` before reporting a window as quiet.
 
 ## Bounded reads, and why every one of them is
 
@@ -132,11 +190,14 @@ from a much narrower `tail=` anyway. A verdict drawn from a truncated dump is a 
 last few seconds wearing the label of the whole window.
 
 That is why the grammar itself, not just good practice, makes `tail=<M>` required and caps it at
-500 for `logs`, and why `events` carries a terminating bound rather than a stream: a call this
-skill lets you make cannot by itself blow the wall, but a call that ignores its own cap — or one
-answered across several containers without narrowing first — still can. Read one container at a
-time, keep `tail` and `window` no wider than the question needs, and if a call still truncates,
-re-run it bounded once and say so in the artifact rather than fetching a third time.
+500 for `logs`, and why `events` carries a terminating bound rather than a stream. **The cap bounds
+lines, not bytes, and a single capped call can blow the wall on its own:** `tail=500` of roughly
+100-byte log lines, each carrying `logs --timestamps`'s 31-byte prefix, comes to about 65KB — past
+the 50KB wall before a second container or a second check even enters the picture. Default to a
+narrower `tail`, `tail=100` answers most questions, and keep `since`/`window` no wider than the
+question needs; reach for `tail=500` only when the question genuinely requires that much history.
+Read one container at a time, and if a call still truncates, re-run it bounded once and say so in
+the artifact rather than fetching a third time.
 
 ## The report artifact contract (§5.6)
 
@@ -170,7 +231,7 @@ confirms it by that declared kind (`src/harvest/reconcile.ts`).
       "selector": "name=web-1",
       "window": "300s",
       "evidence_ref": ["observe-docker docker-host-a inspect web-1: State.Status=running, Health=healthy, RestartCount=0"],
-      "container_id": "3f2a9c1b7e4d",
+      "container_id": "1b9b66a422e957b5bb5c1b3aa508f33b0d291da0953231a811863fcd9c623849",
       "image": "web:1.4.2",
       "restart_count": 0
     }
@@ -189,7 +250,9 @@ confirms it by that declared kind (`src/harvest/reconcile.ts`).
 - **A refused verb is `forbidden`, and the task status is `blocked`.** A container with no
   healthcheck is not a refusal: `health` is `answered`, and the evidence says so.
 - **`container_id`, `image` and `restart_count` are optional.** Include them when `inspect`
-  answered; leave them out rather than guess when it did not.
+  answered; leave them out rather than guess when it did not. `container_id` is the full,
+  untruncated id `inspect` returns (64 hex characters), the same one `--no-trunc` and `.Id` give —
+  never the 12-character short form.
 - **Copy `sweep_id` and `window_opened_at` out of the brief, verbatim, and from nowhere else** —
   not from your transcript, not reconstructed from the clock. An artifact whose `sweep_id` does
   not match is discarded whole.
@@ -202,12 +265,22 @@ This is here so the artifact's `namespace`/target token and the credential's rea
 worker never runs any of it.
 
 1. Create a non-root account on the target, a member of the `docker` group — root-equivalent on
-   the target, with the forced command the only thing between the key and that root.
+   the target, with the forced command the only thing between the key and that root. Its login
+   shell must be `/bin/sh`: sshd runs the forced command through the account's shell, and anything
+   richer is surface this role does not need.
 2. Install `scripts/observe/docker-forced-command` root-owned, mode `0755`, at a path the account
-   cannot write.
+   cannot write. The account's home directory and its `~/.ssh` must be root-owned and not writable
+   by the account itself — an account that could write either could replace the forced command's
+   reach or its own `authorized_keys` line.
 3. Add one `authorized_keys` line:
    `restrict,command="<installed path>" ssh-ed25519 <public key> pifleet-observer-docker`.
-4. Record the target's host key in `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
+4. In `sshd_config` for this account, `AcceptEnv` must pass nothing through — no `PATH`, `IFS`,
+   `ENV`, `BASH_ENV`, and no `DOCKER_*` name. The forced command inherits whatever environment
+   sshd hands it. An accepted `PATH` can make `docker` resolve to another binary, and an accepted
+   `DOCKER_*` variable (`DOCKER_HOST` chief among them) can point its `docker` calls somewhere other
+   than the local socket. `IFS`, `ENV` and `BASH_ENV` are hardening: the shells measured ignore an
+   inherited `IFS`, and `ENV`/`BASH_ENV` only matter to a shell that reads them at startup.
+5. Record the target's host key in `OBSERVER_DOCKER_KNOWN_HOSTS`, and add
    `token host port user` to `OBSERVER_DOCKER_TARGETS`.
-5. Add `{host, port}` to `egress.allow` in `fleet.yaml`, and add the three secret names to
+6. Add `{host, port}` to `egress.allow` in `fleet.yaml`, and add the three secret names to
    `secrets.env_allowlist`.
