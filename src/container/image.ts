@@ -143,6 +143,14 @@ export const BUILD_CONTEXT_ASSETS = [
   // stale validator from one written by the current one. The two extensions
   // above at least fall silent; this one keeps answering.
   "pi-extensions/report-tools.ts",
+  // The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2 task 3.1). It is the only
+  // thing that carries the proxy's `403` rule name past OpenSSH — OpenSSH
+  // itself turns any non-zero ProxyCommand exit into one opaque
+  // `kex_exchange_identification` failure — so a stale copy that mishandles a
+  // refusal (swallows the body, or exits 0 on a non-200) hides the rule name
+  // an operator needs, and does so silently: the dispatch just fails, with
+  // nothing in reach explaining why.
+  "ssh-connect.cjs",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 

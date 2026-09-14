@@ -462,6 +462,22 @@ COPY --chmod=0444 docker/pi-extensions/truncation-recovery.ts /opt/pifleet/trunc
 # well-formed envelopes checked against a rule set that has since moved.
 COPY --chmod=0444 docker/pi-extensions/report-tools.ts /opt/pifleet/report-tools.ts
 
+# The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2 task 3.1). `observe-ssh`
+# (task 3.2, inert until that phase ships) runs every observer SSH call as
+# `-o ProxyCommand="node /opt/pifleet/ssh-connect.cjs %h %p"`, because OpenSSH
+# has no native CONNECT support and this image carries no `nc`/`socat`
+# (`:48-49` above) — `node` is the one thing guaranteed present, since the
+# base image itself is `node:*-bookworm-slim` (`:20`). Read by `node`, never
+# executed directly, so 0444 — same reasoning as the three extensions above.
+#
+# ADDING THIS COPY MEANT ADDING "ssh-connect.cjs" TO `BUILD_CONTEXT_ASSETS` in
+# src/container/image.ts. A stale copy here is dangerous in the same shape the
+# honeypot's staleness is: it is the ONLY thing standing between an operator
+# and the proxy's `403` rule name (`docker/connect-proxy.cjs:257-265`), so a
+# copy that regresses the refusal path hides WHY egress was denied behind
+# OpenSSH's own opaque `kex_exchange_identification` failure instead.
+COPY --chmod=0444 docker/ssh-connect.cjs /opt/pifleet/ssh-connect.cjs
+
 USER 10001:10001
 WORKDIR /workspace
 ENV PI_OFFLINE=0 \

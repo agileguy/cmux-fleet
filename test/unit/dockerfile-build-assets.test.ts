@@ -108,7 +108,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
     // the Dockerfile is clean and when the parse silently matched nothing, and
     // only one of those two is evidence.
     const sources = buildContextSources(DOCKERFILE);
-    expect(sources.length).toBeGreaterThanOrEqual(7);
+    expect(sources.length).toBeGreaterThanOrEqual(8);
 
     const names = new Set(sources.map((s) => assetNameOf(s.source)));
     expect(names).toEqual(
@@ -120,6 +120,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "pi-extensions/dispatch-trigger.ts",
         "pi-extensions/truncation-recovery.ts",
         "pi-extensions/report-tools.ts",
+        "ssh-connect.cjs",
       ]),
     );
   });
@@ -154,6 +155,13 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // moved, and reading `task_id`/`epoch` out of `/policy/task` by a recipe
       // that has moved. The harvester cannot tell the two apart.
       "pi-extensions/report-tools.ts",
+      // Added 2026-09-14 (SRD-OBSERVER-ROLES task 3.1). The SSH ProxyCommand
+      // every observer SSH call runs; a stale copy is dangerous in the same
+      // shape as the honeypot's staleness — it is the ONLY thing that carries
+      // the proxy's `403` rule name past OpenSSH's own opaque
+      // `kex_exchange_identification` failure, so a copy that mishandles a
+      // refusal hides the proxy's rule name from the operator reading it.
+      "ssh-connect.cjs",
     ]);
   });
 
