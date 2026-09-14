@@ -29,9 +29,13 @@
  *
  * ## No filesystem API, on purpose
  *
- * `reconcile.ts` argues it cannot dereference a worker-authored path because
- * nothing in its import graph opens a file. This module joins that graph, so it
- * imports only zod and the pure contracts module.
+ * This module imports only zod and the pure contracts module, and names no
+ * filesystem API. That is a claim about this file, not about `reconcile.ts`'s
+ * import graph: `reconcile.ts` imports `./outbox.ts`, which imports `open` from
+ * `node:fs/promises`. What the ISA pins for `reconcile.ts` (ISC-246, ISC-333)
+ * is narrower, that the file itself names no filesystem API. The parse it
+ * delegates here keeps that property. `test/unit/observer-target-artifacts.test.ts`
+ * holds this file's import list to exactly those two modules.
  */
 
 import { z } from "zod";
@@ -151,16 +155,58 @@ export type ObserverVmOpsArtifact = z.infer<typeof ObserverVmOpsArtifactSchema>;
  * `text` with every known secret value replaced by `<redacted>`.
  *
  * Blank needles are skipped, for the reason `findCredentialLeaks` skips them:
- * an empty needle matches everywhere. Longer needles go first, so a secret that
- * contains a shorter one is not left half-visible.
+ * an empty needle matches everywhere.
+ *
+ * ## Every match is found in the ORIGINAL text, then each overlap is replaced once
+ *
+ * Replacing needle by needle cannot hide overlaps. Once the first needle is
+ * gone, a second needle that shared characters with it no longer matches, and
+ * its tail stays visible: two overlapping 12-character needles came out as
+ * `<redacted>` plus the last four characters of one of them. A needle that
+ * overlaps its own next occurrence loses its tail the same way.
+ *
+ * So the matches of all needles are collected first, overlapping spans merge,
+ * and each merged span becomes one `<redacted>`. A secret containing a shorter
+ * secret, two secrets sharing characters, and a self-overlapping secret are all
+ * hidden whole. Matches that only touch stay two markers, as before.
+ *
+ * The search steps one character past each match so overlaps are found. One
+ * needle's overlapping matches fold into a single span as they are found, so a
+ * long run of one repeated secret costs one span, not one per offset.
  */
 export function redactSecrets(text: string, secrets: readonly string[]): string {
-  const needles = secrets
-    .filter((s) => typeof s === "string" && s.trim() !== "")
-    .sort((a, b) => b.length - a.length);
-  let out = text;
-  for (const n of needles) out = out.split(n).join("<redacted>");
-  return out;
+  const spans: Array<[start: number, end: number]> = [];
+  for (const n of secrets) {
+    if (typeof n !== "string" || n.trim() === "") continue;
+    let start = -1;
+    let end = -1;
+    for (let i = text.indexOf(n); i !== -1; i = text.indexOf(n, i + 1)) {
+      if (i >= end) {
+        if (start !== -1) spans.push([start, end]);
+        start = i;
+      }
+      end = i + n.length;
+    }
+    if (start !== -1) spans.push([start, end]);
+  }
+  if (spans.length === 0) return text;
+
+  spans.sort((x, y) => x[0] - y[0]);
+  let out = "";
+  /** Everything before this index is already in `out`. */
+  let emitted = 0;
+  let [start, end] = spans[0]!;
+  for (const [s, e] of spans) {
+    if (s < end) {
+      end = Math.max(end, e);
+      continue;
+    }
+    out += `${text.slice(emitted, start)}<redacted>`;
+    emitted = end;
+    start = s;
+    end = e;
+  }
+  return `${out}${text.slice(emitted, start)}<redacted>${text.slice(end)}`;
 }
 
 /**
@@ -168,32 +214,55 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
  * the object that holds the key.
  *
  * `findCredentialLeaks` walks string VALUES only. `{"<secret>": "x"}` passes it,
- * the schema then strips the unknown key, and the parse succeeds. The harvest
- * still publishes the file whole, so the key goes out with it.
+ * the schema then strips the unknown key, and the parse succeeds. The file
+ * still holds the key. The harvest inventories that file by path, bytes and
+ * sha256, and `src/run/relay.ts` reads `harvest.derived.artifacts` back, up to
+ * a byte budget, and inlines each file's text into the reply it returns. A key
+ * the parse never saw would reach whoever reads that reply.
  *
  * The finding names the PARENT, in the path spelling `findCredentialLeaks` uses,
  * and never the key, because the key is the secret. A parent path is built from
  * worker-authored keys too, so the caller still redacts it.
  *
  * Needles are filtered as `findCredentialLeaks` filters them: a blank needle
- * matches every key, which would refuse every document. The walk uses an
- * explicit stack, so a deeply nested document cannot exhaust the call stack.
+ * matches every key, which would refuse every document.
+ *
+ * ## Only containers go on the stack
+ *
+ * Keys live only in objects, so a scalar can hold none. Scalars are skipped
+ * where they are found, with no stack entry and no path string. Pushing every
+ * element used to hold one entry and one path per scalar at once. Measured on
+ * a flat 8 MiB `[0,0,…]` document: RSS rose 171 → 951 MiB that way, and
+ * 161 → 290 MiB this way.
+ *
+ * ## The explicit stack does not make the sweep safe against depth
+ *
+ * This walk does not recurse, but `findCredentialLeaks` runs before it and
+ * does. Measured: a document nested 200,000 objects deep parses as JSON and
+ * then throws `RangeError` in that walk. The caller in `reconcile.ts` catches
+ * the throw like any other refusal and clamps the task to `failed`.
  */
 function findSecretKeys(raw: unknown, secrets: readonly string[]): string[] {
   const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
   if (needles.length === 0) return [];
   const hits = new Set<string>();
-  const stack: Array<{ node: unknown; path: string }> = [{ node: raw, path: "" }];
+  const stack: Array<{ node: object; path: string }> = [];
+  if (raw !== null && typeof raw === "object") stack.push({ node: raw, path: "" });
   while (stack.length > 0) {
     const { node, path } = stack.pop()!;
     if (Array.isArray(node)) {
-      node.forEach((v, i) => stack.push({ node: v, path: `${path}[${i}]` }));
-    } else if (node !== null && typeof node === "object") {
+      for (let i = 0; i < node.length; i++) {
+        const v: unknown = node[i];
+        if (v !== null && typeof v === "object") stack.push({ node: v, path: `${path}[${i}]` });
+      }
+    } else {
       for (const [k, v] of Object.entries(node)) {
         if (needles.some((n) => k.includes(n))) {
           hits.add(`a key under ${path === "" ? "<root>" : path}`);
         }
-        stack.push({ node: v, path: path === "" ? k : `${path}.${k}` });
+        if (v !== null && typeof v === "object") {
+          stack.push({ node: v, path: path === "" ? k : `${path}.${k}` });
+        }
       }
     }
   }
@@ -206,12 +275,20 @@ function findSecretKeys(raw: unknown, secrets: readonly string[]): string[] {
  * ## The sweep runs over the RAW document, and it runs FIRST
  *
  * `parseTicketOpsArtifact` sweeps the parsed value. That misses a secret in a
- * key the schema does not know, because zod strips the key. The harvest still
- * digests and publishes the file whole, token included. Sweeping the raw value
+ * key the schema does not know, because zod strips the key from the value it
+ * returns while the file keeps it. The file is what travels: the harvest
+ * inventories it by path, bytes and sha256, and `src/run/relay.ts` inlines the
+ * text of each inventoried artifact into its reply. Sweeping the raw value
  * covers every string the file holds, and `findSecretKeys` covers every key.
  *
  * Running it before the schema means a document that is both malformed and
  * leaky is refused for the leak. Its schema messages are then never produced.
+ *
+ * ## A refusal is a finding, not a filter
+ *
+ * Nothing here withholds the file. The throw becomes a finding in the harvest
+ * report and clamps the task to `failed`, and the file stays in the inventory.
+ * So the message says what was found and where, and claims no more than that.
  *
  * ## The refusal names PATHS, and the paths are redacted too
  *
@@ -227,8 +304,7 @@ function sweepThenParse<T>(
   const leaks = [...findCredentialLeaks(raw, secrets), ...findSecretKeys(raw, secrets)];
   if (leaks.length > 0) {
     throw new Error(
-      `${kind} artifact contains a credential at: ${redactSecrets(leaks.join(", "), secrets)} ` +
-        `— refusing to publish it`,
+      `${kind} artifact contains a credential at: ${redactSecrets(leaks.join(", "), secrets)}`,
     );
   }
   return schema.parse(raw);
