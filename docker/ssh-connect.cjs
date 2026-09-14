@@ -42,7 +42,8 @@
  * exit into the same opaque `kex_exchange_identification: Connection closed
  * by remote host`, so the rule name a `403` carries
  * (`docker/connect-proxy.cjs:257-265`) has to reach stderr HERE or it never
- * reaches anyone at all.
+ * reaches anyone at all. That holds however the refusal's connection ends —
+ * a close, a reset, or not at all — so every one of those paths prints it.
  *
  * WHY THE RESPONSE READ IS BOUNDED, AND WHAT THE BOUND COUNTS. A proxy that
  * answers and a proxy that dribbles bytes forever without a `\r\n\r\n` look
@@ -55,6 +56,32 @@
  * however many there are. Judging the whole read would refuse a healthy tunnel
  * for being fast. A non-`200` response's body is kept only to print, so it is
  * bounded too (`MAX_BODY_BYTES`), and the rest is never read.
+ *
+ * WHY THE RESPONSE IS ALSO BOUNDED IN TIME, AND WHY THAT BOUND HAS NO KNOB. A
+ * byte bound does nothing about a proxy that sends no bytes: a relay that
+ * accepts the connection and wedges, or a refusal with no `Content-Length`
+ * on a connection that is never closed, would hold ssh forever with nothing on
+ * stderr. So the proxy has `RESPONSE_TIMEOUT_MS` (30 s), from the moment the
+ * connection is attempted, to finish answering; the deadline is cleared the
+ * moment a `200` opens the tunnel, so it never limits a tunnel. 30 s is twice
+ * the fleet proxy's own handshake timeout (`HANDSHAKE_TIMEOUT_MS`, 15 s of
+ * client inactivity, which runs until the upstream connects), so a healthy
+ * relay has always answered or dropped the connection before this fires. It
+ * is a constant rather than an environment variable on purpose: this process
+ * inherits the worker's environment through ssh, and a variable read here
+ * could be set by anything running in the worker. The unit tests shorten it
+ * from outside instead, by scaling timers in a wrapper that `require`s this
+ * file.
+ *
+ * HOW THE PROCESS ENDS ONCE THE TUNNEL IS OPEN. ssh keeps its ProxyCommand's
+ * stdin open for the whole session, and learns the tunnel has ended only when
+ * this process's stdout reaches EOF, which is when this process exits. So
+ * stdin closing can never be what ends it. The far side's FIN (the proxy's
+ * 120 s idle teardown, or its `upstream.on("end")` when the target's sshd goes
+ * away) exits 0 once every byte already received has been handed to stdout; a
+ * reset exits 1 with one `ssh-connect:` line; and ssh closing its end of stdout
+ * (EPIPE) exits 1 with one line, not the unhandled-`'error'` stack trace Node
+ * would otherwise print onto ssh's stderr.
  *
  * WHY NOTHING IS `require`d BUT NODE BUILT-INS. This file runs alone:
  * `docker/Dockerfile` COPYs just this one file into the worker image, at
@@ -69,11 +96,12 @@
  * documentation for `process.stdout`), and this script's stdout IS a pipe in
  * production — the far end is `ssh`'s own read of its ProxyCommand's stdout.
  * Every exit path below sets `process.exitCode` and tears down the handles
- * that are still open (the socket, stdin's flowing state) rather than calling
- * `process.exit()`: Node only exits once the event loop is empty, which is
- * exactly once every queued write has actually left the process. A forced
- * `process.exit()` here would truncate exactly the bytes item 2 exists to
- * deliver — the proxy's refusal line — or the tail of a legitimate tunnel.
+ * that are still open (the socket, stdin's flowing state, the deadline timer)
+ * rather than calling `process.exit()`: Node only exits once the event loop is
+ * empty, which is exactly once every queued write has actually left the
+ * process. A forced `process.exit()` here would truncate exactly the bytes
+ * item 2 exists to deliver — the proxy's refusal line — or the tail of a
+ * legitimate tunnel.
  */
 
 const net = require("node:net");
@@ -83,6 +111,13 @@ const MAX_HEADER_BYTES = 8192;
 
 /** At most this much of a non-200 response's body is read and printed. */
 const MAX_BODY_BYTES = 8192;
+
+/**
+ * How long the proxy has, from the connection attempt, to finish answering
+ * the CONNECT. Twice `connect-proxy.cjs`'s 15 s handshake timeout; cleared
+ * when the tunnel opens. Deliberately not configurable (see the docblock).
+ */
+const RESPONSE_TIMEOUT_MS = 30_000;
 
 /**
  * `docker/observe-ssh`'s `is_host`: `[A-Za-z0-9.:-]`, the first character a
@@ -131,6 +166,25 @@ function parsePort(text) {
   return port;
 }
 
+/**
+ * A non-200 response's `Content-Length`, or `null` when its header does not
+ * say where the body ends: no such header, a `Transfer-Encoding` (which
+ * overrides it), or two that disagree. Only ever used to stop waiting early;
+ * `null` leaves the close, the body bound, or the deadline to end the read.
+ */
+function parseContentLength(headerText) {
+  let length = null;
+  for (const line of headerText.split("\r\n").slice(1)) {
+    if (/^transfer-encoding:/i.test(line)) return null;
+    const match = /^content-length:[ \t]*([0-9]{1,15})[ \t]*$/i.exec(line);
+    if (match === null) continue;
+    const value = Number(match[1]);
+    if (length !== null && length !== value) return null;
+    length = value;
+  }
+  return length;
+}
+
 function main() {
   const [host, portArg] = process.argv.slice(2);
 
@@ -166,6 +220,8 @@ function main() {
 
   let torn = false;
   let spliced = false;
+  let connected = false;
+  let stdoutFailed = false;
   // Accumulates the proxy's response. Before `headerEnd` is known this is the
   // in-progress header (bounded by MAX_HEADER_BYTES); once known, further bytes
   // on a non-200 response are the refusal BODY (bounded by MAX_BODY_BYTES),
@@ -173,12 +229,26 @@ function main() {
   // reaches stderr.
   let head = Buffer.alloc(0);
   let headerEnd = -1;
+  let contentLength = null;
 
   const socket = net.connect({ host: proxy.hostname, port: proxy.port, allowHalfOpen: true });
+
+  /**
+   * Stop forwarding stdin. ssh never closes it while the session lives, so a
+   * stdin still flowing into a dead tunnel is what would keep this process
+   * running after the tunnel is gone. Before the splice it was never read.
+   */
+  const releaseStdin = () => {
+    if (!spliced) return;
+    process.stdin.unpipe(socket);
+    process.stdin.pause();
+  };
 
   const teardown = () => {
     if (torn) return;
     torn = true;
+    clearTimeout(deadline);
+    releaseStdin();
     socket.destroy();
   };
 
@@ -192,21 +262,57 @@ function main() {
   /**
    * The proxy's refusal: the status line AND the body naming the rule
    * (`connect-proxy.cjs:257-265`) — an operator reading a failed dispatch must
-   * see WHY, not just that it failed.
+   * see WHY, not just that it failed. The ONLY way a refusal is finished, so
+   * every path that ends one (close, error, body bound, `Content-Length`
+   * reached, deadline) prints it, and `teardown()`'s `torn` makes that once.
    */
-  const reportRefusal = () => {
+  const endRefusal = (note) => {
     const statusLine = head.subarray(0, headerEnd - 4).toString("latin1").split("\r\n")[0] ?? "";
     const body = head.subarray(headerEnd).toString("latin1");
     process.stderr.write(`${statusLine}\n`);
     if (body.length > 0) process.stderr.write(body.endsWith("\n") ? body : `${body}\n`);
+    if (note !== undefined) say(note);
     process.exitCode = 1;
+    teardown();
   };
 
+  /** ssh closed its end of our stdout (EPIPE, most often): one line, not Node's stack trace. */
+  const onStdoutError = (err) => {
+    if (stdoutFailed) return;
+    stdoutFailed = true;
+    say(`cannot write the tunnel to stdout (${err.code || err.message}); closing the tunnel`);
+    process.exitCode = 1;
+    teardown();
+  };
+
+  const onDeadline = () => {
+    if (torn || spliced) return;
+    const seconds = RESPONSE_TIMEOUT_MS / 1000;
+    if (headerEnd === -1) {
+      abort(
+        `no complete response header from the proxy within ${seconds} s ` +
+          `(${connected ? "it accepted the connection" : "it never accepted the connection"})`,
+      );
+      return;
+    }
+    endRefusal(`proxy neither closed the connection nor finished its response within ${seconds} s; stopped reading`);
+  };
+  const deadline = setTimeout(onDeadline, RESPONSE_TIMEOUT_MS);
+
   socket.on("error", (err) => {
+    if (torn) return;
+    if (headerEnd !== -1 && !spliced) {
+      // A complete refusal header arrived before the error (a proxy that
+      // resets instead of closing). The refusal is why the CONNECT failed;
+      // the reset after it adds nothing an operator needs.
+      endRefusal();
+      return;
+    }
     abort(spliced ? `tunnel connection error: ${err.message}` : `proxy connection failed: ${err.message}`);
   });
 
   socket.on("connect", () => {
+    connected = true;
     socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
   });
 
@@ -227,11 +333,13 @@ function main() {
       }
       headerEnd = end + 4;
 
-      const statusLine = head.subarray(0, end).toString("latin1").split("\r\n")[0] ?? "";
+      const headerText = head.subarray(0, end).toString("latin1");
+      const statusLine = headerText.split("\r\n")[0] ?? "";
       const status = statusLine.split(" ")[1];
 
       if (status === "200") {
         spliced = true;
+        clearTimeout(deadline);
         // Anything the proxy wrote AFTER its header in the same read belongs
         // to the tunnel — the target sshd answering fast enough to land in
         // the same TCP segment as the `200`. Dropping it would corrupt the
@@ -239,6 +347,7 @@ function main() {
         const pending = head.subarray(headerEnd);
         head = Buffer.alloc(0);
         socket.removeListener("data", onData);
+        process.stdout.on("error", onStdoutError);
         if (pending.length > 0) process.stdout.write(pending);
         socket.pipe(process.stdout);
         // `{ end: false }`: we end the socket ourselves, below, rather than
@@ -247,59 +356,77 @@ function main() {
         // stdin ending (ssh closed its write side) half-closes the tunnel:
         // `allowHalfOpen: true` above means our own `end()` sends a FIN
         // without also giving up on reading whatever the target still has to
-        // send. MEASURED rather than assumed, and the measurement is why this
-        // is a `setTimeout`, not `.pipe()`'s own end-of-source handling: when
-        // `process.stdin` is already fully written and closed by the time it
-        // is piped here — exactly what a short-lived observer dispatch looks
-        // like — calling `socket.end()` synchronously (or from the SAME
-        // libuv turn: `process.nextTick`, `setImmediate`, or a write's own
-        // completion callback were all tried) intermittently lost bytes the
-        // target had already sent back, even with `allowHalfOpen: true`: 0/15
-        // for each of those against a real loopback socket in this shape;
-        // 15/15 once `end()` waits for one full event-loop turn (Node
-        // v24.3.0, this repo's `docker/connect-proxy.cjs` is unaffected only
-        // because its two ends are live sockets that are never this
-        // synchronous). A zero-delay timer still runs through libuv's poll
-        // phase before firing, which is the turn that matters here — it is
-        // not a race against the clock, so 0 is not a number to "tune".
+        // send. The `end()` waits for a zero-delay timer, and this is what
+        // was measured about that, and where. The first measurement (bytes
+        // the target had already sent back lost in 15 of 15 runs with a
+        // synchronous `end()`, `process.nextTick`, `setImmediate` or a write
+        // callback, and in 0 of 15 behind the timer, with stdin already
+        // closed when piped) was taken with a `node` that reported v24.3.0
+        // and was in fact Bun's `node` wrapper, not Node. Re-measured in the
+        // Phase 3 review: under real Node 24.19.0 (`node:24-bookworm-slim`,
+        // the runtime this file ships in) a synchronous `end()` lost nothing
+        // in 20 of 20 runs; under Bun's wrapper it lost bytes in 20 of 20.
+        // The timer stays because it costs nothing on Node and keeps a
+        // Bun-hosted run, such as this repo's unit tests on a development
+        // machine, from losing the tail. Why Bun loses those bytes, and why
+        // the timer avoids it there, was not established.
         process.stdin.on("end", () => setTimeout(() => socket.end(), 0));
         return;
       }
-      // Non-200: fall through and keep accumulating — `refuse()` on the proxy
-      // side (`connect-proxy.cjs:144-157`) writes `Connection: close`, so the
-      // rest of the body (if any did not arrive in this same read) follows
-      // shortly and the proxy sends FIN.
+      // Non-200. `refuse()` on the proxy side (`connect-proxy.cjs:144-157`)
+      // sends `Content-Length` and `Connection: close`, so its body is
+      // complete once that many bytes are in, without waiting for the FIN.
+      // Without a usable `Content-Length`, the close, the body bound or the
+      // deadline ends the read.
+      contentLength = parseContentLength(headerText);
+    }
+    const bodyBytes = head.length - headerEnd;
+    if (contentLength !== null && contentLength <= MAX_BODY_BYTES) {
+      if (bodyBytes >= contentLength) {
+        head = head.subarray(0, headerEnd + contentLength);
+        endRefusal();
+      }
+      return;
     }
     // A non-200 body, bounded. Past the bound, print what was kept and stop
     // reading: the rule line comes first in every body `refuse()` writes.
-    if (head.length - headerEnd > MAX_BODY_BYTES) {
+    if (bodyBytes > MAX_BODY_BYTES) {
       head = head.subarray(0, headerEnd + MAX_BODY_BYTES);
-      reportRefusal();
-      say(`proxy response body exceeded ${MAX_BODY_BYTES} bytes; the rest was not read`);
-      teardown();
+      endRefusal(`proxy response body exceeded ${MAX_BODY_BYTES} bytes; the rest was not read`);
     }
   };
   socket.on("data", onData);
 
-  // The proxy's FIN, before we ever spliced. `allowHalfOpen: true` means OUR
-  // writable side does not auto-close in response — by design, so a target
-  // that keeps talking after a `200` is never cut off. A refusal never asked
-  // us to write anything, so there is nothing to keep the write side open
-  // FOR: without this, the socket sits half-open forever (we read their FIN,
-  // they never read ours) and `close` — where the refusal is actually
-  // reported below — never fires at all.
   socket.on("end", () => {
-    if (!spliced) socket.end();
+    if (spliced) {
+      // The far side has finished sending: the proxy's idle teardown, or the
+      // target's sshd going away. `'end'` is emitted only once every byte
+      // received has gone through the pipe into stdout, and stdout's queued
+      // writes keep the process alive until they drain. Nothing is left for
+      // ssh to read, so the tunnel is over, whatever stdin is doing. Destroy
+      // rather than `end()`: a FIN from our side can wait behind unflushed
+      // stdin bytes for a reader that is no longer reading.
+      releaseStdin();
+      socket.destroy();
+      return;
+    }
+    // The proxy's FIN, before we ever spliced. `allowHalfOpen: true` means OUR
+    // writable side does not auto-close in response — by design, so a target
+    // that keeps talking after a `200` is never cut off. A refusal never asked
+    // us to write anything, so there is nothing to keep the write side open
+    // FOR: without this, the socket sits half-open forever (we read their FIN,
+    // they never read ours) and `close` — where the refusal is actually
+    // reported below — never fires at all.
+    socket.end();
   });
 
   socket.on("close", () => {
-    if (torn) return; // already reported via `abort()` or the body bound
+    if (torn) return; // already reported via `abort()`, `endRefusal()` or the stdout error
     if (spliced) {
       // The tunnel ended cleanly. Stop reading stdin (nothing left to forward
       // to) and let Node exit once the stdout writes above have actually
       // drained — see the docblock on why this is never a forced `process.exit()`.
-      process.stdin.unpipe(socket);
-      process.stdin.pause();
+      releaseStdin();
       process.exitCode = 0;
       return;
     }
@@ -307,7 +434,7 @@ function main() {
       abort("proxy closed the connection before sending a complete response header");
       return;
     }
-    reportRefusal();
+    endRefusal();
   });
 }
 
