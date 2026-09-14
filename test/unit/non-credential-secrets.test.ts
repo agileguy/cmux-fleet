@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   SecretsSchema,
+  multilineSecretNames,
   nonCredentialSecretNames,
   secretGrantNames,
 } from "../../src/config/schema.ts";
@@ -88,6 +89,66 @@ describe("the config surface", () => {
     expect(() =>
       SecretsSchema.parse({ env_allowlist: [{ name: "X", credentialz: false }] }),
     ).toThrow();
+  });
+
+  /**
+   * `multiline` defaults to `false` in both forms, for the same reason
+   * `credential` defaults to `true`: the default is the refusal, so an
+   * operator who writes nothing extra keeps the newline check.
+   */
+  test("multiline defaults to false, for a bare string and for the long form", () => {
+    const parsed = SecretsSchema.parse({
+      env_allowlist: ["TICKET_API_TOKEN", { name: "OTHER" }, { name: "URL", credential: false }],
+    });
+    expect(multilineSecretNames(parsed.env_allowlist)).toEqual([]);
+  });
+
+  /**
+   * The two flags are independent. The SSH key is multi-line AND still a
+   * credential, so it stays swept; the targets list is multi-line and not a
+   * credential.
+   */
+  test("multiline: true names it, and leaves the grant and the sweep alone", () => {
+    const parsed = SecretsSchema.parse({
+      env_allowlist: [
+        "TICKET_API_TOKEN",
+        { name: "OBSERVER_DOCKER_SSH_KEY", multiline: true },
+        { name: "OBSERVER_DOCKER_TARGETS", credential: false, multiline: true },
+      ],
+    });
+    expect(secretGrantNames(parsed.env_allowlist)).toEqual([
+      "TICKET_API_TOKEN",
+      "OBSERVER_DOCKER_SSH_KEY",
+      "OBSERVER_DOCKER_TARGETS",
+    ]);
+    expect(multilineSecretNames(parsed.env_allowlist)).toEqual([
+      "OBSERVER_DOCKER_SSH_KEY",
+      "OBSERVER_DOCKER_TARGETS",
+    ]);
+    expect(nonCredentialSecretNames(parsed.env_allowlist)).toEqual(["OBSERVER_DOCKER_TARGETS"]);
+  });
+
+  test("one name cannot answer the multiline question twice", () => {
+    expect(() =>
+      SecretsSchema.parse({
+        env_allowlist: ["OBSERVER_DOCKER_SSH_KEY", { name: "OBSERVER_DOCKER_SSH_KEY", multiline: true }],
+      }),
+    ).toThrow(/twice with different multiline settings/);
+    // A bare string and an explicit `multiline: false` are the same answer.
+    expect(() =>
+      SecretsSchema.parse({
+        env_allowlist: ["OBSERVER_DOCKER_SSH_KEY", { name: "OBSERVER_DOCKER_SSH_KEY", multiline: false }],
+      }),
+    ).not.toThrow();
+    // And the credential refusal is not disturbed by a matching multiline answer.
+    expect(() =>
+      SecretsSchema.parse({
+        env_allowlist: [
+          { name: "OBSERVER_DOCKER_TARGETS", multiline: true },
+          { name: "OBSERVER_DOCKER_TARGETS", multiline: true, credential: false },
+        ],
+      }),
+    ).toThrow(/twice with different credential settings/);
   });
 });
 
@@ -182,6 +243,138 @@ describe("the needle supplier honours the run's own record", () => {
     const supply = await resolveWorkerNeedles(wp);
     expect(supply.names).toEqual(["TICKET_BASE_URL"]);
     await rm(base, { recursive: true, force: true });
+  });
+});
+
+/**
+ * A MULTI-LINE credential is swept line by line, and its non-secret lines are
+ * not needles.
+ *
+ * The whole value is one needle, so an artifact that quotes ONE line of a key
+ * would slip past a sweep that only looks for all of it. So each secret line is
+ * a needle too. Blank lines and PEM armor are not secret, and making them
+ * needles would refuse every artifact that mentions a key header, which is the
+ * false positive this file was written about.
+ *
+ * Paired: the body line IS found, the armor line is NOT; the undeclared
+ * targets line IS found, the declared one is NOT.
+ */
+describe("a multi-line credential is swept line by line", () => {
+  /** Built the same way as the fixture in `worker-secrets.test.ts`: PEM-shaped, not a key. */
+  function fakeKey(label: string): string {
+    return [
+      `-----BEGIN ${label}-----`,
+      ...Buffer.from(
+        Array.from({ length: 9 }, (_, i) => `pifleet-fixture-not-a-key-${i};`).join(""),
+      )
+        .toString("base64")
+        .match(/.{1,70}/g)!,
+      `-----END ${label}-----`,
+      "",
+    ].join("\n");
+  }
+  const KEY = fakeKey("OPENSSH PRIVATE KEY");
+  const KNOWN_HOSTS =
+    "docker-host.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyNotReal0000000000000000\n";
+  const TARGETS =
+    "prod-a docker-host.example.com 22 observer\nprod-b docker-host-2.example.com 22 observer\n";
+  const report = (notes: string) => ({ schema: "fixture", notes });
+
+  async function rig(nonCredential: string[], key = KEY) {
+    const base = await mkdtemp(join(tmpdir(), "pifleet-needles-ml-"));
+    const run = runPaths("r-ml", join(base, "runs"));
+    const wp = workerPaths(run, "obs-d1");
+    await mkdir(wp.secretsDir, { recursive: true });
+    await writeFile(join(wp.secretsDir, "OBSERVER_DOCKER_SSH_KEY"), key, "utf8");
+    await writeFile(join(wp.secretsDir, "OBSERVER_DOCKER_KNOWN_HOSTS"), KNOWN_HOSTS, "utf8");
+    await writeFile(join(wp.secretsDir, "OBSERVER_DOCKER_TARGETS"), TARGETS, "utf8");
+    await writeFile(
+      wp.launchJson,
+      JSON.stringify(
+        WorkerLaunchSchema.parse({
+          kind: "container",
+          argv: ["docker", "run", "-i", "--rm", "img", "pi", "--mode", "rpc"],
+          container: "pifleet-r-ml-obs-d1",
+          image: "img",
+          secret_names: [
+            "OBSERVER_DOCKER_SSH_KEY",
+            "OBSERVER_DOCKER_KNOWN_HOSTS",
+            "OBSERVER_DOCKER_TARGETS",
+          ],
+          non_credential_secrets: nonCredential,
+        }),
+      ),
+      "utf8",
+    );
+    return { wp, base };
+  }
+  const DECLARED = ["OBSERVER_DOCKER_KNOWN_HOSTS", "OBSERVER_DOCKER_TARGETS"];
+
+  test("one body line of a multi-line key, alone in an artifact, is found", async () => {
+    const { wp, base } = await rig(DECLARED);
+    try {
+      const supply = await resolveWorkerNeedles(wp);
+      const bodyLine = KEY.split("\n")[2]!;
+      const leaky = report(`the key file began ${bodyLine} and continued`);
+      // The whole value alone does NOT catch it; that is the gap.
+      expect(findCredentialLeaks(leaky, [KEY])).toEqual([]);
+      expect(findCredentialLeaks(leaky, supply.needles).length).toBeGreaterThan(0);
+      // The whole value is still a needle as well.
+      expect(supply.needles).toContain(KEY);
+      // Every body line is a needle.
+      for (const line of KEY.split("\n").slice(1, -2)) expect(supply.needles).toContain(line);
+      // PAIRED: `names[i]` produced `needles[i]`, so the hit is attributable.
+      expect(supply.names.length).toBe(supply.needles.length);
+      expect(supply.names[supply.needles.indexOf(bodyLine)]).toBe("OBSERVER_DOCKER_SSH_KEY");
+      expect(supply.note).toBeNull();
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("a PEM armor line alone is not a finding, and no blank or armor line is a needle", async () => {
+    for (const label of ["OPENSSH PRIVATE KEY", "RSA PRIVATE KEY", "PRIVATE KEY"]) {
+      const { wp, base } = await rig(DECLARED, fakeKey(label));
+      try {
+        const supply = await resolveWorkerNeedles(wp);
+        for (const armor of [`-----BEGIN ${label}-----`, `-----END ${label}-----`]) {
+          expect(findCredentialLeaks(report(`sshd rejected a ${armor} block`), supply.needles)).toEqual(
+            [],
+          );
+          expect(supply.needles).not.toContain(armor);
+        }
+        expect(supply.needles.some((n) => n.trim() === "")).toBe(false);
+        // CONTROL: this supply is armed, so the absences above are not an empty list.
+        expect(supply.needles.length).toBeGreaterThan(1);
+      } finally {
+        await rm(base, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("a multi-line credential: false value is not swept, whole or by line", async () => {
+    const targetLine = TARGETS.split("\n")[0]!;
+    const hostLine = KNOWN_HOSTS.trimEnd();
+    const honest = report(`checked ${targetLine}; host key ${hostLine}`);
+
+    const declared = await rig(DECLARED);
+    try {
+      const supply = await resolveWorkerNeedles(declared.wp);
+      expect(findCredentialLeaks(honest, supply.needles)).toEqual([]);
+      expect(supply.names).not.toContain("OBSERVER_DOCKER_TARGETS");
+      expect(supply.names).not.toContain("OBSERVER_DOCKER_KNOWN_HOSTS");
+    } finally {
+      await rm(declared.base, { recursive: true, force: true });
+    }
+
+    // CONTROL: undeclared, the same artifact is a finding.
+    const undeclared = await rig([]);
+    try {
+      const supply = await resolveWorkerNeedles(undeclared.wp);
+      expect(findCredentialLeaks(honest, supply.needles).length).toBeGreaterThan(0);
+    } finally {
+      await rm(undeclared.base, { recursive: true, force: true });
+    }
   });
 });
 

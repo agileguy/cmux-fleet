@@ -101,7 +101,11 @@
 import { writeFile, chmod, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
-import { nonCredentialSecretNames, secretGrantNames } from "../config/schema.ts";
+import {
+  multilineSecretNames,
+  nonCredentialSecretNames,
+  secretGrantNames,
+} from "../config/schema.ts";
 import {
   ConfigError,
   providerApiKeyEnv,
@@ -1070,6 +1074,7 @@ export function buildWorkerEnv(
   ]);
   const allowlist = secretGrantNames(loaded.config.secrets.env_allowlist);
   const notCredentials = new Set(nonCredentialSecretNames(loaded.config.secrets.env_allowlist));
+  const multiline = new Set(multilineSecretNames(loaded.config.secrets.env_allowlist));
   const secretNames: string[] = [];
   // `secretFiles` is declared at the top of this function and may ALREADY hold
   // the Class 1 key — see the D8 block above. The grants below append to it.
@@ -1111,12 +1116,35 @@ export function buildWorkerEnv(
      * on: `skills/ticket-ops/SKILL.md` concatenates this file's bytes into a
      * `header = "..."` line, and a newline in the middle of it would end the
      * header and start a curl config directive from a credential store.
+     *
+     * ## The opt-in, and why it is per name
+     *
+     * A name the operator marked `multiline: true` may carry LF, because some
+     * grants are files rather than tokens: the observer roles' SSH key,
+     * known_hosts and targets list are one entry per line by nature
+     * (SRD-OBSERVER-ROLES §5.5). The mark is read per NAME and nothing else is
+     * loosened, so the ticket token stays refused on a fleet that marked the
+     * key. The refusal message names the mark AND its limit, so the fix can be
+     * found without it reading as an invitation to mark a header token.
+     *
+     * A CR is refused for every name, marked or not. `NEWLINE` catches it for
+     * an unmarked name; the second check catches it for a marked one, because
+     * a CRLF key or line list is malformed to the tools that read it.
      */
-    if (NEWLINE.test(value)) {
+    if (NEWLINE.test(value) && !multiline.has(requested)) {
       throw new ConfigError(
-        `the value of ${requested} contains a newline — it is delivered as a file whose bytes ` +
-          `are concatenated into a request header, so the remainder would become a separate ` +
-          `directive`,
+        `the value of ${requested} contains a newline, and a granted secret may carry one only ` +
+          `when its secrets.env_allowlist entry says multiline: true — that mark is for a ` +
+          `file-shaped value no consumer splices into a single line (an SSH key, a ` +
+          `one-entry-per-line list); a token concatenated into a request header or a command ` +
+          `must stay on a single line, so for one of those remove the newline from the value`,
+      );
+    }
+    if (value.includes("\r")) {
+      throw new ConfigError(
+        `the value of ${requested} contains a carriage return — multiline: true permits LF line ` +
+          `endings only, because a CRLF key or line list is malformed to the tools that read ` +
+          `it; convert the value to LF line endings`,
       );
     }
     secretNames.push(requested);
@@ -1309,6 +1337,11 @@ export async function writeWorkerSecretFiles(
      * newline would terminate the header mid-quote. It is also what makes the
      * file's byte length equal to the value's, which is what the size check
      * below is able to assert.
+     *
+     * A `multiline: true` value's own final newline is PART of the value and
+     * is written like any other byte. Nothing is added and nothing is trimmed,
+     * so an OpenSSH key arrives with the trailing newline it was generated
+     * with.
      *
      * Raw rather than a pre-formed curl config fragment: `secrets:` is a list
      * of NAMES with no schema, so the fleet does not know whether a given one

@@ -105,6 +105,59 @@ import { safeForReport } from "./outbox.ts";
  */
 export const MIN_NEEDLE_BYTES = 8;
 
+/**
+ * A PEM armor line: `-----BEGIN OPENSSH PRIVATE KEY-----`, `-----END RSA
+ * PRIVATE KEY-----` and their kin. Public text, identical in every key of its
+ * type, so never a needle.
+ */
+const ARMOR_LINE = /^-----(?:BEGIN|END)[A-Z0-9 ]*-----$/;
+
+/** Whether a string may be a literal needle at all: not blank, and over the floor. */
+function usableNeedle(s: string): boolean {
+  return s.trim() !== "" && s.length >= MIN_NEEDLE_BYTES;
+}
+
+/**
+ * The needles ONE value contributes: the whole value, and for a value that
+ * spans lines, each line that is secret material.
+ *
+ * ## Why a multi-line value needs more than one needle
+ *
+ * `findCredentialLeaks` matches with `String.includes`, so the whole value only
+ * catches an artifact that quotes ALL of it. A multi-line credential, such as
+ * the observer roles' OpenSSH key (`multiline: true` in `config/schema.ts`),
+ * leaks just as badly one line at a time, and a worker pasting "the first few
+ * lines of the key" is the realistic shape of that leak. So each line is a
+ * needle too, under the same floor.
+ *
+ * ## Which lines are NOT needles, and why that matters as much
+ *
+ * Blank lines, and PEM armor lines. Armor is public text that appears in every
+ * key of a type and in honest prose about keys. Making it a needle would refuse
+ * every artifact that says "the host rejected a BEGIN OPENSSH PRIVATE KEY
+ * block", which is the false positive `credential: false` was written to end.
+ *
+ * Lines are TRIMMED before use. A trimmed line is a substring of the original,
+ * so it catches strictly more, and delivery refuses CR, so a current run holds
+ * no `\r` to strip anyway.
+ *
+ * One cost is stated rather than hidden. An OpenSSH key's first body line
+ * encodes a header that is the same for every unencrypted key of its type, so
+ * it is not secret either. It is kept as a needle: the only artifact that
+ * carries it is one quoting key material, and that is worth a finding.
+ */
+function needlesFor(value: string): string[] {
+  if (!usableNeedle(value)) return [];
+  const out = [value];
+  if (!value.includes("\n")) return out;
+  for (const raw of value.split("\n")) {
+    const line = raw.trim();
+    if (!usableNeedle(line) || ARMOR_LINE.test(line) || out.includes(line)) continue;
+    out.push(line);
+  }
+  return out;
+}
+
 /** What one worker's grant resolved to. */
 export interface NeedleSupply {
   /**
@@ -150,6 +203,14 @@ export interface NeedleSupply {
    * the run, and has exactly one kind of consumer — a diagnostic printing what
    * was swept. The dataflow is one-way and dies with the report, so a reader
    * who confuses the two has to ignore both names and both docblocks to do it.
+   *
+   * ## INDEX-ALIGNED with `needles`, so a name may repeat
+   *
+   * `names[i]` is the variable that produced `needles[i]`. A multi-line
+   * credential contributes its whole value AND each secret line (see
+   * `needlesFor`), so its name appears once per needle. That keeps the one
+   * question this list answers honest for every needle: which grant does a hit
+   * on this string belong to.
    */
   names: string[];
   /**
@@ -280,10 +341,12 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
     // failure would put a permanent note on every run that grants a region
     // name. This floor is the SWEEP's, deliberately kept here rather than
     // pushed into the shared resolver — the redactor's floor is a different
-    // number chosen against a different failure.
-    if (value.trim() === "" || value.length < MIN_NEEDLE_BYTES) continue;
-    needles.push(value);
-    names.push(name);
+    // number chosen against a different failure. `needlesFor` applies it, to
+    // the whole value and to each line of a multi-line one.
+    for (const needle of needlesFor(value)) {
+      needles.push(needle);
+      names.push(name);
+    }
   }
 
   /**
@@ -341,13 +404,17 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
           `(${safeForReport(providerKeyName)}) that neither its secret store nor its env file ` +
           `carries; its value was not swept for`,
       );
-    } else if (value.trim() !== "" && value.length >= MIN_NEEDLE_BYTES) {
+    } else {
       // The same floor the grants get, applied for the same reason and not
       // reported for the same reason: a value below it is delivered, simply not
       // usable as a literal needle. A provider key short enough to trip this is
-      // not a credential any vendor issues.
-      needles.push(value);
-      names.push(providerKeyName);
+      // not a credential any vendor issues. Through `needlesFor` like the
+      // grants, so the two arms cannot drift; a single-line key yields exactly
+      // the one needle it always did.
+      for (const needle of needlesFor(value)) {
+        needles.push(needle);
+        names.push(providerKeyName);
+      }
     }
   }
   if (resolved.unresolved.length > 0) {

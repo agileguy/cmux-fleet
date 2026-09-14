@@ -18,6 +18,8 @@
  * observable without a container.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { loadConfig, parseConfig, resolveWorker, ConfigError } from "../../src/config/load.ts";
@@ -30,6 +32,7 @@ import {
   SecretReservedNameError,
   secretContainerPath,
   secretPointerName,
+  writeWorkerSecretFiles,
 } from "../../src/run/worker-env.ts";
 import { CREDENTIAL_ENV_VARS } from "../../src/security/adc.ts";
 import {
@@ -155,6 +158,166 @@ describe("ISC-304: a secret arrives only when BOTH lists name it", () => {
         TICKET_TOKEN: "line1\nINJECTED=1",
       }),
     ).toThrow(ConfigError);
+  });
+});
+
+/**
+ * `multiline: true` — the opt-in that lets a value span lines, for the names
+ * that say so and no others (SRD-OBSERVER-ROLES §5.5).
+ *
+ * The observer roles are granted an OpenSSH private key, a known_hosts list and
+ * a targets list. All three are one-entry-per-line by nature, and the newline
+ * refusal above stopped every one of them at `up`. The refusal was not wrong:
+ * it guards the ticket token, whose bytes `skills/ticket-ops/SKILL.md`
+ * concatenates into a curl `header = "..."` line. So the refusal stays the
+ * default, and the operator marks the names that are files rather than tokens.
+ *
+ * Paired like `non-credential-secrets.test.ts`: every test that shows a
+ * multi-line value getting through has a sibling showing what must still be
+ * refused, because a change that dropped the newline check wholesale would
+ * satisfy the positive half on its own.
+ */
+describe("multiline: true delivers a value that spans lines, for the marked names only", () => {
+  /**
+   * PEM-shaped and deliberately NOT a key: base64 of fixture text, wrapped at
+   * 70 columns with a short last line, between armor lines, ending in a
+   * newline. That is the layout `ssh-keygen -t ed25519` writes, measured
+   * rather than remembered. No real key material is committed.
+   */
+  const KEY = [
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+    ...Buffer.from(
+      Array.from({ length: 9 }, (_, i) => `pifleet-fixture-not-a-key-${i};`).join(""),
+    )
+      .toString("base64")
+      .match(/.{1,70}/g)!,
+    "-----END OPENSSH PRIVATE KEY-----",
+    "",
+  ].join("\n");
+  const KEY_NAME = "OBSERVER_DOCKER_SSH_KEY";
+
+  function multilineDoc(entry: string | Record<string, unknown>) {
+    return doc({
+      secrets: { env_allowlist: ["TICKET_TOKEN", entry] },
+      roles: { dockerobs: { secrets: [KEY_NAME] }, ticketer: { secrets: ["TICKET_TOKEN"] } },
+      workers: [
+        { id: "wd", role: "dockerobs" },
+        { id: "wt", role: "ticketer" },
+      ],
+    });
+  }
+
+  function refusal(fn: () => unknown): Error {
+    try {
+      fn();
+    } catch (err) {
+      return err as Error;
+    }
+    throw new Error("expected a refusal");
+  }
+
+  test("the fixture has the shape it claims: armor, several body lines, a trailing newline", () => {
+    const lines = KEY.split("\n");
+    expect(lines[0]).toBe("-----BEGIN OPENSSH PRIVATE KEY-----");
+    expect(lines.at(-2)).toBe("-----END OPENSSH PRIVATE KEY-----");
+    expect(lines.at(-1)).toBe("");
+    expect(lines.length - 3).toBeGreaterThanOrEqual(4);
+  });
+
+  test("an opted multi-line key is delivered byte for byte, trailing newline included", async () => {
+    const loaded = await load(multilineDoc({ name: KEY_NAME, multiline: true }));
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), { [KEY_NAME]: KEY });
+    expect(plan.secretFiles).toEqual([{ name: KEY_NAME, value: KEY }]);
+    expect(plan.vars[secretPointerName(KEY_NAME)]).toBe(secretContainerPath(KEY_NAME));
+    // The value stays out of `vars`, so the env file still serializes and
+    // still carries no part of it.
+    expect(serializeEnvFile(plan.vars)).not.toContain("PRIVATE KEY");
+
+    // ON DISK, through the writer `up` uses: the exact bytes, with the final
+    // newline OpenSSH expects, not a trimmed copy.
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-multiline-"));
+    try {
+      await writeWorkerSecretFiles(join(dir, "secrets"), plan);
+      const bytes = await readFile(join(dir, "secrets", KEY_NAME));
+      expect(bytes.equals(Buffer.from(KEY, "utf8"))).toBe(true);
+      expect(bytes.at(-1)).toBe(0x0a);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * THE SIBLING. One thing differs from the test above, the flag, and the same
+   * bytes are refused. The message says how to mark a name, and says the mark
+   * is not for a value spliced into a single line, so the fix can be found
+   * without inviting anyone to opt the ticket token in.
+   */
+  test("the same key for a name NOT marked is refused, naming the flag and its limit", async () => {
+    for (const entry of [KEY_NAME, { name: KEY_NAME }, { name: KEY_NAME, multiline: false }]) {
+      const loaded = await load(multilineDoc(entry));
+      const err = refusal(() =>
+        buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), { [KEY_NAME]: KEY }),
+      );
+      expect(err).toBeInstanceOf(ConfigError);
+      expect(err.message).toContain(KEY_NAME);
+      expect(err.message).toContain("multiline: true");
+      expect(err.message).toContain("single line");
+      // Never quotes what it refused.
+      expect(err.message).not.toContain(KEY.split("\n")[1]!);
+    }
+  });
+
+  /**
+   * THE TICKET TOKEN STAYS REFUSED, with another name opted in on the same
+   * fleet. The opt-in is per name, so marking the key must not loosen anything
+   * for a name nobody marked.
+   */
+  test("the ticket token's newline is still refused while another name is opted in", async () => {
+    const loaded = await load(multilineDoc({ name: KEY_NAME, multiline: true }));
+    const err = refusal(() =>
+      buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), { TICKET_TOKEN: "line1\nINJECTED=1" }),
+    );
+    expect(err).toBeInstanceOf(ConfigError);
+    expect(err.message).toContain("TICKET_TOKEN");
+    expect(err.message).not.toContain("INJECTED=1");
+  });
+
+  /**
+   * CR IS REFUSED EVEN WHEN OPTED IN. A CRLF key or targets file is malformed
+   * downstream (`docker/observe-ssh` treats a CR as malformed), so the flag
+   * permits LF and nothing else.
+   */
+  test("a carriage return is refused for a name marked multiline", async () => {
+    const loaded = await load(multilineDoc({ name: KEY_NAME, multiline: true }));
+    for (const bad of [KEY.replaceAll("\n", "\r\n"), KEY.replace("\n", "\r"), `${KEY.trimEnd()}\r`]) {
+      const err = refusal(() =>
+        buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), { [KEY_NAME]: bad }),
+      );
+      expect(err).toBeInstanceOf(ConfigError);
+      expect(err.message).toContain(KEY_NAME);
+      expect(err.message).toContain("carriage return");
+    }
+    // CONTROL: the LF-only form, same config, same worker, is delivered.
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), { [KEY_NAME]: KEY });
+    expect(plan.secretFiles).toEqual([{ name: KEY_NAME, value: KEY }]);
+  });
+
+  test("config validate refuses a name listed twice with different multiline answers", async () => {
+    await expect(
+      load(doc({ secrets: { env_allowlist: [KEY_NAME, { name: KEY_NAME, multiline: true }] } })),
+    ).rejects.toThrow(/twice with different multiline settings/);
+    // CONTROL: the same name twice with the same answer loads.
+    const ok = await load(
+      doc({
+        secrets: {
+          env_allowlist: [
+            { name: KEY_NAME, multiline: true },
+            { name: KEY_NAME, multiline: true },
+          ],
+        },
+      }),
+    );
+    expect(ok.config.secrets.env_allowlist.length).toBe(2);
   });
 });
 

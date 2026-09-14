@@ -1423,6 +1423,28 @@ export const CloudSchema = z
  * The DEFAULT is `true`, and a bare string means `true`. An operator who adds
  * a real credential and writes nothing extra gets it swept, which is the
  * direction a mistake has to fall.
+ *
+ * ## `multiline: true` — the second flag, and what it permits
+ *
+ * `buildWorkerEnv` refuses a granted value that contains a newline, because
+ * `skills/ticket-ops/SKILL.md` concatenates a secret file's bytes into a curl
+ * `header = "..."` line and a newline there ends the header and starts a
+ * directive. That refusal is right for a token and wrong for a file: the
+ * observer roles are granted an OpenSSH private key, a known_hosts list and a
+ * targets list (SRD-OBSERVER-ROLES §5.5), each one entry per line by nature.
+ *
+ * `multiline: true` permits exactly one thing: **the value may contain LF.**
+ * The file receives the exact bytes, trailing newline included. A carriage
+ * return is still refused, because a CRLF key or line list is malformed to the
+ * tools that read it. Nothing else changes: the grant, the pointer, the
+ * reserved-name and allowlist checks, and the sweep (a multi-line credential is
+ * swept line by line, see `harvest/needles.ts`).
+ *
+ * **It is only for a value no consumer concatenates into a single line.** A
+ * token spliced into a header, a URL or a command line must not be marked,
+ * whatever its value happens to contain; for one of those the newline is the
+ * defect. The DEFAULT is `false` and a bare string means `false`, so the
+ * refusal stays on for every name nobody deliberately marked.
  */
 export const SecretEntrySchema = z.union([
   shortStr,
@@ -1435,6 +1457,13 @@ export const SecretEntrySchema = z.union([
        * add a comment does not silently disarm the sweep for X.
        */
       credential: z.boolean().default(true),
+      /**
+       * `true` means "the value may contain LF" — for a key file or a
+       * one-entry-per-line list, never for a value spliced into one line. CR
+       * stays refused either way. Defaults to `false`, for the same reason
+       * `credential` defaults to `true`: the default keeps the check.
+       */
+      multiline: z.boolean().default(false),
     })
     .strict(),
 ]);
@@ -1451,6 +1480,11 @@ export function nonCredentialSecretNames(entries: readonly SecretEntry[]): strin
   return entries.flatMap((e) => (typeof e === "string" || e.credential ? [] : [e.name]));
 }
 
+/** The subset declared `multiline: true` — the names whose values may contain LF. */
+export function multilineSecretNames(entries: readonly SecretEntry[]): string[] {
+  return entries.flatMap((e) => (typeof e !== "string" && e.multiline ? [e.name] : []));
+}
+
 export const SecretsSchema = z
   .object({
     /** NEVER provider keys — see SRD §12.4. */
@@ -1465,14 +1499,21 @@ export const SecretsSchema = z
    * operator's intent is unrecoverable from the document. Refusing at
    * `config validate` is cheap; a fleet that quietly disarmed a sweep because
    * of list order is not.
+   *
+   * `multiline` gets the same rule for the same reason: list order must not
+   * decide whether a newline is refused. The two are checked separately, so a
+   * conflict on each is reported on its own.
    */
   .superRefine((v, ctx) => {
-    const seen = new Map<string, boolean>();
+    const seen = new Map<string, { credential: boolean; multiline: boolean }>();
     for (const e of v.env_allowlist) {
       const name = typeof e === "string" ? e : e.name;
-      const isCredential = typeof e === "string" ? true : e.credential;
+      const answer =
+        typeof e === "string"
+          ? { credential: true, multiline: false }
+          : { credential: e.credential, multiline: e.multiline };
       const prior = seen.get(name);
-      if (prior !== undefined && prior !== isCredential) {
+      if (prior !== undefined && prior.credential !== answer.credential) {
         ctx.addIssue({
           code: "custom",
           path: ["env_allowlist"],
@@ -1481,7 +1522,16 @@ export const SecretsSchema = z
             `say once whether it is swept`,
         });
       }
-      seen.set(name, isCredential);
+      if (prior !== undefined && prior.multiline !== answer.multiline) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["env_allowlist"],
+          message:
+            `secrets.env_allowlist lists ${name} twice with different multiline settings — ` +
+            `say once whether its value may span lines`,
+        });
+      }
+      seen.set(name, answer);
     }
   })
   .prefault({});
