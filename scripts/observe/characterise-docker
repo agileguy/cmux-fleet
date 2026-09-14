@@ -255,7 +255,15 @@ async function main(): Promise<void> {
     (cleaning ??= (async () => {
       await starting?.catch(() => undefined);
       // -v: the dind image declares /var/lib/docker a volume, and it would otherwise outlive the container.
-      await run(["docker", "rm", "-f", "-v", dindName]);
+      const removed = await run(["docker", "rm", "-f", "-v", dindName]);
+      // A container that was never created is already gone. Anything else leaves a privileged container running.
+      if (removed.code !== 0 && !removed.stderr.includes("No such container")) {
+        process.stderr.write(
+          `could not remove ${dindName} (exit ${removed.code}): ${removed.stderr.trim()}\n` +
+            `find it with: docker ps -a --filter label=pifleet-char=${id}\n`,
+        );
+        process.exitCode = 1;
+      }
       await rm(work, { recursive: true, force: true });
     })());
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
@@ -347,6 +355,13 @@ async function main(): Promise<void> {
     if (!plainRow) throw new Error("docker ps --all has no char-plain row");
     const filterRows = async (filter: string): Promise<number> =>
       jsonRows((await mustDind([...psAllArgv, "--filter", filter])).stdout, `docker ps --filter ${filter}`).length;
+    // A ps template naming HealthStatus, the field the forced command's template leaves out.
+    const psHealthStatusRun = await dind(["ps", "--all", "--format", "{{json .HealthStatus}}"]);
+    const psHealthStatusTemplate = {
+      template: "{{json .HealthStatus}}",
+      exit: psHealthStatusRun.code,
+      stderr_first_line: psHealthStatusRun.stderr.trim().split("\n")[0] ?? "",
+    };
 
     // stats, exactly as §5.4 runs it.
     const statsArgv = ["stats", "--no-stream", "--no-trunc", "--format", "{{json .}}", "char-plain"];
@@ -492,8 +507,11 @@ async function main(): Promise<void> {
     const installed = await run(["docker", "exec", "-i", dindName, "sh", "-c", "cat > /forced-command"], RUN_TIMEOUT_MS, forcedCommandCopy);
     if (installed.code !== 0) throw new Error(`installing the forced command in dind failed (exit ${installed.code}): ${installed.stderr.trim()}`);
     const dindShell = (await must(["docker", "exec", dindName, "readlink", "-f", "/bin/sh"], "resolve the dind /bin/sh")).stdout.trim();
-    const forced = (command: string, env: string[] = []): Promise<Run> =>
-      run(["docker", "exec", "-e", `SSH_ORIGINAL_COMMAND=${command}`, ...env.flatMap((e) => ["-e", e]), dindName, "timeout", "20", "sh", "/forced-command"]);
+    const forced = (command: string, env: string[] = [], user?: string): Promise<Run> =>
+      run([
+        "docker", "exec", ...(user ? ["-u", user] : []), "-e", `SSH_ORIGINAL_COMMAND=${command}`, ...env.flatMap((e) => ["-e", e]),
+        dindName, "timeout", "20", "sh", "/forced-command",
+      ]);
     const forcedCanaries = [ENV_CANARY, EXEC_CANARY, HEALTHCHECK_CANARY, BIND_TARGET];
     const actorName = (e: Row): string => String((e.Actor as { Attributes?: Row } | undefined)?.Attributes?.name);
     /** Every line as a JSON object, or null when any line is not one (`top` and `logs` print text). */
@@ -516,6 +534,8 @@ async function main(): Promise<void> {
       { command: "inspect char-hc", exit: 0 },
       { command: "inspect char-exited", exit: 0 },
       { command: "logs char-logs since=600s tail=5", exit: 0 },
+      // Read as decimal under this shell too: eight lines, not an octal refusal.
+      { command: "logs char-logs since=600s tail=08", exit: 0 },
       { command: "stats char-plain", exit: 0 },
       { command: "top char-plain", exit: 0 },
       { command: "events since=120s", exit: 0 },
@@ -559,12 +579,38 @@ async function main(): Promise<void> {
         throw new Error(`forced command "${c.command}" exited ${r.code}${r.timedOut ? " (timed out)" : ""}, not ${c.exit}: ${r.stderr.trim()}`);
       }
       if (canariesSeen.length) throw new Error(`forced command "${c.command}" returned ${canariesSeen.join(", ")}`);
-      if (c.command.startsWith("logs") && lines.length !== 5) throw new Error(`forced command "${c.command}" returned ${lines.length} lines, not 5`);
+      const tail = c.command.match(/ tail=(\d+)$/)?.[1];
+      if (tail !== undefined && lines.length !== Number(tail)) {
+        throw new Error(`forced command "${c.command}" returned ${lines.length} lines, not ${Number(tail)}`);
+      }
     }
     if (!psHealthStatus.includes("(healthy)")) throw new Error(`the forced command's ps gave char-hc the Status "${psHealthStatus}", with no (healthy)`);
     const [plainPs, ifsPs] = rendered.filter((e) => e.command === "ps all name=char-plain label=char.label=one");
     if (!plainPs || !ifsPs || plainPs.lines !== ifsPs.lines || JSON.stringify(plainPs.key_sets) !== JSON.stringify(ifsPs.key_sets)) {
       throw new Error(`the caller's IFS changed the forced command's ps result: ${JSON.stringify({ plainPs, ifsPs })}`);
+    }
+    // Failures docker itself reports through the forced command: no daemon at DOCKER_HOST, a caller without
+    // access to the socket, and a container that does not exist. Only the last is an answer about the target.
+    const dockerError = async (command: string, env: string[] = [], user?: string) => {
+      const r = await forced(command, env, user);
+      return {
+        command,
+        ...(env.length ? { env } : {}),
+        ...(user ? { user } : {}),
+        exit: r.code,
+        timed_out: r.timedOut,
+        stderr_first_line: r.stderr.trim().split("\n")[0] ?? "",
+      };
+    };
+    const dockerErrors = {
+      daemon_unreachable: await dockerError("ps", ["DOCKER_HOST=unix:///nonexistent.sock"]),
+      socket_permission_denied: await dockerError("ps", [], "nobody"),
+      no_such_container: await dockerError("inspect char-nosuch"),
+    };
+    for (const [what, e] of Object.entries(dockerErrors)) {
+      if (e.timed_out || e.exit === 0 || e.exit === 77) {
+        throw new Error(`the ${what} probe exited ${e.exit}${e.timed_out ? " (timed out)" : ""}, so it shows nothing: ${e.stderr_first_line}`);
+      }
     }
     if ((await plainState()) !== plainBefore) throw new Error("char-plain changed state across the forced command cases, the refused restart included");
 
@@ -581,17 +627,22 @@ async function main(): Promise<void> {
     const eventContainers = async (filter: string): Promise<string[]> =>
       [...new Set((await forcedRows(`events since=60s ${filter}`)).map(actorName))].sort();
     const psNames = async (filter: string): Promise<string[]> => (await forcedRows(`ps all ${filter}`)).map((r) => String(r.Names)).sort();
+    // A container's id changes every run, so the fixture key names the prefix rather than holding it.
+    const webIdPrefix = (await mustDind(["inspect", "--type", "container", "--format", "{{.Id}}", "web"])).stdout.trim().slice(0, 12);
     const matching = {
       containers: lookalikes,
       events_container_filter: {
         "container=web": await eventContainers("container=web"),
-        "container=eb": await eventContainers("container=eb"),
+        // `h` is not hex, so this can never match a container id the way `eb` could.
+        "container=ebh": await eventContainers("container=ebh"),
         "container=w.b": await eventContainers("container=w.b"),
+        "container=<first 12 characters of web's id>": await eventContainers(`container=${webIdPrefix}`),
       },
       ps_name_filter: {
         "name=web": await psNames("name=web"),
         "name=w.b": await psNames("name=w.b"),
         "name=eb": await psNames("name=eb"),
+        "name=<first 12 characters of web's id>": await psNames(`name=${webIdPrefix}`),
       },
     };
 
@@ -734,7 +785,9 @@ async function main(): Promise<void> {
       shell: dindShell,
       default_ps_key_set: sharedKeyShape([...psRunning, ...psAll], "docker ps").key_set,
       ps_health_status: psHealthStatus,
+      ps_healthstatus_template: psHealthStatusTemplate,
       inspect_health_forms: inspectHealthForms,
+      docker_errors: dockerErrors,
       events_prefix_match: eventsPrefixMatch,
       cases: rendered,
       matching,
