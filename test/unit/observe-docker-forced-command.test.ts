@@ -74,10 +74,13 @@ const JSON_FORMAT = extractSingleQuoted("JSON_FORMAT");
 /** MEASURED, never hand-typed: test/fixtures/observe/docker-cli-shapes.json. */
 const DOCKER_CLI_SHAPES = JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "observe", "docker-cli-shapes.json"), "utf8")) as {
   ps: { key_set: string[] };
-  events: { terminating_bound: string[] };
+  events: { terminating_bound: string[]; action_allowlist: { filters: string[] } };
 };
 /** The exact `["--until", "<value>"]` pair this round's `events` verb must carry. */
 const EVENTS_TERMINATING_BOUND: string[] = DOCKER_CLI_SHAPES.events.terminating_bound;
+/** The lifecycle-and-health `--filter` words, measured to keep every `exec_*` command line out. */
+const EVENTS_ACTION_FILTERS: string[] = DOCKER_CLI_SHAPES.events.action_allowlist.filters;
+const EVENTS_FILTERS = extractSingleQuoted("EVENTS_FILTERS");
 
 /** MEASURED, never hand-typed: test/fixtures/observe/docker-forbidden-verbs.json. */
 const DOCKER_FORBIDDEN_VERBS = JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "observe", "docker-forbidden-verbs.json"), "utf8")) as {
@@ -106,7 +109,7 @@ function topArgv(container: string): string[] {
   return ["top", container];
 }
 function eventsArgv(since: string, container?: string): string[] {
-  const base = ["events", "--since", `${since}s`, ...EVENTS_TERMINATING_BOUND, "--format", JSON_FORMAT];
+  const base = ["events", "--since", `${since}s`, ...EVENTS_TERMINATING_BOUND, "--format", JSON_FORMAT, ...EVENTS_ACTION_FILTERS];
   return container ? [...base, "--filter", `container=${container}`] : base;
 }
 
@@ -426,6 +429,16 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       const r = runScript(shell, "events container=web-1 since=60s");
       expect(r.exitCode).toBe(0);
       expect(r.docker).toEqual(eventsArgv("60", "web-1"));
+    });
+
+    test("events: the filter list is the measured one, and no exec_* action is in it", () => {
+      expect(EVENTS_FILTERS.split(" ")).toEqual(EVENTS_ACTION_FILTERS);
+      const r = runScript(shell, "events since=60s");
+      expect(r.exitCode).toBe(0);
+      const events = (r.docker ?? []).filter((w) => w.startsWith("event="));
+      expect(events).toContain("event=health_status");
+      expect(events.filter((w) => w.startsWith("event=exec_"))).toEqual([]);
+      expect(r.docker).toContain("type=container");
     });
   });
 

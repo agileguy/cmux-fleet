@@ -509,7 +509,7 @@ That is the flag-injection hazard `src/security/docker-names.ts:4-11` records fo
 | `logs` | `<container> since=<N>s tail=<M>`, both REQUIRED, `M <= 500` | `docker logs --timestamps --since <N>s --tail <M> <container>` |
 | `stats` | `<container>` | `docker stats --no-stream --no-trunc --format '{{json .}}' <container>` |
 | `top` | `<container>` | `docker top <container>` |
-| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}'` — `--until 0s` is the measured terminating bound (`test/fixtures/observe/docker-cli-shapes.json` → `.events.terminating_bound`) |
+| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}' --filter type=container`, one `--filter event=` for each of `create, start, restart, stop, die, kill, oom, pause, unpause, destroy, health_status`, and `--filter container=<c>` when given. `--until 0s` is the measured terminating bound, and the action list keeps out every `exec_*` action, which names the exec'd command line (both measured, `test/fixtures/observe/docker-cli-shapes.json` → `.events`) |
 | `info` | — | `docker info --format '<FIXED INFO TEMPLATE>'` |
 | `version` | — | `docker version --format '{{json .}}'` |
 

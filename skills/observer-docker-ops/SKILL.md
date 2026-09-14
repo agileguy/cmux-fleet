@@ -9,11 +9,10 @@ description: How the observer-docker role writes its result — the observer-doc
 entry (SRD-OBSERVER-ROLES §5.5) names a real, mounted skill directory rather than a bundle that
 is not there. What is documented below is the part the role definition and the target-side script
 already fix: the brief inputs, the whole of what the credential can run, the measured shape of
-what comes back, and the artifact contract. What is **not** here: the procedure for turning a
-mixed `state`/`health`/`logs`/`stats`/`events` read into one `assessment`, the call-budget rule,
-and the `submit_report` routing paragraph. Those belong to `roles/observer-docker.md` (§5.5, a
-later task) and reuse `roles/observer-k8s.md`, the same way `observer-ops` leaves its own procedural
-content to a later piece of work.
+what comes back, and the artifact contract. What is **not** here: the call-budget rule and the
+`submit_report` routing paragraph, which live in `roles/observer-docker.md`. Neither file yet
+spells out a procedure for turning a mixed `state`/`health`/`logs`/`stats`/`events` read into one
+`assessment`.
 
 ## Reading your brief (§5.3)
 
@@ -46,7 +45,7 @@ flags, so no worker token can become a docker option.
 | `logs` | `<container> since=<N>s tail=<M>`, both REQUIRED, `M <= 500` | `docker logs --timestamps --since <N>s --tail <M> <container>` |
 | `stats` | `<container>` | `docker stats --no-stream --no-trunc --format '{{json .}}' <container>` |
 | `top` | `<container>` | `docker top <container>` |
-| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}'`, plus `--filter container=<c>` when given |
+| `events` | `since=<N>s`, optional `container=<c>` | `docker events --since <N>s --until 0s --format '{{json .}}'` with fixed lifecycle-and-health filters (below), plus `--filter container=<c>` when given |
 | `info` | — | `docker info --format <FIXED>` |
 | `version` | — | `docker version --format '{{json .}}'` |
 
@@ -87,7 +86,7 @@ These are measured against a real daemon (`test/fixtures/observe/docker-cli-shap
   or `Size`: a bind mount's host path is the same disclosure `inspect` leaves out. `HealthStatus`
   is `none` for a container without a healthcheck.
 - **`name=` filters match as a SUBSTRING, not an exact name.** `name=web` also lists a container
-  named `myweb` (measured: against four containers named `char-*`, `name=char` matched all four and
+  named `myweb` (measured: `name=char` matched every container named `char-*`, and
   `name=char-plain` matched one). Check `Names` in every returned row yourself before reporting on a
   specific container — the filter narrowed the query, it did not confirm the answer.
 - **`inspect`'s `state.Health` is `null` for a container with no healthcheck defined.** That is
@@ -104,9 +103,16 @@ These are measured against a real daemon (`test/fixtures/observe/docker-cli-shap
   optional, the two may come in either order, and nothing else may follow the container. `N` is
   one to ten digits, and `tail=0` is accepted.
 - **`events` needs `since=<N>s` and returns a bounded window, not a stream.** The target adds
-  `--until 0s`, so the call returns the window's events and ends on its own. Each line is one
-  JSON object with keys `Type`, `Action`, `Actor`, `scope`, `time`, `timeNano`. Key order is not a
-  promise Docker or this target makes; read the object by key, never by position.
+  `--until 0s`, so the call returns the window's events and ends on its own. Events from the current
+  second are not returned: an event less than a second old arrives on a later call, not this one.
+  Each line is one JSON object with keys `Type`, `Action`, `Actor`, `scope`, `time`, `timeNano`.
+  Key order is not a promise Docker or this target makes; read the object by key, never by position.
+- **`events` returns container lifecycle and health events only:** `create`, `start`, `restart`,
+  `stop`, `die`, `kill`, `oom`, `pause`, `unpause`, `destroy` and `health_status` (whose `Action`
+  reads like `health_status: healthy`). No `exec_*` action comes back, because each one names the
+  exec'd command line and an operator's `docker exec` can carry a secret there. A label still
+  arrives in each event's `Actor.Attributes`, as `inspect` returns it. So an empty result means no
+  lifecycle or health change in the window, not that nobody ran a command in the container.
 
 ## Bounded reads, and why every one of them is
 

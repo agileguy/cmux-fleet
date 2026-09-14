@@ -40,7 +40,7 @@
 #   top      <container>
 #              -> docker top <container>
 #   events   since=<N>s [container=<c>]
-#              -> docker events --since <N>s --until 0s --format '{{json .}}' [--filter container=<c>]
+#              -> docker events --since <N>s --until 0s --format '{{json .}}' <EVENTS_FILTERS> [--filter container=<c>]
 #   info     (no arguments)
 #              -> docker info --format <FIXED INFO TEMPLATE>
 #   version  (no arguments)
@@ -83,11 +83,12 @@
 #
 # `stats`, `top` and `events` are left at Docker's own shapes (`stats` and
 # `events` already go through `{{json .}}`; `top` has no `--format` at all).
-# None of the three returns a container's environment or mounts. They are not
-# free of disclosure, though: `top` lists each process's command line, and
-# `events` names the command in each `exec_create` action, a healthcheck's
-# included (measured against a real daemon). That is the same text `inspect`
-# already returns in `.State.Health.Log`.
+# None of the three returns a container's environment or mounts. `events` is
+# narrowed further: every `exec_*` action names the exec'd command line, so
+# EVENTS_FILTERS lets through only container lifecycle and health events (both
+# measured against a real daemon). A label still arrives as an event's actor
+# attribute, as `inspect` returns it. `top` still lists each process's command
+# line.
 #
 # ## Argument grammar (conservative on purpose)
 #
@@ -168,7 +169,7 @@
 set -u
 # Globbing off for the whole script. Both `set --` calls below split an
 # unquoted value on purpose (the SSH_ORIGINAL_COMMAND re-split, and the
-# accumulated `--filter` words for `ps`); `set -f` is what keeps a value of
+# `--filter` words for `ps` and `events`); `set -f` is what keeps a value of
 # `*` from expanding against this process's working directory instead of
 # staying the one word it is (the lesson `docker/verbgate` and
 # `docker/observe-ssh` both carry).
@@ -201,8 +202,17 @@ JSON_FORMAT='{{json .}}'
 # The terminating bound for `events` (SRD §5.4; MEASURED, not chosen here:
 # test/fixtures/observe/docker-cli-shapes.json -> .events.terminating_bound).
 # A re-measurement that changes this value is a deliberate edit to this
-# constant, not a guess.
+# constant, not a guess. A query under this bound does not return events from
+# the current second (MEASURED: .events.until_current_second).
 EVENTS_UNTIL_BOUND=0s
+
+# The events `events` lets through: container lifecycle and health, nothing
+# else (MEASURED: test/fixtures/observe/docker-cli-shapes.json ->
+# .events.action_allowlist.filters). Every exec_* action names the exec'd
+# command line, a healthcheck's included, and an operator's `docker exec` can
+# carry a secret there, so no exec_* action is in the list. Every word is a
+# whitespace-free literal; the events case splits this on purpose.
+EVENTS_FILTERS='--filter type=container --filter event=create --filter event=start --filter event=restart --filter event=stop --filter event=die --filter event=kill --filter event=oom --filter event=pause --filter event=unpause --filter event=destroy --filter event=health_status'
 
 # $1 names the verb this refusal is about, or one of the two fixed
 # placeholders below when there is none yet — never a raw, unvalidated byte
@@ -405,6 +415,8 @@ case ${verb} in
     done
     [ "${since_set}" -eq 1 ] || refuse "${verb}" "since=<N>s is required"
     set -- docker events --since "${since_val}s" --until "${EVENTS_UNTIL_BOUND}" --format "${JSON_FORMAT}"
+    # shellcheck disable=SC2086 # unquoted on purpose: whitespace-free literal words, and set -f is on.
+    set -- "$@" ${EVENTS_FILTERS}
     [ "${container_set}" -eq 1 ] && set -- "$@" --filter "container=${container_val}"
     exec "$@"
     ;;
