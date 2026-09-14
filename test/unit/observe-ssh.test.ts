@@ -64,9 +64,10 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..", "..");
 /** The real shim. Read by the pins, never executed: see the header. */
 const REAL_SHIM = join(ROOT, "docker", "observe-ssh");
-/** The other two files `measured_with` hashes. Read only, never executed. */
+/** The other three files `measured_with` hashes. Read only, never executed. */
 const REAL_SSH_CONNECT = join(ROOT, "docker", "ssh-connect.cjs");
 const REAL_CONNECT_PROXY = join(ROOT, "docker", "connect-proxy.cjs");
+const REAL_EGRESS_POLICY = join(ROOT, "docker", "egress-policy.cjs");
 const FACTS_PATH = join(ROOT, "test", "fixtures", "observe", "ssh-transport-facts.json");
 
 /** The real shim's copy-location line, the one line the per-run copy rewrites. */
@@ -80,6 +81,7 @@ interface TransportFacts {
     observe_ssh_sha256: string;
     ssh_connect_sha256: string;
     connect_proxy_sha256: string;
+    egress_policy_sha256: string;
   };
   key_delivery: {
     delivered_mode: string;
@@ -383,6 +385,7 @@ describe("the measured transport facts this suite is wired to", () => {
       ["docker/observe-ssh", REAL_SHIM, FACTS.measured_with.observe_ssh_sha256],
       ["docker/ssh-connect.cjs", REAL_SSH_CONNECT, FACTS.measured_with.ssh_connect_sha256],
       ["docker/connect-proxy.cjs", REAL_CONNECT_PROXY, FACTS.measured_with.connect_proxy_sha256],
+      ["docker/egress-policy.cjs", REAL_EGRESS_POLICY, FACTS.measured_with.egress_policy_sha256],
     ];
     const changed = measured.flatMap(([label, path, recorded]) => {
       const actual = createHash("sha256").update(readFileSync(path)).digest("hex");
