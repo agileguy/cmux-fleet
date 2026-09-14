@@ -1,16 +1,16 @@
 {
   "measured_with": {
     "script": "scripts/observe/characterise-docker",
-    "git_head": "a2afa1f",
+    "git_head": "5c1bbcf",
     "uncommitted_changes_to_measured_files": [],
-    "dind_image": "12e683a16182",
+    "dind_image": "docker:dind",
     "dind_image_id": "sha256:12e683a161823b2a839aeea999b9d960e6e1f9a97b1679ad6b441982e2d9cf07",
     "probe_image": "alpine:3",
     "probe_image_id": "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
     "client_version": "29.7.2",
     "server_version": "29.7.2",
     "server_api_version": "1.55",
-    "measured_at": "2026-09-14T18:37:51.035Z"
+    "measured_at": "2026-09-14T19:53:22.472Z"
   },
   "allowlist": [
     "ps",

@@ -25,6 +25,7 @@ const SRC_SHA256 = createHash("sha256").update(SRC).digest("hex");
 
 type Case = {
   command: string;
+  env?: string[];
   exit: number;
   timed_out: boolean;
   lines: number;
@@ -34,13 +35,20 @@ type Case = {
   health?: unknown;
   timestamp_prefix_bytes?: number;
   actions?: string[];
+  actions_raw?: string[];
   containers_seen?: string[];
 };
+
+type TemplateRun = { template: string; exit: number; stderr_first_line: string };
 
 type RenderedRun = {
   measured_with: { client_version: string; uncommitted_changes_to_measured_files: string[] | null };
   forced_command_sha256: string;
   shell: string;
+  default_ps_key_set: string[];
+  ps_health_status: string;
+  inspect_health_forms: { if_form: TemplateRun; index_form: TemplateRun };
+  events_prefix_match: Record<string, string[]>;
   cases: Case[];
   matching: { events_container_filter: Record<string, string[]>; ps_name_filter: Record<string, string[]> };
 };
@@ -136,6 +144,33 @@ for (const [version, run] of runs) {
       for (const c of cases("ps")) expect(c.key_sets).toEqual([sortedKeys(PS_SHAPE)]);
     });
 
+    test("docker's own ps row has HealthStatus only from 29.5.0, so the template leaves it out and Status shows health", () => {
+      const hasField = !olderThan(run.measured_with.client_version, PS_HEALTHSTATUS_ADDED_IN);
+      expect(run.default_ps_key_set.includes("HealthStatus")).toBe(hasField);
+      expect(Object.keys(PS_SHAPE)).not.toContain("HealthStatus");
+      expect(run.ps_health_status).toContain("(healthy)");
+    });
+
+    test("the caller's IFS did not change the ps result", () => {
+      const [plain, withIfs, ...rest] = run.cases.filter((c) => c.command === "ps all name=char-plain label=char.label=one");
+      expect(rest).toEqual([]);
+      expect(plain?.env).toBeUndefined();
+      expect(withIfs?.env).toEqual(["IFS=:"]);
+      expect({ exit: withIfs?.exit, lines: withIfs?.lines, key_sets: withIfs?.key_sets }).toEqual({
+        exit: 0,
+        lines: plain?.lines,
+        key_sets: plain?.key_sets,
+      });
+    });
+
+    test("inspect reads Health with index, because the if form fails on a container without a healthcheck", () => {
+      const { if_form, index_form } = run.inspect_health_forms;
+      expect(if_form.exit).not.toBe(0);
+      expect(if_form.stderr_first_line).toContain('map has no entry for key "Health"');
+      expect({ exit: index_form.exit, stderr_first_line: index_form.stderr_first_line }).toEqual({ exit: 0, stderr_first_line: "" });
+      expect(INSPECT_FORMAT).toContain('{{with index .State "Health"}}');
+    });
+
     test("inspect carries exactly the inspect template's keys, health included", () => {
       for (const c of cases("inspect")) {
         expect(c.key_sets).toEqual([sortedKeys(INSPECT_SHAPE)]);
@@ -166,7 +201,15 @@ for (const [version, run] of runs) {
       for (const c of cases("events")) {
         expect(c.actions).toContain("start");
         expect(c.actions).toContain("health_status");
+        expect(c.actions_raw?.some((a) => a.startsWith("health_status: "))).toBe(true);
       }
+    });
+
+    test("beside event=health_status the daemon matches event= values as prefixes", () => {
+      expect(run.events_prefix_match["event=exec"]).toEqual([]);
+      expect(run.events_prefix_match["event=exec event=health_status"]).toEqual(
+        expect.arrayContaining(["exec_create", "exec_start", "exec_die"]),
+      );
     });
 
     test("ran under busybox sh, the shell this fixture covers", () => {
@@ -174,11 +217,13 @@ for (const [version, run] of runs) {
     });
 
     // The skill tells a worker to check every returned name because neither filter is exact. `name=w.b`
-    // matching all four names separates a regular expression from a substring match, which would match none.
+    // matching all four names separates a regular expression from a substring match, which would match none;
+    // `container=w.b` matching none shows container= is not one.
     test("events container= matches a name prefix, and ps name= an unanchored regular expression", () => {
       expect(run.matching.events_container_filter).toEqual({
         "container=web": ["web", "web-2", "webhook"],
         "container=eb": [],
+        "container=w.b": [],
       });
       expect(run.matching.ps_name_filter).toEqual({
         "name=web": ["myweb", "web", "web-2", "webhook"],
