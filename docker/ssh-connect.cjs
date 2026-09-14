@@ -440,9 +440,11 @@ function main() {
         // callback, and in 0 of 15 behind the timer, with stdin already
         // closed when piped) was taken with a `node` that reported v24.3.0
         // and was in fact Bun's `node` wrapper, not Node. Re-measured in the
-        // Phase 3 review: under real Node 24.19.0 (`node:24-bookworm-slim`,
-        // the runtime this file ships in) a synchronous `end()` lost nothing
-        // in 20 of 20 runs; under Bun's wrapper it lost bytes in 20 of 20.
+        // Phase 3 review: under real Node 24, the relay's digest-pinned image
+        // (`RELAY_IMAGE`, `src/security/pinned-image.ts`) rather than the
+        // worker's own — which floats on `NODE_TAG` and may sit at a
+        // different 24.x patch — a synchronous `end()` lost nothing in 20 of
+        // 20 runs; under Bun's wrapper it lost bytes in 20 of 20.
         // The timer stays because it costs nothing on Node and keeps a
         // Bun-hosted run, such as this repo's unit tests on a development
         // machine, from losing the tail. Why Bun loses those bytes, and why
