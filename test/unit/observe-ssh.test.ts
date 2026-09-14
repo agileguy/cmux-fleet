@@ -221,11 +221,11 @@ function childEnv(rec: string, fakeExit: number, extra: Record<string, string>):
   };
 }
 
-function runShim(shell: string, args: string[], env: Record<string, string>, fakeExit = 0): Run {
+function runShim(shell: string, args: string[], env: Record<string, string>, fakeExit = 0, cwd = scratch): Run {
   const rec = mkdtempSync(join(scratch, "rec-"));
   const proc = Bun.spawnSync([shell, SHIM, ...args], {
     env: childEnv(rec, fakeExit, env),
-    cwd: scratch,
+    cwd,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -235,6 +235,28 @@ function runShim(shell: string, args: string[], env: Record<string, string>, fak
     stderr: proc.stderr.toString(),
     ssh: readRecord(rec),
   };
+}
+
+/** The name of the one file in `globDir()`: valid as a token, verb, word, value, host and user. */
+const GLOB_BAIT = "web-1";
+
+let globDirPath = "";
+
+/**
+ * A working directory holding exactly one file, `web-1`. A pattern such as
+ * `*`, `web-?` or `[w]eb-1` that reached pathname expansion here would expand
+ * to exactly that one word, which is valid in every position and is also the
+ * enrolled docker target. So a glob that slipped past `set -f` or quoting
+ * would turn a refusal into an ssh call, rather than into a different refusal
+ * (several matches, or none, would each still be refused and hide it).
+ * Created lazily: `describe` bodies run before `beforeAll` makes `scratch`.
+ */
+function globDir(): string {
+  if (globDirPath === "") {
+    globDirPath = mkdtempSync(join(scratch, "glob-cwd-"));
+    writeFileSync(join(globDirPath, GLOB_BAIT), "");
+  }
+  return globDirPath;
 }
 
 /** SRD §5.2 `:422-426`, element by element. */
@@ -452,6 +474,8 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
       ["a key=value with an empty value", ["docker", "web-1", "ps", "name="]],
       ["a key that is not lower-case", ["docker", "web-1", "ps", "Name=api"]],
       ["a slash in a bare word", ["docker", "web-1", "inspect", "a/b"]],
+      ["a verb starting with a digit", ["docker", "web-1", "1ps"]],
+      ["a key=value value with a leading '-'", ["docker", "web-1", "ps", "name=-a"]],
     ];
     test.each(cases)("%s", (_label, args) => {
       const w = world("docker", DOCKER_TARGETS);
@@ -461,11 +485,149 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
       expect(r.ssh).toBeNull();
     });
 
-    test("argument safety is judged before any configuration is read", () => {
-      // No OBSERVER_* variables at all: a hostile verb is still a 77, not a 78.
-      const r = runShim(shell, ["docker", "web-1", "-V"], {});
+    // No OBSERVER_* variables at all, so a check that ran after the
+    // configuration reads would exit 78 instead. Every position is here
+    // because the target and verb are checked on their own lines and the
+    // arguments in a later loop; a hostile verb alone cannot show where that
+    // loop sits.
+    const beforeConfiguration: Array<[string, string[]]> = [
+      ["a hostile target", ["docker", "web-1;pwn", "ps"]],
+      ["a hostile verb", ["docker", "web-1", "-V"]],
+      ["a hostile bare-word argument after a valid verb", ["docker", "web-1", "ps", "all;pwn"]],
+      ["a hostile key=value value after a valid verb", ["docker", "web-1", "ps", "name=api;pwn"]],
+    ];
+    test.each(beforeConfiguration)("argument safety is judged before any configuration is read: %s", (_label, args) => {
+      const r = runShim(shell, args, {});
       expect(r.exitCode).toBe(77);
       expect(r.stderr).toContain(SHIM_REFUSAL);
+      expect(r.ssh).toBeNull();
+    });
+  });
+
+  describe("injection hardening (SRD 3.4): hostile values exit 77 before ssh runs", () => {
+    // Each payload rides on a base that is valid in its position, so the
+    // payload is the only thing wrong with the word. "Before a valid prefix"
+    // forms exercise the whole-word check; "after a valid prefix" forms get
+    // past the first-character check and exercise the every-character one.
+    // Each run's working directory is `globDir()`, where `*` would expand to
+    // the enrolled target if anything globbed.
+    const positions: Array<[string, string, (value: string) => string[]]> = [
+      ["the target", "web-1", (v) => ["docker", v, "ps"]],
+      ["the verb", "ps", (v) => ["docker", "web-1", v]],
+      ["a bare-word argument", "all", (v) => ["docker", "web-1", "ps", v]],
+      ["a key=value value", "api", (v) => ["docker", "web-1", "ps", `name=${v}`]],
+    ];
+    const payloads: Array<[string, (base: string) => string]> = [
+      ["';' after a valid prefix", (b) => `${b};pwn`],
+      ["a lone ';'", () => ";"],
+      ["'$(…)' after a valid prefix", (b) => `${b}$(pwn)`],
+      ["a whole-word '$(…)'", () => "$(pwn)"],
+      ["backticks after a valid prefix", (b) => `${b}\`pwn\``],
+      ["a whole-word backtick substitution", () => "`pwn`"],
+      ["an embedded newline", (b) => `${b}\npwn`],
+      ["a leading newline", (b) => `\n${b}`],
+      ["'-oProxyCommand=…'", () => "-oProxyCommand=/tmp/pwn"],
+      ["a lone '*'", () => "*"],
+      ["'*' after a valid prefix", (b) => `${b}*`],
+    ];
+    const rows = positions.flatMap(([where, base, build]) =>
+      payloads.map(([what, payload]) => [where, what, build(payload(base))] as [string, string, string[]]),
+    );
+
+    test.each(positions)("control: the benign base in %s reaches ssh", (_where, base, build) => {
+      const w = world("docker", DOCKER_TARGETS);
+      const r = runShim(shell, build(base), w.env, 0, globDir());
+      expect(r.stderr).toBe("");
+      expect(r.exitCode).toBe(0);
+      expect(r.ssh).not.toBeNull();
+    });
+
+    test.each(rows)("%s: %s", (_where, _what, args) => {
+      const w = world("docker", DOCKER_TARGETS);
+      const r = runShim(shell, args, w.env, 0, globDir());
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr).toContain(SHIM_REFUSAL);
+      // Messages never echo a refused value, which may hold a newline.
+      expect(r.stderr).not.toContain("pwn");
+      expect(r.ssh).toBeNull();
+    });
+  });
+
+  describe("length limits, each tested where no other refusal can mask it", () => {
+    const TARGETS_WITH = (token: string) => `${token} docker-host.example.com 22 observe\n`;
+    const token32 = `w${"e".repeat(31)}`;
+    const token33 = `w${"e".repeat(32)}`;
+
+    test("a 32-character token, enrolled and requested, reaches ssh", () => {
+      const w = world("docker", TARGETS_WITH(token32));
+      const r = runShim(shell, ["docker", token32, "info"], w.env);
+      expect(r.stderr).toBe("");
+      expect(r.exitCode).toBe(0);
+      expect(r.ssh).not.toBeNull();
+    });
+
+    test("a 33-character token in the targets file refuses the file, even for a valid target", () => {
+      // The request is for the valid `web-1`, so no unknown-token refusal can
+      // stand in for the limit.
+      const w = world("docker", `${TARGETS_WITH(token33)}${DOCKER_TARGETS}`);
+      const r = runShim(shell, ["docker", "web-1", "info"], w.env);
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr).toContain(SHIM_REFUSAL);
+      expect(r.stderr).toContain("OBSERVER_DOCKER_TARGETS_FILE line 1");
+      expect(r.ssh).toBeNull();
+    });
+
+    test("a 33-character target is refused for its shape, not as unknown", () => {
+      const w = world("docker", DOCKER_TARGETS);
+      const r = runShim(shell, ["docker", token33, "info"], w.env);
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr).toContain("the target is not an enrolled-token shape");
+      expect(r.ssh).toBeNull();
+    });
+
+    const limits: Array<[string, string[], string[]]> = [
+      ["the verb (32)", ["docker", "web-1", `p${"s".repeat(31)}`], ["docker", "web-1", `p${"s".repeat(32)}`]],
+      ["a bare-word argument (256)", ["docker", "web-1", "ps", "a".repeat(256)], ["docker", "web-1", "ps", "a".repeat(257)]],
+      [
+        "a key=value argument (256)",
+        ["docker", "web-1", "ps", `name=${"a".repeat(251)}`],
+        ["docker", "web-1", "ps", `name=${"a".repeat(252)}`],
+      ],
+      ["a key (32)", ["docker", "web-1", "ps", `${"k".repeat(32)}=v`], ["docker", "web-1", "ps", `${"k".repeat(33)}=v`]],
+    ];
+    test.each(limits)("%s: at the limit reaches ssh, one over is refused", (_label, atLimit, overLimit) => {
+      const w = world("docker", DOCKER_TARGETS);
+      const ok = runShim(shell, atLimit, w.env);
+      expect(ok.stderr).toBe("");
+      expect(ok.exitCode).toBe(0);
+      expect(ok.ssh?.argv.slice(-(atLimit.length - 2))).toEqual(atLimit.slice(2));
+      const over = runShim(shell, overLimit, w.env);
+      expect(over.exitCode).toBe(77);
+      expect(over.stderr).toContain(SHIM_REFUSAL);
+      expect(over.ssh).toBeNull();
+    });
+  });
+
+  describe("the targets-file split never globs (set -f)", () => {
+    // `parse_line ${line}` is the shim's one unquoted expansion. It runs in
+    // `globDir()`, where every pattern below matches exactly the file `web-1`,
+    // so a glob would rewrite the line into a VALID enrolment of `web-1` and
+    // the request for `web-1` would reach ssh. The file holds only this line:
+    // a second `web-1` line would turn a glob into a duplicate-token refusal
+    // and hide it.
+    const cases: Array<[string, string]> = [
+      ["a '*' token", "* docker-host.example.com 22 observe"],
+      ["a '?' token", "web-? docker-host.example.com 22 observe"],
+      ["a bracket-expression token", "[w]eb-1 docker-host.example.com 22 observe"],
+      ["a '*' host", "web-1 * 22 observe"],
+      ["a '*' user", "web-1 docker-host.example.com 22 *"],
+    ];
+    test.each(cases)("%s is malformed, not expanded against the working directory", (_label, line) => {
+      const w = world("docker", `${line}\n`);
+      const r = runShim(shell, ["docker", GLOB_BAIT, "info"], w.env, 0, globDir());
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr).toContain(SHIM_REFUSAL);
+      expect(r.stderr).toContain("OBSERVER_DOCKER_TARGETS_FILE line 1");
       expect(r.ssh).toBeNull();
     });
   });

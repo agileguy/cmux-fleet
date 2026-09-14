@@ -2,7 +2,7 @@
 "use strict";
 /**
  * `docker/ssh-connect.cjs` — the ProxyCommand every observer SSH call runs
- * (SRD-OBSERVER-ROLES §5.2 task 3.1; SRD §12.4).
+ * (SRD-OBSERVER-ROLES §5.2; §12, Phase 3, task 3.1).
  *
  * WHAT THIS EXISTS FOR. OpenSSH has no native CONNECT support and the image
  * carries no `nc`/`socat` (`docker/Dockerfile:48-49`), so `observe-ssh`'s
@@ -20,6 +20,16 @@
  * well-formed enough to attempt the CONNECT at all, and whether the proxy's
  * answer was `200`.
  *
+ * WHY THE HOST IS VALIDATED HERE TOO. `observe-ssh` only ever passes a host
+ * its `is_host` accepted, but this file interpolates `%h` straight into the
+ * CONNECT request line and the `Host` header, and anything can run it. A CR or
+ * LF in the host would add header lines of the caller's choosing; a space or
+ * `/` would change what the proxy parses as the authority. So the host must
+ * have the shape `is_host` enrols, checked before any socket is opened. A bare
+ * IPv6 literal (`::1`) passes and is sent UNBRACKETED, as `CONNECT ::1:22`:
+ * `connect-proxy.cjs`'s `splitAuthority` splits that at its last `:`, and
+ * bracketing it here would change the host string the egress policy judges.
+ *
  * THE THROWAWAY VERSION THIS REPLACES. `scripts/observe/characterise-ssh-transport`
  * (task 3.0) carries an inline `CONNECT_CLIENT` that measured the round trip
  * against a real proxy on 2026-09-14 (`test/fixtures/observe/ssh-transport-facts.json`,
@@ -34,15 +44,25 @@
  * (`docker/connect-proxy.cjs:257-265`) has to reach stderr HERE or it never
  * reaches anyone at all.
  *
- * WHY THE HEADER READ IS BOUNDED. A proxy that answers and a proxy that
- * dribbles bytes forever without a `\r\n\r\n` look identical to a naive reader
- * right up until one of them runs the process out of memory.
- * `docker/connect-proxy.cjs` bounds the same shape of read at 8 KiB
- * (`MAX_HEADER_BYTES`, its own docblock); the number is mirrored rather than
- * imported, because this file must stay plain Node with no dependencies — it
- * is bind-mounted into every worker image the same way `connect-proxy.cjs` is
- * bind-mounted into the relay, and `require("./connect-proxy.cjs")` would tie
- * a client's startup to a proxy module it has no other reason to load.
+ * WHY THE RESPONSE READ IS BOUNDED, AND WHAT THE BOUND COUNTS. A proxy that
+ * answers and a proxy that dribbles bytes forever without a `\r\n\r\n` look
+ * identical to a naive reader right up until one of them runs the process out
+ * of memory. So the response header, its blank line included, must END within
+ * its first `MAX_HEADER_BYTES`, the 8 KiB `docker/connect-proxy.cjs` uses for
+ * its own `MAX_HEADER_BYTES`. The blank line is searched for BEFORE size is
+ * judged, and only within that window: after a `200`, the target sshd's first
+ * bytes can arrive in the same read as the header, and those are tunnel data,
+ * however many there are. Judging the whole read would refuse a healthy tunnel
+ * for being fast. A non-`200` response's body is kept only to print, so it is
+ * bounded too (`MAX_BODY_BYTES`), and the rest is never read.
+ *
+ * WHY NOTHING IS `require`d BUT NODE BUILT-INS. This file runs alone:
+ * `docker/Dockerfile` COPYs just this one file into the worker image, at
+ * `/opt/pifleet/ssh-connect.cjs`. `connect-proxy.cjs` is not in that image at
+ * all; it reaches the relay container by bind mount
+ * (`PROXY_SCRIPT_CONTAINER_PATH` in `src/security/relay.ts`). A
+ * `require("./connect-proxy.cjs")` would therefore throw `MODULE_NOT_FOUND` on
+ * every call, which is why the 8 KiB figure is mirrored rather than imported.
  *
  * WHY EXIT IS NEVER FORCED WHILE OUTPUT MAY STILL BE QUEUED. `process.stdout`
  * and `process.stderr` write ASYNCHRONOUSLY to a pipe on POSIX (Node's own
@@ -58,8 +78,19 @@
 
 const net = require("node:net");
 
-/** Mirrors `connect-proxy.cjs`'s own cap on an unterminated response header. */
+/** The response header, blank line included, must end within this many bytes. Mirrors `connect-proxy.cjs`. */
 const MAX_HEADER_BYTES = 8192;
+
+/** At most this much of a non-200 response's body is read and printed. */
+const MAX_BODY_BYTES = 8192;
+
+/**
+ * `docker/observe-ssh`'s `is_host`: `[A-Za-z0-9.:-]`, the first character a
+ * letter, digit or `:`, at most 253 characters. Spelled out as ASCII classes,
+ * and anchored with a `$` that in JavaScript (no `m` flag) matches only at the
+ * very end, never before a trailing newline.
+ */
+const HOST_SHAPE = /^[A-Za-z0-9:][A-Za-z0-9.:-]{0,252}$/;
 
 /** Write a diagnostic this script generated itself (not the proxy's own text). */
 function say(message) {
@@ -111,6 +142,15 @@ function main() {
     process.exitCode = 1;
     return;
   }
+  if (!HOST_SHAPE.test(host)) {
+    // The value is not echoed: it may hold the very CR/LF this refuses.
+    say(
+      `host must be [A-Za-z0-9.:-], starting with a letter, digit or ':', at most 253 characters ` +
+        `(the shape observe-ssh enrols); got ${host.length} character(s) that are not`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   const port = parsePort(portArg);
   if (port === null) {
     say(`port must be an integer in 1..65535, got ${JSON.stringify(portArg ?? null)}`);
@@ -127,9 +167,10 @@ function main() {
   let torn = false;
   let spliced = false;
   // Accumulates the proxy's response. Before `headerEnd` is known this is the
-  // in-progress header (bounded below); once known, further bytes on a
-  // non-200 response are the refusal BODY, collected so the full text — not
-  // whatever fit in the first TCP read — reaches stderr.
+  // in-progress header (bounded by MAX_HEADER_BYTES); once known, further bytes
+  // on a non-200 response are the refusal BODY (bounded by MAX_BODY_BYTES),
+  // collected so the rule text — not whatever fit in the first TCP read —
+  // reaches stderr.
   let head = Buffer.alloc(0);
   let headerEnd = -1;
 
@@ -148,6 +189,19 @@ function main() {
     teardown();
   };
 
+  /**
+   * The proxy's refusal: the status line AND the body naming the rule
+   * (`connect-proxy.cjs:257-265`) — an operator reading a failed dispatch must
+   * see WHY, not just that it failed.
+   */
+  const reportRefusal = () => {
+    const statusLine = head.subarray(0, headerEnd - 4).toString("latin1").split("\r\n")[0] ?? "";
+    const body = head.subarray(headerEnd).toString("latin1");
+    process.stderr.write(`${statusLine}\n`);
+    if (body.length > 0) process.stderr.write(body.endsWith("\n") ? body : `${body}\n`);
+    process.exitCode = 1;
+  };
+
   socket.on("error", (err) => {
     abort(spliced ? `tunnel connection error: ${err.message}` : `proxy connection failed: ${err.message}`);
   });
@@ -157,14 +211,20 @@ function main() {
   });
 
   const onData = (chunk) => {
+    if (torn) return;
     head = Buffer.concat([head, chunk]);
     if (headerEnd === -1) {
-      if (head.length > MAX_HEADER_BYTES) {
-        abort(`proxy response header exceeded ${MAX_HEADER_BYTES} bytes without reaching the blank line that ends it`);
+      // The terminator first, and only inside the window: bytes past a
+      // terminated header are not header bytes (see the docblock). A
+      // terminator that ENDS past the window is still over the cap, which is
+      // why the search is not over the whole of `head`.
+      const end = head.subarray(0, MAX_HEADER_BYTES).indexOf("\r\n\r\n");
+      if (end === -1) {
+        if (head.length > MAX_HEADER_BYTES) {
+          abort(`proxy response header exceeded ${MAX_HEADER_BYTES} bytes without reaching the blank line that ends it`);
+        }
         return;
       }
-      const end = head.indexOf("\r\n\r\n");
-      if (end === -1) return;
       headerEnd = end + 4;
 
       const statusLine = head.subarray(0, end).toString("latin1").split("\r\n")[0] ?? "";
@@ -210,6 +270,14 @@ function main() {
       // rest of the body (if any did not arrive in this same read) follows
       // shortly and the proxy sends FIN.
     }
+    // A non-200 body, bounded. Past the bound, print what was kept and stop
+    // reading: the rule line comes first in every body `refuse()` writes.
+    if (head.length - headerEnd > MAX_BODY_BYTES) {
+      head = head.subarray(0, headerEnd + MAX_BODY_BYTES);
+      reportRefusal();
+      say(`proxy response body exceeded ${MAX_BODY_BYTES} bytes; the rest was not read`);
+      teardown();
+    }
   };
   socket.on("data", onData);
 
@@ -225,7 +293,7 @@ function main() {
   });
 
   socket.on("close", () => {
-    if (torn) return; // already reported via `abort()`
+    if (torn) return; // already reported via `abort()` or the body bound
     if (spliced) {
       // The tunnel ended cleanly. Stop reading stdin (nothing left to forward
       // to) and let Node exit once the stdout writes above have actually
@@ -239,14 +307,7 @@ function main() {
       abort("proxy closed the connection before sending a complete response header");
       return;
     }
-    // The refusal, in full: the status line AND the body naming the rule
-    // (`connect-proxy.cjs:257-265`) — an operator reading a failed dispatch
-    // must see WHY, not just that it failed.
-    const statusLine = head.subarray(0, head.indexOf("\r\n\r\n")).toString("latin1").split("\r\n")[0] ?? "";
-    const body = head.subarray(headerEnd).toString("latin1");
-    process.stderr.write(`${statusLine}\n`);
-    if (body.length > 0) process.stderr.write(body.endsWith("\n") ? body : `${body}\n`);
-    process.exitCode = 1;
+    reportRefusal();
   });
 }
 

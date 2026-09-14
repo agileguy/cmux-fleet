@@ -26,6 +26,19 @@ const SCRIPT = new URL("../../docker/ssh-connect.cjs", import.meta.url).pathname
 let fake: Server;
 let fakePort = 0;
 let connections = 0;
+/** The request line of the most recent CONNECT the fake server received. */
+let lastRequestLine = "";
+
+/**
+ * Tunnel bytes pipelined right after a `200`, in the same write. Well over
+ * `MAX_HEADER_BYTES` (8192), so the client's first read holds the header plus
+ * more than 8192 bytes even if loopback splits the write at its 16 KiB MTU.
+ * Position-revealing, so a dropped or reordered chunk cannot pass as equal.
+ */
+const BIG_PIPELINED = Array.from({ length: 20_000 }, (_, i) => String.fromCharCode(65 + (i % 26))).join("");
+
+/** Far past any bound on a refusal body: 256 KiB. */
+const HUGE_BODY_FILLER = "x".repeat(256 * 1024);
 
 /** A free port, released before it is handed to `ssh-connect.cjs` as "nothing listening". */
 async function freePort(): Promise<number> {
@@ -58,7 +71,35 @@ function startFakeServer(): Promise<void> {
         routed = true;
 
         const requestLine = buf.subarray(0, buf.indexOf("\r\n")).toString("latin1");
+        lastRequestLine = requestLine;
         const authority = requestLine.split(" ")[1] ?? "";
+
+        if (authority === "bigtunnel.test:2222") {
+          // A 200 and more than 8192 bytes of tunnel data in ONE write.
+          socket.write(`HTTP/1.1 200 Connection Established\r\n\r\n${BIG_PIPELINED}`);
+          socket.removeListener("data", onData);
+          socket.on("data", (d) => socket.write(`ECHO:${d.toString("latin1")}`));
+          socket.on("end", () => socket.end());
+          return;
+        }
+
+        if (authority === "bigheader.test:2222") {
+          // A 200 whose blank line lands past byte 8192, in one write: the
+          // header itself is over the cap even though it does terminate.
+          socket.write(`HTTP/1.1 200 Connection Established\r\nX-Pad: ${"a".repeat(9000)}\r\n\r\nSSH-2.0-fake\r\n`);
+          return;
+        }
+
+        if (authority === "hugebody.test:443") {
+          const body = `egress denied by rule default-deny\n${HUGE_BODY_FILLER}`;
+          socket.end(
+            `HTTP/1.1 403 Forbidden\r\n` +
+              `Proxy-Agent: fake-connect-proxy\r\n` +
+              `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+              `Connection: close\r\n\r\n${body}`,
+          );
+          return;
+        }
 
         if (authority === "tunnel.test:2222") {
           // 200, with bytes pipelined in the SAME write — the target sshd
@@ -166,6 +207,21 @@ describe("the 200 path (SRD-OBSERVER-ROLES 3.1)", () => {
     expect(stdout).toContain("ECHO:PING");
     expect(connections).toBe(before + 1);
   }, gateBudget([2_000]));
+
+  test("a first read holding the 200 plus more than 8192 bytes of tunnel data still splices every byte", async () => {
+    // The header cap bounds the HEADER. Bytes after a terminated header are
+    // tunnel data, however many arrive in the same read.
+    const before = connections;
+    const { code, stdout, stderr } = await run({ host: "bigtunnel.test", port: "2222", stdin: "PING" });
+
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout.length).toBe(BIG_PIPELINED.length + "ECHO:PING".length);
+    // Compared as booleans so a failure does not print 20 KiB twice.
+    expect(stdout.startsWith(BIG_PIPELINED)).toBe(true);
+    expect(stdout.endsWith("ECHO:PING")).toBe(true);
+    expect(connections).toBe(before + 1);
+  }, gateBudget([2_000]));
 });
 
 describe("what a refusal looks like on stderr (item 2)", () => {
@@ -201,9 +257,68 @@ describe("refused before any connection is attempted (item 3)", () => {
     expect(stderr).toContain("HTTPS_PROXY");
     expect(connections).toBe(before);
   }, gateBudget([2_000]));
+
+  // The host is interpolated into the CONNECT request line and the Host
+  // header, so anything outside `observe-ssh`'s own `is_host` shape could add
+  // header lines (CR/LF) or change how the proxy splits the authority.
+  test.each([
+    ["CR/LF header injection", "evil.test:22 HTTP/1.1\r\nX-Injected: yes\r\nHost"],
+    ["only a trailing LF", "tunnel.test\n"],
+    ["a space", "a b"],
+    ["a '/'", "a/b"],
+    ["an '@'", "user@tunnel.test"],
+    ["a leading '-'", "-tunnel.test"],
+    ["a leading '.'", ".tunnel.test"],
+    ["254 characters", "a".repeat(254)],
+  ] as const)("a host with %s is refused with a named reason, and the fake server sees no connection", async (_label, host) => {
+    const before = connections;
+    const { code, stdout, stderr } = await run({ host, port: "2222" });
+
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("host must be");
+    expect(stdout).toBe("");
+    expect(connections).toBe(before);
+  }, gateBudget([2_000]));
+
+  // The other side of the host rule: these shapes reach the proxy, and reach
+  // it UNCHANGED. A bare IPv6 authority stays unbracketed on purpose: the
+  // proxy's `splitAuthority` reads `::1:22` by its last ':', and bracketing it
+  // would change the host string the egress policy is judged against.
+  test.each([
+    ["a bare IPv6 literal", "::1"],
+    ["an IPv4 address", "10.0.0.12"],
+    ["a name at the 253-character limit", "a".repeat(253)],
+  ] as const)("%s is sent to the proxy as written", async (_label, host) => {
+    const before = connections;
+    await run({ host, port: "22" });
+
+    expect(connections).toBe(before + 1);
+    expect(lastRequestLine).toBe(`CONNECT ${host}:22 HTTP/1.1`);
+  }, gateBudget([2_000]));
 });
 
 describe("bounds on the proxy's own response (item 4)", () => {
+  test("a 200 whose blank line lands past byte 8192 is refused, even in one read", async () => {
+    // Guards the P2 fix from the other side: moving the terminator search
+    // ahead of the cap must not let an oversized header through.
+    const { code, stdout, stderr } = await run({ host: "bigheader.test", port: "2222" });
+
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("8192");
+    expect(stdout).toBe("");
+  }, gateBudget([2_000]));
+
+  test("an oversized refusal body is bounded, and the status line and rule still reach stderr", async () => {
+    const { code, stdout, stderr } = await run({ host: "hugebody.test", port: "443" });
+
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("403 Forbidden");
+    expect(stderr).toContain("egress denied by rule default-deny");
+    expect(stderr).toContain("body exceeded 8192 bytes");
+    expect(stderr.length).toBeLessThan(2 * 8192);
+    expect(stdout).toBe("");
+  }, gateBudget([2_000]));
+
   test("a header that never terminates stops at the cap instead of growing forever", async () => {
     const { code, stderr } = await run({ host: "cap.test", port: "1" });
 
