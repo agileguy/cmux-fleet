@@ -237,13 +237,17 @@ const TICKET_OPS_FAILURE_CEILING: Verdict = "failed";
  * target, so a swapped `target` goes red there.
  *
  * KEPT APART FROM THE TICKET-OPS ARM rather than folded into one list with it.
- * Only some of the ticket-ops text is pinned. The orphan finding and reason are
+ * The ticket-ops text is pinned unevenly. The orphan finding and reason are
  * pinned byte for byte by "the ticket-ops orphan finding and reason are
  * byte-identical" in `harvest-reconcile.test.ts`, and ISC-348's registered claim
- * pins a substring of that finding. No test pins the cap-arm or validation-arm
- * findings, or the ISC-332 reason. A shared renderer could reword those with
- * nothing to notice, and the observer arms redact every line where the
- * ticket-ops arm does not. Two short arms side by side cost less than that.
+ * pins a substring of that finding. The validation-arm finding and the ISC-332
+ * reason are pinned by substrings only: "a malformed ticket-ops.json is reported
+ * and the verdict degrades" in `harvest-ticket-ops-wiring.test.ts` asserts that
+ * the finding contains `ticket-ops.json` and `validation`, and that `reasons`
+ * contains `ISC-332`. No test pins the cap-arm finding. A shared renderer could
+ * reword everything outside those substrings with nothing to notice, and the
+ * observer arms redact every line where the ticket-ops arm does not. Two short
+ * arms side by side cost less than that.
  *
  * `observer-ops.json` is deliberately absent. SRD §3.3 keeps the k8s observer's
  * document out of harvest validation.
@@ -574,70 +578,162 @@ function validateTicketOps(body: Buffer, secrets: readonly string[]): string | n
 }
 
 /**
+ * A JSON string literal's value, or `null` when the span does not decode.
+ *
+ * `JSON.parse` on the literal's own span, so the escapes are decoded exactly as
+ * the document's parse decodes them and there is no second decoder to drift.
+ */
+function decodeJsonLiteral(span: string): string | null {
+  try {
+    const v: unknown = JSON.parse(span);
+    return typeof v === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a known secret is in an observer target document's body, by either of
+ * the two checks `validateObserverTarget` describes.
+ *
+ * Needles are filtered as `findCredentialLeaks` filters them: a blank one
+ * matches everything.
+ *
+ * THE DECODED-LITERAL CHECK IS ONE LINEAR PASS over `text`, at most
+ * `MAX_ARTIFACT_BYTES` of it. The loop tracks only whether it is inside a
+ * literal and whether that literal has held a backslash, and only such a
+ * literal is decoded, once, when it closes. MEASURED on this machine over 8 MiB
+ * bodies: 7 ms with no escapes, and 96 ms at the worst shape tried, 1.6 million
+ * tiny escaped literals. A regular expression for literals is not used: on an
+ * unterminated literal an engine retries from every later quote, which is
+ * quadratic in the body.
+ *
+ * Literal boundaries are found the way JSON finds them, so in a body that
+ * parses every span is a real string literal and decodes. In a body that does
+ * not parse, the boundaries are a best effort and a span that will not decode
+ * is skipped. That body clamps as not-JSON whatever this returns; only the
+ * credential label on its finding depends on it.
+ */
+function credentialInBody(body: Buffer, text: string, secrets: readonly string[]): boolean {
+  const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
+  if (needles.length === 0) return false;
+  if (needles.some((n) => body.includes(n))) return true;
+
+  const QUOTE = 0x22;
+  const BACKSLASH = 0x5c;
+  let start = -1;
+  let hasEscape = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (start === -1) {
+      if (c === QUOTE) {
+        start = i;
+        hasEscape = false;
+      }
+    } else if (c === BACKSLASH) {
+      hasEscape = true;
+      i++; // The escaped character cannot close the literal.
+    } else if (c === QUOTE) {
+      if (hasEscape) {
+        const decoded = decodeJsonLiteral(text.slice(start, i + 1));
+        if (decoded !== null && needles.some((n) => decoded.includes(n))) return true;
+      }
+      start = -1;
+    }
+  }
+  return false;
+}
+
+/**
  * Validate one observer target document, returning a finding or `null`.
  *
  * The sibling of `validateTicketOps`, with the same catch-and-report stance.
- * Two things differ, and each closes a way a granted secret got past the check
- * or into the report.
+ * Three things differ, and each closes a way a granted secret got past the
+ * check or into the report.
  *
- * ## The BYTES are searched, as well as the parsed value
+ * ## The body is searched, as well as the parsed value
  *
- * The parse's own sweep walks what `JSON.parse` produced, and three documents
- * hold a secret that value does not show. A duplicate key whose later value
- * wins: `"sweep_id":"<secret>","sweep_id":null` parses to `null`. A grant held
- * as a number, such as `"restart_count": 918273645501`, which a sweep of
- * strings never visits. And a body that is not JSON at all, such as a leading
- * BOM in front of a leaky document. The harvest publishes the file whole, so
- * each is a leak, and a literal search of the bytes finds all three.
+ * The parse's own sweep walks what `JSON.parse` produced. The harvest
+ * inventories the file whatever the parse kept, and some bodies hold a secret
+ * the parsed value does not show. `credentialInBody` runs two checks on the
+ * body before the parse.
  *
- * The parsed sweep still runs, because a secret spelled with JSON unicode
- * escapes is not in the bytes as written and only the decoded value shows it.
- * When the parsed sweep finds the leak, its throw is not a `ZodError`, and its
- * finding names the path, so it is returned as it is. The bytes finding is used
- * only when the parse succeeded or failed on the schema.
+ * The BYTES check is a literal search of the body as written. It finds a secret
+ * spelled out anywhere in the file: in a duplicate key's dropped value
+ * (`"sweep_id":"<secret>","sweep_id":null` parses to `null`), in a grant written
+ * as a plain integer such as `"restart_count": 918273645501`, which a sweep of
+ * strings never visits, and in a body that is not JSON at all, such as a leading
+ * BOM in front of a leaky document.
+ *
+ * The DECODED-LITERAL check decodes every string literal in the body that holds
+ * a backslash, and searches the decoded values. It finds a secret the bytes do
+ * not spell because an escape stands in for one of its characters: `\u0067hp_…`
+ * for `ghp_…`, or `\/` for `/`, which PHP's encoder writes. That matters where
+ * the parse drops the literal, as a duplicate key's value or as a key inside a
+ * dropped duplicate object. Where the parse keeps the literal, the parsed sweep
+ * sees the decoded string too.
+ *
+ * WHAT NEITHER REACHES. A grant written as a number in another form, such as
+ * `9.18273645501e11`, parses to the same integer and is spelled nowhere in the
+ * body. A secret in base64 or any other encoding is not the needle in any form
+ * either. Both can sit in a document that passes. A body in UTF-16 does not
+ * decode as UTF-8 JSON, so it clamps as not-JSON, and its finding carries no
+ * credential label, because neither check reads UTF-16.
+ *
+ * ## A credential in the body always gets the credential label
+ *
+ * When the parse throws and the body holds a credential, the finding says so,
+ * whatever the throw was. The one throw kept as it is, is the sweep's own
+ * refusal: it already says the document contains a credential, and it names the
+ * path, which is more useful than "somewhere in the body". A `ZodError`, or any
+ * other throw, such as the `RangeError` a deeply nested document raises inside
+ * the sweep, gives way to the body finding.
  *
  * ## The not-JSON finding quotes nothing from the document
  *
- * Bun's parser quotes the token it choked on, cut at the first `/ + - .` or
- * after 200 characters. Measured: a bare `SynthKeyAlpha9Q/zz+Tail...` gives
- * `Unexpected identifier "SynthKeyAlpha9Q"`. A cut token is a PREFIX of the
- * secret, and exact-match redaction cannot find a prefix, so no redaction makes
- * that message safe. The message is dropped instead.
+ * Bun's parser quotes the token it choked on, and cuts it at the first
+ * character that is not a letter, a digit, `$` or `_`, or after 200 characters.
+ * Measured for `/ + - . = : % , } @ # ~ ! *`: each cut a bare
+ * `SynthKeyAlpha9Q<c>zzTail` to `Unexpected identifier "SynthKeyAlpha9Q"`,
+ * while `$`, `_` and a digit kept the whole token. A cut token is a PREFIX of
+ * the secret, and exact-match redaction cannot find a prefix, so no redaction
+ * makes that message safe. The message is dropped instead.
  *
  * ## The returned text is NOT yet safe to print
  *
  * A schema message can quote a worker-authored value, and the sweep's path is
- * built from worker-authored keys. This function does not redact. Its one
- * caller redacts the finished line, path included, before escaping and
- * truncating it (`observerShown` and `observerLine` in
- * `reconcileArtifactClaims`), so there is one place redaction happens.
+ * built from worker-authored keys. This function neither redacts nor escapes.
+ * Redaction happens in more than one place: the parse redacts the sweep's path
+ * list before it throws, and the caller redacts again, in the order its
+ * `observerShown` and `observerLine` docblock gives.
  */
 function validateObserverTarget(
   body: Buffer,
   artifact: ObserverTargetArtifact,
   secrets: readonly string[],
 ): string | null {
-  // Needles filtered as `findCredentialLeaks` filters them: a blank one matches everything.
-  const credentialInBytes = secrets.some(
-    (s) => typeof s === "string" && s.trim() !== "" && body.includes(s),
-  );
+  const text = body.toString("utf8");
+  const credentialInDocument = credentialInBody(body, text, secrets);
   let raw: unknown;
   try {
-    raw = JSON.parse(body.toString("utf8"));
+    raw = JSON.parse(text);
   } catch {
     return (
       `is not parseable JSON (the parser's message is withheld, because it quotes the document)` +
-      (credentialInBytes ? `, and it contains a credential in its bytes` : "")
+      (credentialInDocument ? `, and it contains a credential in its bytes` : "")
     );
   }
   const inBytes = `the document contains a credential in its bytes that its parsed value does not show`;
   try {
     artifact.parse(raw, secrets);
   } catch (e) {
-    const why = credentialInBytes && e instanceof ZodError ? inBytes : describeSchemaFailure(e);
+    // The sweep's own refusal: not a schema failure, and already a credential finding.
+    const sweepRefusal =
+      !(e instanceof ZodError) && e instanceof Error && e.message.includes("contains a credential");
+    const why = credentialInDocument && !sweepRefusal ? inBytes : describeSchemaFailure(e);
     return `fails ${artifact.name} validation (${why})`;
   }
-  return credentialInBytes ? `fails ${artifact.name} validation (${inBytes})` : null;
+  return credentialInDocument ? `fails ${artifact.name} validation (${inBytes})` : null;
 }
 
 /** The errno name, never the whole error: `String(err)` carries host paths. */
@@ -747,22 +843,53 @@ export async function reconcileArtifactClaims(
   };
 
   /**
-   * AN OBSERVER LINE, REDACTED WHOLE. Every finding and clamp reason about an
-   * observer target artifact goes through these, path included, because a path
-   * is worker-authored and a directory can be named after a granted secret.
+   * AN OBSERVER LINE, REDACTED IN LAYERS, path included, because a path is
+   * worker-authored and a directory can be named after a granted secret.
    *
-   * `observerShown` redacts a span BEFORE `safeForReport` escapes and truncates
-   * it. The truncation can cut a secret in half, and the half left is a prefix
-   * that exact-match redaction cannot find afterwards. `observerLine` then
-   * redacts the finished line, which catches a secret spanning two
-   * interpolated parts.
+   * WHICH LINES. The lines this function writes specifically about an observer
+   * target artifact go through these: the validation finding, the not-read
+   * finding, the orphaned-document finding, and the clamp reason each raises.
+   * The generic lines written for ANY artifact do not, and they name an observer
+   * file unredacted: an unclaimed artifact, a claimed artifact that is present
+   * but empty, a per-artifact cap refusal (`too_large`), an `unreadable`
+   * descriptor, and the envelope-claim lines, which render the claimed path.
+   * Those are recorded as out of scope for the observer fix.
+   *
+   * THE LAYERS, in order, for one worker-authored span:
+   *
+   * 1. The parse's own refusal redacts its path list before it throws
+   *    (`sweepThenParse` in `observer-target-artifacts.ts`). Only the sweep's
+   *    message passes through that layer.
+   * 2. `observerShown` redacts the raw span.
+   * 3. It escapes the span with `safeForReport`, uncut.
+   * 4. It redacts the escaped span. Escaping turns a real newline into the two
+   *    characters `\n`, so an escaped span can spell a secret the raw one did
+   *    not.
+   * 5. It truncates, with `safeForReport`'s own cut and `…[truncated]` suffix.
+   *    Cutting before step 4 could leave a rebuilt secret's head behind, and a
+   *    head is a prefix that exact-match redaction cannot find.
+   * 6. `observerLine` redacts the finished line, once the spans and the
+   *    harvester's own words are joined.
+   *
+   * Step 6 catches only a secret that crosses a join, and every join has
+   * harvester text on one side: the artifact's name ends a path, and fixed
+   * words surround each span. So the secrets it alone catches contain words the
+   * harvester wrote, which a real token is unlikely to. It stays because the
+   * worker-authored part of such a secret is still a leak, and because nothing
+   * is appended or cut after it, so "no needle in the finished line" holds of
+   * the string itself. "a secret that runs from a directory name into the
+   * harvester's words is redacted from the finished line" goes red without it.
    *
    * The ticket-ops lines do not go through these, so their text stays as it
    * was (see `OBSERVER_TARGET_ARTIFACTS`). Nor does `artifacts[].path`, for the
    * reason given where it is pushed.
    */
-  const observerShown = (s: string, maxLen?: number): string =>
-    safeForReport(redactSecrets(s, secrets), maxLen);
+  const observerShown = (s: string, maxLen?: number): string => {
+    // An infinite cap escapes without cutting. The second call escapes nothing,
+    // because the first left no control character, so all it does is cut.
+    const escaped = safeForReport(redactSecrets(s, secrets), Number.POSITIVE_INFINITY);
+    return safeForReport(redactSecrets(escaped, secrets), maxLen);
+  };
   const observerLine = (s: string): string => redactSecrets(s, secrets);
 
   /**
