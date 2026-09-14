@@ -143,7 +143,8 @@ export const BUILD_CONTEXT_ASSETS = [
   // stale validator from one written by the current one. The two extensions
   // above at least fall silent; this one keeps answering.
   "pi-extensions/report-tools.ts",
-  // The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2 task 3.1). It is the only
+  // The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2; written and enrolled here
+  // by §12 Phase 3 task 3.1). It is the only
   // thing that carries the proxy's `403` rule name past OpenSSH — OpenSSH
   // itself turns any non-zero ProxyCommand exit into one opaque
   // `kex_exchange_identification` failure — so a stale copy that mishandles a
@@ -151,8 +152,9 @@ export const BUILD_CONTEXT_ASSETS = [
   // an operator needs, and does so silently: the dispatch just fails, with
   // nothing in reach explaining why.
   "ssh-connect.cjs",
-  // The argv-safety shim (SRD-OBSERVER-ROLES §5.2 task 3.3), installed on
-  // PATH as `observe-ssh`. It is what refuses every malformed or hostile
+  // The argv-safety shim (SRD-OBSERVER-ROLES §5.2; written by §12 Phase 3
+  // task 3.2, and installed on PATH as `observe-ssh` and enrolled here by
+  // task 3.3). It is what refuses every malformed or hostile
   // argument BEFORE `ssh` ever runs (task 3.4's injection table). A stale
   // copy under an unmoved tag is a silent regression of that refusal: the
   // binary a worker actually calls would validate against an older, possibly

@@ -58,13 +58,15 @@
 #
 # ## The targets file
 #
-# `OBSERVER_<KIND>_TARGETS_FILE` enrols one target per line:
+# `OBSERVER_<KIND>_TARGETS_FILE` enrols one target per line. Like the known-hosts
+# file it is multi-line, so it reaches the worker through a
+# `secrets.env_allowlist` entry marked `multiline: true`.
 #
 #   token host port user
 #
-#   host  [A-Za-z0-9.:-], starting with a letter, digit or `:`   (a name, IPv4, bare IPv6)
+#   host  1-253 of [A-Za-z0-9.:-], starting with a letter, digit or `:`   (a name, IPv4, bare IPv6)
 #   port  an integer 1..65535, written without a leading zero
-#   user  [A-Za-z0-9._-], starting with a letter, digit or `_`
+#   user  1-32 of [A-Za-z0-9._-], starting with a letter, digit or `_`
 #
 # Fields are separated by spaces or tabs. BLANK AND COMMENT LINES: a line that is
 # empty or holds only spaces and tabs is skipped, and so is a line whose first
@@ -86,7 +88,8 @@
 #   - OpenSSH ignores the key at its delivered mode 0444, because inside the
 #     container the file is owned by the worker uid ("bad permissions").
 #   - A 0600 copy in /tmp is accepted. /tmp is the only writable path in the
-#     read-only worker.
+#     read-only worker that is not harvested: /workspace and /outbox are
+#     writable too, and what lands there is published with the worker's output.
 #   - A key without its trailing newline is refused ("error in libcrypto"), and
 #     a delivered secret file holds the raw value with no newline added.
 #
@@ -225,10 +228,13 @@ is_plain_path() {
 
 # $1 is a variable NAME, $2 its value. Names are spelled out per kind below
 # rather than looked up indirectly, so no variable's contents are ever code.
+# A secret missing from the fleet's env_allowlist fails at `up`
+# (src/run/worker-env.ts), so a running worker never gets here for that reason;
+# an unreadable file means the mount or the file's permissions are wrong.
 delivered() {
   [ -n "$2" ] || blocked "$1 is not set; this worker's secrets: selector does not name it"
   is_plain_path "$2" || blocked "$1 is not a plain absolute path ([A-Za-z0-9._/-]); ssh would re-tokenise it"
-  { [ -f "$2" ] && [ -r "$2" ]; } || blocked "$1 names $2, which cannot be read; the fleet's env_allowlist may not permit it"
+  { [ -f "$2" ] && [ -r "$2" ]; } || blocked "$1 names $2, which is not a readable regular file; check the secrets mount and the file's permissions"
 }
 
 # One targets-file line, already split on spaces and tabs into "$@".
@@ -240,9 +246,9 @@ parse_line() {
   esac
   [ "$#" -eq 4 ] || refuse "${targets_var} line ${lineno} has $# fields; expected: token host port user"
   is_token "$1" || refuse "${targets_var} line ${lineno}: the token is not [a-z0-9][a-z0-9-]{0,31}"
-  is_host "$2" || refuse "${targets_var} line ${lineno}: the host is not [A-Za-z0-9.:-] starting with a letter, digit or ':'"
+  is_host "$2" || refuse "${targets_var} line ${lineno}: the host is not 1-253 of [A-Za-z0-9.:-] starting with a letter, digit or ':'"
   is_port "$3" || refuse "${targets_var} line ${lineno}: the port is not an integer 1..65535"
-  is_user "$4" || refuse "${targets_var} line ${lineno}: the user is not [A-Za-z0-9._-] starting with a letter, digit or '_'"
+  is_user "$4" || refuse "${targets_var} line ${lineno}: the user is not 1-32 of [A-Za-z0-9._-] starting with a letter, digit or '_'"
   case ${seen} in
     *" $1 "*) refuse "${targets_var} line ${lineno}: token $1 is enrolled more than once" ;;
   esac
@@ -362,15 +368,22 @@ fi
 # --- ssh ---------------------------------------------------------------------
 
 # Exactly the §5.2 argv. `exec`, so ssh's exit status and signals reach the
-# caller unchanged and no shell stays behind between them.
+# caller unchanged and no shell stays behind between them. `-n` hands ssh
+# /dev/null as stdin, so a caller looping over a list on its own stdin keeps the
+# rest of the list; the timeout and keepalive bound a connection that never
+# completes or a path that goes silent (§5.2 gives the reasons).
 exec ssh \
   -F /dev/null \
+  -n \
   -T \
   -o BatchMode=yes \
   -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes \
   -o "UserKnownHostsFile=${hosts_file}" \
   -o GlobalKnownHostsFile=/dev/null \
+  -o ConnectTimeout=10 \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
   -o "ProxyCommand=${PROXY_COMMAND}" \
   -i "${key_copy}" \
   -p "${found_port}" \

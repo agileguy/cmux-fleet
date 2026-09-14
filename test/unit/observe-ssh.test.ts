@@ -2,12 +2,12 @@
  * `docker/observe-ssh` is the only road from an observer worker to a Docker host
  * or VM (SRD-OBSERVER-ROLES §5.2, §6.2; Phase 3 task 3.2).
  *
- * These run the REAL shim under the host's POSIX shells, with a recording fake
- * `ssh` first on `PATH`. The fake writes the argv it was handed, NUL-separated
- * so an element holding a newline or a space survives as one record, plus the
- * mode, last byte and bytes of whatever file `-i` named, and then exits with a
- * code the test chooses. "No ssh invocation recorded" means that record file
- * does not exist.
+ * These run the shim (a per-run copy of it, see below) under the host's POSIX
+ * shells, with a recording fake `ssh` first on `PATH`. The fake writes the argv
+ * it was handed, NUL-separated so an element holding a newline or a space
+ * survives as one record, plus the mode, last byte and bytes of whatever file
+ * `-i` named, and then exits with a code the test chooses. "No ssh invocation
+ * recorded" means that record file does not exist.
  *
  * ## Why the key assertions read a fixture
  *
@@ -28,31 +28,45 @@
  * macOS `/bin/sh` is bash 3.2 in POSIX mode, a second implementation). The
  * shell is in every test name, so the run output says which ran.
  *
- * ## The key copy lands in the real /tmp
+ * ## The key copy lands in a per-run directory, never the real /tmp
  *
  * The shim's copy location is a constant, deliberately not movable by any
- * variable (its header says why), so a test cannot redirect it into a scratch
- * directory. The copies these tests leave are fake key material, and `afterAll`
- * removes them.
+ * variable (its header says why). Running the real file would write the shared
+ * `/tmp/observe-ssh-<kind>.key`, so two runs on one host would overwrite each
+ * other's copy between staging it and reading it back (three concurrent runs
+ * were measured at 132 pass / 1 fail). So `beforeAll` writes a per-run copy of
+ * the shim in which the one line `COPY_DIR=/tmp` names a scratch directory
+ * instead, and every case runs that copy. Two pins keep the copy honest: it
+ * differs from the real shim in exactly that line, and the real shim's line is
+ * still the fixture's `copy_dir`. `afterAll` removes the scratch tree, copies
+ * included.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..", "..");
-const SHIM = join(ROOT, "docker", "observe-ssh");
+/** The real shim. Read by the pins, never executed: see the header. */
+const REAL_SHIM = join(ROOT, "docker", "observe-ssh");
 const FACTS_PATH = join(ROOT, "test", "fixtures", "observe", "ssh-transport-facts.json");
+
+/** The real shim's copy-location line, the one line the per-run copy rewrites. */
+const REAL_COPY_DIR_LINE = "COPY_DIR=/tmp";
 
 interface TransportFacts {
   key_delivery: {
@@ -86,11 +100,6 @@ const KNOWN_HOSTS = "docker-host.example.com ssh-ed25519 AAAAfakehostkeyfortests
 /** The one line every shim refusal carries, and a remote 77 never does. */
 const SHIM_REFUSAL = "refused before ssh ran";
 
-/** Where the shim must put the key copy, derived from the measured facts. */
-function keyCopyPath(kind: Kind): string {
-  return `${FACTS.key_delivery.copy_dir}/observe-ssh-${kind}.key`;
-}
-
 const FAKE_SSH = `#!/bin/sh
 # Recording fake ssh for test/unit/observe-ssh.test.ts. Never contacts anything.
 set -u
@@ -112,19 +121,54 @@ exit "\${FAKE_SSH_EXIT:-0}"
 
 let scratch = "";
 let fakeBin = "";
+/** The per-run copy's COPY_DIR. */
+let copyDir = "";
+/** The per-run copy of the shim that every case executes. */
+let shim = "";
+
+/**
+ * The real shim with its one `COPY_DIR=/tmp` line pointed at `dir`. Throws
+ * rather than fall back: a copy that still said `/tmp` would write the shared
+ * key copy this file exists to avoid.
+ */
+function perRunShim(real: string, dir: string): string {
+  // Written unquoted into the shim, so only a plain absolute path will do.
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(dir)) {
+    throw new Error(`the per-run copy directory ${dir} is not a plain absolute path`);
+  }
+  const lines = real.split("\n");
+  const at = lines.flatMap((line, i) => (line === REAL_COPY_DIR_LINE ? [i] : []));
+  if (at.length !== 1) {
+    throw new Error(
+      `expected exactly one '${REAL_COPY_DIR_LINE}' line in docker/observe-ssh, found ${at.length}; ` +
+        "refusing to run a copy that could write the real /tmp",
+    );
+  }
+  lines[at[0] as number] = `COPY_DIR=${dir}`;
+  return lines.join("\n");
+}
 
 beforeAll(() => {
-  scratch = mkdtempSync(join(tmpdir(), "observe-ssh-test-"));
+  // Not `observe-ssh-…`: where tmpdir() is /tmp, that prefix would itself match
+  // the shim's real copy names.
+  scratch = mkdtempSync(join(tmpdir(), "test-observe-ssh-"));
   fakeBin = mkdtempSync(join(scratch, "bin-"));
   writeFileSync(join(fakeBin, "ssh"), FAKE_SSH);
   chmodSync(join(fakeBin, "ssh"), 0o755);
+  copyDir = mkdtempSync(join(scratch, "copy-dir-"));
+  shim = join(scratch, "observe-ssh");
+  writeFileSync(shim, perRunShim(readFileSync(REAL_SHIM, "utf8"), copyDir));
+  chmodSync(shim, 0o755);
 });
 
 afterAll(() => {
   rmSync(scratch, { recursive: true, force: true });
-  // The shim's fixed copy location, see the header. Fake material only.
-  for (const kind of ["docker", "vm"] as const) rmSync(keyCopyPath(kind), { force: true });
 });
+
+/** Where the per-run shim puts the key copy. The pins tie its directory to `copy_dir`. */
+function keyCopyPath(kind: Kind): string {
+  return `${copyDir}/observe-ssh-${kind}.key`;
+}
 
 function shells(): string[] {
   const out: string[] = [];
@@ -223,7 +267,7 @@ function childEnv(rec: string, fakeExit: number, extra: Record<string, string>):
 
 function runShim(shell: string, args: string[], env: Record<string, string>, fakeExit = 0, cwd = scratch): Run {
   const rec = mkdtempSync(join(scratch, "rec-"));
-  const proc = Bun.spawnSync([shell, SHIM, ...args], {
+  const proc = Bun.spawnSync([shell, shim, ...args], {
     env: childEnv(rec, fakeExit, env),
     cwd,
     stdout: "pipe",
@@ -259,11 +303,12 @@ function globDir(): string {
   return globDirPath;
 }
 
-/** SRD §5.2 `:422-426`, element by element. */
+/** SRD §5.2 `:422-427`, element by element. */
 function section52Argv(w: World, kind: Kind, port: string, user: string, host: string, remote: string[]): string[] {
   return [
     "-F",
     "/dev/null",
+    "-n",
     "-T",
     "-o",
     "BatchMode=yes",
@@ -275,6 +320,12 @@ function section52Argv(w: World, kind: Kind, port: string, user: string, host: s
     `UserKnownHostsFile=${w.knownHosts}`,
     "-o",
     "GlobalKnownHostsFile=/dev/null",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=3",
     "-o",
     `ProxyCommand=${FACTS.proxy_command.argv_value}`,
     "-i",
@@ -307,6 +358,39 @@ describe("the measured transport facts this suite is wired to", () => {
     expect(FACTS.exit_codes.remote_exit_77).toBe(77);
     expect(FACTS.exit_codes.host_key_mismatch).toBe(255);
     expect(FACTS.exit_codes.proxy_refused).toBe(255);
+  });
+});
+
+describe("the per-run copy of the shim these cases execute", () => {
+  test("the REAL shim sets its copy directory once, to the fixture's copy_dir, as a literal", () => {
+    const real = readFileSync(REAL_SHIM, "utf8").split("\n");
+    expect(real.filter((line) => /^\s*COPY_DIR=/.test(line))).toEqual([`COPY_DIR=${FACTS.key_delivery.copy_dir}`]);
+    expect(REAL_COPY_DIR_LINE).toBe(`COPY_DIR=${FACTS.key_delivery.copy_dir}`);
+  });
+
+  test("the REAL shim never reads TMPDIR outside a comment", () => {
+    // With the literal pin above and the one-line diff below, this is what
+    // lets the TMPDIR case in the key-copy block speak for the real file.
+    const code = readFileSync(REAL_SHIM, "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line));
+    expect(code.filter((line) => line.includes("TMPDIR"))).toEqual([]);
+  });
+
+  test("the copy differs from the real shim in exactly the COPY_DIR line", () => {
+    const real = readFileSync(REAL_SHIM, "utf8").split("\n");
+    const copy = readFileSync(shim, "utf8").split("\n");
+    expect(copy.length).toBe(real.length);
+    const differing = real.flatMap((line, i) => (line === copy[i] ? [] : [[line, copy[i]]]));
+    expect(differing).toEqual([[REAL_COPY_DIR_LINE, `COPY_DIR=${copyDir}`]]);
+  });
+
+  test("the copy's key copies can never land on the real /tmp/observe-ssh-<kind>.key", () => {
+    expect(copyDir).not.toBe(FACTS.key_delivery.copy_dir);
+    for (const kind of ["docker", "vm"] as const) {
+      expect(keyCopyPath(kind).startsWith(`${FACTS.key_delivery.copy_dir}/observe-ssh-`)).toBe(false);
+      expect(keyCopyPath(kind).startsWith(`${scratch}/`)).toBe(true);
+    }
   });
 });
 
@@ -367,7 +451,7 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
   });
 
   describe("the key copy (test/fixtures/observe/ssh-transport-facts.json)", () => {
-    test("-i names a copy under copy_dir at copy_mode, never the delivered file", () => {
+    test("-i names a copy in the shim's copy directory at copy_mode, never the delivered file", () => {
       const w = world("docker", DOCKER_TARGETS);
       const r = runShim(shell, ["docker", "web-1", "info"], w.env);
       expect(r.exitCode).toBe(0);
@@ -375,7 +459,8 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
       const keyArg = argv[argv.indexOf("-i") + 1];
       expect(FACTS.key_delivery.copy_required).toBe(true);
       expect(keyArg).not.toBe(w.key);
-      expect(keyArg?.startsWith(`${FACTS.key_delivery.copy_dir}/`)).toBe(true);
+      // The per-run stand-in for copy_dir; the pins above tie the real one to the fixture.
+      expect(keyArg).toBe(keyCopyPath("docker"));
       expect(r.ssh?.keyMode).toBe(FACTS.key_delivery.copy_mode);
     });
 
@@ -396,12 +481,15 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
       expect(r.ssh?.keyBytes).toBe(`${KEY}\n`);
     });
 
-    test("TMPDIR cannot move the copy out of /tmp", () => {
+    test("TMPDIR cannot move the copy out of the shim's copy directory", () => {
+      // Run against the per-run copy, which differs from the real shim only in
+      // its COPY_DIR literal (pinned above), so the result holds for the real file.
       const w = world("docker", DOCKER_TARGETS);
       const r = runShim(shell, ["docker", "web-1", "info"], { ...w.env, TMPDIR: w.dir });
       expect(r.exitCode).toBe(0);
       const argv = r.ssh?.argv ?? [];
       expect(argv[argv.indexOf("-i") + 1]).toBe(keyCopyPath("docker"));
+      expect(readdirSync(w.dir).filter((name) => name.startsWith("observe-ssh-"))).toEqual([]);
     });
 
     test("each kind gets its own copy, holding its own key", () => {
@@ -420,7 +508,7 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
       const w = world("docker", DOCKER_TARGETS);
       const recs = Array.from({ length: 8 }, () => mkdtempSync(join(scratch, "rec-")));
       const procs = recs.map((rec) =>
-        Bun.spawn([shell, SHIM, "docker", "web-1", "info"], {
+        Bun.spawn([shell, shim, "docker", "web-1", "info"], {
           env: childEnv(rec, 0, w.env),
           cwd: scratch,
           stdout: "ignore",
@@ -430,6 +518,36 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
       const codes = await Promise.all(procs.map((p) => p.exited));
       expect(codes).toEqual(recs.map(() => 0));
       for (const rec of recs) expect(readRecord(rec)?.keyBytes).toBe(`${KEY}\n`);
+    });
+
+    // A rename onto a directory moves the key INTO it, and onto a symlink swaps
+    // an object the shim never made. The symlink points at a REGULAR file, so
+    // only the `-L` half of the guard can catch it (`-f` follows the link); the
+    // directory is caught by the non-regular half.
+    const plants: Array<[string, (copy: string, decoy: string) => void, (copy: string) => boolean]> = [
+      ["a symlink to a regular file", (copy, decoy) => symlinkSync(decoy, copy), (copy) => lstatSync(copy).isSymbolicLink()],
+      ["a directory", (copy) => mkdirSync(copy), (copy) => lstatSync(copy).isDirectory() && readdirSync(copy).length === 0],
+    ];
+    test.each(plants)("%s already at the copy path exits 78, names the path, and never runs ssh", (_label, plant, untouched) => {
+      const w = world("docker", DOCKER_TARGETS);
+      const copy = keyCopyPath("docker");
+      const decoy = join(w.dir, "decoy");
+      writeFileSync(decoy, "decoy-bytes");
+      rmSync(copy, { recursive: true, force: true }); // a regular copy left by an earlier case
+      plant(copy, decoy);
+      try {
+        const r = runShim(shell, ["docker", "web-1", "info"], w.env);
+        expect(r.exitCode).toBe(78);
+        expect(r.stderr).toContain(`${copy} exists and is not a regular file`);
+        expect(r.stderr).not.toContain(SHIM_REFUSAL);
+        expect(r.ssh).toBeNull();
+        expect(untouched(copy)).toBe(true);
+        expect(readFileSync(decoy, "utf8")).toBe("decoy-bytes");
+        // Refused before mktemp, so nothing was staged beside the copy path.
+        expect(readdirSync(copyDir).filter((name) => name.startsWith("observe-ssh-docker.key."))).toEqual([]);
+      } finally {
+        rmSync(copy, { recursive: true, force: true });
+      }
     });
   });
 
@@ -584,6 +702,47 @@ describe.each(shells())("docker/observe-ssh under %s", (shell) => {
       expect(r.stderr).toContain("the target is not an enrolled-token shape");
       expect(r.ssh).toBeNull();
     });
+
+    // The host and user caps. At the limit the line is the only enrolment and
+    // its value must reach ssh exactly. One over, the line is enrolled under
+    // `db-1` ahead of a valid `web-1` and the request is for `web-1`, so only
+    // the cap on that one field can refuse the file.
+    const host253 = `h${"o".repeat(252)}`;
+    const user32 = `u${"s".repeat(31)}`;
+    const fileLimits: Array<[string, string, string, (token: string, value: string) => string, (w: World) => string[]]> = [
+      [
+        "a host (253)",
+        "the host",
+        host253,
+        (token, value) => `${token} ${value} 22 observe`,
+        (w) => section52Argv(w, "docker", "22", "observe", host253, ["info"]),
+      ],
+      [
+        "a user (32)",
+        "the user",
+        user32,
+        (token, value) => `${token} docker-host.example.com 22 ${value}`,
+        (w) => section52Argv(w, "docker", "22", user32, "docker-host.example.com", ["info"]),
+      ],
+    ];
+    test.each(fileLimits)(
+      "%s in the targets file: at the limit reaches ssh, one over refuses the file naming the line",
+      (_label, field, atLimit, line, expectedArgv) => {
+        expect(atLimit.length).toBe(field === "the host" ? 253 : 32);
+        const at = world("docker", `${line("web-1", atLimit)}\n`);
+        const ok = runShim(shell, ["docker", "web-1", "info"], at.env);
+        expect(ok.stderr).toBe("");
+        expect(ok.exitCode).toBe(0);
+        expect(ok.ssh?.argv).toEqual(expectedArgv(at));
+
+        const over = world("docker", `${line("db-1", `${atLimit}x`)}\n${DOCKER_TARGETS}`);
+        const refused = runShim(shell, ["docker", "web-1", "info"], over.env);
+        expect(refused.exitCode).toBe(77);
+        expect(refused.stderr).toContain(SHIM_REFUSAL);
+        expect(refused.stderr).toContain(`OBSERVER_DOCKER_TARGETS_FILE line 1: ${field}`);
+        expect(refused.ssh).toBeNull();
+      },
+    );
 
     const limits: Array<[string, string[], string[]]> = [
       ["the verb (32)", ["docker", "web-1", `p${"s".repeat(31)}`], ["docker", "web-1", `p${"s".repeat(32)}`]],
