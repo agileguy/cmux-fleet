@@ -363,6 +363,21 @@ secrets:
       credential: false
     - name: GRAFANA_BASE_URL
       credential: false
+    #
+    # `observer-docker`'s three (§5.5, §5.7) — an OpenSSH key, its target's
+    # host keys, and its target inventory (`token host port user` per line).
+    # ALL THREE marked `multiline: true`, because each is legitimately more
+    # than one line and `buildWorkerEnv` refuses a newline in any granted
+    # value unless its entry carries the mark — the ticket and observer-k8s
+    # secrets above are single-line values, which is why none of them do.
+    - name: OBSERVER_DOCKER_SSH_KEY        # credential: swept as a needle
+      multiline: true
+    - name: OBSERVER_DOCKER_KNOWN_HOSTS    # public host keys
+      credential: false
+      multiline: true
+    - name: OBSERVER_DOCKER_TARGETS        # "token host port user" per line
+      credential: false
+      multiline: true
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.
@@ -422,6 +437,11 @@ egress:
     - {host: ci-build.example.com, port: 443}     # image-build server, D4 — build-failure logs
     - {host: k8s-control.example.com, port: 443}  # a control-plane endpoint — kubectl, helm
     - {host: grafana.example.com, port: 443}      # dashboard + datasource checks
+    #
+    # `observer-docker`'s one destination (§5.5, §5.7) — the enrolled target's
+    # SSH port. Reaching it without the key buys a banner and nothing else;
+    # the credential is delivered only to `observer-docker`.
+    - {host: docker-host.example.com, port: 22}
 
 # Which changed files count as the EXAM rather than the answer (§6.5, §8.2a). A
 # diff touching one caps the verdict at `unknown`: a worker that can rewrite the
@@ -506,6 +526,31 @@ roles:
                                            # pass would run twice; see the schema-level warning
                                            # this config would otherwise trip (SRD §6.2, §7.5)
     append_system_prompt_file: ./roles/observer-k8s.md
+  observer-docker:                        # read-only diagnostic role for a Docker host —
+                                           # SRD-OBSERVER-ROLES §5; the read-only boundary lives
+                                           # in the target-side credential, not in this role, so
+                                           # there is no cloud_access, no kubectl and no verb gate
+                                           # to configure here — see roles/observer-docker.md
+    model: gemma-4-26b-a4b-it-bf16        # the same local model as observer-k8s — §5.5
+    thinking: high
+    toolchain: base                       # deliberately NO `docker` CLI in the image — a default
+                                           # `docker ps` would dial /var/run/docker.sock, the
+                                           # honeypot, and log an escape attempt; openssh-client
+                                           # and the observe-docker/observe-ssh shims live in the
+                                           # shared base layer instead (Phase 3), so this line adds
+                                           # nothing Docker-specific of its own
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox pair only
+    skills: [pifleet-worker, observer-docker-ops]
+    cloud_access: false                   # holds no Google identity — nothing here is a cluster
+    egress_access: true                   # a ROUTE to the CONNECT proxy; destinations are egress.allow
+    secrets:                              # an OpenSSH key, its target's host keys, its target
+                                           # inventory — §5.7; all three are multiline (below)
+      - OBSERVER_DOCKER_SSH_KEY
+      - OBSERVER_DOCKER_KNOWN_HOSTS
+      - OBSERVER_DOCKER_TARGETS
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    pane_mode: rpc                        # one seat, obs-d1, in no console — see Q10
+    append_system_prompt_file: ./roles/observer-docker.md
   verifier:                               # confirms a remediation actually worked
     model: gemma-4-26b-a4b-it-bf16
     toolchain: base
@@ -844,6 +889,9 @@ workers:
   - {id: obs-2,  role: observer-k8s}
   # Two, not one: observer is read-only, so a watch on one target can proceed
   # while an inquiry about another is answered (§6.2).
+  # One seat, obs-d1, in no console (§5.5, Q10) — a Docker host, reached
+  # through the observer-docker credential rather than a cluster's RBAC.
+  - {id: obs-d1, role: observer-docker}
   - {id: ver-1,  role: verifier}
   # ---- the `development` console's four seats ----
   #

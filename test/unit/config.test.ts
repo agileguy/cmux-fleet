@@ -185,16 +185,27 @@ function assertDistinctThemes(attended: readonly { id: string; theme?: string }[
 // ---------------------------------------------------------------------------
 
 describe("worked example", () => {
-  // ISC-67: all eight shipped roles load from the shipped default config.
+  // ISC-67: all nine shipped roles load from the shipped default config.
   // observer replaces investigator (SRD-OBSERVER-001 D2) — ISC-391.
   // `triage` is the eighth (SRD-TRIAGE-CONSOLE §6.1): the console with no
-  // keyboard. It is asserted as a NAME in the set rather than by a bumped
-  // count, for the same reason the worker list below is — a count says one
-  // changed and never which.
-  test("fleet.example.yaml loads with all eight shipped roles", async () => {
+  // keyboard. `observer-docker` is the ninth (SRD-OBSERVER-ROLES §5): a
+  // sibling role, not a change to `observer-k8s`. Each is asserted as a NAME
+  // in the set rather than by a bumped count, for the same reason the worker
+  // list below is — a count says one changed and never which.
+  test("fleet.example.yaml loads with all nine shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", OBSERVER_K8S_ROLE, "reviewer", "sre", "tester", "ticketing", "triage", "verifier"].sort(),
+      [
+        "engineer",
+        "observer-docker",
+        OBSERVER_K8S_ROLE,
+        "reviewer",
+        "sre",
+        "tester",
+        "ticketing",
+        "triage",
+        "verifier",
+      ].sort(),
     );
     // Every worker resolves without error, and the SET is asserted rather than
     // its size. A bare `toHaveLength` fails on a number when a worker is added
@@ -206,6 +217,7 @@ describe("worked example", () => {
       "sre-2",
       "obs-1",
       "obs-2",
+      "obs-d1",
       "ver-1",
       // The `development` console's four seats. eng-2 and tst-1 exist for it;
       // the `tester` role had no worker at all before it.

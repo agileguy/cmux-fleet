@@ -47,6 +47,7 @@ describe("the shipped example names only things that exist", () => {
     // removing every briefing path — or renaming the key — goes red here.
     expect(checked.sort()).toEqual([
       "engineer",
+      "observer-docker",
       OBSERVER_K8S_ROLE,
       "reviewer",
       "sre",
