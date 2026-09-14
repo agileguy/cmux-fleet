@@ -1,8 +1,6 @@
 #!/bin/sh
 # docker-forced-command — the whole of what the observer-docker credential can
-# do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4 task 4.1 landed `ps`, `inspect`,
-# `info` and `version`; round 2 task 4.3 adds `logs`, `stats`, `top` and
-# `events`, and replaces the `ps` format with a fixed template — see below).
+# do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4 tasks 4.1 and 4.3).
 #
 # Installed root-owned, mode 0755, at a path the enrolled account cannot write,
 # and named as the `command=` in that account's one `authorized_keys` line
@@ -59,10 +57,23 @@
 # worker.
 #
 # `docker inspect` includes a container's full environment (`.Config.Env`)
-# and bind mounts (`.Mounts`). None of those fields is ever selected below.
-# `inspect` selects id, name, image, created time, `.State` (Health included,
-# since Health lives inside State), restart count, restart policy, labels and
-# published ports — the fields SRD §5.4 names and nothing past them.
+# and bind mounts (`.Mounts`). Neither is ever selected below. `inspect`
+# selects id, name, image, created time, restart count, restart policy,
+# labels, published ports, and a `state` object built field by field:
+# `status, running, paused, restarting, oom_killed, dead, exit_code, error,
+# started_at, finished_at` and `health`. The whole of `.State` is not
+# returned, because `.State.Health.Log[].Output` holds the stdout of every
+# healthcheck run, which is whatever text an operator's probe prints.
+# `health` is `null` when the container has no healthcheck, and otherwise
+# `{"status": ..., "failing_streak": ...}`.
+#
+# `health` reads `{{with index .State "Health"}}`, never `{{if .State.Health}}`.
+# `.Id` is a raw inspect JSON key, so the docker CLI renders this template
+# against the raw JSON map, where a missing key is an error: the `if` form
+# fails with `map has no entry for key "Health"` on every container without a
+# healthcheck. `index` returns nil for a missing key instead. Both forms were
+# measured on docker 29.7.2 and 28.5.2, on running and exited containers with
+# and without a healthcheck.
 #
 # `docker info` can include a configured proxy URL WITH CREDENTIALS in it
 # (`.HttpProxy`, `.HttpsProxy`, `.NoProxy`), plus `.RegistryConfig`, `.Labels`
@@ -73,10 +84,15 @@
 # `docker ps --format '{{json .}}'` (Docker's own default full-JSON row) also
 # carries `Mounts` (a bind mount's HOST SOURCE PATH — the same disclosure
 # `inspect` excludes above) and `LocalVolumes`; it additionally carries `Size`
-# and `Platform`, which this role has no use for. `ps` (round 2, PM decision)
-# selects `ID, Names, Image, Command, CreatedAt, RunningFor, State, Status,
-# HealthStatus, Ports, Labels, Networks` and never `Mounts`, `LocalVolumes`,
-# `Size` or `Platform`.
+# and `Platform`, which this role has no use for. `ps` selects `ID, Names,
+# Image, Command, CreatedAt, RunningFor, State, Status, Ports, Labels,
+# Networks` and never `Mounts`, `LocalVolumes`, `Size` or `Platform`.
+# `Command` is each container's full command line, returned by design.
+#
+# `ps` does not select `HealthStatus`. Docker CLIs before 29.5.0 lack the
+# field, and on 28.5.2 a template naming it exits 1 (`can't evaluate field
+# HealthStatus in type *formatter.ContainerContext`). Health still shows in
+# `Status`, e.g. `Up 2 seconds (healthy)` (measured on 28.5.2).
 #
 # All three are built with Docker's own `json` template function, one field
 # at a time, so the result is valid JSON without a `range`.
@@ -101,8 +117,10 @@
 #   name=<n>   `n` uses the same grammar as `container` above. That limits the
 #              bytes that reach docker's argv, and nothing holding a `/` or a
 #              space ever does. It does not make the filter exact: Docker
-#              still matches `--filter name=` as a substring, so `name=web`
-#              also lists `myweb` (measured against a real daemon).
+#              matches `--filter name=` as an unanchored regular expression,
+#              so `name=web` also lists `myweb`, `name=w.b` lists `wxb`, and
+#              this grammar cannot express `^` or `$` (measured on docker
+#              29.7.2 and 28.5.2).
 #   label=<k>=<v>
 #              `k` and `v` each use the SAME grammar as `container` above
 #              (so, in particular, neither may itself contain `=`; a label
@@ -129,13 +147,16 @@
 #                   trailing lines) and is accepted.
 #                3. `N` (and, defensively, the raw digit string of `M`, even
 #                   though `M`'s numeric ceiling is enforced separately
-#                   below) is capped at DIGITS_MAX=10 digits. The SRD sets no
+#                   below) is capped at DIGITS_MAX=9 digits. The SRD sets no
 #                   ceiling on `N` and this script is the only enforcement
-#                   point (the target has no other gate on argv length for a
-#                   single token), so an unbounded digit string is refused
-#                   rather than passed through — 10 digits is 9,999,999,999
-#                   seconds, far more lookback than any real use needs, while
-#                   still being a fixed, auditable bound.
+#                   point, so an unbounded digit string is refused rather
+#                   than passed through. Nine, because Go's `time.Duration`
+#                   tops out near 9,223,372,036 seconds and a 10-digit value
+#                   can overflow it; 999,999,999 seconds is about 31.7 years.
+#              `N` must also be at least 1, for `logs` and `events` alike. A
+#              zero-second lookback returns nothing, and an empty result reads
+#              like "nothing happened" when nothing was looked at. `tail=0`
+#              stays accepted.
 #   tail=<M>   (logs) `M` uses the digit grammar above, and its numeric value
 #              must additionally be <= 500 (SRD §5.4: an unbounded log pull
 #              hits the 50KB tool-output wall and is clipped from the front —
@@ -143,11 +164,10 @@
 #   container=<c> (events, optional)
 #              `c` uses the same grammar as `container` above.
 #
-# For `logs`, a REPEATED key (`since=` given twice, say) is refused: the verb
-# takes exactly three arguments (container, then exactly two more), so a
-# repeat of one key necessarily leaves the other key unfilled, which the
-# "both keys required" check below catches without any separate
-# duplicate-detection logic.
+# A repeated `since=` or `tail=` in `logs` is refused with "may be given only
+# once", as `events` refuses a repeated `since=` or `container=`. That check
+# does not rely on the three-argument count: `logs web-1 tail=5 tail=6` has
+# three arguments and is refused by the once-check.
 #
 # Whitespace (an embedded newline included), every shell metacharacter and a
 # leading `-` are refused by construction, because none of them is in any
@@ -175,6 +195,15 @@ set -u
 # `docker/observe-ssh` both carry).
 set -f
 
+# IFS is pinned to the POSIX default (space, tab, newline). sshd hands a
+# forced command whatever environment it was given, and the unquoted
+# `${filters}` and `${EVENTS_FILTERS}` expansions below split on IFS. The
+# newline is written literally, because command substitution strips trailing
+# newlines and `$(printf '\n')` would lose it.
+POSIX_IFS="$(printf ' \t')
+"
+IFS="${POSIX_IFS}"
+
 LOWER=abcdefghijklmnopqrstuvwxyz
 UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
 DIGIT=0123456789
@@ -183,18 +212,18 @@ ALNUM="${LOWER}${UPPER}${DIGIT}"
 # The bound on the digit string of `since=<N>s` (both `logs` and `events`)
 # and, defensively, on the raw digit string of `tail=<M>` (`logs`) — see the
 # header's argument-grammar section, choice 3.
-DIGITS_MAX=10
+DIGITS_MAX=9
 
 # `{{json X}}` is Docker's own template function: it marshals X as JSON, so
 # assembling several of them with literal commas and braces produces one
 # valid JSON object without ever pulling in a field this script did not name.
 # See the header for which fields, and why, for each format below.
-INSPECT_FORMAT='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"created":{{json .Created}},"state":{{json .State}},"restart_count":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}'
+INSPECT_FORMAT='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"created":{{json .Created}},"state":{"status":{{json .State.Status}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"oom_killed":{{json .State.OOMKilled}},"dead":{{json .State.Dead}},"exit_code":{{json .State.ExitCode}},"error":{{json .State.Error}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"health":{{with index .State "Health"}}{"status":{{json .Status}},"failing_streak":{{json .FailingStreak}}}{{else}}null{{end}}},"restart_count":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}'
 INFO_FORMAT='{"version":{{json .ServerVersion}},"os":{{json .OperatingSystem}},"kernel":{{json .KernelVersion}},"architecture":{{json .Architecture}},"cpus":{{json .NCPU}},"mem_total":{{json .MemTotal}},"containers":{{json .Containers}},"images":{{json .Images}},"storage_driver":{{json .Driver}},"cgroup_driver":{{json .CgroupDriver}}}'
 # The fixed `ps` template (round 2, PM decision) — see the header's
 # disclosure-boundary section for why the default `{{json .}}` row is not
 # used here.
-PS_FORMAT='{"ID":{{json .ID}},"Names":{{json .Names}},"Image":{{json .Image}},"Command":{{json .Command}},"CreatedAt":{{json .CreatedAt}},"RunningFor":{{json .RunningFor}},"State":{{json .State}},"Status":{{json .Status}},"HealthStatus":{{json .HealthStatus}},"Ports":{{json .Ports}},"Labels":{{json .Labels}},"Networks":{{json .Networks}}}'
+PS_FORMAT='{"ID":{{json .ID}},"Names":{{json .Names}},"Image":{{json .Image}},"Command":{{json .Command}},"CreatedAt":{{json .CreatedAt}},"RunningFor":{{json .RunningFor}},"State":{{json .State}},"Status":{{json .Status}},"Ports":{{json .Ports}},"Labels":{{json .Labels}},"Networks":{{json .Networks}}}'
 # `stats` and `version` both just want the object docker already builds, in
 # full — see the header for why that is safe for these two verbs.
 JSON_FORMAT='{{json .}}'
@@ -266,12 +295,17 @@ original=${SSH_ORIGINAL_COMMAND:-}
 # why this is necessary at all: ssh joins the client's argv with spaces on the
 # way over, so word boundaries are lost and must be rebuilt here. Splitting on
 # tab as well as space is defence in depth for a caller that skipped that shim.
+# Deliberately excludes newline, even though IFS is pinned to include one
+# above: an embedded newline inside one token must stay inside that token, so
+# the grammar below refuses it, rather than silently becoming a token
+# boundary that could split one hostile token into two grammar-passing ones.
 tab=$(printf '\t')
-saved_ifs=$IFS
 IFS=" ${tab}"
 # shellcheck disable=SC2086 # unquoted on purpose: this is the re-split.
 set -- ${original}
-IFS=${saved_ifs}
+# Restored to the pinned constant, not to an inherited value — see the IFS
+# pin above.
+IFS="${POSIX_IFS}"
 
 [ "$#" -ge 1 ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND held only whitespace"
 
@@ -349,6 +383,10 @@ case ${verb} in
           value=${value%s}
           is_digit_string "${value}" "${DIGITS_MAX}" ||
             refuse "${verb}" "a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'"
+          [ "${value}" -ge 1 ] ||
+            refuse "${verb}" "a since= value must be at least 1 second"
+          [ "${since_set}" -eq 0 ] ||
+            refuse "${verb}" "since=<N>s may be given only once"
           since_val=${value}
           since_set=1
           ;;
@@ -358,6 +396,8 @@ case ${verb} in
             refuse "${verb}" "a tail= value must be [0-9]{1,${DIGITS_MAX}} digits"
           [ "${value}" -le 500 ] ||
             refuse "${verb}" "tail must be <= 500"
+          [ "${tail_set}" -eq 0 ] ||
+            refuse "${verb}" "tail=<M> may be given only once"
           tail_val=${value}
           tail_set=1
           ;;
@@ -396,6 +436,8 @@ case ${verb} in
           value=${value%s}
           is_digit_string "${value}" "${DIGITS_MAX}" ||
             refuse "${verb}" "a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'"
+          [ "${value}" -ge 1 ] ||
+            refuse "${verb}" "a since= value must be at least 1 second"
           [ "${since_set}" -eq 0 ] || refuse "${verb}" "since=<N>s may be given only once"
           since_val=${value}
           since_set=1

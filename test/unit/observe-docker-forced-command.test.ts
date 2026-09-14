@@ -31,6 +31,16 @@
  * (`test/fixtures/observe/docker-cli-shapes.json`), never typed by hand, so
  * a re-measurement that changes the bound turns that test red instead of
  * silently passing against a stale literal.
+ *
+ * One deliberate exception: the EXPECTED_*_FORMAT
+ * constants below ARE retyped by hand, because they exist specifically to
+ * catch a change to the real script's templates — extracting the value
+ * under test from the same file under test cannot do that (it would only
+ * ever compare the template to itself). `templateKeys`'s `[A-Za-z]+` key
+ * regex also cannot see a nested object or a `{{with}}` block, so a
+ * key-list check alone lets a widened template through unnoticed. The
+ * EXPECTED_*_FORMAT constants are the one place in this file a template is
+ * pinned as a full literal, on purpose.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -70,6 +80,19 @@ const INSPECT_FORMAT = extractSingleQuoted("INSPECT_FORMAT");
 const INFO_FORMAT = extractSingleQuoted("INFO_FORMAT");
 const PS_FORMAT = extractSingleQuoted("PS_FORMAT");
 const JSON_FORMAT = extractSingleQuoted("JSON_FORMAT");
+
+/**
+ * Hand-typed pins — see the header for why these three
+ * are the deliberate exception to "never retyped here". Each is the exact,
+ * full literal the real script's INSPECT_FORMAT / INFO_FORMAT / PS_FORMAT
+ * must equal, byte for byte.
+ */
+const EXPECTED_INSPECT_FORMAT =
+  '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"created":{{json .Created}},"state":{"status":{{json .State.Status}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"oom_killed":{{json .State.OOMKilled}},"dead":{{json .State.Dead}},"exit_code":{{json .State.ExitCode}},"error":{{json .State.Error}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"health":{{with index .State "Health"}}{"status":{{json .Status}},"failing_streak":{{json .FailingStreak}}}{{else}}null{{end}}},"restart_count":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}';
+const EXPECTED_INFO_FORMAT =
+  '{"version":{{json .ServerVersion}},"os":{{json .OperatingSystem}},"kernel":{{json .KernelVersion}},"architecture":{{json .Architecture}},"cpus":{{json .NCPU}},"mem_total":{{json .MemTotal}},"containers":{{json .Containers}},"images":{{json .Images}},"storage_driver":{{json .Driver}},"cgroup_driver":{{json .CgroupDriver}}}';
+const EXPECTED_PS_FORMAT =
+  '{"ID":{{json .ID}},"Names":{{json .Names}},"Image":{{json .Image}},"Command":{{json .Command}},"CreatedAt":{{json .CreatedAt}},"RunningFor":{{json .RunningFor}},"State":{{json .State}},"Status":{{json .Status}},"Ports":{{json .Ports}},"Labels":{{json .Labels}},"Networks":{{json .Networks}}}';
 
 /** MEASURED, never hand-typed: test/fixtures/observe/docker-cli-shapes.json. */
 const DOCKER_CLI_SHAPES = JSON.parse(readFileSync(join(ROOT, "test", "fixtures", "observe", "docker-cli-shapes.json"), "utf8")) as {
@@ -182,8 +205,19 @@ function readDockerRecord(rec: string): string[] | null {
  * `SSH_ORIGINAL_COMMAND` on the developer's machine cannot satisfy a case
  * that means to test its absence. `sshOriginalCommand` of `undefined` means
  * the variable is not set at all, not set to the empty string.
+ *
+ * `extraEnv` merges additional variables into that
+ * same closed environment — used to simulate a caller whose IFS reaches
+ * this script already set (e.g. `IFS: ":"`), to prove IFS is pinned rather
+ * than inherited.
  */
-function runScript(shell: string, sshOriginalCommand: string | undefined, opts: RunOpts = {}, cwd = scratch): Run {
+function runScript(
+  shell: string,
+  sshOriginalCommand: string | undefined,
+  opts: RunOpts = {},
+  cwd = scratch,
+  extraEnv: Record<string, string> = {},
+): Run {
   const rec = mkdtempSync(join(scratch, "rec-"));
   const env: Record<string, string> = {
     PATH: `${fakeBin}:/usr/bin:/bin`,
@@ -191,6 +225,7 @@ function runScript(shell: string, sshOriginalCommand: string | undefined, opts: 
     FAKE_DOCKER_EXIT: String(opts.exit ?? 0),
     FAKE_DOCKER_STDOUT: opts.stdout ?? "",
     FAKE_DOCKER_STDERR: opts.stderr ?? "",
+    ...extraEnv,
   };
   if (sshOriginalCommand !== undefined) {
     env.SSH_ORIGINAL_COMMAND = sshOriginalCommand;
@@ -212,13 +247,22 @@ describe("the fixed templates (SRD §0.3, §5.4) — the disclosure assertion", 
     expect(JSON_FORMAT).toBe("{{json .}}");
   });
 
-  test("the inspect template selects id, name, image, created, state, restart count, restart policy, labels and ports", () => {
+  test("the inspect template selects id, name, image, created, the named state subfields, restart count, restart policy, labels and ports", () => {
     for (const field of [
       ".Id",
       ".Name",
       ".Config.Image",
       ".Created",
-      ".State",
+      ".State.Status",
+      ".State.Running",
+      ".State.Paused",
+      ".State.Restarting",
+      ".State.OOMKilled",
+      ".State.Dead",
+      ".State.ExitCode",
+      ".State.Error",
+      ".State.StartedAt",
+      ".State.FinishedAt",
       ".RestartCount",
       ".HostConfig.RestartPolicy",
       ".Config.Labels",
@@ -228,11 +272,40 @@ describe("the fixed templates (SRD §0.3, §5.4) — the disclosure assertion", 
     }
   });
 
+  test("the inspect template builds health as {status, failing_streak} or null, via index rather than a direct .State.Health access", () => {
+    expect(INSPECT_FORMAT).toContain('{{with index .State "Health"}}');
+    expect(INSPECT_FORMAT).toContain("{{else}}null{{end}}");
+    expect(INSPECT_FORMAT).toContain('"failing_streak":{{json .FailingStreak}}');
+  });
+
   test("the inspect template never discloses .Config.Env or .Mounts", () => {
     // REVERT CHECK (SRD §12 task 4.1): adding `.Config.Env` to INSPECT_FORMAT
     // in the real script must turn this assertion red.
     expect(INSPECT_FORMAT).not.toContain(".Config.Env");
     expect(INSPECT_FORMAT).not.toContain(".Mounts");
+  });
+
+  test("the inspect template never returns the whole of .State", () => {
+    // REVERT CHECK: replacing the field-by-field `state` object in
+    // INSPECT_FORMAT with `{{json .State}}` in the real script must turn
+    // this assertion red.
+    expect(INSPECT_FORMAT).not.toContain("{{json .State}}");
+  });
+
+  test("the inspect template never returns a healthcheck run's log output", () => {
+    // REVERT CHECK: the whole of `.State` (or `.State.Health` rendered with
+    // `{{json}}`) carries `.State.Health.Log[].Output` — a healthcheck's
+    // stdout. Nothing in INSPECT_FORMAT may contain `.Log`.
+    expect(INSPECT_FORMAT).not.toContain(".Log");
+  });
+
+  test("the inspect template accesses .State.Health only through `index`, never a direct dotted access", () => {
+    // REVERT CHECK: writing `{{if .State.Health}}` (or any other direct
+    // `.State.Health` access) instead of `{{with index .State "Health"}}`
+    // in the real script must turn this assertion red — see the header for
+    // why a direct access breaks the credential on every container with no
+    // healthcheck configured.
+    expect(INSPECT_FORMAT).not.toContain(".State.Health");
   });
 
   test("the info template selects only version, OS, kernel, architecture, CPU count, total memory, container and image counts, storage driver and cgroup driver", () => {
@@ -260,10 +333,20 @@ describe("the fixed templates (SRD §0.3, §5.4) — the disclosure assertion", 
 });
 
 describe("the fixed ps template (round 2 PM decision) — the disclosure assertion", () => {
-  const EXPECTED_PS_KEYS = ["ID", "Names", "Image", "Command", "CreatedAt", "RunningFor", "State", "Status", "HealthStatus", "Ports", "Labels", "Networks"];
+  const EXPECTED_PS_KEYS = ["ID", "Names", "Image", "Command", "CreatedAt", "RunningFor", "State", "Status", "Ports", "Labels", "Networks"];
 
-  test("the ps template's key list equals exactly the twelve named keys", () => {
+  test("the ps template's key list equals exactly the eleven named keys", () => {
     expect(templateKeys(PS_FORMAT)).toEqual(EXPECTED_PS_KEYS);
+  });
+
+  test("the ps template's key list has exactly 11 entries and never HealthStatus", () => {
+    // REVERT CHECK: adding "HealthStatus" back to PS_FORMAT in the real
+    // script (it exits 1 on docker CLI < 29.5.0 — see the header) must turn
+    // this assertion red.
+    const keys = templateKeys(PS_FORMAT);
+    expect(keys).toHaveLength(11);
+    expect(keys).not.toContain("HealthStatus");
+    expect(PS_FORMAT).not.toContain("HealthStatus");
   });
 
   test("every ps template key is in the fixture's measured ps key set (test/fixtures/observe/docker-cli-shapes.json → .ps.key_set)", () => {
@@ -283,6 +366,25 @@ describe("the fixed ps template (round 2 PM decision) — the disclosure asserti
   });
 });
 
+describe("the fixed templates equal their full literal string exactly", () => {
+  // A key-list or toContain check cannot see a nested object or a `{{with}}`
+  // block, so a widened template can slip past those. These three compare
+  // the whole template, byte for byte, against a hand-typed pin — see the
+  // header for why that pin is the one deliberate exception to "never
+  // retyped here" in this file.
+  test("INSPECT_FORMAT equals its full literal string exactly", () => {
+    expect(INSPECT_FORMAT).toBe(EXPECTED_INSPECT_FORMAT);
+  });
+
+  test("INFO_FORMAT equals its full literal string exactly", () => {
+    expect(INFO_FORMAT).toBe(EXPECTED_INFO_FORMAT);
+  });
+
+  test("PS_FORMAT equals its full literal string exactly", () => {
+    expect(PS_FORMAT).toBe(EXPECTED_PS_FORMAT);
+  });
+});
+
 describe("the real script's safety invariants", () => {
   test("never calls eval outside a comment", () => {
     const code = SRC.split("\n").filter((line) => !/^\s*#/.test(line));
@@ -295,6 +397,18 @@ describe("the real script's safety invariants", () => {
     const firstUnquotedResplit = lines.findIndex((l) => l.includes("set -- ${"));
     expect(setF).toBeGreaterThanOrEqual(0);
     expect(firstUnquotedResplit).toBeGreaterThan(setF);
+  });
+
+  test("pins IFS to the POSIX default before either unquoted re-split, and restores it to that same pinned constant rather than an inherited value", () => {
+    // REVERT CHECK: dropping the `IFS="${POSIX_IFS}"` pin, or restoring via
+    // a variable that captured whatever IFS was active a moment before
+    // (e.g. a re-introduced `saved_ifs=$IFS`), must turn this assertion red.
+    const lines = SRC.split("\n");
+    const pinIndex = lines.findIndex((l) => l.trim() === 'IFS="${POSIX_IFS}"');
+    const firstUnquotedResplit = lines.findIndex((l) => l.includes("set -- ${"));
+    expect(pinIndex).toBeGreaterThanOrEqual(0);
+    expect(pinIndex).toBeLessThan(firstUnquotedResplit);
+    expect(SRC).not.toContain("saved_ifs");
   });
 
   test("the file is executable", () => {
@@ -394,11 +508,23 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       expect(r.docker).toEqual(logsArgv("web-1", "007", "007"));
     });
 
-    test("logs: a since= digit string at the 10-digit cap is accepted", () => {
-      const since = "1".repeat(10);
+    test("logs: a since= digit string at the 9-digit cap is accepted", () => {
+      const since = "1".repeat(9);
       const r = runScript(shell, `logs web-1 since=${since}s tail=10`);
       expect(r.exitCode).toBe(0);
       expect(r.docker).toEqual(logsArgv("web-1", since, "10"));
+    });
+
+    test("logs: since=1s, the 1-second minimum, is accepted", () => {
+      const r = runScript(shell, "logs web-1 since=1s tail=10");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "1", "10"));
+    });
+
+    test("logs: since=001s, the 1-second minimum written with leading zeros, is accepted", () => {
+      const r = runScript(shell, "logs web-1 since=001s tail=10");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(logsArgv("web-1", "001", "10"));
     });
 
     test("stats: one container", () => {
@@ -417,6 +543,25 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       const r = runScript(shell, "events since=60s");
       expect(r.exitCode).toBe(0);
       expect(r.docker).toEqual(eventsArgv("60"));
+    });
+
+    test("events: a since= digit string at the 9-digit cap is accepted", () => {
+      const since = "1".repeat(9);
+      const r = runScript(shell, `events since=${since}s`);
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(eventsArgv(since));
+    });
+
+    test("events: since=1s, the 1-second minimum, is accepted", () => {
+      const r = runScript(shell, "events since=1s");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(eventsArgv("1"));
+    });
+
+    test("events: since=001s, the 1-second minimum written with leading zeros, is accepted", () => {
+      const r = runScript(shell, "events since=001s");
+      expect(r.exitCode).toBe(0);
+      expect(r.docker).toEqual(eventsArgv("001"));
     });
 
     test("events: since= plus container=", () => {
@@ -439,6 +584,26 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       expect(events).toContain("event=health_status");
       expect(events.filter((w) => w.startsWith("event=exec_"))).toEqual([]);
       expect(r.docker).toContain("type=container");
+    });
+  });
+
+  describe("IFS: the caller's IFS never changes docker's argv", () => {
+    test("ps: all plus two filters produce the same argv whether or not IFS=: is inherited from the caller", () => {
+      const withoutColonIfs = runScript(shell, "ps all name=web label=app=web");
+      const withColonIfs = runScript(shell, "ps all name=web label=app=web", {}, scratch, { IFS: ":" });
+      expect(withoutColonIfs.exitCode).toBe(0);
+      expect(withColonIfs.exitCode).toBe(0);
+      expect(withColonIfs.docker).toEqual(withoutColonIfs.docker);
+      expect(withColonIfs.docker).toEqual(psArgv(["--all", "--filter", "name=web", "--filter", "label=app=web"]));
+    });
+
+    test("events: since= plus container= produce the same argv whether or not IFS=: is inherited from the caller", () => {
+      const withoutColonIfs = runScript(shell, "events since=60s container=web");
+      const withColonIfs = runScript(shell, "events since=60s container=web", {}, scratch, { IFS: ":" });
+      expect(withoutColonIfs.exitCode).toBe(0);
+      expect(withColonIfs.exitCode).toBe(0);
+      expect(withColonIfs.docker).toEqual(withoutColonIfs.docker);
+      expect(withColonIfs.docker).toEqual(eventsArgv("60", "web"));
     });
   });
 
@@ -509,12 +674,16 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       ["logs: missing since=", "logs web-1 tail=10", "logs"],
       ["logs: since= repeated, tail= never given", "logs web-1 since=60s since=90s", "logs"],
       ["logs: tail= repeated, since= never given", "logs web-1 tail=10 tail=20", "logs"],
+      ["logs: since= repeated, plus a valid tail=", "logs web-1 since=1s since=2s tail=5", "logs"],
+      ["logs: tail= repeated, plus a valid since=", "logs web-1 since=1s tail=5 tail=6", "logs"],
       ["logs: an extra token after both keys (--follow)", "logs web-1 since=60s tail=10 --follow", "logs"],
       ["logs: an extra token after both keys (follow=true)", "logs web-1 since=60s tail=10 follow=true", "logs"],
       ["logs: tail= is not an integer", "logs web-1 since=60s tail=abc", "logs"],
       ["logs: tail= exceeds the 500 cap", "logs web-1 since=60s tail=501", "logs"],
       ["logs: since= is missing its trailing 's'", "logs web-1 since=60 tail=10", "logs"],
-      ["logs: since= digit string longer than the 10-digit cap", `logs web-1 since=${"1".repeat(11)}s tail=10`, "logs"],
+      ["logs: since= digit string longer than the 9-digit cap", `logs web-1 since=${"1".repeat(10)}s tail=10`, "logs"],
+      ["logs: since=0s is refused — a zero-second lookback", "logs web-1 since=0s tail=10", "logs"],
+      ["logs: since=000s is refused — a zero-second lookback written with leading zeros", "logs web-1 since=000s tail=10", "logs"],
       ["logs: container fails Docker's name grammar", "logs -web-1 since=60s tail=10", "logs"],
       ["stats with zero arguments (a bare 'stats' would stream every container)", "stats", "stats"],
       ["stats with two arguments", "stats web-1 web-2", "stats"],
@@ -525,7 +694,9 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
       ["events: missing since=", "events container=web-1", "events"],
       ["events: an unrecognised argument", "events since=60s foo", "events"],
       ["events: container= fails Docker's name grammar", "events since=60s container=-web-1", "events"],
-      ["events: since= digit string longer than the 10-digit cap", `events since=${"1".repeat(11)}s`, "events"],
+      ["events: since= digit string longer than the 9-digit cap", `events since=${"1".repeat(10)}s`, "events"],
+      ["events: since=0s is refused — a zero-second lookback", "events since=0s", "events"],
+      ["events: since=000s is refused — a zero-second lookback written with leading zeros", "events since=000s", "events"],
       ["events: since= given twice", "events since=60s since=120s", "events"],
       ["events: container= given twice", "events since=60s container=web-1 container=web-2", "events"],
       ["a verb with a leading '-'", "-V web-1", "(unrecognised)"],
