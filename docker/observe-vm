@@ -1,0 +1,53 @@
+#!/bin/sh
+# observe-vm — the observer-vm role's only road to a VM
+# (SRD-OBSERVER-ROLES §6.2, §12 Phase 5 task 5.2).
+#
+#   observe-vm <target> <verb> [key=value ...]
+#   observe-vm --help | -h
+#
+# This file owns two things: the usage text below, and being on PATH under the
+# name the observer-vm role calls. Every other argv passes through unchanged
+# as `exec observe-ssh vm "$@"`. observe-ssh validates it (see its own
+# header), and the target's forced command decides which verbs exist.
+#
+# `--help` and `-h` are answered here only when they are the SOLE argument.
+# Passed on, `observe-ssh vm --help` puts `--help` where observe-ssh expects
+# a target token, so it would be refused with exit 77. `observe-vm --help
+# extra` still reaches observe-ssh unchanged.
+usage() {
+  cat <<'EOF'
+usage: observe-vm <target> <verb> [key=value ...]
+
+A thin alias for `observe-ssh vm <target> <verb> [key=value ...]`: runs one
+VM verb against one enrolled target. The target-side forced command, not
+this shim, enforces the full argument grammar and decides which verbs exist.
+
+  verb   uptime | os | system | failed | unit | journal | kernel | disk | memory
+
+Exit 77 with "observe-ssh: refused before ssh ran" on stderr: the call was
+malformed, and no ssh connection was attempted.
+
+Exit 77 with "not a recognised verb" on stderr: the target does not offer
+that verb. Any other exit 77: the target refused an argument.
+
+Exit 78: the fleet did not deliver this worker's configuration.
+
+Exit 126 or 127: the command did not run on the target at all.
+
+Exit 255: ssh's own failure (a host-key mismatch or a proxy refusal).
+
+Any other exit status is the target command's own. `system` exits non-zero
+for a `degraded` system, and that is an answer, not a failure of this shim.
+EOF
+}
+
+if [ "$#" -eq 1 ]; then
+  case $1 in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+  esac
+fi
+
+exec observe-ssh vm "$@"

@@ -123,6 +123,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "ssh-connect.cjs",
         "observe-ssh",
         "observe-docker",
+        "observe-vm",
       ]),
     );
   });
@@ -179,6 +180,12 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // what this repository ships, while build success and an unchanged tag
       // say nothing moved.
       "observe-docker",
+      // The VM role's entry-point alias (SRD-OBSERVER-ROLES task 5.2) — the
+      // same shape as `observe-docker` above, with `vm` in place of `docker`.
+      // A stale copy is the same silent-regression risk: the binary `obs-v1`
+      // actually calls could diverge from what this repository ships while
+      // build success and an unchanged tag say nothing moved.
+      "observe-vm",
     ]);
   });
 
@@ -462,6 +469,19 @@ describe("observe-docker is installed executable and on PATH (SRD-OBSERVER-ROLES
   test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-docker", () => {
     expect(DOCKERFILE).toContain(
       "COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker",
+    );
+  });
+});
+
+/**
+ * `observe-vm`'s `COPY` is pinned exactly, mode and destination together, for
+ * the two reasons `observe-docker`'s pin above gives (SRD-OBSERVER-ROLES task
+ * 5.2).
+ */
+describe("observe-vm is installed executable and on PATH (SRD-OBSERVER-ROLES task 5.2)", () => {
+  test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-vm", () => {
+    expect(DOCKERFILE).toContain(
+      "COPY --chmod=0755 docker/observe-vm /usr/local/bin/observe-vm",
     );
   });
 });

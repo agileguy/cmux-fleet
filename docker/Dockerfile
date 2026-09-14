@@ -361,6 +361,12 @@ COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh
 # unchanged. On PATH as `observe-docker`.
 COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker
 
+# The VM role's entry-point alias (SRD-OBSERVER-ROLES §12 Phase 5, task 5.2),
+# called by the `observer-vm` role. Same shape as observe-docker above: it
+# answers `--help`/`-h` when that is the sole argument and passes every other
+# argv to `observe-ssh vm` unchanged. On PATH as `observe-vm`.
+COPY --chmod=0755 docker/observe-vm /usr/local/bin/observe-vm
+
 # Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
 # (§5.3). Executing each one at build time is the difference between an image
 # that *contains* the tools and an image where they *run*: the relocation above
@@ -381,6 +387,8 @@ RUN set -eux; \
     observe-ssh --help >/dev/null; \
     observe-docker --help >/dev/null; \
     observe-docker --help extra 2>&1 | grep -qF 'observe-ssh: refused before ssh ran'; \
+    observe-vm --help >/dev/null; \
+    observe-vm --help extra 2>&1 | grep -qF 'observe-ssh: refused before ssh ran'; \
     pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.

@@ -170,6 +170,10 @@ export const BUILD_CONTEXT_ASSETS = [
   // from what this repository ships, while the build still succeeds and the
   // tag stays put.
   "observe-docker",
+  // The VM role's entry-point alias (SRD-OBSERVER-ROLES §6.2; written and
+  // enrolled here by §12 Phase 5 task 5.2). Same shape and same staleness
+  // risk as `observe-docker` above, with `vm` in place of `docker`.
+  "observe-vm",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 
