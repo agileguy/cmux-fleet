@@ -515,6 +515,54 @@ describe("events filter prefix safety", () => {
   });
 });
 
+/**
+ * Every printable ASCII byte outside the name grammar's `[A-Za-z0-9._-]`
+ * (`is_docker_name` in the script), computed. Space, tab and newline are
+ * covered by the re-split and embedded-newline cases.
+ */
+const NAME_GRAMMAR_ALLOWED_CHARS = new Set<string>([
+  ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i)), // A-Z
+  ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + i)), // a-z
+  ...Array.from({ length: 10 }, (_, i) => String(i)), // 0-9
+  ".",
+  "_",
+  "-",
+]);
+const NAME_GRAMMAR_DISALLOWED_CHARS: string[] = [];
+for (let code = 0x21; code <= 0x7e; code++) {
+  const ch = String.fromCharCode(code);
+  if (!NAME_GRAMMAR_ALLOWED_CHARS.has(ch)) NAME_GRAMMAR_DISALLOWED_CHARS.push(ch);
+}
+
+/** The five places a name-grammar value appears in the verb grammar. */
+const NAME_GRAMMAR_POSITIONS: Array<{
+  label: string;
+  /** SSH_ORIGINAL_COMMAND with `c` spliced into the middle of an otherwise-valid name. */
+  middle: (c: string) => string;
+  /** SSH_ORIGINAL_COMMAND with `c` as the name's first character. */
+  leading: (c: string) => string;
+}> = [
+  { label: "inspect", middle: (c) => `inspect web${c}1`, leading: (c) => `inspect ${c}web1` },
+  { label: "ps name=", middle: (c) => `ps name=web${c}1`, leading: (c) => `ps name=${c}web1` },
+  { label: "ps label= key", middle: (c) => `ps label=we${c}b=x`, leading: (c) => `ps label=${c}web=x` },
+  { label: "ps label= value", middle: (c) => `ps label=k=web${c}1`, leading: (c) => `ps label=k=${c}web1` },
+  {
+    label: "events container=",
+    middle: (c) => `events since=60s container=web${c}1`,
+    leading: (c) => `events since=60s container=${c}web1`,
+  },
+];
+
+/** [test label, SSH_ORIGINAL_COMMAND] rows: every disallowed character in every position, plus a bad leading character in every position. */
+const NAME_GRAMMAR_CASES: Array<[string, string]> = [
+  ...NAME_GRAMMAR_DISALLOWED_CHARS.flatMap((c) =>
+    NAME_GRAMMAR_POSITIONS.map((pos): [string, string] => [`name grammar refuses '${c}' in ${pos.label}`, pos.middle(c)]),
+  ),
+  ...[".", "_", "-"].flatMap((c) =>
+    NAME_GRAMMAR_POSITIONS.map((pos): [string, string] => [`name grammar refuses leading '${c}' in ${pos.label}`, pos.leading(c)]),
+  ),
+];
+
 describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell) => {
   describe("the exact docker argv per verb and argument shape", () => {
     test("ps: no arguments", () => {
@@ -969,6 +1017,17 @@ describe.each(shells())("scripts/observe/docker-forced-command under %s", (shell
     test.each(DOCKER_FORBIDDEN_VERBS.entries.map((e) => [e.command] as [string]))("%s is refused, no docker invocation recorded", (command) => {
       const r = runScript(shell, command);
       expect(r.exitCode).toBe(77);
+      expect(r.docker).toBeNull();
+    });
+  });
+
+  describe("name grammar refuses every disallowed character, in every position a name appears", () => {
+    // Rows assert the refusal, not its reason: a character such as '=' changes which half
+    // of label=<k>=<v> the refusal names.
+    test.each(NAME_GRAMMAR_CASES)("%s", (_label, cmd) => {
+      const r = runScript(shell, cmd);
+      expect(r.exitCode).toBe(77);
+      expect(r.stderr.startsWith(REFUSAL_PREFIX)).toBe(true);
       expect(r.docker).toBeNull();
     });
   });

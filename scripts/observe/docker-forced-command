@@ -90,9 +90,11 @@
 # `Command` is each container's full command line, returned by design.
 #
 # `ps` does not select `HealthStatus`. Docker CLIs before 29.5.0 lack the
-# field, and on 28.5.2 a template naming it exits 1 (`can't evaluate field
+# field, and a template naming it exits 1 there (`can't evaluate field
 # HealthStatus in type *formatter.ContainerContext`). Health still shows in
-# `Status`, e.g. `Up 2 seconds (healthy)` (measured on 28.5.2).
+# `Status`, e.g. `Up 2 seconds (healthy)`. MEASURED on docker 29.7.2 and
+# 28.5.2: .ps_healthstatus_template and .ps_health_status in
+# test/fixtures/observe/docker-forced-command-rendered.json.
 #
 # All three are built with Docker's own `json` template function, one field
 # at a time, so the result is valid JSON without a `range`.
@@ -120,9 +122,11 @@
 #              bytes that reach docker's argv, and nothing holding a `/` or a
 #              space ever does. It does not make the filter exact: Docker
 #              matches `--filter name=` as an unanchored regular expression,
-#              so `name=web` also lists `myweb`, `name=w.b` lists `wxb`, and
-#              this grammar cannot express `^` or `$` (measured on docker
-#              29.7.2 and 28.5.2).
+#              so `name=web` also lists `myweb`, `name=w.b` lists all four
+#              measured names (`web`, `web-2`, `webhook`, `myweb`), and this
+#              grammar cannot express `^` or `$` (MEASURED on docker 29.7.2
+#              and 28.5.2: .matching.ps_name_filter in
+#              test/fixtures/observe/docker-forced-command-rendered.json).
 #   label=<k>=<v>
 #              `k` and `v` each use the SAME grammar as `container` above
 #              (so, in particular, neither may itself contain `=`; a label
@@ -181,6 +185,9 @@
 #       SSH_ORIGINAL_COMMAND, or an argument that fails its grammar. Matches
 #       the verb gate's convention (`docker/verbgate:9`), so an operator
 #       reads one code for "not authorised" across the fleet.
+#   127 `docker` is not on PATH: the shell's own status when the final `exec`
+#       finds nothing to run (checked under /bin/sh and dash: "exec: docker:
+#       not found").
 #   otherwise  `docker`'s own exit status, via `exec`: this script never
 #       inspects or reinterprets it, and `docker`'s stdout/stderr are never
 #       touched either.
@@ -197,14 +204,14 @@ set -u
 # `docker/observe-ssh` both carry).
 set -f
 
-# IFS is pinned to the POSIX default (space, tab, newline), because the
-# unquoted `${filters}` and `${EVENTS_FILTERS}` expansions below split on it.
-# busybox sh, dash and bash all ignore an IFS in the environment they start
-# with, so the pin only matters under a shell that does not (MEASURED: the
-# `IFS=:` cases in test/unit/observe-docker-forced-command.test.ts under sh and
-# dash, and the `IFS=:` case in docker-forced-command-rendered.json under
-# busybox sh). The newline is written literally, because command substitution
-# strips trailing newlines and `$(printf '\n')` would lose it.
+# IFS is pinned to the POSIX default (space, tab, newline) as defence in depth.
+# Nothing depends on it: the re-split below sets its own IFS, and the later
+# unquoted `${filters}` and `${EVENTS_FILTERS}` hold only grammar-checked words
+# and spaces. The `IFS=:` cases in test/unit/observe-docker-forced-command.test.ts
+# (sh, dash) and docker-forced-command-rendered.json (busybox sh) show these
+# shells ignore an inherited IFS; they cannot show the pin matters. The newline
+# is written literally, because command substitution strips trailing newlines
+# and `$(printf '\n')` would lose it.
 POSIX_IFS="$(printf ' \t')
 "
 IFS="${POSIX_IFS}"
@@ -312,8 +319,8 @@ tab=$(printf '\t')
 IFS=" ${tab}"
 # shellcheck disable=SC2086 # unquoted on purpose: this is the re-split.
 set -- ${original}
-# Restored to the pinned constant, not to an inherited value — see the IFS
-# pin above.
+# Back to the pinned constant, not an inherited value (defence in depth, as
+# above).
 IFS="${POSIX_IFS}"
 
 [ "$#" -ge 1 ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND held only whitespace"
