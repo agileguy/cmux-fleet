@@ -1,0 +1,379 @@
+#!/bin/sh
+# observe-ssh — the only road from an observer worker to a Docker host or VM
+# (SRD-OBSERVER-ROLES §5.2, §6.2).
+#
+#   observe-ssh <docker|vm> <target> <verb> [argument ...]
+#   observe-ssh --help
+#
+# Called by `observe-docker` and `observe-vm`, not typed by a model. It turns an
+# enrolled target TOKEN into one fixed `ssh` argv built from the fleet's
+# delivered secret files, and refuses everything it cannot validate BEFORE ssh
+# runs. The worker never writes an ssh flag, a host, a port or a key path.
+#
+# ## Who owns what
+#
+# This shim owns ARGV SAFETY: every word it forwards is a plain token that
+# cannot become an ssh option, split into two remote words, or read as shell
+# syntax on the far side. It does NOT own the verb allowlist. The target's
+# forced command does (§5.4), because only the target can enforce a rule the
+# worker cannot step around — and the worker can step around this file, since
+# it can read /secrets and run `ssh` itself. Like `ticket-cli` and `verbgate`,
+# this removes the casual mistake, not the determined one.
+#
+# The `_FILE` pointers are read from the environment for the same reason
+# `ticket-cli` reads them there: that is how the fleet delivers a secret
+# (`<NAME>_FILE`, src/run/worker-env.ts). A worker that rewrites them gains
+# nothing it did not already have by reading /secrets directly; egress.allow
+# and the forced command are the controls.
+#
+# ## Exit codes
+#
+#   77  refused by THIS SHIM, before ssh ran. Every such message says so,
+#       because the forced command also exits 77 and ssh passes that through
+#       unchanged (measured: test/fixtures/observe/ssh-transport-facts.json).
+#       A 77 without a "refused before ssh ran" line came from the target.
+#   78  the fleet did not deliver the configuration, or the key copy could not
+#       be staged. `blocked`, never `failed`. Fatal and named rather than
+#       defaulted, for the reason `ticket-cli`'s header gives.
+#   any other status is ssh's own, via `exec`: 255 for a host-key mismatch or a
+#   proxy refusal (measured), otherwise the remote command's.
+#
+# ## Argument grammar (conservative on purpose)
+#
+#   kind      docker | vm
+#   target    [a-z0-9][a-z0-9-]{0,31}              the §5.3 token grammar
+#   verb      [a-z][a-z0-9-]{0,31}
+#   argument  WORD       [A-Za-z0-9][A-Za-z0-9._:@+-]*       a container, a unit, `all`
+#             KEY=VALUE  key [a-z][a-z0-9_]{0,31}
+#                        value [A-Za-z0-9][A-Za-z0-9._:@+/=-]*   `since=300s`, `label=k=v`
+#             at most 256 bytes each
+#
+# These are allowlists, so whitespace (an embedded newline included), every
+# shell metacharacter and a leading `-` are refused by construction rather than
+# by a list someone has to keep complete. ssh joins remote words with spaces and
+# the forced command re-splits them, so a word holding a space would arrive as
+# two. Character classes are spelled out letter by letter, never as ranges,
+# because a range in a bracket expression follows locale collation in some
+# shells. Messages never echo a refused value, which may hold a newline.
+#
+# ## The targets file
+#
+# `OBSERVER_<KIND>_TARGETS_FILE` enrols one target per line:
+#
+#   token host port user
+#
+#   host  [A-Za-z0-9.:-], starting with a letter, digit or `:`   (a name, IPv4, bare IPv6)
+#   port  an integer 1..65535, written without a leading zero
+#   user  [A-Za-z0-9._-], starting with a letter, digit or `_`
+#
+# Fields are separated by spaces or tabs. BLANK AND COMMENT LINES: a line that is
+# empty or holds only spaces and tabs is skipped, and so is a line whose first
+# non-blank character is `#`. A `#` anywhere else is not a comment; the host and
+# user grammars refuse it, so the line is malformed. A carriage return is not a
+# separator, so a CRLF file is malformed.
+#
+# The WHOLE file is validated on every call, and one malformed line refuses
+# every target (77, naming the line number). A lenient parser would pick "the
+# line that parses" out of a file the operator got wrong. A token enrolled twice
+# is refused for the same reason: which enrolment was meant is not something
+# this file can know.
+#
+# ## The key copy
+#
+# MEASURED, not assumed, by scripts/observe/characterise-ssh-transport in the
+# real worker posture (test/fixtures/observe/ssh-transport-facts.json):
+#
+#   - OpenSSH ignores the key at its delivered mode 0444, because inside the
+#     container the file is owned by the worker uid ("bad permissions").
+#   - A 0600 copy in /tmp is accepted. /tmp is the only writable path in the
+#     read-only worker.
+#   - A key without its trailing newline is refused ("error in libcrypto"), and
+#     a delivered secret file holds the raw value with no newline added.
+#
+# So ssh is handed /tmp/observe-ssh-<kind>.key, mode 0600, always ending in a
+# newline. It is written to a unique mktemp file first and renamed into place,
+# so a concurrent call reads either the previous complete copy or this one,
+# never a half-written file.
+#
+# THE LOCATION IS A CONSTANT, NOT ENVIRONMENT. No TMPDIR or other variable moves
+# it: a copy redirected into /workspace or /outbox would be harvested and
+# published with the worker's output.
+#
+# The copy stays after ssh starts (`exec` leaves no process to clean up with).
+# That widens nothing: it sits on the container's own tmpfs, readable only by
+# the worker uid, which can already read the original under /secrets.
+#
+# Nothing here is ever `eval`ed, and no message interpolates a secret value.
+
+set -u
+# Globbing off for the whole script. An unquoted expansion once let an argument
+# of `*` re-expand against the CWD (docker/verbgate). The targets-file parse
+# below splits each line unquoted on purpose, and must never glob.
+set -f
+
+COPY_DIR=/tmp
+PROXY_COMMAND='node /opt/pifleet/ssh-connect.cjs %h %p'
+
+LOWER=abcdefghijklmnopqrstuvwxyz
+UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+DIGIT=0123456789
+ALNUM="${LOWER}${UPPER}${DIGIT}"
+
+usage() {
+  cat <<'EOF'
+usage: observe-ssh <docker|vm> <target> <verb> [argument ...]
+       observe-ssh --help
+
+Runs one verb on one enrolled target over ssh, with the argv, key and
+known-hosts file fixed by the fleet. The target's forced command decides
+which verbs exist.
+
+  kind      docker | vm
+  target    an enrolled token, [a-z0-9][a-z0-9-]{0,31}
+  verb      [a-z][a-z0-9-]{0,31}
+  argument  a word [A-Za-z0-9][A-Za-z0-9._:@+-]*
+            or key=value, key [a-z][a-z0-9_]{0,31},
+            value [A-Za-z0-9][A-Za-z0-9._:@+/=-]*  (256 bytes max each)
+
+Reads OBSERVER_<KIND>_TARGETS_FILE, OBSERVER_<KIND>_SSH_KEY_FILE and
+OBSERVER_<KIND>_KNOWN_HOSTS_FILE.
+
+Exit 77: refused by this shim before ssh ran.
+Exit 78: configuration not delivered (blocked).
+Otherwise: ssh's own status (255 = host key or proxy refusal).
+EOF
+}
+
+refuse() {
+  printf 'observe-ssh: refused before ssh ran: %s\n' "$1" >&2
+  printf 'observe-ssh: this exit 77 is the shim refusing, not the remote forced command.\n' >&2
+  exit 77
+}
+
+blocked() {
+  printf 'observe-ssh: %s\n' "$1" >&2
+  printf 'observe-ssh: this is `blocked`, not `failed`: the fleet did not deliver the configuration.\n' >&2
+  exit 78
+}
+
+unstageable() {
+  printf 'observe-ssh: %s\n' "$1" >&2
+  printf 'observe-ssh: this is `blocked`, not `failed`: the key copy could not be staged in %s.\n' "${COPY_DIR}" >&2
+  exit 78
+}
+
+# True when $1 is non-empty and every character of it is in the set $2.
+# A `-` in a set must come last, where a bracket expression reads it literally.
+only_chars() {
+  [ -n "$1" ] || return 1
+  case $1 in
+    *[!$2]*) return 1 ;;
+  esac
+  return 0
+}
+
+# True when the first character of $1 is in the set $2.
+first_in() {
+  case $1 in
+    [$2]*) return 0 ;;
+  esac
+  return 1
+}
+
+is_token() {
+  only_chars "$1" "${LOWER}${DIGIT}-" && first_in "$1" "${LOWER}${DIGIT}" && [ "${#1}" -le 32 ]
+}
+
+is_verb() {
+  only_chars "$1" "${LOWER}${DIGIT}-" && first_in "$1" "${LOWER}" && [ "${#1}" -le 32 ]
+}
+
+is_argument() {
+  [ "${#1}" -le 256 ] || return 1
+  case $1 in
+    *=*)
+      arg_key=${1%%=*}
+      arg_value=${1#*=}
+      only_chars "${arg_key}" "${LOWER}${DIGIT}_" && first_in "${arg_key}" "${LOWER}" &&
+        [ "${#arg_key}" -le 32 ] &&
+        only_chars "${arg_value}" "${ALNUM}._:@+/=-" && first_in "${arg_value}" "${ALNUM}"
+      return
+      ;;
+  esac
+  only_chars "$1" "${ALNUM}._:@+-" && first_in "$1" "${ALNUM}"
+}
+
+is_host() {
+  only_chars "$1" "${ALNUM}.:-" && first_in "$1" "${ALNUM}:" && [ "${#1}" -le 253 ]
+}
+
+# Digits only, no leading zero (so no octal reading anywhere), five at most, so
+# the numeric comparison cannot overflow.
+is_port() {
+  only_chars "$1" "${DIGIT}" && first_in "$1" "123456789" && [ "${#1}" -le 5 ] && [ "$1" -le 65535 ]
+}
+
+is_user() {
+  only_chars "$1" "${ALNUM}._-" && first_in "$1" "${ALNUM}_" && [ "${#1}" -le 32 ]
+}
+
+# A path goes into `-o UserKnownHostsFile=<path>`, where ssh's own option parser
+# splits on whitespace and expands `%` tokens, so only plain absolute paths pass.
+is_plain_path() {
+  only_chars "$1" "${ALNUM}._/-" && first_in "$1" "/"
+}
+
+# $1 is a variable NAME, $2 its value. Names are spelled out per kind below
+# rather than looked up indirectly, so no variable's contents are ever code.
+delivered() {
+  [ -n "$2" ] || blocked "$1 is not set; this worker's secrets: selector does not name it"
+  is_plain_path "$2" || blocked "$1 is not a plain absolute path ([A-Za-z0-9._/-]); ssh would re-tokenise it"
+  { [ -f "$2" ] && [ -r "$2" ]; } || blocked "$1 names $2, which cannot be read; the fleet's env_allowlist may not permit it"
+}
+
+# One targets-file line, already split on spaces and tabs into "$@".
+# Reads and sets: lineno, seen, found_host, found_port, found_user.
+parse_line() {
+  [ "$#" -eq 0 ] && return 0
+  case $1 in
+    '#'*) return 0 ;;
+  esac
+  [ "$#" -eq 4 ] || refuse "${targets_var} line ${lineno} has $# fields; expected: token host port user"
+  is_token "$1" || refuse "${targets_var} line ${lineno}: the token is not [a-z0-9][a-z0-9-]{0,31}"
+  is_host "$2" || refuse "${targets_var} line ${lineno}: the host is not [A-Za-z0-9.:-] starting with a letter, digit or ':'"
+  is_port "$3" || refuse "${targets_var} line ${lineno}: the port is not an integer 1..65535"
+  is_user "$4" || refuse "${targets_var} line ${lineno}: the user is not [A-Za-z0-9._-] starting with a letter, digit or '_'"
+  case ${seen} in
+    *" $1 "*) refuse "${targets_var} line ${lineno}: token $1 is enrolled more than once" ;;
+  esac
+  seen="${seen}$1 "
+  if [ "$1" = "${target}" ]; then
+    found_host=$2
+    found_port=$3
+    found_user=$4
+  fi
+}
+
+# --- arguments ---------------------------------------------------------------
+
+if [ "$#" -ge 1 ] && [ "$1" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+[ "$#" -ge 3 ] || refuse "expected <docker|vm> <target> <verb> [argument ...], got $# argument(s); see observe-ssh --help"
+
+kind=$1
+target=$2
+verb=$3
+shift 3
+
+case ${kind} in
+  docker)
+    targets_var=OBSERVER_DOCKER_TARGETS_FILE
+    targets_file=${OBSERVER_DOCKER_TARGETS_FILE:-}
+    key_var=OBSERVER_DOCKER_SSH_KEY_FILE
+    key_file=${OBSERVER_DOCKER_SSH_KEY_FILE:-}
+    hosts_var=OBSERVER_DOCKER_KNOWN_HOSTS_FILE
+    hosts_file=${OBSERVER_DOCKER_KNOWN_HOSTS_FILE:-}
+    ;;
+  vm)
+    targets_var=OBSERVER_VM_TARGETS_FILE
+    targets_file=${OBSERVER_VM_TARGETS_FILE:-}
+    key_var=OBSERVER_VM_SSH_KEY_FILE
+    key_file=${OBSERVER_VM_SSH_KEY_FILE:-}
+    hosts_var=OBSERVER_VM_KNOWN_HOSTS_FILE
+    hosts_file=${OBSERVER_VM_KNOWN_HOSTS_FILE:-}
+    ;;
+  *)
+    refuse "the kind must be docker or vm"
+    ;;
+esac
+
+is_token "${target}" || refuse "the target is not an enrolled-token shape, [a-z0-9][a-z0-9-]{0,31}"
+is_verb "${verb}" || refuse "the verb is not [a-z][a-z0-9-]{0,31}"
+
+n=0
+for arg in "$@"; do
+  n=$((n + 1))
+  is_argument "${arg}" ||
+    refuse "argument ${n} after the verb is neither a word nor key=value (see observe-ssh --help); whitespace, shell metacharacters and a leading '-' are never accepted"
+done
+
+# --- configuration -----------------------------------------------------------
+
+delivered "${targets_var}" "${targets_file}"
+delivered "${key_var}" "${key_file}"
+delivered "${hosts_var}" "${hosts_file}"
+[ -s "${key_file}" ] || blocked "${key_var} names ${key_file}, which is empty"
+
+# --- target ------------------------------------------------------------------
+
+tab=$(printf '\t')
+saved_ifs=$IFS
+IFS=" ${tab}"
+lineno=0
+seen=" "
+found_host=
+found_port=
+found_user=
+# `|| [ -n "$line" ]` keeps a last line that has no trailing newline.
+while IFS= read -r line || [ -n "${line}" ]; do
+  lineno=$((lineno + 1))
+  # Unquoted ON PURPOSE: split on spaces and tabs. `set -f` keeps it from globbing.
+  parse_line ${line}
+done < "${targets_file}"
+IFS=$saved_ifs
+
+[ -n "${found_host}" ] || refuse "target ${target} is not enrolled in ${targets_var}"
+
+# --- key copy ----------------------------------------------------------------
+
+umask 077
+key_copy="${COPY_DIR}/observe-ssh-${kind}.key"
+
+# A rename onto a directory would move the file INTO it, and onto a symlink
+# would be fine but is not something this file ever creates, so refuse both.
+if [ -L "${key_copy}" ] || { [ -e "${key_copy}" ] && [ ! -f "${key_copy}" ]; }; then
+  unstageable "${key_copy} exists and is not a regular file"
+fi
+
+staged=$(mktemp "${key_copy}.XXXXXXXX") || unstageable "mktemp could not create a file beside ${key_copy}"
+
+if ! { cat "${key_file}" > "${staged}" && chmod 600 "${staged}"; }; then
+  rm -f "${staged}"
+  unstageable "could not copy ${key_var} to ${staged}"
+fi
+
+# `$(tail -c 1 …)` is empty exactly when the last byte is a newline, because
+# command substitution strips trailing newlines.
+if [ -n "$(tail -c 1 "${staged}")" ]; then
+  if ! printf '\n' >> "${staged}"; then
+    rm -f "${staged}"
+    unstageable "could not terminate the key copy with a newline"
+  fi
+fi
+
+if ! mv -f "${staged}" "${key_copy}"; then
+  rm -f "${staged}"
+  unstageable "could not rename the staged key to ${key_copy}"
+fi
+
+# --- ssh ---------------------------------------------------------------------
+
+# Exactly the §5.2 argv. `exec`, so ssh's exit status and signals reach the
+# caller unchanged and no shell stays behind between them.
+exec ssh \
+  -F /dev/null \
+  -T \
+  -o BatchMode=yes \
+  -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=yes \
+  -o "UserKnownHostsFile=${hosts_file}" \
+  -o GlobalKnownHostsFile=/dev/null \
+  -o "ProxyCommand=${PROXY_COMMAND}" \
+  -i "${key_copy}" \
+  -p "${found_port}" \
+  -l "${found_user}" \
+  "${found_host}" \
+  -- "${verb}" "$@"
