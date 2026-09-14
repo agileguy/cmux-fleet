@@ -1,0 +1,251 @@
+#!/bin/sh
+# docker-forced-command — the whole of what the observer-docker credential can
+# do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4 task 4.1).
+#
+# Installed root-owned, mode 0755, at a path the enrolled account cannot write,
+# and named as the `command=` in that account's one `authorized_keys` line
+# (§5.7): `restrict,command="<installed path>" ssh-ed25519 <key> pifleet-observer-docker`.
+# sshd then runs THIS SCRIPT for every session that key opens, with NO
+# arguments of its own — whatever the client asked for arrives only in
+# SSH_ORIGINAL_COMMAND, which OpenSSH sets to the client's argv joined with a
+# single ASCII space between each element (`docker/observe-ssh` sends
+# `-- "<verb>" "$@"`, so the string here is `<verb> [argument ...]`).
+#
+# ## Who owns what
+#
+# `docker/observe-ssh` owns ARGV SAFETY on the WORKER side and is a courtesy:
+# a worker that skips it and drives ssh directly can put anything at all into
+# SSH_ORIGINAL_COMMAND, including bytes no shell word ever holds (an embedded
+# newline, a leading '-', a NUL is impossible over the wire but nothing else
+# is). THIS script is the credential's only enforcement, on the target, of a
+# rule the worker cannot step around, and it is written to that threat model:
+# every character class below is spelled out, nothing is ever `eval`ed, and no
+# refusal message repeats back an attacker-controlled byte that has not first
+# passed one of those classes (an unvalidated verb or argument might carry a
+# newline that would forge a second, fake log line).
+#
+# ## Verbs (SRD §5.4; this round is task 4.1 of Phase 4 — round 2, task 4.3,
+# adds `logs`, `stats`, `top` and `events`)
+#
+#   ps       [all] [name=<n> | label=<k>=<v>] ...
+#              -> docker ps --no-trunc --format '{{json .}}' [--all] [--filter ...]
+#   inspect  <container>
+#              -> docker inspect --type container --format <FIXED> <container>
+#   info     (no arguments)
+#              -> docker info --format <FIXED>
+#   version  (no arguments)
+#              -> docker version --format '{{json .}}'
+#
+# Every other verb — including `logs`, `stats`, `top` and `events`, which
+# SRD §5.4 grants the ROLE but not yet THIS round, and every mutating or
+# disclosure-shaped verb SRD §5.4 lists as illustrative (`run`, `exec`, `cp`,
+# `system dial-stdio`, ...) — exits 77 naming the verb and runs no `docker` at
+# all. The grammar below is an ALLOWLIST: that list is illustrative, not the
+# mechanism, exactly as SRD §5.4 says of its own table.
+#
+# ## The disclosure boundary (SRD §0.3, §5.4)
+#
+# The `inspect` and `info` formats are fixed HERE, not left to the worker,
+# because `docker inspect` includes a container's full environment
+# (`.Config.Env`) and bind mounts (`.Mounts`), and `docker info` can include a
+# configured proxy URL WITH CREDENTIALS in it (`.HttpProxy`, `.HttpsProxy`,
+# `.NoProxy`), plus `.RegistryConfig`, `.Labels` and swarm cluster details.
+# None of those fields is ever selected below. `inspect` selects id, name,
+# image, created time, `.State` (Health included, since Health lives inside
+# State), restart count, restart policy, labels and published ports — the
+# fields SRD §5.4 names and nothing past them. `info` selects only version,
+# OS, kernel, architecture, CPU count, total memory, container and image
+# counts, storage driver and cgroup driver — the PM decision SRD §12 task 4.1
+# records. Both are built with Docker's own `json` template function, one
+# field at a time, so the result is valid JSON without a `range`.
+#
+# ## Argument grammar (conservative on purpose — SRD §12 task 4.1 asks this
+# round to choose one for `name=` and `label=` and say so here)
+#
+#   verb       [a-z][a-z0-9-]{0,31}
+#   container  Docker's own name grammar, ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$,
+#              capped at 128 bytes to match MAX_DOCKER_NAME
+#              (src/security/docker-names.ts) — restated here because a POSIX
+#              sh script cannot import a TypeScript constant, and the SRD
+#              itself points at that file as the grammar's source.
+#   name=<n>   `n` uses the same grammar as `container` above. That limits the
+#              bytes that reach docker's argv, and nothing holding a `/` or a
+#              space ever does. It does not make the filter exact: Docker
+#              still matches `--filter name=` as a substring, so `name=web`
+#              also lists `myweb` (measured against a real daemon).
+#   label=<k>=<v>
+#              `k` and `v` each use the SAME grammar as `container` above
+#              (so, in particular, neither may itself contain `=`; a label
+#              value that needs one is refused, not truncated or re-split).
+#              Real Docker label values allow a wider character set — this is
+#              deliberately narrower, for one grammar to read and audit
+#              everywhere a value reaches `docker`'s argv, at the cost of
+#              refusing a few label values a real deployment might use.
+#   all        the literal word, nothing else, toggles `docker ps --all`.
+#
+# Whitespace (an embedded newline included), every shell metacharacter and a
+# leading `-` are refused by construction, because none of them is in any
+# character class above — not by a denylist someone has to keep complete.
+#
+# ## Exit codes
+#
+#   77  refused: an unrecognised or not-yet-enabled verb, a missing or
+#       malformed SSH_ORIGINAL_COMMAND, or an argument that fails its
+#       grammar. Matches the verb gate's convention (`docker/verbgate:9`),
+#       so an operator reads one code for "not authorised" across the fleet.
+#   otherwise  `docker`'s own exit status, via `exec`: this script never
+#       inspects or reinterprets it, and `docker`'s stdout/stderr are never
+#       touched either.
+#
+# Nothing here is ever `eval`ed, and no message interpolates a value that has
+# not already passed one of the character classes above.
+
+set -u
+# Globbing off for the whole script. Both `set --` calls below split an
+# unquoted value on purpose (the SSH_ORIGINAL_COMMAND re-split, and the
+# accumulated `--filter` words for `ps`); `set -f` is what keeps a value of
+# `*` from expanding against this process's working directory instead of
+# staying the one word it is (the lesson `docker/verbgate` and
+# `docker/observe-ssh` both carry).
+set -f
+
+LOWER=abcdefghijklmnopqrstuvwxyz
+UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+DIGIT=0123456789
+ALNUM="${LOWER}${UPPER}${DIGIT}"
+
+# `{{json X}}` is Docker's own template function: it marshals X as JSON, so
+# assembling several of them with literal commas and braces produces one
+# valid JSON object without ever pulling in a field this script did not name.
+# See the header for which fields, and why, for each of the two below.
+INSPECT_FORMAT='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"created":{{json .Created}},"state":{{json .State}},"restart_count":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}'
+INFO_FORMAT='{"version":{{json .ServerVersion}},"os":{{json .OperatingSystem}},"kernel":{{json .KernelVersion}},"architecture":{{json .Architecture}},"cpus":{{json .NCPU}},"mem_total":{{json .MemTotal}},"containers":{{json .Containers}},"images":{{json .Images}},"storage_driver":{{json .Driver}},"cgroup_driver":{{json .CgroupDriver}}}'
+# `ps` and `version` both just want the object docker already builds, in full.
+JSON_FORMAT='{{json .}}'
+
+# $1 names the verb this refusal is about, or one of the two fixed
+# placeholders below when there is none yet — never a raw, unvalidated byte
+# string (see the header). $2 is the reason, also never interpolating an
+# unvalidated value.
+refuse() {
+  printf 'docker-forced-command: refused "%s": %s\n' "$1" "$2" >&2
+  exit 77
+}
+
+# True when $1 is non-empty and every character of it is in the set $2.
+# A `-` in a set must come last, where a bracket expression reads it literally.
+only_chars() {
+  [ -n "$1" ] || return 1
+  case $1 in
+    *[!$2]*) return 1 ;;
+  esac
+  return 0
+}
+
+# True when the first character of $1 is in the set $2.
+first_in() {
+  case $1 in
+    [$2]*) return 0 ;;
+  esac
+  return 1
+}
+
+is_verb() {
+  only_chars "$1" "${LOWER}${DIGIT}-" && first_in "$1" "${LOWER}" && [ "${#1}" -le 32 ]
+}
+
+# The one grammar the header promises for a container name, a `name=` value,
+# and each half of a `label=<k>=<v>` pair.
+is_docker_name() {
+  only_chars "$1" "${ALNUM}._-" && first_in "$1" "${ALNUM}" && [ "${#1}" -le 128 ]
+}
+
+# --- read SSH_ORIGINAL_COMMAND ------------------------------------------------
+
+original=${SSH_ORIGINAL_COMMAND:-}
+[ -n "${original}" ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND is not set or is empty"
+
+# Re-split on whitespace, globbing off. `docker/observe-ssh`'s header explains
+# why this is necessary at all: ssh joins the client's argv with spaces on the
+# way over, so word boundaries are lost and must be rebuilt here. Splitting on
+# tab as well as space is defence in depth for a caller that skipped that shim.
+tab=$(printf '\t')
+saved_ifs=$IFS
+IFS=" ${tab}"
+# shellcheck disable=SC2086 # unquoted on purpose: this is the re-split.
+set -- ${original}
+IFS=${saved_ifs}
+
+[ "$#" -ge 1 ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND held only whitespace"
+
+verb=$1
+shift
+
+# Checked before the verb is ever echoed anywhere: only a value that has
+# passed this class is safe to put in a message (the header explains why).
+is_verb "${verb}" || refuse "(unrecognised)" "the verb is not [a-z][a-z0-9-]{0,31}"
+
+case ${verb} in
+  ps)
+    all=0
+    filters=
+    for arg in "$@"; do
+      case ${arg} in
+        all)
+          all=1
+          ;;
+        name=*)
+          value=${arg#name=}
+          is_docker_name "${value}" ||
+            refuse "${verb}" "a name= argument's value must be a whole container name, ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+          filters="${filters} --filter ${arg}"
+          ;;
+        label=*)
+          rest=${arg#label=}
+          case ${rest} in
+            *=*) ;;
+            *) refuse "${verb}" "a label= argument must be label=<key>=<value>" ;;
+          esac
+          key=${rest%%=*}
+          value=${rest#*=}
+          is_docker_name "${key}" ||
+            refuse "${verb}" "a label= key must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+          is_docker_name "${value}" ||
+            refuse "${verb}" "a label= value must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes, and may not itself contain '='"
+          filters="${filters} --filter ${arg}"
+          ;;
+        *)
+          refuse "${verb}" "arguments must be 'all', name=<n> or label=<k>=<v>"
+          ;;
+      esac
+    done
+    set -- docker ps --no-trunc --format "${JSON_FORMAT}"
+    [ "${all}" = 1 ] && set -- "$@" --all
+    # shellcheck disable=SC2086 # unquoted on purpose: every word in $filters
+    # is whitespace-free by construction (is_docker_name and the literal
+    # `--filter` both exclude it), and set -f keeps this from globbing.
+    set -- "$@" ${filters}
+    exec "$@"
+    ;;
+  inspect)
+    [ "$#" -eq 1 ] || refuse "${verb}" "inspect takes exactly one argument, a container name; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    exec docker inspect --type container --format "${INSPECT_FORMAT}" "${container}"
+    ;;
+  info)
+    [ "$#" -eq 0 ] || refuse "${verb}" "info takes no arguments; got $#"
+    exec docker info --format "${INFO_FORMAT}"
+    ;;
+  version)
+    [ "$#" -eq 0 ] || refuse "${verb}" "version takes no arguments; got $#"
+    exec docker version --format "${JSON_FORMAT}"
+    ;;
+  logs | stats | top | events)
+    refuse "${verb}" "not enabled this round (SRD-OBSERVER-ROLES Docs/SRD-OBSERVER-ROLES.md §12 task 4.3 adds it)"
+    ;;
+  *)
+    refuse "${verb}" "not a recognised verb; this round implements ps, inspect, info and version"
+    ;;
+esac
