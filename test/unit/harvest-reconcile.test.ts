@@ -999,3 +999,285 @@ describe("reconcileArtifactClaims — observer target artifacts are validated by
     }
   }, 30_000);
 });
+
+/**
+ * THE KEY-ONLY SECRET (the gap Phase 2 round 1 named).
+ *
+ * `findCredentialLeaks` walks string VALUES. A document whose only copy of the
+ * secret is a KEY, `{"<secret>": "x"}`, passed it untouched, and the schema
+ * strips the unknown key, so the parse passed too. The harvest still publishes
+ * the whole file, key included.
+ *
+ * Each case runs twice through the same helper. With no needles it is clean,
+ * so the extra key is legal and nothing else about the body clamps. With the
+ * needle it clamps, so the refusal can only have come from the sweep.
+ */
+describe("reconcileArtifactClaims — a secret used only as a key is refused", () => {
+  test("a known secret that appears only as a key clamps, and the finding never repeats it", async () => {
+    const cases: Array<[string, string, () => Record<string, unknown>, string]> = [
+      [
+        "a root key",
+        DOCKER_OPS,
+        () => {
+          const d = dockerDoc();
+          d[NEEDLE] = "x";
+          return d;
+        },
+        "<root>",
+      ],
+      [
+        "a key inside a row",
+        DOCKER_OPS,
+        () => {
+          const d = dockerDoc();
+          firstRow(d)[NEEDLE] = "x";
+          return d;
+        },
+        "services[0]",
+      ],
+      [
+        "a key that merely contains the secret",
+        VM_OPS,
+        () => {
+          const d = vmDoc();
+          firstRow(d)[`note-${NEEDLE}-pasted`] = "x";
+          return d;
+        },
+        "services[0]",
+      ],
+    ];
+    for (const [label, name, build, where] of cases) {
+      const body = JSON.stringify(build());
+      // The premise: the needle occurs exactly once in the body, as the key, so
+      // no VALUE carries it.
+      expect(body.split(NEEDLE).length - 1, label).toBe(1);
+      expect(body, label).toContain(`"x"`);
+
+      expectClean(await reconcileNamed(name, body), `${label} control: no needles supplied`);
+
+      const r = await reconcileNamed(name, body, [NEEDLE]);
+      expectClamped(r, name, label);
+      expect(r.discrepancies[0], label).toContain("credential");
+      // It names WHERE the key sits, and never the key itself.
+      expect(r.discrepancies[0], label).toContain(where);
+      expect(JSON.stringify(r), label).not.toContain(NEEDLE);
+      expect(JSON.stringify(r), label).not.toContain(NEEDLE.slice(0, 12));
+    }
+  });
+});
+
+/**
+ * THE ORPHANED-DOCUMENT PASS, generalised to all three pairs (Phase 2 task 2.3).
+ *
+ * `ticket-ops.md` with no `ticket-ops.json` beside it already clamps, because
+ * the `.md` half opts nothing in: no schema runs on it and no credential sweep
+ * does either. `observer-docker-ops.md` and `observer-vm-ops.md` are the same
+ * hole for the two observer targets.
+ *
+ * Every name is SPELLED here rather than imported, for the reason the block
+ * above gives. Every clamp sits beside a control through the same helper that
+ * demonstrably reaches no ceiling.
+ */
+const DOCKER_MD = "observer-docker-ops.md";
+const VM_MD = "observer-vm-ops.md";
+const TICKET_JSON = "ticket-ops.json";
+const TICKET_MD = "ticket-ops.md";
+const PROSE = "# what the worker saw\n\nall quiet\n";
+
+/** A well-formed `ticket-ops.json`, so a pairing control is not clamped for its content. */
+function ticketOpsDoc(): string {
+  return JSON.stringify({
+    schema: "pifleet.ticket-ops/v1",
+    task_id: "T-1",
+    worker: "w1",
+    epoch: 1,
+    operation: "query",
+    ticket_host: "tickets.example.invalid",
+    generated_at: "2026-09-13T10:00:00.000Z",
+    no_change_needed: false,
+    queried: [{ ticket: "T-9", fields: [{ field: "State", value: "Open" }] }],
+    updates: [],
+    commands: ["curl -H 'Authorization: Token <redacted>' https://tickets.example.invalid/T-9"],
+    verdict: "success",
+    notes: "queried T-9 and read its State field back",
+  });
+}
+
+/**
+ * Write every entry under a FRESH `files/`, claim all of them, and reconcile.
+ *
+ * All claimed, so the reverse-direction pass stays silent and the only findings
+ * are the ones under test.
+ */
+async function reconcileFiles(entries: Record<string, string>): Promise<ArtifactReconciliation> {
+  await rm(files, { recursive: true, force: true });
+  for (const [rel, body] of Object.entries(entries)) {
+    await mkdir(dirname(join(files, rel)), { recursive: true });
+    await writeFile(join(files, rel), body);
+  }
+  const scan = await scanHeld();
+  return reconcileArtifactClaims(
+    scan,
+    Object.keys(entries).map((rel) => ({ kind: "file" as const, path: `/outbox/T-1/files/${rel}` })),
+    loc,
+  );
+}
+
+/**
+ * An observer orphan, reported in ITS target's words.
+ *
+ * The finding names its own document and its own missing `.json`, and says what
+ * did not run. The reason names the document and what cannot be known about
+ * the target. Neither mentions tickets, and the reason must not claim a
+ * validation failed, because nothing was parsed.
+ */
+function expectOrphaned(
+  r: ArtifactReconciliation,
+  document: string,
+  artifact: string,
+  target: string,
+  label: string,
+): void {
+  expect(r.discrepancies, label).toHaveLength(1);
+  const finding = r.discrepancies[0]!;
+  expect(finding, label).toContain(`holds ${document} at `);
+  expect(finding, label).toContain(`no ${artifact} beside it`);
+  expect(finding, label).toContain("credential sweep");
+  expect(finding, label).toContain("unchecked, not clean");
+  expect(finding, label).not.toContain("ticket");
+  expect(r.verdictCeiling, label).toBe("failed");
+  expect(r.verdictCeilingReason, label).toContain(`${document} with no ${artifact} beside it`);
+  expect(r.verdictCeilingReason, label).toContain(`what the observer saw on that ${target}`);
+  expect(r.verdictCeilingReason, label).not.toContain("ticket");
+  expect(r.verdictCeilingReason, label).not.toContain("failed validation");
+}
+
+describe("reconcileArtifactClaims — an observer .md with no .json beside it clamps", () => {
+  test("an observer-vm-ops.md alone clamps, and beside its .json it does not", async () => {
+    expectClean(await reconcileFiles({ [VM_MD]: PROSE, [VM_OPS]: JSON.stringify(vmDoc()) }), "vm pair");
+    expectOrphaned(await reconcileFiles({ [VM_MD]: PROSE }), VM_MD, VM_OPS, "VM", "vm .md alone");
+  });
+
+  test("an observer-docker-ops.md alone clamps, and beside its .json it does not", async () => {
+    expectClean(
+      await reconcileFiles({ [DOCKER_MD]: PROSE, [DOCKER_OPS]: JSON.stringify(dockerDoc()) }),
+      "docker pair",
+    );
+    expectOrphaned(
+      await reconcileFiles({ [DOCKER_MD]: PROSE }),
+      DOCKER_MD,
+      DOCKER_OPS,
+      "docker host",
+      "docker .md alone",
+    );
+  });
+
+  /**
+   * PAIRING IS PER DIRECTORY. A `.json` two directories away is a different
+   * document, and accepting it would let one validated file vouch for any number
+   * of unvalidated ones. Both directions, because a check that ignored
+   * directories passes one and a check that demanded the top level passes the
+   * other.
+   */
+  test("a .json in another directory does not pair", async () => {
+    const vmJson = JSON.stringify(vmDoc());
+    expectClean(
+      await reconcileFiles({ [`sub/${VM_MD}`]: PROSE, [`sub/${VM_OPS}`]: vmJson }),
+      "both halves in one subdirectory",
+    );
+    expectOrphaned(
+      await reconcileFiles({ [VM_MD]: PROSE, [`sub/${VM_OPS}`]: vmJson }),
+      VM_MD,
+      VM_OPS,
+      "VM",
+      ".md at the top, .json in a subdirectory",
+    );
+    expectOrphaned(
+      await reconcileFiles({ [`sub/${VM_MD}`]: PROSE, [VM_OPS]: vmJson }),
+      VM_MD,
+      VM_OPS,
+      "VM",
+      ".md in a subdirectory, .json at the top",
+    );
+  });
+
+  /**
+   * PAIRS DO NOT CROSS-VOUCH. Each `.md` is vouched for by its own `.json` and
+   * nothing else. A valid document of another kind beside it is still no
+   * examination of this one.
+   */
+  test("a mismatched pair still clamps", async () => {
+    const dockerJson = JSON.stringify(dockerDoc());
+    const vmJson = JSON.stringify(vmDoc());
+    // Controls: each vouching `.json` is valid on its own terms.
+    expectClean(await reconcileFiles({ [TICKET_MD]: PROSE, [TICKET_JSON]: ticketOpsDoc() }), "ticket pair");
+    expectClean(await reconcileFiles({ [DOCKER_MD]: PROSE, [DOCKER_OPS]: dockerJson }), "docker pair");
+    expectClean(await reconcileFiles({ [VM_MD]: PROSE, [VM_OPS]: vmJson }), "vm pair");
+
+    expectOrphaned(
+      await reconcileFiles({ [DOCKER_MD]: PROSE, [VM_OPS]: vmJson }),
+      DOCKER_MD,
+      DOCKER_OPS,
+      "docker host",
+      "docker .md beside a VM .json",
+    );
+    expectOrphaned(
+      await reconcileFiles({ [VM_MD]: PROSE, [DOCKER_OPS]: dockerJson }),
+      VM_MD,
+      VM_OPS,
+      "VM",
+      "VM .md beside a docker .json",
+    );
+    expectOrphaned(
+      await reconcileFiles({ [DOCKER_MD]: PROSE, [TICKET_JSON]: ticketOpsDoc() }),
+      DOCKER_MD,
+      DOCKER_OPS,
+      "docker host",
+      "docker .md beside a ticket-ops.json",
+    );
+
+    // And the ticket-ops half is not vouched for by an observer document either.
+    const r = await reconcileFiles({ [TICKET_MD]: PROSE, [DOCKER_OPS]: dockerJson });
+    expect(r.discrepancies).toHaveLength(1);
+    expect(r.discrepancies[0]).toContain(`no ${TICKET_JSON} beside it`);
+    expect(r.verdictCeiling).toBe("failed");
+  });
+
+  /**
+   * Three orphans at once report three findings, each in its own words. One
+   * shared sentence would describe two of them wrongly.
+   */
+  test("several orphans each report their own document", async () => {
+    const r = await reconcileFiles({ [TICKET_MD]: PROSE, [DOCKER_MD]: PROSE, [VM_MD]: PROSE });
+    expect(r.discrepancies).toHaveLength(3);
+    const own = (doc: string) => r.discrepancies.filter((d) => d.includes(`holds ${doc} at `));
+    expect(own(TICKET_MD)).toHaveLength(1);
+    expect(own(DOCKER_MD)).toHaveLength(1);
+    expect(own(VM_MD)).toHaveLength(1);
+    expect(own(DOCKER_MD)[0]).not.toContain("observer-vm-ops");
+    expect(own(VM_MD)[0]).not.toContain("observer-docker-ops");
+    expect(r.verdictCeiling).toBe("failed");
+  });
+
+  /**
+   * THE TICKET-OPS ORPHAN KEEPS ITS EXACT TEXT. `harvest-outbox-contract.test.ts`
+   * and `harvest/index.ts` refer to it, so generalising the pass must not
+   * reword it by one byte.
+   */
+  test("the ticket-ops orphan finding and reason are byte-identical", async () => {
+    expectClean(await reconcileFiles({ [TICKET_MD]: PROSE, [TICKET_JSON]: ticketOpsDoc() }), "control");
+
+    const r = await reconcileFiles({ [TICKET_MD]: PROSE });
+    expect(r.discrepancies).toEqual([
+      `the outbox holds ticket-ops.md at ${join(files, TICKET_MD)} with no ticket-ops.json beside ` +
+        `it, so the ticket-ops schema validation and the credential sweep DID NOT RUN on it; this ` +
+        `document is unchecked, not clean`,
+    ]);
+    expect(r.verdictCeiling).toBe("failed");
+    expect(r.verdictCeilingReason).toBe(
+      "the outbox holds ticket-ops.md with no ticket-ops.json beside it, so neither the schema " +
+        "validation nor the credential sweep ran on the worker's account of what it did to the " +
+        "ticket system",
+    );
+  });
+});

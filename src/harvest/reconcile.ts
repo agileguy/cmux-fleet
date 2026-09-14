@@ -221,11 +221,12 @@ const TICKET_OPS_FAILURE_CEILING: Verdict = "failed";
  * The observer TARGET artifacts, selected by name exactly as
  * `TICKET_OPS_ARTIFACT_NAME` is (SRD-OBSERVER-ROLES §5.6, §6.7).
  *
- * A table rather than one boolean per name, because each entry carries three
- * things that must travel together: the name that selects, the one entry point
- * that sweeps and parses, and the words the findings use for the target. A name
- * added without its parse, or a parse reported in another target's words, is
- * not a state this shape can express.
+ * A table rather than one boolean per name, because each entry carries four
+ * things that must travel together: the name that selects, the human `.md`
+ * document that must sit beside it, the one entry point that sweeps and parses,
+ * and the words the findings use for the target. A name added without its
+ * parse, or a parse reported in another target's words, is not a state this
+ * shape can express.
  *
  * KEPT APART FROM THE TICKET-OPS ARM rather than folded into one list with it.
  * Every ticket-ops message and its ISC-332 reason are pinned byte for byte, and
@@ -235,13 +236,29 @@ const TICKET_OPS_FAILURE_CEILING: Verdict = "failed";
  * `observer-ops.json` is deliberately absent. SRD §3.3 keeps the k8s observer's
  * document out of harvest validation.
  */
-const OBSERVER_TARGET_ARTIFACTS: ReadonlyArray<{
+interface ObserverTargetArtifact {
   name: string;
+  /**
+   * The `.md` half, DERIVED from `name` exactly as `TICKET_OPS_DOCUMENT_NAME`
+   * is derived from its artifact name, so the pair cannot drift.
+   */
+  document: string;
   parse: (raw: unknown, secrets: readonly string[]) => unknown;
   target: string;
-}> = [
-  { name: OBSERVER_DOCKER_OPS_ARTIFACT_NAME, parse: parseObserverDockerOpsArtifact, target: "docker host" },
-  { name: OBSERVER_VM_OPS_ARTIFACT_NAME, parse: parseObserverVmOpsArtifact, target: "VM" },
+}
+
+/** One table row. The only place a row is built, so `document` is always derived. */
+function observerTarget(
+  name: string,
+  parse: ObserverTargetArtifact["parse"],
+  target: string,
+): ObserverTargetArtifact {
+  return { name, document: `${basename(name, ".json")}.md`, parse, target };
+}
+
+const OBSERVER_TARGET_ARTIFACTS: ReadonlyArray<ObserverTargetArtifact> = [
+  observerTarget(OBSERVER_DOCKER_OPS_ARTIFACT_NAME, parseObserverDockerOpsArtifact, "docker host"),
+  observerTarget(OBSERVER_VM_OPS_ARTIFACT_NAME, parseObserverVmOpsArtifact, "VM"),
 ];
 
 /**
@@ -774,7 +791,18 @@ export async function reconcileArtifactClaims(
 
   /**
    * A `ticket-ops.md` WITH NO `ticket-ops.json` BESIDE IT — the half of the
-   * document that opts nothing in, arriving alone.
+   * document that opts nothing in, arriving alone. The same holds for
+   * `observer-docker-ops.md` and `observer-vm-ops.md`, each beside its own
+   * `.json` (SRD-OBSERVER-ROLES Phase 2 task 2.3).
+   *
+   * ## THREE PAIRS, and no pair vouches for another
+   *
+   * Each `.md` name is derived from its `.json` name, so no pair can drift.
+   * Each pair collects its OWN directories, so a valid `ticket-ops.json` beside
+   * an `observer-docker-ops.md` examines nothing about the docker document, and
+   * the docker and VM halves say nothing about each other. Each orphan reports
+   * in its own words: the ticket-ops text below is pinned, and an observer's
+   * finding and reason name its document and its target, never tickets.
    *
    * ## The defect, measured
    *
@@ -823,25 +851,65 @@ export async function reconcileArtifactClaims(
    * because a refused entry never enters the digest loop at all.
    */
   {
-    const jsonDirs = new Set<string>();
-    const orphanedDocs: string[] = [];
-    for (const f of ordered) {
-      const name = basename(f.path);
-      if (name === TICKET_OPS_ARTIFACT_NAME) jsonDirs.add(dirname(f.path));
-    }
-    for (const f of ordered) {
-      if (basename(f.path) !== TICKET_OPS_DOCUMENT_NAME) continue;
-      if (jsonDirs.has(dirname(f.path))) continue;
-      orphanedDocs.push(f.path);
-    }
-    for (const path of orphanedDocs) {
-      discrepancies.push(
-        `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} at ${safeForReport(path)} with no ` +
+    /**
+     * One row per pair, each carrying its own words.
+     *
+     * The ticket-ops row's finding and reason are the pinned ISC-348 text, byte
+     * for byte. The observer rows say what did not run and what cannot be known
+     * about THAT target, and never mention tickets: an operator told a docker
+     * host's document skipped "the ticket-ops schema" would be told something
+     * false about which check was missed.
+     */
+    const pairs: ReadonlyArray<{
+      artifact: string;
+      document: string;
+      ceiling: Verdict;
+      finding: (shownPath: string) => string;
+      reason: string;
+    }> = [
+      {
+        artifact: TICKET_OPS_ARTIFACT_NAME,
+        document: TICKET_OPS_DOCUMENT_NAME,
+        ceiling: TICKET_OPS_FAILURE_CEILING,
+        finding: (shownPath) =>
+          `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} at ${shownPath} with no ` +
           `${TICKET_OPS_ARTIFACT_NAME} beside it, so the ticket-ops schema validation and the ` +
           `credential sweep DID NOT RUN on it; this document is unchecked, not clean`,
-      );
-    }
-    if (orphanedDocs.length > 0) {
+        reason:
+          `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} with no ${TICKET_OPS_ARTIFACT_NAME} ` +
+          `beside it, so neither the schema validation nor the credential sweep ran on the ` +
+          `worker's account of what it did to the ticket system`,
+      },
+      ...OBSERVER_TARGET_ARTIFACTS.map((a) => ({
+        artifact: a.name,
+        document: a.document,
+        ceiling: OBSERVER_TARGET_FAILURE_CEILING,
+        finding: (shownPath: string) =>
+          `the outbox holds ${a.document} at ${shownPath} with no ${a.name} beside it, so ` +
+          `neither its schema validation nor the credential sweep ran on it; this document is ` +
+          `unchecked, not clean`,
+        reason:
+          `the outbox holds ${a.document} with no ${a.name} beside it, so neither the schema ` +
+          `validation nor the credential sweep ran on it, and what the observer saw on that ` +
+          `${a.target} cannot be read from a checked report`,
+      })),
+    ];
+    for (const pair of pairs) {
+      // Per pair, so a `.json` of one kind can never vouch for a `.md` of another.
+      const jsonDirs = new Set<string>();
+      for (const f of ordered) {
+        if (basename(f.path) === pair.artifact) jsonDirs.add(dirname(f.path));
+      }
+      const orphanedDocs: string[] = [];
+      for (const f of ordered) {
+        if (basename(f.path) !== pair.document) continue;
+        if (jsonDirs.has(dirname(f.path))) continue;
+        orphanedDocs.push(f.path);
+      }
+      for (const path of orphanedDocs) {
+        discrepancies.push(pair.finding(safeForReport(path)));
+      }
+      if (orphanedDocs.length === 0) continue;
       /**
        * IT CLAMPS, and the argument is the one `TICKET_OPS_FAILURE_CEILING`
        * already makes rather than a new one.
@@ -873,13 +941,13 @@ export async function reconcileArtifactClaims(
        * It is still a CEILING and the `rank` guard at the call site still
        * applies, so `unknown` (rank -1) is untouched. Nothing is weighed on top
        * of evidence the harvest already refused to certify.
+       *
+       * The observer pairs clamp on the same argument, which
+       * `OBSERVER_TARGET_FAILURE_CEILING` makes for their targets: the document
+       * is the observer's entire output, and prose alone was neither validated
+       * nor swept.
        */
-      clampTo(
-        TICKET_OPS_FAILURE_CEILING,
-        `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} with no ${TICKET_OPS_ARTIFACT_NAME} ` +
-          `beside it, so neither the schema validation nor the credential sweep ran on the ` +
-          `worker's account of what it did to the ticket system`,
-      );
+      clampTo(pair.ceiling, pair.reason);
     }
   }
 

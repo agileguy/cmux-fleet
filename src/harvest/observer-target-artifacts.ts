@@ -164,6 +164,43 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
 }
 
 /**
+ * Where a known secret appears as an object KEY in `raw`, named by the path of
+ * the object that holds the key.
+ *
+ * `findCredentialLeaks` walks string VALUES only. `{"<secret>": "x"}` passes it,
+ * the schema then strips the unknown key, and the parse succeeds. The harvest
+ * still publishes the file whole, so the key goes out with it.
+ *
+ * The finding names the PARENT, in the path spelling `findCredentialLeaks` uses,
+ * and never the key, because the key is the secret. A parent path is built from
+ * worker-authored keys too, so the caller still redacts it.
+ *
+ * Needles are filtered as `findCredentialLeaks` filters them: a blank needle
+ * matches every key, which would refuse every document. The walk uses an
+ * explicit stack, so a deeply nested document cannot exhaust the call stack.
+ */
+function findSecretKeys(raw: unknown, secrets: readonly string[]): string[] {
+  const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
+  if (needles.length === 0) return [];
+  const hits = new Set<string>();
+  const stack: Array<{ node: unknown; path: string }> = [{ node: raw, path: "" }];
+  while (stack.length > 0) {
+    const { node, path } = stack.pop()!;
+    if (Array.isArray(node)) {
+      node.forEach((v, i) => stack.push({ node: v, path: `${path}[${i}]` }));
+    } else if (node !== null && typeof node === "object") {
+      for (const [k, v] of Object.entries(node)) {
+        if (needles.some((n) => k.includes(n))) {
+          hits.add(`a key under ${path === "" ? "<root>" : path}`);
+        }
+        stack.push({ node: v, path: path === "" ? k : `${path}.${k}` });
+      }
+    }
+  }
+  return [...hits];
+}
+
+/**
  * Sweep, then parse. The shared body of both entry points.
  *
  * ## The sweep runs over the RAW document, and it runs FIRST
@@ -171,7 +208,7 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
  * `parseTicketOpsArtifact` sweeps the parsed value. That misses a secret in a
  * key the schema does not know, because zod strips the key. The harvest still
  * digests and publishes the file whole, token included. Sweeping the raw value
- * covers every string the file holds.
+ * covers every string the file holds, and `findSecretKeys` covers every key.
  *
  * Running it before the schema means a document that is both malformed and
  * leaky is refused for the leak. Its schema messages are then never produced.
@@ -179,8 +216,7 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
  * ## The refusal names PATHS, and the paths are redacted too
  *
  * A path over the raw value is built from worker-authored keys. A document that
- * uses the secret as a key as well as a value would otherwise put the secret
- * into this message.
+ * uses the secret as a key would otherwise put the secret into this message.
  */
 function sweepThenParse<T>(
   schema: z.ZodType<T>,
@@ -188,7 +224,7 @@ function sweepThenParse<T>(
   raw: unknown,
   secrets: readonly string[],
 ): T {
-  const leaks = findCredentialLeaks(raw, secrets);
+  const leaks = [...findCredentialLeaks(raw, secrets), ...findSecretKeys(raw, secrets)];
   if (leaks.length > 0) {
     throw new Error(
       `${kind} artifact contains a credential at: ${redactSecrets(leaks.join(", "), secrets)} ` +
