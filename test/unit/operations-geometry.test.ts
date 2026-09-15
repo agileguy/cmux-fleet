@@ -23,8 +23,16 @@ import { describe, expect, test } from "bun:test";
 import { CmuxClient } from "../../src/backends/cmux/client.ts";
 import type { SplitDirection } from "../../src/backends/cmux/client.ts";
 import type { ExecResult } from "../../src/container/run.ts";
-import { collatorOverRowPanes } from "../../src/backends/cmux/operations-plan.ts";
 import {
+  OPERATIONS_TOP_FRACTION,
+  REVIEW_TOP_FRACTION,
+  TRIAGE_OBSERVER_ROW_FRACTION,
+  TRIAGE_TOP_FRACTION,
+  collatorOverRowPanes,
+} from "../../src/backends/cmux/operations-plan.ts";
+import {
+  DEVELOPMENT_SPEC,
+  OPERATIONS_SPEC,
   REVIEW_SPEC,
   TRIAGE_SPEC,
   createWorkspace,
@@ -197,10 +205,22 @@ class LayoutModel {
     return out;
   }
 
-  /** The `list-panes --json --id-format uuids` body, panes in creation order. */
-  listPanesJson(): unknown {
+  /**
+   * The `list-panes --json --id-format uuids` body.
+   *
+   * `order` defaults to CREATION order — today's behaviour, and what every
+   * test that does not pass it keeps getting. `"reverse"` exists to prove the
+   * two correction passes read geometry rather than positional array index:
+   * every computation in `applyTopFraction`, `applyMiddleRowFraction` and
+   * `applyBottomWidths` is `Math.min`/`Math.max`/`.find`/`.filter` over the
+   * panes' own `y`/`x`/`paneId` fields, none of which cmux promises an ORDER
+   * for — so a test that only ever sees creation order could pass by accident
+   * on an implementation that silently assumed `panes[0]` was the top-left.
+   */
+  listPanesJson(order: "creation" | "reverse" = "creation"): unknown {
     const boxes = computeBoxes(this.root, OFFSET_X, OFFSET_Y, CONTAINER_WIDTH, CONTAINER_HEIGHT);
-    const panes = this.paneOrder.map((paneId, i) => {
+    const ids = order === "reverse" ? [...this.paneOrder].reverse() : this.paneOrder;
+    const panes = ids.map((paneId, i) => {
       const leaf = this.leafByPane.get(paneId)!;
       const box = boxes.get(leaf)!;
       return {
@@ -259,10 +279,14 @@ interface FakeCmux {
  * A `CmuxClient` scripted against a {@link LayoutModel} instead of a fixed
  * fixture. `afterBuild`, if given, runs on the ONE `select-workspace` call
  * {@link createWorkspace} issues right after every pane is split, renamed and
- * respawned — and before either correction pass reads geometry — so a test can
- * pre-shape the layout the two passes will see.
+ * respawned — and before any correction pass reads geometry — so a test can
+ * pre-shape the layout the passes will see. `paneOrder` controls the order
+ * `list-panes` reports panes in; see {@link LayoutModel.listPanesJson}.
  */
-function fakeCmux(model: LayoutModel, opts: { afterBuild?: (model: LayoutModel) => void } = {}): FakeCmux {
+function fakeCmux(
+  model: LayoutModel,
+  opts: { afterBuild?: (model: LayoutModel) => void; paneOrder?: "creation" | "reverse" } = {},
+): FakeCmux {
   const calls: string[][] = [];
   const titleByPane = new Map<string, string>();
   let afterBuildRan = false;
@@ -295,7 +319,7 @@ function fakeCmux(model: LayoutModel, opts: { afterBuild?: (model: LayoutModel) 
           }
           return ok("");
         case "list-panes":
-          return ok(JSON.stringify(model.listPanesJson()));
+          return ok(JSON.stringify(model.listPanesJson(opts.paneOrder ?? "creation")));
         case "resize-pane": {
           const paneId = a[a.indexOf("--pane") + 1]!;
           const dirFlag = a.find((x) => /^-[UDLR]$/.test(x))!;
@@ -373,6 +397,51 @@ const GOLDEN_REVIEW_SEQUENCE: string[][] = [
 
 const SEVEN = ["top", "r1c1", "r2c1", "r1c2", "r1c3", "r2c2", "r2c3"];
 
+/**
+ * Goldens for every ONE-LOWER-ROW console, captured by running this file
+ * against the PRE-FIX `operations.ts` (commit 06c6dba). SRD-TRIAGE-MIXED-
+ * OBSERVERS §4.3/D4's narrowed shrink branch computes the same amount as the
+ * branch it replaces whenever there is exactly one row below the top and no
+ * divider between them, as in this model — top-row height plus that row's
+ * height is then the whole container, so "current top height minus the
+ * target" and "the container's complement of the target minus this pane's
+ * height" are the same number — and `applyMiddleRowFraction` issues no call
+ * on any spec below, since none of them sets `middleRowFraction`. So these
+ * are the pre-fix sequences, asserted byte for byte. (A live divider can move
+ * the amount by at most its width; this model has none.)
+ */
+const GOLDEN_REVIEW_BIG_SHRINK: string[][] = [
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["resize-pane", "--pane", "pane-1", "-U", "--amount", "449"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["resize-pane", "--pane", "pane-2", "-L", "--amount", "133"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+];
+const GOLDEN_REVIEW_GROW: string[][] = [
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["resize-pane", "--pane", "pane-0", "-D", "--amount", "151"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["resize-pane", "--pane", "pane-2", "-L", "--amount", "133"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+];
+const GOLDEN_OPERATIONS_DEFAULT: string[][] = [
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["resize-pane", "--pane", "pane-0", "-D", "--amount", "158"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+];
+const GOLDEN_OPERATIONS_SHRINK: string[][] = [
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
+  ["resize-pane", "--pane", "pane-1", "-U", "--amount", "216"],
+];
+
 describe("the split-tree model", () => {
   test("matches the live cmux measurement applyBottomWidths' docblock cites (2026-09-13)", async () => {
     const model = new LayoutModel();
@@ -435,9 +504,7 @@ describe("applyBottomWidths, through createWorkspace", () => {
     const model = new LayoutModel();
     const { client, titleByPane } = fakeCmux(model);
 
-    // Height is not under test here: topFraction is overridden to null so
-    // applyTopFraction is a no-op and only the width pass runs.
-    await createWorkspace(client, { ...TRIAGE_SPEC, topFraction: null }, { ...OPTS, workers: SEVEN });
+    await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
 
     const f = model.frames();
     const widthOf = (title: string) => f.get(paneIdFor(titleByPane, title))!.width;
@@ -459,7 +526,7 @@ describe("applyBottomWidths, through createWorkspace", () => {
       },
     });
 
-    await createWorkspace(client, { ...TRIAGE_SPEC, topFraction: null }, { ...OPTS, workers: SEVEN });
+    await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
 
     const f = model.frames();
     for (const title of ["r1c1", "r1c2", "r1c3"]) {
@@ -468,11 +535,11 @@ describe("applyBottomWidths, through createWorkspace", () => {
     }
   });
 
-  test("rows of unequal height: widths still settle to thirds, heights are untouched", async () => {
+  test("rows of unequal height: widths settle to thirds, and the width pass issues no vertical resize", async () => {
     const model = new LayoutModel();
     let row1HeightAfterBuild = 0;
     let row2HeightAfterBuild = 0;
-    const { client, titleByPane } = fakeCmux(model, {
+    const { client, calls, titleByPane } = fakeCmux(model, {
       afterBuild: (m) => {
         // Move the row-one/row-two border so the rows differ by >= 100px —
         // "U" on a row-two pane shrinks row one (the `a` side) and grows row
@@ -484,7 +551,13 @@ describe("applyBottomWidths, through createWorkspace", () => {
       },
     });
 
-    await createWorkspace(client, { ...TRIAGE_SPEC, topFraction: null }, { ...OPTS, workers: SEVEN });
+    // The real spec now: `applyTopFraction` and `applyMiddleRowFraction` both
+    // run and will themselves move this border toward thirds — that is
+    // exercised by the seven-pane height describe below. What THIS test pins
+    // is narrower and still true with both height passes on: the WIDTH pass
+    // settles every column to a third regardless of what the height passes
+    // did to the rows, and it never itself issues a vertical resize.
+    await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
 
     expect(row2HeightAfterBuild - row1HeightAfterBuild).toBeGreaterThanOrEqual(100);
 
@@ -493,9 +566,19 @@ describe("applyBottomWidths, through createWorkspace", () => {
       const width = f.get(paneIdFor(titleByPane, title))!.width;
       expect(Math.abs(width - CONTAINER_WIDTH / 3)).toBeLessThan(1);
     }
-    // Widths only — applyBottomWidths must not have moved the row divider.
-    expect(f.get(paneIdFor(titleByPane, "r1c1"))!.height).toBeCloseTo(row1HeightAfterBuild, 5);
-    expect(f.get(paneIdFor(titleByPane, "r2c1"))!.height).toBeCloseTo(row2HeightAfterBuild, 5);
+
+    // The width pass runs LAST (`createWorkspace`'s own ordering comment), so
+    // nothing after its first horizontal resize should be a vertical one —
+    // proof from the call log, not just the end state, that
+    // `applyBottomWidths` itself never touches a row divider.
+    const firstWidthResizeIdx = calls.findIndex(
+      (c) => c[0] === "resize-pane" && (c.includes("-L") || c.includes("-R")),
+    );
+    expect(firstWidthResizeIdx).toBeGreaterThan(-1);
+    const verticalAfterFirstWidthResize = calls
+      .slice(firstWidthResizeIdx + 1)
+      .filter((c) => c[0] === "resize-pane" && (c.includes("-U") || c.includes("-D")));
+    expect(verticalAfterFirstWidthResize).toEqual([]);
   });
 
   test("bottomWidthFraction: null issues no width resize at all", async () => {
@@ -504,7 +587,7 @@ describe("applyBottomWidths, through createWorkspace", () => {
 
     await createWorkspace(
       client,
-      { ...TRIAGE_SPEC, topFraction: null, bottomWidthFraction: null },
+      { ...TRIAGE_SPEC, bottomWidthFraction: null },
       { ...OPTS, workers: SEVEN },
     );
 
@@ -512,5 +595,309 @@ describe("applyBottomWidths, through createWorkspace", () => {
       (c) => c[0] === "resize-pane" && (c.includes("-L") || c.includes("-R")),
     );
     expect(widthResizes).toEqual([]);
+  });
+});
+
+/**
+ * `applyTopFraction` + `applyMiddleRowFraction`, through `createWorkspace`, on
+ * the SEVEN-pane triage table — the shape neither pass could settle correctly
+ * before SRD-TRIAGE-MIXED-OBSERVERS §4.3/D4: the old shrink branch moved every
+ * non-top pane against `containerHeight * (1 - fraction)`, a target that only
+ * means what it says with ONE row below the top. With two rows it either
+ * over-moved the collator border (a row-one pane) or reached past row one
+ * and moved the border BETWEEN the observer rows instead (a row-two pane).
+ *
+ * Run for BOTH `list-panes` orders the fake can produce, because every
+ * computation in both passes is `Math.min`/`Math.max`/`.find`/`.filter` over
+ * `y`/`x`/`paneId`, and none of that is entitled to assume creation order.
+ */
+describe("applyTopFraction + applyMiddleRowFraction, through createWorkspace: the seven-pane table", () => {
+  const heightOf = (
+    frames: Map<string, { height: number }>,
+    titleByPane: Map<string, string>,
+    title: string,
+  ): number => frames.get(paneIdFor(titleByPane, title))!.height;
+  const widthOf = (
+    frames: Map<string, { width: number }>,
+    titleByPane: Map<string, string>,
+    title: string,
+  ): number => frames.get(paneIdFor(titleByPane, title))!.width;
+
+  const OBSERVER_TITLES = ["r1c1", "r1c2", "r1c3", "r2c1", "r2c2", "r2c3"];
+
+  /** Asserts the settled end state common to every scenario below. */
+  function expectSettled(model: LayoutModel, titleByPane: Map<string, string>): void {
+    const f = model.frames();
+    expect(Math.abs(heightOf(f, titleByPane, "top") - CONTAINER_HEIGHT * (TRIAGE_TOP_FRACTION as number))).toBeLessThan(1);
+    for (const title of OBSERVER_TITLES) {
+      expect(Math.abs(heightOf(f, titleByPane, title) - CONTAINER_HEIGHT / 3)).toBeLessThan(1);
+      expect(Math.abs(widthOf(f, titleByPane, title) - CONTAINER_WIDTH / 3)).toBeLessThan(1);
+    }
+  }
+
+  test.each(["creation", "reverse"] as const)(
+    "row two taller than row one by >= 100px settles to thirds (list order: %s)",
+    async (paneOrder) => {
+      const model = new LayoutModel();
+      let row1Before = 0;
+      let row2Before = 0;
+      const { client, titleByPane } = fakeCmux(model, {
+        paneOrder,
+        afterBuild: (m) => {
+          m.resize(paneIdFor(titleByPane, "r2c1"), "U", 150);
+          const f = m.frames();
+          row1Before = f.get(paneIdFor(titleByPane, "r1c1"))!.height;
+          row2Before = f.get(paneIdFor(titleByPane, "r2c1"))!.height;
+        },
+      });
+
+      await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
+
+      // The pre-shape actually produced unequal rows.
+      expect(row2Before - row1Before).toBeGreaterThanOrEqual(100);
+
+      expectSettled(model, titleByPane);
+    },
+  );
+
+  test.each(["creation", "reverse"] as const)(
+    "row one taller than row two by >= 100px settles to thirds (list order: %s)",
+    async (paneOrder) => {
+      const model = new LayoutModel();
+      let row1Before = 0;
+      let row2Before = 0;
+      const { client, titleByPane } = fakeCmux(model, {
+        paneOrder,
+        afterBuild: (m) => {
+          m.resize(paneIdFor(titleByPane, "r1c1"), "D", 150);
+          const f = m.frames();
+          row1Before = f.get(paneIdFor(titleByPane, "r1c1"))!.height;
+          row2Before = f.get(paneIdFor(titleByPane, "r2c1"))!.height;
+        },
+      });
+
+      await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
+
+      // The pre-shape actually produced unequal rows.
+      expect(row1Before - row2Before).toBeGreaterThanOrEqual(100);
+
+      expectSettled(model, titleByPane);
+    },
+  );
+
+  test.each(["creation", "reverse"] as const)(
+    "collator pre-shrunk below a third (GROW branch) with unequal observer rows settles to thirds (list order: %s)",
+    async (paneOrder) => {
+      const model = new LayoutModel();
+      let row1Before = 0;
+      let row2Before = 0;
+      const { client, titleByPane } = fakeCmux(model, {
+        paneOrder,
+        afterBuild: (m) => {
+          // Shrink the collator well below a third — the top-row pass must
+          // GROW it back, with two rows already beneath it.
+          m.resize(paneIdFor(titleByPane, "r1c1"), "U", 300);
+          // …and still leave the two observer rows unequal, so this scenario
+          // also proves the GROW branch does not accidentally depend on the
+          // two lower rows starting equal.
+          m.resize(paneIdFor(titleByPane, "r2c1"), "U", 150);
+          const f = m.frames();
+          row1Before = f.get(paneIdFor(titleByPane, "r1c1"))!.height;
+          row2Before = f.get(paneIdFor(titleByPane, "r2c1"))!.height;
+        },
+      });
+
+      await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
+
+      // The pre-shape actually produced unequal rows.
+      expect(row2Before - row1Before).toBeGreaterThanOrEqual(100);
+
+      expectSettled(model, titleByPane);
+    },
+  );
+
+  test.each(["creation", "reverse"] as const)(
+    "the collator shrink moves only the row directly beneath it: no -U names a row-two pane (list order: %s)",
+    async (paneOrder) => {
+      const model = new LayoutModel();
+      const { client, calls, titleByPane } = fakeCmux(model, {
+        paneOrder,
+        afterBuild: (m) => {
+          m.resize(paneIdFor(titleByPane, "r2c1"), "U", 150);
+        },
+      });
+
+      await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
+
+      // The collator starts at 526px, so the top pass SHRINKS; row one starts
+      // shorter than row two, so the middle pass GROWS row one with `-D`. No
+      // pass has a reason to issue `-U` on a row-two pane here. A shrink that
+      // reached past row one would move the border BETWEEN the observer rows,
+      // and the middle pass would quietly undo it, so the end state alone
+      // cannot show it; the call log can. With panes listed in reverse order a
+      // row-two pane is the first one such a shrink would visit.
+      const rowTwo = new Set(["r2c1", "r2c2", "r2c3"].map((t) => paneIdFor(titleByPane, t)));
+      const upOnRowTwo = calls.filter(
+        (c) => c[0] === "resize-pane" && c.includes("-U") && rowTwo.has(c[c.indexOf("--pane") + 1]!),
+      );
+      expect(upOnRowTwo).toEqual([]);
+      expectSettled(model, titleByPane);
+    },
+  );
+
+  test("no issued resize-pane is refused", async () => {
+    const model = new LayoutModel();
+    const { client, titleByPane } = fakeCmux(model, {
+      afterBuild: (m) => {
+        // A shape needing correction on every border this console has: the
+        // collator shrunk well below a third AND the two observer rows left
+        // unequal, so every pass in the chain has something to move.
+        m.resize(paneIdFor(titleByPane, "r1c1"), "U", 300);
+        m.resize(paneIdFor(titleByPane, "r2c1"), "U", 150);
+      },
+    });
+
+    // `applyTopFraction`'s own catch would SWALLOW a refused resize — see its
+    // docblock — so a passing end state alone would not catch one. The fake
+    // never refuses a well-formed resize (see `LayoutModel.resize`), so the
+    // only way this pass writes to stderr is a bug that issues a call the
+    // fake's model itself rejects (`invalid_state`, or a pane id it does not
+    // know). Captured directly rather than via the model's own `ok` field, so
+    // the same probe also catches a parse-level refusal.
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const written: string[] = [];
+    process.stderr.write = ((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    expect(written).toEqual([]);
+  });
+});
+
+/**
+ * Every ONE-LOWER-ROW console (`review`, `operations`) keeps its command
+ * sequence under SRD-TRIAGE-MIXED-OBSERVERS §4.3/D4's narrowed shrink branch:
+ * see `GOLDEN_REVIEW_BIG_SHRINK`'s docblock above for why the two branches
+ * agree in this model and why `applyMiddleRowFraction` never issues a call for these
+ * specs. This describe pins that with the same golden-call-sequence technique
+ * `GOLDEN_REVIEW_SEQUENCE` already used, covering both directions
+ * (`applyTopFraction`'s GROW and SHRINK branches) on both consoles.
+ */
+describe("one-lower-row consoles: command sequences unchanged by the narrowed shrink branch", () => {
+  test("review console: default build (existing golden, unchanged)", async () => {
+    const model = new LayoutModel();
+    const { client, calls, titleByPane } = fakeCmux(model);
+
+    await createWorkspace(client, REVIEW_SPEC, OPTS);
+
+    const focusIdx = calls.findIndex((c) => c[0] === "focus-pane");
+    expect(focusIdx).toBeGreaterThan(-1);
+    expect(calls.slice(focusIdx + 1)).toEqual(GOLDEN_REVIEW_SEQUENCE);
+
+    const colHeight = model.frames().get(paneIdFor(titleByPane, "col-1"))!.height;
+    expect(Math.abs(colHeight - CONTAINER_HEIGHT * (REVIEW_TOP_FRACTION as number))).toBeLessThan(1);
+  });
+
+  test("review console: collator pre-grown to ~800px (a bigger SHRINK)", async () => {
+    const model = new LayoutModel();
+    const { client, calls, titleByPane } = fakeCmux(model, {
+      afterBuild: (m) => {
+        const col = paneIdFor(titleByPane, "col-1");
+        const current = m.frames().get(col)!.height;
+        m.resize(col, "D", 800 - current);
+      },
+    });
+
+    await createWorkspace(client, REVIEW_SPEC, OPTS);
+
+    const focusIdx = calls.findIndex((c) => c[0] === "focus-pane");
+    expect(focusIdx).toBeGreaterThan(-1);
+    expect(calls.slice(focusIdx + 1)).toEqual(GOLDEN_REVIEW_BIG_SHRINK);
+
+    const colHeight = model.frames().get(paneIdFor(titleByPane, "col-1"))!.height;
+    expect(Math.abs(colHeight - CONTAINER_HEIGHT * (REVIEW_TOP_FRACTION as number))).toBeLessThan(1);
+  });
+
+  test("review console: collator pre-shrunk to ~200px (GROW)", async () => {
+    const model = new LayoutModel();
+    const { client, calls, titleByPane } = fakeCmux(model, {
+      afterBuild: (m) => {
+        const col = paneIdFor(titleByPane, "col-1");
+        const bottom = paneIdFor(titleByPane, "rev-arch-1");
+        const current = m.frames().get(col)!.height;
+        m.resize(bottom, "U", current - 200);
+      },
+    });
+
+    await createWorkspace(client, REVIEW_SPEC, OPTS);
+
+    const focusIdx = calls.findIndex((c) => c[0] === "focus-pane");
+    expect(focusIdx).toBeGreaterThan(-1);
+    expect(calls.slice(focusIdx + 1)).toEqual(GOLDEN_REVIEW_GROW);
+
+    const colHeight = model.frames().get(paneIdFor(titleByPane, "col-1"))!.height;
+    expect(Math.abs(colHeight - CONTAINER_HEIGHT * (REVIEW_TOP_FRACTION as number))).toBeLessThan(1);
+  });
+
+  test("operations console: default build (0.65 top fraction, a GROW from 526px)", async () => {
+    const model = new LayoutModel();
+    const { client, calls, titleByPane } = fakeCmux(model);
+
+    // OPTS carries no `workers`, so this also checks that the default
+    // (`DEFAULT_OPERATIONS_WORKERS`) is what the plan falls back to.
+    await createWorkspace(client, OPERATIONS_SPEC, OPTS);
+
+    const focusIdx = calls.findIndex((c) => c[0] === "focus-pane");
+    expect(focusIdx).toBeGreaterThan(-1);
+    expect(calls.slice(focusIdx + 1)).toEqual(GOLDEN_OPERATIONS_DEFAULT);
+
+    const topHeight = model.frames().get(paneIdFor(titleByPane, "observer"))!.height;
+    expect(Math.abs(topHeight - CONTAINER_HEIGHT * OPERATIONS_TOP_FRACTION)).toBeLessThan(1);
+  });
+
+  test("operations console: top row pre-grown to ~900px (SHRINK, -U on the monitor)", async () => {
+    const model = new LayoutModel();
+    const { client, calls, titleByPane } = fakeCmux(model, {
+      afterBuild: (m) => {
+        const observer = paneIdFor(titleByPane, "observer");
+        const current = m.frames().get(observer)!.height;
+        m.resize(observer, "D", 900 - current);
+      },
+    });
+
+    await createWorkspace(client, OPERATIONS_SPEC, OPTS);
+
+    const focusIdx = calls.findIndex((c) => c[0] === "focus-pane");
+    expect(focusIdx).toBeGreaterThan(-1);
+    expect(calls.slice(focusIdx + 1)).toEqual(GOLDEN_OPERATIONS_SHRINK);
+
+    const topHeight = model.frames().get(paneIdFor(titleByPane, "observer"))!.height;
+    expect(Math.abs(topHeight - CONTAINER_HEIGHT * OPERATIONS_TOP_FRACTION)).toBeLessThan(1);
+  });
+});
+
+/**
+ * The gate itself: `middleRowFraction` is set on exactly one spec.
+ *
+ * The BEHAVIOURAL pin is the golden sequences above (a gate set on `review`
+ * or `operations` would add a `list-panes` neither golden has) and the
+ * seven-pane describe (a gate absent on `triage` would leave the two observer
+ * rows unsettled) — this test only pins the DATA the gate reads, so a spec
+ * edited to carry the wrong value, or the right value on the wrong spec,
+ * reddens here before it ever reaches a behavioural probe.
+ */
+describe("middleRowFraction: the gate", () => {
+  test("only triage sets it, and only to TRIAGE_OBSERVER_ROW_FRACTION", () => {
+    expect(OPERATIONS_SPEC.middleRowFraction ?? null).toBeNull();
+    expect(DEVELOPMENT_SPEC.middleRowFraction ?? null).toBeNull();
+    expect(REVIEW_SPEC.middleRowFraction ?? null).toBeNull();
+    expect(TRIAGE_SPEC.middleRowFraction).toBe(TRIAGE_OBSERVER_ROW_FRACTION);
+    expect(TRIAGE_SPEC.middleRowFraction).toBe(1 / 2);
   });
 });

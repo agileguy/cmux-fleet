@@ -1383,13 +1383,13 @@ export const DEFAULT_TRIAGE_WORKERS: readonly string[] = [
  *
  * A shrink is also the branch that already works. `applyTopFraction` chooses the
  * row by the SIGN of the correction, so a target below the current height
- * addresses the BOTTOM row with `-U`, which is a border those panes really have.
- * Measured on the live console 2026-09-13: container 1052px, top row 526px, so
- * the target of 350.67px makes `growTop` false and the three observer panes each
- * ask to grow to 701.33px. They share ONE divider, so the re-read-before-every-pane
- * rule collapses the second and third asks to sub-pixel no-ops — the behaviour
- * that docblock's 2026-09-03 measurement describes, reached here for the first
- * time by a console other than `operations`.
+ * addresses the row BENEATH the top with `-U`, which is a border those panes
+ * really have. Measured on the live console 2026-09-13: container 1052px, top
+ * row 526px, so the target of 350.67px makes `growTop` false and the row beneath
+ * is moved `-U` by the top row's excess, 526 − 350.67px. They share ONE divider,
+ * so the re-read-before-every-pane rule collapses the second and third asks to
+ * sub-pixel no-ops — the behaviour that docblock's 2026-09-03 measurement
+ * describes, reached here for the first time by a console other than `operations`.
  *
  * ## And the old caveat that still stands: nobody is watching
  *
@@ -1438,6 +1438,27 @@ export const TRIAGE_TOP_FRACTION: number | null = 1 / 3;
  * panes is the same statement and cannot drift out of range.
  */
 export const TRIAGE_OBSERVER_WIDTH_FRACTION: number | null = 1 / 3;
+
+/**
+ * How much of the height BELOW the collator the first observer row gets, of
+ * the two full-width observer rows the seven-worker table puts beneath it.
+ *
+ * The two rows are handed equal work — each is three observers taking an even
+ * slice of the environment, the same as the columns within either row — so
+ * they are handed equal HEIGHT: `1/2` of whatever the collator's own pass left
+ * for "everything below it". With the collator at {@link TRIAGE_TOP_FRACTION}
+ * (`1/3`), one third of the container, half of the remaining two thirds is one
+ * third again — so every one of the three rows this console now has ends up
+ * the same height, which is the point: nothing about the collator/observer
+ * split should be read as ranking the two observer rows against each other.
+ *
+ * Unset on every other spec. {@link OPERATIONS_SPEC}'s bottom row is one
+ * pane; {@link DEVELOPMENT_SPEC} is a 2x2 with no row below a row; and
+ * {@link REVIEW_SPEC} still has exactly one row beneath its collator. This
+ * fraction is expressible only where there are two rows beneath the top one
+ * to divide between, which today is `triage` alone.
+ */
+export const TRIAGE_OBSERVER_ROW_FRACTION: number | null = 1 / 2;
 
 /**
  * The triage console's panes, in creation order.

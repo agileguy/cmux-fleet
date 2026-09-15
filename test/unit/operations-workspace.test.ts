@@ -353,10 +353,19 @@ describe("creating the workspace", () => {
  * It is now a console with the MOST correction: `topFraction` is `1/3` and it
  * carries a `bottomWidthFraction`, because a collator over three observers is a
  * layout `new-split` cannot produce — halving gives 50/50 vertically and
- * 50/25/25 horizontally. So it issues THREE `list-panes`: the focus lookup, the
- * height pass, and the width pass. The probe is the same behavioural one,
- * counting up instead of down — a spec that dropped either fraction reddens
- * here.
+ * 50/25/25 horizontally. So it issues FOUR `list-panes`: the focus lookup, the
+ * top-row height pass, the middle-row height pass, and the width pass. The
+ * probe is the same behavioural one, counting up instead of down — a spec that
+ * dropped any of the three fractions reddens here.
+ *
+ * **THE FOURTH READ, ADDED SRD-TRIAGE-MIXED-OBSERVERS §4.3/D4.** `TRIAGE_SPEC`
+ * carries a `middleRowFraction` for the seven-worker shape's two observer rows
+ * — see {@link applyMiddleRowFraction} — and `ensureTriage`'s default is still
+ * four workers, one lower row. `applyMiddleRowFraction` reads geometry before
+ * it can tell there is only one row to divide against, so its read is issued
+ * and its correction is not: the pass's own row-count check returns once it
+ * sees fewer than three distinct `y`s, and no `resize-pane` follows it here
+ * either way, since this fake reports no `container_frame` at all.
  *
  * **"THE ONLY SPEC WITH A `bottomWidthFraction`" LASTED ONE DAY.** This docblock
  * said that until 2026-09-13, when `review` was asked to take the same shape and
@@ -433,7 +442,7 @@ describe("the triage console is built from its own spec", () => {
     expect(verbsOf(calls)).toContain("workspace create");
   });
 
-  test("issues one create, three splits and four respawns — and THREE list-panes", async () => {
+  test("issues one create, three splits and four respawns — and FOUR list-panes", async () => {
     const { client, calls } = fakeCmux();
 
     const result = await ensureTriage(client, OPTS);
@@ -455,19 +464,24 @@ describe("the triage console is built from its own spec", () => {
       "rename-tab",
       "respawn-pane",
       "select-workspace",
-      // THREE `list-panes`, and each one is a different claim about this spec.
+      // FOUR `list-panes`, and each one is a different claim about this spec.
       // The first is the focus lookup, which every console does. The second is
       // `applyTopFraction` reading geometry — it returns before that read when
       // `topFraction` is `null`, so its presence IS the 1/3 asserted through
-      // behaviour. The third is `applyBottomWidths`, which only this console
-      // reaches, because it is the only spec carrying a `bottomWidthFraction`.
+      // behaviour. The third is `applyMiddleRowFraction` reading geometry —
+      // present because `middleRowFraction` is set, even though the default
+      // four-worker build has only one row below the top and the pass's own
+      // row-count check finds nothing to divide once it reads. The fourth is
+      // `applyBottomWidths`, which only this console reaches at four workers,
+      // because it is the only spec carrying a `bottomWidthFraction`.
       //
       // No `resize-pane` follows any of them: this fake reports no
-      // `container_frame`, so both passes take their parse-failed path. The
+      // `container_frame`, so every pass takes its parse-failed path. The
       // calls being ISSUED is what this pins — the arithmetic has no double to
       // run against and is measured on the live console instead.
       "list-panes",
       "focus-pane",
+      "list-panes",
       "list-panes",
       "list-panes",
       // The group lookup every rebuild does. No `workspace-group add` follows:

@@ -70,6 +70,7 @@ import {
   REVIEW_REVIEWER_WIDTH_FRACTION,
   REVIEW_TOP_FRACTION,
   REVIEW_WORKSPACE,
+  TRIAGE_OBSERVER_ROW_FRACTION,
   TRIAGE_OBSERVER_WIDTH_FRACTION,
   TRIAGE_TOP_FRACTION,
   TRIAGE_WORKSPACE,
@@ -125,6 +126,25 @@ export interface WorkspaceSpec {
    * same rule governs here.
    */
   readonly bottomWidthFraction: number | null;
+  /**
+   * Fraction of the height BELOW the top row that the row directly beneath it
+   * gets, for a console with TWO rows below the top — or `null`/absent to skip
+   * this pass, which is every console except `triage` at seven workers.
+   *
+   * `applyTopFraction` only ever moves the border between the top row and
+   * "everything below" it; on a console with two rows in that "everything
+   * below" region, that pass alone leaves how those two rows split their
+   * combined height entirely up to whatever `new-split` produced. This field
+   * is the second height correction that settles that split, applied by
+   * {@link applyMiddleRowFraction} — see its docblock for why it must run
+   * after {@link applyTopFraction} and before {@link applyBottomWidths}.
+   *
+   * Optional and defaulting to skipped, on the same reasoning as
+   * {@link topFraction} and {@link bottomWidthFraction}: a console with only
+   * one row below its top row has nothing for this pass to divide, and
+   * running it there would be a no-op dressed as a decision.
+   */
+  readonly middleRowFraction?: number | null;
 }
 
 /**
@@ -229,6 +249,10 @@ export const TRIAGE_SPEC: WorkspaceSpec = {
   panes: triagePanes,
   topFraction: TRIAGE_TOP_FRACTION,
   bottomWidthFraction: TRIAGE_OBSERVER_WIDTH_FRACTION,
+  // Only this console has two rows below its top row (the seven-worker
+  // shape) for this fraction to divide between. See
+  // {@link WorkspaceSpec.middleRowFraction} and {@link TRIAGE_OBSERVER_ROW_FRACTION}.
+  middleRowFraction: TRIAGE_OBSERVER_ROW_FRACTION,
 };
 
 /**
@@ -657,13 +681,28 @@ export async function createWorkspace(
     created.surfaceId,
   );
   if (firstPaneId !== null) await client.runOk(focusPaneArgv(wsId, firstPaneId));
+  // THREE HEIGHT-THEN-WIDTH PASSES, IN THIS ORDER, and the order is not
+  // arbitrary even though the three corrections are independent in what each
+  // one touches:
+  //
+  //   1. `applyTopFraction`     — moves the border between the top row and
+  //                               everything below it.
+  //   2. `applyMiddleRowFraction` — for a console with TWO rows below the
+  //                               top, moves the border BETWEEN those two
+  //                               rows. It runs second because it divides
+  //                               whatever `applyTopFraction` left for
+  //                               "everything below" — see its own docblock
+  //                               for why running it first would have it
+  //                               settle a region the top pass is about to
+  //                               resize out from under it.
+  //   3. `applyBottomWidths`    — re-reads geometry, so it sees every row
+  //                               exactly where the two height passes left
+  //                               it rather than where `new-split` first put
+  //                               it. Running it before either height pass
+  //                               would leave it computing against rows that
+  //                               are about to move underneath it.
   await applyTopFraction(client, wsId, spec.topFraction);
-  // HEIGHT FIRST, THEN WIDTH, and the order is not arbitrary even though the
-  // two corrections are independent in this layout: the height pass moves the
-  // row divider, which changes every bottom pane's `y`. The width pass re-reads
-  // geometry, so it sees the settled rows rather than the ones it was planned
-  // against — running it first would leave it computing against a row that is
-  // about to move underneath it.
+  await applyMiddleRowFraction(client, wsId, spec.middleRowFraction);
   await applyBottomWidths(client, wsId, spec.bottomWidthFraction);
   return { created: true, workspaceId: wsId };
 }
@@ -718,6 +757,35 @@ export async function createWorkspace(
  * failed would trade the whole feature for a nicety. That restraint is also
  * what hid both defects above for as long as it did, so the `catch` now says
  * what it swallowed.
+ *
+ * ## THE SHRINK BRANCH IS NARROWED TO ONE ROW, SRD-TRIAGE-MIXED-OBSERVERS §4.3/D4
+ *
+ * The shrink branch used to move EVERY pane whose `y` differed from the top
+ * row's, each against `containerHeight * (1 - fraction)` — a target that only
+ * means what it says when there is exactly ONE row below the top. That was
+ * every console this function had ever run against, until the triage console
+ * grew a second full-width observer row: a row-one pane there is roughly HALF
+ * of the lower region rather than all of it, so its delta over-moved the
+ * collator's border, and a row-two pane's `-U` reached past row one entirely
+ * and moved the border BETWEEN the two observer rows instead — a border this
+ * function has no business touching.
+ *
+ * The fix moves only the panes in the row DIRECTLY BENEATH the top row (the
+ * smallest `y` greater than `topY`, read once from the first snapshot), and
+ * expresses each pane's delta as the CURRENT top-row height minus its target,
+ * rather than against the container's complement. The two are the same number
+ * when there is one row below and no divider between the rows — top-row height
+ * plus that row's height is then the whole container — which is why a
+ * one-lower-row console (`operations`, `review`, `triage` at four workers)
+ * issues the same verbs, to the same panes, with the same amounts in the
+ * split-tree model the geometry suite runs. A live divider is the one place the
+ * two can differ, by at most its width: the old target counted the divider into
+ * the lower row and this one does not. Where they diverge is the
+ * seven-worker triage console, where they must: the old formula quietly
+ * assumed "the rest of the container" was one row, and a second row is what
+ * that assumption never held for. {@link applyMiddleRowFraction} is what
+ * settles the split BETWEEN two lower rows; this function only ever owns the
+ * border above the first of them.
  */
 async function applyTopFraction(
   client: CmuxClient,
@@ -756,33 +824,65 @@ async function applyTopFraction(
     // would pick a row to issue a no-op against.
     if (Math.abs(topTarget - topHeight) < 1) return;
     const growTop = topTarget > topHeight;
-    // The row that OWNS the border for this direction, and the direction that
-    // names it from there. See the docblock: the other row has no such border
-    // and the call is refused.
-    const movingIds = first.panes
-      .filter((p) => (growTop ? p.y === topY : p.y !== topY))
-      .map((p) => p.paneId);
-    const dir = growTop ? "D" : "U";
+    if (growTop) {
+      // The top row OWNS the border in this direction — see the docblock —
+      // so every top-row pane moves, against the fraction directly.
+      const movingIds = first.panes.filter((p) => p.y === topY).map((p) => p.paneId);
+      for (const paneId of movingIds) {
+        const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+        const pane = geo.panes.find((p) => p.paneId === paneId);
+        if (pane === undefined) continue;
+        const target = geo.containerHeight * fraction;
+        const delta = target - pane.height;
+        // Sub-pixel deltas are what an already-correct layout produces; issuing
+        // them would be a no-op command per pane on every adoption. With a
+        // shared divider this is also the arm that stops a later pane
+        // re-applying a correction an earlier one already made.
+        if (Math.abs(delta) < 1) continue;
+        // Only ever the direction chosen above. A delta whose sign disagrees
+        // with it means the divider has already passed the target — the next
+        // pane's re-read will see that as sub-pixel or as an overshoot, and
+        // either way reversing here would fight the border from the row that
+        // cannot reach it.
+        if (delta < 0) continue;
+        await client.runOk(resizePaneArgv(paneId, "D", delta));
+      }
+      return;
+    }
+    // SHRINK: only the row DIRECTLY BENEATH the top row owns this border — see
+    // the docblock's "THE SHRINK BRANCH IS NARROWED TO ONE ROW" section. A
+    // console with a second row further down (seven-worker `triage`) has that
+    // row's split settled by {@link applyMiddleRowFraction}, not here.
+    const topRowIds = first.panes.filter((p) => p.y === topY).map((p) => p.paneId);
+    const belowY = Math.min(...first.panes.filter((p) => p.y > topY).map((p) => p.y));
+    const movingIds = first.panes.filter((p) => p.y === belowY).map((p) => p.paneId);
     for (const paneId of movingIds) {
       const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
       const pane = geo.panes.find((p) => p.paneId === paneId);
       if (pane === undefined) continue;
-      // Expressed against the row being moved: the top row's target is the
-      // fraction, the bottom row's is its complement.
-      const target = geo.containerHeight * (growTop ? fraction : 1 - fraction);
-      const delta = target - pane.height;
+      // The CURRENT top-row height, re-read — as the max over the pane ids
+      // that formed the top row in the FIRST read, never a stale snapshot.
+      // With a shared divider across the top row (`operations`'s two agent
+      // panes) this is what lets the second pane see the border where the
+      // first pane's resize actually left it.
+      const heights = topRowIds
+        .map((id) => geo.panes.find((p) => p.paneId === id)?.height)
+        .filter((h): h is number => h !== undefined);
+      if (heights.length === 0) continue;
+      const currentTopHeight = Math.max(...heights);
+      const delta = currentTopHeight - geo.containerHeight * fraction;
       // Sub-pixel deltas are what an already-correct layout produces; issuing
-      // them would be a no-op command per pane on every adoption. With a shared
-      // divider this is also the arm that stops the second pane re-applying a
-      // correction the first one already made.
+      // them would be a no-op command per pane on every adoption. With a
+      // shared divider this is also the arm that stops a later pane
+      // re-applying a correction an earlier one already made.
       if (Math.abs(delta) < 1) continue;
-      // Only ever the direction chosen above. A delta whose sign disagrees with
-      // it means the divider has already passed the target — the next pane's
-      // re-read will see that as sub-pixel or as an overshoot, and either way
-      // reversing here would fight the border from the row that cannot reach
-      // it.
+      // Only ever the direction chosen above. A delta whose sign disagrees
+      // with it means the divider has already passed the target — the next
+      // pane's re-read will see that as sub-pixel or as an overshoot, and
+      // either way reversing here would fight the border from the row that
+      // cannot reach it.
       if (delta < 0) continue;
-      await client.runOk(resizePaneArgv(paneId, dir, delta));
+      await client.runOk(resizePaneArgv(paneId, "U", delta));
     }
   } catch (err) {
     // See the docblock: layout is cosmetic, the console is not. But a silent
@@ -790,6 +890,134 @@ async function applyTopFraction(
     // the operator gets a line and still gets a console.
     process.stderr.write(
       `operations: pane layout left as split ` +
+        `(${err instanceof Error ? err.message : String(err)})\n`,
+    );
+  }
+}
+
+/**
+ * Give the row directly beneath the top row {@link TRIAGE_OBSERVER_ROW_FRACTION}
+ * of the height the TWO rows below the top row share between them, on a
+ * console with exactly three rows total.
+ *
+ * SRD-TRIAGE-MIXED-OBSERVERS §4.3/D4. `applyTopFraction` only ever settles the
+ * border between the top row and "everything below" it; on the seven-worker
+ * triage console "everything below" is itself two full-width observer rows,
+ * and nothing before this pass says how THEY split that space. `new-split`
+ * gives them 50/50, same as any other halved pair.
+ *
+ * ## WHY THIS MUST RUN AFTER {@link applyTopFraction}, NEVER BEFORE
+ *
+ * The collator and the two observer rows are not three independent regions —
+ * they are nested splits, one INSIDE the other: `triagePanes`' seven-pane
+ * table opens the observer rows with a `down` off the collator (deciding how
+ * much height the top row gets) and THEN a `down` off the first observer row
+ * (deciding how the remainder splits between the two of them). Moving the
+ * OUTER border — what `applyTopFraction` does — redistributes the "everything
+ * below" region PROPORTIONALLY across both rows nested inside it, because
+ * they are subtrees of that one vertical split and neither row's own internal
+ * ratio changes when the split containing both of them is resized. Settling
+ * the inner border FIRST would have this pass compute a correct split against
+ * the height the two rows happen to hold before the collator has taken or
+ * given back its share — a height {@link applyTopFraction} is about to move
+ * out from under it, exactly the reason {@link createWorkspace}'s own comment
+ * gives for running the width pass after both height passes.
+ *
+ * ## WHY THE DENOMINATOR IS THE TWO ROWS' COMBINED HEIGHT, NOT THE CONTAINER
+ *
+ * The border this pass moves sits BETWEEN the two observer rows and cannot
+ * see the collator's row at all — resizing across it would require reaching
+ * through a border this pass has no business touching, which is exactly the
+ * mistake the narrowed {@link applyTopFraction} shrink branch was written to
+ * stop making. A target expressed as a fraction of the CONTAINER would drift
+ * from wrong to worse every time the collator's own share changed, since the
+ * two numbers have no fixed relationship. A fraction of the two rows' own
+ * combined height is the only target this border can actually reach, and it
+ * is invariant under exactly the resize this pass performs: moving the
+ * border between the rows redistributes height between them without changing
+ * how much they hold TOGETHER, so recomputing the target from a fresh read
+ * before every pane sees the same combined height throughout the loop.
+ *
+ * ## WHY IT IS GATED
+ *
+ * `middleRowFraction` is optional and `null`/`undefined` returns before any
+ * geometry is read, on the same reasoning {@link applyTopFraction} and
+ * {@link applyBottomWidths} both give for their own gates: a console with only
+ * one row below its top row (`operations`, `review`, `triage` at four
+ * workers, `development`) has nothing for this pass to divide between, and
+ * running it there would be a no-op dressed as a decision rather than a
+ * stated absence of one. The row-count check below is the second half of the
+ * same gate — a spec could carry a fraction while `--workers` resolves to a
+ * shape with fewer than three rows, and that is "nothing to divide" too,
+ * discovered from the geometry rather than assumed from the spec.
+ *
+ * Best-effort, for {@link applyTopFraction}'s reason and with its same
+ * remedy: a console whose panes are all correct but the two observer rows are
+ * unevenly split is fully usable, so a cosmetic resize failure must not take
+ * the workspace down — but the `catch` says what it swallowed.
+ */
+async function applyMiddleRowFraction(
+  client: CmuxClient,
+  wsId: string,
+  fraction: number | null | undefined,
+): Promise<void> {
+  if (fraction === null || fraction === undefined) return;
+  let first: ReturnType<typeof parsePaneGeometry>;
+  try {
+    first = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+  } catch {
+    return;
+  }
+  try {
+    const rowYs = [...new Set(first.panes.map((p) => p.y))].sort((a, b) => a - b);
+    // Exactly three rows — collator, first observer row, second observer
+    // row — or there is nothing this pass owns. A console with fewer rows has
+    // no second lower row to divide against; more than three is a shape this
+    // pass does not know and must not guess at.
+    if (rowYs.length !== 3) return;
+    const middleY = rowYs[1]!;
+    const bottomY = rowYs[2]!;
+    const middleIds = first.panes.filter((p) => p.y === middleY).map((p) => p.paneId);
+    const bottomIds = first.panes.filter((p) => p.y === bottomY).map((p) => p.paneId);
+    if (middleIds.length === 0 || bottomIds.length === 0) return;
+    const heightOf = (panes: readonly { paneId: string; height: number }[], ids: readonly string[]): number =>
+      Math.max(...ids.map((id) => panes.find((p) => p.paneId === id)?.height ?? 0));
+    const middleHeight = heightOf(first.panes, middleIds);
+    const bottomHeight = heightOf(first.panes, bottomIds);
+    const target = fraction * (middleHeight + bottomHeight);
+    // Already right, and neither row needs a command. Checked before the row
+    // is chosen because the sign of a sub-pixel delta is noise, and acting on
+    // it would pick a row to issue a no-op against.
+    if (Math.abs(target - middleHeight) < 1) return;
+    const growMiddle = target > middleHeight;
+    // Growing the middle row moves the border by resizing the MIDDLE row's
+    // own panes `-D`; shrinking it is done from the other side, resizing the
+    // BOTTOM row's panes `-U` — the same "choose the row that owns the
+    // border" rule {@link applyTopFraction} states at length, applied to the
+    // border between these two rows instead of the one above them.
+    const movingIds = growMiddle ? middleIds : bottomIds;
+    const dir = growMiddle ? "D" : "U";
+    for (const paneId of movingIds) {
+      const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+      const pane = geo.panes.find((p) => p.paneId === paneId);
+      if (pane === undefined) continue;
+      // Re-read before every pane, and the target recomputed from THIS read —
+      // never the first one — for the reason the docblock states: the two
+      // rows' combined height is what stays invariant across this loop, not
+      // either row's height alone, so recomputing from the current split is
+      // what lets a shared divider collapse a later pane's ask to a
+      // sub-pixel no-op instead of re-applying a correction already made.
+      const midNow = heightOf(geo.panes, middleIds);
+      const botNow = heightOf(geo.panes, bottomIds);
+      const targetNow = fraction * (midNow + botNow);
+      const delta = growMiddle ? targetNow - midNow : midNow - targetNow;
+      if (Math.abs(delta) < 1) continue;
+      if (delta < 0) continue;
+      await client.runOk(resizePaneArgv(paneId, dir, delta));
+    }
+  } catch (err) {
+    process.stderr.write(
+      `operations: observer row height left as split ` +
         `(${err instanceof Error ? err.message : String(err)})\n`,
     );
   }
