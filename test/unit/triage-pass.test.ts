@@ -47,7 +47,6 @@ import {
   type SweepDriver,
   type SweepJoin,
   type SweepOpen,
-  type SweptEnvironment,
   type TriagePassDeps,
   type TriagePassOutcome,
 } from "../../src/run/triage-pass.ts";
@@ -65,6 +64,7 @@ import { freshDeliveryState, type NotifyOutcome, type NotifyRequest } from "../.
 import {
   SATURATION_MIN_MISSING,
   SATURATION_VERDICTS,
+  type DeclaredEnvironment,
   type ObserverArtifact,
   type SaturationOutcome,
   type SaturationVerdict,
@@ -314,20 +314,21 @@ interface DepsOptions {
   readonly notify?: TriagePassDeps["notify"];
   /** Defaults to {@link ENVIRONMENT}. Only task 3.3's own tests override it. */
   readonly environment?: string;
-  /** Defaults to the one k8s environment the rest of this fixture world sweeps. */
-  readonly environments?: readonly SweptEnvironment[];
+  /** Defaults to the one k8s environment and its services the rest of this fixture world sweeps. */
+  readonly declared?: readonly DeclaredEnvironment[];
 }
 
-/** {@link deps}'s default {@link TriagePassDeps.environments} — the one k8s environment. */
-const K8S_ENVIRONMENTS: readonly SweptEnvironment[] = [{ name: ENVIRONMENT, kind: "k8s" }];
+/** {@link deps}'s default {@link TriagePassDeps.declared} — the one k8s environment. */
+const K8S_DECLARED: readonly DeclaredEnvironment[] = [
+  { name: ENVIRONMENT, kind: "k8s", services: [...SERVICES] },
+];
 
 function deps(opts: DepsOptions = {}): TriagePassDeps {
   const config = defaultTriageConsoleConfig();
   clock.at = opts.now ?? T0;
   return {
     environment: opts.environment ?? ENVIRONMENT,
-    environments: opts.environments ?? K8S_ENVIRONMENTS,
-    declared: [...SERVICES],
+    declared: opts.declared ?? K8S_DECLARED,
     windowPolicy: { default_window_s: DEFAULT_WINDOW_S, reserve_s: config.reserve_s },
     config,
     notify: opts.notify === undefined ? config.notify : opts.notify,
@@ -1934,17 +1935,22 @@ describe("the memo is a value in and a value out", () => {
  * with no need to drive a second sweep for `"firing"`.
  */
 describe("task 3.3's settle half — one environment fact per swept kind", () => {
-  /** Two kinds present at once: the fixture's existing k8s seats, plus a docker one. */
-  const MIXED_ENVIRONMENTS: readonly SweptEnvironment[] = [
-    { name: "do-cluster", kind: "k8s" },
-    { name: "docker-host", kind: "docker" },
+  /**
+   * Two kinds present at once: the fixture's existing k8s seats, plus a
+   * docker one. `docker-host` declares no services of its own here — these
+   * tests exercise `observerBlocked`'s per-kind scoping via `blocked`, never
+   * a docker dispatch, and an empty `services` is legal (§6.5's `N = 0` row).
+   */
+  const MIXED_DECLARED: readonly DeclaredEnvironment[] = [
+    { name: "do-cluster", kind: "k8s", services: [...SERVICES] },
+    { name: "docker-host", kind: "docker", services: [] },
   ];
 
   test("a blocked docker seat opens observer_blocked on docker only, never on k8s", async () => {
     const records = store();
     const spy = driver({ blocked: ["obs-td1"] });
     await triagePass(
-      deps({ driver: spy.driver, records, environment: "do-cluster", environments: MIXED_ENVIRONMENTS }),
+      deps({ driver: spy.driver, records, environment: "do-cluster", declared: MIXED_DECLARED }),
     );
     // do-cluster (k8s): obs-td1 is not a k8s seat, so workersOfKind("k8s", ...) is
     // empty and the record stays clear.
@@ -1957,7 +1963,7 @@ describe("task 3.3's settle half — one environment fact per swept kind", () =>
     const records = store();
     const spy = driver({ blocked: ["obs-t2"] });
     await triagePass(
-      deps({ driver: spy.driver, records, environment: "do-cluster", environments: MIXED_ENVIRONMENTS }),
+      deps({ driver: spy.driver, records, environment: "do-cluster", declared: MIXED_DECLARED }),
     );
     expect(records.held.get("console_health:do-cluster/observer_blocked")?.state).toBe("provisional");
     expect(records.held.get("console_health:docker-host/observer_blocked")?.state).toBe("clear");
@@ -1970,26 +1976,26 @@ describe("task 3.3's settle half — one environment fact per swept kind", () =>
     // it from every kind, k8s and docker alike.
     const spy = driver({ blocked: ["obs-d1"] });
     await triagePass(
-      deps({ driver: spy.driver, records, environment: "do-cluster", environments: MIXED_ENVIRONMENTS }),
+      deps({ driver: spy.driver, records, environment: "do-cluster", declared: MIXED_DECLARED }),
     );
     expect(records.held.get("console_health:do-cluster/observer_blocked")?.state).toBe("clear");
     expect(records.held.get("console_health:docker-host/observer_blocked")?.state).toBe("clear");
   });
 
-  test("one entry per deps.environments element, in deps.environments order", async () => {
+  test("one entry per deps.declared element, in deps.declared order", async () => {
     const records = store();
     // Deliberately neither alphabetical nor deps.environment-first, so an
     // implementation that assumes an order (or sorts) is caught rather than
     // coincidentally agreeing with it. Only the vm seat is blocked, so the
     // pairing is checked alongside the order rather than assumed from it.
-    const ordered: readonly SweptEnvironment[] = [
-      { name: "vm-host", kind: "vm" },
-      { name: "do-cluster", kind: "k8s" },
-      { name: "docker-host", kind: "docker" },
+    const ordered: readonly DeclaredEnvironment[] = [
+      { name: "vm-host", kind: "vm", services: [] },
+      { name: "do-cluster", kind: "k8s", services: [...SERVICES] },
+      { name: "docker-host", kind: "docker", services: [] },
     ];
     const spy = driver({ blocked: ["obs-tv1"] });
     const out = await triagePass(
-      deps({ driver: spy.driver, records, environment: "do-cluster", environments: ordered }),
+      deps({ driver: spy.driver, records, environment: "do-cluster", declared: ordered }),
     );
 
     const scopes = out.written.flatMap((r) =>
@@ -2008,20 +2014,22 @@ describe("task 3.3's settle half — one environment fact per swept kind", () =>
    * empty alongside the throw, so a refusal that fired AFTER a dispatch would
    * fail here too.
    */
-  describe("triagePass refuses a miswired deps.environments before anything is dispatched", () => {
-    test("an empty environments list", async () => {
+  describe("triagePass refuses a miswired deps.declared before anything is dispatched", () => {
+    test("an empty declared list", async () => {
       const spy = driver();
-      await expect(triagePass(deps({ driver: spy.driver, environments: [] }))).rejects.toThrow(
-        /deps\.environments is empty/,
+      await expect(triagePass(deps({ driver: spy.driver, declared: [] }))).rejects.toThrow(
+        /deps\.declared is empty/,
       );
       expect(spy.opened).toHaveLength(0);
       expect(spy.dispatched).toHaveLength(0);
     });
 
-    test("environments that omit an entry named deps.environment", async () => {
+    test("declared that omits an entry named deps.environment", async () => {
       const spy = driver();
       await expect(
-        triagePass(deps({ driver: spy.driver, environments: [{ name: "not-cni-dev", kind: "k8s" }] })),
+        triagePass(
+          deps({ driver: spy.driver, declared: [{ name: "not-cni-dev", kind: "k8s", services: [...SERVICES] }] }),
+        ),
       ).rejects.toThrow(/does not contain an entry named "cni-dev"/);
       expect(spy.opened).toHaveLength(0);
       expect(spy.dispatched).toHaveLength(0);
@@ -2033,9 +2041,9 @@ describe("task 3.3's settle half — one environment fact per swept kind", () =>
         triagePass(
           deps({
             driver: spy.driver,
-            environments: [
-              { name: ENVIRONMENT, kind: "k8s" },
-              { name: ENVIRONMENT, kind: "docker" },
+            declared: [
+              { name: ENVIRONMENT, kind: "k8s", services: [...SERVICES] },
+              { name: ENVIRONMENT, kind: "docker", services: [] },
             ],
           }),
         ),
@@ -2050,9 +2058,9 @@ describe("task 3.3's settle half — one environment fact per swept kind", () =>
         triagePass(
           deps({
             driver: spy.driver,
-            environments: [
-              { name: ENVIRONMENT, kind: "k8s" },
-              { name: "second-k8s", kind: "k8s" },
+            declared: [
+              { name: ENVIRONMENT, kind: "k8s", services: [...SERVICES] },
+              { name: "second-k8s", kind: "k8s", services: [] },
             ],
           }),
         ),
@@ -2060,5 +2068,70 @@ describe("task 3.3's settle half — one environment fact per swept kind", () =>
       expect(spy.opened).toHaveLength(0);
       expect(spy.dispatched).toHaveLength(0);
     });
+  });
+});
+
+/**
+ * Task 4.2 — `dispatchPartition` (`triagePass`'s call inside it) receives
+ * `deps.declared` mapped to `{kind, services}`, one group per entry, rather
+ * than a single hardcoded k8s group built from a flat `deps.declared`. §5's
+ * own example: `do-cluster` and `docker-host` both declare a `grafana`, and
+ * D21 keys the merged assessment on `(environment, service)` precisely so the
+ * two do not collide.
+ */
+describe("task 4.2 — dispatchPartition covers every declared kind, not a hardcoded k8s group", () => {
+  /** do-cluster (k8s) and docker-host (docker), each declaring one `grafana` — SRD-TRIAGE-MIXED-OBSERVERS §5. */
+  const GRAFANA_DECLARED: readonly DeclaredEnvironment[] = [
+    { name: "do-cluster", kind: "k8s", services: ["grafana"] },
+    { name: "docker-host", kind: "docker", services: ["grafana"] },
+  ];
+
+  /** A fresh, gap-free `grafana` row naming its own environment (task 4.1b's `TriageRow.environment`). */
+  function grafanaRow(environment: string): TriageRow {
+    return { ...healthyRow("grafana"), environment };
+  }
+
+  test("a k8s seat's grafana and a docker seat's grafana are BOTH dispatched, and both rows come back observed", async () => {
+    const spy = driver({
+      assignments: [
+        { worker: "obs-t1", services: ["grafana"] },
+        { worker: "obs-td1", services: ["grafana"] },
+      ],
+      artifacts: (sweepId) => [artifact("obs-t1", sweepId), artifact("obs-td1", sweepId)],
+      rows: () => [grafanaRow("do-cluster"), grafanaRow("docker-host")],
+    });
+    const out = await triagePass(
+      deps({ driver: spy.driver, environment: "do-cluster", declared: GRAFANA_DECLARED }),
+    );
+
+    expect(out.kind).toBe("swept");
+    expect([...spy.dispatched].sort((a, b) => a.worker.localeCompare(b.worker))).toEqual([
+      { sweepId: "T-sweep-1", worker: "obs-t1" },
+      { sweepId: "T-sweep-1", worker: "obs-td1" },
+    ]);
+    expect(out.assessment?.services.map((s) => [s.environment, s.service, s.reason])).toEqual([
+      ["do-cluster", "grafana", "observed"],
+      ["docker-host", "grafana", "observed"],
+    ]);
+  });
+
+  /**
+   * `docker-host`'s `grafana` is never claimed by a docker seat — only a k8s
+   * one claims a `grafana`, and per-kind scoping (task 4.1) means that claim
+   * counts toward `do-cluster`'s declared set and NOT `docker-host`'s. The
+   * docker bucket is therefore still missing its one service and the whole
+   * sweep is refused before anything is dispatched.
+   */
+  test("docker-host's grafana claimed only by a k8s seat is refused before anything is dispatched", async () => {
+    const spy = driver({ assignments: [{ worker: "obs-t1", services: ["grafana"] }] });
+    const out = await triagePass(
+      deps({ driver: spy.driver, environment: "do-cluster", declared: GRAFANA_DECLARED }),
+    );
+
+    expect(out.kind).toBe("partition_refused");
+    expect(out.partition?.code).toBe("partition_incomplete");
+    expect(out.partition?.missing).toEqual(["grafana"]);
+    expect(spy.dispatched).toHaveLength(0);
+    expect(spy.collated).toHaveLength(0);
   });
 });

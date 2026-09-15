@@ -1407,20 +1407,15 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
     const outcome = await triagePass({
       environment,
       /*
-       * Exactly the environments this sweep actually covers — today the one
-       * k8s environment, matching `environment` above. A fact for an
-       * environment nobody swept would be a clear citing a sweep that never
-       * looked (§6.8's asymmetry), so this stays a one-element list until
-       * Phase 4 widens the call site above to dispatch docker and vm too.
+       * Exactly the environments this sweep covers, today the one k8s
+       * environment; the next round widens it to every kind
+       * `environmentsByKind` finds present. A fact for an environment nobody
+       * swept would be a clear citing a sweep that never looked (§6.8's
+       * asymmetry). Services stay in FILE order, which `checkTriagePartition`
+       * compares against: sorting would make `partition_incomplete`'s list
+       * disagree with the file an operator is about to open.
        */
-      environments: [{ name: environment, kind: "k8s" }],
-      /*
-       * FILE order, which `TriageEnvironment.services` preserves and
-       * `checkTriagePartition` compares against. Sorting here would make
-       * `partition_incomplete`'s list disagree with the file an operator is
-       * about to open.
-       */
-      declared: target.services.map((s) => s.name),
+      declared: [{ name: environment, kind: "k8s", services: target.services.map((s) => s.name) }],
       /*
        * §7.4's legal window range, assembled from the two files that fix it —
        * the targets file supplies `default_window` (already seconds) and §7.8

@@ -105,6 +105,7 @@ import {
   sweepObservations,
   SATURATION_MIN_MISSING,
   SATURATION_PAIR,
+  type DeclaredEnvironment,
   type InferenceEndpoint,
   type ObserverArtifact,
   type SaturationOutcome,
@@ -463,57 +464,39 @@ export const FRESH_SATURATION_MEMO: SaturationMemo = { result: null, sweepId: nu
 // Deps and outcome
 // ---------------------------------------------------------------------------
 
-/**
- * One environment a sweep covered, with its kind (SRD-TRIAGE-MIXED-OBSERVERS
- * §6.1). {@link TriagePassDeps.environments} is a list of these.
- */
-export interface SweptEnvironment {
-  readonly name: string;
-  readonly kind: TriageEnvironmentKind;
-}
-
 export interface TriagePassDeps {
   /**
-   * The environment `declared` and every notification's extras are keyed
-   * under — the one identity a SERVICE-scoped fact hangs off, for as long as
-   * this pass dispatches only one environment.
-   *
-   * **SERVICES STILL BELONG TO ONE ENVIRONMENT, in THIS caller.** `completeSweep`
-   * builds `coverage.declared` (`triage-verdict.ts`) as the single-entry list
-   * `[{name: this, kind: …, services: declared}]`, so `assessTriageSweep` mints
-   * this name onto every `ServiceAssessment.environment` it emits and
-   * `sweepObservations` reads it back off each one — task 4.1b (Phase 4) keyed
-   * both on `(environment, service)`, and a one-entry `declared` is what keeps
-   * that key equal to this single name everywhere in one pass. Task 4.2 widens
-   * this call site to more than one entry.
-   *
-   * Console-health facts are per environment instead: {@link environments}
-   * lists every environment the sweep covered, and `triagePass` refuses a list
-   * that does not name this one.
+   * The environment name console-health (saturation) announcements use —
+   * {@link extrasFor} reads it for `extras.environment` and the
+   * `inference_saturated` subject's scope, and nothing else.
    */
   readonly environment: string;
   /**
-   * Every environment this sweep covered, in order (SRD-TRIAGE-MIXED-OBSERVERS
-   * §6.1).
+   * Every environment this sweep covers, in file order, each with its own
+   * declared services (SRD-TRIAGE-MIXED-OBSERVERS §6.1, D21; task 4.2).
    *
-   * `completeSweep` builds one {@link ConsoleEnvironmentFactsLocal} per entry:
-   * `observerBlocked` is computed ONLY from THAT entry's `kind`, through
-   * `workersOfKind` (`./triage-seat-kinds.ts`) over the sweep's flat
-   * `join.blocked` list — so a blocked k8s seat can never open
-   * `observer_blocked` on a docker or vm environment, and vice versa.
-   * `collated` is the one sweep-wide collation document, shared by every
-   * entry, since one sweep still has one collator.
+   * **The ONE source of what this sweep covers, where task 4.1b left two.**
+   * Before this task a caller kept `declared` (one k8s environment's service
+   * names) and `environments` (every environment's name and kind, no services
+   * of its own) in step by hand; `completeSweep` built `coverage.declared` from
+   * one and the per-environment console-health facts from the other, and
+   * nothing enforced that the two agreed. This field replaces both:
+   * `dispatchPartition` (`triagePass`) receives it mapped to `{kind, services}`
+   * per entry, `coverage.declared` (`triage-verdict.ts`) IS it, and `settle`'s
+   * per-environment `observerBlocked` facts map over it directly — `workersOfKind`
+   * (`./triage-seat-kinds.ts`) scopes each entry's fact to THAT entry's own
+   * `kind` over the sweep's flat `join.blocked` list, so a blocked k8s seat can
+   * never open `observer_blocked` on a docker or vm environment, and vice versa.
    *
-   * `triagePass` refuses (throws) an `environments` that is empty, that omits
-   * an entry named {@link environment}, or that repeats a name or a kind — a
-   * host wiring fault caught ONCE, before anything is dispatched. The two
-   * `environments: []` exits (`skipped`, `budget_exhausted`) are unaffected:
-   * neither sweeps anything, so §6.8a's *"a sweep that did not run says
-   * nothing about any environment"* still holds.
+   * `triagePass` refuses (throws) a `declared` that is empty, that omits an
+   * entry named {@link environment}, or that repeats a name or a kind — a host
+   * wiring fault caught ONCE, before anything is dispatched. The two
+   * `environments: []` exits on {@link Settlement} (`skipped`,
+   * `budget_exhausted`) are unaffected: neither sweeps anything, so §6.8a's
+   * *"a sweep that did not run says nothing about any environment"* still
+   * holds.
    */
-  readonly environments: readonly SweptEnvironment[];
-  /** Every service `triage/targets.yaml` declares for it, in FILE order. */
-  readonly declared: readonly string[];
+  readonly declared: readonly DeclaredEnvironment[];
   /** §7.4's legal window range, assembled from the two files that fix it. */
   readonly windowPolicy: WindowPolicy;
   /**
@@ -893,7 +876,7 @@ function expiredSweep(
 }
 
 /**
- * The wiring refusals over {@link TriagePassDeps.environments}.
+ * The wiring refusals over {@link TriagePassDeps.declared}.
  *
  * A HOST fault, so a throw rather than a value: these are shapes the composition
  * root got wrong before a single sweep function was called, not something a
@@ -904,37 +887,37 @@ function expiredSweep(
  * message is enough to fix the call site without opening this file.
  */
 function refuseMiswiredEnvironments(
-  environments: readonly SweptEnvironment[],
+  declared: readonly DeclaredEnvironment[],
   environment: string,
 ): void {
-  if (environments.length === 0) {
+  if (declared.length === 0) {
     throw new Error(
-      "triagePass: deps.environments is empty. The sweep must declare every " +
+      "triagePass: deps.declared is empty. The sweep must declare every " +
         "environment it covers, deps.environment included.",
     );
   }
-  if (!environments.some((e) => e.name === environment)) {
+  if (!declared.some((e) => e.name === environment)) {
     throw new Error(
-      `triagePass: deps.environments does not contain an entry named ` +
+      `triagePass: deps.declared does not contain an entry named ` +
         `"${environment}" (deps.environment). Found: ` +
-        `[${environments.map((e) => e.name).join(", ")}].`,
+        `[${declared.map((e) => e.name).join(", ")}].`,
     );
   }
   const seenNames = new Set<string>();
-  for (const e of environments) {
+  for (const e of declared) {
     if (seenNames.has(e.name)) {
       throw new Error(
-        `triagePass: deps.environments names "${e.name}" more than once. Every ` +
+        `triagePass: deps.declared names "${e.name}" more than once. Every ` +
           `entry must be a distinct environment.`,
       );
     }
     seenNames.add(e.name);
   }
   const seenKinds = new Set<TriageEnvironmentKind>();
-  for (const e of environments) {
+  for (const e of declared) {
     if (seenKinds.has(e.kind)) {
       throw new Error(
-        `triagePass: deps.environments names kind "${e.kind}" more than once ` +
+        `triagePass: deps.declared names kind "${e.kind}" more than once ` +
           `(on "${e.name}"). A sweep dispatches at most one environment per kind.`,
       );
     }
@@ -943,7 +926,7 @@ function refuseMiswiredEnvironments(
 }
 
 export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcome> {
-  refuseMiswiredEnvironments(deps.environments, deps.environment);
+  refuseMiswiredEnvironments(deps.declared, deps.environment);
   const at = deps.now();
   const runs = await deps.sweep.runs();
   const inFlight = await deps.sweep.inFlight();
@@ -1125,11 +1108,14 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
    * act on. `Promise.all` preserves input order in `results`, so this is the
    * partition's own order and it is stable.
    */
-  // Phase 4 task 4.1: `dispatchPartition` now checks per kind. The sweep still
-  // declares only its k8s environment here until task 4.2 widens `triage.ts` to
-  // wire docker and vm environments through too.
+  /*
+   * Phase 4 task 4.1/4.2: `dispatchPartition` checks per kind, once per entry
+   * of `deps.declared` (SRD-TRIAGE-MIXED-OBSERVERS §5, D8). `declared` is the
+   * same list `coverage.declared` reads below, so there is no second,
+   * hand-maintained group here to drift from it.
+   */
   const fanOut = await dispatchPartition(
-    [{ kind: "k8s", services: deps.declared }],
+    deps.declared.map((e) => ({ kind: e.kind, services: e.services })),
     assignments,
     async (assignment) => {
       await deps.sweep.dispatchObserver(sweepId, assignment);
@@ -1208,20 +1194,10 @@ async function completeSweep(
         { document: null, evidenceRef: s.sweepId, staleCollators: [] };
 
   const coverage: SweepCoverage = {
-    // Phase 4 task 4.1b: `coverage.declared` names every environment the
-    // sweep covers. This pass still dispatches only its one k8s environment
-    // (`deps.environment`/`deps.declared`) until task 4.2 widens the call
-    // site to wire docker and vm environments through too, so one entry is
-    // the whole list.
-    declared: [
-      {
-        name: deps.environment,
-        // `refuseMiswiredEnvironments` has already thrown if `deps.environments`
-        // names no entry called `deps.environment`, so this lookup always finds one.
-        kind: (deps.environments.find((e) => e.name === deps.environment) as SweptEnvironment).kind,
-        services: deps.declared,
-      },
-    ],
+    // Phase 4 task 4.1b/4.2: `coverage.declared` IS `deps.declared` — one
+    // list, naming every environment this sweep covers with its own declared
+    // services, in file order.
+    declared: deps.declared,
     assignments: s.assignments,
     artifacts: s.join.artifacts,
     window: {
@@ -1288,7 +1264,7 @@ async function completeSweep(
     /** A sweep that RAN resets §6.4's counter. §6.8a's *"cleared by a sweep that ran"*. */
     consecutiveSkips: 0,
     /*
-     * One entry per `deps.environments` element, IN ORDER.
+     * One entry per `deps.declared` element, IN ORDER.
      *
      * `observerBlocked` is scoped to THAT environment's kind alone: `workersOfKind`
      * (`./triage-seat-kinds.ts`) filters the sweep's one flat `join.blocked` list
@@ -1299,7 +1275,7 @@ async function completeSweep(
      * kind by `workersOfKind` and so counts for NO environment here: it cannot be
      * attributed to one, so it is silently excluded rather than thrown on.
      */
-    environments: deps.environments.map((e) => ({
+    environments: deps.declared.map((e) => ({
       environment: e.name,
       observerBlocked: workersOfKind(e.kind, s.join.blocked).length > 0,
       /** §6.5's zero-row, sweep-wide: one collation document per sweep, shared by every environment entry. */
