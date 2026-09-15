@@ -58,11 +58,13 @@ OBSERVER_DOCKER_TARGETS_FILE` line) is answered by reading the targets file abov
 again with a token it actually lists — never by guessing another name.
 
 Read the exit status AND the stderr text before you write a row — the exit code alone does not say
-who refused what:
+who refused what. The table is read top to bottom; the first row whose condition matches is the one
+that applies, with "anything else" last:
 
 | Exit | What it means | What the row says |
 |---|---|---|
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
+| `77` with `observe-ssh: refused before ssh ran` on stderr, naming `<targets_var> line <n>` (`OBSERVER_DOCKER_TARGETS_FILE` for this kind) | the targets file itself is malformed — a bad field, a bad line, or a duplicate token, not something your own call caused | this is a fleet configuration fault: the task is `blocked`, the row is `indeterminate`, and there is no retry — the file needs fixing by whoever enrols targets |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
 | `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, the report artifact contract's action-verb bullet below (`An action verb — restart, stop, start, kill, rm, exec, pause…`) names the channel (`state`) |
 | `77` with any other `docker-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all (a followed log, `stats` for every container), that channel is `forbidden` instead |
@@ -74,9 +76,9 @@ who refused what:
 
 A `77` whose `observe-ssh: refused before ssh ran` line goes on to name `<targets_var> line <n>`
 (`docker/observe-ssh` refuses the WHOLE targets file when one line is malformed, holds a duplicate
-token, or has a bad field) is a fleet configuration fault, not your own call malformed: the task is
-`blocked`, the row is `indeterminate`, and there is no retry — the file needs fixing by whoever
-enrols targets, calling again with the same broken file cannot help.
+token, or has a bad field) is the fleet configuration fault the table's row above names, not your
+own call malformed: the task is `blocked`, the row is `indeterminate`, and there is no retry — the
+file needs fixing by whoever enrols targets, calling again with the same broken file cannot help.
 
 Measured on both docker versions: `.docker_errors` in the rendered fixture. A missing container
 (`.docker_errors.no_such_container`) also exits 1, with `No such container:` on stderr, and that is
@@ -99,17 +101,19 @@ filter it in the worker's own shell (jq is in the image), keeping only `Names`, 
 `Status`:
 
 ```
-out=$(observe-docker <target> ps); rc=$?; printf '%s\n' "$out" | jq -c '{Names, State, Status}'
+out=$(observe-docker <target> ps); rc=$?; printf '%s\n' "$out" | jq -c '{Names, State, Status}'; printf 'observe-docker exit: %s\n' "$rc"
 ```
 
-Read `$rc` against the exit table above — it is `observe-docker`'s own exit status, captured
-before anything is piped through `jq`. A piped form (`observe-docker <target> ps | jq -c '...'`),
-even with `set -o pipefail`, reports whichever command in the pipe fails LAST — pipefail is
-rightmost-failure, not `observe-docker`'s status — so an ssh drop mid-stream, or a 77 with
-non-JSON output, would route as `jq`'s failure instead of `observe-docker`'s. Measured: `bash -c
-'set -o pipefail; (printf "{\"Names\":\"a\"}\n{trunc"; exit 255) | jq -c "{Names}"; echo $?'`
-prints 5, not 255. A `jq` failure on `$out` on its own, with `$rc` at 0, means the output was not
-the expected JSON — never an answer about the target either way. Pick the containers the brief
+The worker's bash tool starts a new shell for each call, so `$rc` itself does not survive past this
+one call — read the `observe-docker exit: <n>` line the command prints on its own, at the end,
+against the exit table above. That line is `observe-docker`'s own exit status, captured before
+anything is piped through `jq`. A piped form (`observe-docker <target> ps | jq -c '...'`), even with
+`set -o pipefail`, reports whichever command in the pipe fails LAST — pipefail is rightmost-failure,
+not `observe-docker`'s status — so an ssh drop mid-stream, or a 77 with non-JSON output, would route
+as `jq`'s failure instead of `observe-docker`'s. Measured: `bash -c 'set -o pipefail; (printf
+"{\"Names\":\"a\"}\n{trunc"; exit 255) | jq -c "{Names}"; echo $?'` prints 5, not 255. A `jq` failure
+on `$out` on its own, with the printed status at 0, means the output was not the expected JSON —
+never an answer about the target either way. Pick the containers the brief
 means from the trimmed survey, then query only those by name (`ps name=<n>`, `inspect`, `logs`).
 When the brief already names containers or gives a selector, skip the survey and go straight to
 name-scoped calls.

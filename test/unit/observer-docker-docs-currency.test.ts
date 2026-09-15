@@ -27,10 +27,13 @@
  *  9. the skill's survey-then-filter rule ("Surveying containers when the brief names none"):
  *     the worked command's jq projection is exactly `{Names, State, Status}` (set equality, still
  *     checked as a subset of `PS_FORMAT`'s fields read from `docker-forced-command`, never
- *     hard-coded here); the worked command, run under `bash` with `observe-docker` stubbed to
- *     print a partial line and exit 255, actually carries THAT captured status through rather
- *     than `jq`'s (a piped `pipefail` form cannot — pipefail reports the RIGHTMOST failure); and
- *     the input table's `selector` default names the rule
+ *     hard-coded here); the worked command, run EXACTLY as extracted under both `bash` and `sh`
+ *     with `observe-docker` on PATH as a real executable stub (never a shell function — the
+ *     hyphenated name is invalid there) that prints a partial line and exits 255, actually PRINTS
+ *     that captured status on its own line rather than jq's (a piped `pipefail` form cannot —
+ *     pipefail reports the RIGHTMOST failure, and the worker's bash tool starts a new shell per
+ *     call so a bare `$rc` never survives to be read back); and the input table's `selector`
+ *     default names the rule
  *
  * 10. the skill's "where the tokens are" passage: the variable it tells the worker to read for
  *     the docker kind equals the one `docker/observe-ssh` assigns in its `docker)` case arm (read
@@ -45,8 +48,9 @@
  *
  * 12. a `docker/observe-ssh` refusal that names the targets file and a line number
  *     (`<targets_var> line <n>`) is documented as a fleet configuration fault — `blocked`,
- *     `indeterminate`, no retry — kept apart from the generic "your own call was malformed" row,
- *     and the quoted wording is pinned against `docker/observe-ssh`'s own `refuse()` text
+ *     `indeterminate`, no retry — in its own table row, ordered ABOVE the generic "your own call
+ *     was malformed" row (the table is read top to bottom, first match wins), and the quoted
+ *     wording is pinned against `docker/observe-ssh`'s own `refuse()` text
  *
  * Not covered, in general: when a channel is `forbidden` rather than a call to fix — that is prose
  * judgement, except for the one case choice 8 pins: an action verb (restart, stop, start, kill, rm,
@@ -541,51 +545,73 @@ describe("the survey-then-filter rule's jq projection only ever keeps real ps te
   });
 });
 
-describe("the survey-then-filter rule's worked command captures observe-docker's own exit status, not jq's", () => {
+describe("the survey-then-filter rule's worked command prints observe-docker's own exit status, not jq's", () => {
   /**
-   * Runs the worked command under `bash`, with `observe-docker` replaced by a
-   * function that prints a PARTIAL JSON line (so `jq` fails on it) and exits
-   * 255 — the exact scenario the skill's prose measures (an ssh drop
-   * mid-stream, or a 77 with non-JSON output). `<target>` is the skill's
-   * documentation placeholder, never meant to be typed literally, so it is
-   * substituted with a plain word before the shell ever sees it; the stub
-   * ignores its arguments regardless.
+   * Runs `command` EXACTLY as extracted from the skill — no harness-appended
+   * echo of its own — under `shell`, with `observe-docker` on PATH as a REAL
+   * EXECUTABLE SCRIPT in a temp dir, never a shell function: `observe-docker`
+   * is not a valid function name in sh or dash (the hyphen makes it so), so a
+   * function definition would itself fail to parse there, silently hiding the
+   * very regression this test exists to catch. The stub prints a PARTIAL
+   * JSON line with NO trailing newline and exits 255 — the exact scenario the
+   * skill's prose measures (an ssh drop mid-stream, or a 77 with non-JSON
+   * output). `<target>` is the skill's documentation placeholder, never meant
+   * to be typed literally, so it is substituted with a plain word before the
+   * shell ever sees it; the stub ignores its arguments regardless.
    *
-   * The captured status is echoed back out rather than relied on as bash's
-   * own exit code, so a `jq` failure later in the pipeline (expected here,
-   * since the JSON is partial) cannot be confused with it.
+   * The captured status is read back from the `observe-docker exit: <n>`
+   * line the worked command itself is now required to print, since the
+   * worker's bash tool starts a new shell per call and `$rc` alone would not
+   * survive to be read.
    */
-  function runWorkedCommand(command: string): { rc: string | null; stdout: string } {
-    const script = [
-      "observe-docker() {",
-      "  printf '{\"Names\":\"a\"';",
-      "  return 255;",
-      "}",
-      command.replace(/<target>/g, "test-target"),
-      'printf "\\nCAPTURED_RC=%s\\n" "$rc"',
-    ].join("\n");
-    const proc = Bun.spawnSync(["bash", "-c", script]);
-    const stdout = proc.stdout.toString();
-    const m = stdout.match(/CAPTURED_RC=(\d+)/);
-    return { rc: m ? m[1]! : null, stdout };
+  function runWorkedCommand(shell: "bash" | "sh", command: string): { statusLine: string | null; stdout: string; stderr: string } {
+    const dir = mkdtempSync(join(tmpdir(), "observe-docker-stub-"));
+    try {
+      const stubPath = join(dir, "observe-docker");
+      writeFileSync(stubPath, ["#!/bin/sh", "printf '{\"Names\":\"a\"'", "exit 255", ""].join("\n"), { mode: 0o755 });
+      const script = command.replace(/<target>/g, "test-target");
+      const proc = Bun.spawnSync([shell, "-c", script], {
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+      });
+      const stdout = proc.stdout.toString();
+      const stderr = proc.stderr.toString();
+      const m = stdout.match(/observe-docker exit: (\S+)/);
+      return { statusLine: m ? m[1]! : null, stdout, stderr };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 
-  test("bash captures 255 — observe-docker's own status — even though jq then fails on the partial line", () => {
+  test("bash: the printed status line carries 255 — observe-docker's own status — even though jq then fails on the partial line", () => {
     const command = surveyWorkedCommand(SKILL);
-    const { rc, stdout } = runWorkedCommand(command);
-    expect(rc, `the worked command never assigned $rc from observe-docker's own status: ${JSON.stringify(stdout)}`).not.toBeNull();
-    expect(Number(rc)).toBe(255);
+    const { statusLine, stdout, stderr } = runWorkedCommand("bash", command);
+    expect(
+      statusLine,
+      `no "observe-docker exit: <n>" line in output (stdout=${JSON.stringify(stdout)}, stderr=${JSON.stringify(stderr)})`,
+    ).not.toBeNull();
+    expect(Number(statusLine)).toBe(255);
   });
 
-  test("a reverted pipefail form does not carry $rc at all — this probe would catch that regression", () => {
-    // The OLD form the skill used to document: no capture, so `$rc` is never
-    // assigned and the echoed value is empty. This is the mutation item 1
-    // names ("a mutation back to the old pipefail form goes red"), run here
-    // directly against the old text rather than against SKILL.md, so this
-    // test does not itself depend on SKILL.md staying fixed.
-    const oldForm = "set -o pipefail; observe-docker <target> ps | jq -c '{Names, State, Status}'";
-    const { rc, stdout } = runWorkedCommand(oldForm);
-    expect(rc, `expected the old pipefail form to leave $rc unset, but got: ${JSON.stringify(stdout)}`).toBeNull();
+  test("sh: the printed status line carries 255 too — the worked command is POSIX, not bash-only", () => {
+    const command = surveyWorkedCommand(SKILL);
+    const { statusLine, stdout, stderr } = runWorkedCommand("sh", command);
+    expect(
+      statusLine,
+      `no "observe-docker exit: <n>" line in output (stdout=${JSON.stringify(stdout)}, stderr=${JSON.stringify(stderr)})`,
+    ).not.toBeNull();
+    expect(Number(statusLine)).toBe(255);
+  });
+
+  test("a mutant with the status-printing part removed prints no status line at all — this probe would catch that regression", () => {
+    // Derived from the REAL worked command by stripping its own trailing
+    // status-print segment, rather than hand-typing the old wording, so this
+    // stays anchored to whatever the worked command actually says (mutation
+    // item 1: "remove the status print from SKILL.md" goes red here).
+    const command = surveyWorkedCommand(SKILL);
+    const mutated = command.replace(/;\s*printf 'observe-docker exit: %s\\n' "\$rc"\s*$/, "");
+    expect(mutated, "could not strip the status-print segment from the worked command — the extractor has rotted").not.toBe(command);
+    const { statusLine, stdout } = runWorkedCommand("bash", mutated);
+    expect(statusLine, `expected no status line after stripping the print, but got: ${JSON.stringify(stdout)}`).toBeNull();
   });
 });
 
@@ -720,6 +746,7 @@ describe("the token-listing awk command actually extracts just the tokens", () =
         env: { ...process.env, OBSERVER_DOCKER_TARGETS_FILE: targetsFile },
       });
       const stdout = proc.stdout.toString();
+      expect(proc.exitCode, `awk exited non-zero; stderr was: ${proc.stderr.toString()}`).toBe(0);
       expect(stdout, `stderr was: ${proc.stderr.toString()}`).toBe("alpha\nbeta\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -736,15 +763,33 @@ describe("the token-listing awk command actually extracts just the tokens", () =
 describe("a refused targets file is documented as a fleet configuration fault, not a malformed call", () => {
   const NEEDLE = "<targets_var> line <n>";
 
-  test("the skill states it in one sentence, with the real task/row words and no retry", () => {
-    expect(SKILL, "the skill does not quote the targets-file line-number wording").toContain(NEEDLE);
-    const sentenceStart = SKILL.indexOf(NEEDLE);
-    const sentenceEnd = SKILL.indexOf("\n\n", sentenceStart);
-    const sentence = SKILL.slice(Math.max(0, sentenceStart - 200), sentenceEnd === -1 ? undefined : sentenceEnd).replace(/\s+/g, " ");
-    expect(sentence).toContain("configuration fault");
-    expect(sentence).toContain("`blocked`");
-    expect(sentence).toContain("`indeterminate`");
-    expect(sentence).toContain("no retry");
+  /**
+   * The fleet-configuration-fault paragraph below the table, anchored on its
+   * OWN opening words and closed at its own blank line — the same
+   * anchor-and-close shape `actionVerbRuleBullet` uses above for choice 8,
+   * and the one the VM twin's equivalent passage is read by. A window
+   * measured backwards a fixed distance from NEEDLE's first occurrence (the
+   * old approach) could just as easily land on words from the table's new
+   * row above, which quotes this same NEEDLE — anchoring on the paragraph's
+   * own wording is what keeps this test reading the paragraph, specifically.
+   */
+  function fleetConfigFaultParagraph(src: string): string {
+    const marker = "A `77` whose `observe-ssh: refused before ssh ran` line goes on to name `<targets_var> line <n>`";
+    const markerAt = src.indexOf(marker);
+    expect(markerAt, "the skill's fleet-configuration-fault paragraph is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+    const after = src.slice(markerAt);
+    const end = after.indexOf("\n\n");
+    expect(end, "the fleet-configuration-fault paragraph never ends — this probe has rotted").toBeGreaterThan(0);
+    return after.slice(0, end);
+  }
+
+  test("the skill states it in one paragraph, with the real task/row words and no retry", () => {
+    const paragraph = fleetConfigFaultParagraph(SKILL).replace(/\s+/g, " ");
+    expect(paragraph).toContain(NEEDLE);
+    expect(paragraph).toContain("configuration fault");
+    expect(paragraph).toContain("`blocked`");
+    expect(paragraph).toContain("`indeterminate`");
+    expect(paragraph).toContain("no retry");
   });
 
   test("docker/observe-ssh actually refuses a malformed targets-file line with `${targets_var} line ${lineno}`", () => {
@@ -754,12 +799,23 @@ describe("a refused targets file is documented as a fleet configuration fault, n
     expect(OBSERVE_SSH).toContain('refuse "${targets_var} line ${lineno}');
   });
 
-  test("the sentence sits apart from the generic 'your own call was malformed' row", () => {
-    const marker = "| `77` with `observe-ssh: refused before ssh ran` on stderr |";
-    const markerAt = SKILL.indexOf(marker);
-    expect(markerAt, "the skill's shim-refusal table row is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
-    const lineEnd = SKILL.indexOf("\n", markerAt);
-    const row = SKILL.slice(markerAt, lineEnd);
-    expect(row, "the targets-file configuration-fault wording leaked into the generic malformed-call row").not.toContain(NEEDLE);
+  test("the targets-file row sits ABOVE the generic 'your own call was malformed' row", () => {
+    // Anchored on each row's own opening text, which differs after the verb
+    // clause ("...on stderr, naming `<targets_var>..." vs. "...on stderr |"),
+    // so each marker can only match its own row, never the other one.
+    const newRowMarker = "| `77` with `observe-ssh: refused before ssh ran` on stderr, naming `<targets_var> line <n>`";
+    const newRowAt = SKILL.indexOf(newRowMarker);
+    expect(newRowAt, "the skill's targets-file-refusal table row is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+
+    const genericMarker = "| `77` with `observe-ssh: refused before ssh ran` on stderr |";
+    const genericAt = SKILL.indexOf(genericMarker);
+    expect(genericAt, "the skill's generic malformed-call table row is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+    expect(genericAt, "the two row markers matched the same text — they must identify two distinct rows").not.toBe(newRowAt);
+
+    // The required mutation: swapping the two rows' order turns this red.
+    expect(
+      newRowAt,
+      "the targets-file-refusal row must sit ABOVE the generic malformed-call row, so a worker reading top to bottom hits it first",
+    ).toBeLessThan(genericAt);
   });
 });

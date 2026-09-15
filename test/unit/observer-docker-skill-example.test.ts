@@ -132,21 +132,65 @@ function absentKeyValidates(schema: z.ZodObject<z.ZodRawShape>, sample: Record<s
 }
 
 /**
- * The row schema's own OPTIONAL field names, derived from what the schema actually accepts —
- * omitting each key of the documented example row in turn and checking the row still validates
- * (`absentKeyValidates`) — rather than typed here or inferred from a single zod wrapper class.
- * That tracks `ObserverDockerOpsArtifactSchema` even if a field's optionality comes to be
- * expressed with `.default()`, `.optional().transform()`, `.optional().pipe()` or
- * `.exactOptional()` instead of a bare `.optional()`, and even if a field is added, renamed or
- * removed. Nullability is a SEPARATE question from optionality — `.nullable().optional()` is
- * optional by this same test, and still gets selected here; whether a selected key also accepts
- * `null` is checked per key with `safeParse`, below, not assumed from membership in this list.
+ * Confirms the installed zod still exposes `.optional()`'s own internal `_zod.optin === "optional"`
+ * marker the way `rowOptionalKeys()` cross-checks against below — a canary against an
+ * `instanceof z.ZodOptional` check (which only recognises exactly one wrapper shape and silently
+ * misses every other one a field can be omittable through: `.default()`, `.optional().transform()`,
+ * `.optional().pipe()` and zod 4's `.exactOptional()`). Measured directly against the installed
+ * zod (4.4.3, `bun -e`): `.optional()`, `.default()` and `.optional().transform()` all carry
+ * `_zod.optin === "optional"`. If a zod upgrade renames or drops the marker, this throws here
+ * rather than silently making every key look "not optional".
+ */
+function assertOptinMarkerAvailable(): void {
+  const canary = z.string().optional() as unknown as { _zod?: { optin?: unknown } };
+  expect(canary._zod && "optin" in canary._zod, "the installed zod no longer sets field._zod.optin on `.optional()`").toBe(true);
+  expect(canary._zod!.optin, "the installed zod's `.optional()` no longer marks _zod.optin as 'optional'").toBe("optional");
+}
+
+/**
+ * The row schema's own OPTIONAL field names — a key that may be OMITTED from a real, valid row and
+ * still validate. Selected BEHAVIOURALLY: remove the key from the documented example row and
+ * re-parse with the real row schema ("what the schema accepts: absent validates") — rather than
+ * typed here or inferred from a single zod wrapper class. That tracks `ObserverDockerOpsArtifactSchema`
+ * even if a field's optionality comes to be expressed with `.default()`, `.optional().transform()`,
+ * `.optional().pipe()` or `.exactOptional()` instead of a bare `.optional()`, and even if a field is
+ * added, renamed or removed.
+ *
+ * Cross-checked against zod 4's own internal `field._zod.optin` marker (truthy whenever a field's
+ * own shape tolerates omission) after `assertOptinMarkerAvailable()` confirms the installed zod
+ * still exposes it. A key the behavioural test selects but the marker disagrees with fails loudly,
+ * by name, rather than being trusted on one signal alone.
+ *
+ * Nullability is a SEPARATE question from optionality — `.nullable().optional()` is optional by
+ * this same test, and still gets selected here; whether a selected key also accepts `null` is
+ * checked per key with `safeParse`, below, not assumed from membership in this list.
  */
 function rowOptionalKeys(): string[] {
+  assertOptinMarkerAvailable();
   const servicesField = ObserverDockerOpsArtifactSchema.shape.services as z.ZodArray<z.ZodObject<z.ZodRawShape>>;
   const rowSchema = servicesField.element;
   const sampleRow = (realExample() as { services: Array<Record<string, unknown>> }).services[0]!;
-  return Object.keys(rowSchema.shape).filter((key) => absentKeyValidates(rowSchema, sampleRow, key));
+
+  // Anti-vacuity: the documented example row must itself validate BEFORE any
+  // key is removed, or every key below would look "not optional" for a
+  // reason unrelated to its own optionality.
+  const baseline = rowSchema.safeParse(sampleRow);
+  expect(
+    baseline.success,
+    `the documented example row does not itself validate: ${baseline.success ? "" : baseline.error.message}`,
+  ).toBe(true);
+
+  const keys: string[] = [];
+  for (const [key, field] of Object.entries(rowSchema.shape)) {
+    if (!absentKeyValidates(rowSchema, sampleRow, key)) continue; // omitting it breaks validation: required
+    const optin = (field as unknown as { _zod: { optin?: unknown } })._zod.optin;
+    expect(
+      optin,
+      `"${key}" validates when omitted, but zod's own _zod.optin marker disagrees (reads ${JSON.stringify(optin)}) — the behavioural and internal signals conflict`,
+    ).toBeTruthy();
+    keys.push(key);
+  }
+  return keys;
 }
 
 /** A deep-enough clone for mutating one row of the documented example without touching the original. */
