@@ -41,7 +41,7 @@ the one that applies, with "anything else" last:
 
 | Exit | What it means | What the row says |
 |---|---|---|
-| any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries — so this row sits above the `0` row | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
+| `journal` or `kernel`, any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries — so this row sits above the `0` row | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
 | `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
@@ -49,29 +49,32 @@ the one that applies, with "anything else" last:
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
 | `124` from `disk` | `df` did not return inside the 20-second bound `disk` runs it under, most likely a hung network mount | the `resources` coverage is `unreachable` — asked, never answered — and the row is `indeterminate`; never evidence of free space; any stderr goes in `evidence_ref` |
 | `125` from `disk`, or `126` or `127` from any verb | `125`: `timeout` itself failed, so `df` never ran. `126`/`127`: the target command did not run at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
-| `128` or above from `disk` | `df` was killed by something other than `timeout`'s own expiry — for example `137` — so that is not `df`'s answer either | the `resources` coverage is `unreachable`, and the row is `indeterminate`; never evidence of free space; any stderr goes in `evidence_ref` |
-| `255` | ssh's own failure — a host-key mismatch or a proxy refusal | `reachability` is `unreachable`, and the row is `indeterminate` |
+| `255` | ssh's own failure — a host-key mismatch or a proxy refusal — or a target command that died by a signal, which ssh reports the same way (measured 2026-09-14 with OpenSSH_10.2p1: a remote command killed by SIGKILL or SIGTERM exits `255`) | `reachability` is `unreachable`, and the row is `indeterminate` |
 | `1` with stdout exactly `This account is currently not available.` and stderr empty | the account's login shell is `nologin` (measured: `/usr/sbin/nologin` on Ubuntu 24.04 writes that line to stdout, nothing to stderr, and exits 1), so the forced command never ran and the target is mis-enrolled | the task status is `blocked`, and every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted` |
 | any non-zero exit from any verb with both stdout and stderr empty | no §6.4 command fails silently, so this is not a real command's own answer — a login shell of `/bin/false` produces exactly this shape | the task status is `blocked`, and every row not otherwise answered is `indeterminate` with coverage `not_attempted` |
-| any other non-zero exit from `journal` or `kernel` | measured to exit `0` in every case this project has data for, so a non-zero exit here is never a quiet window | the `logs` channel is `unreachable`, the row is `indeterminate`, and stderr goes in `evidence_ref` |
-| anything else | the target command's own exit, returned from the target | the channel is `answered`; the error or state text goes in `evidence_ref` |
+| non-zero from `system`, with one state word on stdout | `systemctl is-system-running` reports a state that is not `running` through its exit code (measured: `degraded` with exit `1` on systemd 239) | the `system` channel is `answered`, and the state word is its evidence |
+| anything else — any other non-zero exit, from any verb | not an answer: no other verb exits non-zero in any case the fixtures measure, and a failed read has nothing to record | the channel is `unreachable` for the check that verb answers (see "Checks, and the verbs that answer them"), the row is `indeterminate`, and stderr goes in `evidence_ref` |
 
-**The unreachable rule (§6.3), stated plainly.** An SSH round trip that never completed (exit
-`255`) is `coverage.result: unreachable` and `assessment: indeterminate`, never `unhealthy`. You
+**The unreachable rule (§6.3), stated plainly.** Exit `255` is an SSH round trip that never
+completed, or a target command that died by a signal, which ssh reports the same way. Either is
+`coverage.result: unreachable` and `assessment: indeterminate`, never `unhealthy`. You
 cannot tell a down VM from a down route, so do not guess which one it is.
 
 **`system` exiting non-zero is an answer, not a failure.** `systemctl is-system-running` prints a
 state word (for example `degraded`) and can exit non-zero for it; that is `answered` coverage
 with the state word as evidence, not a reason to retry the call or mark it `unreachable`.
 
-**Fail closed on `journal` and `kernel`.** In every case `test/fixtures/observe/vm-tool-shapes.json`
-measures — `.journal.oldest.exit`, `.journal.oldest_empty_window.exit`, `.journal.target.exit`,
-`.kernel.oldest.exit` and `.kernel.target.exit` — both verbs exit `0`, including the empty-window
-case. So a non-zero exit from either one is never a quiet window; it is refused or broken, not
-silence. The permission-refusal row above is measured on systemd 255 only — the systemd 239 floor
-this project also tracks is unmeasured for it — and that is exactly why the fail-closed row exists:
-any other non-zero exit from `journal` or `kernel` is `unreachable` coverage and an `indeterminate`
-row, with stderr recorded rather than the gap assumed empty.
+**Fail closed on every verb but `system`.** In every case `test/fixtures/observe/vm-tool-shapes.json`
+measures, `failed` (`.failed.oldest`, `.failed.target`), `unit` (every `.show.*` case, a missing
+unit included), `journal` (`.journal.oldest`, `.journal.oldest_empty_window`, `.journal.target`)
+and `kernel` (`.kernel.oldest`, `.kernel.target`) exit `0`. The empty window is measured for
+`journal` only. `uptime`, `os` and `memory` read files under `/proc` and `/etc`, and `disk` reads
+`df`, so a non-zero exit from any of them leaves no reading to record. A non-zero exit from any
+verb except `system` is therefore refused or broken, never a quiet answer such as an empty window
+or no failed units, and the table's last row makes it `unreachable` coverage and an
+`indeterminate` row, with stderr recorded. The permission row is measured on systemd 255 only, and
+the systemd 239 floor this project also tracks is unmeasured for it; the last row is what catches
+a different wording there.
 
 **A silent mis-enrolment never reads as `answered`.** A login shell of `/bin/false` makes every
 call exit `1` with empty stdout and empty stderr — no verb ever runs. No §6.4 command fails this
@@ -94,10 +97,12 @@ that never returns is never evidence of free space — nor of anything else.
 
 Measured on Ubuntu 24.04, coreutils' `timeout` exits `124` when it kills `df` and the kill
 succeeds, `125` when `timeout` itself fails, `126` when `df` cannot be executed and `127` when it
-is not found, `128` or above when `df` is killed by a signal `timeout` did not send, and otherwise
-passes `df`'s own exit straight through. So `124` is the hung-mount case the table above can
-actually kill, `125` from `disk` and `126`/`127` are the "did not run at all" row, `128` or above
-is `df` killed by something else, and only an exit below `124` is `df`'s own answer.
+is not found, and otherwise passes `df`'s own exit straight through. A `df` killed by a signal
+`timeout` did not send makes `timeout` die by that same signal rather than exit (measured
+2026-09-14 with GNU coreutils 9.11), and ssh reports a target command that died by a signal as
+`255`, so that case reads as the `255` row. So `124` is the hung-mount case `timeout` can actually
+end, `125` from `disk` and `126`/`127` are the "did not run at all" row, and only an exit below
+`124` is `df`'s own answer.
 
 ## Checks, and the verbs that answer them
 
@@ -152,11 +157,12 @@ tokens, in any order, and a repeated key is refused:
   argument shape gets it through.
 
 **Refused with exit 77, never reaching a shell:** `shutdown`, `reboot`, `poweroff`, `halt`;
-`systemctl` with any verb other than `is-system-running` and `show` (`start`, `stop`, `restart`,
+`systemctl` with any verb other than `is-system-running`, `list-units` and `show` (`start`, `stop`, `restart`,
 `reload`, `enable`, `disable`, `mask`, `kill`, `isolate`, `daemon-reload`, `set-property`, and
 more); `journalctl` with `--vacuum-*`, `--rotate`, `--flush` or `--sync`; `kill`; any package
 manager; `sudo`; any free-form path read — no verb here takes a path. The account also holds no
-sudo, so even a bypassed grammar could not run a mutating `systemctl` verb.
+sudo, and a non-root `systemctl restart` without polkit authorisation fails, so a bypassed grammar
+still could not run a mutating `systemctl` verb unless polkit grants this account one.
 
 **Disclosure.** `journal` returns whatever services logged. Quote only the lines that support a
 finding, never whole windows. Arbitrary application log files are out of reach by construction,
@@ -296,11 +302,12 @@ argument parsing. `ENV` and `BASH_ENV` rely on this account's `/bin/sh` login sh
 the Docker role's note gives: a `bash` started as `bash -c` reads `BASH_ENV`, but a `bash` started
 as `sh` (as `/bin/sh` may itself be) does not.
 
-A login shell of `/bin/false` or `nologin` makes every call fail the same way; the exit table above
-says how that reads.
+A login shell of `/bin/false` or `nologin` makes every call fail before the forced command runs. The
+two print different output, and the exit table above gives each its own row.
 
 The target's host key goes in `OBSERVER_VM_KNOWN_HOSTS`, one `token host port user` line in
-`OBSERVER_VM_TARGETS`, and `{host, port}` in `egress.allow`.
+`OBSERVER_VM_TARGETS`, and `{host, port}` in `egress.allow`; the three secret names go in
+`secrets.env_allowlist` (§6.6).
 
 **Verify afterward, the same three checks §5.7 gives the Docker role, adapted to this one:**
 `sshd -T -C user=<account>,host=<host>,addr=<addr>` for this account's effective `AcceptEnv`,

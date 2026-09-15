@@ -56,7 +56,7 @@
 #             -> cat /proc/meminfo
 #
 # Every other verb — `shutdown`, `reboot`, `poweroff`, `halt`, any
-# `systemctl` verb other than the two above (`start`, `stop`, `restart`,
+# `systemctl` verb other than the three above (`start`, `stop`, `restart`,
 # `reload`, `enable`, `disable`, `mask`, `kill`, `isolate`, `daemon-reload`,
 # `set-property`, ...), any `journalctl` flag other than the closed set
 # `journal`/`kernel` build below (`--vacuum-*`, `--rotate`, `--flush`,
@@ -69,9 +69,9 @@
 #
 # ## The unit-name grammar (SRD §6.3, tightened)
 #
-# SRD §6.3's class for a unit name is `[a-zA-Z0-9@._:-]+`. This script adds
-# two tightenings, both stated here because they are this implementation's
-# choice, not the SRD's:
+# SRD §6.3's class for a unit name is `^[a-zA-Z0-9][a-zA-Z0-9@._:-]*$`, at
+# most 255 bytes, and this script enforces exactly that. The two ways it is
+# narrower than a bare `[a-zA-Z0-9@._:-]+`, and why:
 #
 #   1. The FIRST character must be `[a-zA-Z0-9]`, narrower than the rest of
 #      the class. A leading '-' would otherwise reach `systemctl show` as an

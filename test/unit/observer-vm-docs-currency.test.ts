@@ -357,7 +357,7 @@ function priorityRangeMentionsFromSkill(src: string): Array<[string, string]> {
 /** Every place the skill states `disk`'s timeout bound in prose: "<N>-second". The verb-grammar table's literal `timeout <N> df -P -k` command is checked separately, as an exact string. */
 function diskSecondsMentionsFromSkill(src: string): number[] {
   const nums = [...src.matchAll(/(\d+)-second/g)].map((m) => Number(m[1]));
-  expect(nums.length, "no '<N>-second' statements matched in the skill — the extractor has rotted").toBeGreaterThanOrEqual(2);
+  expect(nums.length, "no '<N>-second' statements matched in the skill — the extractor has rotted").toBeGreaterThanOrEqual(3);
   return nums;
 }
 
@@ -469,7 +469,7 @@ function exitTableRows(src: string): Array<{ full: string; rowSays: string }> {
   const tableBlock = after.slice(0, endAt);
   const pipeLines = tableBlock.split("\n").filter((l) => l.trim().startsWith("|"));
   const dataLines = pipeLines.filter((l) => !/^\s*\|[\s-]*\|[\s-]*\|[\s-]*\|\s*$/.test(l));
-  expect(dataLines.length, "no exit-table data rows found below the header — the extractor has rotted").toBeGreaterThanOrEqual(14);
+  expect(dataLines.length, "no exit-table data rows found below the header — the extractor has rotted").toBeGreaterThanOrEqual(13);
   return dataLines.map((line) => {
     const cols = line.split("|");
     expect(cols.length, `an exit-table row does not split into exactly 3 '|'-delimited data columns: ${JSON.stringify(line)}`).toBe(5);
@@ -533,7 +533,7 @@ describe("the exit table's third-column tokens are real enum members, imported f
 
   test("every 'the <channel> coverage is <result>' pair names real enum members", () => {
     const pairs = rowsSays().flatMap(coverageIsPairs);
-    expect(pairs.length, "no 'the <channel> coverage is <result>' pairs matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(2);
+    expect(pairs.length, "no 'the <channel> coverage is <result>' pairs matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(1);
     for (const [channel, result] of pairs) {
       expect(VM_CHANNELS.has(channel), `the exit table names channel "${channel}", which is not a member of ObserverVmChannelSchema (${[...VM_CHANNELS].join(", ")})`).toBe(true);
       expect(COVERAGE_RESULTS.has(result), `the exit table states a ${channel} coverage result of "${result}", which is not a member of ObserverCoverageResultSchema (${[...COVERAGE_RESULTS].join(", ")})`).toBe(true);
@@ -576,7 +576,7 @@ describe("the exit table's third-column tokens are real enum members, imported f
 
   test("every 'the row is <assessment>' token names a real assessment", () => {
     const tokens = rowsSays().flatMap(rowIsAssessmentTokens);
-    expect(tokens.length, "no 'the row is <assessment>' tokens matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(5);
+    expect(tokens.length, "no 'the row is <assessment>' tokens matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(4);
     for (const assessment of tokens) {
       expect(ASSESSMENTS.has(assessment), `the exit table states the row is "${assessment}", which is not a member of ObserverAssessmentSchema (${[...ASSESSMENTS].join(", ")})`).toBe(true);
     }
@@ -596,10 +596,39 @@ describe("the exit table's first-match order is pinned", () => {
     ).toBeLessThan(zeroIdx);
   });
 
+  test("every row sits in the order this list gives, and no row is added or removed without changing it", () => {
+    // First match wins, so the order IS the contract: a broader row placed above a narrower one
+    // silently takes its cases, as a `128`-or-above row once took every `255` from `disk`.
+    const EXPECTED = [
+      "`journal` or `kernel`, any exit, with `Hint:",
+      "`0`",
+      "`77` with `observe-ssh: refused before ssh ran`",
+      "`77` with `vm-forced-command: refused \"<verb>\": not a recognised verb",
+      "`77` with any other `vm-forced-command: refused",
+      "`78`",
+      "`124` from `disk`",
+      "`125` from `disk`, or `126` or `127` from any verb",
+      "`255`",
+      "`1` with stdout exactly",
+      "any non-zero exit from any verb with both stdout and stderr empty",
+      "non-zero from `system`",
+      "anything else",
+    ];
+    const exits = exitTableRows(SKILL).map((r) => r.full.split("|")[1]!.trim());
+    expect(exits.length, `the exit table has ${exits.length} rows; this list pins ${EXPECTED.length}`).toBe(EXPECTED.length);
+    EXPECTED.forEach((prefix, i) => {
+      expect(exits[i]!.startsWith(prefix), `exit-table row ${i + 1} is ${JSON.stringify(exits[i])}; expected it to start with ${JSON.stringify(prefix)}`).toBe(true);
+    });
+  });
+
   test("the 'anything else' row is last", () => {
     const rows = exitTableRows(SKILL).map((r) => r.full);
     const lastRow = rows[rows.length - 1]!;
     expect(lastRow.includes("anything else"), `the exit table's last row is not the 'anything else' row: ${JSON.stringify(lastRow)}`).toBe(true);
+    // The catch-all fails closed: a non-zero exit nothing above explains is never `answered`.
+    const lastRowSays = exitTableRows(SKILL).at(-1)!.rowSays;
+    expect(lastRowSays, "the 'anything else' row reads a non-zero exit as answered").not.toContain("`answered`");
+    expect(lastRowSays, "the 'anything else' row no longer makes the channel unreachable").toContain("the channel is `unreachable`");
   });
 });
 

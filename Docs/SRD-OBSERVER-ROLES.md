@@ -749,7 +749,7 @@ applies to a control plane.
 | `memory` | — | `cat /proc/meminfo` |
 
 **Refused with exit 77, never reaching a shell:** `shutdown`, `reboot`, `poweroff`, `halt`; `systemctl`
-with any verb other than the two above (`start`, `stop`, `restart`, `reload`, `enable`, `disable`,
+with any verb other than the three above, `is-system-running`, `list-units` and `show` (`start`, `stop`, `restart`, `reload`, `enable`, `disable`,
 `mask`, `kill`, `isolate`, `daemon-reload`, `set-property`, …); `journalctl` with `--vacuum-*`,
 `--rotate`, `--flush` or `--sync`; `kill`; any package manager; `sudo`; any free-form path read. The
 account's lack of sudo is the second layer: `systemctl restart` run by a non-root user without polkit

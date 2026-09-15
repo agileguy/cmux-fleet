@@ -492,8 +492,9 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
     // The real guard on the script's own IFS pin is the static test above,
     // "pins IFS to the POSIX default before the unquoted re-split, …" —
     // that is the one that goes red if the `IFS="${POSIX_IFS}"` pin is
-    // removed. skills/observer-docker-ops/SKILL.md:328-330 makes this same
-    // point for the Docker role's forced command.
+    // removed. The Docker skill's enrolment step on IFS, ENV and BASH_ENV
+    // (skills/observer-docker-ops/SKILL.md) makes this same point for the
+    // Docker role's forced command.
     test("shown, not guarded: journal: unit= plus priority= produce the same argv whether or not IFS=: is inherited, because this shell discards it before parsing — not because of vm-forced-command's own pin", () => {
       const withoutColonIfs = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3");
       const withColonIfs = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3", {}, scratch, { IFS: ":" });
