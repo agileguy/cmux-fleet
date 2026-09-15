@@ -109,8 +109,10 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
 | `col-1` | collator | review | `base` | writes the fan-out request; does not review |
 | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | reviewer | review | `base` | three vendors, read-only, `shared-ro` |
-| `tri-1` | triage | triage | `base` | THE collator, and there is exactly one. Its envelope names every declared service and all three observer seats; it DIVIDES the environment between them (§6.5's ⌈N/3⌉ — the partition is the worker's judgement, not the host's arithmetic), then collates all three replies into ONE document. **`gabe/gemma-4-26b-a4b-it`** (LAN, `hosted: false`); `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
-| `obs-t1`, `obs-t2`, `obs-t3` | **observer-k8s** | triage | `base` | three seats under the one collator, each handed a share of the environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `tri-1` | triage | triage | `base` | THE collator, and there is exactly one. Its envelope names every declared service and all SIX observer seats, across three kinds — k8s, docker, vm. It DIVIDES the environment BY KIND, and within each kind, between that kind's own seats (SRD-TRIAGE-MIXED-OBSERVERS §5: k8s's ⌈N/3⌉ across `obs-t1..3`, docker split evenly across `obs-td1`/`obs-td2`, vm's whole share to `obs-tv1` alone — every split is the worker's judgement, not the host's arithmetic), then collates all six replies into ONE document. **`gabe/gemma-4-26b-a4b-it`** (LAN, `hosted: false`); `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
+| `obs-t1`, `obs-t2`, `obs-t3` | **observer-k8s** | triage | `base` | three seats under the one collator, each handed a share of the k8s environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `obs-td1`, `obs-td2` | **observer-docker** | triage | `base` | two seats under the one collator, splitting the environment's docker containers evenly between them; never a k8s or vm service. `cloud_access: false`. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `obs-tv1` | **observer-vm** | triage | `base` | the sole vm seat under the one collator; the whole of the environment's vm share is its own, since this console holds at most one vm environment (SRD-TRIAGE-MIXED-OBSERVERS §6.1) and there is no vm-kind seat to split it with. `cloud_access: false`. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
 is **TRACKED** — since 2026-09-12, by operator decision recorded in `.gitignore`
@@ -124,18 +126,21 @@ knowing before it is used to reason about this one: its `tester` role declares n
 `egress_access` and its `egress.allow` names no package registry, so **"egress to
 the registries" is false there**; its development seats run local oMLX models
 rather than hosted ones; and the `review` console's four seats are not declared in
-it at all. **The `triage` console's FOUR ARE** — `tri-1`, `obs-t1`, `obs-t2` and
-`obs-t3` appear in both files, so the example can stand that console up where it
-cannot stand up `review`.
+it at all. **The `triage` console's SEVEN ARE** — `tri-1`, `obs-t1`, `obs-t2`,
+`obs-t3`, `obs-td1`, `obs-td2` and `obs-tv1` appear in both files, so the example
+can stand that console up where it cannot stand up `review`.
 
-**THIS ROW HAS NOW BEEN WRONG IN BOTH DIRECTIONS, AND THAT IS THE REASON TO
+**THIS ROW HAS NOW BEEN WRONG IN MULTIPLE DIRECTIONS, AND THAT IS THE REASON TO
 DISTRUST THIS TABLE RATHER THAN READ IT.** It said FOUR until 2026-09-11 while
 only two seats existed — claiming *"the three `obs-t*` seats … on the local
 `gpt-oss-20b-MXFP4-Q8` the role pins"*, carrying the words *"Checked 2026-09-07
 rather than assumed"*, and carrying a warning about how it had nearly grown a
 fourth false clause. It grew one anyway, by rotting. It was corrected to two, and
-on 2026-09-12 the console genuinely grew a second pair, so it is four again — by
-an edit this time, not by drift.
+on 2026-09-12 the console genuinely grew a second pair, so it was four again — by
+an edit this time, not by drift. On 2026-09-14 three more seats joined —
+`obs-td1`, `obs-td2` (docker) and `obs-tv1` (vm), SRD-TRIAGE-MIXED-OBSERVERS §5 —
+so the count is SEVEN now, again by an edit rather than by drift; this paragraph
+sat at "four" for a day after the code it describes had already moved to seven.
 
 **A claim that says when it was checked is a claim nobody re-checks**; the date
 reads as a guarantee and is only a timestamp. That lesson is the durable part of
