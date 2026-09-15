@@ -1922,6 +1922,35 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
   });
 
   /**
+   * Task 3.3's settle half (SRD-TRIAGE-MIXED-OBSERVERS §6.1), pinned on the
+   * PRODUCTION wiring rather than on a hand-built `TriagePassDeps` — the call
+   * site in `productionTriageDeps`'s `pass` now passes
+   * `environments: [{ name: environment, kind: "k8s" }]`, and this is the test
+   * that would fail if that literal were wrong, empty, or misnamed.
+   *
+   * `TriagePassOutcome` carries no `environments` field of its own, so the fact
+   * is read the same way `triage-pass.test.ts` reads it: through the written
+   * incident records, which is also how the existing `observer_blocked` and
+   * `routing` assertions in this file read their facts.
+   */
+  test("a real sweep settles exactly one environment fact, named for the k8s environment", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-01Z-4444");
+    const outcome = await productionTriageDeps(async () => fleet.effects).pass();
+
+    expect(outcome.kind).toBe("swept");
+    const environmentFactScopes = outcome.written.flatMap((r) =>
+      r.subject.kind === "console_health" && r.subject.health === "observer_blocked"
+        ? [r.subject.scope]
+        : [],
+    );
+    // FIXTURE_TARGETS declares exactly one environment, "cni-dev" (kind absent,
+    // defaulting to k8s), so a correct wiring settles exactly one entry, named
+    // for it. An empty or misnamed list is refused by triagePass and throws here.
+    expect(environmentFactScopes).toEqual(["cni-dev"]);
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
+  });
+
+  /**
    * **Two passes over ONE deps object, which is the only way to see the carried
    * state at all.**
    *
