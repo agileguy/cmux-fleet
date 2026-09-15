@@ -1119,10 +1119,17 @@ export async function triagePass(deps: TriagePassDeps): Promise<TriagePassOutcom
    * act on. `Promise.all` preserves input order in `results`, so this is the
    * partition's own order and it is stable.
    */
-  const fanOut = await dispatchPartition(deps.declared, assignments, async (assignment) => {
-    await deps.sweep.dispatchObserver(sweepId, assignment);
-    return assignment.worker;
-  });
+  // Phase 4 task 4.1: `dispatchPartition` now checks per kind. The sweep still
+  // declares only its k8s environment here until task 4.2 widens `triage.ts` to
+  // wire docker and vm environments through too.
+  const fanOut = await dispatchPartition(
+    [{ kind: "k8s", services: deps.declared }],
+    assignments,
+    async (assignment) => {
+      await deps.sweep.dispatchObserver(sweepId, assignment);
+      return assignment.worker;
+    },
+  );
   const dispatched: string[] = fanOut.kind === "dispatched" ? [...fanOut.results] : [];
 
   const refusedPartition = fanOut.kind === "refused" ? fanOut : null;

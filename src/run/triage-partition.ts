@@ -81,6 +81,8 @@
  */
 
 import type { DispatchRefusal, DispatchRequestItem } from "./dispatch-request.ts";
+import { seatKind } from "./triage-seat-kinds.ts";
+import { TRIAGE_ENVIRONMENT_KINDS, type TriageEnvironmentKind } from "./triage-targets.ts";
 
 /**
  * One observer's share of the environment.
@@ -207,6 +209,25 @@ export interface PartitionFault {
 export type PartitionCheck = { kind: "complete" } | ({ kind: "refused" } & PartitionFault);
 
 /**
+ * Which kind's check produced this call, and how wide it was — SRD-TRIAGE-
+ * MIXED-OBSERVERS §5, D8; Phase 4 task 4.1.
+ *
+ * Used ONLY in {@link checkTriagePartition}'s refusal text. Partitioning is
+ * now three independent checks, one per {@link TriageEnvironmentKind}, each
+ * against that kind's own declared set — the old console had exactly one
+ * check and a hardcoded "three requests wide"; `width` is what replaces the
+ * hardcoded number, and `kind` is what replaces the silence about which
+ * check produced it. `dispatchPartition` passes this on every one of its
+ * three fixed-order calls; a caller checking one kind in isolation (a test)
+ * may omit it and get today's wording back.
+ */
+export interface PartitionCheckContext {
+  readonly kind: TriageEnvironmentKind;
+  /** The number of assignments checked for this kind — not the service count. */
+  readonly width: number;
+}
+
+/**
  * A sweep's requests, as the partition both waiting modules already take —
  * SRD-TRIAGE-CONSOLE §7.3, §13 task 5.1a.
  *
@@ -275,6 +296,7 @@ export function partitionFromRequests(
 export function checkTriagePartition(
   declared: readonly string[],
   assignments: readonly PartitionAssignment[],
+  context?: PartitionCheckContext,
 ): PartitionCheck {
   const declaredSet = new Set(declared);
 
@@ -306,7 +328,9 @@ export function checkTriagePartition(
       undeclared,
       reason:
         `the partition claims ${plural(duplicated.length, "service")} more than once ` +
-        `(${duplicated.join(", ")}). The fan-out is three requests wide (§6.5), so a service ` +
+        `(${duplicated.join(", ")}). The fan-out is ` +
+        `${context ? `${plural(context.width, "request")} wide, for ${context.kind}` : "three requests wide"}` +
+        ` (§6.5), so a service ` +
         `claimed twice is another service not claimed at all — ` +
         `${missing.length === 0 ? "none here, but the shape is the same" : `here ${missing.join(", ")}`}` +
         `. The whole request is refused and nothing was dispatched.`,
@@ -353,7 +377,23 @@ export type PartitionOutcome<T> =
   | ({ kind: "refused" } & PartitionFault);
 
 /**
- * Check the partition, and dispatch it ONLY if it is complete.
+ * The declared services for one environment kind — one element of
+ * {@link dispatchPartition}'s `declared` argument (SRD-TRIAGE-MIXED-OBSERVERS
+ * §5, D8; Phase 4 task 4.1).
+ *
+ * `triage/targets.yaml` can now declare up to three environments at once, one
+ * per kind (§6.1's `environmentsByKind`), and each kind's assignments must be
+ * checked against ONLY that kind's own declared set — a k8s service claimed by
+ * a docker seat must be refused exactly as an undeclared service would be,
+ * never accepted because it happens to appear in some OTHER kind's list.
+ */
+export interface DeclaredKindGroup {
+  readonly kind: TriageEnvironmentKind;
+  readonly services: readonly string[];
+}
+
+/**
+ * Check the partition, and dispatch it ONLY if every kind is complete.
  *
  * **This function exists so that "validate before dispatching any of it" is a
  * property of the code rather than of caller discipline.** §6.5 states the
@@ -369,6 +409,30 @@ export type PartitionOutcome<T> =
  * Dispatch is an argument, which is what lets Phase 5 grade the ordering with a
  * spy over an array and *"no container and no network"*.
  *
+ * ## Partitioning runs once per kind, fixed order, first refusal wins (D8)
+ *
+ * `assignments` is split by `seatKind` (`triage-seat-kinds.ts`) into one bucket
+ * per {@link TriageEnvironmentKind}, and each bucket is checked against that
+ * SAME kind's own group in `declared` — never against the union of every kind's
+ * services, which is precisely the bug this design closes (§5, §10): a docker
+ * container fed into the k8s group's declared set must still read
+ * `partition_incomplete` for k8s, not be silently accepted because the name
+ * happens to be declared somewhere else. The three checks run in the fixed
+ * order `k8s`, `docker`, `vm` and the first refusal stops the sweep — nothing is
+ * dispatched unless all three are complete. A kind present in neither
+ * `declared` nor `assignments` is skipped rather than checked (it would report
+ * `complete` either way; skipping just avoids a pointless empty check).
+ *
+ * **An assignment is never silently dropped.** A worker `seatKind` does not
+ * recognise at all — `tri-1`, a typo, an id from another console — falls
+ * through every kind bucket, so after the three fixed checks it is checked one
+ * more time against an empty declared set: every service it claims comes back
+ * `undeclared`, exactly the same refusal an invented service always gets. This
+ * catches the same shape of mistake a worker whose kind HAS no declared group
+ * already gets caught by inside the fixed-order loop (§5's *"a k8s service, a
+ * docker container and a VM unit never share a request"*), for the one worker
+ * id that has no kind to check it under at all.
+ *
  * **Serial, deliberately.** `relayPass` is serial already (§6.5) and the three
  * dispatches are cheap next to the observer passes they start, so there is no
  * concurrency to buy here — while `Promise.all` would start every dispatch before
@@ -376,12 +440,41 @@ export type PartitionOutcome<T> =
  * fan-out this function's whole argument is against.
  */
 export async function dispatchPartition<T>(
-  declared: readonly string[],
+  declared: readonly DeclaredKindGroup[],
   assignments: readonly PartitionAssignment[],
   dispatch: (assignment: PartitionAssignment) => Promise<T>,
 ): Promise<PartitionOutcome<T>> {
-  const check = checkTriagePartition(declared, assignments);
-  if (check.kind === "refused") return check;
+  const declaredByKind = new Map<TriageEnvironmentKind, readonly string[]>(
+    declared.map((group) => [group.kind, group.services]),
+  );
+
+  for (const kind of TRIAGE_ENVIRONMENT_KINDS) {
+    const declaredForKind = declaredByKind.get(kind) ?? [];
+    const assignmentsForKind = assignments.filter((a) => seatKind(a.worker) === kind);
+    // Not present: nothing declared for this kind and no assignment claims to
+    // be one. Checking it anyway would always answer "complete" (an empty
+    // declared set against an empty claim set), so skipping is an
+    // optimisation, not a behaviour change.
+    if (declaredForKind.length === 0 && assignmentsForKind.length === 0) continue;
+    const check = checkTriagePartition(declaredForKind, assignmentsForKind, {
+      kind,
+      width: assignmentsForKind.length,
+    });
+    if (check.kind === "refused") return check;
+  }
+
+  /*
+   * The safety net for a worker `seatKind` cannot place in any of the three
+   * kinds above — see the docblock's "never silently dropped" paragraph. No
+   * kind names this bucket, so it is checked with no declared set of its own
+   * and (deliberately) no `context`: today's default wording is the correct
+   * one for a refusal that is not "for" any kind.
+   */
+  const unrecognised = assignments.filter((a) => seatKind(a.worker) === null);
+  if (unrecognised.length > 0) {
+    const check = checkTriagePartition([], unrecognised);
+    if (check.kind === "refused") return check;
+  }
 
   /*
    * **CONCURRENT, and this is an anti-criterion rather than a preference.**
