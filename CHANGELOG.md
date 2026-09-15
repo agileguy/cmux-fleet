@@ -4,6 +4,127 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-15
+
+This release covers ten commits since 1.1.0: three cap and threshold
+raises that keep the triage console from timing out or overflowing its
+report cap, a resize-pane fix that lets console layouts apply, an image
+toolchain pin, a collation-vocabulary fix, and a per-request output-token
+cap applied to every worker and separately to gabe.
+
+### Added
+
+- **A per-request output-token cap on every worker.** Seats sent no
+  `max_tokens`, so the endpoint budgeted about 213k output tokens a
+  request, and a runaway generation once stalled a seat for 16 minutes
+  past Pi's idle timeout, while completed turns ran p50 99, p90 800, p99
+  3118, max 7395. A `models.json` `maxTokens` never reaches an
+  OpenAI-compatible request, so the cap now travels as a per-model
+  `max_output_tokens` map on each provider, resolves into
+  `PIFLEET_PI_MAX_OUTPUT_TOKENS`, and is applied by
+  `docker/pi-extensions/output-token-cap.ts` on `before_provider_request`.
+  It sets `max_tokens` only when the request carries no cap of its own, so
+  compaction's smaller budget is left alone; an empty or invalid value is
+  a no-op. The extension is loaded on every worker, baked 0444 in the
+  image, and enrolled as a build-context asset.
+- **A refusal for briefs that name another seat's artifact files.** In
+  sweeps 146 and 147 the collator briefed every k8s observer to write
+  `observer-k8s(-ops).json/.md`, names that exist nowhere; one seat obeyed
+  and delivered nothing. `dispatch_request` now refuses, before writing
+  anything, a brief whose `observer-*.json/.md` tokens are not that seat's
+  own pair, so the collator reads the reason and retries. The host
+  refuses the same file with a new `observer_artifact_mismatch` code as a
+  backstop, and one fixture set proves both sides agree.
+
+### Changed
+
+- **The observer deadline is 1200s** (cadence 1020 -> 1620), up from 600s.
+  `childDeadlineS` is derived, not a field: it subtracts the shared 300s
+  margin from `cadence_s - reserve_s`, so cadence is the lever local to
+  this console. T-sweep-146 split its services evenly and every observer
+  still timed out at 600s, and so did the collation; each transcript ended
+  on a tool result with no next turn, at about 10 tok/s decode on the
+  shared model, with docker seats at 48k-112k input tokens. T-sweep-145
+  lost the same way. The cost is a 27-minute tick.
+- **The report byte cap is 16384 for a single collator.** The console
+  went back to one collator on 2026-09-14, so one `triage.json` holds a
+  row for every declared service. T-sweep-148 wrote 15 rows in 9277 bytes
+  and the old 8192 cap refused it whole, recording every service
+  unobserved. `TRIAGE_DOCUMENT_MAX_BYTES` is now 16384;
+  `MAX_SERVICES_PER_ENVIRONMENT` stays 16. A new test parses 16 synthetic
+  rows sized to T-sweep-148's largest row (768 bytes) and fails if they no
+  longer fit.
+- **Gabe's per-request output tokens are capped at 8192.** The endpoint
+  had been budgeting about 98k output tokens a request, measured as a
+  mean over 2116 requests; completed turns measured p50 99, p90 800, p99
+  3118, max 7395 over 363 turns, so 8192 is about 1.1x that max.
+
+### Fixed
+
+- **`resize-pane` is scoped to its workspace**, so console layouts apply.
+  It was sent a pane UUID with no `--workspace` and cmux answered
+  `not_found`, so every sizing pass fell back to the default split and
+  the triage console came up with its observer rows at 50/25/25 instead
+  of thirds. Reproduced live with the same UUID. `resizePaneArgv` now
+  requires and validates the workspace id, and all five call sites pass
+  the workspace being built.
+- **The image pins fd 10.5.0** so Pi's find tool works. Pi 0.79.6's find
+  tool always passes `--no-require-git`, which Debian bookworm's fd-find
+  8.6.0 rejects, so every find call in a seat failed (sweeps 145-147).
+  Installs the upstream musl build, checksum-pinned per arch, keeps the
+  `fdfind` name, and smoke-tests Pi's exact flags at build time and in
+  the image probe.
+- **Docker and VM check names are host vocabulary.** T-sweep-151 was
+  refused before dispatch with `worker_prose [resources]`: the previous
+  collation used "resources" as a coverage channel on a VM row, a
+  `TRIAGE_VM_CHECKS` member, while `HOST_VOCABULARY` held only the k8s
+  `TRIAGE_CHECKS`. `HOST_VOCABULARY` now includes `TRIAGE_DOCKER_CHECKS`
+  and `TRIAGE_VM_CHECKS`. A regression test reproduces the refusal with a
+  same-length control that still refuses, and a coverage test discovers
+  every exported `*_CHECKS` list and fails if a member is missing, so a
+  new environment kind cannot fall behind silently.
+- **All four Pi extensions are named in comments that still counted
+  three.** Comment-only, five places.
+- **CI now collects 173 container probes**, and two stale asset counts
+  are corrected. `TOTAL_EXPECTED` 172 was arithmetic nobody had run.
+  Running the job's 19 files with every gate unset on a clean checkout
+  gives "Ran 173 tests across 19 files", and the same method at the
+  pushed tip gives 160 over 18, matching that run's own log line. The
+  missed test is in image.test.ts: the fd-flags entry added to the
+  toolchain probe loop.
+
+### Verified live
+
+`[1.1.0]`'s claim that nothing in that release had run live no longer
+holds for what it shipped. Measured on the live seven-pane console,
+2026-09-15:
+
+- The console was recreated at 21:07Z with all seven seats on one image,
+  each carrying `PIFLEET_PI_MAX_OUTPUT_TOKENS=8192`, and PID 1's argv
+  including the extension.
+- Sweep 150 collated 15 rows in 6717 bytes; sweep 151 collated 15 rows in
+  6985 bytes; sweep 152 collated 15 rows in **9048 bytes** and was
+  accepted, which is over the old 8192 cap and is the report-cap raise
+  proved live.
+- The output cap, read from the endpoint's own `max_tokens` histogram
+  between two snapshots after the restart: 162 requests, every one of
+  them in (5000, 10000], against a mean of about 97.7k before.
+- The vocabulary fix cleared a real refusal: sweep 151's document again
+  carried `resources` and `reachability`, the exact shape that refused
+  sweep 151 before the fix, and sweep 152 rendered and passed.
+- Sweep 149's lost collation was traced: the collator read all six
+  replies, then spent 6m19s drafting the whole document inside its
+  thinking before writing any argument, and the request ended with zero
+  output and no collation. That was before the cap; both capped sweeps
+  collated.
+
+### Not yet verified live
+
+- The container probe count of 173 is measured locally with every gate
+  off and cross-checked against one real run's log line, but no real run
+  of that job has collected 173 yet.
+- The integration and end-to-end suites have not run on this branch.
+
 ## [1.1.0] — 2026-09-15
 
 This release covers Phases 1-5 of `Docs/SRD-TRIAGE-MIXED-OBSERVERS.md`.
