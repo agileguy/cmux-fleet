@@ -459,6 +459,12 @@ llm:
       # pools separately, so the token figure is not invariant to this setting.
       context_windows:
         gemma-4-26b-a4b-it: 262144
+      # Per-request output cap (2026-09-15). Completed turns measured p50 99,
+      # p90 800, p99 3118, max 7395 output tokens over 363 turns; 8192 is about
+      # 1.1x that max. Without it the server budgeted ~98k per request and a
+      # runaway generation ran past the task deadline.
+      max_output_tokens:
+        gemma-4-26b-a4b-it: 8192
       # NO `tag_style` — this is not a tag-style catalogue.
       # NO `probe_timeout_ms` — the fleet-wide 60s is right for a local server
       # that answered a tool-call probe in 2.45s under 8-way concurrency.
