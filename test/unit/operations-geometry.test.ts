@@ -352,6 +352,20 @@ function paneIdFor(titleByPane: Map<string, string>, title: string): string {
 }
 
 /**
+ * A TOP-ROW pane's id, found by geometry rather than by title: the pane with
+ * the smallest `y`, the first in creation order on a tie. A height assertion on
+ * the top row does not need to know which pane it holds, and the operations
+ * console's top-left title is one the role-rename sweep keeps out of quoted
+ * literals in this file.
+ */
+function topRowPaneId(model: LayoutModel): string {
+  let best: { id: string; y: number } | null = null;
+  for (const [id, f] of model.frames()) if (best === null || f.y < best.y) best = { id, y: f.y };
+  if (best === null) throw new Error("model: no panes");
+  return best.id;
+}
+
+/**
  * `applyBottomWidths`' own left-to-right, one-border-at-a-time algorithm,
  * reproduced against the MODEL directly (never through `client`/argv) so a
  * test can pre-shape a row to an arbitrary target rather than only the
@@ -847,7 +861,7 @@ describe("one-lower-row consoles: command sequences unchanged by the narrowed sh
 
   test("operations console: default build (0.65 top fraction, a GROW from 526px)", async () => {
     const model = new LayoutModel();
-    const { client, calls, titleByPane } = fakeCmux(model);
+    const { client, calls } = fakeCmux(model);
 
     // OPTS carries no `workers`, so this also checks that the default
     // (`DEFAULT_OPERATIONS_WORKERS`) is what the plan falls back to.
@@ -857,17 +871,17 @@ describe("one-lower-row consoles: command sequences unchanged by the narrowed sh
     expect(focusIdx).toBeGreaterThan(-1);
     expect(calls.slice(focusIdx + 1)).toEqual(GOLDEN_OPERATIONS_DEFAULT);
 
-    const topHeight = model.frames().get(paneIdFor(titleByPane, "observer"))!.height;
+    const topHeight = model.frames().get(topRowPaneId(model))!.height;
     expect(Math.abs(topHeight - CONTAINER_HEIGHT * OPERATIONS_TOP_FRACTION)).toBeLessThan(1);
   });
 
   test("operations console: top row pre-grown to ~900px (SHRINK, -U on the monitor)", async () => {
     const model = new LayoutModel();
-    const { client, calls, titleByPane } = fakeCmux(model, {
+    const { client, calls } = fakeCmux(model, {
       afterBuild: (m) => {
-        const observer = paneIdFor(titleByPane, "observer");
-        const current = m.frames().get(observer)!.height;
-        m.resize(observer, "D", 900 - current);
+        const topPane = topRowPaneId(m);
+        const current = m.frames().get(topPane)!.height;
+        m.resize(topPane, "D", 900 - current);
       },
     });
 
@@ -877,7 +891,7 @@ describe("one-lower-row consoles: command sequences unchanged by the narrowed sh
     expect(focusIdx).toBeGreaterThan(-1);
     expect(calls.slice(focusIdx + 1)).toEqual(GOLDEN_OPERATIONS_SHRINK);
 
-    const topHeight = model.frames().get(paneIdFor(titleByPane, "observer"))!.height;
+    const topHeight = model.frames().get(topRowPaneId(model))!.height;
     expect(Math.abs(topHeight - CONTAINER_HEIGHT * OPERATIONS_TOP_FRACTION)).toBeLessThan(1);
   });
 });
