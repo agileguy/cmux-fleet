@@ -584,4 +584,41 @@ describe("egress-relay.cjs — bad IDLE_TIMEOUT_MS/ACTIVE_IDLE_TIMEOUT_MS/MAX_CO
     expect(reply.toString()).toBe("ECHO:HELLO");
     client.destroy();
   }, cliBudget(1));
+
+  /**
+   * `PIFLEET_RELAY_MAX_CONNECTIONS`'s own ceiling is `MAX_RELAY_CONNECTIONS`
+   * (65536, see `docker/egress-relay.cjs`) — a DIFFERENT, lower bound than the
+   * two timeouts' `MAX_TIMEOUT_MS` (2147483647) pinned just above. Nothing
+   * before this pair of tests notices if `MAX_RELAY_CONNECTIONS` itself moves:
+   * the `badValues` loop's `"2147483648"` case is past BOTH ceilings at once,
+   * so it stays red whichever one governs, and every other case in that loop
+   * is nowhere near 65536 either. Pinning 65536 accepted / 65537 refused is
+   * what actually catches `MAX_RELAY_CONNECTIONS` drifting.
+   */
+  test("boundary: 65536 (MAX_RELAY_CONNECTIONS) is accepted for PIFLEET_RELAY_MAX_CONNECTIONS — relay starts, prints its forwarding line, and echoes traffic", async () => {
+    const up = await startUpstream();
+    upstreams.push(up);
+    const listenPort = await freePort();
+    const relay = await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_MAX_CONNECTIONS: "65536",
+    });
+    expect(relay.sawForwardingLine).toBe(true);
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("HELLO");
+    const reply = (await once(client, "data")) as Buffer;
+    expect(reply.toString()).toBe("ECHO:HELLO");
+    client.destroy();
+  }, cliBudget(1));
+
+  test("boundary: 65537 (one past MAX_RELAY_CONNECTIONS) is rejected at startup, naming PIFLEET_RELAY_MAX_CONNECTIONS", async () => {
+    const relay = await startRelay(
+      [{ listenPort: await freePort(), host: "127.0.0.1", port: 8000, name: "omlx" }],
+      { PIFLEET_RELAY_MAX_CONNECTIONS: "65537" },
+    );
+    const code = await expectRejectsAtStartup(relay);
+    expect(code).not.toBe(0);
+    expect(await relay.stderr()).toContain("PIFLEET_RELAY_MAX_CONNECTIONS");
+  }, cliBudget(1));
 });

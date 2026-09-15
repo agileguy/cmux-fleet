@@ -86,9 +86,9 @@ function optionalFieldsBullet(src: string): string {
  * `.exactOptional()`. Measured on the installed zod 4.4.3 (`bun -e`, reading
  * each wrapper's own `._zod.optin`): every one of those, `.default()`
  * included, marks `_zod.optin === "optional"` too — the same string
- * `.optional()` itself uses; grepping `node_modules/zod` for `"defaulted"`
- * turns up nothing on this version. If a zod upgrade renames or drops the
- * marker, this throws here rather than silently making every key look
+ * `.optional()` itself uses; none of them reports a runtime `_zod.optin`
+ * value of `"defaulted"`. If a zod upgrade renames or drops the marker,
+ * this throws here rather than silently making every key look
  * "not optional".
  */
 function assertOptinMarkerAvailable(): void {
@@ -109,8 +109,8 @@ function assertOptinMarkerAvailable(): void {
  * Cross-checked against zod 4's own internal `field._zod.optin` marker
  * (truthy whenever a field's own shape tolerates omission — measured above as
  * the single string `"optional"` on the installed zod 4.4.3, `.default()`
- * included; there is no separate `"defaulted"` value on this version) after
- * `assertOptinMarkerAvailable()` confirms the installed zod still exposes it.
+ * included; no wrapper reports a runtime `_zod.optin` value of `"defaulted"`
+ * on this version) after `assertOptinMarkerAvailable()` confirms the installed zod still exposes it.
  * A key the behavioural test selects but the marker disagrees with fails
  * loudly, by name, rather than being trusted on one signal alone.
  *

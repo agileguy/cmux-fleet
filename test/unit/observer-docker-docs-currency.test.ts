@@ -50,7 +50,12 @@
  *     (`<targets_var> line <n>`) is documented as a fleet configuration fault — `blocked`,
  *     `indeterminate`, no retry — in its own table row, ordered ABOVE the generic "your own call
  *     was malformed" row (the table is read top to bottom, first match wins), and the quoted
- *     wording is pinned against `docker/observe-ssh`'s own `refuse()` text
+ *     wording is pinned against `docker/observe-ssh`'s own `refuse()` text. The row's own third
+ *     column ("What the row says") is read on its own — split out of that one table row, not the
+ *     prose paragraph below the table — and asserted to carry `blocked`, `indeterminate` and a
+ *     no-retry statement, and never the generic row's "retry it once" wording: the paragraph-only
+ *     check alone would stay green if that column were edited back to the generic instruction while
+ *     only the row's position and the paragraph below it were left alone.
  *
  * Not covered, in general: when a channel is `forbidden` rather than a call to fix — that is prose
  * judgement, except for the one case choice 8 pins: an action verb (restart, stop, start, kill, rm,
@@ -58,7 +63,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -547,6 +552,32 @@ describe("the survey-then-filter rule's jq projection only ever keeps real ps te
 
 describe("the survey-then-filter rule's worked command prints observe-docker's own exit status, not jq's", () => {
   /**
+   * A real POSIX `sh`, never `/bin/sh`'s bash-in-POSIX-mode. On this Mac
+   * `/bin/sh` IS bash (measured: `bash 3.2.57`, `$BASH_VERSION` set) running
+   * in POSIX mode, and POSIX mode still accepts bash-only constructs a real
+   * POSIX shell refuses — `${PIPESTATUS[0]}` and `[[ ]]` among them (measured:
+   * `/bin/sh -c 'false | true; echo "${PIPESTATUS[0]}"'` prints `1` and exits
+   * 0; the same line under `/bin/dash` prints `Bad substitution` and exits 2).
+   * So a bash-only mutant of the worked command would pass an "sh" test by
+   * accident. `dash` is a real POSIX shell and is on this Mac at `/bin/dash`;
+   * prefer whatever `dash` resolves to on PATH, then `/bin/dash` directly, and
+   * fall back to `sh` only if neither is found — degraded coverage, not a
+   * hard failure, since a bash-only mutant then passes this check the same
+   * way the old "sh"-named test did. Resolved once per run and the result is
+   * folded into the test's own name and failure messages, so a run that
+   * silently fell back to the degraded path says so.
+   */
+  function resolvePosixShell(): { bin: string; label: string } {
+    const onPath = Bun.which("dash");
+    if (onPath) return { bin: onPath, label: `dash (${onPath})` };
+    if (existsSync("/bin/dash")) return { bin: "/bin/dash", label: "dash (/bin/dash)" };
+    return {
+      bin: "sh",
+      label: "sh — dash not found on PATH or at /bin/dash; POSIX coverage is degraded to whatever /bin/sh actually is",
+    };
+  }
+
+  /**
    * Runs `command` EXACTLY as extracted from the skill — no harness-appended
    * echo of its own — under `shell`, with `observe-docker` on PATH as a REAL
    * EXECUTABLE SCRIPT in a temp dir, never a shell function: `observe-docker`
@@ -564,7 +595,7 @@ describe("the survey-then-filter rule's worked command prints observe-docker's o
    * worker's bash tool starts a new shell per call and `$rc` alone would not
    * survive to be read.
    */
-  function runWorkedCommand(shell: "bash" | "sh", command: string): { statusLine: string | null; stdout: string; stderr: string } {
+  function runWorkedCommand(shell: string, command: string): { statusLine: string | null; stdout: string; stderr: string } {
     const dir = mkdtempSync(join(tmpdir(), "observe-docker-stub-"));
     try {
       const stubPath = join(dir, "observe-docker");
@@ -592,12 +623,14 @@ describe("the survey-then-filter rule's worked command prints observe-docker's o
     expect(Number(statusLine)).toBe(255);
   });
 
-  test("sh: the printed status line carries 255 too — the worked command is POSIX, not bash-only", () => {
+  const POSIX_SHELL = resolvePosixShell();
+
+  test(`posix (${POSIX_SHELL.label}): the printed status line carries 255 too — the worked command is POSIX, not bash-only`, () => {
     const command = surveyWorkedCommand(SKILL);
-    const { statusLine, stdout, stderr } = runWorkedCommand("sh", command);
+    const { statusLine, stdout, stderr } = runWorkedCommand(POSIX_SHELL.bin, command);
     expect(
       statusLine,
-      `no "observe-docker exit: <n>" line in output (stdout=${JSON.stringify(stdout)}, stderr=${JSON.stringify(stderr)})`,
+      `[${POSIX_SHELL.label}] no "observe-docker exit: <n>" line in output (stdout=${JSON.stringify(stdout)}, stderr=${JSON.stringify(stderr)})`,
     ).not.toBeNull();
     expect(Number(statusLine)).toBe(255);
   });
@@ -817,5 +850,54 @@ describe("a refused targets file is documented as a fleet configuration fault, n
       newRowAt,
       "the targets-file-refusal row must sit ABOVE the generic malformed-call row, so a worker reading top to bottom hits it first",
     ).toBeLessThan(genericAt);
+  });
+
+  /**
+   * The targets-file-refusal table row itself — from its own opening marker
+   * (the same one `newRowMarker` above uses to find it) to the end of its
+   * line. Scoped to the row alone, not the paragraph below it and not the
+   * whole file: a mutation that edits ONLY the row's own third column
+   * (leaving the paragraph below untouched) is what this is built to catch —
+   * "the skill states it in one paragraph" above reads a DIFFERENT passage of
+   * text and would stay green through exactly that edit.
+   */
+  function targetsFileRuleRow(src: string): string {
+    const marker = "| `77` with `observe-ssh: refused before ssh ran` on stderr, naming `<targets_var> line <n>`";
+    const markerAt = src.indexOf(marker);
+    expect(markerAt, "the skill's targets-file-refusal table row is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+    const lineEnd = src.indexOf("\n", markerAt);
+    expect(lineEnd, "the targets-file-refusal row never ends — this probe has rotted").toBeGreaterThan(markerAt);
+    return src.slice(markerAt, lineEnd);
+  }
+
+  /**
+   * The row's own third column — "What the row says" — split on the
+   * markdown table's cell pipes. A three-column data row splits into exactly
+   * 5 pieces on `|` (leading empty, three cells, trailing empty), the same
+   * shape the VM twin's `exitTableRows()` relies on for every row in its
+   * table (`test/unit/observer-vm-docs-currency.test.ts`).
+   */
+  function rowThirdColumn(row: string): string {
+    const cells = row.split("|");
+    expect(cells.length, `expected a 3-column table row (5 pipe-split segments), got ${cells.length}: ${JSON.stringify(row)}`).toBe(5);
+    return cells[3]!.trim();
+  }
+
+  test("the row's own third column says blocked/indeterminate/no-retry, not the generic retry instruction", () => {
+    // Mirrors the VM twin's equivalent check (observer-vm-docs-currency.test.ts,
+    // "the malformed-targets-file row's 'What the row says' column states
+    // blocked/indeterminate/no-retry, not a retry instruction"): read the
+    // ROW's own cell, not the prose paragraph below the table, so editing the
+    // column back to the generic row's "fix the call and retry it once"
+    // wording turns this red even though the paragraph stays untouched.
+    const row = targetsFileRuleRow(SKILL);
+    const column = rowThirdColumn(row);
+    expect(column).toContain("`blocked`");
+    expect(column).toContain("`indeterminate`");
+    expect(column, "the row's own third column does not say there is no retry").toMatch(/no retry/);
+    expect(
+      column,
+      "the row's own third column wrongly carries the generic row's retry instruction",
+    ).not.toMatch(/retry it once/);
   });
 });
