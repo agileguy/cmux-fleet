@@ -1440,59 +1440,103 @@ export const TRIAGE_TOP_FRACTION: number | null = 1 / 3;
 export const TRIAGE_OBSERVER_WIDTH_FRACTION: number | null = 1 / 3;
 
 /**
- * The triage console's panes, in creation order: ONE COLLATOR ACROSS THE TOP,
- * its observers along the bottom.
+ * The triage console's panes, in creation order.
  *
- *     +-----------------------------------+
- *     |               tri-1               |
- *     +----------+-----------+------------+
- *     |  obs-t1  |  obs-t2   |   obs-t3   |
- *     +----------+-----------+------------+
+ * `DEFAULT_TRIAGE_WORKERS` still holds four ids — Phase 2.1 of
+ * `Docs/SRD-TRIAGE-MIXED-OBSERVERS.md` moves it to seven — so this function
+ * branches on the WORKER COUNT it is actually handed, rather than assuming a
+ * single shape:
  *
- * **THIS STOPPED SHARING {@link agentSquarePanes} ON 2026-09-13, and the reason
- * is a shape the square cannot express.** The square's table is
- * `[right, down·from0, down·from1]`, which makes pane 2 the top row's second
- * half — so pane 1 can never be full width. A collator over N observers needs
- * the first split to go DOWN off pane 1 and every later one to go RIGHT along
- * the row that split created. Delegating to the square would have produced a
- * 2x2 with `tri-1` in a quarter of the screen and `obs-t3` under `obs-t1`,
- * which is a different console from the one the operator asked for.
+ *  - **Four** workers still delegate to {@link collatorOverRowPanes}, the
+ *    builder SHARED with {@link reviewPanes}: one collator across the top,
+ *    its workers in one row beneath. Phase 2.1 deletes this branch once
+ *    `DEFAULT_TRIAGE_WORKERS` moves to seven and every call takes the table
+ *    below instead.
+ *  - **Seven** workers build from a HARDCODED table
+ *    (SRD-TRIAGE-MIXED-OBSERVERS §4.2), never `collatorOverRowPanes` and never
+ *    a computed sequence — the collator full width, TWO full-width rows of
+ *    three beneath it:
  *
- * **AND ON THE SAME DAY IT STARTED SHARING AGAIN — {@link collatorOverRowPanes},
- * with `review`.** That is not a reversal of the paragraph above; it is the
- * distinction that paragraph was drawing, arriving in code. What triage could
- * never share was the SQUARE. What it always could share is a builder for its
- * own shape, and the moment `review` was asked to take that shape there were two
- * consoles needing one table. So the table moved out of this function rather
- * than being copied into that one.
+ *        +-----------------------------------+
+ *        |                 0                 |
+ *        +----------+-----------+------------+
+ *        |    1     |     3     |     4      |
+ *        +----------+-----------+------------+
+ *        |    2     |     5     |     6      |
+ *        +----------+-----------+------------+
  *
- * **THREE CLAIMS ABOUT SHARING HAVE NOW BEEN TRUE HERE IN TWENTY-FOUR HOURS**,
- * and the sequence is worth more than any one of them. It read "shares the
- * square, and a hand copy would have had to be edited when this console went
- * from four seats to two" — true while triage was a SUBSET of the square. Then
- * "shares nothing; the shape differs rather than the count" — true for one day,
- * while it was the only console of its shape. Now "shares `collatorOverRowPanes`
- * with `review`". Every one of the three was correct when written and none of
- * them was wrong later; what changed underneath each was the set of consoles in
- * this file. **A docblock about what a function SHARES is a claim about its
- * siblings, not about itself, so it expires when a sibling moves and nothing in
- * this function will redden.** Check the caller list before believing this
- * paragraph: `grep -n 'collatorOverRowPanes' src/`.
+ *    CREATION order is not READING order. A full-width row can only be
+ *    peeled off a pane BEFORE the row above it is divided into columns — once
+ *    a pane has been split `right`, a later `down` off it only narrows that
+ *    one cell, not the whole row. So both `down` splits that open the two
+ *    observer rows (indices 1 and 2) happen before either row's own `right`
+ *    splits (3 and 4 on row one; 5 and 6 on row two), even though the rows
+ *    read out left to right as `1, 3, 4` and `2, 5, 6`.
+ *  - **Any other count** — 0 gets its own message; 1, 2, 3, 5, 6, 8 and up do
+ *    not — is refused by name: the console holds exactly four or seven
+ *    workers and has no sensible degraded shape in between or beyond them.
  *
- * The anchor discipline — that a split names the pane it divides rather than
- * "the previous one" — moved out with the table and is stated at
- * {@link collatorOverRowPanes}. It is the lesson `operationsPanes` learned at
- * its git pane, and it is the part that actually breaks under copying, which is
- * why it now lives in exactly one place for both consoles.
- *
- * `triage-plan.test.ts` pinned the SHARING structurally, comparing this plan's
- * split table against `reviewPanes`' at runtime. That pin was inverted on
- * 2026-09-13 to assert the two do NOT match, and is now inverted BACK, because
- * they match again through a different builder. It has therefore flipped twice
- * in a day — which is the strongest argument available that the property worth
- * pinning is **this console's own shape**, the collator full width over one row
- * of observers, rather than its agreement with a neighbour that is free to move.
+ * Panes are built the way {@link collatorOverRowPanes} builds one (same
+ * `title`/`worker`/`command` shape, same `backend`/`configPath` defaults, same
+ * `assertPlainValue` checks) so the seven-pane branch differs from the
+ * four-pane one only in geometry, not in how a pane is assembled.
  */
 export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
-  return collatorOverRowPanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
+  const workers = opts.workers ?? DEFAULT_TRIAGE_WORKERS;
+
+  if (workers.length === 0) {
+    throw new Error("triage: refusing an empty --workers set — name at least one worker");
+  }
+
+  if (workers.length === 4) {
+    // Phase 2.1 of Docs/SRD-TRIAGE-MIXED-OBSERVERS.md removes this branch
+    // once DEFAULT_TRIAGE_WORKERS moves to seven and every call falls through
+    // to the seven-pane table below.
+    return collatorOverRowPanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
+  }
+
+  if (workers.length !== 7) {
+    throw new Error(
+      `triage: refusing ${workers.length} workers — the console holds exactly four workers ` +
+        `(one collator, one row of three) or seven (one collator, two rows of three)`,
+    );
+  }
+
+  const repoRoot = opts.repoRoot;
+  const backend = opts.backend ?? "headless";
+  const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
+
+  for (const w of workers) assertPlainValue("worker id", w);
+  assertPlainValue("backend", backend);
+
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
+
+  // SRD-TRIAGE-MIXED-OBSERVERS §4.2's own table, kept beside the docblock's
+  // diagram deliberately — the two have to agree, and cannot if the sequence
+  // is computed. Index 0 takes the initial surface (`split: null`) and is
+  // read straight off this table for i >= 1; the anchor discipline (which
+  // pane a split names as `splitFrom`) is the part that breaks under a
+  // "same as the previous one" assumption once a row divides.
+  const SEVEN_PANE_SHAPE: readonly { split: SplitDirection; splitFrom: number }[] = [
+    { split: "down", splitFrom: 0 },
+    { split: "down", splitFrom: 1 },
+    { split: "right", splitFrom: 1 },
+    { split: "right", splitFrom: 3 },
+    { split: "right", splitFrom: 2 },
+    { split: "right", splitFrom: 5 },
+  ];
+
+  return workers.map((worker, i) => ({
+    title: worker,
+    worker,
+    command: `${envPreamble()} ${agentPaneCommand({
+      repoRoot,
+      worker,
+      backend,
+      configPath,
+      attach: tuiWorkers.has(worker),
+      workspaceName: opts.workspaceName,
+    })}`,
+    ...(i === 0 ? { split: null } : SEVEN_PANE_SHAPE[i - 1]!),
+  }));
 }

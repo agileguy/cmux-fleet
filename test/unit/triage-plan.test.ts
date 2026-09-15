@@ -41,11 +41,14 @@
  *
  * ## The anti-vacuity pin, and why a cross-console comparison is not enough
  *
- * `triagePanes` is one line delegating to `collatorOverRowPanes`, and the value
- * of that — SRD-TRIAGE-CONSOLE D5's bet that a console is a DATA addition — is
- * entirely in the delegation. A hand-rolled copy of the split table here would
- * be INDISTINGUISHABLE from the delegation on the day it was written and would
- * pass every literal assertion in this file.
+ * At four workers `triagePanes` is one line delegating to `collatorOverRowPanes`,
+ * and the value of that — SRD-TRIAGE-CONSOLE D5's bet that a console is a DATA
+ * addition — is entirely in the delegation. A hand-rolled copy of the split
+ * table here would be INDISTINGUISHABLE from the delegation on the day it was
+ * written and would pass every literal assertion in this file. (At seven
+ * workers — SRD-TRIAGE-MIXED-OBSERVERS §4.2 — the function takes its own
+ * hardcoded table instead, on purpose; see the seven-pane describe block
+ * below.)
  *
  * So the shape is asserted BOTH ways: as a literal anchor table, and against a
  * sibling AT RUNTIME on one shared worker set. The runtime comparison is the one
@@ -453,5 +456,177 @@ describe("the seats the plan names are the seats the tracked config declares", (
       ["obs-t2", OBSERVER_K8S_ROLE],
       ["obs-t3", OBSERVER_K8S_ROLE],
     ]);
+  });
+});
+
+/**
+ * THE SEVEN-PANE SHAPE (SRD-TRIAGE-MIXED-OBSERVERS §4.2) — a second geometry
+ * `triagePanes` builds, on a worker count the four-worker tests above never
+ * exercise. `DEFAULT_TRIAGE_WORKERS` still names four ids, so this whole block
+ * uses SYNTHETIC ids that name their own final cell rather than the real
+ * roster — the roster move is a later phase (§11 task 1.1 does the geometry
+ * only).
+ *
+ * Ids are given in CREATION order, which SRD §4.2 states is not reading
+ * order: both `down` splits that open the two observer rows happen before
+ * either row's own `right` splits, so a pane named for row two's first column
+ * (`r2c1`) is created (index 2) before row one's second and third columns
+ * (`r1c2`, `r1c3`, indices 3 and 4).
+ */
+const SEVEN = ["top", "r1c1", "r2c1", "r1c2", "r1c3", "r2c2", "r2c3"] as const;
+
+/** A pane, reduced to exactly what a layout replay needs. */
+type LaidOutPane = { readonly title: string; readonly split: string | null; readonly splitFrom?: number };
+
+type UnitCell = { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number };
+
+/**
+ * Replays `split`/`splitFrom` as a binary split tree over a unit square, the
+ * way `new-split` actually behaves: `down` halves the anchor's cell top over
+ * bottom (anchor keeps the top half, the new pane takes the bottom half);
+ * `right` halves it left over right (anchor keeps the left half, the new pane
+ * takes the right half). `splitFrom` undefined means "the previous pane",
+ * matching {@link OperationsPane.splitFrom}'s own contract. `up`/`left` are
+ * not a direction any builder in this file emits, so this throws on them
+ * rather than guessing a meaning.
+ */
+function computeCells(panes: readonly LaidOutPane[]): UnitCell[] {
+  const cells: UnitCell[] = [];
+  panes.forEach((p, i) => {
+    if (i === 0) {
+      cells[0] = { left: 0, right: 1, top: 0, bottom: 1 };
+      return;
+    }
+    const anchorIndex = p.splitFrom ?? i - 1;
+    const anchor = cells[anchorIndex]!;
+    if (p.split === "down") {
+      const mid = (anchor.top + anchor.bottom) / 2;
+      cells[i] = { ...anchor, top: mid };
+      cells[anchorIndex] = { ...anchor, bottom: mid };
+    } else if (p.split === "right") {
+      const mid = (anchor.left + anchor.right) / 2;
+      cells[i] = { ...anchor, left: mid };
+      cells[anchorIndex] = { ...anchor, right: mid };
+    } else {
+      throw new Error(`computeCells: unsupported split direction ${String(p.split)}`);
+    }
+  });
+  return cells;
+}
+
+/**
+ * Rows in READING order: cells grouped by top edge (a row), each row ordered
+ * by left edge, as arrays of titles. This is the probe that catches a single
+ * wide row where two were expected — see the revert check below.
+ */
+function rowsOf(panes: readonly LaidOutPane[]): string[][] {
+  const cells = computeCells(panes);
+  const rows = new Map<number, { left: number; title: string }[]>();
+  panes.forEach((p, i) => {
+    const cell = cells[i]!;
+    const key = Math.round(cell.top * 1e6);
+    const row = rows.get(key) ?? [];
+    row.push({ left: cell.left, title: p.title });
+    rows.set(key, row);
+  });
+  return [...rows.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, entries]) => entries.sort((a, b) => a.left - b.left).map((e) => e.title));
+}
+
+/** Each row's total width — 1 means the row is genuinely full width. */
+function rowWidthsOf(panes: readonly LaidOutPane[]): number[] {
+  const cells = computeCells(panes);
+  const rows = new Map<number, number>();
+  cells.forEach((cell) => {
+    const key = Math.round(cell.top * 1e6);
+    rows.set(key, (rows.get(key) ?? 0) + (cell.right - cell.left));
+  });
+  return [...rows.entries()].sort(([a], [b]) => a - b).map(([, width]) => width);
+}
+
+describe("triagePanes builds a second, hardcoded shape at exactly seven workers", () => {
+  it("returns seven panes named and ordered SEVEN, by title and by worker", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN });
+    expect(panes).toHaveLength(7);
+    expect(panes.map((p) => p.title)).toEqual([...SEVEN]);
+    expect(panes.map((p) => p.worker)).toEqual([...SEVEN]);
+  });
+
+  it("matches SRD §4.2's split table literally", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN });
+    expect(panes.map((p) => [p.split, p.splitFrom ?? null])).toEqual([
+      [null, null],
+      ["down", 0],
+      ["down", 1],
+      ["right", 1],
+      ["right", 3],
+      ["right", 2],
+      ["right", 5],
+    ]);
+  });
+
+  it("replays to one collator row and two full-width observer rows, in reading order", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN });
+    expect(rowsOf(panes)).toEqual([["top"], ["r1c1", "r1c2", "r1c3"], ["r2c1", "r2c2", "r2c3"]]);
+
+    // Full width means exactly that: every row's cells sum to 1, not merely a
+    // count of three.
+    for (const width of rowWidthsOf(panes)) expect(width).toBeCloseTo(1, 10);
+  });
+
+  it("SRD §11 task 1.1's revert check: the OLD flat-row table reads as ONE wide row, not two", () => {
+    /*
+     * The table `triagePanes` used to delegate to before this task —
+     * `collatorOverRowPanes`'s own shape, `[null, down·0, right·1, right·2,
+     * right·3, right·4, right·5]` — stretched over the same seven ids. This is
+     * exactly the mutation task 1.1 names: pass the old flat-row order and the
+     * two-row assertion above must be able to tell the difference.
+     */
+    const flat: LaidOutPane[] = [
+      { title: "top", split: null },
+      { title: "r1c1", split: "down", splitFrom: 0 },
+      { title: "r2c1", split: "right", splitFrom: 1 },
+      { title: "r1c2", split: "right", splitFrom: 2 },
+      { title: "r1c3", split: "right", splitFrom: 3 },
+      { title: "r2c2", split: "right", splitFrom: 4 },
+      { title: "r2c3", split: "right", splitFrom: 5 },
+    ];
+
+    const rows = rowsOf(flat);
+    expect(rows).not.toEqual([["top"], ["r1c1", "r1c2", "r1c3"], ["r2c1", "r2c2", "r2c3"]]);
+    expect(rows).toEqual([["top"], ["r1c1", "r2c1", "r1c2", "r1c3", "r2c2", "r2c3"]]);
+  });
+
+  it.each([3, 5, 6, 8])("refuses %d workers, naming the console and the count", (n) => {
+    const workers = Array.from({ length: n }, (_, i) => `w-${i}`);
+    expect(() => triagePanes({ ...BASE, workers })).toThrow(
+      new RegExp(`^triage: refusing ${n} workers`),
+    );
+  });
+
+  it("gives no seven-pane a keyboard when the caller names no tui workers", () => {
+    for (const p of triagePanes({ ...BASE, workers: SEVEN })) {
+      expect(p.command, `${p.title} was handed a keyboard`).not.toContain("'--attach-here'");
+    }
+  });
+
+  it("hands exactly the named seat a keyboard, and no other", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN, tuiWorkers: ["r2c2"] });
+    for (const p of panes) {
+      if (p.title === "r2c2") {
+        expect(p.command).toContain("'--attach-here'");
+      } else {
+        expect(p.command, `${p.title} was handed a keyboard`).not.toContain("'--attach-here'");
+      }
+    }
+  });
+
+  it("refuses a worker id assertPlainValue refuses, on the seven-worker path too", () => {
+    // A space fails PLAIN_VALUE_RE the same way it would on the four-worker
+    // path — this branch has its own loop over `workers` and the same
+    // guard could in principle have been dropped when the table was added.
+    const workers = ["top", "r1c1", "r2c1", "not plain", "r1c3", "r2c2", "r2c3"];
+    expect(() => triagePanes({ ...BASE, workers })).toThrow(/not a plain identifier/);
   });
 });
