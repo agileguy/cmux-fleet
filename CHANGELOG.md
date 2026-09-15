@@ -4,6 +4,116 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.6] — 2026-09-15
+
+This release is Phase 6 of `Docs/SRD-OBSERVER-ROLES.md`
+(observer-operator-enrolment), the last phase of that SRD.
+
+An operator can now find, enrol and dispatch the Docker and VM observer
+seats from the fleet skill. One enrolled Docker host and one enrolled VM
+were probed live. Each answered a read-only inquiry, and each refused a
+mutation with nothing on the target changed.
+
+### Added
+
+- **The fleet operator skill** lists `obs-2`, `obs-d1` and `obs-v1`, with
+  trigger phrases for Docker and VM inquiries and for enrolling a target.
+  `Workflows/DispatchTask.md` says how a Docker or VM brief carries its
+  target, containers or units, checks and window, still verbatim from the
+  user, and how a seat in no console is reached.
+- **`Workflows/EnrolTarget.md`** is the operator runbook from an unenrolled
+  host to the before-and-after negative probe.
+- **`fleet.yaml`** allows the two enrolled targets, each through an
+  `/etc/hosts` alias on the fleet host, so a machine without the alias fails
+  closed.
+
+### Verified live
+
+- Positive probe: `obs-v1` reported its VM healthy, with an uptime matching a
+  direct reading, and `obs-d1` reported five monitoring containers healthy.
+  Both artifacts parse under the harvest schema.
+- Negative probe: asked to restart a container, `obs-d1` came back `blocked`
+  with `state` `forbidden`. The forced command logged the session, and the
+  container's `StartedAt` and restart count were unchanged. Asked to reboot
+  the VM, `obs-v1` came back `blocked` with `system` `forbidden`, and the
+  machine's boot time was unchanged.
+
+### Changed
+
+- Both observer skills record a refused action on the channel it concerns:
+  `state` for any container change, `system` for a reboot or shutdown,
+  `units` for starting, stopping or restarting a unit.
+- The Docker skill surveys containers once when a brief names none, keeping
+  only `Names`, `State` and `Status`, then queries the chosen containers by
+  name.
+- Both skills say where the enrolled target tokens live and how to list them,
+  so a worker reads the file instead of guessing names.
+- Both skills say an unanswered optional artifact field is omitted, never
+  `null`, which harvest refuses.
+- **The egress relay** keeps its short idle timeout
+  (`PIFLEET_RELAY_IDLE_TIMEOUT_MS`, 120000) only until a connection's first
+  byte. After that both legs use `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`
+  (900000), so a long model prefill is no longer cut at 120 seconds.
+
+### Fixed during review
+
+- An action brief to the VM observer uses the action word as the verb
+  (`observe-vm <target> restart <unit>`). Passing it as a second argument to
+  `unit` was refused on argument count, and that refusal read as a malformed
+  call.
+- The Docker survey captures `observe-docker`'s exit status before filtering
+  and prints it as `observe-docker exit: <n>`. Under `pipefail` an ssh drop
+  mid-stream reported `jq`'s 5, not 255, and a bare `$rc` does not survive
+  to be read, because each worker call starts a new shell.
+- A refusal naming `<targets_var> line <n>` is a fleet configuration fault:
+  `blocked`, `indeterminate`, not retried. Both skills give it its own
+  exit-table row above the generic "fix the call and retry it once" row.
+  `observe-ssh` prefixes every refusal the same way, and the first matching
+  row wins.
+- The relay refuses a bad timeout or connection-cap override at startup,
+  naming the variable. An override must be plain digits with no leading zero:
+  at most 2147483647 for either timeout and 65536 for the cap. Before, a bad
+  idle timeout crashed the relay on connect, a bad active timeout crashed it
+  on the first byte, and `"1e3"`, `"0x10"` or `" 5"` were quietly accepted.
+  An idle timeout above 2147483647 was cut down to about 24 days with only a
+  warning.
+- EnrolTarget: the inventory host, the `egress.allow` host and the
+  `known_hosts` name must be the same string. Enrolment proves the forced
+  command with a nonsense verb before any refused-action probe. Secrets go
+  through a one-command prefix, never an interactive export.
+- EnrolTarget's VM no-reboot check times each reading by its task's dispatch
+  and completion. It passes only when the first uptime covers the whole probe
+  window and the second has grown by at least the gap between the tasks. A
+  short first uptime is inconclusive, never a pass.
+- EnrolTarget says, from source, that re-running `up` for a seat makes a new
+  run and a second container holding the same key, so tear the old run down
+  first. It also says the key sits on the fleet host under the run for the
+  run's life. `Workflows/DispatchTask.md` now says the same, where it used
+  to call that behaviour unknown.
+- The no-reboot check states its preconditions: record each dispatch time
+  before sending the task, and send the second read only after the first
+  completes. An inconclusive result means rerun with a longer baseline, not
+  stop.
+- `skill-frontmatter.test.ts` also parses the fleet operator skill.
+- Tests execute the token-listing commands, pin the survey projection
+  exactly, select optional keys by what the schema accepts, and replace
+  revert checks that could not fail.
+- Tests pin each exit table's row order and what the targets-file row tells
+  the worker. They run the survey command under dash where one exists,
+  because macOS `sh` is bash and accepts bash-only syntax. They also pin the
+  relay's limits at their boundaries.
+
+### Upgrading
+
+- The relay script is bind-mounted and is not a drift input, so a running
+  relay keeps the old code. Restart each `pifleet-egress-relay-*` container
+  after pulling this release.
+
+### Known residual
+
+- A client that sends one byte and goes silent now holds a relay slot for
+  900 s instead of 120 s. No per-source connection cap bounds it yet.
+
 ## [1.0.5] — 2026-09-14
 
 This release is Phase 5 of `Docs/SRD-OBSERVER-ROLES.md` (observer-vm-role).
