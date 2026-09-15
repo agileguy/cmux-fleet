@@ -30,6 +30,10 @@
  *     `-le` bound in `docker/observe-ssh`, read from that function's own body, not typed here
  *  7. every extraction proves it found something before it is used, so a moved heading or a
  *     rewritten sentence fails loudly instead of letting a comparison pass on an empty set
+ *  8. the variable name the skill's "Where the enrolled tokens live" passage tells the worker to
+ *     read equals the one `docker/observe-ssh` assigns to `targets_var` in its own `vm)` case arm;
+ *     the worked command in that passage reads that variable rather than a hard-coded `/secrets/`
+ *     path; and the brief-inputs table's `target` row points at the passage
  */
 
 import { describe, expect, test } from "bun:test";
@@ -777,5 +781,95 @@ describe("the skill's action-verb rule names real channels for an action the che
 
   test("the exit table's `77` unrecognised-verb row points to this rule", () => {
     expect(SKILL).toContain('"When the brief asks for an action, not a check" below names which channel');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 8. where the enrolled tokens live: the variable name, the worked command, and
+//    the inputs table's pointer to it
+// -----------------------------------------------------------------------------
+
+/**
+ * `docker/observe-ssh`'s own `targets_var=` assignment inside its `vm)` case
+ * arm (not the `docker)` arm right above it, which assigns the same-shaped
+ * name for a different kind) — scoped by anchoring on the two-space `vm)` arm
+ * head immediately followed by the four-space assignment line.
+ */
+function vmTargetsVarFromObserveSsh(src: string): string {
+  const m = src.match(/\n {2}vm\)\n {4}targets_var=([A-Z_]+)\n/);
+  expect(m, "docker/observe-ssh's `vm)` case arm's targets_var assignment is gone — this probe has rotted").not.toBeNull();
+  return m![1]!;
+}
+
+/** The skill's "Where the enrolled tokens live" paragraph, located once and reused by the extractors below. */
+function enrolledTokensPassage(src: string): string {
+  const marker = "**Where the enrolled tokens live.**";
+  const markerAt = src.indexOf(marker);
+  expect(markerAt, "the skill's 'Where the enrolled tokens live' paragraph is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const after = src.slice(markerAt);
+  const endAt = after.indexOf("\n\nRead the exit status");
+  expect(endAt, "the 'Where the enrolled tokens live' passage never reaches the exit-table lead-in — this probe has rotted").toBeGreaterThan(0);
+  return after.slice(0, endAt);
+}
+
+/** The `$VARNAME` the passage names as "the value of `$<VAR>`" — the variable the worker is told to read. */
+function enrolledTokensVarFromSkill(src: string): string {
+  const passage = enrolledTokensPassage(src);
+  const m = passage.match(/value of `\$([A-Z_]+)`/);
+  expect(m, "the skill's 'value of $<VAR>' statement is gone from the enrolled-tokens passage — this probe has rotted").not.toBeNull();
+  return m![1]!;
+}
+
+/** The ```sh fenced worked command inside the passage. */
+function enrolledTokensCommandFromSkill(src: string): string {
+  const passage = enrolledTokensPassage(src);
+  const fenceStart = passage.indexOf("```sh");
+  expect(fenceStart, "no ```sh fence found in the enrolled-tokens passage — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const bodyStart = fenceStart + "```sh".length;
+  const fenceEnd = passage.indexOf("```", bodyStart);
+  expect(fenceEnd, "the enrolled-tokens passage's ```sh fence never closes — this probe has rotted").toBeGreaterThan(bodyStart);
+  return passage.slice(bodyStart, fenceEnd);
+}
+
+/** The brief-inputs table's `target` row, "| Input | Form | Default when absent |" through its first data row starting `| target `. */
+function inputsTableTargetRow(src: string): string {
+  const heading = "| Input | Form | Default when absent |";
+  const headingAt = src.indexOf(heading);
+  expect(headingAt, "the skill's brief-inputs table header is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const after = src.slice(headingAt);
+  const m = after.match(/\n\|\s*target\s*\|.*\|\s*\n/);
+  expect(m, "the brief-inputs table's target row is gone — this probe has rotted").not.toBeNull();
+  return m![0]!;
+}
+
+describe("the skill's enrolled-tokens variable equals docker/observe-ssh's real targets_var for vm", () => {
+  test("the variable named in 'value of $<VAR>' is docker/observe-ssh's own vm targets_var", () => {
+    const real = vmTargetsVarFromObserveSsh(OBSERVE_SSH);
+    const stated = enrolledTokensVarFromSkill(SKILL);
+    expect(stated, `the skill tells the worker to read $${stated}; docker/observe-ssh's vm case arm assigns targets_var=${real}`).toBe(real);
+  });
+});
+
+describe("the skill's worked command reads the variable, never a hard-coded /secrets/ path", () => {
+  test("the command references the real variable by name", () => {
+    const real = vmTargetsVarFromObserveSsh(OBSERVE_SSH);
+    const command = enrolledTokensCommandFromSkill(SKILL);
+    expect(command, `the worked command does not reference "$${real}"`).toContain(`"$${real}"`);
+  });
+
+  test("the command never hard-codes a /secrets/ path", () => {
+    const command = enrolledTokensCommandFromSkill(SKILL);
+    expect(command, `the worked command hard-codes a /secrets/ path instead of reading the variable: ${JSON.stringify(command)}`).not.toMatch(
+      /\/secrets\//,
+    );
+  });
+});
+
+describe("the brief-inputs table's target row points at the enrolled-tokens passage", () => {
+  test("the target row names the 'Where the enrolled tokens live' passage", () => {
+    const row = inputsTableTargetRow(SKILL);
+    expect(row, `the target row does not point at the enrolled-tokens passage: ${JSON.stringify(row)}`).toContain(
+      "Where the enrolled tokens live",
+    );
   });
 });

@@ -18,7 +18,7 @@ absent, say so in the artifact rather than guessing.
 
 | Input | Form | Default when absent |
 |---|---|---|
-| target | a target TOKEN from the enrolled inventory, `^[a-z0-9][a-z0-9-]{0,31}$` | the single enrolled VM, stated in the artifact; otherwise the row is `indeterminate` |
+| target | a target TOKEN from the enrolled inventory — list them with the command under "Where the enrolled tokens live" below, `^[a-z0-9][a-z0-9-]{0,31}$` | a brief word naming a listed token; the single token when the file lists exactly one, stated in the artifact; otherwise the row is `indeterminate` |
 | units | zero or more systemd unit names, each matching `^[a-zA-Z0-9][a-zA-Z0-9@._:-]*$`, at most 255 bytes | none — system-level checks only |
 | checks | a closed subset of `reachability`, `system`, `units`, `logs`, `resources`, `cloud` | `reachability, system, units, logs` |
 | window | seconds, e.g. `300s` | `300s` |
@@ -34,6 +34,25 @@ The call form is `observe-vm <target> <verb> [argument ...]`. `target` is one of
 enrolled on this fleet. `observe-vm` is a thin alias for `observe-ssh vm <target> <verb>
 [argument ...]`; it does not itself enforce the verb grammar below — the target's forced command
 does.
+
+**Where the enrolled tokens live.** The enrolled tokens are in the file whose path is the
+value of `$OBSERVER_VM_TARGETS_FILE`, one `token host port user` line per target — the same
+variable `docker/observe-ssh` itself reads for the `vm` kind. The token is the first field.
+List them by reading the variable, never a hard-coded `/secrets/...` path:
+
+```sh
+awk 'NF && $1 !~ /^#/ {print $1}' "$OBSERVER_VM_TARGETS_FILE"
+```
+
+`observe-ssh`'s own parser splits each line on runs of spaces and tabs and skips blank and
+`#`-comment lines; this command tolerates the same repeated whitespace, for the same reason.
+Only the token belongs in an artifact — never the host, port or user the same line carries.
+
+A word in the brief that names one of the listed tokens is the target. If the file lists
+exactly one token, use it and say so in the artifact; with more than one token and no matching
+word in the brief, the row is `indeterminate`. A `not enrolled` refusal from `observe-ssh` is
+answered by reading this file and calling again with a listed token — never by trying another
+guessed name.
 
 Read the exit status AND the stderr text before you write a row — the exit code alone does not
 say who refused what. The table is read top to bottom; the first row whose condition matches is
