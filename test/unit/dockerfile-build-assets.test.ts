@@ -3,11 +3,13 @@
  * (ISC-270).
  *
  * WHAT IS BROKEN TODAY: NOTHING, and that is the point. `BUILD_CONTEXT_ASSETS`
- * carries eight names; the Dockerfile reads seven distinct files out of the
- * build context — `docker/verbgate` (COPYed five times, once per gated cloud
- * binary), `docker/ticket-cli`, `docker/entrypoint.sh`, `docker/honeypot.cjs`,
- * and the four `docker/pi-extensions/*.ts` — and `Dockerfile` itself is the
- * eighth enrolled name, the one nothing COPYs because it IS the recipe. So the
+ * carries thirteen names; the Dockerfile reads twelve distinct files out of
+ * the build context — `docker/verbgate` (COPYed five times, once per gated
+ * cloud binary), `docker/ticket-cli`, `docker/entrypoint.sh`,
+ * `docker/honeypot.cjs`, `docker/ssh-connect.cjs`, `docker/observe-ssh`,
+ * `docker/observe-docker`, `docker/observe-vm`, and the four
+ * `docker/pi-extensions/*.ts` — and `Dockerfile` itself is the thirteenth
+ * enrolled name, the one nothing COPYs because it IS the recipe. So the
  * array covers the build context exactly. This file is not a repair. It is the
  * thing that keeps the array correct once nobody remembers that it has to be.
  *
@@ -20,7 +22,7 @@
  * arrived after it, and both line numbers had moved by hundreds. A header that
  * enumerates is a header that rots, and a rotted header that still SOUNDS
  * authoritative is worse than none — it tells the next reader the array is
- * three names long while they are looking at eight. The enumerations that are
+ * three names long while they are looking at thirteen. The enumerations that are
  * load-bearing are therefore the assertions below, which fail when they are
  * wrong; the count above is prose and no line number appears in it deliberately.
  *

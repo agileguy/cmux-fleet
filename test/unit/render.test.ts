@@ -1692,8 +1692,9 @@ describe("image tag", () => {
   /**
    * ISC-160, the other half — the Dockerfile is not the whole recipe.
    *
-   * The Dockerfile `COPY`s six files it does not contain, and hashing only its
-   * own text left every one of them outside the tag:
+   * The Dockerfile `COPY`s twelve files it does not contain, and hashing only
+   * its own text left every one of them outside the tag. This block moves the
+   * digest for seven of them:
    *
    *  - `docker/verbgate` IS the cloud-mutation gate (ISC-104/105/106/107). An
    *    image built before a gate fix carries the OLD gate, and reusing it
@@ -1707,12 +1708,15 @@ describe("image tag", () => {
    *    environment, so a stale copy reads a credential from the wrong variable
    *    or queries an unscoped workspace — and the second returns ROWS rather
    *    than an error.
-   *  - `docker/pi-extensions/dispatch-trigger.ts` and
-   *    `docker/pi-extensions/truncation-recovery.ts` are the two extensions Pi
-   *    executes IN-PROCESS, and both go stale by falling SILENT: the first
-   *    stops firing and the worker sits idle against a staged task, the second
-   *    stops matching Pi's `BashToolDetails` field names and finds no
-   *    truncation to report. Neither raises anything anywhere.
+   *  - `docker/pi-extensions/dispatch-trigger.ts`,
+   *    `docker/pi-extensions/truncation-recovery.ts` and
+   *    `docker/pi-extensions/output-token-cap.ts` are the three extensions Pi
+   *    executes IN-PROCESS, and all three go stale by falling SILENT: the
+   *    first stops firing and the worker sits idle against a staged task, the
+   *    second stops matching Pi's `BashToolDetails` field names and finds no
+   *    truncation to report, and the third stops recognising the provider
+   *    request shape and every seat goes back to sending no `max_tokens` at
+   *    all. None raises anything anywhere.
    *
    * THE LAST FOUR WERE ENROLLED WITH NOTHING BUT MEMBERSHIP BEHIND THEM. Each
    * of `ticket-cli.test.ts`, `auto-trigger.test.ts` and
@@ -1721,7 +1725,7 @@ describe("image tag", () => {
    * Membership is a claim about an ARRAY; ISC-160's claim is that the TAG
    * moves when the bytes move, and an array entry that `configHash` never
    * reads satisfies the first and not the second. These cases make the second
-   * claim for all six.
+   * claim for all seven.
    *
    * `pi-extensions/report-tools.ts` is deliberately NOT in this list.
    * `test/unit/dockerfile-build-assets.test.ts` pins it end to end — real

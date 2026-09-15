@@ -1024,7 +1024,25 @@ jobs:
           # to TOTAL_EXPECTED is unchanged, which this entry did not itself
           # verify end to end. Confirm on the next real run of this job; if it
           # disagrees, trust the job's own count over this arithmetic.
-          TOTAL_EXPECTED: "172"
+          #
+          # 2026-09-15, 172 -> 173: the hand method above was finally run end
+          # to end, closing that entry's own "confirm on the next real run"
+          # caveat. On a clean checkout of committed 3d0dab5, the nineteen
+          # listed files with every gate variable UNSET read 8 pass, 165
+          # skip, 0 fail — "Ran 173 tests across 19 files", one more than the
+          # 172 this arithmetic landed on. Cross-checked against real CI: the
+          # same method at pushed tip bf51521 reads "Ran 160 tests across 18
+          # files", and GitHub Actions run 34780451749's container job
+          # printed that exact line. Per file, bf51521 -> 3d0dab5:
+          # image.test.ts 29 -> 30, extension-declarations-image.test.ts 9 ->
+          # 11, ssh-connect-node.test.ts new at 10, every other file
+          # unchanged — 160 + 10 + 2 = 172, not 173. The missed +1 is inside
+          # image.test.ts: dabc88d ("image: pin fd 10.5.0 so Pi's find tool
+          # works") added an "fd accepts Pi's find flags" entry to the
+          # toolchain `probes` array, which the per-probe `it(...)` loop
+          # turns into one more test, and TOTAL_EXPECTED was never bumped
+          # for it.
+          TOTAL_EXPECTED: "173"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
