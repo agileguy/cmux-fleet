@@ -536,7 +536,7 @@ COPY --chmod=0444 docker/pi-extensions/output-token-cap.ts /opt/pifleet/output-t
 # has no native CONNECT support and this image carries no `nc`/`socat`
 # (`:48-49` above) — `node` is the one thing guaranteed present, since the
 # base image itself is `node:*-bookworm-slim` (`:20`). Read by `node`, never
-# executed directly, so 0444 — same reasoning as the three extensions above.
+# executed directly, so 0444 — same reasoning as the four extensions above.
 #
 # ADDING THIS COPY MEANT ADDING "ssh-connect.cjs" TO `BUILD_CONTEXT_ASSETS` in
 # src/container/image.ts. A stale copy here is dangerous in the same shape the

@@ -322,7 +322,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  * citation the SRD carried in three places about a different file that was also
  * never written. The check now reads the real `types.d.ts` out of the image and
  * compares this interface's members, and the events every `pi.on` call
- * subscribes to, against it — for all three extensions, not just this one.
+ * subscribes to, against it — for all four extensions, not just this one.
  */
 export interface ExtensionAPI {
   registerTool<Params>(tool: ToolDefinitionLike<Params>): void;

@@ -30,7 +30,7 @@
  * an equality would go red on every upgrade that added a capability nobody here
  * uses, which is noise that trains a reader to re-baseline without looking. The
  * question worth asking is narrower and is the one that actually breaks a
- * worker: **is every member and every event name these three files depend on
+ * worker: **is every member and every event name these four files depend on
  * still there?** So the assertion is containment, and its failure message names
  * the missing spelling.
  *

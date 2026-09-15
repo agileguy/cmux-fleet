@@ -6,7 +6,7 @@
  * carries eight names; the Dockerfile reads seven distinct files out of the
  * build context — `docker/verbgate` (COPYed five times, once per gated cloud
  * binary), `docker/ticket-cli`, `docker/entrypoint.sh`, `docker/honeypot.cjs`,
- * and the three `docker/pi-extensions/*.ts` — and `Dockerfile` itself is the
+ * and the four `docker/pi-extensions/*.ts` — and `Dockerfile` itself is the
  * eighth enrolled name, the one nothing COPYs because it IS the recipe. So the
  * array covers the build context exactly. This file is not a repair. It is the
  * thing that keeps the array correct once nobody remembers that it has to be.
