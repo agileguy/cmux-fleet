@@ -69,10 +69,11 @@ import {
 import { DISPATCH_REQUEST_FILE } from "../../src/run/dispatch-request.ts";
 import { TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
 import type { TriageDocument } from "../../src/run/triage-verdict.ts";
-import type { TriageService } from "../../src/run/triage-targets.ts";
+import type { TriageDockerService, TriageService, TriageVmService } from "../../src/run/triage-targets.ts";
 import {
   FORBIDDEN_ENVELOPE_CLASSES,
   OBSERVER_ARTIFACT_FILE,
+  OBSERVER_ARTIFACT_FILE_BY_KIND,
   OBSERVER_STATUSES,
   SWEEP_FILES_DIR,
   SweepEnvelopeError,
@@ -87,6 +88,7 @@ import {
   projectPreviousState,
   readObserverArtifactAt,
   readTriageDocumentAt,
+  renderCollationEnvelope,
   renderSweepEnvelope,
   sweepProducers,
   triageDocumentPath,
@@ -94,6 +96,7 @@ import {
   type ForbiddenEnvelopeClass,
   type SweepDispatchOutcome,
   type SweepEnvelopeInput,
+  type SweepEnvironment,
   type SweepProducerDeps,
   normalizeSliceReportingPath,
   CLUSTER_CALL_TIMEOUT_S,
@@ -104,7 +107,14 @@ import {
   composeObserverBrief,
   freshnessEchoDemand,
   readWindowInstant,
+  pairHasService,
+  seatsForEnvironments,
+  type SweepPair,
 } from "../../src/run/triage-envelope.ts";
+import {
+  OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+  OBSERVER_VM_OPS_ARTIFACT_NAME,
+} from "../../src/harvest/observer-target-artifacts.ts";
 import {
   consoleTransport,
   productionRelayEffects,
@@ -189,6 +199,17 @@ const SERVICES: readonly TriageService[] = [
     checks: ["sink"],
     window: null,
   },
+];
+
+/**
+ * The single k8s environment `producerFixture` and its siblings sweep — task
+ * 4.2's `environments` replacing the flat `environment`/`services` pair.
+ * Named once so every `sweepProducers({...})` fixture below reads the same
+ * value rather than four call sites each re-spelling `{name: "cni-dev", kind:
+ * "k8s", services: SERVICES}`.
+ */
+const SWEEP_ENVIRONMENTS: readonly SweepEnvironment[] = [
+  { name: "cni-dev", kind: "k8s", services: SERVICES },
 ];
 
 /** The marker the anti-criterion is about, and it must never appear in a brief. */
@@ -507,13 +528,408 @@ function envelopeInput(over: Partial<SweepEnvelopeInput> = {}): SweepEnvelopeInp
   return {
     sweepId: sweepTaskId(41),
     windowOpenedAt: "2026-09-06T12:00:00.000Z",
-    environment: "cni-dev",
-    services: SERVICES,
+    environments: [{ name: "cni-dev", kind: "k8s", services: SERVICES }],
     defaultWindowS: 300,
     previousDocument: null,
     ...over,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Task 3.3's envelope half — SweepEnvironment: a LIST of environments
+// ---------------------------------------------------------------------------
+
+/**
+ * Pulls one `serviceBlock` back out of a rendered brief by its heading line,
+ * stopping at the first blank line — `serviceBlock` never emits one internally,
+ * so this recovers exactly the lines that function produced, whichever kind
+ * rendered them.
+ */
+function extractServiceBlock(brief: string, serviceName: string): string {
+  const marker = `- service: ${serviceName}`;
+  const at = brief.indexOf(marker);
+  expect(at, `"${marker}" not found in the brief`).toBeGreaterThanOrEqual(0);
+  const lines: string[] = [];
+  for (const line of brief.slice(at).split("\n")) {
+    if (line === "") break;
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+const K8S_ENV_NAME = "do-cluster";
+const K8S_ENV_SERVICE: TriageService = {
+  name: "routing",
+  namespace: "aodapn-routing",
+  workload: "routing-api",
+  checks: ["rollout", "logs"],
+  window: null,
+};
+
+const DOCKER_ENV_NAME = "docker-host";
+const DOCKER_ENV_SERVICE: TriageDockerService = {
+  name: "sidecar",
+  namespace: "docker",
+  checks: ["state", "health"],
+};
+
+describe("SweepEnvironment: more than one environment in one sweep", () => {
+  const k8sEnv: SweepEnvironment = { name: K8S_ENV_NAME, kind: "k8s", services: [K8S_ENV_SERVICE] };
+  const dockerEnv: SweepEnvironment = {
+    name: DOCKER_ENV_NAME,
+    kind: "docker",
+    services: [DOCKER_ENV_SERVICE],
+  };
+
+  test("the title names both, in list order", () => {
+    const { title } = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    expect(title).toBe(`${K8S_ENV_NAME}, ${DOCKER_ENV_NAME}: health sweep ${sweepTaskId(41)}`);
+  });
+
+  test("the brief names both environments with their kinds", () => {
+    const { brief } = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    expect(brief).toContain(`${K8S_ENV_NAME} (k8s)`);
+    expect(brief).toContain(`${DOCKER_ENV_NAME} (docker)`);
+  });
+
+  test("the docker service block shows its checks and namespace, with no workload or window line", () => {
+    const { brief } = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    const block = extractServiceBlock(brief, DOCKER_ENV_SERVICE.name);
+    expect(block).toBe(
+      [
+        `- service: ${DOCKER_ENV_SERVICE.name}`,
+        `  namespace: ${DOCKER_ENV_SERVICE.namespace}`,
+        `  checks: ${DOCKER_ENV_SERVICE.checks.join(", ")}`,
+      ].join("\n"),
+    );
+    expect(block).not.toContain("workload");
+    expect(block).not.toContain("window");
+  });
+
+  /**
+   * **The premise this whole file rests on for the multi-environment case.**
+   * `serviceBlock` is a pure function of the service and `defaultWindowS`, so a
+   * k8s row's own lines must read identically whether it is the sweep's only
+   * environment or one of several — extracted by heading from each brief and
+   * compared byte-for-byte, not merely asserted equal by construction.
+   */
+  test("the k8s block is byte-identical to that service's block in a one-environment render", () => {
+    const solo = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv] }));
+    const soloBlock = extractServiceBlock(solo.brief, K8S_ENV_SERVICE.name);
+
+    const multi = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    const multiBlock = extractServiceBlock(multi.brief, K8S_ENV_SERVICE.name);
+
+    expect(multiBlock).toBe(soloBlock);
+    // Premise: the k8s block really carries the fields a docker block lacks —
+    // the comparison above would be worth nothing over two empty strings.
+    expect(soloBlock).toContain("workload:");
+    expect(soloBlock).toContain("window:");
+  });
+
+  test("an empty environments list is refused", () => {
+    expect(() => renderSweepEnvelope(envelopeInput({ environments: [] }))).toThrow(
+      SweepEnvelopeError,
+    );
+  });
+
+  test("a duplicated environment name is refused", () => {
+    const twice: SweepEnvironment = { name: "cni-dev", kind: "k8s", services: SERVICES };
+    expect(() =>
+      renderSweepEnvelope(envelopeInput({ environments: [twice, twice] })),
+    ).toThrow(SweepEnvelopeError);
+  });
+
+  test("order follows the list: reversing the environments reverses the title and section order", () => {
+    const forward = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    const reversed = renderSweepEnvelope(envelopeInput({ environments: [dockerEnv, k8sEnv] }));
+
+    expect(forward.title).toBe(`${K8S_ENV_NAME}, ${DOCKER_ENV_NAME}: health sweep ${sweepTaskId(41)}`);
+    expect(reversed.title).toBe(`${DOCKER_ENV_NAME}, ${K8S_ENV_NAME}: health sweep ${sweepTaskId(41)}`);
+
+    const forwardK8s = forward.brief.indexOf(`### ${K8S_ENV_NAME} (k8s)`);
+    const forwardDocker = forward.brief.indexOf(`### ${DOCKER_ENV_NAME} (docker)`);
+    expect(forwardK8s).toBeGreaterThanOrEqual(0);
+    expect(forwardDocker).toBeGreaterThan(forwardK8s);
+
+    const reversedK8s = reversed.brief.indexOf(`### ${K8S_ENV_NAME} (k8s)`);
+    const reversedDocker = reversed.brief.indexOf(`### ${DOCKER_ENV_NAME} (docker)`);
+    expect(reversedDocker).toBeGreaterThanOrEqual(0);
+    expect(reversedK8s).toBeGreaterThan(reversedDocker);
+  });
+
+  /**
+   * D21's whole reason to exist, and the exact scenario named in
+   * SRD-TRIAGE-MIXED-OBSERVERS §6: `do-cluster` and `docker-host` can each
+   * declare a `grafana`, and the merged document can carry a DIFFERENT
+   * assessment for each. Keyed on (environment, service) — task 4.1b — both
+   * carry, distinctly, both in `projectPreviousState`'s own output and in the
+   * rendered brief.
+   */
+  test("do-cluster's grafana and docker-host's grafana carry separately, keyed on (environment, service)", () => {
+    const k8sGrafana: SweepEnvironment = {
+      name: K8S_ENV_NAME,
+      kind: "k8s",
+      services: [{ ...K8S_ENV_SERVICE, name: "grafana" }],
+    };
+    const dockerGrafana: SweepEnvironment = {
+      name: DOCKER_ENV_NAME,
+      kind: "docker",
+      services: [{ ...DOCKER_ENV_SERVICE, name: "grafana" }],
+    };
+    const previous: TriageDocument = {
+      worker: TRIAGE_COLLATOR,
+      sweep_id: "T-sweep-40",
+      services: [
+        {
+          service: "grafana",
+          environment: K8S_ENV_NAME,
+          assessment: "unhealthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-t1",
+        },
+        {
+          service: "grafana",
+          environment: DOCKER_ENV_NAME,
+          assessment: "healthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-td1",
+        },
+      ],
+      unaccounted: [],
+    };
+    const environments = [k8sGrafana, dockerGrafana];
+
+    expect(projectPreviousState(previous, environments)).toEqual([
+      { environment: K8S_ENV_NAME, service: "grafana", assessment: "unhealthy" },
+      { environment: DOCKER_ENV_NAME, service: "grafana", assessment: "healthy" },
+    ]);
+
+    const { brief } = renderSweepEnvelope(envelopeInput({ environments, previousDocument: previous }));
+    expect(brief).toContain(`- ${K8S_ENV_NAME}/grafana: unhealthy`);
+    expect(brief).toContain(`- ${DOCKER_ENV_NAME}/grafana: healthy`);
+  });
+
+  /**
+   * The rule `TriageRow.environment` and `projectPreviousState` both document,
+   * shared with the verdict through {@link resolveRowEnvironment}: a row with
+   * no `environment` at all — every document written before this field
+   * existed looks like this — resolves to the sweep's ONE environment when
+   * there is exactly one, and to the ONE declared environment whose services
+   * include the row's own `service`, when there is exactly one such owner.
+   * `grafana`, declared under both environments here, has two owners rather
+   * than one — the ambiguity is about the SERVICE's unique ownership, not
+   * merely about the sweep covering two environments — so it carries NOTHING,
+   * because there is no longer a single legal answer to resolve it to.
+   */
+  test("a null-environment row carries with one environment and carries nothing when its service has two owners", () => {
+    const previous: TriageDocument = {
+      worker: TRIAGE_COLLATOR,
+      sweep_id: "T-sweep-40",
+      services: [
+        {
+          service: "grafana",
+          assessment: "healthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-t1",
+        },
+      ],
+      unaccounted: [],
+    };
+    const grafanaEnv = (name: string): SweepEnvironment => ({
+      name,
+      kind: "docker",
+      services: [{ name: "grafana", namespace: "ns", checks: ["state"] }],
+    });
+
+    expect(projectPreviousState(previous, [grafanaEnv(K8S_ENV_NAME)])).toEqual([
+      { environment: K8S_ENV_NAME, service: "grafana", assessment: "healthy" },
+    ]);
+    expect(
+      projectPreviousState(previous, [grafanaEnv(K8S_ENV_NAME), grafanaEnv(DOCKER_ENV_NAME)]),
+    ).toEqual([]);
+  });
+
+  /**
+   * The host-side backstop this task adds: a silent row is placed identically
+   * on the grading path ({@link resolveRowEnvironment}, spent by
+   * `assessTriageSweep`) and the carried-state path (`projectPreviousState`
+   * here). Two environments are declared, but only `do-cluster` declares
+   * `ntfy` — `docker-host` declares an unrelated `grafana` — so the row has
+   * exactly one owner and carries forward under it, even though the collator
+   * that wrote `previous` left `environment` out entirely.
+   */
+  test("a null-environment row carries under the one environment that uniquely declares its service, with two declared", () => {
+    const previous: TriageDocument = {
+      worker: TRIAGE_COLLATOR,
+      sweep_id: "T-sweep-40",
+      services: [
+        {
+          service: "ntfy",
+          assessment: "healthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-t1",
+        },
+      ],
+      unaccounted: [],
+    };
+    const withService = (name: string, serviceName: string): SweepEnvironment => ({
+      name,
+      kind: "docker",
+      services: [{ name: serviceName, namespace: "ns", checks: ["state"] }],
+    });
+
+    expect(
+      projectPreviousState(previous, [
+        withService(K8S_ENV_NAME, "ntfy"),
+        withService(DOCKER_ENV_NAME, "grafana"),
+      ]),
+    ).toEqual([{ environment: K8S_ENV_NAME, service: "ntfy", assessment: "healthy" }]);
+  });
+
+  /**
+   * §7.2's collator-facing instruction (task 4.1b): present, naming the legal
+   * values, exactly when the sweep covers more than one environment — absent
+   * for one, on the same byte-for-byte guarantee the rest of this describe
+   * block asserts for the single-environment render.
+   */
+  test("the environment-field instruction appears only when the sweep covers more than one environment", () => {
+    const solo = renderSweepEnvelope(envelopeInput()).brief;
+    expect(solo).not.toContain("must also carry `environment`");
+
+    const multi = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] })).brief;
+    expect(multi).toContain("must also carry `environment`");
+    expect(multi).toContain([k8sEnv, dockerEnv].map((e) => `\`${e.name}\``).join(", "));
+  });
+
+  /** The namespace half: the declared namespaces are flat across environments too. */
+  test("a previous selector that degraded to a namespace declared in the second environment is not worker prose", () => {
+    const second: SweepEnvironment = {
+      name: DOCKER_ENV_NAME,
+      kind: "docker",
+      services: [{ name: "authorization", namespace: "container-ns", checks: ["state"] }],
+    };
+    const previous = {
+      ...PREVIOUS,
+      services: [{ ...PREVIOUS.services[1]!, selector: "container-ns" }],
+      unaccounted: [],
+    } as TriageDocument;
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({ environments: [k8sEnv, second], previousDocument: previous }),
+    );
+    expect(brief).toContain("container-ns");
+  });
+});
+
+describe("SweepEnvironment: a vm service's units", () => {
+  const VM_ENV_NAME = "vm-fleet";
+  const withUnits: TriageVmService = {
+    name: "queue",
+    namespace: "vm-host",
+    checks: ["reachability", "system"],
+    units: ["queue.service", "queue-worker.service"],
+  };
+  const withoutUnits: TriageVmService = {
+    name: "cache",
+    namespace: "vm-host",
+    checks: ["reachability", "system"],
+    units: [],
+  };
+
+  test("every unit name renders", () => {
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({
+        environments: [{ name: VM_ENV_NAME, kind: "vm", services: [withUnits] }],
+      }),
+    );
+    const block = extractServiceBlock(brief, withUnits.name);
+    expect(block).toContain(`units: ${withUnits.units.join(", ")}`);
+    for (const unit of withUnits.units) expect(block).toContain(unit);
+  });
+
+  test("the twin with units: [] renders no units line", () => {
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({
+        environments: [{ name: VM_ENV_NAME, kind: "vm", services: [withoutUnits] }],
+      }),
+    );
+    const block = extractServiceBlock(brief, withoutUnits.name);
+    expect(block).not.toContain("units");
+    expect(block).toBe(
+      [
+        `- service: ${withoutUnits.name}`,
+        `  namespace: ${withoutUnits.namespace}`,
+        `  checks: ${withoutUnits.checks.join(", ")}`,
+      ].join("\n"),
+    );
+  });
+});
+
+/**
+ * `renderCollationEnvelope`'s `environment` field — SRD-TRIAGE-MIXED-OBSERVERS
+ * D21. The tracked `triage/targets.yaml` declares `grafana` and
+ * `prometheus` in both the k8s environment and `docker-host`, and
+ * `resolveRowEnvironment` (`triage-verdict.ts`) can place a silent row on its
+ * own only when exactly one declared environment lists its service —
+ * `grafana`, declared under both, has two owners rather than one, so only the
+ * collator can say which environment a merged row for it is about, and this
+ * brief is the one place that can ask for the field.
+ */
+describe("renderCollationEnvelope: the environment field (SRD-TRIAGE-MIXED-OBSERVERS D21)", () => {
+  const SWEEP = sweepTaskId(80);
+  const k8sSeat = { worker: "obs-t1", aspect: "slice1" };
+  const dockerSeat = { worker: "obs-td1", aspect: "docker1" };
+  const vmSeat = { worker: "obs-tv1", aspect: "vm1" };
+
+  test("a single-environment collation brief does not ask for `environment`", () => {
+    const { brief } = renderCollationEnvelope({
+      sweepId: SWEEP,
+      environment: "cni-dev",
+      seats: [k8sSeat],
+      environments: [{ name: "cni-dev", kind: "k8s", services: [] }],
+    });
+    expect(brief).not.toContain("`environment`");
+    expect(brief).toContain(childTaskId(SWEEP, k8sSeat.aspect));
+    // No parenthetical label on the one reply path there is nothing to disambiguate.
+    expect(brief).not.toMatch(/\.json \(/);
+  });
+
+  test("a three-environment collation brief names `environment`, all three environment names, and labels each reply path", () => {
+    const environments: readonly SweepEnvironment[] = [
+      { name: "cni-dev", kind: "k8s", services: [] },
+      { name: "docker-host", kind: "docker", services: [] },
+      { name: "vm-fleet", kind: "vm", services: [] },
+    ];
+    const { brief } = renderCollationEnvelope({
+      sweepId: SWEEP,
+      environment: "cni-dev, docker-host, vm-fleet",
+      seats: [k8sSeat, dockerSeat, vmSeat],
+      environments,
+    });
+
+    expect(brief).toContain("`environment`");
+    for (const e of environments) expect(brief).toContain(`\`${e.name}\``);
+
+    // Each reply path is labelled with the environment its OWN seat belongs to.
+    expect(brief).toContain(`${childTaskId(SWEEP, k8sSeat.aspect)}.json (cni-dev)`);
+    expect(brief).toContain(`${childTaskId(SWEEP, dockerSeat.aspect)}.json (docker-host)`);
+    expect(brief).toContain(`${childTaskId(SWEEP, vmSeat.aspect)}.json (vm-fleet)`);
+
+    expect(envelopeIssues(brief, null)).toEqual([]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // §12.6 — the four forbidden classes, BY NAME
@@ -761,18 +1177,23 @@ describe("§7.2: a previous sweep's report cannot reach the next sweep's brief a
    * that looks structural.
    */
   test("projectPreviousState keeps only declared services and enum assessments", () => {
-    const declared = SERVICES.map((s) => s.name);
-    const projected = projectPreviousState(PREVIOUS, declared);
+    const environments: readonly SweepEnvironment[] = [
+      { name: "cni-dev", kind: "k8s", services: SERVICES },
+    ];
+    const projected = projectPreviousState(PREVIOUS, environments);
     expect(projected).toEqual([
-      { service: "routing", assessment: "unhealthy" },
-      { service: "authorization", assessment: "healthy" },
+      { environment: "cni-dev", service: "routing", assessment: "unhealthy" },
+      { environment: "cni-dev", service: "authorization", assessment: "healthy" },
     ]);
     // The undeclared row is gone by NAME, not by position.
     expect(projected.map((p) => p.service)).not.toContain(`phantom-${MARKER}`);
   });
 
   test("projectPreviousState of no document is an empty list, not a throw", () => {
-    expect(projectPreviousState(null, ["routing"])).toEqual([]);
+    const environments: readonly SweepEnvironment[] = [
+      { name: "cni-dev", kind: "k8s", services: SERVICES },
+    ];
+    expect(projectPreviousState(null, environments)).toEqual([]);
   });
 
   /**
@@ -941,7 +1362,7 @@ describe("§7.4: observer-ops.json → ObserverArtifact", () => {
   test("the artifact path is the worker's outbox, the task, and files/", async () => {
     const run = await seedRun("2026-09-06T00-00-01Z-0001");
     const child = childTaskId(sweepTaskId(41), "slice1");
-    expect(observerArtifactPath(run, "obs-t1", child)).toBe(
+    expect(observerArtifactPath(run, "obs-t1", child, "k8s")).toBe(
       join(workerOutboxDir(run.root, "obs-t1"), child, SWEEP_FILES_DIR, OBSERVER_ARTIFACT_FILE),
     );
     // The one duplicated constant, pinned to the module that owns it. The
@@ -949,6 +1370,35 @@ describe("§7.4: observer-ops.json → ObserverArtifact", () => {
     // `harvest/`; this assertion is what stops the copy drifting.
     expect(SWEEP_FILES_DIR).toBe(OUTBOX_FILES_DIR);
     expect(OBSERVER_ARTIFACT_FILE).toBe("observer-ops.json");
+  });
+
+  /**
+   * Task 5.1: `observerArtifactPath` reads the kind's OWN filename, not
+   * `OBSERVER_ARTIFACT_FILE` for every seat. Before this, `joinSweep` read
+   * every seat through the k8s filename alone, so a docker or vm observer's
+   * correctly-written reply was never found — `observer-docker-ops.json` and
+   * `observer-vm-ops.json` are the names those two roles actually write
+   * (`skills/observer-docker-ops/SKILL.md` §5.6, `skills/observer-vm-ops/SKILL.md`
+   * §6.7).
+   */
+  test("the artifact path names the KIND's own filename, docker and vm included", async () => {
+    const run = await seedRun("2026-09-06T00-00-01Z-0002");
+    const child = childTaskId(sweepTaskId(41), "docker1");
+    expect(observerArtifactPath(run, "obs-td1", child, "docker")).toBe(
+      join(workerOutboxDir(run.root, "obs-td1"), child, SWEEP_FILES_DIR, OBSERVER_DOCKER_OPS_ARTIFACT_NAME),
+    );
+    expect(observerArtifactPath(run, "obs-tv1", child, "vm")).toBe(
+      join(workerOutboxDir(run.root, "obs-tv1"), child, SWEEP_FILES_DIR, OBSERVER_VM_OPS_ARTIFACT_NAME),
+    );
+    // The mapping is imported from the module that owns the names, not
+    // respelled — pinned here so the two cannot drift apart.
+    expect(OBSERVER_ARTIFACT_FILE_BY_KIND).toEqual({
+      k8s: "observer-ops.json",
+      docker: OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+      vm: OBSERVER_VM_OPS_ARTIFACT_NAME,
+    });
+    expect(OBSERVER_DOCKER_OPS_ARTIFACT_NAME).toBe("observer-docker-ops.json");
+    expect(OBSERVER_VM_OPS_ARTIFACT_NAME).toBe("observer-vm-ops.json");
   });
 
   test("an absent artifact file is `absent`, never an empty artifact", async () => {
@@ -1054,8 +1504,7 @@ function producerFixture(
     "publishReplies" in outcome ? { kind: "accepted" } : outcome;
   const producers = sweepProducers({
     run,
-    environment: "cni-dev",
-    services: SERVICES,
+    environments: SWEEP_ENVIRONMENTS,
     defaultWindowS: 300,
     previousDocument: async () => null,
     dispatch: async (args) => {
@@ -1080,6 +1529,398 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     expect(sent[0]!.brief).toContain(TRIAGE_VERDICT_RULE);
     // The brief the actor sends is the one the renderer audited.
     expect(envelopeIssues(sent[0]!.brief, null)).toEqual([]);
+  });
+
+  /**
+   * Task 3.3's envelope half widens {@link SweepEnvelopeInput}'s SHAPE only —
+   * the production caller still passes exactly one (k8s) environment. This
+   * pins `openSweep`'s call site to `renderSweepEnvelope` over
+   * `environments: [{ name: deps.environment, kind: "k8s", services:
+   * pair.services }]`, so mutating that call site to pass a second
+   * environment — or to add a `(k8s)` suffix a one-environment render never
+   * had — turns this test red.
+   */
+  test("openSweep still sends the one-environment envelope", async () => {
+    const run = await seedRun("2026-09-14T00-00-01Z-9001");
+    const { sent, producers } = producerFixture(run);
+    const sweepId = sweepTaskId(41);
+    const dispatchedAt = "2026-09-06T12:05:00.000Z";
+
+    await producers.openSweep(sweepId, dispatchedAt);
+
+    expect(sent).toHaveLength(1);
+    const expected = renderSweepEnvelope({
+      sweepId,
+      windowOpenedAt: windowOpenedAt(dispatchedAt, 300),
+      environments: [{ name: "cni-dev", kind: "k8s", services: SERVICES }],
+      defaultWindowS: 300,
+      previousDocument: null,
+      // NOT `TRIAGE_CONSOLE_ASPECTS` whole — task 5.1: a k8s-only sweep's
+      // envelope names only the seats of the kinds it declares, the three
+      // k8s ones. `seatsForEnvironments` is the same function the default
+      // pair itself resolves its seats through, so this pins the production
+      // behaviour rather than a second, hand-picked list of three.
+      seats: seatsForEnvironments(SWEEP_ENVIRONMENTS),
+    });
+    expect(sent[0]!.brief).toBe(expected.brief);
+    expect(sent[0]!.title).toBe(expected.title);
+    // One environment renders as today — no ` (k8s)` suffix anywhere.
+    expect(sent[0]!.brief).not.toContain("(k8s)");
+    expect(sent[0]!.title).not.toContain("(k8s)");
+  });
+
+  /**
+   * SRD-TRIAGE-MIXED-OBSERVERS task 4.2's trap, closed: `## The seats` must
+   * name only the seats of the kinds the sweep actually declares. Before this
+   * task `openSweep` handed `renderSweepEnvelope` `TRIAGE_CONSOLE_ASPECTS`
+   * whole regardless of which kinds were in play, so a k8s-only sweep's
+   * envelope still told the collator about `obs-td1`, `obs-td2` and
+   * `obs-tv1` — seats it holds no child task id for and, since task 4.1,
+   * seats a k8s service dispatched to would get the whole sweep refused for
+   * a kind mismatch.
+   */
+  test("a k8s-only sweep's `## The seats` block names only the three k8s seats", async () => {
+    const run = await seedRun("2026-09-14T00-00-06Z-9006");
+    const { sent, producers } = producerFixture(run);
+    await producers.openSweep(sweepTaskId(41), "2026-09-06T12:05:00.000Z");
+    expect(sent).toHaveLength(1);
+    for (const seat of ["obs-t1", "obs-t2", "obs-t3"]) {
+      expect(sent[0]!.brief).toContain(`- ${seat}: task id`);
+    }
+    for (const seat of ["obs-td1", "obs-td2", "obs-tv1"]) {
+      expect(sent[0]!.brief).not.toContain(`- ${seat}: task id`);
+    }
+  });
+
+  /**
+   * SRD-TRIAGE-MIXED-OBSERVERS task 4.2: `SweepPair.environments` replaces
+   * the flat `services` list, and one pair can now carry a slice of more
+   * than one environment under the same collator. `openSweep` must hand
+   * `renderSweepEnvelope` the pair's WHOLE `environments` list — this is
+   * `renderSweepEnvelope`'s own multi-environment rendering (asserted
+   * directly in the `SweepEnvironment` describe block above), reached
+   * through `sweepProducers` rather than called directly.
+   */
+  test("a two-environment pair renders both environments in one envelope", async () => {
+    const run = await seedRun("2026-09-14T00-00-07Z-9007");
+    const sent: Sent[] = [];
+    const k8sEnv: SweepEnvironment = { name: K8S_ENV_NAME, kind: "k8s", services: [K8S_ENV_SERVICE] };
+    const dockerEnv: SweepEnvironment = {
+      name: DOCKER_ENV_NAME,
+      kind: "docker",
+      services: [DOCKER_ENV_SERVICE],
+    };
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: seatsForEnvironments([k8sEnv, dockerEnv]),
+      environments: [k8sEnv, dockerEnv],
+    };
+    const producers = sweepProducers({
+      run,
+      environments: [k8sEnv, dockerEnv],
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    await producers.openSweep(sweepTaskId(50), "2026-09-06T12:05:00.000Z");
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.brief).toContain(`### ${K8S_ENV_NAME} (k8s)`);
+    expect(sent[0]!.brief).toContain(`### ${DOCKER_ENV_NAME} (docker)`);
+    expect(sent[0]!.brief).toContain(`- service: ${K8S_ENV_SERVICE.name}`);
+    expect(sent[0]!.brief).toContain(`- service: ${DOCKER_ENV_SERVICE.name}`);
+  });
+
+  /**
+   * SRD-TRIAGE-MIXED-OBSERVERS task 4.2: `pair.services.length === 0` was the
+   * skip check before {@link SweepPair.environments} replaced the flat list.
+   * With more than one environment per pair the question is "does ANY
+   * environment in this pair's slice have a service" — a pair whose every
+   * environment is empty must still not be dispatched.
+   */
+  test("a pair whose environments are all empty is not dispatched", async () => {
+    const run = await seedRun("2026-09-14T00-00-08Z-9008");
+    const sent: Sent[] = [];
+    const emptyPair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: TRIAGE_CONSOLE_ASPECTS,
+      environments: [
+        { name: "cni-dev", kind: "k8s", services: [] },
+        { name: "docker-host", kind: "docker", services: [] },
+      ],
+    };
+    const producers = sweepProducers({
+      run,
+      environments: emptyPair.environments,
+      pairs: [emptyPair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    const open = await producers.openSweep(sweepTaskId(51), "2026-09-06T12:05:00.000Z");
+    expect(open).toEqual({ kind: "opened" });
+    expect(sent).toHaveLength(0);
+    expect(pairHasService(emptyPair)).toBe(false);
+  });
+
+  /**
+   * `joinSweep` iterates the RESOLVED PAIRS' seats now, not
+   * `TRIAGE_CONSOLE_ASPECTS` whole (task 5.1). A seat that is in no pair has
+   * no child task id this sweep ever minted, so reading it would be asking
+   * `observerArtifactPath` for a path nothing was ever dispatched under —
+   * this seeds a WELL-FORMED artifact for such a seat anyway, so a pass
+   * would prove the loop is still walking the full console list rather than
+   * the pairs it was actually given.
+   */
+  test("joinSweep does not read a seat that is in no pair", async () => {
+    const run = await seedRun("2026-09-14T00-00-09Z-9009");
+    const sweepId = sweepTaskId(52);
+    const includedSeat = TRIAGE_CONSOLE_ASPECTS[0]!; // obs-t1
+    const excludedSeat = TRIAGE_CONSOLE_ASPECTS[1]!; // obs-t2
+
+    for (const seat of [includedSeat, excludedSeat]) {
+      const child = childTaskId(sweepId, seat.aspect);
+      const dir = join(workerOutboxDir(run.root, seat.worker), child, SWEEP_FILES_DIR);
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, OBSERVER_ARTIFACT_FILE),
+        JSON.stringify({ worker: seat.worker, sweep_id: sweepId, window_opened_at: "w" }),
+        "utf8",
+      );
+    }
+
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [includedSeat],
+      environments: SWEEP_ENVIRONMENTS,
+    };
+    const producers = sweepProducers({
+      run,
+      environments: SWEEP_ENVIRONMENTS,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async () => ({ kind: "accepted" }),
+    });
+
+    const joined = await producers.join(sweepId);
+    expect(joined.artifacts.map((a) => a.worker)).toEqual([includedSeat.worker]);
+  });
+
+  /**
+   * **THE 5.1 REVERT CHECK.** Before this task, `joinSweep` read every seat
+   * through {@link OBSERVER_ARTIFACT_FILE} ("observer-ops.json") alone —
+   * correct for a k8s seat and wrong for a docker or vm one, which write
+   * `observer-docker-ops.json` / `observer-vm-ops.json` instead
+   * (`skills/observer-docker-ops/SKILL.md` §5.6, `skills/observer-vm-ops/SKILL.md`
+   * §6.7). A docker or vm observer could do its job perfectly and its reply
+   * would never be found, because the join asked the wrong directory for the
+   * wrong file.
+   *
+   * Falsified by reverting `OBSERVER_ARTIFACT_FILE_BY_KIND` (or
+   * `observerArtifactPath`'s use of it) to answer `OBSERVER_ARTIFACT_FILE`
+   * for every kind: the artifacts below are written at their REAL filenames,
+   * so a join that goes back to reading `observer-ops.json` for everyone
+   * finds neither and this test goes red on the `toEqual` below.
+   */
+  test("joinSweep reads a docker seat's reply at observer-docker-ops.json and a vm seat's at observer-vm-ops.json", async () => {
+    const run = await seedRun("2026-09-14T00-00-10Z-9010");
+    const sweepId = sweepTaskId(53);
+    const dockerSeat = { worker: "obs-td1", aspect: "docker1" };
+    const vmSeat = { worker: "obs-tv1", aspect: "vm1" };
+
+    const writeArtifact = async (
+      seat: { readonly worker: string; readonly aspect: string },
+      filename: string,
+    ): Promise<void> => {
+      const child = childTaskId(sweepId, seat.aspect);
+      const dir = join(workerOutboxDir(run.root, seat.worker), child, SWEEP_FILES_DIR);
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, filename),
+        JSON.stringify({ worker: seat.worker, sweep_id: sweepId, window_opened_at: "w", services: [] }),
+        "utf8",
+      );
+    };
+    await writeArtifact(dockerSeat, OBSERVER_DOCKER_OPS_ARTIFACT_NAME);
+    await writeArtifact(vmSeat, OBSERVER_VM_OPS_ARTIFACT_NAME);
+
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [dockerSeat, vmSeat],
+      environments: [
+        { name: "docker-host", kind: "docker", services: [DOCKER_ENV_SERVICE] },
+        { name: "vm-host", kind: "vm", services: [] },
+      ],
+    };
+    const producers = sweepProducers({
+      run,
+      environments: pair.environments,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async () => ({ kind: "accepted" }),
+    });
+
+    const joined = await producers.join(sweepId);
+    expect(joined.artifacts.map((a) => a.worker).sort()).toEqual(["obs-td1", "obs-tv1"]);
+  });
+
+  /**
+   * SRD-TRIAGE-MIXED-OBSERVERS §5, §7, task 5.2. The artifact below is
+   * `skills/observer-docker-ops/SKILL.md` §5.6's OWN worked example, copied
+   * verbatim rather than a k8s-shaped stand-in: `schema`, `container_id`,
+   * `image` and `restart_count` are fields no k8s `observer-ops.json` carries,
+   * and `sweep_id`/`window_opened_at` are `null` exactly the way the skill's
+   * own example ships them — the ordinary shape of an observer that has not
+   * been told a sweep's echo yet.
+   *
+   * `parseObserverArtifact` (`triage-envelope.ts`) narrows every artifact down
+   * to `{worker, sweep_id, window_opened_at}` — §7.4's three gated fields —
+   * and the risk this test pins is that narrowing a real docker artifact's
+   * `null` some other way (dropping the artifact as unparseable, or coercing
+   * the missing echo to a truthy placeholder) would hide the exact fault
+   * `sweepIdEcho` (`triage-verdict.ts`) exists to catch. The gate itself is
+   * `triage-verdict.test.ts`'s; this only pins that the value SURVIVES the
+   * join with its `null` intact.
+   */
+  test("a docker seat's real observer-docker-ops.json shape with sweep_id: null survives joinSweep as a null sweep_id, not dropped or coerced", async () => {
+    const run = await seedRun("2026-09-15T00-00-01Z-9101");
+    const sweepId = sweepTaskId(60);
+    const dockerSeat = { worker: "obs-td1", aspect: "docker1" };
+    const child = childTaskId(sweepId, dockerSeat.aspect);
+    const dir = join(workerOutboxDir(run.root, dockerSeat.worker), child, SWEEP_FILES_DIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, OBSERVER_DOCKER_OPS_ARTIFACT_NAME),
+      JSON.stringify({
+        schema: "pifleet.observer-docker-ops/v1",
+        worker: dockerSeat.worker,
+        sweep_id: null,
+        window_opened_at: null,
+        services: [
+          {
+            name: "web-1",
+            namespace: "docker-host-a",
+            assessment: "healthy",
+            coverage: [
+              { channel: "state", result: "answered" },
+              { channel: "health", result: "answered" },
+              { channel: "logs", result: "answered" },
+            ],
+            selector: "name=web-1",
+            window: "300s",
+            evidence_ref: [
+              "observe-docker docker-host-a inspect web-1: State.Status=running, Health=healthy, RestartCount=0",
+            ],
+            container_id: "1b9b66a422e957b5bb5c1b3aa508f33b0d291da0953231a811863fcd9c623849",
+            image: "web:1.4.2",
+            restart_count: 0,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [dockerSeat],
+      environments: [{ name: "docker-host", kind: "docker", services: [] }],
+    };
+    const producers = sweepProducers({
+      run,
+      environments: pair.environments,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async () => ({ kind: "accepted" }),
+    });
+
+    const joined = await producers.join(sweepId);
+    expect(joined.artifacts).toHaveLength(1);
+    expect(joined.artifacts[0]!.worker).toBe("obs-td1");
+    expect(joined.artifacts[0]!.sweep_id).toBeNull();
+  });
+
+  /**
+   * The vm sibling of the fixture above — `skills/observer-vm-ops/SKILL.md`
+   * §6.7's worked example as it shipped before 2026-09-15, when its row `name`
+   * and `namespace` were corrected to the brief's service and target token (the
+   * join under test does not read either): `uptime_s`, `system_state` and
+   * `failed_units` are fields no k8s or docker artifact carries, and
+   * `window_opened_at` is `null` exactly as the skill ships it. Asserts the
+   * other half of §7.4's pair: a null `window_opened_at` survives the join
+   * intact, the same way a null `sweep_id` does above.
+   */
+  test("a vm seat's real observer-vm-ops.json shape with window_opened_at: null survives joinSweep as a null window_opened_at, not dropped or coerced", async () => {
+    const run = await seedRun("2026-09-15T00-00-02Z-9102");
+    const sweepId = sweepTaskId(61);
+    const vmSeat = { worker: "obs-tv1", aspect: "vm1" };
+    const child = childTaskId(sweepId, vmSeat.aspect);
+    const dir = join(workerOutboxDir(run.root, vmSeat.worker), child, SWEEP_FILES_DIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, OBSERVER_VM_OPS_ARTIFACT_NAME),
+      JSON.stringify({
+        schema: "pifleet.observer-vm-ops/v1",
+        worker: vmSeat.worker,
+        sweep_id: null,
+        window_opened_at: null,
+        services: [
+          {
+            name: "vm-1.example.com",
+            namespace: "vm-1",
+            assessment: "healthy",
+            coverage: [
+              { channel: "reachability", result: "answered" },
+              { channel: "system", result: "answered" },
+              { channel: "units", result: "answered" },
+              { channel: "logs", result: "answered" },
+              { channel: "resources", result: "not_attempted" },
+              { channel: "cloud", result: "not_attempted" },
+            ],
+            selector: "vm-1",
+            window: "300s",
+            evidence_ref: [
+              "observe-vm vm-1 system: state running",
+              "observe-vm vm-1 failed: 0 units listed",
+            ],
+            uptime_s: 431827,
+            system_state: "running",
+            failed_units: [],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [vmSeat],
+      environments: [{ name: "vm-host", kind: "vm", services: [] }],
+    };
+    const producers = sweepProducers({
+      run,
+      environments: pair.environments,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async () => ({ kind: "accepted" }),
+    });
+
+    const joined = await producers.join(sweepId);
+    expect(joined.artifacts).toHaveLength(1);
+    expect(joined.artifacts[0]!.worker).toBe("obs-tv1");
+    expect(joined.artifacts[0]!.window_opened_at).toBeNull();
   });
 
   /**
@@ -1388,11 +2229,61 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     const { sent, producers } = producerFixture(run);
     await producers.collate(sweepTaskId(41));
     const brief = sent[0]!.brief;
-    // Derived from the roster rather than a fixed list, so the assertion follows
-    // the console rather than needing an edit each time its seats change.
-    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+    // NOT `TRIAGE_CONSOLE_ASPECTS` whole (task 5.1) — the fixture's default
+    // pair covers only its own k8s environment, so its collation brief names
+    // only the three k8s seats' reply paths. `seatsForEnvironments` is the
+    // same function the default pair itself resolves its seats through.
+    for (const seat of seatsForEnvironments(SWEEP_ENVIRONMENTS)) {
       expect(brief).toContain(childTaskId(sweepTaskId(41), seat.aspect));
     }
+    for (const aspect of ["docker1", "docker2", "vm1"]) {
+      expect(brief).not.toContain(childTaskId(sweepTaskId(41), aspect));
+    }
+    expect(envelopeIssues(brief, null)).toEqual([]);
+  });
+
+  /**
+   * The collate CALL SITE hands the pair's own environments to the brief. The
+   * `renderCollationEnvelope` tests call that function directly, so they cannot
+   * see a caller that passed one environment where the pair holds three.
+   */
+  test("a pair covering k8s, docker and vm gets a collation brief that asks for `environment`", async () => {
+    const run = await seedRun("2026-09-15T00-00-92Z-9092");
+    const sweepId = sweepTaskId(92);
+    const environments: readonly SweepEnvironment[] = [
+      ...SWEEP_ENVIRONMENTS,
+      { name: DOCKER_ENV_NAME, kind: "docker", services: [DOCKER_ENV_SERVICE] },
+      {
+        name: "vm-host",
+        kind: "vm",
+        services: [{ name: "vm-1", namespace: "vm", checks: ["system"], units: [] }],
+      },
+    ];
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: seatsForEnvironments(environments),
+      environments,
+    };
+    const sent: Sent[] = [];
+    const producers = sweepProducers({
+      run,
+      environments,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    await producers.collate(sweepId);
+
+    expect(sent).toHaveLength(1);
+    const brief = sent[0]!.brief;
+    expect(brief).toContain("`environment`");
+    expect(brief).toContain(`${childTaskId(sweepId, "docker1")}.json (${DOCKER_ENV_NAME})`);
+    expect(brief).toContain(`${childTaskId(sweepId, "vm1")}.json (vm-host)`);
     expect(envelopeIssues(brief, null)).toEqual([]);
   });
 
@@ -1453,8 +2344,7 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     const sent: Sent[] = [];
     const producers = sweepProducers({
       run,
-      environment: "cni-dev",
-      services: SERVICES,
+      environments: SWEEP_ENVIRONMENTS,
       defaultWindowS: 300,
       previousDocument: async () => PREVIOUS,
       dispatch: async (args) => {
@@ -1587,8 +2477,7 @@ describe("§13 task 3.4: claimedSuccess names §7.1/§7.2's entries and decides 
     try {
       const producers = sweepProducers({
         run: collatorRun,
-        environment: "cni-dev",
-        services: SERVICES,
+        environments: SWEEP_ENVIRONMENTS,
         defaultWindowS: 300,
         previousDocument: async () => null,
         dispatch: async () => ({ kind: "accepted" }),
@@ -1761,7 +2650,7 @@ describe("freshnessEchoDemand (ISC-1119, authored under ISC-1136)", () => {
     "`aodapnc-grafana-dev`. Both files, every time.";
 
   test("names both fields in their exact spellings, quoting the sweep id and the window", () => {
-    const demand = freshnessEchoDemand("T-sweep-1", WINDOW);
+    const demand = freshnessEchoDemand("T-sweep-1", WINDOW, "k8s");
     expect(demand).toContain('`sweep_id` exactly "T-sweep-1"');
     expect(demand).toContain(`\`window_opened_at\` exactly "${WINDOW}"`);
   });
@@ -1772,7 +2661,7 @@ describe("freshnessEchoDemand (ISC-1119, authored under ISC-1136)", () => {
    * `readWindowInstant` for why the host cannot supply one.
    */
   test("a null window produces no invented value", () => {
-    const demand = freshnessEchoDemand("T-sweep-9", null);
+    const demand = freshnessEchoDemand("T-sweep-9", null, "k8s");
     expect(demand).toContain('`sweep_id` exactly "T-sweep-9"');
     expect(demand).not.toMatch(/window_opened_at` exactly "/);
     expect(demand).toContain("as this brief states the observation window opening");
@@ -1784,10 +2673,26 @@ describe("freshnessEchoDemand (ISC-1119, authored under ISC-1136)", () => {
    * measured failure was five correct artifacts discarded whole.
    */
   test("it says what an artifact missing either one costs", () => {
-    const demand = freshnessEchoDemand("T-sweep-1", WINDOW);
+    const demand = freshnessEchoDemand("T-sweep-1", WINDOW, "k8s");
     expect(demand).toContain("discarded whole");
     expect(demand).toContain("recorded as unobserved");
     expect(demand).toContain("copied from this brief and from nowhere else");
+  });
+
+  /**
+   * **THE FILENAME IS PER KIND (SRD-TRIAGE-MIXED-OBSERVERS §5), and this is the
+   * revert check for it.** Before this fix the demand named `observer-ops.json`
+   * unconditionally, which told a docker or vm observer to echo its freshness
+   * fields into a file `joinSweep` never reads back for it.
+   */
+  test("names each kind's own artifact file, never another kind's", () => {
+    expect(freshnessEchoDemand("T-sweep-1", WINDOW, "k8s")).toContain("`observer-ops.json`");
+    const docker = freshnessEchoDemand("T-sweep-1", WINDOW, "docker");
+    expect(docker).toContain("`observer-docker-ops.json`");
+    expect(docker).not.toContain("observer-ops.json");
+    const vm = freshnessEchoDemand("T-sweep-1", WINDOW, "vm");
+    expect(vm).toContain("`observer-vm-ops.json`");
+    expect(vm).not.toContain("observer-ops.json");
   });
 
   test("readWindowInstant finds the instant in the collator's own prose", () => {
@@ -1888,8 +2793,7 @@ describe("§7.4: the published set and the declared set are one set", () => {
   function realProducers(run: RunPaths): ReturnType<typeof sweepProducers> {
     return sweepProducers({
       run,
-      environment: "cni-dev",
-      services: SERVICES,
+      environments: SWEEP_ENVIRONMENTS,
       defaultWindowS: 300,
       previousDocument: async () => null,
       dispatch: async () => ({ kind: "accepted" }),
@@ -2101,7 +3005,7 @@ describe("the sweep envelope carries what the collator is asked to emit", () => 
       `Sweep ${sweepId}. Observation window opens ${window}. Check \`grafana\`. ` +
       `Write both files into /outbox/${child}/files/.`;
 
-    const composed = composeObserverBrief({ judgement, sweepId, childTaskId: child });
+    const composed = composeObserverBrief({ judgement, sweepId, childTaskId: child, kind: "k8s" });
     expect(composed.rewrote).toEqual([]);
     expect(composed.window).toBe(window);
     expect(composed.brief.startsWith(judgement)).toBe(true);
@@ -2328,7 +3232,8 @@ describe("dispatchObserver dispatches the COMPOSED brief (ISC-1131, ISC-1134, IS
       "the dispatch port did not receive composeObserverBrief's output — the composer is " +
         "not on the dispatch path (ISC-1104's shape: five green tests, no caller)",
     ).toBe(
-      composeObserverBrief({ judgement: collatorBrief, sweepId, childTaskId: childId }).brief,
+      composeObserverBrief({ judgement: collatorBrief, sweepId, childTaskId: childId, kind: "k8s" })
+        .brief,
     );
 
     // The seam between the collator's words and the host's is marked, so an
@@ -2337,6 +3242,121 @@ describe("dispatchObserver dispatches the COMPOSED brief (ISC-1131, ISC-1134, IS
     expect(brief.indexOf(OBSERVER_CONTRACT_HEADING)).toBeGreaterThan(
       brief.indexOf("aodapnc-grafana-dev"),
     );
+  });
+
+  /**
+   * **THE KIND MUST REACH THE REAL DISPATCH PATH — a unit test of
+   * `composeObserverBrief` alone cannot see a call site that forgot to pass it.**
+   * Before this fix `dispatchObserver` called the composer with no `kind` at
+   * all, so a docker seat got the k8s contract: told to echo into
+   * `observer-ops.json`, a file `joinSweep` never reads back for a docker reply
+   * (SRD-TRIAGE-MIXED-OBSERVERS §5).
+   */
+  test("obs-td1's dispatched brief names observer-docker-ops.json, never observer-ops.json", async () => {
+    const run = await seedRun("2026-09-15T00-00-90Z-9090");
+    const sweepId = sweepTaskId(90);
+    const dockerEnv: SweepEnvironment = {
+      name: DOCKER_ENV_NAME,
+      kind: "docker",
+      services: [DOCKER_ENV_SERVICE],
+    };
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: seatsForEnvironments([dockerEnv]),
+      environments: [dockerEnv],
+    };
+
+    const dir = join(workerOutboxDir(run.root, TRIAGE_COLLATOR), sweepId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, DISPATCH_REQUEST_FILE),
+      JSON.stringify({
+        schema: "pifleet.dispatchrequest/v1",
+        parent_task_id: sweepId,
+        requests: [
+          {
+            worker: "obs-td1",
+            title: "Health sweep",
+            brief: `Sweep ${sweepId}. Check \`${DOCKER_ENV_SERVICE.name}\` on ${DOCKER_ENV_SERVICE.namespace}.`,
+            services: [DOCKER_ENV_SERVICE.name],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const sent: Sent[] = [];
+    const producers = sweepProducers({
+      run,
+      environments: [dockerEnv],
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    await producers.dispatchObserver(sweepId, {
+      worker: "obs-td1",
+      services: [DOCKER_ENV_SERVICE.name],
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.brief).toContain("`observer-docker-ops.json`");
+    expect(sent[0]!.brief).not.toContain("observer-ops.json");
+    expect(sent[0]!.brief).not.toContain("kubectl");
+  });
+
+  /**
+   * The host invariant `dispatchObserver` refuses rather than guesses: a
+   * worker this console dispatches to but `TRIAGE_SEAT_KINDS` does not name is
+   * a configuration fault, never silently treated as k8s.
+   */
+  test("a seat with no known kind refuses rather than defaulting to k8s", async () => {
+    const run = await seedRun("2026-09-15T00-00-91Z-9091");
+    const sweepId = sweepTaskId(91);
+    const strayWorker = "obs-t9"; // not in TRIAGE_SEAT_KINDS
+    const strayPair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [{ worker: strayWorker, aspect: "slice9" }],
+      environments: SWEEP_ENVIRONMENTS,
+    };
+    const dir = join(workerOutboxDir(run.root, TRIAGE_COLLATOR), sweepId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, DISPATCH_REQUEST_FILE),
+      JSON.stringify({
+        schema: "pifleet.dispatchrequest/v1",
+        parent_task_id: sweepId,
+        requests: [
+          { worker: strayWorker, title: "Health sweep", brief: "Sweep.", services: ["routing"] },
+        ],
+      }),
+      "utf8",
+    );
+    const sent: Sent[] = [];
+    const producers = sweepProducers({
+      run,
+      environments: SWEEP_ENVIRONMENTS,
+      pairs: [strayPair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    let thrown: unknown = null;
+    try {
+      await producers.dispatchObserver(sweepId, { worker: strayWorker, services: ["routing"] });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SweepEnvelopeError);
+    expect(sent).toHaveLength(0);
   });
 });
 
@@ -2364,8 +3384,9 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       judgement: `Sweep ${SWEEP}. Window opens ${WINDOW}. Look at grafana.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
-    expect(brief).toContain(freshnessEchoDemand(SWEEP, WINDOW));
+    expect(brief).toContain(freshnessEchoDemand(SWEEP, WINDOW, "k8s"));
     expect(brief).toContain(ROW_SHAPE_DEMAND);
     expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
     expect(brief).toContain(BOUNDED_CALLS_DEMAND);
@@ -2388,6 +3409,7 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
         `pass --request-timeout=5s on everything.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
     expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
     expect(brief).toContain(BOUNDED_CALLS_DEMAND);
@@ -2402,7 +3424,12 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
   /** Judgement first, contract second — the old call site's own argument, kept. */
   test("the collator's judgement leads and the host's block follows it", () => {
     const judgement = `Sweep ${SWEEP}. Window opens ${WINDOW}. Look at grafana.`;
-    const { brief } = composeObserverBrief({ judgement, sweepId: SWEEP, childTaskId: CHILD });
+    const { brief } = composeObserverBrief({
+      judgement,
+      sweepId: SWEEP,
+      childTaskId: CHILD,
+      kind: "k8s",
+    });
     expect(brief.startsWith(judgement)).toBe(true);
     expect(brief.indexOf(OBSERVER_CONTRACT_HEADING)).toBeGreaterThan(0);
   });
@@ -2417,6 +3444,7 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       judgement: `Sweep ${SWEEP}. Write both files into /outbox/${SWEEP}/files/.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
     expect(r.rewrote).toEqual([SWEEP]);
     expect(r.brief).toContain(`/outbox/${CHILD}/files/`);
@@ -2434,10 +3462,99 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       judgement: `Sweep ${SWEEP}. Look at grafana.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
     expect(r.window).toBeNull();
     expect(r.brief).toContain('`sweep_id` exactly "T-sweep-31"');
     expect(r.brief).not.toMatch(/window_opened_at` exactly "/);
+  });
+});
+
+/**
+ * SRD-TRIAGE-MIXED-OBSERVERS §5 — the observer contract holds for every kind,
+ * not just k8s. `composeObserverBrief` used to hand a docker or vm seat the
+ * same four paragraphs a k8s seat gets, unconditionally: told to echo into
+ * `observer-ops.json` (a file `joinSweep` never reads back for it) and to
+ * bound its calls with `kubectl --request-timeout` (a flag neither credential
+ * has). These tests are the revert check for both halves of that defect.
+ */
+describe("composeObserverBrief is kind-aware (SRD-TRIAGE-MIXED-OBSERVERS §5)", () => {
+  const SWEEP = "T-sweep-90";
+  const WINDOW = "2026-09-15T09:00:00.000Z";
+  const judgementFor = (child: string): string =>
+    `Sweep ${SWEEP}. Window opens ${WINDOW}. Write both files into /outbox/${child}/files/.`;
+
+  /** The k8s brief keeps its current meaning — every existing k8s pin stays green. */
+  test("a k8s brief still names observer-ops.json and the kubectl timeout", () => {
+    const child = "T-sweep-90-slice1";
+    const { brief } = composeObserverBrief({
+      judgement: judgementFor(child),
+      sweepId: SWEEP,
+      childTaskId: child,
+      kind: "k8s",
+    });
+    expect(brief).toContain("`observer-ops.json`");
+    expect(brief).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+    expect(brief).toContain("kubectl");
+  });
+
+  /**
+   * A docker brief names its own file and carries none of the three k8s-only
+   * strings a docker observer has no use for: it has no `kubectl`, no
+   * `--request-timeout`, and nothing tells it to write `observer-ops.json`.
+   */
+  test("a docker brief names observer-docker-ops.json and none of the k8s strings", () => {
+    const child = "T-sweep-90-docker1";
+    const { brief } = composeObserverBrief({
+      judgement: judgementFor(child),
+      sweepId: SWEEP,
+      childTaskId: child,
+      kind: "docker",
+    });
+    expect(brief).toContain("`observer-docker-ops.json`");
+    expect(brief).not.toContain("observer-ops.json");
+    expect(brief).not.toContain("kubectl");
+    expect(brief).not.toContain("--request-timeout");
+  });
+
+  /** The vm sibling of the docker test above. */
+  test("a vm brief names observer-vm-ops.json and none of the k8s strings", () => {
+    const child = "T-sweep-90-vm1";
+    const { brief } = composeObserverBrief({
+      judgement: judgementFor(child),
+      sweepId: SWEEP,
+      childTaskId: child,
+      kind: "vm",
+    });
+    expect(brief).toContain("`observer-vm-ops.json`");
+    expect(brief).not.toContain("observer-ops.json");
+    expect(brief).not.toContain("kubectl");
+    expect(brief).not.toContain("--request-timeout");
+  });
+
+  /**
+   * Each kind's own call-bound paragraph states the bound ITS OWN credential
+   * enforces, not a flag borrowed from another kind's grammar.
+   */
+  test("docker and vm each state their own read bound, never the other's", () => {
+    const docker = composeObserverBrief({
+      judgement: judgementFor("T-sweep-90-docker1"),
+      sweepId: SWEEP,
+      childTaskId: "T-sweep-90-docker1",
+      kind: "docker",
+    }).brief;
+    expect(docker).toContain("`tail=<M>`");
+    expect(docker).toContain("capped at");
+
+    const vm = composeObserverBrief({
+      judgement: judgementFor("T-sweep-90-vm1"),
+      sweepId: SWEEP,
+      childTaskId: "T-sweep-90-vm1",
+      kind: "vm",
+    }).brief;
+    expect(vm).toContain("`lines=<M>`");
+    expect(vm).not.toContain("`tail=<M>`");
+    expect(docker).not.toContain("`lines=<M>`");
   });
 });
 
@@ -2502,6 +3619,20 @@ describe("ROW_SHAPE_DEMAND (ISC-1166 follow-up)", () => {
   test("states the consequence the host actually applies", () => {
     expect(ROW_SHAPE_DEMAND).toContain("indeterminate");
     expect(ROW_SHAPE_DEMAND).toContain("unobserved");
+  });
+
+  /**
+   * **`name` IS THE BRIEF'S SERVICE NAME, NEVER A HOSTNAME OR AN ID
+   * (SRD-TRIAGE-MIXED-OBSERVERS phase 4-5 review).** Until 2026-09-15
+   * `skills/observer-vm-ops/SKILL.md` called `name` *"the VM's own name"* and
+   * gave a hostname where the tracked `triage/targets.yaml` declares the
+   * service `vm-1`; a row keyed on the hostname grades the declared service as
+   * unreported even though the VM answered. The skill now agrees, and this
+   * document still outranks any mounted skill that drifts from it.
+   */
+  test("says `name` is the brief's own service name, never a hostname or an id", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("the service's name exactly as this brief names it");
+    expect(ROW_SHAPE_DEMAND).toContain("never a hostname");
   });
 });
 

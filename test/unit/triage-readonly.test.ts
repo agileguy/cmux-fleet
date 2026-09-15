@@ -267,6 +267,7 @@ describe("D7a: the triage console's own modules cannot command the fleet", () =>
       "run/triage-notify.ts",
       "run/triage-partition.ts",
       "run/triage-pass.ts",
+      "run/triage-seat-kinds.ts",
       "run/triage-targets.ts",
       "run/triage-verdict.ts",
     ]);

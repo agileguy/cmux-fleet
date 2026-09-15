@@ -94,6 +94,50 @@ export const TRIAGE_CHECKS = ["rollout", "logs", "sink", "endpoint"] as const;
 export type TriageCheck = (typeof TRIAGE_CHECKS)[number];
 
 /**
+ * The three shapes an environment can declare (SRD-TRIAGE-MIXED-OBSERVERS §6):
+ * a Kubernetes control plane (unchanged from §7.1, and the default when
+ * `kind` is absent — today's `triage/targets.yaml` parses unchanged), a
+ * single enrolled Docker host, or a single enrolled VM. `TriageEnvironmentSchema`
+ * discriminates on this field; each kind's own `checks` vocabulary and required
+ * fields differ enough (a `kube_context` versus a target token) that they are
+ * three sibling `.strict()` schemas rather than one schema with optional parts.
+ */
+export const TRIAGE_ENVIRONMENT_KINDS = ["k8s", "docker", "vm"] as const;
+export type TriageEnvironmentKind = (typeof TRIAGE_ENVIRONMENT_KINDS)[number];
+
+/**
+ * The closed check vocabulary `observer-docker` answers, matching
+ * `skills/observer-docker-ops/SKILL.md`'s own `checks` table.
+ */
+export const TRIAGE_DOCKER_CHECKS = ["state", "health", "logs", "stats", "events"] as const;
+export type TriageDockerCheck = (typeof TRIAGE_DOCKER_CHECKS)[number];
+
+/**
+ * `skills/observer-docker-ops/SKILL.md`'s own default "when a brief omits
+ * `checks`" — reused here as the targets file's default for the same reason:
+ * a row that does not think about `checks` should get the same answer the
+ * observer itself would give it.
+ */
+export const TRIAGE_DOCKER_DEFAULT_CHECKS = ["state", "health", "logs"] as const;
+
+/**
+ * The closed check vocabulary `observer-vm` answers, matching
+ * `skills/observer-vm-ops/SKILL.md`'s own `checks` table. Unlike docker, the
+ * targets file gives no default here — owner decision 5 fixes the one
+ * enrolled VM's checks explicitly in every row, so a row that omits `checks`
+ * is refused rather than guessed.
+ */
+export const TRIAGE_VM_CHECKS = [
+  "reachability",
+  "system",
+  "units",
+  "logs",
+  "resources",
+  "cloud",
+] as const;
+export type TriageVmCheck = (typeof TRIAGE_VM_CHECKS)[number];
+
+/**
  * §7.1's cap on one environment's service list.
  *
  * **8, lowered from 64 by SRD-WORKER-DISPATCH-EXTENSION §13 task 7.3**, because
@@ -110,9 +154,10 @@ export type TriageCheck = (typeof TRIAGE_CHECKS)[number];
  * written, all 20 collations harvested carried exactly 3 services or none, so 8
  * was 2.6x the observed maximum. There are 109 on disk now and still no
  * collation wider than 3 rows, but the environment went to 9 services the same
- * day this cap went to 16, so that old ratio no longer describes the headroom:
- * nine services split 5/4 across two collators, and 16 is 3.2x the largest
- * slice either one can be handed. Raising it again is legitimate and cheap —
+ * day this cap went to 16, so that old ratio no longer described the headroom:
+ * on that day nine services split 5/4 across two collators, and 16 was 3.2x the
+ * largest slice either one could be handed. One collator now holds every row,
+ * as the history note below records. Raising it again is legitimate and cheap —
  * but it has to move with the byte cap, and `triage-document.test.ts` fails if
  * the two stop agreeing.
  *
@@ -126,13 +171,24 @@ export type TriageCheck = (typeof TRIAGE_CHECKS)[number];
  * "has to move with the byte cap" and this is that rule being obeyed rather
  * than excepted.
  *
- * **The raise is cheap for a reason that did not exist when the warning was
- * written.** The coupling it warns about was that ONE collator wrote ONE
- * document covering every declared service, so the service count and the
- * document size were the same number twice. The triage console now runs TWO
- * pairs (`DEFAULT_TRIAGE_WORKERS`), the host splits the declared list between
- * the collators with `evenSlices`, and each collator collates only its own
- * half — so 16 declared services is two 8-row documents, not one 16-row one.
+ * **HISTORY — why the raise was cheap at the time it was made, 2026-09-12 to
+ * 2026-09-14.** The coupling the warning above warns about was that ONE
+ * collator wrote ONE document covering every declared service, so the
+ * service count and the document size were the same number twice. For those
+ * two days the triage console ran TWO pairs (`DEFAULT_TRIAGE_WORKERS`), the
+ * host split the declared list between the collators with `evenSlices`, and
+ * each collator collated only its own half — so 16 declared services was two
+ * 8-row documents, not one 16-row one.
+ *
+ * PRESENT: the roster is back to a single collator (`tri-1`, since
+ * 2026-09-14), which writes ONE `triage.json` per sweep holding a row for
+ * every declared service of every environment. The coupling the warning
+ * above describes is therefore back too — this same 16 now also bounds the
+ * SUM of services across every declared environment, not just one
+ * environment's own list (the total check in `TriageTargetsSchema`'s
+ * `superRefine` enforces that), and one
+ * document holds at most 16 rows. Read this comment together with the one on
+ * that check; they have to agree.
  *
  * WHAT THIS UNBLOCKS, concretely: the `monitoring` namespace holds 8 workloads,
  * and at the old ceiling `monitoring` + `ntfy` was 9 and refused at load — the
@@ -140,6 +196,14 @@ export type TriageCheck = (typeof TRIAGE_CHECKS)[number];
  * cloudflared and vault services beside it.
  */
 export const MAX_SERVICES_PER_ENVIRONMENT = 16;
+
+/**
+ * §6's bound on one vm service's named `units[]`. The SRD asks for a bound
+ * "the way `MAX_SERVICES_PER_ENVIRONMENT` bounds a k8s service list" and
+ * names no number of its own, so this reuses that one rather than inventing
+ * a fresh figure with no measurement behind it.
+ */
+export const MAX_UNITS_PER_SERVICE = MAX_SERVICES_PER_ENVIRONMENT;
 
 const shortStr = z.string().min(1).max(4096);
 
@@ -160,6 +224,147 @@ const triageToken = z
       "under ~/.pifleet/triage/, so a name carrying a slash, a space or a leading dot is a " +
       "directory traversal rather than a label",
   );
+
+/**
+ * The target TOKEN grammar both `skills/observer-docker-ops/SKILL.md` and
+ * `skills/observer-vm-ops/SKILL.md` give for `target`: the enrolled SSH
+ * token an `OBSERVER_DOCKER_TARGETS`/`OBSERVER_VM_TARGETS` row names —
+ * never a hostname, an IP or a vendor-generated identifier.
+ */
+const TARGET_TOKEN_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const targetToken = z
+  .string()
+  .regex(
+    TARGET_TOKEN_RE,
+    "must be a target token: lowercase letters, digits and hyphens, starting with a letter " +
+      "or digit, at most 32 characters — the grammar both skills/observer-docker-ops/SKILL.md " +
+      "and skills/observer-vm-ops/SKILL.md give for `target`",
+  );
+
+/**
+ * The systemd unit-name grammar `skills/observer-vm-ops/SKILL.md` gives,
+ * bounded at 255 BYTES — UTF-8 byte length, not string length, because a
+ * name carrying multi-byte characters could otherwise smuggle more past the
+ * grammar's own cap than a character count would show.
+ */
+const UNIT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9@._:-]*$/;
+const unitName = z
+  .string()
+  .regex(
+    UNIT_NAME_RE,
+    "must be a systemd unit name: a letter or digit, then any run of letters, digits or " +
+      "@ . _ : - — the grammar skills/observer-vm-ops/SKILL.md gives",
+  )
+  .refine((name) => Buffer.byteLength(name, "utf8") <= 255, {
+    message:
+      "must be at most 255 bytes (UTF-8 byte length, not string length) — the cap " +
+      "skills/observer-vm-ops/SKILL.md gives",
+  });
+
+// ---------------------------------------------------------------------------
+// Shared refusals (§6) — the same read-amplification and incident-identity
+// arguments today's k8s-only checks already make, reused across kinds rather
+// than re-derived per kind.
+// ---------------------------------------------------------------------------
+
+/**
+ * A check listed twice on one service, for any kind: the same §6.10 rule 1
+ * argument `TriageServiceSchema` already makes for k8s, reused verbatim —
+ * every check is a read against a live target on every sweep, whichever kind
+ * of target it is, so listing one twice doubles that read.
+ */
+function duplicateCheckIssues(checks: readonly string[], ctx: z.RefinementCtx): void {
+  const seen = new Set<string>();
+  checks.forEach((check, i) => {
+    if (seen.has(check)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["checks", i],
+        message:
+          `duplicate check "${check}" — every check is a read against a live target on every ` +
+          `sweep (§6.10 rule 1), so listing one twice doubles that read`,
+      });
+    }
+    seen.add(check);
+  });
+}
+
+/**
+ * A unit named twice on one vm service — the same read-amplification
+ * argument as {@link duplicateCheckIssues}, over `units[]` instead of
+ * `checks[]`.
+ */
+function duplicateUnitIssues(units: readonly string[], ctx: z.RefinementCtx): void {
+  const seen = new Set<string>();
+  units.forEach((unit, i) => {
+    if (seen.has(unit)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["units", i],
+        message:
+          `duplicate unit "${unit}" — every named unit is a read against a live target on every ` +
+          `sweep (§6.10 rule 1, the same read-amplification argument as a duplicate check), so ` +
+          `listing one twice doubles that read`,
+      });
+    }
+    seen.add(unit);
+  });
+}
+
+/**
+ * A service name repeated within one environment, for any kind. Incident state
+ * keys on (environment, service) (§6.8, SRD-TRIAGE-MIXED-OBSERVERS D21), so the
+ * same name in two DIFFERENT environments is legal and is two services; inside
+ * one environment the name is the whole of what tells two rows apart, so two
+ * rows sharing it are two services sharing one incident.
+ */
+function duplicateServiceNameIssues(
+  services: readonly { readonly name: string }[],
+  ctx: z.RefinementCtx,
+): void {
+  const firstAt = new Map<string, number>();
+  services.forEach((service, i) => {
+    const first = firstAt.get(service.name);
+    if (first !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["services", i, "name"],
+        message:
+          `duplicate service name "${service.name}" — already declared at services.${first}. ` +
+          `Incident state keys on (environment, service) (§6.8), so inside one environment two ` +
+          `rows sharing one name are two services sharing one incident`,
+      });
+    } else {
+      firstAt.set(service.name, i);
+    }
+  });
+}
+
+/**
+ * SRD-TRIAGE-MIXED-OBSERVERS §6: "`namespace` on a docker or vm row carries
+ * that environment's `target` token" — matching what the observer's own
+ * artifact echoes back (`namespace` in `observer-docker-ops.json`/
+ * `observer-vm-ops.json`), so the collator's reconciliation compares like
+ * against like.
+ */
+function namespaceMatchesTargetIssues(
+  services: readonly { readonly namespace: string }[],
+  target: string,
+  ctx: z.RefinementCtx,
+): void {
+  services.forEach((service, i) => {
+    if (service.namespace !== target) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["services", i, "namespace"],
+        message:
+          `namespace "${service.namespace}" does not match this environment's target ` +
+          `"${target}" — a docker or vm row's namespace carries its environment's target token ` +
+          `(SRD-TRIAGE-MIXED-OBSERVERS §6), the same scope the observer's own artifact echoes back`,
+      });
+    }
+  });
+}
 
 export const TriageServiceSchema = z
   .object({
@@ -203,8 +408,56 @@ export const TriageServiceSchema = z
     });
   });
 
-export const TriageEnvironmentSchema = z
+/**
+ * A docker environment's one service row (SRD-TRIAGE-MIXED-OBSERVERS §6):
+ * `name`/`namespace` mean what they mean for a k8s service, `checks` is
+ * `observer-docker`'s own closed vocabulary rather than the k8s one, and
+ * there is no `workload` — a container has no second name to resolve — and
+ * no per-service `window` override, since §6 gives docker only the shared
+ * `default_window`.
+ */
+export const TriageDockerServiceSchema = z
   .object({
+    name: triageToken,
+    /** DECLARED (§6.2 rule 2); on a docker row it must equal the environment's `target`. */
+    namespace: shortStr,
+    checks: z
+      .array(z.enum(TRIAGE_DOCKER_CHECKS))
+      .min(1)
+      .max(TRIAGE_DOCKER_CHECKS.length)
+      .default(() => [...TRIAGE_DOCKER_DEFAULT_CHECKS]),
+  })
+  .strict()
+  .superRefine((service, ctx) => duplicateCheckIssues(service.checks, ctx));
+
+/**
+ * A vm environment's one service row (SRD-TRIAGE-MIXED-OBSERVERS §6): the
+ * same `name`/`namespace` shape, `observer-vm`'s own closed `checks`
+ * vocabulary with NO default (owner decision 5 fixes every row's checks
+ * explicitly), and `units[]`, new and vm-only.
+ */
+export const TriageVmServiceSchema = z
+  .object({
+    name: triageToken,
+    /** DECLARED (§6.2 rule 2); on a vm row it must equal the environment's `target`. */
+    namespace: shortStr,
+    checks: z.array(z.enum(TRIAGE_VM_CHECKS)).min(1).max(TRIAGE_VM_CHECKS.length),
+    /** Named systemd units swept every time, beyond the whole-system checks. */
+    units: z.array(unitName).max(MAX_UNITS_PER_SERVICE).default([]),
+  })
+  .strict()
+  .superRefine((service, ctx) => {
+    duplicateCheckIssues(service.checks, ctx);
+    duplicateUnitIssues(service.units, ctx);
+  });
+
+/**
+ * Today's k8s environment shape, unchanged field-for-field, plus the
+ * discriminant `kind` literal (SRD-TRIAGE-MIXED-OBSERVERS §6).
+ */
+export const TriageK8sEnvironmentSchema = z
+  .object({
+    kind: z.literal("k8s"),
     /**
      * DECLARED, never derived, and fenced (§6.2 rule 2, §6.10).
      *
@@ -217,30 +470,83 @@ export const TriageEnvironmentSchema = z
      * §6.10 rule 1's default, and the reason it is `5m` rather than something
      * generous: *"a six-hour log window re-read every five minutes is 72x the
      * necessary read volume against a live logging API, and it is the obvious
-     * default a person would write."*
+     * default a person would write."* Every kind shares this default and this
+     * reasoning (§6's worked example sets it on all three).
      */
     default_window: durationSeconds.prefault("5m"),
     services: z.array(TriageServiceSchema).min(1).max(MAX_SERVICES_PER_ENVIRONMENT),
   })
   .strict()
+  .superRefine((environment, ctx) => duplicateServiceNameIssues(environment.services, ctx));
+
+/**
+ * A docker environment (SRD-TRIAGE-MIXED-OBSERVERS §6): `target` replaces
+ * `kube_context` — the enrolled `OBSERVER_DOCKER_TARGETS` token, not a
+ * cluster identity — and every service's `namespace` must equal it, so the
+ * collator compares against exactly what the observer's own artifact echoes
+ * back.
+ */
+export const TriageDockerEnvironmentSchema = z
+  .object({
+    kind: z.literal("docker"),
+    target: targetToken,
+    default_window: durationSeconds.prefault("5m"),
+    services: z.array(TriageDockerServiceSchema).min(1).max(MAX_SERVICES_PER_ENVIRONMENT),
+  })
+  .strict()
   .superRefine((environment, ctx) => {
-    const firstAt = new Map<string, number>();
-    environment.services.forEach((service, i) => {
-      const first = firstAt.get(service.name);
-      if (first !== undefined) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["services", i, "name"],
-          message:
-            `duplicate service name "${service.name}" — already declared at services.${first}. ` +
-            `The name keys this service's incident state (§6.8), so two rows sharing one name ` +
-            `are two services sharing one incident`,
-        });
-      } else {
-        firstAt.set(service.name, i);
-      }
-    });
+    duplicateServiceNameIssues(environment.services, ctx);
+    namespaceMatchesTargetIssues(environment.services, environment.target, ctx);
   });
+
+/**
+ * A vm environment (SRD-TRIAGE-MIXED-OBSERVERS §6): `target` replaces
+ * `kube_context` the same way it does for docker, and every service's
+ * `namespace` must equal it for the same reason.
+ */
+export const TriageVmEnvironmentSchema = z
+  .object({
+    kind: z.literal("vm"),
+    target: targetToken,
+    default_window: durationSeconds.prefault("5m"),
+    services: z.array(TriageVmServiceSchema).min(1).max(MAX_SERVICES_PER_ENVIRONMENT),
+  })
+  .strict()
+  .superRefine((environment, ctx) => {
+    duplicateServiceNameIssues(environment.services, ctx);
+    namespaceMatchesTargetIssues(environment.services, environment.target, ctx);
+  });
+
+/**
+ * Fills in `kind: "k8s"` on a raw environment that names no `kind` at all,
+ * so today's `triage/targets.yaml` — written before this field existed —
+ * still parses unchanged (§6). Anything else, including an environment that
+ * already names a `kind` (valid or not) and anything that is not a plain
+ * object, passes through untouched: this is a default for an ABSENT field,
+ * never a correction for a wrong one.
+ */
+function defaultEnvironmentKind(raw: unknown): unknown {
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw) && !("kind" in raw)) {
+    return { ...(raw as Record<string, unknown>), kind: "k8s" };
+  }
+  return raw;
+}
+
+/**
+ * The union `kind` discriminates over (§6). A raw environment with no `kind`
+ * defaults to `k8s` before the union ever sees it; one naming a `kind` outside
+ * {@link TRIAGE_ENVIRONMENT_KINDS} is refused by the union itself, and
+ * {@link parseTriageTargets} turns that refusal into a message naming the
+ * allowed kinds.
+ */
+export const TriageEnvironmentSchema = z.preprocess(
+  defaultEnvironmentKind,
+  z.discriminatedUnion("kind", [
+    TriageK8sEnvironmentSchema,
+    TriageDockerEnvironmentSchema,
+    TriageVmEnvironmentSchema,
+  ]),
+);
 
 export const TriageTargetsSchema = z
   .object({
@@ -274,9 +580,59 @@ export const TriageTargetsSchema = z
         });
       }
     }
+
+    /*
+     * The SUM of every environment's `services`, bounded at
+     * MAX_SERVICES_PER_ENVIRONMENT — SRD-TRIAGE-MIXED-OBSERVERS phase 4-5 review.
+     *
+     * A different question from the per-environment `.max(MAX_SERVICES_PER_
+     * ENVIRONMENT)` each of `TriageK8sEnvironmentSchema` and its docker/vm
+     * siblings already carries: those refuse ONE environment alone naming too
+     * many services, and say nothing about the sweep as a whole. This console
+     * has a single collator (`tri-1` in `dispatch-request.ts`'s
+     * `TRIAGE_CONSOLE_ROSTER`, since 2026-09-14), which writes ONE `triage.json` per sweep,
+     * holding a row for every service of every declared environment; the
+     * split-by-half arithmetic `MAX_SERVICES_PER_ENVIRONMENT`'s own docblock
+     * above still describes (two collators, each handed half the list) is
+     * this console's HISTORY, not its present shape. `TriageDocumentSchema`
+     * (`triage-document.ts`) caps that one document's `services` at the same
+     * MAX_SERVICES_PER_ENVIRONMENT, so a targets file whose environments sum
+     * past it declares a sweep no collation document this console ever writes
+     * could hold whole — 10 k8s services and 10 docker services each pass
+     * their own environment's cap and are refused only here.
+     *
+     * Reuses MAX_SERVICES_PER_ENVIRONMENT rather than minting a third figure:
+     * `triage-document.ts`'s own rule is that the services cap and the byte
+     * cap move TOGETHER, and a distinct sweep-total bound would be one more
+     * number to keep in step with both.
+     */
+    const totalServices = Object.values(doc.environments).reduce(
+      (sum, environment) => sum + environment.services.length,
+      0,
+    );
+    if (totalServices > MAX_SERVICES_PER_ENVIRONMENT) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["environments"],
+        message:
+          `this file declares ${totalServices} services across all environments combined, ` +
+          `which is more than MAX_SERVICES_PER_ENVIRONMENT (${MAX_SERVICES_PER_ENVIRONMENT}) ` +
+          `allows in total. The console's single collator writes ONE triage.json per sweep, ` +
+          `holding a row for every service of every declared environment, and that document's ` +
+          `own services cap (TriageDocumentSchema, triage-document.ts) is the same ` +
+          `${MAX_SERVICES_PER_ENVIRONMENT} — so a sweep this wide could never fit in the one ` +
+          `collation document it produces. Remove services from one or more environments.`,
+      });
+    }
   });
 
 export type TriageService = z.infer<typeof TriageServiceSchema>;
+export type TriageDockerService = z.infer<typeof TriageDockerServiceSchema>;
+export type TriageVmService = z.infer<typeof TriageVmServiceSchema>;
+export type TriageK8sEnvironment = z.infer<typeof TriageK8sEnvironmentSchema>;
+export type TriageDockerEnvironment = z.infer<typeof TriageDockerEnvironmentSchema>;
+export type TriageVmEnvironment = z.infer<typeof TriageVmEnvironmentSchema>;
+/** An environment of any kind — the union {@link TriageEnvironmentSchema} discriminates on `kind`. */
 export type TriageEnvironment = z.infer<typeof TriageEnvironmentSchema>;
 export type TriageEnvironments = Readonly<Record<string, TriageEnvironment>>;
 
@@ -379,12 +735,22 @@ function listContexts(contexts: ReadonlySet<string>): string {
  * must be a SUBSET of the kubeconfig's. The reverse — a kubeconfig whose every
  * context is named here — is a different and useless property, and it is the
  * inversion a symmetric fixture cannot catch.
+ *
+ * **Scoped to k8s environments only (SRD-TRIAGE-MIXED-OBSERVERS §6).** A
+ * docker or vm environment carries no `kube_context` at all — its reach is
+ * bounded by its SSH credential, not by this fence — so it is filtered out
+ * before either arm runs, and the undeclared-reach message below counts and
+ * names only the k8s environments a missing kubeconfig would actually leave
+ * unbounded.
  */
 export function kubeContextIssues(
   environments: TriageEnvironments,
   reach: ConsoleReach,
 ): FieldIssue[] {
-  const names = Object.keys(environments);
+  const k8sEntries = Object.entries(environments).filter(
+    (entry): entry is [string, TriageK8sEnvironment] => entry[1].kind === "k8s",
+  );
+  const names = k8sEntries.map(([name]) => name);
   if (reach.kind === "undeclared") {
     /*
      * One ROOT issue rather than one per environment: nothing in this file is
@@ -392,23 +758,24 @@ export function kubeContextIssues(
      * it a refusal for this console, because unset, `kubectl` falls through to
      * whatever kubeconfig the image happens to carry and a console asked about
      * one environment holds every context the operator ever authenticated
-     * against.
+     * against. Nothing to bound when there is no k8s environment at all.
      */
+    if (names.length === 0) return [];
     return [
       {
         path: "",
         message:
           `cloud.kubeconfig is unset in the fleet config, and the triage console REQUIRES it ` +
           `(D11, §6.10). Unset, kubectl falls through to whatever kubeconfig the image happens ` +
-          `to carry, so this file's ${names.length} environment(s) (${names.join(", ")}) would ` +
-          `not be bounded by anything. Set cloud.kubeconfig to a filtered copy carrying exactly ` +
-          `the contexts this file names.`,
+          `to carry, so this file's ${names.length} k8s environment(s) (${names.join(", ")}) ` +
+          `would not be bounded by anything. Set cloud.kubeconfig to a filtered copy carrying ` +
+          `exactly the contexts this file names.`,
       },
     ];
   }
   const issues: FieldIssue[] = [];
-  for (const name of names) {
-    const context = environments[name]!.kube_context;
+  for (const [name, environment] of k8sEntries) {
+    const context = environment.kube_context;
     if (reach.contexts.has(context)) continue;
     issues.push({
       path: `environments.${name}.kube_context`,
@@ -488,10 +855,15 @@ export function windowIssues(
     `(which must itself stay within cadence_s in ${files.console}).`;
 
   for (const [name, environment] of Object.entries(environments)) {
+    // The cadence bound applies to every kind's `default_window` (§6.10 rule
+    // 1 is a read-amplification argument, not a k8s-specific one).
     if (environment.default_window > cadenceS) {
       const path = `environments.${name}.default_window`;
       issues.push({ path, message: why(environment.default_window, path) });
     }
+    // The per-service `window` override exists only on k8s services — a
+    // docker or vm service has no such field to fence.
+    if (environment.kind !== "k8s") continue;
     environment.services.forEach((service, i) => {
       if (service.window === null) return;
       const path = `environments.${name}.services.${i}.window`;
@@ -573,6 +945,16 @@ export function fenceTriageTargets(
  * diagnostic names the key itself — §7.1's *"an unknown key is a field-level
  * error, never an ignored typo"*.
  */
+/** Reads the raw value at a zod issue's `path` back out of the parsed YAML. */
+function valueAtPath(doc: unknown, path: readonly PropertyKey[]): unknown {
+  let cur: unknown = doc;
+  for (const segment of path) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<PropertyKey, unknown>)[segment as string];
+  }
+  return cur;
+}
+
 export function parseTriageTargets(text: string, path: string): UnfencedTriageTargets {
   let doc: unknown;
   try {
@@ -590,6 +972,25 @@ export function parseTriageTargets(text: string, path: string): UnfencedTriageTa
           path: [...i.path.map(String), k].join("."),
           message: "unrecognized key",
         }));
+      }
+      /*
+       * The environment `kind` union's own refusal: zod's default message
+       * ("Invalid discriminator value…") does not say what the document
+       * actually wrote, because the issue carries no `input`. The raw value
+       * is still reachable at this same path in `doc`, so it is read back out
+       * rather than left silent.
+       */
+      if (i.code === "invalid_union" && i.path[i.path.length - 1] === "kind") {
+        const path = i.path.map(String).join(".");
+        const bad = valueAtPath(doc, i.path);
+        return [
+          {
+            path,
+            message:
+              `invalid kind ${JSON.stringify(bad)} — must be one of: ` +
+              `${TRIAGE_ENVIRONMENT_KINDS.join(", ")}`,
+          },
+        ];
       }
       return [{ path: i.path.map(String).join("."), message: i.message }];
     });

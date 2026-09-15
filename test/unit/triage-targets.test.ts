@@ -50,13 +50,20 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { ConfigValidationError } from "../../src/config/load.ts";
 import {
   DEFAULT_TRIAGE_TARGETS_DEPS,
   MAX_SERVICES_PER_ENVIRONMENT,
+  MAX_UNITS_PER_SERVICE,
   TRIAGE_CHECKS,
+  TRIAGE_DOCKER_CHECKS,
+  TRIAGE_DOCKER_DEFAULT_CHECKS,
+  TRIAGE_ENVIRONMENT_KINDS,
   TRIAGE_TARGETS_SCHEMA,
+  TRIAGE_VM_CHECKS,
   declaredReach,
   fenceTriageTargets,
   kubeContextIssues,
@@ -68,6 +75,7 @@ import {
   windowIssues,
   type ConsoleReach,
   type TriageFence,
+  type TriageK8sEnvironment,
   type UnfencedTriageTargets,
 } from "../../src/run/triage-targets.ts";
 
@@ -129,6 +137,19 @@ function envsOf(doc: UnfencedTriageTargets) {
   return doc.environments_unchecked_against_kubeconfig;
 }
 
+/**
+ * Every fixture in THIS section is k8s-only (no `kind` in the YAML, so it
+ * defaults there — see task 3.1's own describe block below), so this narrows
+ * the union down to the k8s arm rather than casting at each call site.
+ */
+function k8sEnv(envs: ReturnType<typeof envsOf>, name: string): TriageK8sEnvironment {
+  const env = envs[name];
+  if (env === undefined || env.kind !== "k8s") {
+    throw new Error(`expected environment "${name}" to be k8s, got ${JSON.stringify(env)}`);
+  }
+  return env;
+}
+
 /** The issues a refusal carried, or a failure if it did not refuse at all. */
 function issuesFrom(fn: () => unknown): { path: string; message: string }[] {
   try {
@@ -159,7 +180,7 @@ describe("a fixture round-trips (task 3.1's acceptance)", () => {
     const envs = envsOf(parsed());
     expect(Object.keys(envs).sort()).toEqual(["cni-dev", "cni-verify"]);
 
-    const dev = envs["cni-dev"]!;
+    const dev = k8sEnv(envs, "cni-dev");
     expect(dev.kube_context).toBe("gke-cni-dev");
     expect(dev.services.map((s) => s.name)).toEqual(["mia", "authorization", "authentication"]);
     expect(dev.services[1]).toMatchObject({
@@ -179,14 +200,14 @@ describe("a fixture round-trips (task 3.1's acceptance)", () => {
   });
 
   test("an omitted workload is null — §7.1 makes it optional for selector-resolved services", () => {
-    const authn = envsOf(parsed())["cni-dev"]!.services[2]!;
+    const authn = k8sEnv(envsOf(parsed()), "cni-dev").services[2]!;
     expect(authn.name).toBe("authentication");
     expect(authn.workload).toBeNull();
   });
 
   test("window is null when unset and seconds when set, so no consumer re-parses units", () => {
-    expect(envsOf(parsed())["cni-dev"]!.services[0]!.window).toBeNull();
-    expect(envsOf(parsed())["cni-verify"]!.services[0]!.window).toBe(60);
+    expect(k8sEnv(envsOf(parsed()), "cni-dev").services[0]!.window).toBeNull();
+    expect(k8sEnv(envsOf(parsed()), "cni-verify").services[0]!.window).toBe(60);
   });
 
   test("a fenced document round-trips to the same environments under the usable name", () => {
@@ -376,6 +397,343 @@ environments:
   test("YAML that is not YAML is refused naming the file, not thrown raw", () => {
     const issues = issuesFrom(() => parseTriageTargets("version: 1\n  : : :\n", TARGETS_PATH));
     expect(issues[0]!.message).toContain("not valid YAML");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.1 (SRD-TRIAGE-MIXED-OBSERVERS §6) — the environment `kind`, docker, vm
+// ---------------------------------------------------------------------------
+
+/** A docker environment, one row taking the default `checks` and one overriding it. */
+const DOCKER_YAML = `
+version: 1
+environments:
+  docker-host:
+    kind: docker
+    target: docker
+    default_window: 5m
+    services:
+      - {name: grafana,    namespace: docker}
+      - {name: prometheus, namespace: docker, checks: [state, stats]}
+`;
+
+/** A vm environment, its one service carrying named units. */
+const VM_YAML = `
+version: 1
+environments:
+  vm-host:
+    kind: vm
+    target: vm
+    default_window: 5m
+    services:
+      - {name: vm-1, namespace: vm, checks: [system, units, resources],
+         units: [docker.service, ssh.service, systemd-journald.service]}
+`;
+
+describe("the environment kind (SRD-TRIAGE-MIXED-OBSERVERS §6)", () => {
+  test("TRIAGE_ENVIRONMENT_KINDS is exactly the three §6 names", () => {
+    expect([...TRIAGE_ENVIRONMENT_KINDS]).toEqual(["k8s", "docker", "vm"]);
+  });
+
+  test("MAX_UNITS_PER_SERVICE reuses MAX_SERVICES_PER_ENVIRONMENT's own number", () => {
+    expect(MAX_UNITS_PER_SERVICE).toBe(MAX_SERVICES_PER_ENVIRONMENT);
+  });
+
+  /** ASYMMETRIC: the two documents differ in exactly one line — the explicit `kind:`. */
+  test('a file with no `kind` parses with kind: "k8s", and otherwise matches the explicit twin exactly', () => {
+    const withoutKind = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    default_window: 5m
+    services: [{name: mia, namespace: ns-mia, checks: [rollout, logs]}]
+`;
+    const withKind = `
+version: 1
+environments:
+  cni-dev:
+    kind: k8s
+    kube_context: gke-cni-dev
+    default_window: 5m
+    services: [{name: mia, namespace: ns-mia, checks: [rollout, logs]}]
+`;
+    const implicit = envsOf(parseTriageTargets(withoutKind, TARGETS_PATH))["cni-dev"];
+    const explicit = envsOf(parseTriageTargets(withKind, TARGETS_PATH))["cni-dev"];
+    expect(implicit?.kind).toBe("k8s");
+    expect(implicit).toEqual(explicit);
+  });
+
+  test("a docker environment parses, and a service with no `checks` takes the skill's default", () => {
+    const env = envsOf(parseTriageTargets(DOCKER_YAML, TARGETS_PATH))["docker-host"];
+    if (env === undefined || env.kind !== "docker") throw new Error("expected a docker environment");
+    expect(env.target).toBe("docker");
+    expect(env.services[0]).toMatchObject({
+      name: "grafana",
+      namespace: "docker",
+      checks: [...TRIAGE_DOCKER_DEFAULT_CHECKS],
+    });
+    expect(env.services[1]!.checks).toEqual(["state", "stats"]);
+  });
+
+  test("a vm environment with units parses", () => {
+    const env = envsOf(parseTriageTargets(VM_YAML, TARGETS_PATH))["vm-host"];
+    if (env === undefined || env.kind !== "vm") throw new Error("expected a vm environment");
+    expect(env.target).toBe("vm");
+    expect(env.services[0]).toMatchObject({
+      name: "vm-1",
+      namespace: "vm",
+      checks: ["system", "units", "resources"],
+      units: ["docker.service", "ssh.service", "systemd-journald.service"],
+    });
+  });
+
+  test("a docker environment carrying kube_context is refused, its k8s twin (no kube_context) passes", () => {
+    const bad = `
+version: 1
+environments:
+  docker-host:
+    kind: docker
+    target: docker
+    kube_context: gke-cni-dev
+    default_window: 5m
+    services: [{name: grafana, namespace: docker}]
+`;
+    const issues = issuesFrom(() => parseTriageTargets(bad, TARGETS_PATH));
+    expect(issues).toEqual([{ path: "environments.docker-host.kube_context", message: "unrecognized key" }]);
+
+    // The twin: the SAME document minus the stray key parses.
+    expect(
+      envsOf(parseTriageTargets(DOCKER_YAML, TARGETS_PATH))["docker-host"],
+    ).not.toBeUndefined();
+  });
+
+  test("a k8s environment carrying `target` is refused, its docker twin (with target) passes", () => {
+    const bad = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    target: docker
+    default_window: 5m
+    services: [{name: mia, namespace: ns, checks: [rollout]}]
+`;
+    const issues = issuesFrom(() => parseTriageTargets(bad, TARGETS_PATH));
+    expect(issues).toEqual([{ path: "environments.cni-dev.target", message: "unrecognized key" }]);
+
+    // The twin: a docker environment, where `target` belongs, parses fine.
+    expect(envsOf(parseTriageTargets(DOCKER_YAML, TARGETS_PATH))["docker-host"]).not.toBeUndefined();
+  });
+
+  test("a docker environment missing target is refused", () => {
+    const yaml = `
+version: 1
+environments:
+  docker-host:
+    kind: docker
+    default_window: 5m
+    services: [{name: grafana, namespace: docker}]
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues.some((i) => i.path === "environments.docker-host.target")).toBe(true);
+  });
+
+  test("an unknown kind is refused, naming the three allowed kinds", () => {
+    const yaml = `
+version: 1
+environments:
+  weird-host:
+    kind: cloud
+    target: x
+    default_window: 5m
+    services: [{name: a, namespace: x}]
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.path).toBe("environments.weird-host.kind");
+    for (const kind of TRIAGE_ENVIRONMENT_KINDS) {
+      expect(issues[0]!.message).toContain(kind);
+    }
+  });
+
+  test("a docker check outside its own vocabulary is refused", () => {
+    const yaml = `
+version: 1
+environments:
+  docker-host:
+    kind: docker
+    target: docker
+    default_window: 5m
+    services: [{name: grafana, namespace: docker, checks: [rollout]}]
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues[0]!.path).toBe("environments.docker-host.services.0.checks.0");
+  });
+
+  test("and the twin: a k8s check outside ITS OWN vocabulary is refused too — the two vocabularies do not leak into each other", () => {
+    const yaml = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    default_window: 5m
+    services: [{name: mia, namespace: ns, checks: [state]}]
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues[0]!.path).toBe("environments.cni-dev.services.0.checks.0");
+  });
+
+  const vmYamlWithUnit = (unit: string) => `
+version: 1
+environments:
+  vm-host:
+    kind: vm
+    target: vm
+    default_window: 5m
+    services: [{name: vm-1, namespace: vm, checks: [system], units: ["${unit}"]}]
+`;
+
+  test("a unit name starting with '-' is refused", () => {
+    const issues = issuesFrom(() => parseTriageTargets(vmYamlWithUnit("-bad.service"), TARGETS_PATH));
+    expect(issues.some((i) => i.path === "environments.vm-host.services.0.units.0")).toBe(true);
+  });
+
+  test("a 256-byte unit name is refused while a 255-byte one passes", () => {
+    const issues = issuesFrom(() => parseTriageTargets(vmYamlWithUnit("a".repeat(256)), TARGETS_PATH));
+    expect(issues.some((i) => i.path === "environments.vm-host.services.0.units.0")).toBe(true);
+
+    const env = envsOf(parseTriageTargets(vmYamlWithUnit("a".repeat(255)), TARGETS_PATH))["vm-host"];
+    if (env === undefined || env.kind !== "vm") throw new Error("expected a vm environment");
+    expect(env.services[0]!.units[0]).toHaveLength(255);
+  });
+
+  test("a namespace different from the environment's target is refused on a docker row, the equal-namespace twin passes", () => {
+    const bad = `
+version: 1
+environments:
+  docker-host:
+    kind: docker
+    target: docker
+    default_window: 5m
+    services: [{name: grafana, namespace: not-docker}]
+`;
+    const issues = issuesFrom(() => parseTriageTargets(bad, TARGETS_PATH));
+    expect(issues[0]!.path).toBe("environments.docker-host.services.0.namespace");
+    expect(issues[0]!.message).toContain("not-docker");
+    expect(issues[0]!.message).toContain("docker");
+
+    // The twin: namespace equal to target passes — DOCKER_YAML's own rows.
+    expect(envsOf(parseTriageTargets(DOCKER_YAML, TARGETS_PATH))["docker-host"]).not.toBeUndefined();
+  });
+
+  test("a duplicate service name inside a docker environment is refused", () => {
+    const yaml = `
+version: 1
+environments:
+  docker-host:
+    kind: docker
+    target: docker
+    default_window: 5m
+    services:
+      - {name: grafana, namespace: docker}
+      - {name: grafana, namespace: docker, checks: [stats]}
+`;
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+    expect(issues[0]!.path).toBe("environments.docker-host.services.1.name");
+  });
+
+  test("kubeContextIssues over {k8s env naming a context the reach lacks, docker env} refuses only the k8s one", () => {
+    const k8sEnvs = envsOf(parseTriageTargets(OVERLAP_YAML, TARGETS_PATH));
+    const dockerEnvs = envsOf(parseTriageTargets(DOCKER_YAML, TARGETS_PATH));
+    // `prod` names `gke-cni-prod`, which REACHES_DEV_AND_VERIFY does not carry.
+    const combined = { prod: k8sEnvs["prod"]!, "docker-host": dockerEnvs["docker-host"]! };
+    const issues = kubeContextIssues(combined, REACHES_DEV_AND_VERIFY);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.path).toBe("environments.prod.kube_context");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The sweep-wide total (SRD-TRIAGE-MIXED-OBSERVERS §5) — a bound the
+// per-environment `.max(MAX_SERVICES_PER_ENVIRONMENT)` checks above cannot
+// see, because it is a fact about the SUM, not about any one environment.
+// ---------------------------------------------------------------------------
+
+/** A k8s environment block naming `count` services, each unique within it. */
+function k8sServicesBlock(env: string, context: string, count: number): string {
+  const rows = Array.from(
+    { length: count },
+    (_, i) => `      - {name: ${env}-svc-${i}, namespace: ns, checks: [rollout]}`,
+  ).join("\n");
+  return `  ${env}:\n    kube_context: ${context}\n    services:\n${rows}\n`;
+}
+
+/** A docker environment block naming `count` services. */
+function dockerServicesBlock(env: string, count: number): string {
+  const rows = Array.from(
+    { length: count },
+    (_, i) => `      - {name: ${env}-svc-${i}, namespace: docker}`,
+  ).join("\n");
+  return `  ${env}:\n    kind: docker\n    target: docker\n    default_window: 5m\n    services:\n${rows}\n`;
+}
+
+/** A vm environment block naming `count` services. */
+function vmServicesBlock(env: string, count: number): string {
+  const rows = Array.from(
+    { length: count },
+    (_, i) => `      - {name: ${env}-svc-${i}, namespace: vm, checks: [system]}`,
+  ).join("\n");
+  return `  ${env}:\n    kind: vm\n    target: vm\n    default_window: 5m\n    services:\n${rows}\n`;
+}
+
+describe(`the sweep-wide total is bounded at MAX_SERVICES_PER_ENVIRONMENT too — one collation document carries every row of the sweep`, () => {
+  test("17 services split across TWO environments, each under its own per-environment cap, is refused naming the total, the bound, and the one document", () => {
+    const yaml =
+      `version: 1\nenvironments:\n` +
+      k8sServicesBlock("cni-dev", "gke-cni-dev", 9) +
+      dockerServicesBlock("docker-host", 8);
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+
+    expect(issues[0]!.path).toBe("environments");
+    expect(issues[0]!.message).toContain("17");
+    expect(issues[0]!.message).toContain(String(MAX_SERVICES_PER_ENVIRONMENT));
+    expect(issues[0]!.message).toContain("triage.json");
+    expect(issues[0]!.message).toContain("one collation document");
+  });
+
+  test("17 services split across THREE environments — one per kind — is refused the same way", () => {
+    const yaml =
+      `version: 1\nenvironments:\n` +
+      k8sServicesBlock("cni-dev", "gke-cni-dev", 6) +
+      dockerServicesBlock("docker-host", 6) +
+      vmServicesBlock("vm-host", 5);
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+
+    expect(issues[0]!.path).toBe("environments");
+    expect(issues[0]!.message).toContain("17");
+    expect(issues[0]!.message).toContain(String(MAX_SERVICES_PER_ENVIRONMENT));
+  });
+
+  test(`${MAX_SERVICES_PER_ENVIRONMENT} services split across kinds — right at the bound — is accepted`, () => {
+    // 9 + 5 + 2 = MAX_SERVICES_PER_ENVIRONMENT exactly.
+    const yaml =
+      `version: 1\nenvironments:\n` +
+      k8sServicesBlock("cni-dev", "gke-cni-dev", 9) +
+      dockerServicesBlock("docker-host", 5) +
+      vmServicesBlock("vm-host", 2);
+    const envs = envsOf(parseTriageTargets(yaml, TARGETS_PATH));
+    const total = Object.values(envs).reduce((sum, e) => sum + e.services.length, 0);
+
+    expect(total).toBe(MAX_SERVICES_PER_ENVIRONMENT);
+  });
+
+  test("the tracked triage/targets.yaml still parses", () => {
+    const text = readFileSync(join(import.meta.dir, "..", "..", "triage", "targets.yaml"), "utf8");
+    const envs = envsOf(parseTriageTargets(text, "triage/targets.yaml"));
+    const total = Object.values(envs).reduce((sum, e) => sum + e.services.length, 0);
+
+    // 9 (do-cluster) + 5 (docker-host) + 1 (vm-host) = 15, inside the bound.
+    expect(total).toBeLessThanOrEqual(MAX_SERVICES_PER_ENVIRONMENT);
   });
 });
 

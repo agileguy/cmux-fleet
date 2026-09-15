@@ -353,10 +353,21 @@ describe("creating the workspace", () => {
  * It is now a console with the MOST correction: `topFraction` is `1/3` and it
  * carries a `bottomWidthFraction`, because a collator over three observers is a
  * layout `new-split` cannot produce — halving gives 50/50 vertically and
- * 50/25/25 horizontally. So it issues THREE `list-panes`: the focus lookup, the
- * height pass, and the width pass. The probe is the same behavioural one,
- * counting up instead of down — a spec that dropped either fraction reddens
- * here.
+ * 50/25/25 horizontally. So it issues FOUR `list-panes`: the focus lookup, the
+ * top-row height pass, the middle-row height pass, and the width pass. The
+ * probe is the same behavioural one, counting up instead of down — a spec that
+ * dropped any of the three fractions reddens here.
+ *
+ * **THE FOURTH READ, ADDED SRD-TRIAGE-MIXED-OBSERVERS §4.3/D4.** `TRIAGE_SPEC`
+ * carries a `middleRowFraction` for the seven-worker shape's two observer rows
+ * — see {@link applyMiddleRowFraction} — and `ensureTriage`'s default is now
+ * `DEFAULT_TRIAGE_WORKERS` at seven, two full-width rows below the collator
+ * (SRD-TRIAGE-MIXED-OBSERVERS task 2.1). `applyMiddleRowFraction` still reads
+ * geometry before it can tell how many rows there are to divide against, so its
+ * read is issued and its correction is not: this fake reports no
+ * `container_frame` at all, so the geometry parse throws before the pass's own
+ * row-count check is ever reached — the same reason {@link applyTopFraction}
+ * and {@link applyBottomWidths} issue a read and no `resize-pane` here.
  *
  * **"THE ONLY SPEC WITH A `bottomWidthFraction`" LASTED ONE DAY.** This docblock
  * said that until 2026-09-13, when `review` was asked to take the same shape and
@@ -433,7 +444,7 @@ describe("the triage console is built from its own spec", () => {
     expect(verbsOf(calls)).toContain("workspace create");
   });
 
-  test("issues one create, three splits and four respawns — and THREE list-panes", async () => {
+  test("issues one create, six splits and seven respawns — and FOUR list-panes", async () => {
     const { client, calls } = fakeCmux();
 
     const result = await ensureTriage(client, OPTS);
@@ -442,7 +453,20 @@ describe("the triage console is built from its own spec", () => {
     expect(verbsOf(calls)).toEqual([
       "workspace list",
       "workspace create",
-      // Pane 1 consumes the surface `workspace create` opened with — no split.
+      // Pane 0 (`tri-1`) consumes the surface `workspace create` opened with —
+      // no split. The other six panes of `triagePanes`' SEVEN_PANE_SHAPE table
+      // (SRD-TRIAGE-MIXED-OBSERVERS §4.2) each split, rename and respawn once,
+      // in the table's creation order — two `down` splits opening both
+      // full-width observer rows before either row's own four `right` splits.
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
+      "new-split",
       "rename-tab",
       "respawn-pane",
       "new-split",
@@ -455,19 +479,25 @@ describe("the triage console is built from its own spec", () => {
       "rename-tab",
       "respawn-pane",
       "select-workspace",
-      // THREE `list-panes`, and each one is a different claim about this spec.
+      // FOUR `list-panes`, and each one is a different claim about this spec.
       // The first is the focus lookup, which every console does. The second is
       // `applyTopFraction` reading geometry — it returns before that read when
       // `topFraction` is `null`, so its presence IS the 1/3 asserted through
-      // behaviour. The third is `applyBottomWidths`, which only this console
-      // reaches, because it is the only spec carrying a `bottomWidthFraction`.
+      // behaviour. The third is `applyMiddleRowFraction` reading geometry —
+      // present because `middleRowFraction` is set, and the seven-worker
+      // default build genuinely has two rows below the top for it to divide;
+      // its own row-count check is never reached here regardless, because the
+      // fourth is `applyBottomWidths`, which every triage build reaches, since
+      // `bottomWidthFraction` is set on `TRIAGE_SPEC` too.
       //
       // No `resize-pane` follows any of them: this fake reports no
-      // `container_frame`, so both passes take their parse-failed path. The
-      // calls being ISSUED is what this pins — the arithmetic has no double to
-      // run against and is measured on the live console instead.
+      // `container_frame`, so every pass's geometry read throws and each pass
+      // takes its parse-failed path before it can even count rows. The calls
+      // being ISSUED is what this pins — the arithmetic has no double to run
+      // against and is measured on the live console instead.
       "list-panes",
       "focus-pane",
+      "list-panes",
       "list-panes",
       "list-panes",
       // The group lookup every rebuild does. No `workspace-group add` follows:
@@ -476,7 +506,7 @@ describe("the triage console is built from its own spec", () => {
     ]);
   });
 
-  test("the four named seats get the four panes, in pane order", async () => {
+  test("the seven named seats get the seven panes, in pane CREATION order", async () => {
     const { client, calls } = fakeCmux();
     await ensureTriage(client, OPTS);
 
@@ -484,9 +514,25 @@ describe("the triage console is built from its own spec", () => {
       .filter((c) => verb(["cmux", ...c]) === "rename-tab")
       .map((c) => c[c.indexOf("--title") + 1]);
     // THE NAMED SEATS, never a count: three consoles are one function call apart
-    // and a spec pointed at the wrong constant would still produce four panes in
-    // a 2x2 and stand up the wrong fleet.
-    expect(titles).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
+    // and a spec pointed at the wrong constant would still produce seven panes
+    // in the wrong shape and stand up the wrong fleet.
+    //
+    // CREATION order, not the owner's READING order — `triagePanes`'
+    // SEVEN_PANE_SHAPE table (SRD-TRIAGE-MIXED-OBSERVERS §4.2, D3) opens both
+    // full-width observer rows with `down` splits (indices 1, 2) before either
+    // row's own `right` splits divide it into columns (3, 4 for row one; 5, 6
+    // for row two), so the two rows' leading panes interleave here even though
+    // they read out left to right as `obs-t1, obs-t2, obs-t3` and
+    // `obs-td1, obs-td2, obs-tv1`.
+    expect(titles).toEqual([
+      "tri-1",
+      "obs-t1",
+      "obs-td1",
+      "obs-t2",
+      "obs-t3",
+      "obs-td2",
+      "obs-tv1",
+    ]);
     // …and against the exported default rather than only against literals, so a
     // seat renamed in the plan and not here is a red test rather than a console
     // whose panes are titled for workers it never starts.
@@ -520,7 +566,7 @@ describe("the triage console is built from its own spec", () => {
     for (const c of commands) expect(c).not.toContain("'--attach-here'");
   });
 
-  test("the observer row splits DOWN off the collator, and each pane respawns once", async () => {
+  test("both observer rows split DOWN off an earlier pane before either splits RIGHT, and each pane respawns once", async () => {
     const { client, calls } = fakeCmux();
     await ensureTriage(client, OPTS);
 
@@ -528,33 +574,61 @@ describe("the triage console is built from its own spec", () => {
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
 
     /*
-     * **THE FIRST SPLIT IS THE LOAD-BEARING ASSERTION** as of 2026-09-13, and
-     * the previous version of this comment named a different pane for the same
-     * structural reason — worth keeping, because the lesson outlived its shape.
-     * It said pane 4's anchor was the one that mattered, since the 2x2 needed
-     * `down` off `surf-1` rather than off its predecessor, and a wrong anchor
-     * produced a 3+1 console every other assertion in this file accepted.
+     * **THE FIRST TWO SPLITS ARE THE LOAD-BEARING ASSERTION**, on
+     * `triagePanes`' SEVEN_PANE_SHAPE table (SRD-TRIAGE-MIXED-OBSERVERS §4.2,
+     * D3). Earlier shapes of this console made the same point about a single
+     * anchor; the seven-pane table makes it about the first TWO, because both
+     * full-width rows have to be peeled off before either is divided into
+     * columns — once a pane is split `right`, a later `down` off it only
+     * narrows that one cell, not the whole row.
      *
-     * The shape is now a collator over a row, and the fragile anchor has moved
-     * to the FRONT: pane 2 splits `down` off `surf-0`, which is what creates the
-     * observer row and leaves `tri-1` spanning the width. Make it `right` — the
-     * square builder's table — and the console comes out a 2x2 with the collator
-     * in a quarter, while every count, title and command assertion here still
-     * passes. Only the direction list catches it.
+     * Pane 1 (`obs-t1`) splits `down` off `surf-0` (`tri-1`), opening the
+     * FIRST observer row and leaving `tri-1` spanning the width. Pane 2
+     * (`obs-td1`) then splits `down` off `surf-1` (`obs-t1`), opening the
+     * SECOND observer row before row one has any columns of its own. Only
+     * after that do panes 3-4 split `right` along row one (off `surf-1` then
+     * `surf-3`) and panes 5-6 split `right` along row two (off `surf-2` then
+     * `surf-5`). Swap either `down` for a `right` — the square builder's
+     * table — and the shape collapses to fewer rows while every count, title
+     * and command assertion here still passes; only the direction and anchor
+     * lists catch it.
      *
-     * Panes 3 and 4 then walk ALONG that row, each anchored on its predecessor:
-     * `surf-1` then `surf-2`. That is the one part that got simpler — a row is
-     * the shape where "the previous pane" is finally the right anchor, so the
-     * surface list is now consecutive rather than doubling back.
+     * The anchors are CREATION order, not reading order: row one's anchors
+     * (`surf-0`, `surf-1`, `surf-3`) and row two's (`surf-1`, `surf-2`,
+     * `surf-5`) interleave rather than walking two separate rows straight
+     * through, which is `triagePanes`' own docblock's point about the two
+     * orders differing.
      */
-    expect(splits.map((c) => c[1])).toEqual(["down", "right", "right"]);
-    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2"]);
+    expect(splits.map((c) => c[1])).toEqual([
+      "down",
+      "down",
+      "right",
+      "right",
+      "right",
+      "right",
+    ]);
+    expect(splits.map(surfaceOf)).toEqual([
+      "surf-0",
+      "surf-1",
+      "surf-1",
+      "surf-3",
+      "surf-2",
+      "surf-5",
+    ]);
     // Every pane respawns into the surface it was given, and never twice into
     // one: a stale anchor repeats an id here.
     const respawned = calls
       .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
       .map(surfaceOf);
-    expect(respawned).toEqual(["surf-0", "surf-1", "surf-2", "surf-3"]);
+    expect(respawned).toEqual([
+      "surf-0",
+      "surf-1",
+      "surf-2",
+      "surf-3",
+      "surf-4",
+      "surf-5",
+      "surf-6",
+    ]);
   });
 
   test("the workspace is named `triage` and opened on the INVOCATION directory", async () => {

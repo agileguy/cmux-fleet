@@ -2,42 +2,50 @@
 /**
  * `scripts/triage` — open the standing scheduled triage console.
  *
- *   ./scripts/triage                                # tri-1, obs-t1, obs-t2, obs-t3
+ *   ./scripts/triage                                # tri-1, obs-t1, obs-td1, obs-t2, obs-t3, obs-td2, obs-tv1
  *   ./scripts/triage --dry-run                      # print the plan, touch nothing
  *   ./scripts/triage --restart obs-t1               # respawn one observer
  *   ./scripts/triage --restart tri-1 --task t.json  # fresh reconciler, then dispatch
  *
- * ONE COLLATOR ACROSS THE TOP, ITS THREE OBSERVERS ALONG THE BOTTOM. `tri-1`
- * divides the environment between them and collates their reports into one
- * document:
+ * ONE COLLATOR ACROSS THE TOP, SIX OBSERVERS BENEATH IT IN TWO ROWS OF THREE
+ * (SRD-TRIAGE-MIXED-OBSERVERS §4.2, since 2026-09-15 — three `observer-k8s`
+ * seats before that, since 2026-09-13). `tri-1` divides the environment
+ * between them, across three KINDS of target now (k8s, docker, vm — §5-6),
+ * and collates their reports into one document. `triagePanes`
+ * (`src/backends/cmux/operations-plan.ts`) carries the split table and its own
+ * diagram, in pane CREATION order; this file does not repeat the split table,
+ * but draws the console again below, in the owner's READING order:
  *
  * ```
  * +-----------------------------------+
- * |               tri-1               |
- * +----------+-----------+------------+
- * |  obs-t1  |  obs-t2   |   obs-t3   |
- * +----------+-----------+------------+
+ * |                tri-1               |
+ * +-----------+-----------+-----------+
+ * |  obs-t1   |  obs-t2   |  obs-t3   |
+ * +-----------+-----------+-----------+
+ * |  obs-td1  |  obs-td2  |  obs-tv1  |
+ * +-----------+-----------+-----------+
  * ```
  *
- * THE ORDER OF `DEFAULT_TRIAGE_WORKERS` IS WHAT BUILDS THIS, and the diagram is
- * pinned to it cell-for-cell by `fresh-dispatch.test.ts` — the picture is
- * load-bearing, not decoration. `triagePanes` splits `[null, down-from-0,
- * right-from-1, right-from-2]`: the collator first, then one split DOWN to make
- * the observer row, then RIGHT along it. It STOPPED sharing `agentSquarePanes`
- * on 2026-09-13 — that table's `[null, right, down-from-0, down-from-1]` makes
- * pane 2 the top row's second half, so pane 1 can never be full width.
+ * `test/unit/fresh-dispatch.test.ts` parses this picture and pins it against
+ * `TRIAGE_CONSOLE_ROSTER`, so it cannot go stale silently the way a second,
+ * unchecked copy of `triagePanes`' diagram would. It reads differently from
+ * `DEFAULT_TRIAGE_WORKERS`, which is pane CREATION order rather than reading
+ * order — `triagePanes`' own docblock carries why the two cannot be merged
+ * into one array (SRD-TRIAGE-MIXED-OBSERVERS §4.2, D3).
  *
  * (TWO PAIRS for one day, 2026-09-12: `tri-1` over `obs-t1` and `tri-2` over
  * `obs-t2`, a 2x2 off the shared square. It worked, and it produced two
  * collation documents the host had to merge; one collated report is why the
- * second collator became a third observer.)
+ * second collator became a third observer, and three more became six.)
  *
  * ## What makes this different from `scripts/review`
  *
  * Not the shape, and not the fifth process either — both are copied, and
- * `agentSquarePanes` and `console-relay.ts` are shared rather than duplicated so
- * the 2x2 and the actor's bookkeeping cannot be got backwards in only one of
- * them.
+ * `console-relay.ts` is shared rather than duplicated so the actor's
+ * bookkeeping cannot be got backwards in only one of them. `triagePanes` and
+ * `reviewPanes` stopped sharing a pane builder on 2026-09-13; see
+ * `triagePanes`'s own docblock for why two full-width rows cannot be
+ * expressed by the table `review` still uses.
  *
  * The difference is that NOBODY IS SITTING HERE. Every seat is `pane_mode: rpc`
  * (SRD-TRIAGE-CONSOLE §6.1), so there is no keyboard in any pane and no
@@ -48,7 +56,7 @@
  *   - the panes are VIEWS, so `--dry-run` is how an operator inspects this
  *     console far more often than opening it is;
  *   - a mis-adoption here is quiet in a way a `review` mis-adoption is not —
- *     four wrong panes in a window nobody opens — which is why `TRIAGE_SPEC`
+ *     seven wrong panes in a window nobody opens — which is why `TRIAGE_SPEC`
  *     exact-matches its workspace title like its three siblings.
  *
  * Running it twice is safe and is the expected way to get back to the console: a
@@ -107,7 +115,7 @@
  * script and both halves of that were silent.
  *
  * WHY THE ACTOR IS NOT WAITED FOR. On a fresh `--recreate` or a first run the
- * four `pifleet up`s have not finished when this returns, so no run exists to
+ * seven `pifleet up`s have not finished when this returns, so no run exists to
  * point an actor at. This script does NOT block: `up` runs the tool-call gate
  * over every allowlisted model sequentially, and a console script that hangs for
  * minutes is one an operator kills. It prints the one-line remedy instead — run
@@ -180,7 +188,7 @@ const CONSOLE = "triage";
 const USAGE = `Usage: scripts/triage [options]
 
   --workers <ids>   comma-separated pifleet workers, in pane order
-                    (default: ${DEFAULT_TRIAGE_WORKERS.join(",")}; at most 4)
+                    (default: ${DEFAULT_TRIAGE_WORKERS.join(",")}; exactly seven)
   --backend <kind>  pifleet backend (default: headless)
   --config <path>   fleet.yaml (default: <repo>/fleet.yaml)
   --dry-run         print the pane plan and exit without touching cmux
@@ -294,8 +302,8 @@ async function main(argv: string[]): Promise<number> {
    * The console's workers, resolved ONCE.
    *
    * The actor's `PIFLEET_RELAY_RUNS` pin has to name the same set the panes were
-   * built from, or it pins three of four and `consoleRunResolution` — which
-   * takes the pinned branch whole — leaves the fourth unresolved for the life of
+   * built from, or it pins six of seven and `consoleRunResolution` — which
+   * takes the pinned branch whole — leaves the seventh unresolved for the life of
    * the process. Re-deriving `opts.workers ?? DEFAULT_TRIAGE_WORKERS` at each
    * site is how those two sets come to differ under a `--workers` flag.
    */
@@ -305,7 +313,7 @@ async function main(argv: string[]): Promise<number> {
    * Which of these workers want Pi's own interface — READ FROM THE CONFIG, and
    * on this console the expected answer is NONE.
    *
-   * All four seats are `pane_mode: rpc` (§6.1), so `tuiWorkers` should come back
+   * All seven seats are `pane_mode: rpc` (§6.1), so `tuiWorkers` should come back
    * empty and no pane should carry `--attach-here`. It is still read rather than
    * assumed, for the reason `scripts/development` records in the opposite
    * direction: the config is what decides, this script is not, and a hard-coded
@@ -344,7 +352,7 @@ async function main(argv: string[]): Promise<number> {
      * is watching. Printed from {@link triageActorArgv} rather than described,
      * so a preview that disagreed with what is spawned is unreachable — the
      * hazard `operations-console.test.ts` records for the pane commands, applied
-     * to the one command those four panes do not carry.
+     * to the one command those seven panes do not carry.
      *
      * It is also the only place `--cadence`'s effect is VISIBLE without starting
      * anything, which is what makes an honoured flag inspectable at all.
@@ -358,8 +366,8 @@ async function main(argv: string[]): Promise<number> {
 
   /*
    * `--recreate` stops the runs the OLD panes created, before the new ones make
-   * more — four runs here, as on `review` and `development`, so without it every
-   * rebuild strands four unattached containers and the stale run directories
+   * more — seven runs here, one per worker, so without it every
+   * rebuild strands seven unattached containers and the stale run directories
    * make `logs --worker` resolve "the most recent run" to whichever still
    * exists.
    *
@@ -411,7 +419,7 @@ async function main(argv: string[]): Promise<number> {
 
     /*
      * ANY pane, not only the reconciler's. The actor holds `--run` for `tri-1`
-     * and a `PIFLEET_RELAY_RUNS` pin for the three observers, both fixed for the
+     * and a `PIFLEET_RELAY_RUNS` pin for the six observers, both fixed for the
      * life of the process, so respawning an observer's pane leaves an actor
      * whose pin names a run that no longer exists — and a pinned worker that
      * cannot be resolved refuses every fan-out, quietly, forever. On a console
@@ -586,7 +594,7 @@ function triageActorArgv(cliEntry: string, cadenceS: number | null): string[] {
  * Called before anything that stops a run — `--recreate` and every `--restart` —
  * because an actor's whole configuration is run ids. It holds `--run <id>` for
  * `tri-1` and, when the map was complete, a `PIFLEET_RELAY_RUNS` pin for the
- * three observers; both are fixed for the life of the process. Restarting ANY
+ * six observers; both are fixed for the life of the process. Restarting ANY
  * pane invalidates them, and an actor left pointing at a dead run polls forever
  * in silence.
  *
@@ -660,7 +668,7 @@ async function stopActor(why: string): Promise<void> {
  * `consoleRunResolution` takes the pinned branch WHOLE and a worker missing from
  * the pin is missing for the life of the process. On a fresh create no run
  * exists yet, so nothing is pinned and nothing is started; on the re-run that
- * adopts the console, all four are live and the pin is exact.
+ * adopts the console, all seven are live and the pin is exact.
  */
 async function startActor(
   repoRoot: string,
@@ -675,7 +683,7 @@ async function startActor(
    *
    * `TRIAGE_CONSOLE_ROSTER.collators` rather than "pane 1", for the reason
    * `dispatch-request.ts` gives: deriving the role boundary from the LAYOUT
-   * means the day someone reorders the panes, the console keeps starting four
+   * means the day someone reorders the panes, the console keeps starting seven
    * healthy workers and refuses every dispatch.
    */
   const reconciler = workers.find((w) => TRIAGE_CONSOLE_ROSTER.collators.includes(w));
@@ -785,7 +793,7 @@ async function startActor(
  * and the only one that was not getting it.
  *
  * **The asymmetry this closes.** Every pane command begins
- * `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a`, so the four workers
+ * `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a`, so the seven workers
  * have always had the operator's environment. The actor is spawned from this
  * script with a bare `process.env`, which is whatever shell happened to run
  * `./scripts/triage`. That is fine for everything the actor did until §6.9 gave

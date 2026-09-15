@@ -116,27 +116,31 @@ import {
 } from "../../run/paths.ts";
 import { readBudgetState, readTaskRecord } from "../../run/state.ts";
 import { processStartTime } from "../../run/registry.ts";
-import {
-  collationTaskId,
-  sweepNumber,
-  sweepTaskId,
-  TRIAGE_CONSOLE_ASPECTS,
-} from "../../run/task-ids.ts";
+import { collationTaskId, sweepNumber, sweepTaskId } from "../../run/task-ids.ts";
 import {
   TRIAGE_CONSOLE_ROSTER,
   readDispatchRequest,
 } from "../../run/dispatch-request.ts";
 import { evenSlices, partitionFromRequests } from "../../run/triage-partition.ts";
 import {
+  pairHasService,
   readTriageDocumentAt,
+  seatsForEnvironments,
   sweepProducers,
   triageDocumentPath,
   type SweepDispatch,
+  type SweepEnvironment,
   type SweepProducerDeps,
   type SweepProducers,
 } from "../../run/triage-envelope.ts";
 import { loadTriagePair, sweepDeadlineS } from "../../run/triage-config.ts";
-import type { TriageEnvironment, TriageFileNames } from "../../run/triage-targets.ts";
+import type {
+  TriageDockerEnvironment,
+  TriageEnvironments,
+  TriageFileNames,
+  TriageK8sEnvironment,
+  TriageVmEnvironment,
+} from "../../run/triage-targets.ts";
 import type { InferenceEndpoint, SaturationProbe, TriageDocument } from "../../run/triage-verdict.ts";
 import {
   freshDeliveryState,
@@ -722,7 +726,7 @@ export function buildTriageSweepDriver(
       : async (sweepId) => {
           const senders = await Promise.all(
             pairs
-              .filter((p) => p.services.length > 0)
+              .filter(pairHasService)
               .map(async (p) => ({
                 collator: p.collator,
                 run: await withSeatRun.seatRun!(p.collator),
@@ -982,39 +986,90 @@ export async function resolveCollatorRun(
   return run;
 }
 
+/** {@link environmentsByKind}'s return: one named environment per kind, docker/vm optional. */
+export interface EnvironmentsByKind {
+  readonly k8s: { readonly name: string; readonly environment: TriageK8sEnvironment };
+  readonly docker: { readonly name: string; readonly environment: TriageDockerEnvironment } | null;
+  readonly vm: { readonly name: string; readonly environment: TriageVmEnvironment } | null;
+}
+
 /**
- * §7.1's inventory projected onto the ONE environment a sweep is.
+ * §7.1's inventory projected onto the (up to) three environments one sweep
+ * can visit, one per kind (SRD-TRIAGE-MIXED-OBSERVERS §6.1). Replaces
+ * `soleEnvironment`, which refused anything other than exactly one declared
+ * environment — with three kinds possibly present at once, that rule is
+ * scoped to k8s alone: exactly one k8s environment is required (the same "at
+ * least one, not two" `soleEnvironment` enforced), and at most one docker and
+ * at most one vm.
  *
- * `triage-pass.ts` states the limit and this is where it becomes a refusal:
- * *"ONE SWEEP IS ONE ENVIRONMENT, and that is a limit rather than a law …
- * `ConsoleHealthFacts` takes a LIST of environments, which is the seam a
- * multi-environment console would grow into; nothing in Phase 6 asks for it and
- * nothing here forecloses it."*
+ * A mixed-kind sweep needs up to three environments present at once;
+ * `ConsoleHealthFacts.environments` (`triage-incident.ts`) is already a LIST
+ * for exactly this reason.
  *
- * **Refused by NAME on both sides**, because the two failures need different
- * answers: a targets file with no environments is one an operator has not
- * finished writing, and a file with two is one that outgrew a console this
- * design does not build yet. A loader that silently took the first would sweep
- * one environment and report health for a fleet, which is the most damaging
- * shape a message from this console can have.
+ * Every present environment must also declare the SAME `default_window`
+ * (operator decision): a sweep has one `window_opened_at`, derived from one
+ * default window, and every artifact's window gate compares against that
+ * single value, so a mismatch between kinds would make the gate wrong for
+ * whichever kind did not set the pace.
+ *
+ * **Refused by NAME, every violated rule in ONE message.** An operator fixing
+ * a targets file should see every rule it broke in one pass rather than
+ * re-running `config validate` once per correction.
  */
-export function soleEnvironment(environments: Readonly<Record<string, TriageEnvironment>>): {
-  readonly name: string;
-  readonly environment: TriageEnvironment;
-} {
-  const names = Object.keys(environments);
-  if (names.length !== 1) {
+export function environmentsByKind(environments: TriageEnvironments): EnvironmentsByKind {
+  const k8s: { name: string; environment: TriageK8sEnvironment }[] = [];
+  const docker: { name: string; environment: TriageDockerEnvironment }[] = [];
+  const vm: { name: string; environment: TriageVmEnvironment }[] = [];
+  for (const [name, environment] of Object.entries(environments)) {
+    if (environment.kind === "k8s") k8s.push({ name, environment });
+    else if (environment.kind === "docker") docker.push({ name, environment });
+    else vm.push({ name, environment });
+  }
+
+  const describe = (names: string[]) => (names.length === 0 ? "none" : names.join(", "));
+  const rules: string[] = [];
+  if (k8s.length !== 1) {
+    rules.push(
+      `exactly one k8s environment is required, found ${k8s.length} ` +
+        `(${describe(k8s.map((e) => e.name))})`,
+    );
+  }
+  if (docker.length > 1) {
+    rules.push(
+      `at most one docker environment is allowed, found ${docker.length} ` +
+        `(${describe(docker.map((e) => e.name))})`,
+    );
+  }
+  if (vm.length > 1) {
+    rules.push(
+      `at most one vm environment is allowed, found ${vm.length} ` +
+        `(${describe(vm.map((e) => e.name))})`,
+    );
+  }
+  /*
+   * Every present environment must share ONE default_window (operator
+   * decision). A sweep has one window_opened_at, derived from one default
+   * window, and every artifact's window gate (§7.4) compares against that
+   * single value — so a k8s environment at 5m beside a docker one at 10m
+   * would make §7.4's check wrong for whichever kind did not set the pace.
+   * Runs over every declared environment regardless of the count rules
+   * above (k8s first, then docker, then vm) so both kinds of refusal can
+   * appear together when both are true.
+   */
+  const present = [...k8s, ...docker, ...vm];
+  const distinctWindows = new Set(present.map((e) => e.environment.default_window));
+  if (distinctWindows.size > 1) {
+    const named = present.map((e) => `${e.name}=${e.environment.default_window}s`).join(", ");
+    rules.push(`environments must declare one shared default_window, found different values: ${named}`);
+  }
+  if (rules.length > 0) {
     throw new CliError(
-      `triage/targets.yaml declares ${names.length} environments (${
-        names.length === 0 ? "none" : names.join(", ")
-      }) and one sweep is ONE environment (SRD-TRIAGE-CONSOLE §12). A multi-environment console ` +
-        `is a seam this design leaves open and does not build: declare exactly one environment, ` +
-        `or run one console per environment.`,
+      `triage/targets.yaml: ${rules.join("; ")} (SRD-TRIAGE-MIXED-OBSERVERS §6.1).`,
       EXIT.USAGE,
     );
   }
-  const name = names[0]!;
-  return { name, environment: environments[name]! };
+
+  return { k8s: k8s[0]!, docker: docker[0] ?? null, vm: vm[0] ?? null };
 }
 
 /**
@@ -1295,7 +1350,19 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
       paths: e.triageFiles,
       kubeconfigPath: e.kubeconfigPath,
     });
-    const { name: environment, environment: target } = soleEnvironment(pair.targets.environments);
+    /*
+     * Docker and vm environments are validated HERE — `environmentsByKind` runs
+     * the refusals above over all three kinds, so a mixed-kind targets file with
+     * two docker environments or no k8s one is refused before a sweep is ever
+     * opened. This call site now sweeps every kind `environmentsByKind` finds
+     * present, task 4.2's last step: the envelope (`sweepEnvironments` below),
+     * the declared list and `triagePass`'s environment facts all cover k8s,
+     * docker (when declared) and vm (when declared), in that order — the
+     * per-kind partition (task 4.1) and the `(environment, service)` keying
+     * (task 4.1b) already read a list this wide.
+     */
+    const { k8s, docker, vm } = environmentsByKind(pair.targets.environments);
+    const { name: environment, environment: target } = k8s;
 
     /*
      * THE SPLIT — BOTH halves of it, by collator count.
@@ -1303,47 +1370,101 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
      * **This was positional pairing until 2026-09-13 and deliberately is not any
      * more.** The text here used to call "collator `i` owns aspect seat `i`" the
      * invariant the whole design rests on, and with two collators over one seat
-     * each it was. The console now runs ONE collator over THREE observers, so
-     * there is no pairing left to assert: `tri-1` is shown every seat in
-     * `TRIAGE_CONSOLE_ASPECTS` and decides the partition across them itself.
+     * each it was. The console now runs ONE collator over up to SIX observers —
+     * three k8s, two docker, one vm — so there is no pairing left to assert:
+     * `tri-1` is shown every seat whose kind this sweep declares
+     * (`seatsForEnvironments`, below) and decides the partition across them
+     * itself.
      *
      * Splitting both lists by `collators.length` keeps this general rather than
      * hard-coding the one. At a count of 1 it is the identity — every seat and
-     * every service to the single collator — and if a second collator is ever
-     * added back it divides seats and services the same way, front-loaded, with
-     * no second code path to discover. `evenSlices` is already the function that
-     * says "as even as the count allows" (operator, 2026-09-12).
+     * every service of every present kind to the single collator — and if a
+     * second collator is ever added back it divides seats and services the same
+     * way, front-loaded, with no second code path to discover. `evenSlices` is
+     * already the function that says "as even as the count allows" (operator,
+     * 2026-09-12).
      *
-     * WHAT THE HOST STILL DOES AND WHAT IT NO LONGER DOES: it hands `tri-1` the
-     * whole environment and checks the union that comes back. It does NOT decide
-     * which observer gets which service — that is §6.5's ⌈N/3⌉, *"the partition
-     * is the triage worker's to make"*, and `checkTriagePartition` refuses an
-     * incomplete or duplicated partition without refusing a lopsided one.
+     * WHAT THE HOST STILL DOES AND WHAT IT NO LONGER DOES: it hands `tri-1`
+     * every present environment whole and checks the union that comes back, per
+     * kind. It does NOT decide which observer gets which service — that is
+     * §6.5's ⌈N/3⌉, *"the partition is the triage worker's to make"*, and
+     * `checkTriagePartition` refuses an incomplete or duplicated partition
+     * without refusing a lopsided one.
      *
      * `declared` below stays the WHOLE list for the reason it always did: it is
      * what the union is counted against, so §6.5's question — *"is this a
-     * partition OF the declared set?"* — is asked once over the environment
-     * rather than degrading into per-slice checks that could each pass while a
+     * partition OF the declared set?"* — is asked once per environment rather
+     * than degrading into per-slice checks that could each pass while a
      * service fell down the gap between them.
      */
     const collators = TRIAGE_CONSOLE_ROSTER.collators;
-    const slices = evenSlices(target.services, collators.length);
-    const seatShares = evenSlices(TRIAGE_CONSOLE_ASPECTS, collators.length);
+    /*
+     * THE WHOLE SWEEP'S environments — every kind `environmentsByKind` finds
+     * present, k8s always and docker/vm when the targets file declares them
+     * (SRD-TRIAGE-MIXED-OBSERVERS §5, §6.1, task 4.2's last step). Named once
+     * so `declared` below, `seatShares` and `buildTriageSweepDriver`'s
+     * `environments` deps all read the SAME value rather than three call sites
+     * each re-deriving which kinds are present and risking two of them
+     * disagreeing about which environments this sweep actually covers.
+     */
+    const declaredEnvironments: readonly (SweepEnvironment | null)[] = [
+      { name: k8s.name, kind: "k8s", services: k8s.environment.services },
+      docker === null
+        ? null
+        : { name: docker.name, kind: "docker", services: docker.environment.services },
+      vm === null ? null : { name: vm.name, kind: "vm", services: vm.environment.services },
+    ];
+    const sweepEnvironments: readonly SweepEnvironment[] = declaredEnvironments.filter(
+      (e): e is SweepEnvironment => e !== null,
+    );
+    /*
+     * EACH ENVIRONMENT'S OWN `evenSlices` SHARE, by collator count. One
+     * collator's `SweepPair` carries a slice of EVERY sweep environment, not
+     * one flat services list, because two environments can each declare a
+     * `grafana` (D21) and only keeping them apart per environment lets
+     * `evenSlices` divide each one on its own terms rather than one shared
+     * list that loses which environment a service came from.
+     */
+    const environmentShares = sweepEnvironments.map((e) => evenSlices(e.services, collators.length));
+    /*
+     * ONLY THE SEATS OF THE KINDS THIS SWEEP DECLARES, task 4.2's fix for the
+     * trap task 4.1 left standing. `TRIAGE_CONSOLE_ASPECTS` names all six
+     * seats across three kinds; a k8s-only sweep whose envelope named the
+     * docker and vm seats too would show them a child task id they are never
+     * dispatched under, and since task 4.1 a collator handing a k8s service
+     * to one of them is refused whole for a kind mismatch it never had a
+     * service for. `seatsForEnvironments` (`triage-envelope.ts`) answers with
+     * only the seats of the kinds `sweepEnvironments` names — the three k8s
+     * seats alone when the targets file declares only k8s, and every present
+     * kind's seats once docker or vm join it.
+     */
+    const seatShares = evenSlices(seatsForEnvironments(sweepEnvironments), collators.length);
     const sweepPairs = collators.map((collator, i) => ({
       collator,
       seats: seatShares[i] ?? [],
-      services: slices[i] ?? [],
+      environments: sweepEnvironments.map((e, envIndex) => ({
+        name: e.name,
+        kind: e.kind,
+        services: environmentShares[envIndex]?.[i] ?? [],
+      })) satisfies SweepEnvironment[],
     }));
 
     const outcome = await triagePass({
       environment,
       /*
-       * FILE order, which `TriageEnvironment.services` preserves and
-       * `checkTriagePartition` compares against. Sorting here would make
-       * `partition_incomplete`'s list disagree with the file an operator is
-       * about to open.
+       * Exactly the environments this sweep covers — every kind
+       * `environmentsByKind` found present, mapped from `sweepEnvironments`
+       * above so the two cannot disagree. A fact for an environment nobody
+       * swept would be a clear citing a sweep that never looked (§6.8's
+       * asymmetry). Services stay in FILE order, which `checkTriagePartition`
+       * compares against: sorting would make `partition_incomplete`'s list
+       * disagree with the file an operator is about to open.
        */
-      declared: target.services.map((s) => s.name),
+      declared: sweepEnvironments.map((e) => ({
+        name: e.name,
+        kind: e.kind,
+        services: e.services.map((s) => s.name),
+      })),
       /*
        * §7.4's legal window range, assembled from the two files that fix it —
        * the targets file supplies `default_window` (already seconds) and §7.8
@@ -1365,8 +1486,7 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
       sweep: buildTriageSweepDriver(
         {
           run,
-          environment,
-          services: target.services,
+          environments: sweepEnvironments,
           pairs: sweepPairs,
           defaultWindowS: target.default_window,
           /*

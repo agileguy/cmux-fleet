@@ -85,6 +85,7 @@ import {
   dispatchPartition,
   evenSlices,
   partitionFromRequests,
+  type DeclaredKindGroup,
   type PartitionAssignment,
 } from "../../src/run/triage-partition.ts";
 import { parseTriageTargets } from "../../src/run/triage-targets.ts";
@@ -109,6 +110,15 @@ import { parseTriageTargets } from "../../src/run/triage-targets.ts";
  * make a `.reverse()` mutation HARDER to catch, not easier.
  */
 const DECLARED = ["ntfy", "prometheus", "grafana"] as const;
+
+/**
+ * `DECLARED`, grouped by kind for {@link dispatchPartition} — SRD-TRIAGE-MIXED-
+ * OBSERVERS §5, D8; Phase 4 task 4.1. Every fixture above this point in the
+ * file (and most below it) partitions with `OBS` (`obs-t1`/`obs-t2`), both k8s
+ * seats (`TRIAGE_SEAT_KINDS`), so wrapping `DECLARED` as the single k8s group
+ * reproduces exactly the one-kind console this suite predates.
+ */
+const K8S_DECLARED: readonly DeclaredKindGroup[] = [{ kind: "k8s", services: DECLARED }];
 
 /**
  * `DECLARED` as a targets document — the fixture the pin at the end parses.
@@ -187,7 +197,7 @@ describe("the positive control — a partition that covers the environment exact
     // whole environment.
     const partition = [assign(OBS[0], "ntfy", "prometheus", "grafana")];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("dispatched");
     if (outcome.kind !== "dispatched") return;
@@ -214,7 +224,7 @@ describe("the positive control — a partition that covers the environment exact
       assign(OBS[0]),
     ];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("dispatched");
     expect(calls).toHaveLength(3);
@@ -273,7 +283,7 @@ describe("the positive control — a partition that covers the environment exact
       throw new Error(`dispatch refused for ${a.worker}`);
     };
 
-    await expect(dispatchPartition(DECLARED, partition, dispatch)).rejects.toThrow(
+    await expect(dispatchPartition(K8S_DECLARED, partition, dispatch)).rejects.toThrow(
       "dispatch refused for obs-t1",
     );
     /*
@@ -295,7 +305,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
     const { dispatch, calls } = spy();
     const partition = [assign(OBS[0], "ntfy"), assign(OBS[0], "prometheus")];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
@@ -326,7 +336,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
       assign(OBS[0], "grafana", "ingest"),
     ];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
@@ -355,7 +365,7 @@ describe("the incomplete arm — a service in the environment appears in no requ
       assign(OBS[0], "grafana"),
     ];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
@@ -418,7 +428,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
       assign(OBS[0], "ntfy"),
     ];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
@@ -446,7 +456,7 @@ describe("the duplicate arm — a service appears in more than one request", () 
       assign(OBS[0], "grafana"),
     ];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
@@ -507,7 +517,7 @@ describe("precedence, when both faults hold at once", () => {
     // `missing` still names both gaps, which is what this test is about.
     const partition = [assign(OBS[0], "ntfy"), assign(OBS[0], "ntfy")];
 
-    const outcome = await dispatchPartition(DECLARED, partition, dispatch);
+    const outcome = await dispatchPartition(K8S_DECLARED, partition, dispatch);
 
     expect(outcome.kind).toBe("refused");
     if (outcome.kind !== "refused") return;
@@ -694,7 +704,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
 
     const { dispatch, calls } = spy();
     const outcome = await dispatchPartition(
-      DECLARED,
+      K8S_DECLARED,
       partitionFromRequests(read.request.requests),
       dispatch,
     );
@@ -736,7 +746,7 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
 
     const { dispatch, calls } = spy();
     const outcome = await dispatchPartition(
-      DECLARED,
+      K8S_DECLARED,
       partitionFromRequests(read.request.requests),
       dispatch,
     );
@@ -780,13 +790,387 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
     const declared = targets.environments_unchecked_against_kubeconfig;
 
     /*
-     * The SOLE environment, read out of the document rather than named here.
-     * `soleEnvironment` refuses any count but one, so "the one this document
-     * declares" is well defined without spelling the token a second time.
+     * The fixture declares exactly one environment, a k8s one, so it is read
+     * out of the document rather than named here, without spelling the token
+     * a second time.
      */
     const names = Object.keys(declared);
     expect(names).toHaveLength(1);
     expect(declared[names[0]!]!.services.map((s) => s.name)).toEqual([...DECLARED]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-MIXED-OBSERVERS §5, §10, D8 — Phase 4 task 4.1: partitioning runs
+// once per kind, in the fixed order k8s, docker, vm, and the first refusal
+// stops the sweep. Every fixture below keeps k8s, docker and vm service names
+// DISJOINT (`ntfy`/`prometheus`/`grafana` vs `cadvisor`/`node_exporter` vs
+// `vm-1`), so an implementation that checked one flat union of every kind's
+// services instead of three separate kinds would accept partitions this suite
+// refuses, rather than passing by coincidence.
+// ---------------------------------------------------------------------------
+
+const K8S_SERVICES = ["ntfy", "prometheus", "grafana"] as const;
+const DOCKER_SERVICES = ["cadvisor", "node_exporter"] as const;
+const VM_SERVICES = ["vm-1"] as const;
+
+/** Every kind present and complete: 3 k8s + 2 docker + 1 vm seats. */
+const MIXED_DECLARED: readonly DeclaredKindGroup[] = [
+  { kind: "k8s", services: K8S_SERVICES },
+  { kind: "docker", services: DOCKER_SERVICES },
+  { kind: "vm", services: VM_SERVICES },
+];
+
+describe("per-kind partitioning (SRD-TRIAGE-MIXED-OBSERVERS §5, §10, D8)", () => {
+  /**
+   * THE POSITIVE CONTROL, first for the reason every other positive control in
+   * this file is first: a check that refused unconditionally would satisfy
+   * every refusal fixture below it while dispatching nothing to a real console.
+   */
+  test("a complete mixed partition dispatches every assignment across all three kinds", async () => {
+    const { dispatch, calls } = spy();
+    const mixed = [
+      assign("obs-t1", "ntfy"),
+      assign("obs-t2", "prometheus"),
+      assign("obs-t3", "grafana"),
+      assign("obs-td1", "cadvisor"),
+      assign("obs-td2", "node_exporter"),
+      assign("obs-tv1", "vm-1"),
+    ];
+
+    const outcome = await dispatchPartition(MIXED_DECLARED, mixed, dispatch);
+
+    expect(outcome.kind).toBe("dispatched");
+    expect([...calls.map((c) => c.worker)].sort()).toEqual(
+      ["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"].sort(),
+    );
+  });
+
+  /**
+   * THE SRD'S OWN REVERT CHECK (task 4.1's acceptance). If `dispatchPartition`
+   * regressed to checking one flat union of every kind's declared services
+   * against every assignment, this fixture would pass silently: the union of
+   * {ntfy, prometheus, grafana, cadvisor} and the union of what the five
+   * assignments below claim are the SAME SET, so a flat check sees a complete
+   * cover. Scoped per kind, it is not: k8s's own three seats never claim
+   * `cadvisor`, so k8s's own check is missing it — refused `partition_incomplete`
+   * FOR k8s, never silently accepted because the name is declared somewhere else.
+   */
+  test("a docker container fed into the k8s group's declared set reports partition_incomplete for k8s", async () => {
+    const { dispatch, calls } = spy();
+    const declared: readonly DeclaredKindGroup[] = [
+      // "cadvisor" is a docker container name, misfiled under k8s's own declared set.
+      { kind: "k8s", services: [...K8S_SERVICES, "cadvisor"] },
+      { kind: "docker", services: DOCKER_SERVICES },
+    ];
+    const mixed = [
+      assign("obs-t1", "ntfy"),
+      assign("obs-t2", "prometheus"),
+      assign("obs-t3", "grafana"),
+      assign("obs-td1", "cadvisor"),
+      assign("obs-td2", "node_exporter"),
+    ];
+
+    const outcome = await dispatchPartition(declared, mixed, dispatch);
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_incomplete");
+    expect(outcome.missing).toEqual(["cadvisor"]);
+    expect(calls).toEqual([]);
+  });
+
+  test("a k8s service claimed by a docker seat is refused as undeclared, for docker (§10)", async () => {
+    const { dispatch, calls } = spy();
+    const mixed = [
+      assign("obs-t1", "ntfy"),
+      assign("obs-t2", "prometheus"),
+      assign("obs-t3", "grafana"),
+      // "grafana" is a k8s service name, wrongly claimed by a docker seat.
+      assign("obs-td1", "grafana"),
+      assign("obs-td2", "node_exporter"),
+    ];
+
+    const outcome = await dispatchPartition(
+      [{ kind: "k8s", services: K8S_SERVICES }, { kind: "docker", services: DOCKER_SERVICES }],
+      mixed,
+      dispatch,
+    );
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_incomplete");
+    expect(outcome.undeclared).toEqual(["grafana"]);
+    expect(calls).toEqual([]);
+  });
+
+  test("a docker container claimed by a k8s seat is refused as undeclared, for k8s (§10)", async () => {
+    const { dispatch, calls } = spy();
+    const mixed = [
+      // "cadvisor" is a docker container name, wrongly claimed by a k8s seat.
+      assign("obs-t1", "cadvisor"),
+      assign("obs-t2", "prometheus"),
+      assign("obs-t3", "grafana"),
+      assign("obs-td1", "cadvisor"),
+      assign("obs-td2", "node_exporter"),
+    ];
+
+    const outcome = await dispatchPartition(
+      [{ kind: "k8s", services: K8S_SERVICES }, { kind: "docker", services: DOCKER_SERVICES }],
+      mixed,
+      dispatch,
+    );
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_incomplete");
+    // k8s is checked FIRST (fixed order), so k8s's own fault surfaces — the
+    // docker seat's legitimate claim on "cadvisor" is never even reached.
+    expect(outcome.undeclared).toEqual(["cadvisor"]);
+    expect(calls).toEqual([]);
+  });
+
+  test("k8s and docker both faulty: the refusal names k8s, the fixed order's first kind", async () => {
+    const { dispatch, calls } = spy();
+    const declared: readonly DeclaredKindGroup[] = [
+      { kind: "k8s", services: K8S_SERVICES },
+      { kind: "docker", services: DOCKER_SERVICES },
+    ];
+    // k8s is missing "grafana"; docker is ALSO missing "node_exporter" — both
+    // would refuse if checked alone, and the fixed order settles which wins.
+    const mixed = [assign("obs-t1", "ntfy"), assign("obs-t2", "prometheus"), assign("obs-td1", "cadvisor")];
+
+    const outcome = await dispatchPartition(declared, mixed, dispatch);
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    // k8s's own missing list ("grafana"), never docker's ("node_exporter") —
+    // that is the fixed order made observable.
+    expect(outcome.missing).toEqual(["grafana"]);
+    expect(calls).toEqual([]);
+  });
+
+  /**
+   * Covers both the width/kind naming (task 4.1's design) and the SRD's own
+   * phrasing check: *"names its own width and kind, not 'three'"*. `reason` is
+   * asserted deliberately here, unlike the rest of this file (see the module
+   * docblock) — this test is specifically about the NEW context substitution,
+   * not about re-deriving a rule the structured fields already carry.
+   */
+  test("only docker faulty: the refusal names docker, its own width, and not 'three'", async () => {
+    const { dispatch, calls } = spy();
+    const declared: readonly DeclaredKindGroup[] = [
+      { kind: "k8s", services: K8S_SERVICES },
+      { kind: "docker", services: DOCKER_SERVICES },
+    ];
+    // k8s is complete. Docker's two seats both claim "cadvisor" — a duplicate.
+    const mixed = [
+      assign("obs-t1", "ntfy"),
+      assign("obs-t2", "prometheus"),
+      assign("obs-t3", "grafana"),
+      assign("obs-td1", "cadvisor"),
+      assign("obs-td2", "cadvisor"),
+    ];
+
+    const outcome = await dispatchPartition(declared, mixed, dispatch);
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_duplicate");
+    expect(outcome.duplicated).toEqual(["cadvisor"]);
+    expect(outcome.reason).toContain("2 requests wide, for docker");
+    expect(outcome.reason).not.toContain("three requests wide");
+    expect(calls).toEqual([]);
+  });
+
+  test("any refusal dispatches nothing, including when k8s is complete and vm is not", async () => {
+    const { dispatch, calls } = spy();
+    const declared: readonly DeclaredKindGroup[] = [
+      { kind: "k8s", services: K8S_SERVICES },
+      { kind: "vm", services: VM_SERVICES },
+    ];
+    const mixed = [
+      assign("obs-t1", "ntfy"),
+      assign("obs-t2", "prometheus"),
+      assign("obs-t3", "grafana"),
+      // The vm seat claims nothing — "vm-1" is missing.
+      assign("obs-tv1"),
+    ];
+
+    const outcome = await dispatchPartition(declared, mixed, dispatch);
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_incomplete");
+    expect(outcome.missing).toEqual(["vm-1"]);
+    expect(calls).toEqual([]);
+  });
+
+  /**
+   * `tri-1` is a real console worker (it is the collator) but
+   * `TRIAGE_SEAT_KINDS` deliberately names no kind for it — it observes no
+   * environment itself. An assignment for it, or for any other worker
+   * `seatKind` does not recognise, must be refused rather than quietly
+   * excluded from every kind's count — see `dispatchPartition`'s docblock.
+   */
+  test("an assignment for a worker with no kind is refused, not silently dropped", async () => {
+    const { dispatch, calls } = spy();
+    const mixed = [
+      assign("obs-t1", "ntfy"),
+      assign("obs-t2", "prometheus"),
+      assign("obs-t3", "grafana"),
+      assign("tri-1", "phantom-service"),
+    ];
+
+    const outcome = await dispatchPartition(
+      [{ kind: "k8s", services: K8S_SERVICES }],
+      mixed,
+      dispatch,
+    );
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("partition_incomplete");
+    expect(outcome.undeclared).toEqual(["phantom-service"]);
+    expect(calls).toEqual([]);
+  });
+
+  /**
+   * ── An assignment that cannot belong to this sweep refuses everything,
+   * BEFORE any dispatch — even when it claims nothing at all.
+   *
+   * Before this fix, an orphaned worker claiming an EMPTY share was invisible
+   * to every check in this file: `checkTriagePartition` against that worker's
+   * (absent) declared group sees nothing missing and nothing undeclared —
+   * there is nothing to compare — so the old per-kind loop answered
+   * `complete` for it, and the old post-loop net only ever looked at claimed
+   * services. `{worker: "obs-td1", services: []}` on a k8s-only sweep reached
+   * `Promise.all` in full, alongside the legitimate k8s slices — the exact
+   * partial fan-out this module exists to prevent. Each fixture below proves
+   * the opposite with a dispatch spy: zero calls, even though every OTHER
+   * assignment in the same partition is individually complete and legal.
+   */
+  describe("an orphaned assignment refuses the whole partition before any dispatch", () => {
+    test("a k8s-only declared set refuses a docker seat claiming nothing (obs-td1: [])", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        // docker is not declared at all — this seat cannot belong to this sweep,
+        // whether or not it claims a service.
+        assign("obs-td1"),
+      ];
+
+      const outcome = await dispatchPartition(
+        [{ kind: "k8s", services: K8S_SERVICES }],
+        mixed,
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(calls).toEqual([]);
+    });
+
+    /*
+     * PartitionFault promises all three lists on every refusal. An orphan wins
+     * the code, but the declared service nobody claimed and the invented one
+     * are still reported.
+     */
+    test("an orphan refusal still reports the kinds' missing and undeclared services", async () => {
+      const { dispatch, calls } = spy();
+      const outcome = await dispatchPartition(
+        [{ kind: "k8s", services: K8S_SERVICES }],
+        [assign("obs-t1", "ntfy"), assign("obs-t2", "prometheus", "phantom"), assign("tri-1")],
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(outcome.missing).toEqual(["grafana"]);
+      expect(outcome.undeclared).toEqual(["phantom"]);
+      expect(outcome.reason).toContain("tri-1");
+      expect(calls).toEqual([]);
+    });
+
+    test("the collator claiming nothing (tri-1: []) is refused, not silently complete", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        assign("tri-1"),
+      ];
+
+      const outcome = await dispatchPartition(
+        [{ kind: "k8s", services: K8S_SERVICES }],
+        mixed,
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(calls).toEqual([]);
+    });
+
+    test("k8s plus docker declared still refuses a vm seat claiming nothing (obs-tv1: [])", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        assign("obs-td1", "cadvisor"),
+        assign("obs-td2", "node_exporter"),
+        // vm is not declared in this sweep — this seat cannot belong to it.
+        assign("obs-tv1"),
+      ];
+
+      const outcome = await dispatchPartition(
+        [
+          { kind: "k8s", services: K8S_SERVICES },
+          { kind: "docker", services: DOCKER_SERVICES },
+        ],
+        mixed,
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(calls).toEqual([]);
+    });
+
+    /**
+     * THE POSITIVE CONTROL FOR THIS BLOCK: an empty claim is legal — even
+     * still dispatched — when its worker's kind DOES have a declared group.
+     * Without this, a broken implementation that refused every empty share
+     * (declared or not) would pass all three fixtures above for the wrong
+     * reason.
+     */
+    test("an empty claim on a DECLARED kind stays legal and still dispatches", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        // obs-td1 holds every docker service; obs-td2 is idle — legal, same as
+        // §6.5's "an idle observer is not an error".
+        assign("obs-td1", "cadvisor", "node_exporter"),
+        assign("obs-td2"),
+        assign("obs-tv1", "vm-1"),
+      ];
+
+      const outcome = await dispatchPartition(MIXED_DECLARED, mixed, dispatch);
+
+      expect(outcome.kind).toBe("dispatched");
+      expect([...calls.map((c) => c.worker)].sort()).toEqual(
+        ["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"].sort(),
+      );
+    });
   });
 });
 

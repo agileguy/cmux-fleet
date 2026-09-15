@@ -28,42 +28,56 @@ design property with a test behind it.
 ## Starting it
 
 ```bash
-cd ~/repos/cmux-fleet && ./scripts/triage            # four panes, then the actor
+cd ~/repos/cmux-fleet && ./scripts/triage            # seven panes, then the actor
 cd ~/repos/cmux-fleet && ./scripts/triage --no-actor # panes only, actor by hand
 cd ~/repos/cmux-fleet && ./scripts/triage --actor-stop
 ```
 
-**Four seats: ONE COLLATOR OVER THREE OBSERVERS** as of 2026-09-13. `tri-1`
-composes the sweep request and collates the replies; `obs-t1`, `obs-t2` and
-`obs-t3` each sweep a share of the environment. The collator's envelope carries
-the WHOLE declared service list and names all three seats.
+**Seven seats: ONE COLLATOR OVER SIX OBSERVERS, OF THREE KINDS** as of
+2026-09-14 (SRD-TRIAGE-MIXED-OBSERVERS §5). `tri-1` composes the sweep request
+and collates the replies; `obs-t1`, `obs-t2` and `obs-t3` each sweep a share of
+the k8s environment, `obs-td1` and `obs-td2` each sweep a share of the docker
+environment, and `obs-tv1` sweeps the whole of the vm environment alone. The
+collator's envelope carries the WHOLE declared service list, across every kind,
+and names all six seats.
 
 **The partition is the COLLATOR's to make, and that is what `roles/triage.md` now
-tells it**: one entry per observer inside one `requests[]` file, the union
-covering every declared service exactly once. This is §6.5's ⌈N/3⌉ — *"the
-partition is the triage worker's to make"*. The host checks the union and refuses
-`partition_incomplete` or `partition_duplicate`; it does NOT choose the shares and
-does not refuse a lopsided one.
+tells it**: one entry per seat inside one `requests[]` file, split BY KIND first
+— a k8s service, a docker container and a vm unit never share a request
+(SRD-TRIAGE-MIXED-OBSERVERS §5) — and within each kind, the union covering every
+declared service of that kind exactly once. k8s follows §6.5's ⌈N/3⌉ across its
+three seats — *"the partition is the triage worker's to make"* — docker splits
+evenly across its two seats, and vm's whole share goes to its one seat, because
+there is no second vm seat to split it with. The host checks each kind's union on
+its own and refuses `partition_incomplete` or `partition_duplicate`; it does NOT
+choose the shares and does not refuse a lopsided one.
 
-**The role prompt asks for an EVEN split for a measured reason.** The three
-observers run concurrently against one shared deadline, so a sweep costs the
-largest share rather than the sum. On T-sweep-116 — the last sweep of the two-pair
-arrangement — an observer handed four services spent its entire 480s deadline and
-wrote no artifact, so all four came back `unobserved`. The deadline is now 600s
-(`triage/console.yaml`), and three seats make nine services three each.
+**The role prompt asks for an EVEN split, within each kind, for a measured
+reason.** All six observers run concurrently against one shared deadline, so a
+sweep costs the largest share rather than the sum. On T-sweep-116 — the last
+sweep of the two-pair arrangement — an observer handed four services spent its
+entire 480s deadline and wrote no artifact, so all four came back `unobserved`.
+The deadline is now 600s (`triage/console.yaml`), and three k8s seats make nine
+k8s services three each; the docker and vm seats added 2026-09-14 divide their
+own kinds by the same rule.
 
-**READ THIS BEFORE REPEATING THE COUNT, because this line has been wrong in BOTH
-directions.** It said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one share
-each"* until 2026-09-11, when `obs-t2` and `obs-t3` existed in no config and no
-roster — a sentence that rotted upward while the code shrank under it. It is four
-again now, by a real edit rather than by drift: `TRIAGE_CONSOLE_ROSTER`
+**READ THIS BEFORE REPEATING THE COUNT, because this line has been wrong in
+multiple directions.** It said *"Four seats … `obs-t1`/`obs-t2`/`obs-t3` … one
+share each"* until 2026-09-11, when `obs-t2` and `obs-t3` existed in no config
+and no roster — a sentence that rotted upward while the code shrank under it. It
+was four again from 2026-09-12, by a real edit rather than by drift, and grew to
+SEVEN on 2026-09-14 when `obs-td1`, `obs-td2` (docker) and `obs-tv1` (vm) joined
+(SRD-TRIAGE-MIXED-OBSERVERS §5): `TRIAGE_CONSOLE_ROSTER`
 (`src/run/dispatch-request.ts`), `DEFAULT_TRIAGE_WORKERS`
 (`src/backends/cmux/operations-plan.ts`), `TRIAGE_CONSOLE_ASPECTS`
 (`src/run/task-ids.ts`), and the `workers:` blocks of both `fleet.yaml` and
-`fleet.example.yaml`. The standing warning is unchanged and applies to this
-sentence too: **verify the count against one of those before repeating it.**
+`fleet.example.yaml` all name seven today. The standing warning is unchanged and
+applies to this sentence too: **verify the count against one of those before
+repeating it.**
 
-Both seats run a **local** `gemma-4-26b-a4b-it-bf16`. The model has moved twice —
+All seven seats run `gabe/gemma-4-26b-a4b-it`, served over the LAN (`hosted: false` in
+`fleet.yaml`) rather than sent to a third party — **local** in that D1 sense, not on the
+seat's own machine. The model has moved twice —
 `gpt-oss-20b-MXFP4-Q8` under the 2026-09-03 decision, then a hosted trial on
 `obs-t1` that was taken and withdrawn on the same day — but D1 has not moved: it
 is about whether an observer's context may leave the machine, not about speed.
@@ -155,7 +169,7 @@ down because nobody could answer.
   file.
 - **The console does NOT currently recycle itself** — `triage/console.yaml` sets
   `recycle_after_sweeps: 0`, and `0` disables it. The mechanism is real, and this
-  is what it does when enabled: every N sweeps it takes both seats down and back
+  is what it does when enabled: every N sweeps it takes every seat down and back
   up, to stop a day's transcript accumulating into one session, between sweeps and
   never during one, and a recycle interrupted half way is *finished* by the next
   boundary rather than restarted. It is off because the recycle is a **headless**

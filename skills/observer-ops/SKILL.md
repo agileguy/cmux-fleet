@@ -155,9 +155,11 @@ So when the literal lookup misses:
   is one call and it either shows you the component set or genuinely shows you nothing.
 - **A component set IS the resolution.** Several workloads whose names are obviously facets of
   the requested one - a pipeline, a producer/consumer pair, an api/worker split - resolve the
-  target. Report a row per component, or one row that NAMES every component it covers. Do not
-  pick one silently, and do not average their health into a single word without saying which
-  ones you looked at.
+  target. Report it as ONE row, under the brief's service name exactly as given, that NAMES
+  every component it covered in its evidence - never one row per component: a row named after a
+  component instead of the brief's service grades that declared service unreported. Do not pick
+  one silently, and do not average their health into a single word without saying which ones you
+  looked at.
 - **`indeterminate` still requires that you looked.** "I could not resolve this" is legitimate
   only after the namespace enumeration came back with nothing plausible. "The literal name was
   not a Service object" is not a resolution attempt, and an artifact saying so about a namespace

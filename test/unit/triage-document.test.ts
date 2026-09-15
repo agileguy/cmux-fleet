@@ -461,7 +461,9 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
  * seam asserted against a discarded artifact grades nothing.
  */
 const COVERAGE: SweepCoverage = {
-  declared: ["authorization"],
+  // SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b: `declared` names environments,
+  // each with its own services, rather than a flat service-name list.
+  declared: [{ name: "cni-dev", kind: "k8s", services: ["authorization"] }],
   assignments: [{ worker: "obs-t2", services: ["authorization"] }],
   artifacts: [
     { worker: "obs-t2", sweep_id: "T-sweep-41", window_opened_at: "2026-09-06T11:56:00.000Z" },
@@ -1286,5 +1288,30 @@ describe("roles/triage.md's example against the schema it is supposed to satisfy
 
     // And the schema refuses it, which is the whole of the repair.
     expect(read(goodDocument({ services: [asItArrives] })).kind).toBe("refused");
+  });
+});
+
+/**
+ * SRD-TRIAGE-MIXED-OBSERVERS D21: once one sweep covers two environments, a
+ * service name alone no longer picks out one row, so a row may carry the
+ * environment it is about. The parser checks the spelling only. Which
+ * environment an absent value means is the verdict's question, because only
+ * the verdict knows how many environments the sweep covered.
+ */
+describe("SRD-TRIAGE-MIXED-OBSERVERS D21: a row may name its environment", () => {
+  test("absent parses as null, and a named environment arrives as written", () => {
+    const absent = read(goodDocument());
+    if (absent.kind !== "ok") throw new Error(absent.reason);
+    expect(absent.document.services[0]!.environment).toBeNull();
+
+    const named = read(goodDocument({ services: [goodRow({ environment: "docker-host" })] }));
+    if (named.kind !== "ok") throw new Error(named.reason);
+    expect(named.document.services[0]!.environment).toBe("docker-host");
+  });
+
+  test("an environment that is not a bare token is refused at its own path", () => {
+    const got = refusalFor(goodDocument({ services: [goodRow({ environment: "../do-cluster" })] }));
+    expect(got.code).toBe("schema");
+    expect(got.issues.map((i) => i.path)).toContain("services.0.environment");
   });
 });

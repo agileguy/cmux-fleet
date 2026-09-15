@@ -400,6 +400,8 @@ caches the role name anywhere `status` reports it is **not verified**, so Phase 
 | Read-only import walk | No. No new module is imported by a triage ROOT, and `DISPATCH_PATH` keeps its one member | `test/unit/triage-readonly.test.ts:130-157` |
 | Tests pinning id-and-role pairs | **Literal role only** | `test/unit/triage-plan.test.ts:451-453`, `test/unit/dispatch-request.test.ts:1681-1683` |
 
+`Docs/SRD-TRIAGE-MIXED-OBSERVERS.md` supersedes this section for the three new triage-only seats `obs-td1`, `obs-td2` and `obs-tv1`, while `obs-d1` and `obs-v1` stay in no console.
+
 The triage prompt changes by one path (`roles/triage.md:263`). Its seats need the restart in §4.4.
 
 ---
@@ -885,7 +887,7 @@ titles. `observer-k8s`'s grant. The `observer-ops` skill's content.
 | D1 | The rename changes the ROLE IDENTIFIER only | Pane title, skill, artifact, triage fields, incident kinds and worker ids are other identifiers or English (§4.2) |
 | D2 | New roles are separate roles, not modes | Grant minimisation, the lesson of the `investigator` merge (§1.3) |
 | D3 | Both new roles are inquiry-only in v1 | The deploy-watch shape is pipeline-specific (§3.3) |
-| D4 | New seats join no console | Keeps both consoles' plans and every roster test unchanged (§4.5) |
+| D4 | New seats join no console | Keeps both consoles' plans and every roster test unchanged (§4.5); superseded for `obs-td1`, `obs-td2` and `obs-tv1` by `Docs/SRD-TRIAGE-MIXED-OBSERVERS.md`, which joins them to the triage console — `obs-d1`/`obs-v1` still join none |
 | D6 | One seat per new role | Read-only concurrency is safe, but nothing yet dispatches in parallel to these (Q10) |
 | D8 | Exit 77 for a refused target verb | One code for "not authorised" fleet-wide (`docker/verbgate:9`) |
 

@@ -28,6 +28,7 @@ import { join } from "node:path";
 
 import { DEFAULT_TRIAGE_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import { relayLockPath } from "../../src/run/console-relay.ts";
+import { TRIAGE_CONSOLE_ROSTER } from "../../src/run/dispatch-request.ts";
 import { triageActorLockPath } from "../../src/run/triage-actor.ts";
 import {
   busyRefusal,
@@ -916,20 +917,37 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
   });
 
   /**
-   * The pane diagram in its header is held to the same seats, in the same order.
+   * The pane diagram in its header is held to the same seats, in READING
+   * order — the owner's left-to-right, top-to-bottom order, not pane
+   * CREATION order.
    *
-   * This is where the divergence actually lives now: add a third seat to
-   * `DEFAULT_TRIAGE_WORKERS` and the code adapts while `scripts/triage:14-20`
-   * goes on drawing its two names, in a file no compiler opens. The
-   * diagram is parsed rather than string-matched, so the assertion is an
-   * EQUALITY in both directions — a seat removed from the constant but left in
-   * the picture reddens too, which a `toContain` per seat would not catch.
+   * This is where the divergence actually lives now: add a seventh seat to
+   * the roster and the code adapts while `scripts/triage`'s header goes on
+   * drawing the old picture, in a file no compiler opens. The diagram is
+   * parsed rather than string-matched, so the FIRST assertion is an EQUALITY
+   * against `TRIAGE_CONSOLE_ROSTER` in both directions — a seat removed from
+   * the roster but left in the picture reddens too, which a `toContain` per
+   * seat would not catch.
    *
-   * It pins the DIAGRAM against the list and says nothing about pane geometry:
-   * `console-restart.test.ts`'s header records that cmux's reported index and
-   * the `--workers` order disagree, and `triage-plan.test.ts` owns that.
+   * `TRIAGE_CONSOLE_ROSTER`, not `DEFAULT_TRIAGE_WORKERS`, is what the picture
+   * is held to: the diagram draws the console the way an operator reads it —
+   * `tri-1` on top, then each observer row left to right — and that is the
+   * roster's own order. `DEFAULT_TRIAGE_WORKERS` is pane CREATION order
+   * instead (SRD-TRIAGE-MIXED-OBSERVERS §4.2, D3): both full-width observer
+   * rows are opened with a `down` split before either row's own `right`
+   * splits divide it into columns, which interleaves the two rows' leading
+   * panes and does not read out the way the picture does. The SECOND
+   * assertion below still ties the picture to that array — as a SET, sorted,
+   * the one comparison the two orders agree on — so a seat added to
+   * `DEFAULT_TRIAGE_WORKERS` and never drawn, or drawn and never added to the
+   * roster, reddens too.
+   *
+   * It pins the DIAGRAM against the roster and says nothing about pane
+   * geometry: `console-restart.test.ts`'s header records that cmux's reported
+   * index and the `--workers` order disagree, and `triage-plan.test.ts` owns
+   * that.
    */
-  test("its pane diagram names those same seats, in the same order", async () => {
+  test("its pane diagram names those same seats, in READING order", async () => {
     const src = await source("triage");
     const open = at(src, "```", 0, "scripts/triage's header draws no pane diagram");
     const close = at(src, "```", open + 3, "the pane diagram's fence is unterminated");
@@ -946,7 +964,8 @@ describe("scripts/triage's fifth process, which nothing typechecks (ISC-600)", (
           .filter((c) => c !== ""),
       );
 
-    expect(cells).toEqual([...DEFAULT_TRIAGE_WORKERS]);
+    expect(cells).toEqual([...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ROSTER.reviewers]);
+    expect([...cells].sort()).toEqual([...DEFAULT_TRIAGE_WORKERS].sort());
   });
 });
 

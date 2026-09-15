@@ -99,18 +99,25 @@ import {
   TRIAGE_CONSOLE_ROSTER,
   dispatchRequestPath,
 } from "../../src/run/dispatch-request.ts";
-import { TRIAGE_CONSOLE_ASPECTS } from "../../src/run/task-ids.ts";
+import { TRIAGE_CONSOLE_ASPECTS, type AspectSeat } from "../../src/run/task-ids.ts";
+import { seatKind } from "../../src/run/triage-seat-kinds.ts";
 import { TRIAGE_DOCUMENT_SCHEMA } from "../../src/run/triage-document.ts";
 import type { TriagePassOutcome } from "../../src/run/triage-pass.ts";
 import {
   observerArtifactPath,
   triageDocumentPath,
   type SweepDispatch,
+  type SweepEnvironment,
   type SweepProducerDeps,
 } from "../../src/run/triage-envelope.ts";
 import type { NotifyRequest } from "../../src/run/triage-notify.ts";
 import { statusOutcome } from "../../src/run/triage-notify.ts";
-import type { TriageEnvironment, TriageService } from "../../src/run/triage-targets.ts";
+import type {
+  TriageDockerEnvironment,
+  TriageK8sEnvironment,
+  TriageService,
+  TriageVmEnvironment,
+} from "../../src/run/triage-targets.ts";
 import {
   NO_COLLATOR_RUN,
   buildSweepDriver,
@@ -125,9 +132,9 @@ import {
   register,
   renderStatus,
   readSweepPartition,
+  environmentsByKind,
   resolveCollatorRun,
   resolveSeatRuns,
-  soleEnvironment,
   triageStatus,
   type TriageCommandDeps,
   type TriageProductionEffects,
@@ -1026,11 +1033,15 @@ describe("buildTriageSweepDriver: ten members from one dep set", () => {
     },
   ];
 
+  /** task 4.2's `environments`, replacing the flat `environment`/`services` pair. */
+  const ENVIRONMENTS: readonly SweepEnvironment[] = [
+    { name: "cni-dev", kind: "k8s", services: SERVICES },
+  ];
+
   function producerDeps(run: ReturnType<typeof runPaths>, sent: string[]): SweepProducerDeps {
     return {
       run,
-      environment: "cni-dev",
-      services: SERVICES,
+      environments: ENVIRONMENTS,
       defaultWindowS: 300,
       previousDocument: async () => null,
       dispatch: async (args) => {
@@ -1144,17 +1155,25 @@ current-context: gke-cni-dev
  * against the slice it was actually given. The division was not a free choice.
  *
  * With ONE collator it is. `evenSlices(3 services, 1 collator)` hands `tri-1`
- * the whole environment and `evenSlices(3 aspects, 1)` hands it all three seats,
- * so the partition among those seats is the collator's own judgement — §6.5's
- * ⌈N/3⌉, *"the partition is the triage worker's to make"*. The host checks only
- * that the union covers every declared service exactly once; it does not choose
- * the shares and does not refuse a lopsided one.
+ * the whole environment and `evenSlices(6 aspects, 1)` hands it all six seats
+ * (SRD-TRIAGE-MIXED-OBSERVERS grew the aspect table from three to six on
+ * 2026-09-14), so the partition among those seats is the collator's own
+ * judgement — §6.5's ⌈N/3⌉, *"the partition is the triage worker's to make"*.
+ * The host checks only that the union covers every declared service exactly
+ * once; it does not choose the shares and does not refuse a lopsided one.
  *
  * So this table is now the FIXTURE COLLATOR's decision rather than a transcript
  * of the host's arithmetic, and one service each is the even split the role
  * prompt asks for. What still constrains it is the completeness check: drop a
  * service here and the sweep is refused `partition_incomplete`, name one twice
  * and it is refused `partition_duplicate`.
+ *
+ * **STILL ONLY THREE ENTRIES, below, though the collator now holds six seats.**
+ * `FIXTURE_TARGETS` declares one k8s environment and nothing for docker or vm
+ * to observe, so this fixture's own partition — unlike the collator's full
+ * seat list — covers only the three k8s seats. `PAIRS`, below, filters
+ * `TRIAGE_CONSOLE_ASPECTS` down to the seats named here for exactly that
+ * reason.
  */
 const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
   "obs-t1": ["routing"],
@@ -1175,21 +1194,50 @@ const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
  * than left to rot.** `expectDispatchesWereWellFormed` derives its dispatch
  * count from `p.seats.length` per pair, so a second collator would not silently
  * produce wrong expectations — but the flat `seats: TRIAGE_CONSOLE_ASPECTS`
- * below WOULD hand both collators all three seats, which is not what
- * `evenSlices` would do. If `TRIAGE_CONSOLE_ROSTER.collators` ever grows, this
- * line has to share the aspects out rather than copy them.
+ * below WOULD hand both collators every seat the filter below admits, which is
+ * not what `evenSlices` would do. If `TRIAGE_CONSOLE_ROSTER.collators` ever
+ * grows, this line has to share the aspects out rather than copy them.
+ *
+ * **FILTERED TO THE SEATS `SLICE_OF` NAMES, since 2026-09-14
+ * (SRD-TRIAGE-MIXED-OBSERVERS Phase 2).** `TRIAGE_CONSOLE_ASPECTS` now also
+ * lists `obs-td1`, `obs-td2` and `obs-tv1`, but `FIXTURE_TARGETS` above
+ * declares only a k8s environment — this fixture has no docker or vm service
+ * of its own kind to hand those seats, and won't until the target inventory
+ * and its per-kind partition land (SRD Phases 3-4). A fixture collator that
+ * claimed them would write a slice `SLICE_OF` cannot answer, so this filter
+ * keeps the fixture honest about what it can fan out to rather than papering
+ * over the gap with an entry `SLICE_OF` does not really have.
  */
-const PAIRS = TRIAGE_CONSOLE_ROSTER.collators.map((collator) => ({
-  collator,
-  seats: TRIAGE_CONSOLE_ASPECTS,
-}));
+/** One collator's own fan-out — `SweepPair` (`triage-envelope.ts`), at fixture scale. */
+interface FixturePair {
+  readonly collator: string;
+  readonly seats: readonly AspectSeat[];
+}
+
+/**
+ * Every collator's pair, derived from a `sliceOf` table rather than hand-copied
+ * per fixture — SRD-TRIAGE-MIXED-OBSERVERS task 4.2's generalization, so the
+ * mixed fixture below builds its OWN pairs from its OWN slice without a second
+ * copy of this filter. `seat.worker in sliceOf` mirrors the rule production's
+ * `seatsForEnvironments` (`triage-envelope.ts`) closes the same gap with: a
+ * seat holds a request only when this fixture's own slice table has something
+ * declared for it to claim.
+ */
+function pairsFor(sliceOf: Readonly<Record<string, readonly string[]>>): readonly FixturePair[] {
+  return TRIAGE_CONSOLE_ROSTER.collators.map((collator) => ({
+    collator,
+    seats: TRIAGE_CONSOLE_ASPECTS.filter((seat) => seat.worker in sliceOf),
+  }));
+}
+
+const PAIRS = pairsFor(SLICE_OF);
 
 const isCollator = (worker: string): boolean =>
   TRIAGE_CONSOLE_ROSTER.collators.includes(worker);
 
-/** The pair a collator acts for. */
-const pairOf = (collator: string): (typeof PAIRS)[number] =>
-  PAIRS.find((p) => p.collator === collator)!;
+/** The pair a collator acts for, within one fixture's own `pairs` list. */
+const pairOf = (pairs: readonly FixturePair[], collator: string): FixturePair =>
+  pairs.find((p) => p.collator === collator)!;
 
 /**
  * `routing` is the one service that reports badly, and the asymmetry is the
@@ -1202,13 +1250,98 @@ const pairOf = (collator: string): (typeof PAIRS)[number] =>
  */
 const UNHEALTHY_SERVICE = "routing";
 
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-MIXED-OBSERVERS task 4.2's last step — a mixed k8s+docker+vm
+// targets file, driven over the same production path as `FIXTURE_TARGETS`
+// above rather than a second `fixtureFleet`-shaped function.
+// ---------------------------------------------------------------------------
+
+/**
+ * `FIXTURE_TARGETS` plus one docker environment (two services) and one vm
+ * environment (one service), all at the SAME `default_window` as the k8s one
+ * — `environmentsByKind` (`triage.ts`) refuses a mismatch, so a fixture that
+ * gave docker or vm a different window would be testing that refusal instead
+ * of the sweep. Row shapes copied from the tracked `triage/targets.yaml:103-128`
+ * rather than invented, so this fixture validates against the same schema the
+ * real inventory does.
+ */
+const FIXTURE_TARGETS_MIXED = `
+version: 1
+environments:
+  cni-dev:
+    kube_context: gke-cni-dev
+    default_window: 2m
+    services:
+      - {name: routing,        namespace: ns-routing, workload: routing-api, checks: [rollout, logs]}
+      - {name: authorization,  namespace: ns-auth,    workload: authz,       checks: [rollout, logs]}
+      - {name: authentication, namespace: ns-auth,    workload: authn,       checks: [rollout, logs]}
+  docker-host:
+    kind: docker
+    target: docker
+    default_window: 2m
+    services:
+      - {name: grafana,    namespace: docker, checks: [state, health, logs]}
+      - {name: prometheus, namespace: docker, checks: [state, health, logs]}
+  vm-host:
+    kind: vm
+    target: vm
+    default_window: 2m
+    services:
+      - {name: vm-1, namespace: vm, checks: [system, units, resources],
+         units: [docker.service, ssh.service, systemd-journald.service]}
+`;
+
+/**
+ * `FIXTURE_TARGETS_MIXED`'s own partition — SIX entries now, one per seat,
+ * because every kind has something declared for its seats to claim. The k8s
+ * three keep `SLICE_OF`'s division; the two docker services split one each
+ * across `obs-td1`/`obs-td2`; the one vm service goes whole to `obs-tv1`,
+ * exactly as D15 (no split at one seat).
+ */
+const MIXED_SLICE_OF: Readonly<Record<string, readonly string[]>> = {
+  "obs-t1": ["routing"],
+  "obs-t2": ["authorization"],
+  "obs-t3": ["authentication"],
+  "obs-td1": ["grafana"],
+  "obs-td2": ["prometheus"],
+  "obs-tv1": ["vm-1"],
+};
+
+/**
+ * Which of `FIXTURE_TARGETS_MIXED`'s three environments each seat's kind
+ * belongs to — what {@link documentRow}'s `environment` argument is filled
+ * from. With three environments declared, `roles/triage.md`'s field rule
+ * (and D21) require every collation row to name its environment; this table
+ * is this fixture's own account of that fact, kept beside `MIXED_SLICE_OF`
+ * rather than re-derived from `seatKind` plus a guess at which environment a
+ * kind resolves to.
+ */
+const MIXED_ENVIRONMENT_OF: Readonly<Record<string, string>> = {
+  "obs-t1": "cni-dev",
+  "obs-t2": "cni-dev",
+  "obs-t3": "cni-dev",
+  "obs-td1": "docker-host",
+  "obs-td2": "docker-host",
+  "obs-tv1": "vm-host",
+};
+
+const MIXED_PAIRS = pairsFor(MIXED_SLICE_OF);
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(value), "utf8");
 }
 
-/** One §7.5 row, in the shape `TriageDocumentSchema` accepts. */
-function documentRow(service: string, observer: string): Record<string, unknown> {
+/**
+ * One §7.5 row, in the shape `TriageDocumentSchema` accepts.
+ *
+ * `environment` is OMITTED by default — legal exactly when the fixture's own
+ * envelope names one environment (`roles/triage.md`'s field rule, D21) — and
+ * carried when the caller passes one, which the mixed fixture below does for
+ * every row so `(environment, service)` keying (task 4.1b) can tell its
+ * `grafana` apart from a same-named service in a different environment.
+ */
+function documentRow(service: string, observer: string, environment?: string): Record<string, unknown> {
   return {
     service,
     assessment: service === UNHEALTHY_SERVICE ? "unhealthy" : "healthy",
@@ -1223,6 +1356,7 @@ function documentRow(service: string, observer: string): Record<string, unknown>
     window: "2m",
     evidence_ref: [`${observer}:observer-ops.json#services[0]`],
     observer,
+    ...(environment === undefined ? {} : { environment }),
   };
 }
 
@@ -1251,6 +1385,11 @@ function documentRow(service: string, observer: string): Record<string, unknown>
  * relocation is that the recorded arrays are asserted by LENGTH out there: a
  * throw from in here — including a deliberately wrong expectation somebody adds
  * back — truncates the sequence and reddens the test that used to swallow it.
+ *
+ * `sliceOf`, `pairs` and `environmentOf` default to the k8s-only fixture's own
+ * values, so every call site before task 4.2's mixed fixture existed is
+ * unaffected; the mixed fixture passes its own three rather than this function
+ * growing a parallel k8s-only/mixed branch internally.
  */
 function fixtureFleetDispatch(
   run: RunPaths,
@@ -1258,10 +1397,15 @@ function fixtureFleetDispatch(
   windows: (string | null)[],
   titles: string[],
   settled: string[],
+  briefs: string[],
+  sliceOf: Readonly<Record<string, readonly string[]>> = SLICE_OF,
+  pairs: readonly FixturePair[] = PAIRS,
+  environmentOf?: (worker: string) => string | undefined,
 ): SweepDispatch {
   let sweepId = "";
   return async ({ taskId, worker, title, brief }) => {
     titles.push(title);
+    briefs.push(brief);
     log.push(`${worker}:${taskId}`);
     await writeJson(inboxTaskPath(run, taskId), { schema: "pifleet.task/v1", task_id: taskId });
 
@@ -1299,15 +1443,15 @@ function fixtureFleetDispatch(
        * refused `partition_duplicate`. With one collator the concatenation has a
        * single contributor again, so the fan-out returns to this file.
        */
-      const { seats } = pairOf(worker);
+      const { seats } = pairOf(pairs, worker);
       await writeJson(dispatchRequestPath(run.root, worker, taskId), {
         schema: DISPATCH_REQUEST_SCHEMA,
         parent_task_id: taskId,
         requests: seats.map((seat) => ({
           worker: seat.worker,
           title: `${taskId} ${seat.worker}`,
-          brief: `Observe ${SLICE_OF[seat.worker]!.join(", ")} and report one row per service.`,
-          services: [...SLICE_OF[seat.worker]!],
+          brief: `Observe ${sliceOf[seat.worker]!.join(", ")} and report one row per service.`,
+          services: [...sliceOf[seat.worker]!],
         })),
       });
     } else if (!isCollator(worker)) {
@@ -1326,11 +1470,27 @@ function fixtureFleetDispatch(
       const seatId = seatRuns[worker];
       const seatTree =
         seatId === undefined ? run : runPaths(seatId, runsRoot(process.env));
-      await writeJson(observerArtifactPath(seatTree, worker, taskId), {
+      /*
+       * THE SEAT'S OWN KIND, never a hardcoded `"k8s"` — task 4.2's mixed
+       * fixture dispatches `obs-td1`/`obs-td2`/`obs-tv1` too, and each writes
+       * its OWN artifact filename (`OBSERVER_ARTIFACT_FILE_BY_KIND`,
+       * `triage-envelope.ts`), not `observer-ops.json` for all three.
+       * `seatKind` returns `null` only for a worker this table does not name —
+       * the collator, or a typo — and this branch only ever sees a real
+       * observer seat, so a `null` here is this fixture's own bug, not a case
+       * to paper over.
+       */
+      const kind = seatKind(worker);
+      if (kind === null) {
+        throw new Error(
+          `fixtureFleetDispatch: ${worker} is dispatched as an observer but seatKind names no kind for it`,
+        );
+      }
+      await writeJson(observerArtifactPath(seatTree, worker, taskId, kind), {
         sweep_id: sweepId,
         window_opened_at: windows[windows.length - 1],
         status: "success",
-        services: SLICE_OF[worker]!.map((service) => ({
+        services: sliceOf[worker]!.map((service) => ({
           service,
           assessment: documentRow(service, worker)["assessment"],
         })),
@@ -1348,13 +1508,19 @@ function fixtureFleetDispatch(
        * entirely, is visible here even though the service list is complete
        * either way. While there were two collators the split was visible as two
        * half-documents; it has moved inside the one document rather than gone.
+       *
+       * Each row also carries `environmentOf(s.worker)` — `undefined` for the
+       * k8s-only fixture, so `documentRow` omits the field exactly as it did
+       * before this parameter existed, and the seat's own environment name for
+       * the mixed fixture, where more than one environment means a row without
+       * it cannot be placed (`roles/triage.md`'s field rule, D21).
        */
-      const { seats } = pairOf(worker);
+      const { seats } = pairOf(pairs, worker);
       await writeJson(triageDocumentPath(run, taskId, worker), {
         schema: TRIAGE_DOCUMENT_SCHEMA,
         sweep_id: sweepId,
         services: seats.flatMap((s) =>
-          SLICE_OF[s.worker]!.map((service) => documentRow(service, s.worker)),
+          sliceOf[s.worker]!.map((service) => documentRow(service, s.worker, environmentOf?.(s.worker))),
         ),
         unaccounted: [],
       });
@@ -1426,6 +1592,13 @@ interface FixtureFleet {
    */
   readonly titles: string[];
   /**
+   * Every dispatch BRIEF the console minted, in the same order as
+   * {@link dispatched} — task 4.2/5's `## The seats` check reads this rather
+   * than re-deriving the brief, so a fixture that only recorded whether a
+   * dispatch happened could not tell WHICH seats the envelope actually named.
+   */
+  readonly briefs: string[];
+  /**
    * The observation window the HOST minted, read back out of each sweep brief —
    * one per sweep, and `null` when the brief carried none (§13 task 6.9a).
    *
@@ -1484,6 +1657,31 @@ interface FixtureFleetOptions {
    * value the fixture reads back out of the thing it is testing.
    */
   readonly settleDeadlineMs?: number;
+  /**
+   * `triage/targets.yaml`'s body. Defaults to {@link FIXTURE_TARGETS}, the
+   * k8s-only inventory every test before this option existed assumed —
+   * SRD-TRIAGE-MIXED-OBSERVERS task 4.2's mixed fixture is a targets OVERRIDE
+   * on the same harness rather than a second `fixtureFleet`-shaped function.
+   */
+  readonly targets?: string;
+  /**
+   * The fixture collator's own partition, and the fan-out it implies —
+   * {@link fixtureFleetDispatch}'s `sliceOf`/`pairs` parameters, threaded
+   * through rather than read off a module constant so this one function can
+   * serve both the k8s-only fixture and the mixed one. Default to
+   * {@link SLICE_OF}/{@link PAIRS}; the mixed test passes
+   * {@link MIXED_SLICE_OF}/{@link MIXED_PAIRS}.
+   */
+  readonly sliceOf?: Readonly<Record<string, readonly string[]>>;
+  readonly pairs?: readonly FixturePair[];
+  /**
+   * Which environment a collation row should name — {@link documentRow}'s
+   * third argument, threaded through `fixtureFleetDispatch`. `undefined`
+   * (the default) omits the field, legal only when `targets` declares one
+   * environment; the mixed fixture passes {@link MIXED_ENVIRONMENT_OF}'s
+   * lookup because it declares three (D21, `roles/triage.md`'s field rule).
+   */
+  readonly environmentOf?: (worker: string) => string | undefined;
 }
 
 /**
@@ -1511,7 +1709,7 @@ async function fixtureFleet(
 
   const configDir = join(base, "fleet");
   await mkdir(join(configDir, "triage"), { recursive: true });
-  await writeFile(join(configDir, "triage", "targets.yaml"), FIXTURE_TARGETS);
+  await writeFile(join(configDir, "triage", "targets.yaml"), fixture.targets ?? FIXTURE_TARGETS);
   if (fixture.console !== undefined) {
     await writeFile(join(configDir, "triage", "console.yaml"), fixture.console);
   }
@@ -1522,6 +1720,7 @@ async function fixtureFleet(
   const delivered: NotifyRequest[] = [];
   const windows: (string | null)[] = [];
   const titles: string[] = [];
+  const briefs: string[] = [];
   const settled: string[] = [];
   const recycled: string[] = [];
   const deadlines: number[] = [];
@@ -1542,7 +1741,17 @@ async function fixtureFleet(
        * deadline, be wrong about it, and pass.
        */
       deadlines.push(opts.settleDeadlineMs);
-      return fixtureFleetDispatch(r, dispatched, windows, titles, settled);
+      return fixtureFleetDispatch(
+        r,
+        dispatched,
+        windows,
+        titles,
+        settled,
+        briefs,
+        fixture.sliceOf,
+        fixture.pairs,
+        fixture.environmentOf,
+      );
     },
     /*
      * §6.3 step 7's publish-and-declare, recorded so a test can assert the
@@ -1593,6 +1802,7 @@ async function fixtureFleet(
     recycled,
     deadlines,
     titles,
+    briefs,
     windows,
     settled,
     settleDeadlineMs: fixture.settleDeadlineMs ?? 240_000,
@@ -1629,12 +1839,18 @@ async function fixtureFleet(
  * `sweeps` is how many passes reached the dispatch factory — 0 for a test whose
  * pass is a stub, which is a claim rather than an exemption: it says the stub
  * really did dispatch nothing.
+ *
+ * `pairs` defaults to {@link PAIRS}, the k8s-only fixture's own — so every
+ * call site before the mixed fixture existed is unaffected — and the mixed
+ * test passes {@link MIXED_PAIRS}, whose seats span all three kinds rather
+ * than k8s alone.
  */
 function expectDispatchesWereWellFormed(
   fleet: FixtureFleet,
-  expected: { readonly sweeps: number },
+  expected: { readonly sweeps: number; readonly pairs?: readonly FixturePair[] },
 ): void {
   const { sweeps } = expected;
+  const pairs = expected.pairs ?? PAIRS;
   // THE COMPLETENESS CLAIM, and the one that makes every line below meaningful:
   // FIVE dispatches per sweep since 2026-09-13 — one collator's sweep envelope,
   // its three observers' slices, and its collation. It was three at one pair and
@@ -1643,13 +1859,13 @@ function expectDispatchesWereWellFormed(
   // became true.
   //
   // DERIVED PER PAIR rather than spelled, because every fixed expression tried
-  // here has been wrong within a day of being written. `PAIRS.length * 3` was
+  // here has been wrong within a day of being written. `pairs.length * 3` was
   // right at two pairs of one seat each and is wrong the moment a pair holds a
   // different number of seats; `2 + TRIAGE_CONSOLE_ASPECTS.length` coincided with
   // the right answer at one pair and evaluated to four at two. Each pair
   // contributes its open, its collation, and one dispatch per seat it owns —
   // which is the actual rule and is true at every shape this console has had.
-  const perSweep = PAIRS.reduce((n, p) => n + 2 + p.seats.length, 0);
+  const perSweep = pairs.reduce((n, p) => n + 2 + p.seats.length, 0);
   expect(fleet.dispatched.length, "the recorded dispatch sequence is short — a stub threw").toBe(
     perSweep * sweeps,
   );
@@ -1679,12 +1895,12 @@ function expectDispatchesWereWellFormed(
   expect(fleet.titles.filter((t) => t.trim() === "")).toEqual([]);
   // One host-minted observation window per COLLATOR per sweep, none missing.
   // Each pair is opened with its own envelope and each envelope states its own
-  // instant. **Back to one per sweep, and still spelled `* PAIRS.length`**: this
+  // instant. **Back to one per sweep, and still spelled `* pairs.length`**: this
   // read a bare `sweeps` while the console had one collator, went wrong when it
   // grew to two, and is numerically identical again now that it is back to one.
   // The factor stays because it is the REASON rather than the current value —
   // the number of windows is a fact about collators, not about sweeps.
-  expect(fleet.windows.length).toBe(sweeps * PAIRS.length);
+  expect(fleet.windows.length).toBe(sweeps * pairs.length);
   expect(fleet.windows.filter((w) => w === null)).toEqual([]);
   // §12's closing anti-criterion: no criterion in this file requires a real
   // model. The fixture's probe THROWS, and a throw inside the pass is exactly
@@ -1860,6 +2076,37 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
   });
 
   /**
+   * SRD-TRIAGE-MIXED-OBSERVERS task 4.2's trap, closed on the PRODUCTION path
+   * rather than only in `triage-envelope.test.ts`'s unit fixtures.
+   * `sweepPairs`'s seats used to come straight from `TRIAGE_CONSOLE_ASPECTS`
+   * whole — all six — so a k8s-only `triage/targets.yaml` (`FIXTURE_TARGETS`,
+   * the fixture every test in this file loads) still produced a `## The
+   * seats` block naming `obs-td1`, `obs-td2` and `obs-tv1`: seats the
+   * collator holds no child task id for, and — since task 4.1 — seats that
+   * would refuse the whole sweep if handed a k8s service. Production now
+   * names only the three k8s seats the sweep actually covers.
+   */
+  test("`## The seats` names only the k8s seats when targets.yaml declares only k8s", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-40Z-4040");
+    const deps = productionTriageDeps(async () => fleet.effects);
+    const { err } = await runTriage(["--once"], deps);
+    expect(err).toBeNull();
+
+    // The FIRST dispatch is the sweep envelope — `openSweep` runs, per pair,
+    // before any observer is fanned out to (asserted by position in the test
+    // above: `fleet.dispatched.slice(0, PAIRS.length)`).
+    expect(fleet.dispatched[0]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1`);
+    const envelopeBrief = fleet.briefs[0]!;
+    for (const seat of ["obs-t1", "obs-t2", "obs-t3"]) {
+      expect(envelopeBrief).toContain(`- ${seat}: task id`);
+    }
+    for (const seat of ["obs-td1", "obs-td2", "obs-tv1"]) {
+      expect(envelopeBrief).not.toContain(`- ${seat}: task id`);
+    }
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
+  });
+
+  /**
    * The pass's own value, which is what `--json` publishes and what the incident
    * machine acted on. Asserted separately from the dispatch order because they
    * fail for different reasons: an empty `dispatched[]` is a partition that was
@@ -1876,6 +2123,9 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     // settle in is a schedule rather than a fact worth asserting. Sorting was
     // already the right call when there were two; at three it is what keeps this
     // from failing on a scheduler rather than on a defect.
+    // Still three, not six: this fixture's collator only fans out to the seats
+    // `SLICE_OF` names (k8s), because `FIXTURE_TARGETS` declares no docker or
+    // vm environment for the new seats to observe (see `PAIRS` above).
     expect([...outcome.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     // §12: *"A first `unhealthy` observation notifies nothing."*
     expect(outcome.notifications).toEqual([]);
@@ -1892,6 +2142,35 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     );
     expect(onDisk.startsWith(process.env["HOME"]!)).toBe(true);
     expect(readFileSync(onDisk, "utf8")).toContain("provisional");
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
+  });
+
+  /**
+   * Task 3.3's settle half (SRD-TRIAGE-MIXED-OBSERVERS §6.1), pinned on the
+   * PRODUCTION wiring rather than on a hand-built `TriagePassDeps` — the call
+   * site in `productionTriageDeps`'s `pass` now passes
+   * `environments: [{ name: environment, kind: "k8s" }]`, and this is the test
+   * that would fail if that literal were wrong, empty, or misnamed.
+   *
+   * `TriagePassOutcome` carries no `environments` field of its own, so the fact
+   * is read the same way `triage-pass.test.ts` reads it: through the written
+   * incident records, which is also how the existing `observer_blocked` and
+   * `routing` assertions in this file read their facts.
+   */
+  test("a real sweep settles exactly one environment fact, named for the k8s environment", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-01Z-4444");
+    const outcome = await productionTriageDeps(async () => fleet.effects).pass();
+
+    expect(outcome.kind).toBe("swept");
+    const environmentFactScopes = outcome.written.flatMap((r) =>
+      r.subject.kind === "console_health" && r.subject.health === "observer_blocked"
+        ? [r.subject.scope]
+        : [],
+    );
+    // FIXTURE_TARGETS declares exactly one environment, "cni-dev" (kind absent,
+    // defaulting to k8s), so a correct wiring settles exactly one entry, named
+    // for it. An empty or misnamed list is refused by triagePass and throws here.
+    expect(environmentFactScopes).toEqual(["cni-dev"]);
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 
@@ -2083,8 +2362,83 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     const doc = JSON.parse(out) as { schema: string; kind: string; dispatched: string[] };
     expect(doc.schema).toBe("pifleet.triagepass/v1");
     expect(doc.kind).toBe("swept");
+    // Still three: the docker/vm seats are absent from this fixture's fan-out
+    // for the same reason as above — no docker/vm environment in
+    // `FIXTURE_TARGETS` for `SLICE_OF` to name them against.
     expect([...doc.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
+  });
+});
+
+describe("SRD-TRIAGE-MIXED-OBSERVERS task 4.2: production sweeps every kind present, not k8s alone", () => {
+  /**
+   * The last k8s-only piece task 4.2 closes. `productionTriageDeps`'s `pass`
+   * closure used to keep only `k8s` out of `environmentsByKind`'s return and
+   * build `sweepEnvironments`, `declared` and the seat list from that one
+   * environment alone — so a tracked `triage/targets.yaml` declaring docker
+   * and vm environments swept neither, silently, every sweep. Driven over the
+   * SAME production path §13 task 6.1b's own describe block uses
+   * (`productionTriageDeps` + `pass()` + `fixtureFleet`) rather than a
+   * hand-built `TriagePassDeps`: `triagePass` itself has covered a multi-kind
+   * `declared` list since task 4.1/4.1b (`triage-pass.test.ts`), and a pure
+   * unit test of it proves nothing about whether `triage.ts`'s own call site
+   * ever hands it more than k8s. §3.3: the wiring layer is the layer the
+   * coverage gate keeps catching.
+   */
+  test("a mixed k8s+docker+vm targets file dispatches all six seats and assesses every (environment, service)", async () => {
+    const fleet = await fixtureFleet("2026-09-06T07-30-00Z-0001", {
+      targets: FIXTURE_TARGETS_MIXED,
+      sliceOf: MIXED_SLICE_OF,
+      pairs: MIXED_PAIRS,
+      environmentOf: (worker) => MIXED_ENVIRONMENT_OF[worker],
+    });
+    const outcome = await productionTriageDeps(async () => fleet.effects).pass();
+
+    // A COMPLETED sweep, not `partition_refused` — each kind's own partition
+    // (task 4.1) held, which it can only do if every kind was actually swept
+    // rather than silently dropped the way it was before this call site
+    // widened.
+    expect(outcome.kind).toBe("swept");
+
+    // ALL SIX observers dispatched — three k8s, two docker, one vm — sorted
+    // for the concurrent fan-out's own reason
+    // (`expectDispatchesWereWellFormed`'s docblock).
+    expect([...outcome.dispatched].sort()).toEqual(
+      ["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"].sort(),
+    );
+
+    // `## The seats` names all six, and the brief carries all three
+    // environment headings — `renderSweepEnvelope`'s `### <name> (<kind>)`
+    // sub-section per environment, which only appears once more than one
+    // environment is declared (`triage-envelope.ts`).
+    const envelopeBrief = fleet.briefs[0]!;
+    for (const seat of ["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"]) {
+      expect(envelopeBrief).toContain(`- ${seat}: task id`);
+    }
+    for (const heading of ["### cni-dev (k8s)", "### docker-host (docker)", "### vm-host (vm)"]) {
+      expect(envelopeBrief).toContain(heading);
+    }
+
+    // Every declared (environment, service) has an OBSERVED row — docker and
+    // vm included, and graded from a real row rather than defaulted to
+    // `indeterminate` for want of one (D21, task 4.1b's `(environment,
+    // service)` keying).
+    type Triple = [string, string, string];
+    const byEnvironmentService = (a: Triple, b: Triple) => `${a[0]}:${a[1]}`.localeCompare(`${b[0]}:${b[1]}`);
+    const observedTriples = outcome
+      .assessment!.services.map((s): Triple => [s.environment, s.service, s.reason])
+      .sort(byEnvironmentService);
+    const expectedTriples: Triple[] = [
+      ["cni-dev", "routing", "observed"],
+      ["cni-dev", "authorization", "observed"],
+      ["cni-dev", "authentication", "observed"],
+      ["docker-host", "grafana", "observed"],
+      ["docker-host", "prometheus", "observed"],
+      ["vm-host", "vm-1", "observed"],
+    ];
+    expect(observedTriples).toEqual(expectedTriples.sort(byEnvironmentService));
+
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1, pairs: MIXED_PAIRS });
   });
 });
 
@@ -2159,20 +2513,144 @@ describe("§13 task 6.1b: what the production deps still REFUSE, and by name", (
   });
 
   /**
-   * **One sweep is ONE environment, and both wrong counts are refused by name.**
+   * **Exactly one k8s environment, at most one docker, at most one vm — every
+   * violated rule refused in one message, by name (SRD-TRIAGE-MIXED-OBSERVERS
+   * §6.1).**
    *
-   * `triage-pass.ts` states the limit — *"`ConsoleHealthFacts` takes a LIST of
-   * environments, which is the seam a multi-environment console would grow
-   * into; nothing in Phase 6 asks for it"* — and a loader that silently took the
-   * first would sweep one environment and report health for a fleet.
+   * `soleEnvironment`'s old rule — "one sweep is ONE environment" — is now
+   * scoped to k8s alone, because a mixed-kind sweep needs up to three
+   * environments declared at once. `ConsoleHealthFacts.environments`
+   * (`triage-incident.ts`) is already a LIST for exactly this reason.
    */
-  test("a targets file that declares zero or two environments is refused by name", () => {
-    const env = (kube: string): TriageEnvironment =>
-      ({ kube_context: kube, default_window: 120, services: [] }) as unknown as TriageEnvironment;
-    expect(soleEnvironment({ "cni-dev": env("a") }).name).toBe("cni-dev");
-    expect(() => soleEnvironment({})).toThrow(/declares 0 environments \(none\)/);
-    expect(() => soleEnvironment({ "cni-dev": env("a"), "cni-verify": env("b") })).toThrow(
-      /declares 2 environments \(cni-dev, cni-verify\)/,
+  const k8sFixture = (kube: string, defaultWindow = 120): TriageK8sEnvironment =>
+    ({
+      kind: "k8s",
+      kube_context: kube,
+      default_window: defaultWindow,
+      services: [],
+    }) as unknown as TriageK8sEnvironment;
+  const dockerFixture = (target: string, defaultWindow = 120): TriageDockerEnvironment =>
+    ({
+      kind: "docker",
+      target,
+      default_window: defaultWindow,
+      services: [],
+    }) as unknown as TriageDockerEnvironment;
+  const vmFixture = (target: string, defaultWindow = 120): TriageVmEnvironment =>
+    ({ kind: "vm", target, default_window: defaultWindow, services: [] }) as unknown as TriageVmEnvironment;
+
+  test("one k8s environment alone is accepted, docker and vm both null", () => {
+    const result = environmentsByKind({ "cni-dev": k8sFixture("a") });
+    expect(result.k8s.name).toBe("cni-dev");
+    expect(result.docker).toBeNull();
+    expect(result.vm).toBeNull();
+  });
+
+  test("k8s + docker + vm together are accepted, each returned by name", () => {
+    const result = environmentsByKind({
+      "cni-dev": k8sFixture("a"),
+      "docker-host": dockerFixture("docker"),
+      "vm-host": vmFixture("vm"),
+    });
+    expect(result.k8s.name).toBe("cni-dev");
+    expect(result.docker?.name).toBe("docker-host");
+    expect(result.vm?.name).toBe("vm-host");
+  });
+
+  test("an empty targets file is refused: zero k8s environments", () => {
+    expect(() => environmentsByKind({})).toThrow(
+      /exactly one k8s environment is required, found 0 \(none\)/,
+    );
+  });
+
+  test("a docker-only file is refused: it still has zero k8s environments", () => {
+    expect(() => environmentsByKind({ "docker-host": dockerFixture("docker") })).toThrow(
+      /exactly one k8s environment is required, found 0 \(none\)/,
+    );
+  });
+
+  test("two k8s environments are refused by name", () => {
+    expect(() =>
+      environmentsByKind({ "cni-dev": k8sFixture("a"), "cni-verify": k8sFixture("b") }),
+    ).toThrow(/exactly one k8s environment is required, found 2 \(cni-dev, cni-verify\)/);
+  });
+
+  test("two docker environments are refused by name, alongside the required k8s one", () => {
+    expect(() =>
+      environmentsByKind({
+        "cni-dev": k8sFixture("a"),
+        "docker-a": dockerFixture("docker-a"),
+        "docker-b": dockerFixture("docker-b"),
+      }),
+    ).toThrow(/at most one docker environment is allowed, found 2 \(docker-a, docker-b\)/);
+  });
+
+  test("two vm environments are refused by name, alongside the required k8s one", () => {
+    expect(() =>
+      environmentsByKind({
+        "cni-dev": k8sFixture("a"),
+        "vm-a": vmFixture("vm-a"),
+        "vm-b": vmFixture("vm-b"),
+      }),
+    ).toThrow(/at most one vm environment is allowed, found 2 \(vm-a, vm-b\)/);
+  });
+
+  test("every violated rule appears in the SAME message, not just the first", () => {
+    let thrown: unknown;
+    try {
+      environmentsByKind({
+        "docker-a": dockerFixture("docker-a"),
+        "docker-b": dockerFixture("docker-b"),
+        "vm-a": vmFixture("vm-a"),
+        "vm-b": vmFixture("vm-b"),
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CliError);
+    const message = (thrown as CliError).message;
+    expect((thrown as CliError).exitCode).toBe(EXIT.USAGE);
+    expect(message).toContain("exactly one k8s environment is required, found 0 (none)");
+    expect(message).toContain("at most one docker environment is allowed, found 2 (docker-a, docker-b)");
+    expect(message).toContain("at most one vm environment is allowed, found 2 (vm-a, vm-b)");
+    expect(message).toContain("SRD-TRIAGE-MIXED-OBSERVERS §6.1");
+    expect(message).toContain("triage/targets.yaml");
+  });
+
+  /**
+   * Operator decision: every present environment must share ONE
+   * `default_window`, because a sweep has one `window_opened_at` derived
+   * from one default window and every artifact's window gate (§7.4) compares
+   * against that single value.
+   */
+  test("a k8s environment and a docker environment at different default_window are refused, naming both", () => {
+    expect(() =>
+      environmentsByKind({
+        "do-cluster": k8sFixture("a", 300),
+        "docker-host": dockerFixture("docker", 600),
+      }),
+    ).toThrow(
+      /environments must declare one shared default_window, found different values: do-cluster=300s, docker-host=600s/,
+    );
+  });
+
+  test("and the twin: the same default_window on both is accepted", () => {
+    const result = environmentsByKind({
+      "do-cluster": k8sFixture("a", 300),
+      "docker-host": dockerFixture("docker", 300),
+    });
+    expect(result.k8s.name).toBe("do-cluster");
+    expect(result.docker?.name).toBe("docker-host");
+  });
+
+  test("a k8s environment and a vm environment at different default_window are refused too — not docker-specific", () => {
+    expect(() =>
+      environmentsByKind({
+        "do-cluster": k8sFixture("a", 300),
+        "vm-host": vmFixture("vm", 120),
+      }),
+    ).toThrow(
+      /environments must declare one shared default_window, found different values: do-cluster=300s, vm-host=120s/,
     );
   });
 });

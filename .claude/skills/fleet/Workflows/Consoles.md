@@ -6,32 +6,44 @@ The four standing cmux workspaces.
 |---------|--------|-------|
 | operations | `./scripts/operations` | `obs-1` agent, `pifleet monitor`, `tick-1` agent |
 | development | `./scripts/development` | `eng-1`, `eng-2`, `tst-1`, `tst-2` — four equal agent panes |
-| review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — **four** agent panes: the collator full width on top, its three reviewers along the bottom, **plus a host process** (a 2x2 until 2026-09-13, when it was changed to match `triage`) |
-| triage | `./scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3` — **four** agent panes: the collator full width on top, its three observers along the bottom, **plus a host process** |
+| review | `./scripts/review` | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — **four** agent panes: the collator full width on top, its three reviewers along the bottom, **plus a host process** (a 2x2 until 2026-09-13, when it was changed to match `triage`'s then-current one-row shape) |
+| triage | `./scripts/triage` | `tri-1`, `obs-t1`, `obs-t2`, `obs-t3`, `obs-td1`, `obs-td2`, `obs-tv1` — **seven** agent panes: the collator full width on top, its three k8s observers in the row beneath it, and its two docker observers plus its one vm observer in the row beneath that, **plus a host process** |
 
 The development console's fourth seat is `tst-2` on `role: tester`; `rev-1` is
 gone, and review is the `review` console's job now. The review console's four
 seats are `shared-ro` — they read the operator's checkout at whatever ref it
 stands on, and the three reviewers hold no `bash`.
 
-**This row has been wrong in BOTH directions and has now returned to its FIRST
-spelling, which is why it is worth a paragraph rather than a correction.** It read
-`tri-1, obs-t1, obs-t2, obs-t3` — "four equal agent panes" — until 2026-09-11,
-when `obs-t2` and `obs-t3` were in neither config and `roles/triage.md` had been
-telling the collator *"this console has exactly one observer"* the whole time this
-table said three. It was corrected to two. On 2026-09-12 the console grew a real
-second pair, so it was four again, by an edit to five files rather than by prose
-outliving code. On 2026-09-13 the second COLLATOR became a third OBSERVER.
+**This row has been wrong in multiple directions, sat briefly at its FIRST
+spelling, and has since grown past it — which is why it is worth a paragraph
+rather than a correction.** It read `tri-1, obs-t1, obs-t2, obs-t3` — "four equal
+agent panes" — until 2026-09-11, when `obs-t2` and `obs-t3` were in neither
+config and `roles/triage.md` had been telling the collator *"this console has
+exactly one observer"* the whole time this table said three. It was corrected to
+two. On 2026-09-12 the console grew a real second pair, so it was four again, by
+an edit to five files rather than by prose outliving code. On 2026-09-13 the
+second COLLATOR became a third OBSERVER. On 2026-09-14 three more seats joined,
+of two kinds this table had never named — `obs-td1`/`obs-td2` (docker) and
+`obs-tv1` (vm), SRD-TRIAGE-MIXED-OBSERVERS §5 — taking the console to seven, and
+in the same change the observers moved from one row beneath the collator to two:
+three k8s seats over a row of two docker seats plus the vm seat.
 
-**So the seat list is once more the one this table first claimed — and this time
-the seats behind it exist.** That is the distinction to check rather than the
-spelling: `obs-t3` is now in `TRIAGE_CONSOLE_ASPECTS`, `TRIAGE_CONSOLE_ROSTER`,
-`DEFAULT_TRIAGE_WORKERS` and the `workers:` block of both config files. The 2026-09-11
-correction was made because none of that was true.
+**So the seat list to check against is SEVEN, not four — and the seats behind it
+exist.** That is the distinction to check rather than the spelling: `obs-td1`,
+`obs-td2` and `obs-tv1` are now in `TRIAGE_CONSOLE_ASPECTS`, `TRIAGE_CONSOLE_ROSTER`,
+`DEFAULT_TRIAGE_WORKERS` and the `workers:` block of both config files, alongside
+the four k8s-era seats. The 2026-09-11 correction was made because none of that
+kind of evidence was true at the time; verify the same way now.
 
-The shape is `tri-1` over `obs-t1`, `obs-t2` and `obs-t3`: one collator is handed
-the WHOLE environment, divides it between the three observers itself (§6.5's
-⌈N/3⌉ — a judgement the host checks rather than performs), and collates all three
+The shape is `tri-1` full width on top, then two full-width rows of three
+beneath it: `obs-t1`, `obs-t2` and `obs-t3` (k8s) in the row directly under the
+collator, and `obs-td1`, `obs-td2` (docker) plus `obs-tv1` (vm) in the row under
+that. One collator is handed the WHOLE environment and divides it BY KIND —
+every k8s service goes to one of the three k8s seats (§6.5's ⌈N/3⌉, within that
+kind), every docker container to one of the two docker seats, and the vm
+environment's whole share to the lone vm seat, since there is no second vm seat
+to split it with (SRD-TRIAGE-MIXED-OBSERVERS §5, §6.1) — every split a judgement
+the host checks per kind rather than performs — and then collates all six
 replies into ONE document. The two-pair arrangement it replaced wrote two
 documents the host had to merge and echo-check for staleness. Before repeating any seat list
 from this file, read `DEFAULT_TRIAGE_WORKERS` in
@@ -40,11 +52,11 @@ pane count is exactly the kind of fact a prose table keeps after the code has
 moved on, in whichever direction the code went.
 
 **"No keyboard" came off that row with them, because it depends on which config
-you mean.** All four triage seats inherit `pane_mode: rpc` from their roles in the
+you mean.** All seven triage seats inherit `pane_mode: rpc` from their roles in the
 tracked `fleet.example.yaml`, and `scripts/triage` reads the mode from the config
 rather than hard-coding it. But the operator's `fleet.yaml` — tracked since
 2026-09-12, not gitignored as this line used to say — overrides
-BOTH seats to `pane_mode: tui` with themes, on a 2026-09-07 decision recorded in
+all seven seats to `pane_mode: tui` with themes, on a 2026-09-07 decision recorded in
 the file — *"the operator watches these panes, and a console nobody can see is a
 console nobody trusts"* — and tracked `triage/console.yaml` corroborates it in
 passing (*"6 was the value while the seats were rpc"*). Say which file you mean
@@ -123,7 +135,7 @@ A record it cannot verify (`unreadable`, or a pid whose identity cannot be
 confirmed) is **left exactly where it is and nothing is signalled**. The script
 says so and starts nothing; find out what that pid is, then remove the file.
 
-## The triage console has an actor too — the fifth process behind its four panes
+## The triage console has an actor too — the eighth process behind its seven panes
 
 Same shape as review, different reason. `tri-1` is a collator, and the thing a
 collator cannot do is **dispatch**: all it can do toward a sweep is write
@@ -245,16 +257,17 @@ cd ~/repos/cmux-fleet && ./scripts/review --recreate
 
 `--recreate` **stops every run the old panes created** before building the new
 ones. That is a teardown of live agents — as many as three bystanders for one
-wedged worker on a four-pane console, `triage` included since it grew its second
-pair. Use it when the *set*
+wedged worker on a four-pane console (`development`, `review`), and as many as
+six bystanders on `triage`'s seven-pane console. Use it when the *set*
 of workers changes or the pane layout is wrong; use `--restart` for everything
 else.
 
 `development` and `review` are **four runs each**, because every pane is
 attended and `--attach-here` hands over the terminal of the process that runs it.
 `review --recreate` stops its relay first, before those runs go down, since the
-relay's whole configuration is their run ids. `triage` is **four** runs on the same
-rule, since 2026-09-12. Only runs holding that console's own workers are stopped — the other three
+relay's whole configuration is their run ids. `triage` is **seven** runs on the
+same rule — four since 2026-09-12, seven since 2026-09-14 added the docker and
+vm seats (SRD-TRIAGE-MIXED-OBSERVERS §5). Only runs holding that console's own workers are stopped — the other three
 consoles survive a rebuild.
 
 **A recreated console goes back into its sidebar group and keeps its colour.**

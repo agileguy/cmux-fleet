@@ -271,8 +271,8 @@ the one that was supposed to carry the evidence.
   "window_opened_at": null,
   "services": [
     {
-      "name": "vm-1.example.com",
-      "namespace": "vm-1",
+      "name": "vm-1",
+      "namespace": "vm",
       "assessment": "healthy",
       "coverage": [
         {"channel": "reachability", "result": "answered"},
@@ -282,9 +282,9 @@ the one that was supposed to carry the evidence.
         {"channel": "resources", "result": "not_attempted"},
         {"channel": "cloud", "result": "not_attempted"}
       ],
-      "selector": "vm-1",
+      "selector": "vm",
       "window": "300s",
-      "evidence_ref": ["observe-vm vm-1 system: state running", "observe-vm vm-1 failed: 0 units listed"],
+      "evidence_ref": ["observe-vm vm system: state running", "observe-vm vm failed: 0 units listed"],
       "uptime_s": 431827,
       "system_state": "running",
       "failed_units": []
@@ -293,8 +293,16 @@ the one that was supposed to carry the evidence.
 }
 ```
 
-- **`services[]` keeps its name, and one row is one VM.** `name` is the VM's own name, and
-  `namespace` is the target token.
+- **`services[]` keeps its name, and one row is one VM.** `name` is the service name exactly as
+  the brief gives it — the collator copies it verbatim out of the operator's declared service
+  list, e.g. `triage/targets.yaml`'s `{name: vm-1, namespace: vm, ...}` — and `namespace` is the
+  target token, likewise exactly as the brief gives it: the same TOKEN this skill's own call form
+  uses (`observe-vm <target> <verb>`). The two are deliberately not the same string in the example
+  above — a declared service name and the enrolled credential's token are different things, and a
+  row that conflates them (for example by naming itself after the VM's own hostname) stops
+  matching the service the host's targets file declared, and grades as unreported. If the VM's own
+  hostname is worth recording, it belongs in `evidence_ref` or the narrative `.md` — never a new
+  JSON field; nothing in this contract has a place for it otherwise.
 - **`coverage[].channel` is closed to `reachability`, `system`, `units`, `logs`, `resources`,
   `cloud`.** **`coverage[].result`** and **`assessment`** are the same closed enums every observer
   target uses: `answered | unreachable | forbidden | not_attempted` and

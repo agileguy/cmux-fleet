@@ -1682,21 +1682,26 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
       ["obs-t1", OBSERVER_K8S_ROLE],
       ["obs-t2", OBSERVER_K8S_ROLE],
       ["obs-t3", OBSERVER_K8S_ROLE],
+      ["obs-td1", "observer-docker"],
+      ["obs-td2", "observer-docker"],
+      ["obs-tv1", "observer-vm"],
     ]);
 
     /*
      * THE SET EQUALITY THIS BLOCK'S DOCBLOCK ASKED FOR, landed 2026-09-12.
      *
-     * The gap it names is precise and the four literals above do not close it:
-     * a config check catches a seat RENAMED in one place, and catches nothing
+     * The gap it names is precise and the literals above do not close it: a
+     * config check catches a seat RENAMED in one place, and catches nothing
      * when a seat is added to `DEFAULT_TRIAGE_WORKERS` and not to the roster, or
      * the other way round. Both lists are now the console's seats, so they must
      * agree as SETS — `REVIEW_CONSOLE_ROSTER`'s pin at :240, over this console.
      *
-     * Sorted rather than ordered on purpose: `DEFAULT_TRIAGE_WORKERS` is in PANE
-     * order (both collators, then both observers, which is what pairs each
-     * observer under its own collator) and the roster is grouped by ROLE. The
-     * two orders are different facts and neither is wrong.
+     * Sorted rather than ordered on purpose: `DEFAULT_TRIAGE_WORKERS` is the
+     * seven-seat PANE CREATION order (SRD-TRIAGE-MIXED-OBSERVERS §4.2, D3 —
+     * both full-width rows are opened before either is split into columns, so
+     * the array interleaves the two observer rows' leading panes) and the
+     * roster is grouped by ROLE, in the owner's READING order. The two orders
+     * are different facts and neither is wrong.
      */
     const rostered = [...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ROSTER.reviewers];
     expect([...rostered].sort()).toEqual([...DEFAULT_TRIAGE_WORKERS].sort());

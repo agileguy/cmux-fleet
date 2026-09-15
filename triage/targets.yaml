@@ -37,11 +37,10 @@
 version: 1
 
 environments:
-  # `soleEnvironment` refuses a targets file that declares anything other than
-  # exactly ONE environment — "one sweep is ONE environment, and that is a limit
-  # rather than a law" (§12) — so a second environment here is a refusal at load
-  # rather than a second sweep. The key is the logical environment token, and it
-  # must match `SESSION_ID_RE` because it becomes a path segment under
+  # One environment per kind, validated by `environmentsByKind`: exactly one
+  # k8s, at most one docker, at most one vm (SRD-TRIAGE-MIXED-OBSERVERS §6.1).
+  # Each key is the logical environment token, and it must match
+  # `SESSION_ID_RE` because it becomes a path segment under
   # `~/.pifleet/triage/`.
   #
   # This environment answers from the open internet and needs no corporate VPN.
@@ -75,15 +74,23 @@ environments:
     # services to nine. `kubectl -n monitoring get deploy,sts,ds` returns exactly
     # eight workloads and this list names all of them, plus `ntfy` in its own
     # namespace. Nine is inside `MAX_SERVICES_PER_ENVIRONMENT` (16, doubled the
-    # same day) and the two collators split it 5/4 with `evenSlices`, so each
-    # writes a five- or four-row `triage.json`.
+    # same day).
+    #
+    # THAT SAME 16 ALSO CAPS THE WHOLE FILE, ACROSS ALL THREE ENVIRONMENTS: the
+    # console has a single collator (`tri-1`), which writes ONE `triage.json` per
+    # sweep, holding a row for every declared service — k8s, docker and vm alike,
+    # not just this environment's own. Today the total is 15: nine here, five on
+    # `docker-host`, one on `vm-host` — one short of the 16 cap.
     #
     # THE SIZE IS MEASURED rather than projected from the schema: across the 103
     # collations on disk that parse with rows (109 files in all), a row costs 415
     # bytes on average and 621 at worst (largest document 1 863 bytes, 3 rows,
-    # T-sweep-4).
-    # A five-row slice at the worst observed row cost is ~3.1 KB against the
-    # 8 192-byte document cap.
+    # T-sweep-4). Neither figure was measured on a 15-row document: they were
+    # taken on 2026-09-12, before one collator wrote every row. Honest arithmetic
+    # from those per-row figures: 15 rows at the average cost is ~6.2 KB against
+    # the 8 192-byte document cap; 15 rows at the worst observed cost is ~9.3 KB,
+    # which would EXCEED that cap. So the margin for a full 15-row document is
+    # not yet measured, only projected from rows measured on much smaller ones.
     #
     # NOT ONE ROW DECLARES A `workload`, for the reason recorded above, and the
     # live workload names are why it matters: `grafana` is `kps-grafana`,
@@ -100,3 +107,30 @@ environments:
       - {name: kube-state-metrics,  namespace: monitoring, checks: [rollout, logs]}
       - {name: node-exporter,       namespace: monitoring, checks: [rollout, logs]}
       - {name: prometheus-operator, namespace: monitoring, checks: [rollout, logs]}
+
+  # The token is the enrolled `OBSERVER_DOCKER_TARGETS` token; every row's
+  # `namespace` carries that same token (§6), matching what the observer's own
+  # artifact echoes back. The five containers are the host's monitoring stack
+  # (owner decision 4), split between `obs-td1` and `obs-td2`.
+  docker-host:
+    kind: docker
+    target: docker
+    default_window: 5m
+    services:
+      - {name: grafana,          namespace: docker, checks: [state, health, logs]}
+      - {name: grafana-renderer, namespace: docker, checks: [state, health, logs]}
+      - {name: prometheus,       namespace: docker, checks: [state, health, logs]}
+      - {name: cadvisor,         namespace: docker, checks: [state, health, logs]}
+      - {name: node_exporter,    namespace: docker, checks: [state, health, logs]}
+
+  # The token is the enrolled `OBSERVER_VM_TARGETS` token; `obs-tv1` alone
+  # sweeps it, no split. `[system, units, resources]` covers the whole-system
+  # verbs (`uptime`, `system`, `failed`, `disk`, `memory`) plus the three named
+  # units (owner decision 5, D17).
+  vm-host:
+    kind: vm
+    target: vm
+    default_window: 5m
+    services:
+      - {name: vm-1, namespace: vm, checks: [system, units, resources],
+         units: [docker.service, ssh.service, systemd-journald.service]}

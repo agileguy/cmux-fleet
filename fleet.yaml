@@ -79,17 +79,16 @@ run:
   # console in this fleet gave each worker its OWN run --- `agentPaneCommand`
   # builds `up --workers <one worker>` and `operations-plan.ts:310` says it in
   # as many words: "Each pane creates its own run". So this key had nothing to
-  # bind on, at any value. The triage console is the first run holding four
-  # seats, and three of them fan out at once; at 1 the sweep serialises and
-  # cannot fit a five-minute cadence.
+  # bind on, at any value. The triage console was the first run holding more
+  # than one seat; at 1 the sweep serialises and cannot fit a five-minute
+  # cadence.
   #
-  # THE COST, which is the reason this is 4 and not higher: the bound that
-  # actually matters is oMLX throughput, and all four triage seats are LOCAL
-  # (D1 arm 3). Four concurrent local requests from this run is the ceiling
-  # this number sets, and it is set at the console's size deliberately --- a
-  # larger value would not make the sweep faster and would let some future
-  # multi-worker run outrun the server it shares.
-  max_concurrent: 4          # bounded by oMLX throughput, not pane count (§5.9)
+  # RAISED AGAIN TO 12 for the seven-seat console (SRD-TRIAGE-MIXED-OBSERVERS
+  # D16, owner decision 6) — NOT derived from seat-count or throughput
+  # arithmetic. All seven triage seats are still LOCAL (D1 arm 3), on the same
+  # `gabe/gemma-4-26b-a4b-it` model; whether 12 concurrent local requests still
+  # fits oMLX's throughput is unmeasured — revisit if a sweep starts queuing.
+  max_concurrent: 12          # bounded by oMLX throughput, not pane count (§5.9)
   budget:
     tokens_ceiling: 6000000  # THE ceiling — local models have no price table
     # Held up front per admission and reconciled at settle. NOTE the shape this
@@ -753,7 +752,9 @@ roles:
       - OBSERVER_DOCKER_KNOWN_HOSTS
       - OBSERVER_DOCKER_TARGETS
     isolation: none                       # no repository; the outbox pair is the whole output
-    pane_mode: rpc                        # one seat, obs-d1, in no console (Q10)
+    pane_mode: rpc                        # obs-d1 stays in no console (Q10);
+                                          # obs-td1/obs-td2 (triage) also use
+                                          # this role, overriding to tui below
     append_system_prompt_file: ./roles/observer-docker.md
   observer-vm:                            # read-only diagnostic role for a VM
                                           # (SRD-OBSERVER-ROLES §6). The read-only boundary is
@@ -770,7 +771,9 @@ roles:
       - OBSERVER_VM_KNOWN_HOSTS
       - OBSERVER_VM_TARGETS
     isolation: none                       # no repository; the outbox pair is the whole output
-    pane_mode: rpc                        # one seat, obs-v1, in no console (Q10)
+    pane_mode: rpc                        # obs-v1 stays in no console (Q10);
+                                          # obs-tv1 (triage) also uses this
+                                          # role, overriding to tui below
     append_system_prompt_file: ./roles/observer-vm.md
   verifier:                               # confirms a remediation actually worked
     model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
@@ -1357,16 +1360,18 @@ workers:
      model: ollama-cloud/glm-5.3,
      append_system_prompt_file: ./roles/review/implementation-language.md}
 
-  # ---- The triage console (SRD-TRIAGE-CONSOLE §6.1) — four tui seats, one run ----
+  # ---- The triage console (SRD-TRIAGE-CONSOLE §6.1, SRD-TRIAGE-MIXED-OBSERVERS) — seven tui seats, one run ----
   #
   # WHAT THIS FILE SAYS TODAY, each claim checkable against a line it names.
-  # All four seats set `model: gabe/gemma-4-26b-a4b-it` and `pane_mode: tui` on
-  # their own lines: `tri-1` and `obs-t1` below, and the `obs-t2`/`obs-t3` pair
-  # that closes this list. Both roles name that same model (`roles.triage.model`,
-  # `roles.observer-k8s.model`) and both are `pane_mode: rpc`. So on each seat the
-  # `model:` repeats its role's value and is still the line that binds, because a
-  # worker's own `model:` wins over its role's (`pick` in `src/config/load.ts`),
-  # while the `pane_mode:` is a real override of the role.
+  # All seven seats set `model: gabe/gemma-4-26b-a4b-it` and `pane_mode: tui` on
+  # their own lines: `tri-1` and `obs-t1` below, the `obs-t2`/`obs-t3` pair, and
+  # the `obs-td1`/`obs-td2`/`obs-tv1` trio that closes this list. All four roles
+  # involved (`roles.triage.model`, `roles.observer-k8s.model`,
+  # `roles.observer-docker.model`, `roles.observer-vm.model`) name that same
+  # model and are all `pane_mode: rpc`. So on each seat the `model:` repeats its
+  # role's value and is still the line that binds, because a worker's own
+  # `model:` wins over its role's (`pick` in `src/config/load.ts`), while the
+  # `pane_mode:` is a real override of the role.
   #
   # The tracked `fleet.example.yaml` differs on both counts. Its `triage` and
   # `observer-k8s` roles name `gemma-4-26b-a4b-it-bf16` and are `pane_mode: rpc`,
@@ -1511,3 +1516,11 @@ workers:
   # recycle cannot rebuild a tui pane, and that trade is already recorded above.
   - {id: obs-t2, role: observer-k8s, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: gruvbox-light}
   - {id: obs-t3, role: observer-k8s, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: everforest-dark}
+  # SRD-TRIAGE-MIXED-OBSERVERS' docker/vm triage seats — obs-td1/obs-td2 (role
+  # observer-docker) and obs-tv1 (role observer-vm) — join ONLY this console.
+  # `pane_mode: tui` matches obs-t1..3 above, and `triage/console.yaml`'s
+  # `recycle_after_sweeps: 0` stays correct for the same reason it does there
+  # (a headless recycle cannot rebuild a tui pane).
+  - {id: obs-td1, role: observer-docker, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: dracula}
+  - {id: obs-td2, role: observer-docker, model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: one-dark}
+  - {id: obs-tv1, role: observer-vm,     model: gabe/gemma-4-26b-a4b-it, pane_mode: tui, theme: solarized-dark}
