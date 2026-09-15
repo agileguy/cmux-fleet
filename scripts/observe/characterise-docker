@@ -36,7 +36,11 @@
  * image, start that one container, load the image into it, and remove it: its
  * own containers are never listed, inspected or touched. The dind daemon never
  * pulls. The container and its anonymous `/var/lib/docker` volume are removed
- * on exit, on success, on failure, or on SIGINT, SIGTERM or SIGHUP.
+ * on exit, on success, on failure, or on SIGINT, SIGTERM or SIGHUP. A signal
+ * also stops every other command this script has in flight — the whole of what
+ * a Ctrl-C looks like from here is "wait for the create, stop everything else,
+ * remove the container, exit" — and says so on stderr; a second signal only
+ * warns, it never escalates to a SIGKILL this script sends itself.
  *
  * ## Usage
  *
@@ -115,14 +119,124 @@ const SRD_NAMED_FORMS = [
 type Run = { code: number; stdout: string; stderr: string; ms: number; timedOut: boolean };
 type Row = Record<string, unknown>;
 
-/** How long a timed-out process gets after SIGTERM before SIGKILL. */
+/** How long a timed-out process gets after SIGTERM before SIGKILL, and the grace `stopTrackedChildren` gives a stopped child before escalating. */
 const KILL_GRACE_MS = 2_000;
+
+/**
+ * True from the instant a signal handler runs, sampled by `run()` before it spawns anything. Once set,
+ * every ordinary call refuses instead of starting a fresh child, so main()'s sequential flow cannot spawn
+ * a new process into a stop that has already been decided — the only children left to deal with are the
+ * ones already in `trackedChildren` when the signal arrived. The dind create and cleanup's own commands
+ * pass `{ exempt: true }` to run regardless, because they must.
+ */
+let stopping = false;
+
+/**
+ * Sets `stopping`. The first signal's `onFirst` calls it before `cleanup()`; it is exported so
+ * `characterise-signal.test.ts` can prove `run()` refuses a new ordinary child once it has run.
+ */
+export function markStopping(): void {
+  stopping = true;
+}
+
+/** One `run()` child that is in flight and not `exempt`. */
+type TrackedChild = { argv: string[]; exited: Promise<void> };
+/**
+ * Every non-`exempt` child `run()` has spawned and not yet settled, keyed by pid — which `detached` also
+ * makes that child's own process group id, so the key doubles as the group to signal. Populated and
+ * emptied by `run()` itself; read by `stopTrackedChildren()`.
+ */
+const trackedChildren = new Map<number, TrackedChild>();
+
+/** Options for one `run()` call. */
+type RunOpts = { exempt?: boolean };
+
+/**
+ * Signal a detached child's whole process group — its own pid, since `detached` makes it the leader —
+ * rather than only the child. A group that is already gone (ESRCH) is not a failure; anything else is.
+ */
+function signalGroup(pid: number, sig: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, sig);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+  }
+}
+
+/**
+ * Stops every child `run()` currently has in flight — SIGTERM to its process group, SIGKILL to whichever
+ * haven't exited within `KILL_GRACE_MS` — and waits for each to actually be gone before returning. The
+ * dind create's own child is never in `trackedChildren` (it runs with `exempt: true`), so this never
+ * touches it; `cleanup()` awaits `starting` separately, in parallel with this. Safe to call with nothing
+ * in flight. Exported so `characterise-signal.test.ts` can drive it directly against real children.
+ */
+export async function stopTrackedChildren(): Promise<void> {
+  const targets = [...trackedChildren.entries()];
+  if (targets.length === 0) return;
+  for (const [pid] of targets) signalGroup(pid, "SIGTERM");
+  await Promise.all(
+    targets.map(async ([pid, child]) => {
+      const exitedInTime = await Promise.race([
+        child.exited.then(() => true),
+        Bun.sleep(KILL_GRACE_MS).then(() => false),
+      ]);
+      if (!exitedInTime) {
+        signalGroup(pid, "SIGKILL");
+        await child.exited;
+      }
+    }),
+  );
+}
+
+/**
+ * The shape `cleanup()` runs, factored out so a test can prove the stop step is actually part of it —
+ * not just that `stopTrackedChildren()` works in isolation. Calls `stopTrackedChildren()` directly
+ * (not handed in as a callback) so that claim is airtight: there is no wiring layer left for a test to
+ * miss between this function and the real, module-singleton child registry. Waits for the create to
+ * settle (if one was started) and stops every other in-flight child IN PARALLEL — `removeContainer` must
+ * never race a child still writing to disk, and neither the create's own child nor an unrelated in-flight
+ * one should have to wait on the other — then, only once both are done, runs `removeContainer`.
+ */
+export async function runCleanup(awaitCreate: () => Promise<unknown>, removeContainer: () => Promise<void>): Promise<void> {
+  await Promise.all([awaitCreate(), stopTrackedChildren()]);
+  await removeContainer();
+}
+
+/** How many signals this run has been told about so far. */
+type SignalState = { count: number };
+
+/**
+ * One signal's handling, factored out of the `process.on` callbacks in `main()` so a test can drive it
+ * directly — without starting docker. Bumps `state.count` and writes exactly one line: on the FIRST
+ * signal, what this run is about to stop and remove, and how long it may still wait on a create in
+ * flight, then calls `onFirst` (in production: `markStopping()` and start `cleanup()`, see the create's docblock
+ * above `run()`); on every LATER signal, a warning that a SIGKILL right now can leave that container
+ * behind, with the line to find it. `onFirst` never runs a second time.
+ */
+export function handleSignal(
+  state: SignalState,
+  write: (text: string) => void,
+  containerName: string,
+  id: string,
+  createBoundS: number,
+  createLabel: string,
+  onFirst: () => void,
+): void {
+  state.count += 1;
+  if (state.count === 1) {
+    write(`stopping every in-flight command and removing ${containerName}; a ${createLabel} still in flight is waited on first, up to ${createBoundS}s\n`);
+    onFirst();
+  } else {
+    write(`a SIGKILL now can leave ${containerName} running; find it with: docker ps -a --filter label=pifleet-char=${id}\n`);
+  }
+}
 
 /**
  * Run a command as an argv array, optionally with a file on stdin. Never through a shell. A process
  * this ends is reported `timedOut`, because its exit status alone (143) looks like a real one. The call
- * still waits for the pipes to close, so a descendant that keeps stdout open holds it past the timeout;
- * nothing this script runs leaves one behind.
+ * still waits for the pipes to close — but the timeout now ends the child's whole process group rather
+ * than only its pid (see below), which is what keeps a descendant holding stdout open from holding this
+ * function past the timeout too.
  *
  * Spawned `detached`: on POSIX this calls `setsid()`, so the child leads its own
  * process group instead of sitting in the terminal's. A Ctrl-C at the terminal
@@ -136,29 +250,41 @@ const KILL_GRACE_MS = 2_000;
  * terminal's signal could falsify that on the exact command that matters
  * most. Detached, this process is the only thing that decides when to stop
  * waiting on a running child — a signal we handle stops us, not it.
+ *
+ * That detachment cuts both ways: nothing external stops these children either, so the signal handler
+ * does it explicitly. Every non-`exempt` call registers itself in `trackedChildren` for as long as it
+ * runs; `stopTrackedChildren()` (called once, from the first signal) SIGTERMs each one's whole process
+ * group and waits for it to exit. `run()` also refuses to start a NEW non-`exempt` child once `stopping`
+ * is set, so nothing spawned after that point is left for a second pass to find.
  */
-async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS, stdinPath?: string): Promise<Run> {
+export async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS, stdinPath?: string, opts: RunOpts = {}): Promise<Run> {
+  if (stopping && !opts.exempt) throw new Error(`stopped by a signal before running: ${argv.join(" ")}`);
   const started = Date.now();
   const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: stdinPath ? Bun.file(stdinPath) : "ignore", detached: true });
+  if (!opts.exempt) trackedChildren.set(proc.pid, { argv, exited: proc.exited.then(() => undefined) });
   let timedOut = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill();
-    killTimer = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
+    signalGroup(proc.pid, "SIGTERM");
+    killTimer = setTimeout(() => signalGroup(proc.pid, "SIGKILL"), KILL_GRACE_MS);
   }, timeoutMs);
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  clearTimeout(timer);
-  clearTimeout(killTimer);
-  return { code, stdout, stderr, ms: Date.now() - started, timedOut };
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    clearTimeout(timer);
+    clearTimeout(killTimer);
+    return { code, stdout, stderr, ms: Date.now() - started, timedOut };
+  } finally {
+    trackedChildren.delete(proc.pid);
+  }
 }
 
-async function must(argv: string[], what: string): Promise<Run> {
-  const r = await run(argv);
+async function must(argv: string[], what: string, opts?: RunOpts): Promise<Run> {
+  const r = await run(argv, undefined, undefined, opts);
   if (r.timedOut) throw new Error(`${what} timed out after ${RUN_TIMEOUT_MS}ms`);
   if (r.code !== 0) throw new Error(`${what} failed (exit ${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
   return r;
@@ -258,31 +384,42 @@ async function main(): Promise<void> {
   // The `docker run -d` that creates the dind container, while it is in flight. A signal landing then
   // must not remove the container before it exists, or the create completes after the cleanup.
   let starting: Promise<unknown> | undefined;
-  // Set by a signal, and read in the same synchronous turn that starts the container: a signal before
-  // the start stops it happening, and one after it finds `starting` set.
-  let stopping = false;
+  // `stopping` (module-level) is set in the same synchronous turn that would start the container: a
+  // signal before the start stops it happening, and one after it finds `starting` set.
   // One cleanup, shared: a signal and the `finally` below both await the same run of it, so neither
-  // returns while the other's `docker rm` or `rm` is still going.
+  // returns while the other's stop-other-children pass, `docker rm`, or `rm` is still going. Stopping
+  // every other in-flight child happens BEFORE `rm(work, …)`: `docker image save -o <work>/…` is one of
+  // those children, and removing `work` while it is still writing there is exactly the race this
+  // ordering avoids.
   let cleaning: Promise<void> | undefined;
   const cleanup = (): Promise<void> =>
-    (cleaning ??= (async () => {
-      await starting?.catch(() => undefined);
-      // -v: the dind image declares /var/lib/docker a volume, and it would otherwise outlive the container.
-      const removed = await run(["docker", "rm", "-f", "-v", dindName]);
-      // A container that was never created is already gone. Anything else leaves a privileged container running.
-      if (removed.code !== 0 && !removed.stderr.includes("No such container")) {
-        process.stderr.write(
-          `could not remove ${dindName} (exit ${removed.code}): ${removed.stderr.trim()}\n` +
-            `find it with: docker ps -a --filter label=pifleet-char=${id}\n`,
-        );
-        process.exitCode = 1;
-      }
-      await rm(work, { recursive: true, force: true });
-    })());
+    (cleaning ??= runCleanup(
+      () => starting?.catch(() => undefined) ?? Promise.resolve(),
+      async () => {
+        // -v: the dind image declares /var/lib/docker a volume, and it would otherwise outlive the container.
+        const removed = await run(["docker", "rm", "-f", "-v", dindName], undefined, undefined, { exempt: true });
+        // A container that was never created is already gone. Anything else leaves a privileged container running.
+        if (removed.code !== 0 && !removed.stderr.includes("No such container")) {
+          process.stderr.write(
+            `could not remove ${dindName} (exit ${removed.code}): ${removed.stderr.trim()}\n` +
+              `find it with: docker ps -a --filter label=pifleet-char=${id}\n`,
+          );
+          process.exitCode = 1;
+        }
+        await rm(work, { recursive: true, force: true });
+      },
+    ));
+  // How long an operator may have to wait for the create alone, worst case: run()'s own timeout plus the
+  // grace it gives the group before SIGKILL. Named in the first-signal message below so silence during
+  // that wait reads as "still waiting", not "hung".
+  const CREATE_BOUND_S = Math.round((RUN_TIMEOUT_MS + KILL_GRACE_MS) / 1000);
+  const signalState: SignalState = { count: 0 };
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
     process.on(signal, () => {
-      stopping = true;
-      void cleanup().then(() => process.exit(code));
+      handleSignal(signalState, (text) => process.stderr.write(text), dindName, id, CREATE_BOUND_S, "dind container create", () => {
+        markStopping();
+        void cleanup().then(() => process.exit(code));
+      });
     });
   }
 
@@ -320,6 +457,7 @@ async function main(): Promise<void> {
         "-e", "DOCKER_TLS_CERTDIR=", args.dindImage, "dockerd", "--host=unix:///var/run/docker.sock",
       ],
       "start dind",
+      { exempt: true },
     );
     await starting;
     let ready = false;
