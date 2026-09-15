@@ -37,11 +37,10 @@
 version: 1
 
 environments:
-  # `soleEnvironment` refuses a targets file that declares anything other than
-  # exactly ONE environment — "one sweep is ONE environment, and that is a limit
-  # rather than a law" (§12) — so a second environment here is a refusal at load
-  # rather than a second sweep. The key is the logical environment token, and it
-  # must match `SESSION_ID_RE` because it becomes a path segment under
+  # One environment per kind, validated by `environmentsByKind`: exactly one
+  # k8s, at most one docker, at most one vm (SRD-TRIAGE-MIXED-OBSERVERS §6.1).
+  # Each key is the logical environment token, and it must match
+  # `SESSION_ID_RE` because it becomes a path segment under
   # `~/.pifleet/triage/`.
   #
   # This environment answers from the open internet and needs no corporate VPN.
@@ -100,3 +99,30 @@ environments:
       - {name: kube-state-metrics,  namespace: monitoring, checks: [rollout, logs]}
       - {name: node-exporter,       namespace: monitoring, checks: [rollout, logs]}
       - {name: prometheus-operator, namespace: monitoring, checks: [rollout, logs]}
+
+  # The token is the enrolled `OBSERVER_DOCKER_TARGETS` token; every row's
+  # `namespace` carries that same token (§6), matching what the observer's own
+  # artifact echoes back. The five containers are the host's monitoring stack
+  # (owner decision 4), split between `obs-td1` and `obs-td2`.
+  docker-host:
+    kind: docker
+    target: docker
+    default_window: 5m
+    services:
+      - {name: grafana,          namespace: docker, checks: [state, health, logs]}
+      - {name: grafana-renderer, namespace: docker, checks: [state, health, logs]}
+      - {name: prometheus,       namespace: docker, checks: [state, health, logs]}
+      - {name: cadvisor,         namespace: docker, checks: [state, health, logs]}
+      - {name: node_exporter,    namespace: docker, checks: [state, health, logs]}
+
+  # The token is the enrolled `OBSERVER_VM_TARGETS` token; `obs-tv1` alone
+  # sweeps it, no split. `[system, units, resources]` covers the whole-system
+  # verbs (`uptime`, `system`, `failed`, `disk`, `memory`) plus the three named
+  # units (owner decision 5, D17).
+  vm-host:
+    kind: vm
+    target: vm
+    default_window: 5m
+    services:
+      - {name: vm-1, namespace: vm, checks: [system, units, resources],
+         units: [docker.service, ssh.service, systemd-journald.service]}

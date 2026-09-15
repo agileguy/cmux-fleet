@@ -1627,8 +1627,8 @@ export type SweepDispatch = (args: {
  *
  * **A pair is the unit, and that is the whole design.** The console is not one
  * collator with two observers (which is what `TRIAGE_CONSOLE_ASPECTS` alone
- * would suggest) and it is not two environments (which `soleEnvironment` refuses,
- * correctly — an environment token is a path segment and the scope every
+ * would suggest) and it is not two k8s environments (which `environmentsByKind`
+ * refuses, correctly — an environment token is a path segment and the scope every
  * incident is reported against, so two tokens for one cluster would report health
  * for a fleet). It is ONE environment whose service list is divided between two
  * collators, each briefing its own observer.

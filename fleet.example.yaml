@@ -1037,12 +1037,12 @@ workers:
   #
   # A SECOND ENVIRONMENT IS STILL NEITHER A WORKER LINE NOR A `max_concurrent`
   # DECISION, and the second pair did NOT lift that refusal — it went around it.
-  # `soleEnvironment` (in `src/cli/commands/triage.ts`) still refuses a targets
-  # file declaring other than exactly one environment, and still should: an
-  # environment token is a path segment under `~/.pifleet/triage/` and the scope
-  # every incident is reported against, so two tokens for one cluster would make
-  # the console report health for a fleet. What the pairs divide is the SERVICE
-  # LIST of the one environment, not the environments.
+  # `environmentsByKind` (in `src/cli/commands/triage.ts`) still refuses a
+  # targets file declaring other than exactly one k8s environment, and still
+  # should: an environment token is a path segment under `~/.pifleet/triage/`
+  # and the scope every incident is reported against, so two tokens for one
+  # cluster would make the console report health for a fleet. What the pairs
+  # divide is the SERVICE LIST of the one environment, not the environments.
   - {id: tri-1,  role: triage}
   # OBSERVERS ON THE ROLE THAT ALREADY EXISTS, doing the job it was written
   # for, at a cadence — no new role, no widened grant, and that is the strongest
@@ -1051,8 +1051,8 @@ workers:
   #
   # ONE OBSERVER PER COLLATOR is the design as of 2026-09-12, and this paragraph
   # said ONE SEAT PER ENVIRONMENT until then. The old reasoning — that the
-  # fan-out is one observer wide because `soleEnvironment` admits one
-  # environment — confused a limit on ENVIRONMENTS with a limit on SEATS. One
+  # fan-out is one observer wide because the loader admitted one environment —
+  # confused a limit on ENVIRONMENTS with a limit on SEATS. One
   # environment can be divided among several observers; what it cannot be is
   # reported as several environments.
   #
