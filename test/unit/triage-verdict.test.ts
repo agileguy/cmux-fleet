@@ -3714,3 +3714,341 @@ describe("a sweep across two environments — keyed on (environment, service), n
     ]);
   });
 });
+
+/**
+ * SRD-TRIAGE-MIXED-OBSERVERS §5, §7; §11 task 5.2. Until this task, both of
+ * §6.6 layer 3's freshness gates — the `sweep_id` echo and the
+ * `window_opened_at` echo — had been proven only for the three k8s seats,
+ * `obs-t1..3`, in the two describes above. Nothing in `sweepIdEcho`,
+ * `windowEcho` or `assessTriageSweep` reads a seat's kind before spending
+ * either gate — {@link resolveAssignmentEnvironment} matches `seatKind`
+ * against `coverage.declared`'s own `kind`, and the gates themselves take
+ * plain strings — so the claim these tests check is that a docker or vm
+ * seat's artifact is discarded by the SAME functions, not by a parallel path
+ * that happens to agree.
+ *
+ * ## One sweep, three kinds, so "no other kind is touched" is assertable
+ *
+ * Every fixture below declares all three kinds at once — one k8s environment,
+ * one docker environment split across two seats, one vm environment — and
+ * stales exactly one artifact. That is what lets each test assert the
+ * mirror-image half of §6.6 layer 3's own claim: not only that the stale
+ * seat's services fall, but that every other seat, of every OTHER kind, stays
+ * `observed`/`healthy`. A fixture with only one non-k8s environment present
+ * could show the gate firing; it could not show a docker fault leaving the
+ * vm environment alone, because there would be no vm environment there to
+ * leave alone.
+ *
+ * ## Reuses the file's own helpers, deliberately
+ *
+ * `artifact()`, `assign()`, `doc()`, `row()`, `SWEEP`, `PREVIOUS`, `WINDOW`,
+ * `TOO_EARLY` are the exact fixtures the k8s describes above already use —
+ * SRD-TRIAGE-MIXED-OBSERVERS §5's whole claim is that a docker or vm seat is
+ * graded by the same functions a k8s seat is, so building a second set of
+ * fixtures for this block would test that a SEPARATE implementation agrees,
+ * not that the real one does.
+ */
+describe("docker and vm seats go through the same §6.6 layer 3 / §7.4 freshness gates as k8s (task 5.2)", () => {
+  /**
+   * One environment per kind. The docker environment carries two services,
+   * one per docker seat (`obs-td1`, `obs-td2`), so a stale `obs-td1` can be
+   * shown taking down only `docker-svc-1` and leaving `docker-svc-2` — the
+   * docker-internal half of "and no others" — as well as the k8s and vm
+   * environments.
+   */
+  const THREE_KIND_DECLARED: readonly DeclaredEnvironment[] = [
+    { name: "do-cluster", kind: "k8s", services: ["k8s-svc"] },
+    { name: "docker-host", kind: "docker", services: ["docker-svc-1", "docker-svc-2"] },
+    { name: "vm-host", kind: "vm", services: ["vm-svc"] },
+  ];
+
+  /** Every seat fresh — the positive control every stale fixture perturbs one entry of. */
+  function baseArtifacts(): readonly ObserverArtifact[] {
+    return [artifact("obs-t1"), artifact("obs-td1"), artifact("obs-td2"), artifact("obs-tv1")];
+  }
+
+  /** `baseArtifacts()` with exactly one worker's entry swapped for `value`. */
+  function withArtifact(worker: string, value: ObserverArtifact): readonly ObserverArtifact[] {
+    return baseArtifacts().map((a) => (a.worker === worker ? value : a));
+  }
+
+  function threeKindCoverage(over: Partial<SweepCoverage> = {}): SweepCoverage {
+    return {
+      declared: THREE_KIND_DECLARED,
+      assignments: [
+        assign("obs-t1", "k8s-svc"),
+        assign("obs-td1", "docker-svc-1"),
+        assign("obs-td2", "docker-svc-2"),
+        assign("obs-tv1", "vm-svc"),
+      ],
+      artifacts: baseArtifacts(),
+      window: WINDOW,
+      ...over,
+    };
+  }
+
+  function threeKindDoc(): TriageDocument {
+    return doc([
+      row("k8s-svc", { environment: "do-cluster" }),
+      row("docker-svc-1", { environment: "docker-host" }),
+      row("docker-svc-2", { environment: "docker-host" }),
+      row("vm-svc", { environment: "vm-host" }),
+    ]);
+  }
+
+  /**
+   * One assessment, found by its (environment, service) pair rather than by
+   * service name alone — the file's own `of()` cannot be reused for the
+   * grafana-collision fixture at the foot of this block, where the same
+   * service name is declared under two environments (task 4.1b), so every
+   * fixture in this block goes through this lookup instead, for consistency.
+   */
+  function assessmentOf(
+    result: ReturnType<typeof assessTriageSweep>,
+    environment: string,
+    service: string,
+  ): ServiceAssessment {
+    const found = result.services.find(
+      (s) => s.environment === environment && s.service === service,
+    );
+    if (found === undefined) throw new Error(`no assessment for ${environment}/${service}`);
+    return found;
+  }
+
+  describe("docker (obs-td1, obs-td2)", () => {
+    /** Mirrors "an artifact echoing no sweep id at all is stale_replay" (§6.6 layer 3, k8s). */
+    test("a null sweep_id is stale_replay, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({ artifacts: withArtifact("obs-td1", artifact("obs-td1", null)) }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "docker-host", "docker-svc-1");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_replay");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_replay).toEqual(["obs-td1"]);
+      expect(result.census.observers_stale).toEqual(["obs-td1"]);
+      expect(result.census.counted).toBe(3); // k8s-svc, docker-svc-2, vm-svc
+
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "vm-host", "vm-svc").assessment).toBe("healthy");
+    });
+
+    /** Mirrors "a stale observer artifact takes its own services down and no others" (§6.6 layer 3, k8s). */
+    test("a previous sweep's id is stale_replay, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({ artifacts: withArtifact("obs-td1", artifact("obs-td1", PREVIOUS)) }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "docker-host", "docker-svc-1");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_replay");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_replay).toEqual(["obs-td1"]);
+      expect(result.census.observers_stale).toEqual(["obs-td1"]);
+      expect(result.census.counted).toBe(3);
+
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "vm-host", "vm-svc").assessment).toBe("healthy");
+    });
+
+    /** Mirrors "an artifact that names no window discards its services" (§7.4, k8s). */
+    test("a null window_opened_at is stale_window, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({
+          artifacts: withArtifact("obs-td1", { worker: "obs-td1", sweep_id: SWEEP, window_opened_at: null }),
+        }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "docker-host", "docker-svc-1");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_window");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_window).toEqual(["obs-td1"]);
+      expect(result.census.observers_stale_window).toEqual(["obs-td1"]);
+      expect(result.census.counted).toBe(3);
+
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "vm-host", "vm-svc").assessment).toBe("healthy");
+    });
+
+    /** Mirrors "one bad window takes every service that observer covered, and no others" (§7.4, k8s). */
+    test("a window outside §7.4's range is stale_window, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({
+          artifacts: withArtifact("obs-td1", artifact("obs-td1", SWEEP, TOO_EARLY)),
+        }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "docker-host", "docker-svc-1");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_window");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_window).toEqual(["obs-td1"]);
+      expect(result.census.observers_stale_window).toEqual(["obs-td1"]);
+      expect(result.census.counted).toBe(3);
+
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "vm-host", "vm-svc").assessment).toBe("healthy");
+    });
+  });
+
+  describe("vm (obs-tv1)", () => {
+    /** Mirrors "an artifact echoing no sweep id at all is stale_replay" (§6.6 layer 3, k8s). */
+    test("a null sweep_id is stale_replay, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({ artifacts: withArtifact("obs-tv1", artifact("obs-tv1", null)) }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "vm-host", "vm-svc");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_replay");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_replay).toEqual(["obs-tv1"]);
+      expect(result.census.observers_stale).toEqual(["obs-tv1"]);
+      expect(result.census.counted).toBe(3); // k8s-svc, docker-svc-1, docker-svc-2
+
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-1").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+    });
+
+    /** Mirrors "a stale observer artifact takes its own services down and no others" (§6.6 layer 3, k8s). */
+    test("a previous sweep's id is stale_replay, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({ artifacts: withArtifact("obs-tv1", artifact("obs-tv1", PREVIOUS)) }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "vm-host", "vm-svc");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_replay");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_replay).toEqual(["obs-tv1"]);
+      expect(result.census.observers_stale).toEqual(["obs-tv1"]);
+      expect(result.census.counted).toBe(3);
+
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-1").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+    });
+
+    /** Mirrors "an artifact that names no window discards its services" (§7.4, k8s). */
+    test("a null window_opened_at is stale_window, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({
+          artifacts: withArtifact("obs-tv1", { worker: "obs-tv1", sweep_id: SWEEP, window_opened_at: null }),
+        }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "vm-host", "vm-svc");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_window");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_window).toEqual(["obs-tv1"]);
+      expect(result.census.observers_stale_window).toEqual(["obs-tv1"]);
+      expect(result.census.counted).toBe(3);
+
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-1").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+    });
+
+    /** Mirrors "one bad window takes every service that observer covered, and no others" (§7.4, k8s). */
+    test("a window outside §7.4's range is stale_window, not counted, and every other kind stays healthy", () => {
+      const result = assessTriageSweep(
+        SWEEP,
+        threeKindCoverage({
+          artifacts: withArtifact("obs-tv1", artifact("obs-tv1", SWEEP, TOO_EARLY)),
+        }),
+        threeKindDoc(),
+      );
+
+      const failing = assessmentOf(result, "vm-host", "vm-svc");
+      expect(failing.assessment).toBe("indeterminate");
+      expect(failing.reason).toBe("stale_window");
+      expect(failing.claimed).toBeNull();
+
+      expect(result.stale_window).toEqual(["obs-tv1"]);
+      expect(result.census.observers_stale_window).toEqual(["obs-tv1"]);
+      expect(result.census.counted).toBe(3);
+
+      expect(assessmentOf(result, "do-cluster", "k8s-svc").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-1").assessment).toBe("healthy");
+      expect(assessmentOf(result, "docker-host", "docker-svc-2").assessment).toBe("healthy");
+    });
+  });
+
+  /**
+   * The tracked `triage/targets.yaml` declares a `grafana` under both
+   * `do-cluster` (k8s) and `docker-host` (docker) — the same collision the
+   * mixed-environment describe above grades for a FRESH pair of artifacts.
+   * This is its stale counterpart: task 4.1b's (environment, service) keying
+   * is what keeps the two `grafana` rows apart at all, and this fixture
+   * checks that a stale artifact on one side of that key does not bleed into
+   * the other. `resolveAssignmentEnvironment` (`triage-verdict.ts`) places
+   * `obs-t1`'s assignment against `do-cluster` and `obs-td1`'s against
+   * `docker-host` by `seatKind` alone, so an implementation that instead
+   * grouped by `row.service` would collapse the two into one `duplicate_rows`
+   * pair rather than grading them independently.
+   */
+  test("a stale docker grafana and a fresh k8s grafana, in their own environments — only the docker grafana goes stale", () => {
+    const declared: readonly DeclaredEnvironment[] = [
+      { name: "do-cluster", kind: "k8s", services: ["grafana"] },
+      { name: "docker-host", kind: "docker", services: ["grafana"] },
+    ];
+    const coverage: SweepCoverage = {
+      declared,
+      assignments: [assign("obs-t1", "grafana"), assign("obs-td1", "grafana")],
+      artifacts: [artifact("obs-t1"), artifact("obs-td1", PREVIOUS)],
+      window: WINDOW,
+    };
+    const document = doc([
+      row("grafana", { environment: "do-cluster" }),
+      row("grafana", { environment: "docker-host" }),
+    ]);
+
+    const result = assessTriageSweep(SWEEP, coverage, document);
+
+    const k8sGrafana = result.services.find((s) => s.environment === "do-cluster");
+    const dockerGrafana = result.services.find((s) => s.environment === "docker-host");
+    if (k8sGrafana === undefined || dockerGrafana === undefined) {
+      throw new Error("expected one row per environment");
+    }
+
+    expect(k8sGrafana.assessment).toBe("healthy");
+    expect(k8sGrafana.reason).toBe("observed");
+
+    expect(dockerGrafana.assessment).toBe("indeterminate");
+    expect(dockerGrafana.reason).toBe("stale_replay");
+    expect(dockerGrafana.claimed).toBeNull();
+
+    expect(result.stale_replay).toEqual(["obs-td1"]);
+    expect(result.census.observers_stale).toEqual(["obs-td1"]);
+    expect(result.census.counted).toBe(1);
+  });
+});

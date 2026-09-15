@@ -1676,6 +1676,152 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
   });
 
   /**
+   * SRD-TRIAGE-MIXED-OBSERVERS §5, §7, task 5.2. The artifact below is
+   * `skills/observer-docker-ops/SKILL.md` §5.6's OWN worked example, copied
+   * verbatim rather than a k8s-shaped stand-in: `schema`, `container_id`,
+   * `image` and `restart_count` are fields no k8s `observer-ops.json` carries,
+   * and `sweep_id`/`window_opened_at` are `null` exactly the way the skill's
+   * own example ships them — the ordinary shape of an observer that has not
+   * been told a sweep's echo yet.
+   *
+   * `parseObserverArtifact` (`triage-envelope.ts`) narrows every artifact down
+   * to `{worker, sweep_id, window_opened_at}` — §7.4's three gated fields —
+   * and the risk this test pins is that narrowing a real docker artifact's
+   * `null` some other way (dropping the artifact as unparseable, or coercing
+   * the missing echo to a truthy placeholder) would hide the exact fault
+   * `sweepIdEcho` (`triage-verdict.ts`) exists to catch. The gate itself is
+   * `triage-verdict.test.ts`'s; this only pins that the value SURVIVES the
+   * join with its `null` intact.
+   */
+  test("a docker seat's real observer-docker-ops.json shape with sweep_id: null survives joinSweep as a null sweep_id, not dropped or coerced", async () => {
+    const run = await seedRun("2026-09-15T00-00-01Z-9101");
+    const sweepId = sweepTaskId(60);
+    const dockerSeat = { worker: "obs-td1", aspect: "docker1" };
+    const child = childTaskId(sweepId, dockerSeat.aspect);
+    const dir = join(workerOutboxDir(run.root, dockerSeat.worker), child, SWEEP_FILES_DIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, OBSERVER_DOCKER_OPS_ARTIFACT_NAME),
+      JSON.stringify({
+        schema: "pifleet.observer-docker-ops/v1",
+        worker: dockerSeat.worker,
+        sweep_id: null,
+        window_opened_at: null,
+        services: [
+          {
+            name: "web-1",
+            namespace: "docker-host-a",
+            assessment: "healthy",
+            coverage: [
+              { channel: "state", result: "answered" },
+              { channel: "health", result: "answered" },
+              { channel: "logs", result: "answered" },
+            ],
+            selector: "name=web-1",
+            window: "300s",
+            evidence_ref: [
+              "observe-docker docker-host-a inspect web-1: State.Status=running, Health=healthy, RestartCount=0",
+            ],
+            container_id: "1b9b66a422e957b5bb5c1b3aa508f33b0d291da0953231a811863fcd9c623849",
+            image: "web:1.4.2",
+            restart_count: 0,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [dockerSeat],
+      environments: [{ name: "docker-host", kind: "docker", services: [] }],
+    };
+    const producers = sweepProducers({
+      run,
+      environments: pair.environments,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async () => ({ kind: "accepted" }),
+    });
+
+    const joined = await producers.join(sweepId);
+    expect(joined.artifacts).toHaveLength(1);
+    expect(joined.artifacts[0]!.worker).toBe("obs-td1");
+    expect(joined.artifacts[0]!.sweep_id).toBeNull();
+  });
+
+  /**
+   * The vm sibling of the fixture above — `skills/observer-vm-ops/SKILL.md`
+   * §6.7's OWN worked example, copied verbatim: `uptime_s`, `system_state` and
+   * `failed_units` are fields no k8s or docker artifact carries, and
+   * `window_opened_at` is `null` exactly as the skill ships it. Asserts the
+   * other half of §7.4's pair: a null `window_opened_at` survives the join
+   * intact, the same way a null `sweep_id` does above.
+   */
+  test("a vm seat's real observer-vm-ops.json shape with window_opened_at: null survives joinSweep as a null window_opened_at, not dropped or coerced", async () => {
+    const run = await seedRun("2026-09-15T00-00-02Z-9102");
+    const sweepId = sweepTaskId(61);
+    const vmSeat = { worker: "obs-tv1", aspect: "vm1" };
+    const child = childTaskId(sweepId, vmSeat.aspect);
+    const dir = join(workerOutboxDir(run.root, vmSeat.worker), child, SWEEP_FILES_DIR);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, OBSERVER_VM_OPS_ARTIFACT_NAME),
+      JSON.stringify({
+        schema: "pifleet.observer-vm-ops/v1",
+        worker: vmSeat.worker,
+        sweep_id: null,
+        window_opened_at: null,
+        services: [
+          {
+            name: "vm-1.example.com",
+            namespace: "vm-1",
+            assessment: "healthy",
+            coverage: [
+              { channel: "reachability", result: "answered" },
+              { channel: "system", result: "answered" },
+              { channel: "units", result: "answered" },
+              { channel: "logs", result: "answered" },
+              { channel: "resources", result: "not_attempted" },
+              { channel: "cloud", result: "not_attempted" },
+            ],
+            selector: "vm-1",
+            window: "300s",
+            evidence_ref: [
+              "observe-vm vm-1 system: state running",
+              "observe-vm vm-1 failed: 0 units listed",
+            ],
+            uptime_s: 431827,
+            system_state: "running",
+            failed_units: [],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [vmSeat],
+      environments: [{ name: "vm-host", kind: "vm", services: [] }],
+    };
+    const producers = sweepProducers({
+      run,
+      environments: pair.environments,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async () => ({ kind: "accepted" }),
+    });
+
+    const joined = await producers.join(sweepId);
+    expect(joined.artifacts).toHaveLength(1);
+    expect(joined.artifacts[0]!.worker).toBe("obs-tv1");
+    expect(joined.artifacts[0]!.window_opened_at).toBeNull();
+  });
+
+  /**
    * §6.10 exit 5 travels as a VALUE. `SweepOpen`'s docblock: *"A refused
    * admission is not a thrown pass … a throw here would be caught by the loop and
    * logged as a fault, which is the same information with none of the
