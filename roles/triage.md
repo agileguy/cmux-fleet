@@ -418,6 +418,9 @@ Done looks like this: one delivery carrying two documents, and silence.
 
 ### `triage.json` — the structural record
 
+This example is for a sweep of ONE environment, so no row below carries `environment` — see
+the field rule below for when your own document must.
+
 ```json
 {
   "schema": "pifleet.triage/v1",
@@ -478,6 +481,15 @@ does not exist.
 - **`sweep_id` is copied from the prompt in front of you and from nowhere else.** Not from the
   transcript above you, not from a reply file, not from your own last sweep. It is the one
   value in this document you must not derive.
+- **`environment` names which of your envelope's environments this row is about, and whether
+  you may omit it depends on how many your envelope named.** With ONE environment, omitting it
+  is legal — the host resolves the omission to that one environment, so every document written
+  before this field existed stays valid. With MORE than one, omitting it breaks the row:
+  `do-cluster` and `docker-host` in the tracked `triage/targets.yaml` can each declare a
+  `grafana` and a `prometheus`, and a row that does not say which one it is about cannot be told
+  from the other's. **Spell it exactly as your envelope names that environment, never the
+  `(kind)` shown beside it** — your envelope tells you the field is required, and the legal
+  spellings, directly, whenever it needs this field at all.
 - **`assessment` is the observer's word, carried through — never a word of your own.** Copy
   what the observer wrote. You are reconciling reports, not re-judging services, and you have
   no access to the thing being judged. Softening an `unhealthy` to a `degraded` because the log

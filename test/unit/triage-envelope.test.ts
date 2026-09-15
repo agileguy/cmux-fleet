@@ -639,21 +639,114 @@ describe("SweepEnvironment: more than one environment in one sweep", () => {
   });
 
   /**
-   * The declared list is flat across every environment, so a previous row for a
-   * service declared only in the SECOND environment still carries. Keying it by
-   * (environment, service) is task 4.1b's job, not this one's.
+   * D21's whole reason to exist, and the exact scenario named in
+   * SRD-TRIAGE-MIXED-OBSERVERS §6: `do-cluster` and `docker-host` can each
+   * declare a `grafana`, and the merged document can carry a DIFFERENT
+   * assessment for each. Keyed on (environment, service) — task 4.1b — both
+   * carry, distinctly, both in `projectPreviousState`'s own output and in the
+   * rendered brief.
    */
-  test("a previous row carries for a service declared in any environment, not only the first", () => {
-    const authzInDocker: SweepEnvironment = {
+  test("do-cluster's grafana and docker-host's grafana carry separately, keyed on (environment, service)", () => {
+    const k8sGrafana: SweepEnvironment = {
+      name: K8S_ENV_NAME,
+      kind: "k8s",
+      services: [{ ...K8S_ENV_SERVICE, name: "grafana" }],
+    };
+    const dockerGrafana: SweepEnvironment = {
       name: DOCKER_ENV_NAME,
       kind: "docker",
-      services: [{ name: "authorization", namespace: "docker", checks: ["state"] }],
+      services: [{ ...DOCKER_ENV_SERVICE, name: "grafana" }],
     };
-    const { brief } = renderSweepEnvelope(
-      envelopeInput({ environments: [k8sEnv, authzInDocker], previousDocument: PREVIOUS }),
-    );
-    expect(brief).toContain("- routing: unhealthy");
-    expect(brief).toContain("- authorization: healthy");
+    const previous: TriageDocument = {
+      worker: TRIAGE_COLLATOR,
+      sweep_id: "T-sweep-40",
+      services: [
+        {
+          service: "grafana",
+          environment: K8S_ENV_NAME,
+          assessment: "unhealthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-t1",
+        },
+        {
+          service: "grafana",
+          environment: DOCKER_ENV_NAME,
+          assessment: "healthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-td1",
+        },
+      ],
+      unaccounted: [],
+    };
+    const environments = [k8sGrafana, dockerGrafana];
+
+    expect(projectPreviousState(previous, environments)).toEqual([
+      { environment: K8S_ENV_NAME, service: "grafana", assessment: "unhealthy" },
+      { environment: DOCKER_ENV_NAME, service: "grafana", assessment: "healthy" },
+    ]);
+
+    const { brief } = renderSweepEnvelope(envelopeInput({ environments, previousDocument: previous }));
+    expect(brief).toContain(`- ${K8S_ENV_NAME}/grafana: unhealthy`);
+    expect(brief).toContain(`- ${DOCKER_ENV_NAME}/grafana: healthy`);
+  });
+
+  /**
+   * The asymmetry `TriageRow.environment` and `projectPreviousState` both
+   * document: a row with no `environment` at all — every document written
+   * before this field existed looks like this — resolves to the sweep's ONE
+   * environment when there is exactly one, and carries NOTHING once the sweep
+   * covers two, because there is no longer a default to resolve it to.
+   */
+  test("a null-environment row carries with one environment and carries nothing with two", () => {
+    const previous: TriageDocument = {
+      worker: TRIAGE_COLLATOR,
+      sweep_id: "T-sweep-40",
+      services: [
+        {
+          service: "grafana",
+          assessment: "healthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-t1",
+        },
+      ],
+      unaccounted: [],
+    };
+    const grafanaEnv = (name: string): SweepEnvironment => ({
+      name,
+      kind: "docker",
+      services: [{ name: "grafana", namespace: "ns", checks: ["state"] }],
+    });
+
+    expect(projectPreviousState(previous, [grafanaEnv(K8S_ENV_NAME)])).toEqual([
+      { environment: K8S_ENV_NAME, service: "grafana", assessment: "healthy" },
+    ]);
+    expect(
+      projectPreviousState(previous, [grafanaEnv(K8S_ENV_NAME), grafanaEnv(DOCKER_ENV_NAME)]),
+    ).toEqual([]);
+  });
+
+  /**
+   * §7.2's collator-facing instruction (task 4.1b): present, naming the legal
+   * values, exactly when the sweep covers more than one environment — absent
+   * for one, on the same byte-for-byte guarantee the rest of this describe
+   * block asserts for the single-environment render.
+   */
+  test("the environment-field instruction appears only when the sweep covers more than one environment", () => {
+    const solo = renderSweepEnvelope(envelopeInput()).brief;
+    expect(solo).not.toContain("must also carry `environment`");
+
+    const multi = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] })).brief;
+    expect(multi).toContain("must also carry `environment`");
+    expect(multi).toContain([k8sEnv, dockerEnv].map((e) => `\`${e.name}\``).join(", "));
   });
 
   /** The namespace half: the declared namespaces are flat across environments too. */
@@ -965,18 +1058,23 @@ describe("§7.2: a previous sweep's report cannot reach the next sweep's brief a
    * that looks structural.
    */
   test("projectPreviousState keeps only declared services and enum assessments", () => {
-    const declared = SERVICES.map((s) => s.name);
-    const projected = projectPreviousState(PREVIOUS, declared);
+    const environments: readonly SweepEnvironment[] = [
+      { name: "cni-dev", kind: "k8s", services: SERVICES },
+    ];
+    const projected = projectPreviousState(PREVIOUS, environments);
     expect(projected).toEqual([
-      { service: "routing", assessment: "unhealthy" },
-      { service: "authorization", assessment: "healthy" },
+      { environment: "cni-dev", service: "routing", assessment: "unhealthy" },
+      { environment: "cni-dev", service: "authorization", assessment: "healthy" },
     ]);
     // The undeclared row is gone by NAME, not by position.
     expect(projected.map((p) => p.service)).not.toContain(`phantom-${MARKER}`);
   });
 
   test("projectPreviousState of no document is an empty list, not a throw", () => {
-    expect(projectPreviousState(null, ["routing"])).toEqual([]);
+    const environments: readonly SweepEnvironment[] = [
+      { name: "cni-dev", kind: "k8s", services: SERVICES },
+    ];
+    expect(projectPreviousState(null, environments)).toEqual([]);
   });
 
   /**

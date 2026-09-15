@@ -26,11 +26,13 @@
  * {@link renderSweepEnvelope} takes the previous sweep's `triage.json` as a WHOLE
  * DOCUMENT and projects it itself — a caller cannot hand it prose because there
  * is no parameter that accepts any. {@link projectPreviousState} keeps exactly
- * two things per row: a service name **the host itself declared**, and an
- * `assessment` token from a closed four-member enum. The selector, the window
- * spelling, the evidence ledger, the coverage channel names and the
- * `unaccounted[]` list are worker-authored strings and none of them has anywhere
- * to sit.
+ * three things per row: an environment and a service name **the host itself
+ * declared** (SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b — a service name alone
+ * stopped being unique the moment one sweep could cover more than one
+ * environment), and an `assessment` token from a closed four-member enum. The
+ * selector, the window spelling, the evidence ledger, the coverage channel
+ * names and the `unaccounted[]` list are worker-authored strings and none of
+ * them has anywhere to sit.
  *
  * **2. The audit, which is the tripwire for the day somebody adds a field.**
  * {@link envelopeIssues} re-reads the rendered text against the very document it
@@ -1065,15 +1067,22 @@ export class SweepEnvelopeError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * One service's carried state — TWO FIELDS, and the shortness is the point.
+ * One service's carried state — THREE FIELDS, and the shortness is still the
+ * point.
  *
  * §7.2 carries *"the previous sweep's per-service state, as **structured state
- * only**"*. Both members are host-checkable: the name against the targets file,
- * the assessment against a closed enum. There is deliberately no `note`, no
- * `summary` and no `evidence` member, because a field that admits free text is
- * where the next person will put the last sweep's paragraph.
+ * only**"*. Every member is host-checkable: the environment and the service
+ * name against the sweep's own declared environments (SRD-TRIAGE-MIXED-OBSERVERS
+ * D21, task 4.1b — a service name alone stopped being unique the moment one
+ * sweep could cover more than one environment, since `do-cluster` and
+ * `docker-host` both declare a `grafana` and a `prometheus` in the tracked
+ * `triage/targets.yaml`), and the assessment against a closed enum. There is
+ * deliberately no `note`, no `summary` and no `evidence` member, because a
+ * field that admits free text is where the next person will put the last
+ * sweep's paragraph.
  */
 export interface PreviousServiceState {
+  readonly environment: string;
   readonly service: string;
   readonly assessment: ObserverAssessment;
 }
@@ -1081,33 +1090,68 @@ export interface PreviousServiceState {
 const ASSESSMENTS: ReadonlySet<string> = new Set<string>(OBSERVER_ASSESSMENTS);
 
 /**
- * Project the previous sweep's `triage.json` down to what may cross.
+ * Project the previous sweep's `triage.json` down to what may cross, keyed on
+ * (environment, service) — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
  *
- * **Filtered against `declared` rather than deduplicated or sanitised**, because
- * a service name is worker-authored too: `triage.json`'s rows are whatever `tri-1`
- * wrote, and a row naming a service the targets file never declared would put an
- * attacker-chosen token into the next brief under the host's own voice. The host
- * knows the legal names; nothing else has to be trusted.
+ * **Filtered against the sweep's declared (environment, service) pairs rather
+ * than deduplicated or sanitised**, because a service name is worker-authored
+ * too: `triage.json`'s rows are whatever `tri-1` wrote, and a row naming a pair
+ * the targets file never declared would put an attacker-chosen token into the
+ * next brief under the host's own voice. The host knows the legal pairs;
+ * nothing else has to be trusted.
  *
- * Order follows `declared` rather than the document, so two sweeps whose worker
- * happened to order its rows differently produce the same brief — the
+ * **A row whose `environment` is absent or `null` resolves to the sweep's ONE
+ * environment when there is exactly one** — every document written before this
+ * field existed carries no `environment` at all, and a sweep still covering
+ * only `do-cluster` must keep reading them exactly as before. **With more than
+ * one environment a `null` resolves to nothing**: there is no default among two
+ * or three, and a row that does not say which one it means cannot be keyed, so
+ * it carries nothing forward rather than guessing which environment it was
+ * about. This is the same asymmetry `TriageRow.environment` documents at its
+ * own declaration.
+ *
+ * A row for an (environment, service) pair the sweep does not declare carries
+ * nothing, exactly as an undeclared service always has. The first row for a
+ * given pair wins — a duplicate is a worker's replay, not a second opinion.
+ *
+ * Order follows `environments` — each in the sweep's own order, and each one's
+ * own services in ITS order — rather than the document, so two sweeps whose
+ * worker happened to order its rows differently produce the same brief: the
  * comparability §6.6 is about, applied to the one input a worker controls.
  */
 export function projectPreviousState(
   document: TriageDocument | null,
-  declared: readonly string[],
+  environments: readonly SweepEnvironment[],
 ): readonly PreviousServiceState[] {
   if (document === null) return [];
-  const byName = new Map<string, ObserverAssessment>();
+
+  /** What an absent/null row resolves to — the sweep's one environment, or nothing. */
+  const soleEnvironment = environments.length === 1 ? environments[0]!.name : null;
+
+  const byEnvironment = new Map<string, Map<string, ObserverAssessment>>();
   for (const row of document.services) {
     if (!ASSESSMENTS.has(row.assessment)) continue;
-    if (byName.has(row.service)) continue;
-    byName.set(row.service, row.assessment);
+    const environment = row.environment ?? soleEnvironment;
+    if (environment === null) continue;
+    let byService = byEnvironment.get(environment);
+    if (byService === undefined) {
+      byService = new Map<string, ObserverAssessment>();
+      byEnvironment.set(environment, byService);
+    }
+    if (byService.has(row.service)) continue;
+    byService.set(row.service, row.assessment);
   }
+
   const out: PreviousServiceState[] = [];
-  for (const name of declared) {
-    const assessment = byName.get(name);
-    if (assessment !== undefined) out.push({ service: name, assessment });
+  for (const environment of environments) {
+    const byService = byEnvironment.get(environment.name);
+    if (byService === undefined) continue;
+    for (const service of environment.services) {
+      const assessment = byService.get(service.name);
+      if (assessment !== undefined) {
+        out.push({ environment: environment.name, service: service.name, assessment });
+      }
+    }
   }
   return out;
 }
@@ -1362,15 +1406,20 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
   const single = environments.length === 1 ? environments[0]! : null;
 
   /*
-   * FLAT, ACROSS EVERY ENVIRONMENT, in list order. Keying these by
-   * (environment, service) — so two environments cannot collide on a shared
-   * service name — is task 4.1b's job (Phase 4); this round widens the
-   * envelope's SHAPE only and does not fix the keying.
+   * FLAT, ACROSS EVERY ENVIRONMENT, in list order — but only for the audit
+   * below, which asks "is this string a name the HOST put in the brief"
+   * (`workerAuthoredStrings`'s `hostNames`/`hostTokens`) and does not care
+   * which environment a name belongs to: a name the host declared anywhere is
+   * not prose the worker wrote, wherever in the brief it turns up. The
+   * previous-state projection does not use this list — it needs a KEYED input,
+   * so it is handed `environments` itself, below, because that one DOES have
+   * to tell `do-cluster`'s `grafana` from `docker-host`'s
+   * (SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b).
    */
-  const declared = environments.flatMap((e) => e.services.map((s) => s.name));
+  const declaredNames = environments.flatMap((e) => e.services.map((s) => s.name));
   const declaredNamespaces = environments.flatMap((e) => e.services.map((s) => s.namespace));
 
-  const carried = projectPreviousState(input.previousDocument, declared);
+  const carried = projectPreviousState(input.previousDocument, environments);
   const rule = input.verdictRule ?? TRIAGE_VERDICT_RULE;
   const seats = input.seats ?? TRIAGE_CONSOLE_ASPECTS;
 
@@ -1419,18 +1468,63 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
           ]),
         ];
 
+  /**
+   * Single-environment renders exactly what it always has — `- service:
+   * assessment` — so the byte-for-byte guarantee holds without a branch that
+   * could drift. More than one environment prefixes each line with the
+   * environment it belongs to, on the same D21 reasoning `PreviousServiceState`
+   * carries the field for: a bare service name stopped being unique the moment
+   * `do-cluster` and `docker-host` could both carry a `grafana`.
+   */
   const previousLines =
     carried.length === 0
       ? [
-          "There is no previous state for this environment. Treat every service as unseen; do",
+          single !== null
+            ? "There is no previous state for this environment. Treat every service as unseen; do"
+            : "There is no previous state for these environments. Treat every service as unseen; do",
           "not infer one from anything above this line in your context.",
         ]
       : [
-          "One line per service, and these two fields are the WHOLE of what crossed from the",
+          single !== null
+            ? "One line per service, and these two fields are the WHOLE of what crossed from the"
+            : "One line per service, and these three fields are the WHOLE of what crossed from the",
           "last sweep. No finding, no recommendation and no sentence from the last report is",
           "here, deliberately — it is context for what to look at, never a finding to confirm.",
           "",
-          ...carried.map((p) => `- ${p.service}: ${p.assessment}`),
+          ...carried.map((p) =>
+            single !== null
+              ? `- ${p.service}: ${p.assessment}`
+              : `- ${p.environment}/${p.service}: ${p.assessment}`,
+          ),
+        ];
+
+  /**
+   * D21's collator-facing half — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
+   * **Empty for one environment**, so `single`'s branch above already
+   * guarantees this envelope's text does not change: an empty array splices
+   * into nothing, which is what keeps the single-environment brief
+   * byte-for-byte identical to what it rendered before this field existed.
+   *
+   * More than one environment gets told the CONSEQUENCE rather than left to
+   * infer it from `## This sweep`'s bulleted list above: `do-cluster` and
+   * `docker-host` can each declare a `grafana`, so a row this collator writes
+   * without `environment` cannot be told from the other's, and the verdict
+   * that keys on the pair has nothing to key it with. The legal values are
+   * spelled out explicitly — never "as shown above" — because the only other
+   * place this envelope names an environment on its own line pairs it with
+   * `(${environments[0]?.kind ?? "kind"})`, and that parenthesised kind is
+   * this brief's own annotation, not part of the name.
+   */
+  const environmentFieldNote: readonly string[] =
+    single !== null
+      ? []
+      : [
+          "",
+          `This sweep covers more than one environment, so every row you write in`,
+          `\`${TRIAGE_DOCUMENT_FILE}\` must also carry \`environment\`, spelled exactly as this`,
+          `envelope names it — one of: ${environments.map((e) => `\`${e.name}\``).join(", ")}. Never`,
+          `the kind shown in parentheses beside it above: that is this brief's own annotation, not`,
+          `part of the name.`,
         ];
 
   const brief = [
@@ -1449,6 +1543,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     "",
     `**The two field names are \`sweep_id\` and \`window_opened_at\`, spelled exactly that way.**`,
     `Your own \`${TRIAGE_DOCUMENT_FILE}\` carries \`sweep_id\`, copied from the row above.`,
+    ...environmentFieldNote,
     "",
     `**You do not have to tell your observers to echo those two fields, and you should not spend`,
     `your brief trying.** The host appends the observer's reporting contract to every brief you`,
@@ -1510,19 +1605,19 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
   ].join("\n");
 
   /*
-   * `declared` and `declaredNamespaces` (computed above, flat across every
-   * environment) are passed to the audit so a previous document that merely
-   * ECHOED them — `unaccounted[]` is exactly that — is not mistaken for prose
-   * crossing between sweeps. The host wrote these names into this very brief.
-   * The namespaces travel with the names because the host writes both into
-   * every brief, and a `selector` that degraded to either is a token the host
-   * handed over rather than prose the worker wrote — see
+   * `declaredNames` and `declaredNamespaces` (computed above, flat across
+   * every environment) are passed to the audit so a previous document that
+   * merely ECHOED them — `unaccounted[]` is exactly that — is not mistaken for
+   * prose crossing between sweeps. The host wrote these names into this very
+   * brief. The namespaces travel with the names because the host writes both
+   * into every brief, and a `selector` that degraded to either is a token the
+   * host handed over rather than prose the worker wrote — see
    * `workerAuthoredStrings`, and the three sweeps 2026-09-09 spent refusing on
    * `alert-notifier`.
    */
   const issues = [
-    ...envelopeIssues(title, input.previousDocument, declared, declaredNamespaces),
-    ...envelopeIssues(brief, input.previousDocument, declared, declaredNamespaces),
+    ...envelopeIssues(title, input.previousDocument, declaredNames, declaredNamespaces),
+    ...envelopeIssues(brief, input.previousDocument, declaredNames, declaredNamespaces),
   ];
   if (issues.length > 0) {
     throw new SweepEnvelopeError(
@@ -1831,8 +1926,8 @@ export interface SweepProducerDeps {
    *
    * **It takes the collator as of 2026-09-12, and a zero-arg version was a silent
    * half-blinding.** `renderSweepEnvelope` projects this through
-   * `projectPreviousState(previousDocument, declared)`, which keeps only rows
-   * whose service is in THIS pair's slice. Each collator writes a document
+   * `projectPreviousState(previousDocument, environments)`, which keeps only
+   * rows whose service is in THIS pair's slice. Each collator writes a document
    * covering only its own half, so handing `tri-2` the document `tri-1` wrote
    * leaves nothing that survives the projection: `tri-2` would open every sweep
    * with *"There is no previous state for this environment"* and lose the carried
