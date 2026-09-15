@@ -1034,6 +1034,144 @@ describe("per-kind partitioning (SRD-TRIAGE-MIXED-OBSERVERS §5, §10, D8)", () 
     expect(outcome.undeclared).toEqual(["phantom-service"]);
     expect(calls).toEqual([]);
   });
+
+  /**
+   * ── An assignment that cannot belong to this sweep refuses everything,
+   * BEFORE any dispatch — even when it claims nothing at all.
+   *
+   * Before this fix, an orphaned worker claiming an EMPTY share was invisible
+   * to every check in this file: `checkTriagePartition` against that worker's
+   * (absent) declared group sees nothing missing and nothing undeclared —
+   * there is nothing to compare — so the old per-kind loop answered
+   * `complete` for it, and the old post-loop net only ever looked at claimed
+   * services. `{worker: "obs-td1", services: []}` on a k8s-only sweep reached
+   * `Promise.all` in full, alongside the legitimate k8s slices — the exact
+   * partial fan-out this module exists to prevent. Each fixture below proves
+   * the opposite with a dispatch spy: zero calls, even though every OTHER
+   * assignment in the same partition is individually complete and legal.
+   */
+  describe("an orphaned assignment refuses the whole partition before any dispatch", () => {
+    test("a k8s-only declared set refuses a docker seat claiming nothing (obs-td1: [])", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        // docker is not declared at all — this seat cannot belong to this sweep,
+        // whether or not it claims a service.
+        assign("obs-td1"),
+      ];
+
+      const outcome = await dispatchPartition(
+        [{ kind: "k8s", services: K8S_SERVICES }],
+        mixed,
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(calls).toEqual([]);
+    });
+
+    /*
+     * PartitionFault promises all three lists on every refusal. An orphan wins
+     * the code, but the declared service nobody claimed and the invented one
+     * are still reported.
+     */
+    test("an orphan refusal still reports the kinds' missing and undeclared services", async () => {
+      const { dispatch, calls } = spy();
+      const outcome = await dispatchPartition(
+        [{ kind: "k8s", services: K8S_SERVICES }],
+        [assign("obs-t1", "ntfy"), assign("obs-t2", "prometheus", "phantom"), assign("tri-1")],
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(outcome.missing).toEqual(["grafana"]);
+      expect(outcome.undeclared).toEqual(["phantom"]);
+      expect(outcome.reason).toContain("tri-1");
+      expect(calls).toEqual([]);
+    });
+
+    test("the collator claiming nothing (tri-1: []) is refused, not silently complete", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        assign("tri-1"),
+      ];
+
+      const outcome = await dispatchPartition(
+        [{ kind: "k8s", services: K8S_SERVICES }],
+        mixed,
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(calls).toEqual([]);
+    });
+
+    test("k8s plus docker declared still refuses a vm seat claiming nothing (obs-tv1: [])", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        assign("obs-td1", "cadvisor"),
+        assign("obs-td2", "node_exporter"),
+        // vm is not declared in this sweep — this seat cannot belong to it.
+        assign("obs-tv1"),
+      ];
+
+      const outcome = await dispatchPartition(
+        [
+          { kind: "k8s", services: K8S_SERVICES },
+          { kind: "docker", services: DOCKER_SERVICES },
+        ],
+        mixed,
+        dispatch,
+      );
+
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind !== "refused") return;
+      expect(outcome.code).toBe("partition_incomplete");
+      expect(calls).toEqual([]);
+    });
+
+    /**
+     * THE POSITIVE CONTROL FOR THIS BLOCK: an empty claim is legal — even
+     * still dispatched — when its worker's kind DOES have a declared group.
+     * Without this, a broken implementation that refused every empty share
+     * (declared or not) would pass all three fixtures above for the wrong
+     * reason.
+     */
+    test("an empty claim on a DECLARED kind stays legal and still dispatches", async () => {
+      const { dispatch, calls } = spy();
+      const mixed = [
+        assign("obs-t1", "ntfy"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-t3", "grafana"),
+        // obs-td1 holds every docker service; obs-td2 is idle — legal, same as
+        // §6.5's "an idle observer is not an error".
+        assign("obs-td1", "cadvisor", "node_exporter"),
+        assign("obs-td2"),
+        assign("obs-tv1", "vm-1"),
+      ];
+
+      const outcome = await dispatchPartition(MIXED_DECLARED, mixed, dispatch);
+
+      expect(outcome.kind).toBe("dispatched");
+      expect([...calls.map((c) => c.worker)].sort()).toEqual(
+        ["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"].sort(),
+      );
+    });
+  });
 });
 
 /**

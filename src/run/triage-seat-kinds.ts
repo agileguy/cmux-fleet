@@ -41,8 +41,18 @@ export const TRIAGE_SEAT_KINDS: Readonly<Record<string, TriageEnvironmentKind>> 
  * rather than guess: guessing a kind for an unrecognised worker would let a
  * misconfigured or mistyped id silently join whichever kind the guess landed
  * on, instead of surfacing as the unrecognised seat it actually is.
+ *
+ * **Own properties only.** `TRIAGE_SEAT_KINDS` is a plain object literal —
+ * source-legible, the same reason every seat table in this codebase is one —
+ * and a plain object's prototype chain carries members like `toString`,
+ * `constructor` and `__proto__` that a bracket lookup finds even though this
+ * table never wrote them. `worker` is a string a container chose, not one
+ * this table wrote, so `Object.hasOwn` is what keeps `seatKind("toString")`
+ * answering `null` instead of quietly returning `Object.prototype.toString`
+ * typed — and accepted downstream — as a `TriageEnvironmentKind`.
  */
 export function seatKind(worker: string): TriageEnvironmentKind | null {
+  if (!Object.hasOwn(TRIAGE_SEAT_KINDS, worker)) return null;
   return TRIAGE_SEAT_KINDS[worker] ?? null;
 }
 
@@ -52,13 +62,16 @@ export function seatKind(worker: string): TriageEnvironmentKind | null {
  *
  * A seat `TRIAGE_SEAT_KINDS` does not name is excluded from every kind's
  * result — it is not a member of `"k8s"`, `"docker"` or `"vm"`, because it
- * has no kind at all rather than an unspecified one.
+ * has no kind at all rather than an unspecified one. Routed through
+ * {@link seatKind} rather than a bracket lookup of its own, so a seat whose
+ * worker id collides with an inherited `Object.prototype` member is excluded
+ * here for the same reason it is excluded there.
  */
 export function seatsOfKind(
   kind: TriageEnvironmentKind,
   seats: readonly AspectSeat[] = TRIAGE_CONSOLE_ASPECTS,
 ): readonly AspectSeat[] {
-  return seats.filter((seat) => TRIAGE_SEAT_KINDS[seat.worker] === kind);
+  return seats.filter((seat) => seatKind(seat.worker) === kind);
 }
 
 /**
@@ -68,11 +81,12 @@ export function seatsOfKind(
  * For computing `observerBlocked` per environment: a sweep's join reports one
  * flat blocked-worker list, and splitting it through this function per kind is
  * what keeps a blocked k8s seat from counting against the docker or vm
- * environment.
+ * environment. Routed through {@link seatKind} for the same own-property
+ * reason {@link seatsOfKind} is.
  */
 export function workersOfKind(
   kind: TriageEnvironmentKind,
   workers: readonly string[],
 ): readonly string[] {
-  return workers.filter((worker) => TRIAGE_SEAT_KINDS[worker] === kind);
+  return workers.filter((worker) => seatKind(worker) === kind);
 }

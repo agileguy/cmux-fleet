@@ -393,6 +393,65 @@ export interface DeclaredKindGroup {
 }
 
 /**
+ * Refuse one or more assignments whose worker cannot belong to this sweep at
+ * all — see {@link dispatchPartition}'s "refused FIRST" section for why this
+ * runs before any per-kind check, and why it fires on an empty claim exactly
+ * as it does on a populated one.
+ *
+ * Spends `partition_incomplete` rather than a code of its own, on the same
+ * reasoning the module docblock gives for an invented service: this is a
+ * third way a partition can fail that neither `partition_incomplete` nor
+ * `partition_duplicate` names precisely, and a third code is not this
+ * module's to add unilaterally (`DispatchRefusal` lives in
+ * `dispatch-request.ts`). Every service an orphaned worker claims is,
+ * definitionally, a service no group in `declared` can vouch for — the same
+ * shape of fault an invented service is, just discovered by worker instead of
+ * by name — so it is reported the same way: in `undeclared`, unique and in
+ * first-claim order across the offending assignments.
+ *
+ * `perKind` is each declared kind's own check over the assignments that DO
+ * belong, and its lists are merged in. {@link PartitionFault} promises all
+ * three lists are populated on every refusal whichever code won, so a sweep
+ * refused for an orphan still reports the declared services nobody claimed.
+ */
+function refuseOrphanedAssignments(
+  orphaned: readonly PartitionAssignment[],
+  perKind: readonly PartitionCheck[],
+): PartitionFault {
+  const refusals = perKind.flatMap((check) => (check.kind === "refused" ? [check] : []));
+  const undeclared: string[] = [];
+  const seen = new Set<string>();
+  const note = (service: string): void => {
+    if (seen.has(service)) return;
+    seen.add(service);
+    undeclared.push(service);
+  };
+  for (const assignment of orphaned) assignment.services.forEach(note);
+  for (const check of refusals) check.undeclared.forEach(note);
+
+  const offenders = orphaned
+    .map((assignment) => {
+      const kind = seatKind(assignment.worker);
+      return kind === null
+        ? `${assignment.worker} (no recognised kind)`
+        : `${assignment.worker} (${kind}, not declared for this sweep)`;
+    })
+    .join(", ");
+
+  return {
+    code: "partition_incomplete",
+    missing: refusals.flatMap((check) => check.missing),
+    duplicated: refusals.flatMap((check) => check.duplicated),
+    undeclared,
+    reason:
+      `${plural(orphaned.length, "assignment")} cannot belong to this sweep: ${offenders}. ` +
+      `A worker with no kind, or with a kind this sweep declares no environment for, is never ` +
+      `a legitimate member of the partition, whatever it does or does not claim. Nothing was ` +
+      `checked kind-by-kind and nothing was dispatched.`,
+  };
+}
+
+/**
  * Check the partition, and dispatch it ONLY if every kind is complete.
  *
  * **This function exists so that "validate before dispatching any of it" is a
@@ -409,7 +468,40 @@ export interface DeclaredKindGroup {
  * Dispatch is an argument, which is what lets Phase 5 grade the ordering with a
  * spy over an array and *"no container and no network"*.
  *
- * ## Partitioning runs once per kind, fixed order, first refusal wins (D8)
+ * ## An assignment that cannot belong to this sweep is refused FIRST, before
+ * any per-kind check runs (D8; the fix for the gap below)
+ *
+ * Every assignment is checked against `declaredByKind` before the fixed-order
+ * loop even starts: a worker `seatKind` does not recognise at all (`tri-1`, a
+ * typo, an id from another console) and a worker whose kind IS recognised but
+ * has no group in `declared` at all (a docker seat dispatched on a k8s-only
+ * sweep) are the same mistake wearing two shapes — neither can be a
+ * legitimate member of this partition, independent of what, or whether,
+ * it claims. {@link refuseOrphanedAssignments} refuses both shapes together,
+ * naming every offending worker and its kind (or its absence of one), before
+ * a single per-kind check runs and before anything is dispatched.
+ *
+ * **This has to run BEFORE the per-kind loop, not after it, because an empty
+ * claim makes the old placement blind.** `checkTriagePartition([], [{worker,
+ * services: []}])` reports nothing missing and nothing undeclared — there is
+ * nothing to compare an empty declared set against an empty claim — so a
+ * kind-scoped check can never be the thing that catches a worker with no
+ * bucket to be checked IN, the moment that worker claims nothing. That used to
+ * be exactly the gap here: a docker seat dispatched on a k8s-only sweep with
+ * an empty share sailed through the fixed-order loop (docker has no declared
+ * group, but the check over it still answered `complete`), sailed through the
+ * old post-loop net (which only ever inspected CLAIMED services), and reached
+ * `Promise.all` — the partial fan-out this function's whole argument is
+ * against, for the one case that argument does not mention: an idle orphan.
+ * Checking every assignment's eligibility up front, independent of its
+ * claims, closes that regardless of what the worker does or does not claim.
+ *
+ * A worker whose kind DOES have a group in `declared` is never touched by
+ * this check, however little it claims — an idle seat of a *declared* kind
+ * stays legal, exactly as {@link checkTriagePartition}'s own docblock says an
+ * idle observer is not an error.
+ *
+ * ## Partitioning then runs once per kind, fixed order, first refusal wins (D8)
  *
  * `assignments` is split by `seatKind` (`triage-seat-kinds.ts`) into one bucket
  * per {@link TriageEnvironmentKind}, and each bucket is checked against that
@@ -421,23 +513,22 @@ export interface DeclaredKindGroup {
  * order `k8s`, `docker`, `vm` and the first refusal stops the sweep — nothing is
  * dispatched unless all three are complete. A kind present in neither
  * `declared` nor `assignments` is skipped rather than checked (it would report
- * `complete` either way; skipping just avoids a pointless empty check).
+ * `complete` either way; skipping just avoids a pointless empty check). A kind
+ * absent from `declared` but present in `assignments` — the combination that
+ * used to reach this loop and slip through it on an empty claim — can no
+ * longer arrive here at all: the up-front check above already refused any
+ * assignment that would have put it there.
  *
- * **An assignment is never silently dropped.** A worker `seatKind` does not
- * recognise at all — `tri-1`, a typo, an id from another console — falls
- * through every kind bucket, so after the three fixed checks it is checked one
- * more time against an empty declared set: every service it claims comes back
- * `undeclared`, exactly the same refusal an invented service always gets. This
- * catches the same shape of mistake a worker whose kind HAS no declared group
- * already gets caught by inside the fixed-order loop (§5's *"a k8s service, a
- * docker container and a VM unit never share a request"*), for the one worker
- * id that has no kind to check it under at all.
+ * **No assignment is silently dropped.** Every assignment is accounted for by
+ * one of the two checks above: the up-front one refuses a worker with no kind
+ * or no declared group for its kind, and the fixed-order loop below refuses
+ * anything a worker of a genuinely declared kind claims wrongly (§5's *"a k8s
+ * service, a docker container and a VM unit never share a request"*).
  *
- * **Serial, deliberately.** `relayPass` is serial already (§6.5) and the three
- * dispatches are cheap next to the observer passes they start, so there is no
- * concurrency to buy here — while `Promise.all` would start every dispatch before
- * the first rejection could stop the others, quietly reintroducing the partial
- * fan-out this function's whole argument is against.
+ * **Every check runs before the first dispatch, and the dispatches then run
+ * concurrently.** The comment above the `Promise.all` below says why the
+ * fan-out is concurrent; the refusals above are what keep that from being a
+ * partial fan-out.
  */
 export async function dispatchPartition<T>(
   declared: readonly DeclaredKindGroup[],
@@ -448,31 +539,43 @@ export async function dispatchPartition<T>(
     declared.map((group) => [group.kind, group.services]),
   );
 
+  /*
+   * See the docblock's "refused FIRST" section: a worker with no kind, or
+   * with a kind this sweep declares no group for, is refused here — before
+   * the fixed-order loop, and independent of what it claims — rather than
+   * relying on the per-kind checks below to catch it only when it claims
+   * something.
+   */
+  const orphaned = assignments.filter((a) => {
+    const kind = seatKind(a.worker);
+    return kind === null || !declaredByKind.has(kind);
+  });
+  if (orphaned.length > 0) {
+    const legitimate = assignments.filter((a) => !orphaned.includes(a));
+    const perKind = declared.map((group) =>
+      checkTriagePartition(
+        group.services,
+        legitimate.filter((a) => seatKind(a.worker) === group.kind),
+      ),
+    );
+    return { kind: "refused", ...refuseOrphanedAssignments(orphaned, perKind) };
+  }
+
   for (const kind of TRIAGE_ENVIRONMENT_KINDS) {
     const declaredForKind = declaredByKind.get(kind) ?? [];
     const assignmentsForKind = assignments.filter((a) => seatKind(a.worker) === kind);
     // Not present: nothing declared for this kind and no assignment claims to
     // be one. Checking it anyway would always answer "complete" (an empty
     // declared set against an empty claim set), so skipping is an
-    // optimisation, not a behaviour change.
+    // optimisation, not a behaviour change. By construction (the orphan check
+    // above already ran) `assignmentsForKind` can only be non-empty here when
+    // `declaredForKind` is too, so this condition is really just "is this
+    // kind entirely absent from the sweep".
     if (declaredForKind.length === 0 && assignmentsForKind.length === 0) continue;
     const check = checkTriagePartition(declaredForKind, assignmentsForKind, {
       kind,
       width: assignmentsForKind.length,
     });
-    if (check.kind === "refused") return check;
-  }
-
-  /*
-   * The safety net for a worker `seatKind` cannot place in any of the three
-   * kinds above — see the docblock's "never silently dropped" paragraph. No
-   * kind names this bucket, so it is checked with no declared set of its own
-   * and (deliberately) no `context`: today's default wording is the correct
-   * one for a refusal that is not "for" any kind.
-   */
-  const unrecognised = assignments.filter((a) => seatKind(a.worker) === null);
-  if (unrecognised.length > 0) {
-    const check = checkTriagePartition([], unrecognised);
     if (check.kind === "refused") return check;
   }
 

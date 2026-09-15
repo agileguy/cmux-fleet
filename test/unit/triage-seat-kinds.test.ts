@@ -99,6 +99,20 @@ describe("seatKind", () => {
     expect(seatKind("rev-arch-1")).toBeNull();
     expect(seatKind("obs-d1")).toBeNull();
   });
+
+  /*
+   * 4. `TRIAGE_SEAT_KINDS` is a plain object literal, so a bracket lookup
+   * alone (`TRIAGE_SEAT_KINDS[worker]`) resolves an inherited
+   * `Object.prototype` member for a worker id that happens to collide with
+   * one — even though this table never named that worker. A container picks
+   * `worker`, not this table, so these three ids must all read as "no kind"
+   * rather than as whatever `Object.prototype` carries under that name.
+   */
+  test("refuses inherited Object.prototype members disguised as worker ids", () => {
+    expect(seatKind("toString")).toBeNull();
+    expect(seatKind("constructor")).toBeNull();
+    expect(seatKind("__proto__")).toBeNull();
+  });
 });
 
 describe("seatsOfKind", () => {
@@ -136,6 +150,20 @@ describe("seatsOfKind", () => {
     );
     expect(new Set(byKind).size).toBe(byKind.length);
   });
+
+  /*
+   * A seat list a container built, so a worker id colliding with an
+   * inherited `Object.prototype` member must be excluded from every kind —
+   * the same guarantee `seatKind` makes, carried through the filter.
+   */
+  test("excludes a seat whose worker id is an inherited Object.prototype member", () => {
+    const seats: readonly AspectSeat[] = [
+      { worker: "obs-t1", aspect: "slice1" },
+      { worker: "toString", aspect: "bogus" },
+      { worker: "constructor", aspect: "bogus" },
+    ];
+    expect(seatsOfKind("k8s", seats).map((seat) => seat.worker)).toEqual(["obs-t1"]);
+  });
 });
 
 describe("workersOfKind", () => {
@@ -150,6 +178,11 @@ describe("workersOfKind", () => {
     expect(workersOfKind("k8s", [])).toEqual([]);
     expect(workersOfKind("docker", [])).toEqual([]);
     expect(workersOfKind("vm", [])).toEqual([]);
+  });
+
+  /* Same guarantee as `seatKind`'s own-property test, carried through the filter. */
+  test("excludes an inherited Object.prototype member from a flat worker-id list", () => {
+    expect(workersOfKind("k8s", ["obs-t1", "toString", "__proto__"])).toEqual(["obs-t1"]);
   });
 });
 
