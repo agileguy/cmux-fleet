@@ -1300,7 +1300,10 @@ jobs:
     # probes structurally incapable of naming different models — inheritance,
     # not two lines that agree today.
     env:
-      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
+      # [2026-09-15] The live endpoint moved from the operator's laptop to a
+      # different self-hosted server. That server serves `gemma-4-26b-a4b-it`
+      # (no `-bf16` suffix) and only that name, so the pin below moved to match.
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -1489,6 +1492,12 @@ jobs:
           # name the server does not list, so a typo here is a red job and not a
           # silent fallback.
           #
+          # [2026-09-15] The paragraph above is superseded, and left rather than
+          # rewritten: CI and the fleet no longer dial the same server (see this
+          # job's `env:` block), so the pin now matches the model the server CI
+          # dials serves — it is no longer necessarily the model `fleet.yaml`'s
+          # live seats run.
+          #
           # [MOVED 2026-09-09] The assignment itself now lives at JOB level — see
           # the job header. The warmup step needs the same value and used to
           # hardcode a different one; inheriting is what stops the two drifting.
@@ -1578,7 +1587,11 @@ jobs:
       # about, made deliberately and left visible rather than dressed up: the
       # chain measurement for gemma is what THIS JOB is now for, and if the
       # chain goes intermittently red the diagnosis is written directly above.
-      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
+      #
+      # [2026-09-15] The live endpoint moved from the operator's laptop to a
+      # different self-hosted server. That server serves `gemma-4-26b-a4b-it`
+      # (no `-bf16` suffix) and only that name, so the pin below moved to match.
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

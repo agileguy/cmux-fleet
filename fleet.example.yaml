@@ -174,7 +174,7 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
   #     allow:
   #       - {host: 192.168.86.49, port: 8000}
   api_key_env: OMLX_API_KEY  # self-hosted server credential, injected by the supervisor
-  model: gemma-4-26b-a4b-it-bf16
+  model: gemma-4-26b-a4b-it
   thinking: medium
   models_allowlist:          # checked against GET /v1/models at `up`
     # The `triage` console's two seats, both LOCAL — see the role below.
@@ -195,7 +195,13 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
     # this change: `config validate CLI (ISC-58) > exits 0 on the shipped
     # example` went red the moment the seats moved and this line had not. The
     # guard did its job; the note above predicted the shape precisely.
-    - gemma-4-26b-a4b-it-bf16
+    #
+    # [2026-09-15] Moved again, this time dropping only the `-bf16` suffix:
+    # the live endpoint moved to the operator's other self-hosted server,
+    # which serves `gemma-4-26b-a4b-it` and only that name. The warning above
+    # still applies — this entry has to move in lockstep with every `model:`
+    # pin above and below or `up` refuses the seats that outrun it.
+    - gemma-4-26b-a4b-it
   require_native_tool_calls: true   # `up` probes each model — see §5.9
   #
   # PER-MODEL CONTEXT WINDOWS live on a PROVIDER block, so they appear under
@@ -511,7 +517,7 @@ defaults:
 roles:
   # ---- SRE / cloud-ops: the primary role set ----
   sre:                                    # diagnoses AND remediates
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: base                       # gcloud/kubectl/helm are in every image
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -522,7 +528,7 @@ roles:
                                            # `investigator` in this same change (D2);
                                            # deploy watches AND ad-hoc service inquiries,
                                            # one skill bundle, `mode` picks the shape
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     thinking: high                        # reconciling four disagreeing channels is the job
     toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
     tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox artifact only
@@ -546,7 +552,7 @@ roles:
                                            # in the target-side credential, not in this role, so
                                            # there is no cloud_access, no kubectl and no verb gate
                                            # to configure here — see roles/observer-docker.md
-    model: gemma-4-26b-a4b-it-bf16        # the same local model as observer-k8s — §5.5
+    model: gemma-4-26b-a4b-it        # the same local model as observer-k8s — §5.5
     thinking: high
     toolchain: base                       # deliberately NO `docker` CLI in the image — a default
                                            # `docker ps` would dial /var/run/docker.sock, the
@@ -570,7 +576,7 @@ roles:
     append_system_prompt_file: ./roles/observer-docker.md
   observer-vm:                            # read-only diagnostic role for a VM — SRD-OBSERVER-ROLES
                                            # §6; twin of observer-docker, reached via SSH only
-    model: gemma-4-26b-a4b-it-bf16        # same model as observer-docker
+    model: gemma-4-26b-a4b-it        # same model as observer-docker
     thinking: high
     toolchain: base                       # observe-vm and observe-ssh live in the shared base layer
     tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox pair only
@@ -588,7 +594,7 @@ roles:
                                            # role and inherits rpc here
     append_system_prompt_file: ./roles/observer-vm.md
   verifier:                               # confirms a remediation actually worked
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: base
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -598,13 +604,13 @@ roles:
 
   # ---- code roles: available, secondary ----
   engineer:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: node
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/engineer.md
   reviewer:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     thinking: high
     toolchain: base
     # READ PLUS `submit_report`, and NO write, NO bash, NO edit.
@@ -683,7 +689,7 @@ roles:
     append_system_prompt_file: ./roles/reviewer.md
     isolation: shared-ro
   tester:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: python
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -691,7 +697,7 @@ roles:
 
   # ---- ticketing: holds a write credential for a system OUTSIDE the fleet ----
   ticketing:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     # `base` is deliberate and sufficient. The worker talks to the ticket API as
     # plain REST with `curl` and parses with `jq`, both of which are in every
     # image (`docker/Dockerfile:25`). There is NO vendor CLI and there is not
@@ -777,7 +783,7 @@ roles:
     # `ci.yml`'s `PIFLEET_OMLX_MODEL` and ISC-1116: a CI job that cold-loads a
     # model the fleet is NOT running adds a second resident model to a capped
     # oMLX and starves the live seats. This line is the anchor that guard reads.
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     thinking: high                        # collating one observer's report into one document IS the job
     toolchain: base                       # it reads artifacts; there is nothing to build
     # `reviewer`'s grant above, copied deliberately — the same set the `review`

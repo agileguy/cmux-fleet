@@ -128,8 +128,14 @@ const TRIAGE_SEATS = [
  * oMLX worker to bf16 on 2026-09-07, SRD §11 Q8's tool-argument ceilings were
  * measured on this model, and CI now generates against it too — see ISC-1116 at
  * the foot of this file for why those three have to be the same string.
+ *
+ * [CHANGED 2026-09-15] `gemma-4-26b-a4b-it-bf16` -> `gemma-4-26b-a4b-it`. The
+ * live endpoint CI dials moved to the operator's other self-hosted server,
+ * which serves only the non-bf16 name — see ci.yml's `PIFLEET_OMLX_MODEL` and
+ * ISC-290. The privacy argument above is still why this is a LOCAL model;
+ * only the served name changed, not the reasoning for keeping it local.
  */
-const TRIAGE_MODEL = "gemma-4-26b-a4b-it-bf16";
+const TRIAGE_MODEL = "gemma-4-26b-a4b-it";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -428,7 +434,7 @@ describe("worked example", () => {
  *
  * THE TRAP THIS BLOCK IS WRITTEN AGAINST, named because falling into it makes
  * the whole block worthless: a criterion that only asserts "the two seats
- * resolve to `gemma-4-26b-a4b-it-bf16`" passes just as happily if someone deletes
+ * resolve to `gemma-4-26b-a4b-it`" passes just as happily if someone deletes
  * the seats entirely, and an absence asserted over a filtered set is satisfied
  * by an empty set. So every assertion here is made against `TRIAGE_SEATS` —
  * a list this file NAMES — and the seats' presence is checked before their
@@ -3777,9 +3783,29 @@ describe("CI generates against the model the fleet already runs (ISC-1116)", () 
 
     // Model-shaped: a vendor-ish name carrying a quantisation or size token.
     // Deliberately broad — this should trip on a name nobody anticipated.
+    //
+    // [2026-09-15] The gemma branch USED TO carry the expected model as a
+    // literal inside a negative lookahead (`(?!26b-a4b-it-bf16)`, later
+    // `(?!26b-a4b-it\b)`). Both versions were wrong the same way: `[\w.]`
+    // excludes `-`, so `gemma-[\w.]+-` can only ever anchor at `gemma-4-`,
+    // which means the lookahead is tested at exactly ONE position and a `\b`
+    // there holds for every suffix, not just the one named. The effect was
+    // silent — `gemma-4-26b-a4b-it-bf16`, gabe's `-nvfp4` alias, and any
+    // other `gemma-4-26b-a4b-it-*` variant all escaped the guard once the
+    // exact literal stopped matching what was active, and the suite stayed
+    // green because nothing in `ci.yml` named one of them at the time.
+    //
+    // The fix drops the literal entirely: the gemma branch now matches ANY
+    // `gemma-<token>(-<token>)+` shape, and `expected` — already read from
+    // `seatModels()` above — is what excludes the fleet's own model, by
+    // exact string equality, after matching rather than inside the pattern.
+    // No model name is compiled into this regex, so the next rename cannot
+    // reopen this hole the way the last two attempts did.
     const OTHERS =
-      /\b(?:GLM-[\w.]+-Air[\w-]*|Qwen[\w.]*-\d+B[\w-]*|gpt-oss-[\w-]+|Llama-[\w.]+-\d+B[\w-]*|gemma-[\w.]+-(?!26b-a4b-it-bf16)[\w-]+)\b/g;
-    const found = [...new Set([...active.matchAll(OTHERS)].map((m) => m[0]))];
+      /\b(?:GLM-[\w.]+-Air[\w-]*|Qwen[\w.]*-\d+B[\w-]*|gpt-oss-[\w-]+|Llama-[\w.]+-\d+B[\w-]*|gemma-[\w.]+(?:-[\w.]+)+)\b/g;
+    const found = [...new Set([...active.matchAll(OTHERS)].map((m) => m[0]))].filter(
+      (name) => name !== expected,
+    );
     expect(
       found,
       `ci.yml can load ${found.join(", ")} beside ${expected}. That server is shared with ` +
