@@ -25,16 +25,28 @@
  *     `indeterminate`, `blocked`, `not_attempted`)
  *
  *  9. the skill's survey-then-filter rule ("Surveying containers when the brief names none"):
- *     the worked command's jq projection keeps only fields that are in the real `ps` template
- *     (read from `docker-forced-command`'s `PS_FORMAT` literal, never hard-coded here), the
- *     worked command preserves `observe-docker`'s exit code through the pipe (`pipefail` or
- *     `PIPESTATUS`), and the input table's `selector` default names the rule
+ *     the worked command's jq projection is exactly `{Names, State, Status}` (set equality, still
+ *     checked as a subset of `PS_FORMAT`'s fields read from `docker-forced-command`, never
+ *     hard-coded here); the worked command, run under `bash` with `observe-docker` stubbed to
+ *     print a partial line and exit 255, actually carries THAT captured status through rather
+ *     than `jq`'s (a piped `pipefail` form cannot — pipefail reports the RIGHTMOST failure); and
+ *     the input table's `selector` default names the rule
  *
  * 10. the skill's "where the tokens are" passage: the variable it tells the worker to read for
  *     the docker kind equals the one `docker/observe-ssh` assigns in its `docker)` case arm (read
  *     from that file's text, never hard-coded here), the worked listing command reads that
- *     variable rather than a literal `/secrets/...` path, and the input table's `target` row
- *     points at the passage
+ *     variable rather than a literal `/secrets/...` path (matched as a whole identifier, not a
+ *     prefix), and the input table's `target` row points at the passage
+ *
+ * 11. the token-listing `awk` command, extracted from the skill, actually runs under `sh` against
+ *     a constructed targets file (a `#` comment line, a blank line, space- and tab-separated
+ *     fields, two targets) and prints exactly the two tokens, one per line — never the host, port
+ *     or user
+ *
+ * 12. a `docker/observe-ssh` refusal that names the targets file and a line number
+ *     (`<targets_var> line <n>`) is documented as a fleet configuration fault — `blocked`,
+ *     `indeterminate`, no retry — kept apart from the generic "your own call was malformed" row,
+ *     and the quoted wording is pinned against `docker/observe-ssh`'s own `refuse()` text
  *
  * Not covered, in general: when a channel is `forbidden` rather than a call to fix — that is prose
  * judgement, except for the one case choice 8 pins: an action verb (restart, stop, start, kill, rm,
@@ -42,7 +54,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -438,8 +451,25 @@ describe("the skill's action-verb rule names a real channel for an action the ch
     expect(bullet, "the rule does not say marking every channel not_attempted is wrong here").toMatch(/not_attempted`\s+is wrong/);
   });
 
-  test("the exit table's `77` unrecognised-verb row points to this rule", () => {
-    expect(SKILL).toContain("the report artifact contract's coverage bullet below names the channel (`state`)");
+  test("the exit table's `77` unrecognised-verb row points at the action-verb bullet itself", () => {
+    // Extract the 77 unrecognised-verb ROW alone, not a whole-file toContain,
+    // so a pointer phrase that merely exists somewhere else in the file
+    // cannot satisfy this by accident.
+    const marker = '| `77` with `docker-forced-command: refused "<verb>": not a recognised verb';
+    const markerAt = SKILL.indexOf(marker);
+    expect(markerAt, "the skill's 77 unrecognised-verb table row is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+    const lineEnd = SKILL.indexOf("\n", markerAt);
+    expect(lineEnd, "the 77 unrecognised-verb row never ends — this probe has rotted").toBeGreaterThan(markerAt);
+    const row = SKILL.slice(markerAt, lineEnd);
+
+    // The phrase the row uses to identify the bullet must actually be how the
+    // action-verb bullet itself starts — the same anchor choice 8's
+    // `actionVerbRuleBullet` uses — so a row that names some OTHER bullet, or
+    // one that has drifted from the bullet's real wording, goes red.
+    const pointerPhrase = "An action verb — restart, stop, start, kill, rm, exec, pause";
+    expect(row, "the 77 row no longer names the action-verb bullet by a phrase that identifies it").toContain(pointerPhrase);
+    const bullet = actionVerbRuleBullet(SKILL);
+    expect(bullet, "the phrase the 77 row points at is not how the action-verb bullet actually starts").toContain(pointerPhrase);
   });
 });
 
@@ -503,13 +533,59 @@ describe("the survey-then-filter rule's jq projection only ever keeps real ps te
     const bogus = projected.filter((f) => !real.has(f));
     expect(bogus, `the worked command's jq projection keeps these fields and docker-forced-command's ps template does not have them: ${bogus.join(", ")}`).toEqual([]);
   });
+
+  test("the projection is exactly {Names, State, Status} — widening it (e.g. to Labels) goes red", () => {
+    const command = surveyWorkedCommand(SKILL);
+    const projected = new Set(jqProjectionFields(command));
+    expect(projected).toEqual(new Set(["Names", "State", "Status"]));
+  });
 });
 
-describe("the survey-then-filter rule's worked command preserves observe-docker's exit code through the pipe", () => {
-  test("the worked command carries pipefail (or reads PIPESTATUS)", () => {
+describe("the survey-then-filter rule's worked command captures observe-docker's own exit status, not jq's", () => {
+  /**
+   * Runs the worked command under `bash`, with `observe-docker` replaced by a
+   * function that prints a PARTIAL JSON line (so `jq` fails on it) and exits
+   * 255 — the exact scenario the skill's prose measures (an ssh drop
+   * mid-stream, or a 77 with non-JSON output). `<target>` is the skill's
+   * documentation placeholder, never meant to be typed literally, so it is
+   * substituted with a plain word before the shell ever sees it; the stub
+   * ignores its arguments regardless.
+   *
+   * The captured status is echoed back out rather than relied on as bash's
+   * own exit code, so a `jq` failure later in the pipeline (expected here,
+   * since the JSON is partial) cannot be confused with it.
+   */
+  function runWorkedCommand(command: string): { rc: string | null; stdout: string } {
+    const script = [
+      "observe-docker() {",
+      "  printf '{\"Names\":\"a\"';",
+      "  return 255;",
+      "}",
+      command.replace(/<target>/g, "test-target"),
+      'printf "\\nCAPTURED_RC=%s\\n" "$rc"',
+    ].join("\n");
+    const proc = Bun.spawnSync(["bash", "-c", script]);
+    const stdout = proc.stdout.toString();
+    const m = stdout.match(/CAPTURED_RC=(\d+)/);
+    return { rc: m ? m[1]! : null, stdout };
+  }
+
+  test("bash captures 255 — observe-docker's own status — even though jq then fails on the partial line", () => {
     const command = surveyWorkedCommand(SKILL);
-    const preserves = /pipefail/.test(command) || /PIPESTATUS/.test(command);
-    expect(preserves, `the worked command does not preserve the exit code through the pipe: ${JSON.stringify(command)}`).toBe(true);
+    const { rc, stdout } = runWorkedCommand(command);
+    expect(rc, `the worked command never assigned $rc from observe-docker's own status: ${JSON.stringify(stdout)}`).not.toBeNull();
+    expect(Number(rc)).toBe(255);
+  });
+
+  test("a reverted pipefail form does not carry $rc at all — this probe would catch that regression", () => {
+    // The OLD form the skill used to document: no capture, so `$rc` is never
+    // assigned and the echoed value is empty. This is the mutation item 1
+    // names ("a mutation back to the old pipefail form goes red"), run here
+    // directly against the old text rather than against SKILL.md, so this
+    // test does not itself depend on SKILL.md staying fixed.
+    const oldForm = "set -o pipefail; observe-docker <target> ps | jq -c '{Names, State, Status}'";
+    const { rc, stdout } = runWorkedCommand(oldForm);
+    expect(rc, `expected the old pipefail form to leave $rc unset, but got: ${JSON.stringify(stdout)}`).toBeNull();
   });
 });
 
@@ -577,13 +653,18 @@ function tokensWorkedCommand(src: string): string {
 
 /**
  * The shell variable name the worked command reads, e.g. `OBSERVER_DOCKER_TARGETS_FILE`
- * out of `"$OBSERVER_DOCKER_TARGETS_FILE"`. Matched as a whole uppercase/underscore
- * identifier (never a bare substring check), so a rename to a merely-prefixed or
- * merely-suffixed variant is caught rather than passing by coincidence — the same
- * reason choice 6's numeric extractors read a full assignment, not a fragment.
+ * out of `"$OBSERVER_DOCKER_TARGETS_FILE"`. Matched as a whole shell identifier — letters
+ * of EITHER case, digits and underscore, per POSIX's variable-name grammar — never a bare
+ * substring check, so a rename to a merely-prefixed or merely-suffixed variant is caught
+ * rather than passing by coincidence — the same reason choice 6's numeric extractors read
+ * a full assignment, not a fragment. The character class must include lowercase: a class of
+ * uppercase-digits-underscore only stops at the first lowercase character it meets, so it
+ * would read `OBSERVER_DOCKER_TARGETS_FILE` out of `$OBSERVER_DOCKER_TARGETS_FILEx` too —
+ * silently matching a PREFIX of a different, longer identifier, exactly the "merely-suffixed
+ * variant" this docblock promises to catch.
  */
 function tokensVarFromWorkedCommand(command: string): string {
-  const m = command.match(/\$\{?([A-Z][A-Z0-9_]*)\}?/);
+  const m = command.match(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/);
   expect(m, "no shell variable reference found in the worked command — this probe has rotted").not.toBeNull();
   return m![1]!;
 }
@@ -610,5 +691,75 @@ describe("the skill points the worker at the same tokens-file variable docker/ob
 
   test("the heading the pointer names actually exists in the skill", () => {
     expect(SKILL).toContain("## Calling the target, and reading its exit");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 11. the token-listing awk command, extracted from the skill, actually runs
+//     under `sh` and prints just the tokens — a real targets file, not a
+//     description of one.
+// -----------------------------------------------------------------------------
+
+describe("the token-listing awk command actually extracts just the tokens", () => {
+  test("stdout is exactly the two tokens, one per line — never the host, port or user", () => {
+    const command = tokensWorkedCommand(SKILL);
+    const dir = mkdtempSync(join(tmpdir(), "observer-docker-targets-"));
+    const targetsFile = join(dir, "targets");
+    try {
+      writeFileSync(
+        targetsFile,
+        [
+          "# a comment line, skipped",
+          "",
+          "alpha  docker-a.example 22 svc-a",
+          "beta\tdocker-b.example\t2222\tsvc-b",
+          "",
+        ].join("\n"),
+      );
+      const proc = Bun.spawnSync(["sh", "-c", command], {
+        env: { ...process.env, OBSERVER_DOCKER_TARGETS_FILE: targetsFile },
+      });
+      const stdout = proc.stdout.toString();
+      expect(stdout, `stderr was: ${proc.stderr.toString()}`).toBe("alpha\nbeta\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 12. a docker/observe-ssh refusal that names the targets file and a line
+//     number is documented as a fleet configuration fault, distinct from the
+//     generic "your own call was malformed" row.
+// -----------------------------------------------------------------------------
+
+describe("a refused targets file is documented as a fleet configuration fault, not a malformed call", () => {
+  const NEEDLE = "<targets_var> line <n>";
+
+  test("the skill states it in one sentence, with the real task/row words and no retry", () => {
+    expect(SKILL, "the skill does not quote the targets-file line-number wording").toContain(NEEDLE);
+    const sentenceStart = SKILL.indexOf(NEEDLE);
+    const sentenceEnd = SKILL.indexOf("\n\n", sentenceStart);
+    const sentence = SKILL.slice(Math.max(0, sentenceStart - 200), sentenceEnd === -1 ? undefined : sentenceEnd).replace(/\s+/g, " ");
+    expect(sentence).toContain("configuration fault");
+    expect(sentence).toContain("`blocked`");
+    expect(sentence).toContain("`indeterminate`");
+    expect(sentence).toContain("no retry");
+  });
+
+  test("docker/observe-ssh actually refuses a malformed targets-file line with `${targets_var} line ${lineno}`", () => {
+    // CONTROL: read straight from source, so a rewritten parse_line that
+    // drops this wording turns this red rather than the skill's own prose
+    // alone (which could satisfy the assertion above by coincidence).
+    expect(OBSERVE_SSH).toContain('refuse "${targets_var} line ${lineno}');
+  });
+
+  test("the sentence sits apart from the generic 'your own call was malformed' row", () => {
+    const marker = "| `77` with `observe-ssh: refused before ssh ran` on stderr |";
+    const markerAt = SKILL.indexOf(marker);
+    expect(markerAt, "the skill's shim-refusal table row is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+    const lineEnd = SKILL.indexOf("\n", markerAt);
+    const row = SKILL.slice(markerAt, lineEnd);
+    expect(row, "the targets-file configuration-fault wording leaked into the generic malformed-call row").not.toContain(NEEDLE);
   });
 });

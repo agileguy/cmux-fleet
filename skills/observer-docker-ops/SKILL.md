@@ -64,13 +64,19 @@ who refused what:
 |---|---|---|
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
-| `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, the report artifact contract's coverage bullet below names the channel (`state`) |
+| `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, the report artifact contract's action-verb bullet below (`An action verb — restart, stop, start, kill, rm, exec, pause…`) names the channel (`state`) |
 | `77` with any other `docker-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all (a followed log, `stats` for every container), that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
 | `126` or `127` | `docker` did not run on the target at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | `255` | ssh's own failure — a host-key mismatch or a proxy refusal | the target is `unreachable` |
 | `1` with `failed to connect to the docker API`, `Cannot connect to the Docker daemon`, or `permission denied while trying to connect to the` on stderr | `docker` on the target could not reach its own daemon — a stopped daemon, an account outside the socket's group, or `DOCKER_HOST` pointing elsewhere | the same as the `126`/`127` row: rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | anything else | docker's own exit, returned from the target (e.g. no such container) | the channel is `answered`, and the error text goes in `evidence_ref` |
+
+A `77` whose `observe-ssh: refused before ssh ran` line goes on to name `<targets_var> line <n>`
+(`docker/observe-ssh` refuses the WHOLE targets file when one line is malformed, holds a duplicate
+token, or has a bad field) is a fleet configuration fault, not your own call malformed: the task is
+`blocked`, the row is `indeterminate`, and there is no retry — the file needs fixing by whoever
+enrols targets, calling again with the same broken file cannot help.
 
 Measured on both docker versions: `.docker_errors` in the rendered fixture. A missing container
 (`.docker_errors.no_such_container`) also exits 1, with `No such container:` on stderr, and that is
@@ -85,21 +91,28 @@ what the task needs has no form the grammar accepts at all.
 
 ## Surveying containers when the brief names none
 
-Run `ps` exactly once, and never repeat an unfiltered call. On 2026-09-15, an unfiltered `ps`
-against a real host measured about 39KB of JSON, one line per container, full `Labels` and
-`Command` included. Pipe that one call through `jq`, in the worker's own shell (jq is in the
-image), and keep only `Names`, `State` and `Status`:
+Run the UNFILTERED survey exactly once, and never repeat it. A name-scoped follow-up
+(`ps name=<n>`) is a different call, not a repeat of this one, and stays allowed as many times as
+the task needs. On 2026-09-15, an unfiltered `ps` against a real host measured about 39KB of JSON,
+one line per container, full `Labels` and `Command` included. Capture that one call's output, then
+filter it in the worker's own shell (jq is in the image), keeping only `Names`, `State` and
+`Status`:
 
 ```
-set -o pipefail; observe-docker <target> ps | jq -c '{Names, State, Status}'
+out=$(observe-docker <target> ps); rc=$?; printf '%s\n' "$out" | jq -c '{Names, State, Status}'
 ```
 
-`set -o pipefail` carries `observe-docker`'s own exit code through the pipe. Without it, the shell
-reports `jq`'s exit code instead of `observe-docker`'s, and the exit table above stops routing on
-the real result; with it, that same exit table still applies to this piped call, the same as to a
-bare one. Pick the containers the brief means from the trimmed survey, then query only those by
-name (`ps name=<n>`, `inspect`, `logs`). When the brief already names containers or gives a
-selector, skip the survey and go straight to name-scoped calls.
+Read `$rc` against the exit table above — it is `observe-docker`'s own exit status, captured
+before anything is piped through `jq`. A piped form (`observe-docker <target> ps | jq -c '...'`),
+even with `set -o pipefail`, reports whichever command in the pipe fails LAST — pipefail is
+rightmost-failure, not `observe-docker`'s status — so an ssh drop mid-stream, or a 77 with
+non-JSON output, would route as `jq`'s failure instead of `observe-docker`'s. Measured: `bash -c
+'set -o pipefail; (printf "{\"Names\":\"a\"}\n{trunc"; exit 255) | jq -c "{Names}"; echo $?'`
+prints 5, not 255. A `jq` failure on `$out` on its own, with `$rc` at 0, means the output was not
+the expected JSON — never an answer about the target either way. Pick the containers the brief
+means from the trimmed survey, then query only those by name (`ps name=<n>`, `inspect`, `logs`).
+When the brief already names containers or gives a selector, skip the survey and go straight to
+name-scoped calls.
 
 ## The verb grammar — the whole of what the credential can do (§5.4)
 

@@ -96,17 +96,57 @@ function optionalFieldsBullet(src: string): string {
   return OPTIONAL_BULLET_START + rest.slice(0, end);
 }
 
+/** Collapses every run of whitespace (a markdown line wrap included) to a single space, so a
+ * prose assertion checks the words, not the column Markdown happened to wrap them at. */
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
 /**
- * The row schema's own optional-and-not-nullable field names, read from the schema's shape
- * rather than typed here, so this list tracks `ObserverDockerOpsArtifactSchema` even if a field
- * is ever added, renamed or removed from it.
+ * The optional-fields bullet's own extraction-and-assertions, shared so the revert check below
+ * can run this EXACT function against mutated source and expect it to throw — rather than a
+ * hand-rolled restatement of the same assertions, which could drift from what the real test above
+ * actually checks.
+ */
+function runBulletAssertions(src: string): void {
+  const bullet = normalizeWhitespace(optionalFieldsBullet(src));
+  expect(bullet).toContain("optional means OMITTED");
+  expect(bullet).toContain("never write `null` in its place");
+  expect(bullet).toContain("refuses a `null` value");
+  expect(bullet).toContain("fails the whole artifact, not just the row");
+  expect(bullet).toContain("carries none of these three keys");
+}
+
+/**
+ * Whether `schema` still validates `sample` with `key` removed entirely — the actual meaning of
+ * "optional" for a schema field, independent of which zod wrapper expresses it. `.optional()`,
+ * `.default(...)`, `.optional().transform(...)`, `.optional().pipe(...)` and `.exactOptional()`
+ * all accept an absent key; only `instanceof z.ZodOptional` singles out the first of those.
+ * `sample` must be a value the FULL schema already accepts, so removing one key at a time isolates
+ * that key's own optionality rather than tripping over some other missing or invalid field.
+ */
+function absentKeyValidates(schema: z.ZodObject<z.ZodRawShape>, sample: Record<string, unknown>, key: string): boolean {
+  const withoutKey = { ...sample };
+  delete withoutKey[key];
+  return schema.safeParse(withoutKey).success;
+}
+
+/**
+ * The row schema's own OPTIONAL field names, derived from what the schema actually accepts —
+ * omitting each key of the documented example row in turn and checking the row still validates
+ * (`absentKeyValidates`) — rather than typed here or inferred from a single zod wrapper class.
+ * That tracks `ObserverDockerOpsArtifactSchema` even if a field's optionality comes to be
+ * expressed with `.default()`, `.optional().transform()`, `.optional().pipe()` or
+ * `.exactOptional()` instead of a bare `.optional()`, and even if a field is added, renamed or
+ * removed. Nullability is a SEPARATE question from optionality — `.nullable().optional()` is
+ * optional by this same test, and still gets selected here; whether a selected key also accepts
+ * `null` is checked per key with `safeParse`, below, not assumed from membership in this list.
  */
 function rowOptionalKeys(): string[] {
   const servicesField = ObserverDockerOpsArtifactSchema.shape.services as z.ZodArray<z.ZodObject<z.ZodRawShape>>;
-  const rowShape = servicesField.element.shape;
-  return Object.entries(rowShape)
-    .filter(([, field]) => field instanceof z.ZodOptional)
-    .map(([key]) => key);
+  const rowSchema = servicesField.element;
+  const sampleRow = (realExample() as { services: Array<Record<string, unknown>> }).services[0]!;
+  return Object.keys(rowSchema.shape).filter((key) => absentKeyValidates(rowSchema, sampleRow, key));
 }
 
 /** A deep-enough clone for mutating one row of the documented example without touching the original. */
@@ -226,10 +266,13 @@ describe("observer-docker-ops skill's §5.6 JSON example is a valid artifact (ta
 
   test("the schema really does carry the three optional row fields this suite exercises", () => {
     // Anti-vacuity for every loop below: if the schema's shape ever stops
-    // reporting these as optional-and-not-nullable, the loops below would
-    // silently run zero iterations and pass by doing nothing.
+    // reporting these three as optional, the loops below would silently run
+    // zero iterations and pass by doing nothing. (Nullability is checked
+    // separately, per key, inside the loop below — not assumed here.)
     expect(optionalKeys.sort()).toEqual(["container_id", "image", "restart_count"]);
   });
+
+  const rowSchema = (ObserverDockerOpsArtifactSchema.shape.services as z.ZodArray<z.ZodObject<z.ZodRawShape>>).element;
 
   for (const key of optionalKeys) {
     test(`omitting optional field "${key}" from the example still validates`, () => {
@@ -240,7 +283,21 @@ describe("observer-docker-ops skill's §5.6 JSON example is a valid artifact (ta
 
     test(`setting optional field "${key}" to null fails validation and names "${key}"`, () => {
       const doc = cloneExample();
-      doc.services[0]![key] = null;
+      const sampleRow = doc.services[0]!;
+
+      // Checked with safeParse, per key, rather than assumed from `key`'s
+      // membership in `optionalKeys`: an `.optional()` field can also be
+      // `.nullable()`, and that is a DIFFERENT property from being omittable.
+      // A key that unexpectedly accepts null is reported BY NAME here, loudly,
+      // instead of this test silently passing or failing on a confusing
+      // generic ZodError mismatch below.
+      const nullAccepted = rowSchema.safeParse({ ...sampleRow, [key]: null }).success;
+      expect(
+        nullAccepted,
+        `optional field "${key}" unexpectedly accepts a null value — the skill's "optional means OMITTED, never null" claim does not hold for it`,
+      ).toBe(false);
+
+      sampleRow[key] = null;
       let thrown: unknown;
       try {
         parseObserverDockerOpsArtifact(doc);
@@ -282,22 +339,28 @@ describe("observer-docker-ops skill's §5.6 JSON example is a valid artifact (ta
 
   test("the optional-fields bullet says an unanswered field is omitted, and `null` fails validation", () => {
     const src = readFileSync(join(import.meta.dir, "..", "..", SKILL), "utf8");
-    const bullet = optionalFieldsBullet(src);
-    expect(bullet).toContain("optional means OMITTED");
-    expect(bullet).toContain("never write `null` in its place");
-    expect(bullet).toContain("refuses a `null`\n  value");
-    expect(bullet).toContain("fails the whole artifact, not just the row");
-    expect(bullet).toContain("carries none of these three keys");
+    runBulletAssertions(src);
   });
 
-  test("revert check: deleting the null-is-refused sentence turns the bullet test red", () => {
+  test("revert check: moving the null-is-refused sentence outside the bullet turns the bullet test red", () => {
     const src = readFileSync(join(import.meta.dir, "..", "..", SKILL), "utf8");
     const sentence =
       "Harvest's schema accepts an absent key but refuses a `null`\n  value for any of the three, and that refusal fails the whole artifact, not just the row. A row\n  ";
     expect(src).toContain(sentence); // the sentence is really there, verbatim
-    const mutated = src.replace(sentence, "");
+
+    // Moved out — appended past the end of the document — rather than
+    // deleted. This pins that `optionalFieldsBullet`'s own boundary (the
+    // bullet's end) is what makes the real bullet test catch the regression,
+    // not a hand-rolled restatement of that test's assertions: deleting the
+    // sentence would make `bullet.not.toContain(...)` trivially true (of
+    // course absent text is absent), which cannot fail no matter how the
+    // extractor is written. Moving it lets `runBulletAssertions` — the exact
+    // function the real test above calls — decide, by actually throwing.
+    const mutated = src.replace(sentence, "") + "\n\n" + sentence;
     expect(mutated).not.toBe(src);
-    const bullet = optionalFieldsBullet(mutated);
-    expect(bullet).not.toContain("refuses a `null`\n  value");
+    expect(mutated).toContain(sentence); // still in the document, just relocated
+
+    expect(() => runBulletAssertions(src)).not.toThrow(); // sanity: passes on the real source
+    expect(() => runBulletAssertions(mutated)).toThrow();
   });
 });
