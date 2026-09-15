@@ -802,10 +802,11 @@ roles:
     # detect it. Passing the collation as an ARGUMENT is only safe if the model
     # carries it intact, so this role kept `write` while `reviewer` lost it. The
     # gate is now closed from the other side: `TRIAGE_DOCUMENT_MAX_BYTES` bounds
-    # the document at 4 096 bytes and REFUSES above it, and
-    # `MAX_SERVICES_PER_ENVIRONMENT` and `TRIAGE_NOTE_MAX_BYTES` came down to 8
-    # and 1 024 so that bound is reachable rather than nominal. An observed
-    # maximum is not a bound; that cap is.
+    # the document at 16 384 bytes (4 096 originally; 8 192 from 2026-09-12;
+    # this figure since 2026-09-15) and REFUSES above it, and
+    # `MAX_SERVICES_PER_ENVIRONMENT` came down to 8 and `TRIAGE_NOTE_MAX_BYTES`
+    # to 1 024 so that bound is reachable rather than nominal — services since
+    # raised to 16, 2026-09-12. An observed maximum is not a bound; that cap is.
     #
     # NO `bash`, and here that is the load-bearing omission rather than an
     # inherited habit. This role's entire output is a request for something ELSE

@@ -361,16 +361,24 @@ export const TriageDocumentSchema = z
  * 16 and 8 192; the note cap did not move.** The argument survives because the
  * two that moved moved together, which is this constant's own rule — see the
  * note on the constant below and `triage-targets.ts`. They remain un-composable
- * at their extremes, which is inherent: 16 maximal notes cannot fit in 8 192 and
- * no choice of three numbers makes them. What changed is that each bound can now
- * be hit by a document this parser accepts, instead of describing a document it
- * would always refuse.
+ * at their extremes, which is inherent: 16 maximal notes are 16 384 bytes on
+ * their own — exactly this cap's CURRENT size, below — so it is the row's other
+ * six fields and the document's own wrapper, bytes no choice of three numbers
+ * removes, that put a document of them over it. What changed on 2026-09-12 is
+ * that each bound could now be hit by a document this parser accepts, instead
+ * of describing a document it would always refuse.
+ *
+ * **This document cap moved AGAIN on 2026-09-15, 8 192 to 16 384, ALONE — the
+ * services cap did not move this time.** See the history note on the constant
+ * below for why, and {@link MAX_SERVICES_PER_ENVIRONMENT}'s own docblock in
+ * `triage-targets.ts` for the reason 16 was already the right number.
  *
  * ## Why 4 096 ORIGINALLY, and the one thing this number is NOT
  *
- * (The cap is 8 192 since 2026-09-12. The measurement below is what sized the
- * original 4 096 and is the reason the raise needed an argument rather than a
- * preference — read it before moving this number again.)
+ * (The cap is 16 384 since 2026-09-15, and was 8 192 from 2026-09-12 until then.
+ * The measurement below is what sized the original 4 096 and is the reason
+ * every raise since has needed an argument rather than a preference — read it
+ * before moving this number again.)
  *
  * §11's Q8 probe measured a local model accepting a 4 KB tool argument intact
  * and **silently delivering 39% of an 8 KB one** — `isError` false, epoch
@@ -434,7 +442,43 @@ export const TriageDocumentSchema = z
  * this cap is 4.4x that — not the 5.6x it would be against §11's older 1 472,
  * which counted a different population. The cap is a wire limit, not a target.
  */
-export const TRIAGE_DOCUMENT_MAX_BYTES = 8192;
+/*
+ * RAISED AGAIN, 8192 -> 16384, on 2026-09-15, by operator instruction — and
+ * ALONE this time. `MAX_SERVICES_PER_ENVIRONMENT` did not move with it.
+ *
+ * The two-pair console above did not last: the roster went back to a single
+ * collator, `tri-1`, on 2026-09-14 (see `triage-targets.ts`'s own history of
+ * that), so the scenario the paragraph above only PROJECTED — "16 services
+ * would have meant a ~9 KB document against a 4 KB wire" — is what actually
+ * happened, against the cap this raise replaces rather than the 4 KB one.
+ * T-sweep-148 wrote all fifteen services declared that day into ONE document,
+ * 9 277 bytes as written to disk, and the 8 192-byte cap refused it whole:
+ * every one of those fifteen services recorded unobserved for that sweep. That
+ * is a real refusal of a real document this console produced, not a
+ * projection — `triage/targets.yaml` said this would happen and it did.
+ *
+ * The multiplier moves with it, the same way it did on 2026-09-12: the
+ * observed maximum is now 9 277 bytes (T-sweep-148, 15 rows, 2026-09-15), so
+ * 16 384 is 1.77x that — room for the sixteenth declared service that sweep
+ * did not yet carry, not a repeat of 2026-09-12's roughly 2x margin against a
+ * much smaller document.
+ *
+ * `MAX_SERVICES_PER_ENVIRONMENT` stays 16 because it was already the right
+ * number: the one-collator reality already makes it bound the SUM of services
+ * across every declared environment, in one document, and that has not
+ * changed. What needed to grow was headroom for that sum's worst case in
+ * BYTES, not the count of rows. And the composability gap this whole docblock
+ * has argued from — "per-field bounds do not compose into a document bound" —
+ * is now closed by more than an edit-time rule: `triage-document.test.ts`
+ * carries a test that fails whenever {@link MAX_SERVICES_PER_ENVIRONMENT} rows
+ * at a realistic worst-case row size do not fit under this cap, built from
+ * T-sweep-148's own measured row sizes. Raising {@link MAX_SERVICES_PER_ENVIRONMENT}
+ * without this cap keeping up, or lowering this cap below what that many
+ * realistic rows need, now reddens that probe instead of waiting to be
+ * noticed on a real sweep — raising this cap alone reddens nothing; it only
+ * adds headroom.
+ */
+export const TRIAGE_DOCUMENT_MAX_BYTES = 16384;
 
 /** Why a `triage.json` was refused, as a value rather than as prose. */
 export type TriageDocumentRefusal = "too_large" | "not_json" | "not_an_object" | "schema";
@@ -543,9 +587,10 @@ export function parseTriageDocument(
       code: "too_large",
       reason:
         `${ctx.path} is ${bytes} bytes and this document is bounded at ` +
-        `${TRIAGE_DOCUMENT_MAX_BYTES}. Above roughly this size the model these seats run was ` +
-        `measured delivering a SHORT report with no error and a green epoch, so a document ` +
-        `this large is refused loudly rather than acted on partially.`,
+        `${TRIAGE_DOCUMENT_MAX_BYTES}. §11 measured the model these seats run silently deliver ` +
+        `only a fraction of a smaller tool argument — \`isError\` false, epoch \`success\`, no ` +
+        `error anywhere — so a document this large is refused loudly rather than acted on ` +
+        `partially, ahead of finding out the hard way whether that failure mode scales up too.`,
       issues: [],
     };
   }

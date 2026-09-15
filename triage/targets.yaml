@@ -85,12 +85,19 @@ environments:
     # THE SIZE IS MEASURED rather than projected from the schema: across the 103
     # collations on disk that parse with rows (109 files in all), a row costs 415
     # bytes on average and 621 at worst (largest document 1 863 bytes, 3 rows,
-    # T-sweep-4). Neither figure was measured on a 15-row document: they were
-    # taken on 2026-09-12, before one collator wrote every row. Honest arithmetic
-    # from those per-row figures: 15 rows at the average cost is ~6.2 KB against
-    # the 8 192-byte document cap; 15 rows at the worst observed cost is ~9.3 KB,
-    # which would EXCEED that cap. So the margin for a full 15-row document is
-    # not yet measured, only projected from rows measured on much smaller ones.
+    # T-sweep-4). Neither figure was measured on a 15-row document at the time
+    # they were taken, 2026-09-12, before one collator wrote every row — the
+    # honest arithmetic from those per-row figures projected 15 rows at the
+    # worst observed cost at ~9.3 KB, which would EXCEED the 8 192-byte cap
+    # that stood then.
+    #
+    # THE PROJECTION WAS RIGHT, AND IT IS NO LONGER A PROJECTION: T-sweep-148
+    # (2026-09-15) ran this exact fifteen-row list through the single collator
+    # and wrote 9 277 bytes to disk. The 8 192-byte cap refused it whole — every
+    # service on this page recorded unobserved for that sweep — which is why
+    # `TRIAGE_DOCUMENT_MAX_BYTES` is 16 384 now, not 8 192. See its docblock in
+    # `triage-document.ts` for the full account and `triage-document.test.ts`
+    # for the test that keeps this margin from closing silently again.
     #
     # NOT ONE ROW DECLARES A `workload`, for the reason recorded above, and the
     # live workload names are why it matters: `grafana` is `kps-grafana`,

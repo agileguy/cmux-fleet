@@ -40,6 +40,7 @@ import {
   parseDispatchRequest,
 } from "../../src/run/dispatch-request.ts";
 import {
+  TRIAGE_DOCUMENT_MAX_BYTES,
   TRIAGE_DOCUMENT_SCHEMA,
   parseTriageDocument,
 } from "../../src/run/triage-document.ts";
@@ -352,6 +353,48 @@ describe("the document teaches `note`, and teaches it the way the host enforces 
   test("the no-severity rule is restated for prose, where a schema cannot enforce it", () => {
     expect(ROLE).toContain("The `note` field does not reopen this");
     expect(ROLE).toContain("**`note` is now that place, so");
+  });
+});
+
+/**
+ * The whole-document byte cap, taught the same way `note`'s is — ISC-1109's
+ * pattern applied to the figure the 2026-09-15 raise moved.
+ *
+ * A document naming `8192` against a schema enforcing `16384` teaches a
+ * worker to trim a document the host would in fact have accepted; one naming
+ * a much larger figure teaches it that a document the host will refuse whole
+ * is safe to send. Either way the number in the prose is a claim about this
+ * host, so it is compared to this host — the same discipline the `note` bound
+ * above is held to, applied to the bound around the whole document it sits in.
+ */
+describe("the document teaches its own whole-document cap, and teaches the true one", () => {
+  /**
+   * Sliced with `between()` rather than matched on `ROLE` directly: this
+   * paragraph wraps across several source lines, and a raw `toContain` over a
+   * phrase that crosses a wrap is really an assertion about where the line
+   * happens to break — §7.3's hazard this file's own helper exists to avoid.
+   */
+  const wholeDocumentCap = (): string =>
+    between("**The whole document is bounded too", "**Three shapes worth reading twice");
+
+  test("the enforced whole-document byte bound in the prose is the one the schema enforces", () => {
+    const section = wholeDocumentCap();
+    expect(section).toContain(String(TRIAGE_DOCUMENT_MAX_BYTES));
+    // In BYTES, said in the document rather than left for a worker to assume —
+    // `note`'s bound draws the same distinction, for the same reason.
+    expect(section).toContain("Counted from the bytes it crosses as, not characters.");
+  });
+
+  /**
+   * The claim a worker acts on differently from a per-field refusal: a
+   * document over this cap loses every row in the sweep, not only the one
+   * that happened to push it over — so trimming one oversized field is not
+   * always enough, and the prose says so rather than leaving it implied.
+   */
+  test("the prose says the whole document is refused, not just the offending row", () => {
+    expect(wholeDocumentCap()).toContain(
+      "the host refuses the whole document before reading a single row",
+    );
   });
 });
 

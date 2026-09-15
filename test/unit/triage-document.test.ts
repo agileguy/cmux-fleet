@@ -289,19 +289,28 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
       expect(withoutCap.success, "the fixture breaks a FIELD bound and proves nothing").toBe(true);
 
       /*
-       * THE RESIDUAL GAP, and it is deliberately small now.
+       * THE RESIDUAL GAP, and it is now the TIGHTEST it has ever been.
        *
        * Before task 7.3 this fixture was ~60x the cap, because 64 rows x 4 000
        * bytes of `note` is 256 000. The retune to 8 and 1 024 closed most of
-       * that, and what is left cannot be closed by any choice of three numbers:
-       * at the 2026-09-12 doubling, 16 maximal notes are 16 384 bytes and will
-       * not fit in 8 192 whatever the ceilings are — and note that DOUBLING
-       * BOTH preserves this exactly, because the overflow is a ratio
-       * (`MAX_SERVICES_PER_ENVIRONMENT` x `TRIAGE_NOTE_MAX_BYTES` is 2x the
-       * document cap) and scaling both numerator and denominator leaves it
-       * alone. So the claim this test makes is the narrow, permanent one —
-       * per-field bounds do not compose into a document bound, and the document
-       * cap is therefore doing work no field bound does.
+       * that. At the 2026-09-12 doubling (16 rows, cap 8 192) the sixteen
+       * maximal notes ALONE — 16 384 bytes, ignoring every other field — were
+       * already 2x the cap by themselves, so no amount of JSON structure was
+       * needed to push this fixture over.
+       *
+       * **That is no longer true at 16 384.** Sixteen maximal notes are
+       * 16 384 bytes exactly — this cap's own current size — so the notes
+       * alone no longer guarantee an overflow. What closes the rest of the
+       * gap is the row's other six required fields and the document's own
+       * wrapper, which cannot serialise to zero bytes: this fixture is
+       * 20 858 bytes, of which 16 384 is notes and the remaining 4 474 is
+       * quotes, braces, field names, `service`, `assessment`, `coverage`,
+       * `selector`, `window`, `evidence_ref` and `observer` on every row plus
+       * `schema`, `sweep_id` and `unaccounted` once. No choice of three
+       * numbers removes that overhead, so the claim this test makes is the
+       * narrow, permanent one — per-field bounds do not compose into a
+       * document bound, and the document cap is therefore doing work no
+       * field bound does.
        */
       expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(TRIAGE_DOCUMENT_MAX_BYTES);
 
@@ -325,7 +334,7 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
        * document cap at all and the "at the cap" arm would be asserting the NOTE
        * bound while claiming to assert the document one.
        *
-       * ## SPREAD ACROSS TWO ROWS, and that is a correction rather than a style
+       * ## SPREAD ACROSS AS MANY ROWS AS FIT, computed rather than fixed
        *
        * This padded ONE row until 2026-09-12 and said `selector` was *"a plain
        * bounded string with room to spare"*. That premise died the moment the
@@ -334,35 +343,58 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
        * and `parseTriageDocument` answers `refused` on the SCHEMA arm — while this
        * test's own byte assertion still passed, because the document really was
        * exactly at the cap. A test asserting "at the cap parses" was therefore
-       * failing for a reason that had nothing to do with the cap.
+       * failing for a reason that had nothing to do with the cap. Two rows fixed
+       * it, at 8 192.
        *
-       * Two rows keep every string inside its own bound, and the guard below
-       * makes the premise an ASSERTION instead of a sentence: the next raise of
-       * `TRIAGE_DOCUMENT_MAX_BYTES` reddens here naming the field cap, rather
-       * than looking like the document cap is broken.
+       * **Two rows stopped being enough at 16 384 — measured, not guessed: this
+       * test failed on the 2026-09-15 raise with exactly the message it was
+       * written to fail with**, `firstPad` computed at 7 899 against a 4 096
+       * field cap. A fixed row count is therefore the wrong shape for a probe
+       * that has to survive further raises without being rewritten by hand each
+       * time, so the row count below is COMPUTED — tried from two rows upward
+       * until the pad fits — rather than a literal this file will need a third
+       * correction to.
        */
-      const base = goodDocument({
-        services: [goodRow({ selector: "" }), goodRow({ selector: "" })],
-      });
-      const overhead = Buffer.byteLength(JSON.stringify(base), "utf8");
-      const room = TRIAGE_DOCUMENT_MAX_BYTES - overhead;
-      expect(room, "the empty document already exceeds the cap").toBeGreaterThan(0);
-
       /** `shortStr`'s ceiling — the bound each PAD must stay inside. */
       const FIELD_MAX = 4096;
-      const firstPad = Math.ceil(room / 2);
-      const secondPad = room - firstPad;
-      expect(
-        firstPad,
-        "the pad no longer fits one `selector`: spread it across more rows",
-      ).toBeLessThanOrEqual(FIELD_MAX);
+
+      /** The base document's overhead at `numRows` empty-`selector` rows. */
+      const roomAt = (numRows: number): number => {
+        const base = goodDocument({
+          services: Array.from({ length: numRows }, () => goodRow({ selector: "" })),
+        });
+        return TRIAGE_DOCUMENT_MAX_BYTES - Buffer.byteLength(JSON.stringify(base), "utf8");
+      };
+
+      let numRows = 2;
+      let room = roomAt(numRows);
+      while (Math.ceil(room / numRows) > FIELD_MAX) {
+        numRows += 1;
+        // `services` is itself capped at MAX_SERVICES_PER_ENVIRONMENT — a room
+        // that cannot be spread within that many rows means the cap and the
+        // field bound have stopped being reconcilable at all, which is a
+        // premise this test has to name rather than loop on forever.
+        expect(
+          numRows,
+          "no row count under MAX_SERVICES_PER_ENVIRONMENT spreads this pad inside FIELD_MAX",
+        ).toBeLessThanOrEqual(MAX_SERVICES_PER_ENVIRONMENT);
+        room = roomAt(numRows);
+      }
+      expect(room, "the empty document already exceeds the cap").toBeGreaterThan(0);
+
+      const perRow = Math.floor(room / numRows);
+      const remainder = room - perRow * numRows;
+      expect(perRow + remainder, "the last row's pad still overflows FIELD_MAX").toBeLessThanOrEqual(
+        FIELD_MAX,
+      );
 
       const padded = (extra: number): Json =>
         goodDocument({
-          services: [
-            goodRow({ selector: "x".repeat(firstPad) }),
-            goodRow({ selector: "x".repeat(secondPad + extra) }),
-          ],
+          services: Array.from({ length: numRows }, (_, i) =>
+            goodRow({
+              selector: "x".repeat(perRow + (i === numRows - 1 ? remainder + extra : 0)),
+            }),
+          ),
         });
 
       const atCapText = JSON.stringify(padded(0));
@@ -407,16 +439,118 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
      * clearance rests on, and a cap set below it would refuse collations this
      * console has genuinely produced — turning a size bound into an outage. It
      * is asserted here so that lowering the cap has to argue with the evidence.
+     *
+     * **Superseded 2026-09-15 by a real refusal, not a census.** The 1 863
+     * figure this test used to pin was the largest of 20 three-row-or-fewer
+     * collations, harvested before one collator wrote every declared service
+     * into a single document. T-sweep-148 is that single-collator document at
+     * its actual size: 15 rows, 9 277 bytes as written to disk, and the
+     * 8 192-byte cap standing that day refused it whole — every service
+     * recorded unobserved. That refusal is why the cap moved, so the number
+     * pinned here now IS the failure, not a census taken before it.
      */
     test("the largest collation this console has produced is inside the cap", () => {
-      // MEASURED on this machine 2026-09-08 across the 20 `triage.json` files
-      // this console has harvested, not quoted from §11. The census's 1 472 is
-      // the summed STRING bytes of an envelope, which is a different and
-      // smaller measurement than the serialised document that must now cross
-      // as a tool argument — the largest of those is 1 863 bytes, and every
-      // one of the 20 carries exactly 3 services or none.
-      const OBSERVED_MAX_BYTES = 1863;
+      // MEASURED 2026-09-15, T-sweep-148: 15 services, one collator (`tri-1`),
+      // one `triage.json`, 9 277 bytes as written to disk. It is the document
+      // whose refusal by the then-8 192-byte cap is why this cap is 16 384.
+      const OBSERVED_MAX_BYTES = 9277;
       expect(TRIAGE_DOCUMENT_MAX_BYTES).toBeGreaterThan(OBSERVED_MAX_BYTES);
+    });
+
+    /**
+     * THE CHECK THAT WAS MISSING, named as such by the 2026-09-15 raise this
+     * branch answers: not that some fixture fits under the cap, and not that
+     * the cap exceeds one past sweep's size, but that {@link
+     * MAX_SERVICES_PER_ENVIRONMENT} rows — the console's own declared ceiling,
+     * not fewer — fit under {@link TRIAGE_DOCUMENT_MAX_BYTES} at a REALISTIC
+     * worst-case row size. T-sweep-148 had fifteen rows and was refused; this
+     * asks the question the next sweep with sixteen would have asked, ahead of
+     * a sweep asking it.
+     *
+     * SIZED FROM MEASURED DATA. T-sweep-148 (2026-09-15) is real production
+     * output — a real service, environment, cluster selector and command
+     * evidence in every one of its fifteen rows — and none of it belongs in a
+     * tracked file (§0.3's disclosure boundary). What is safe to carry here is
+     * the SHAPE and the BYTE COUNT: its heaviest row was a `vm-host` row
+     * carrying all six `TRIAGE_VM_CHECKS` channels and eight `evidence_ref`
+     * entries, serialising to 768 bytes — the widest this schema's optional
+     * arrays are exercised in practice. `worstCaseRow` below copies that
+     * SHAPE with entirely synthetic names and placeholder text, padded to the
+     * same 768 bytes, so the fixture is sized like the real worst row without
+     * being it.
+     */
+    describe("sixteen rows at the measured worst-case size (2026-09-15 raise)", () => {
+      /** T-sweep-148's heaviest row, serialised — see the docblock above. */
+      const WORST_ROW_BYTES = 768;
+
+      /** Shaped like that row; every value here is synthetic. */
+      function worstCaseRow(i: number, padLength: number): Json {
+        const idx = String(i).padStart(2, "0");
+        return {
+          service: `svc-synthetic-${idx}`,
+          environment: "env-synthetic",
+          assessment: "healthy",
+          coverage: [
+            { channel: "reachability", result: "answered" },
+            { channel: "system", result: "answered" },
+            { channel: "units", result: "answered" },
+            { channel: "logs", result: "not_attempted" },
+            { channel: "resources", result: "answered" },
+            { channel: "cloud", result: "not_attempted" },
+          ],
+          selector: "synthetic-selector-token",
+          window: "300s",
+          evidence_ref: [
+            "synthetic evidence line one",
+            "synthetic evidence line two",
+            "synthetic evidence line three",
+            "synthetic evidence line four",
+            "synthetic evidence line five",
+            "synthetic evidence line six",
+            "synthetic evidence line seven",
+            "s".repeat(padLength),
+          ],
+          observer: `obs-synthetic-${idx}`,
+        };
+      }
+
+      test("MAX_SERVICES_PER_ENVIRONMENT rows this size parse ok, under the cap", () => {
+        // The pad that lands row 0 at exactly WORST_ROW_BYTES, computed rather
+        // than hand-tuned. Every row is the same length: the only part of the
+        // shape that varies with `i` is a fixed two-digit index.
+        const zeroPadBytes = Buffer.byteLength(JSON.stringify(worstCaseRow(0, 0)), "utf8");
+        const padLength = WORST_ROW_BYTES - zeroPadBytes;
+        expect(
+          padLength,
+          "the unpadded skeleton already exceeds the measured worst row",
+        ).toBeGreaterThan(0);
+
+        const rows = Array.from({ length: MAX_SERVICES_PER_ENVIRONMENT }, (_, i) =>
+          worstCaseRow(i, padLength),
+        );
+        // The premise: every row really is the measured size, not
+        // approximately it — a fixture that quietly drifted smaller would
+        // pass what follows for the wrong reason.
+        for (const row of rows) {
+          expect(Buffer.byteLength(JSON.stringify(row), "utf8")).toBe(WORST_ROW_BYTES);
+        }
+
+        const doc = goodDocument({ sweep_id: "T-sweep-synthetic-fit", services: rows });
+        const text = JSON.stringify(doc);
+
+        // THE ASSERTION ITSELF: this is what reddens if `TRIAGE_DOCUMENT_MAX_BYTES`
+        // is ever lowered back below what the console's own declared row count
+        // can genuinely produce, or if `MAX_SERVICES_PER_ENVIRONMENT` rises
+        // without the byte cap rising to cover it — the drift this whole raise
+        // exists to make impossible to ship silently.
+        expect(Buffer.byteLength(text, "utf8")).toBeLessThan(TRIAGE_DOCUMENT_MAX_BYTES);
+
+        // And through the real parser, per §13 task 7.3's own rule — a byte
+        // count under the cap proves nothing about the document that carries
+        // it unless `parseTriageDocument` is the thing asked.
+        const got = parseTriageDocument(text, CTX);
+        expect(got.kind).toBe("ok");
+      });
     });
   });
 

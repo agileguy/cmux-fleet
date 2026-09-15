@@ -1252,8 +1252,12 @@ describe("evenSlices divides a declared list between the console's collators", (
     expect(evenSlices(["a", "b", "c", "d"], 2).map((s) => s.length)).toEqual([2, 2]);
     // 5 across 2 is the monitoring-sized case: 3/2.
     expect(evenSlices(["a", "b", "c", "d", "e"], 2).map((s) => s.length)).toEqual([3, 2]);
-    // 16 across 2 is the doubled cap: 8/8, which is what keeps each collation
-    // inside TRIAGE_DOCUMENT_MAX_BYTES.
+    // 16 across 2 is MAX_SERVICES_PER_ENVIRONMENT split the way this console
+    // ran it 2026-09-12 to 2026-09-14, two collators: 8/8. The console runs
+    // one collator now (`tri-1`, since 2026-09-14), so this is `evenSlices`'s
+    // general shape, not live routing — and the byte cap that split kept each
+    // half inside has since moved to 16 384 for an unrelated reason (see
+    // `triage-document.ts`), so this case no longer says anything about it.
     expect(
       evenSlices(Array.from({ length: 16 }, (_, i) => `svc-${i}`), 2).map((s) => s.length),
     ).toEqual([8, 8]);

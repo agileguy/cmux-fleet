@@ -158,8 +158,13 @@ export type TriageVmCheck = (typeof TRIAGE_VM_CHECKS)[number];
  * on that day nine services split 5/4 across two collators, and 16 was 3.2x the
  * largest slice either one could be handed. One collator now holds every row,
  * as the history note below records. Raising it again is legitimate and cheap —
- * but it has to move with the byte cap, and `triage-document.test.ts` fails if
- * the two stop agreeing.
+ * but `triage-document.test.ts` carries a fit test that fails unless
+ * {@link TRIAGE_DOCUMENT_MAX_BYTES} can still hold this many rows at a
+ * realistic worst-case size, so the byte cap either already has the headroom
+ * or has to grow alongside it. That is the coupling now; the two do not have
+ * to move by the same factor, or even move together at all, as the
+ * 2026-09-15 history note below records — they just both have to stay true
+ * of a document this console can actually write.
  *
  * (The "~570 bytes a row" this paragraph used to quote was an estimate reported
  * as a measurement. The real figures, over the 103 collations that parse with
@@ -194,6 +199,16 @@ export type TriageVmCheck = (typeof TRIAGE_VM_CHECKS)[number];
  * and at the old ceiling `monitoring` + `ntfy` was 9 and refused at load — the
  * console would not have started. 16 leaves room for that list and for the
  * cloudflared and vault services beside it.
+ *
+ * **2026-09-15: this number DID NOT MOVE, and {@link TRIAGE_DOCUMENT_MAX_BYTES}
+ * moved alone, 8 192 to 16 384.** The PRESENT paragraph above turned out to
+ * describe a real sweep rather than only a projection: T-sweep-148 declared
+ * fifteen services, one collator wrote them into one 9 277-byte document, and
+ * the then-8 192-byte cap refused it whole. 16 was already the right count for
+ * this console's one-document reality — raising it further was not what the
+ * failure needed. What the failure needed was room for that sum's worst case
+ * in bytes, which is `triage-document.ts`'s own history note to read. The fit
+ * test named above is what would have caught this before a sweep did.
  */
 export const MAX_SERVICES_PER_ENVIRONMENT = 16;
 

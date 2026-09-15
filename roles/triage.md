@@ -462,6 +462,13 @@ the field rule below for when your own document must.
 }
 ```
 
+**The whole document is bounded too, not just the `note` field below it. ENFORCED: 16384
+bytes.** Counted from the bytes it crosses as, not characters. Above that the host refuses the
+whole document before reading a single row — every service in this sweep is recorded unobserved,
+not only the row that pushed it over. If you are trimming to fit, `note` is the field with room
+to spare once `coverage`, `selector`, `window` and `evidence_ref` say only what is useful; cut it
+first.
+
 **Three shapes worth reading twice, because the obvious guess is wrong for each.**
 
 - **`coverage` is a list of `{channel, result}` objects, not a list of channel names.** `result`
