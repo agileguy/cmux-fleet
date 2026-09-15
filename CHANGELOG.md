@@ -4,6 +4,85 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.5] — 2026-09-14
+
+This release is Phase 5 of `Docs/SRD-OBSERVER-ROLES.md` (observer-vm-role).
+
+The fleet can now describe a VM observer: a role, its skill, and the forced
+command an operator installs on a systemd Linux target. The live `fleet.yaml`
+carries both the `observer-docker` and `observer-vm` roles, with seats `obs-d1`
+and `obs-v1` in no console.
+
+### Added
+
+- **`scripts/observe/vm-forced-command`** is the whole of what the observer-vm
+  key can do on a target. sshd runs it for every session, and it reads the
+  request from `SSH_ORIGINAL_COMMAND`.
+  - Verbs: `uptime`, `os`, `system`, `failed`, `unit`, `journal`, `kernel`,
+    `disk` and `memory`. Everything else exits 77 and runs nothing.
+  - `unit` takes one name of at most 255 bytes from a fixed character class.
+  - `journal` and `kernel` require `since=<N>s` (1 to 9 digits, at least one
+    second) and `lines=` (at most 500). `journal` also takes `unit=` and
+    `priority=` (one digit, 0 to 7). Each key may appear once.
+  - `disk` runs `timeout 20 df -P -k`, so a hung network mount cannot block it.
+- **`docker/observe-vm <target> <verb> [key=value ...]`** is the role's alias
+  for `observe-ssh vm`, copied onto the worker image's PATH.
+- **`skills/observer-vm-ops`** tells the worker how to call a target, read each
+  exit, and write its artifact pair.
+- **The `observer-vm` role** in `fleet.example.yaml`, with seat `obs-v1`, one
+  egress rule and three multiline secrets.
+- **`scripts/observe/characterise-vm`** measures the systemd facts the forced
+  command relies on, against systemd 239 (RHEL/Rocky 8, the oldest in scope)
+  and 255. Its fixtures back the tests.
+
+### Fixed during review
+
+- `since=0s` is refused, as `logs` refuses it on the Docker role. Both
+  `since=` refusals now describe the same no-leading-zero grammar; one still
+  described the old one.
+- Every refusal test pins the whole reason the forced command prints, and
+  the accepted boundaries (`since=1s`, `since=999999999s`, each `priority`
+  from 0 to 7) are pinned with their exact argv.
+- The SRD's unit-name class, `since=` rule and `disk` timeout wording match
+  the forced command and the skill.
+- `priority=` accepts exactly one digit from 0 to 7.
+- `disk` runs under `timeout 20`. The skill reads exit 124 as a timeout and
+  125 as `timeout` failing, never as free space.
+- The skill reads an unreadable journal as `forbidden` and a `nologin` shell
+  as a blocked task, from the text each one actually prints.
+- The skill's exit table is read top to bottom, first match wins, so a
+  journal-permission Hint at exit 0 is never `answered`. A non-zero exit from
+  any verb but `system` is `unreachable`, and a non-zero exit with nothing on
+  either stream reads as a mis-enrolled account.
+- A target command killed by a signal reaches the worker as ssh's exit 255,
+  so the skill reads it as `unreachable`. The old "128 or above from `disk`"
+  row could never fire, and it hid the 255 row.
+- A `disk` timeout is `resources` coverage `unreachable`, never the
+  `indeterminate` token the coverage enum does not have.
+- The VM enrolment steps name the same four sshd environment settings as the
+  Docker role, where `PATH` must come from, and how `IFS`, `ENV` and
+  `BASH_ENV` are kept out.
+- A Ctrl-C during `characterise-vm` or `characterise-docker`'s container create
+  no longer leaves the container running. A signal also stops every other
+  command either script has in flight, and says what it is waiting on. With
+  stderr piped through `tee`, a Ctrl-C no longer exits before the container
+  is removed. On macOS, a child that exits just as the signal arrives no
+  longer makes cleanup fail before the container is removed.
+- `characterise-signal.test.ts` runs no longer end each other's processes
+  when two run at once.
+- Tests check every coverage, assessment, channel and task-status token in the
+  VM skill's exit table against the real schemas, and pin the table's
+  first-match order.
+- Tests pin the argument grammar's edges, a forged newline in a refused
+  argument, and the forced command's independence from the caller's `IFS`.
+- Tests keep the skill's verbs, caps and quoted refusal line, the role's verb
+  list and `observe-vm`'s usage line in step with the forced command. They
+  also check that "not a recognised verb" appears only in the catch-all's
+  refusal.
+- `characterise-vm`'s two help-page parsers, which produce 196 of the 207
+  forbidden-command fixture entries, now have unit tests against systemd 239-
+  and 255-shaped help text.
+
 ## [1.0.4] — 2026-09-14
 
 This release is Phase 4 of `Docs/SRD-OBSERVER-ROLES.md` (observer-docker-role).
