@@ -414,6 +414,9 @@ async function main(): Promise<void> {
   // that wait reads as "still waiting", not "hung".
   const CREATE_BOUND_S = Math.round((RUN_TIMEOUT_MS + KILL_GRACE_MS) / 1000);
   const signalState: SignalState = { count: 0 };
+  // An EPIPE on the first-signal line must not be what ends the run: `2>&1 | tee` loses its reader to the
+  // same Ctrl-C, and Bun exits on an unhandled stderr error before cleanup removes the container.
+  process.stderr.on("error", () => {});
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
     process.on(signal, () => {
       handleSignal(signalState, (text) => process.stderr.write(text), dindName, id, CREATE_BOUND_S, "dind container create", () => {

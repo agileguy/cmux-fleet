@@ -373,6 +373,14 @@ for (const [scriptName, sites] of Object.entries(CALL_SITES)) {
       expect(mainBody).toMatch(sites.remove);
     });
 
+    test("stderr errors are handled before the signal handlers that write to it are installed", () => {
+      const guardAt = mainBody.indexOf('process.stderr.on("error"');
+      const handlersAt = mainBody.indexOf("process.on(signal");
+      expect(guardAt, `${scriptName}'s main() never handles a stderr error, so an EPIPE on the first-signal line exits before cleanup`).toBeGreaterThan(-1);
+      expect(handlersAt, `${scriptName}'s main() no longer installs its signal handlers`).toBeGreaterThan(-1);
+      expect(guardAt, "the stderr error handler is installed after the signal handlers").toBeLessThan(handlersAt);
+    });
+
     test("the first signal calls markStopping() before cleanup()", () => {
       expect(mainBody).toMatch(
         /process\.on\(signal, \(\) => \{\s*handleSignal\([^;]*?\(\) => \{\s*markStopping\(\);\s*void cleanup\(\)\.then\(\(\) => process\.exit\(code\)\);/,

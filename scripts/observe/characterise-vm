@@ -39,7 +39,9 @@
  * SIGINT, SIGTERM or SIGHUP (its `pifleet-char=<id>` label is there so an
  * operator can find one a SIGKILL left behind); the
  * host's other containers are never listed, inspected or touched. A signal also
- * stops every other command this script has in flight over SSH — the whole of
+ * stops every other command this script has in flight (for a command on the
+ * target, that is its local ssh client; the remote side can outlive it until
+ * the container is removed) — the whole of
  * what a Ctrl-C looks like from here is "wait for the create, stop everything
  * else, remove the container, exit" — and says so on stderr; a second signal
  * only warns, it never escalates to a SIGKILL this script sends itself.
@@ -443,6 +445,9 @@ async function main(): Promise<void> {
   // that wait reads as "still waiting", not "hung".
   const CREATE_BOUND_S = Math.round((RUN_TIMEOUT_MS + KILL_GRACE_MS) / 1000);
   const signalState: SignalState = { count: 0 };
+  // An EPIPE on the first-signal line must not be what ends the run: `2>&1 | tee` loses its reader to the
+  // same Ctrl-C, and Bun exits on an unhandled stderr error before cleanup removes the container.
+  process.stderr.on("error", () => {});
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
     process.on(signal, () => {
       handleSignal(signalState, (text) => process.stderr.write(text), name, id, CREATE_BOUND_S, "container create", () => {
