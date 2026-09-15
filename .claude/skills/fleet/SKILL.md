@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review/triage workspace, run or check the triage console ("start triaging", "is the triage console running", "what is triage saying", "sweep now"), or names any fleet worker or console by name.
+description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, obs-2, obs-d1, obs-v1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review/triage workspace, run or check the triage console ("start triaging", "is the triage console running", "what is triage saying", "sweep now"), ask what containers are running or how they look on a Docker host, ask whether a VM is up or check its units, logs or journal, enrol a Docker host or a VM as a target, or names any fleet worker or console by name.
 ---
 
 # fleet
@@ -87,7 +87,8 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | Workflow | Trigger | File |
 |----------|---------|------|
 | **ProjectManager** | "run ProjectManager on <repo> against <SRD>", "implement this SRD with the fleet", "run the SRD through the fleet", "have the fleet build <SRD path>", "project-manage this SRD" | `Workflows/ProjectManager.md` |
-| **DispatchTask** | "use tick-1", "send this to eng-1", "get the fleet to…", "ask the observer" | `Workflows/DispatchTask.md` |
+| **DispatchTask** | "use tick-1", "send this to eng-1", "get the fleet to…", "ask the observer", "use obs-d1", "ask obs-v1", "check the containers on <docker host>", "check on <vm>" | `Workflows/DispatchTask.md` |
+| **EnrolTarget** | "enrol a Docker host", "enrol a VM for obs-v1", "add a target for obs-d1", "set up a new observer-docker target" | `Workflows/EnrolTarget.md` |
 | **Consoles** | "recreate the operations workspace", "rebuild the development console", "open the review console", "open the triage console", "open the consoles", "restart tst-1", "make it a python worker", "launch it from <repo>" | `Workflows/Consoles.md` |
 | **Observe** | "what is the fleet doing", "is eng-1 still working", "show me the transcript" | `Workflows/Observe.md` |
 | **Intervene** | "steer eng-1", "abort that task", "unstage it", "take the terminal" | `Workflows/Intervene.md` |
@@ -100,6 +101,9 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | Worker | Role | Console | Toolchain | Notes |
 |--------|------|---------|-----------|-------|
 | `obs-1` | observer-k8s | operations | `base` | read-only cluster/log questions; has cloud access |
+| `obs-2` | observer-k8s | none | `base` | second `observer-k8s` seat, same grant as `obs-1`; `rpc` rather than `obs-1`'s attended `tui`, so a dispatched watch does not sit in the operator's pane — obs-1 is the one a human watches, obs-2 takes the dispatched passes |
+| `obs-d1` | observer-docker | none | `base` | read-only inquiry about containers on one enrolled Docker host. The worker calls its `observe-docker` shim, which runs SSH to the target, and the target's forced command decides what runs; no `docker` CLI in the worker; `cloud_access: false` |
+| `obs-v1` | observer-vm | none | `base` | read-only inquiry about one enrolled VM's reachability, system state, units, logs and resources. The worker calls its `observe-vm` shim, which runs SSH to the target, and the target's forced command decides what runs; `cloud_access: false` (Q2: the cloud channel is off) |
 | `tick-1` | ticketing | operations | `base` | Rally via `TICKET_*` secrets; egress to `rally1.rallydev.com` |
 | `eng-1`, `eng-2` | engineer | development | `node` | hosted model, own git checkout, no egress |
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
