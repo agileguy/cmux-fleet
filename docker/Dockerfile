@@ -32,11 +32,17 @@ ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 # byte-identical. Shipping both tools makes the download UNREACHED rather than
 # merely blocked.
 #
-# The symlink is load-bearing, not tidiness. Debian ships the binary as
-# `fdfind` (the name `fd` belongs to fdclone), and Pi 0.79.6 happens to accept
-# either — `systemBinaryNames: ["fd", "fdfind"]`. Providing BOTH names means
-# the fix does not depend on Pi continuing to know Debian's rename, and a
-# worker's own `fd ...` command line works the way its muscle memory expects.
+# fd is NOT Debian's `fd-find`, and that is a measured fix rather than taste.
+# Pi 0.79.6's `find` tool passes `--no-require-git` on every call, and Debian
+# bookworm's fd 8.6.0 rejects that flag ("Found argument '--no-require-git'
+# which wasn't expected"), so every `find` a worker made failed. That was
+# measured in the triage collator's transcripts on 2026-09-15 (T-sweep-145 and
+# T-sweep-147). The upstream musl build is pinned by version AND sha256 per
+# architecture, so two workers on one role stay byte-identical and a swapped
+# tarball fails the build. Both names are still provided: Pi accepts either
+# (`systemBinaryNames: ["fd", "fdfind"]`), and a worker's own `fd ...` command
+# line works the way its muscle memory expects. The tool check at the end of
+# this file runs the exact flags Pi uses.
 # `procps` is pifleet's OWN dependency, not a convenience for the agent.
 # `safety/procstart.ts` and `safety/procgroup.ts` both shell out to `ps` — it is
 # how a run decides whether a pid is alive before it stops, reaps or prunes
@@ -46,9 +52,26 @@ ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 # `IdentityReadError`, which wears `EXIT.BACKEND_UNAVAILABLE` — so the failure
 # arrives as exit 3 from an unrelated command rather than as a missing binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg procps openssh-client \
- && rm -rf /var/lib/apt/lists/* \
- && ln -s /usr/bin/fdfind /usr/local/bin/fd
+      bash ca-certificates git ripgrep jq curl less tini gnupg procps openssh-client \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG FD_VERSION=10.5.0
+ARG FD_SHA256_ARM64=d76c4317f7d5dba69f8a2a15856c90c777e7f0dd4e85f0de8c76de6992c374d4
+ARG FD_SHA256_AMD64=761c72dc8e120d85b22292063be8a796e2eeb20eb3e4f38b8fa2343ccf3514a7
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      arm64) fd_arch=aarch64; fd_sha="${FD_SHA256_ARM64}" ;; \
+      amd64) fd_arch=x86_64; fd_sha="${FD_SHA256_AMD64}" ;; \
+      *) echo "fd: no pinned build for TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    fd_tgz="fd-v${FD_VERSION}-${fd_arch}-unknown-linux-musl.tar.gz"; \
+    curl -fsSL -o "/tmp/${fd_tgz}" "https://github.com/sharkdp/fd/releases/download/v${FD_VERSION}/${fd_tgz}"; \
+    echo "${fd_sha}  /tmp/${fd_tgz}" | sha256sum -c -; \
+    mkdir -p /tmp/fd; \
+    tar -xzf "/tmp/${fd_tgz}" -C /tmp/fd --strip-components=1; \
+    install -m 0755 /tmp/fd/fd /usr/local/bin/fd; \
+    ln -s /usr/local/bin/fd /usr/local/bin/fdfind; \
+    rm -rf "/tmp/${fd_tgz}" /tmp/fd
 
 # --- cloud CLI baseline: present in EVERY worker image (SRD §5.3) ---
 # SRE-shaped tasks are a primary use case; a role that discovers mid-task that
@@ -382,6 +405,7 @@ RUN set -eux; \
     rg --version >/dev/null; \
     fd --version >/dev/null; \
     fdfind --version >/dev/null; \
+    fd --glob --color=never --hidden --no-require-git --max-results 1 -- fd /usr/local/bin >/dev/null; \
     /opt/pifleet/rally-cli/bin/rally-cli --version >/dev/null; \
     ssh -V; \
     observe-ssh --help >/dev/null; \

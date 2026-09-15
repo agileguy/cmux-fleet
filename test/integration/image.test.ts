@@ -205,12 +205,20 @@ describe("toolchain baseline (ISC-33..37)", () => {
     ["jq", "/usr/bin/jq", ["--version"]],
     ["curl", "/usr/bin/curl", ["--version"]],
     // The search tools are here for a different reason from the rest: see the
-    // offline-resolution test below. `fd` is the symlink, `fdfind` is Debian's
-    // real name, and each is probed because one existing does not make the
-    // other exist.
+    // offline-resolution test below. `fd` is the pinned upstream build and
+    // `fdfind` is the symlink kept for Debian's name, and each is probed because
+    // one existing does not make the other exist.
     ["rg", "/usr/bin/rg", ["--version"]],
     ["fd", "/usr/local/bin/fd", ["--version"]],
-    ["fdfind", "/usr/bin/fdfind", ["--version"]],
+    ["fdfind", "/usr/local/bin/fdfind", ["--version"]],
+    // The exact flags Pi 0.79.6's `find` tool passes. Debian bookworm's fd 8.6.0
+    // rejected `--no-require-git`, so every `find` call failed (2026-09-15,
+    // T-sweep-145 and T-sweep-147); `--version` alone passed throughout.
+    [
+      "fd accepts Pi's find flags",
+      "/usr/local/bin/fd",
+      ["--glob", "--color=never", "--hidden", "--no-require-git", "--max-results", "1", "--", "fd", "/usr/local/bin"],
+    ],
   ];
   for (const [name, bin, args] of probes) {
     it(`${name} works inside the image`, async () => {

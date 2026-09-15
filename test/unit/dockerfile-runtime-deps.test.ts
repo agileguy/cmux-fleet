@@ -186,6 +186,37 @@ describe("observe-ssh is exercised at build time (SRD-OBSERVER-ROLES task 3.3)",
 });
 
 /**
+ * fd is the pinned upstream build, and the build runs the flags Pi passes.
+ *
+ * Pi 0.79.6's `find` tool passes `--no-require-git` on every call. Debian
+ * bookworm's `fd-find` 8.6.0 rejects that flag, so every `find` a worker made
+ * failed with "Found argument '--no-require-git' which wasn't expected"
+ * (measured 2026-09-15 in the triage collator's transcripts, T-sweep-145 and
+ * T-sweep-147), while the smoke block's `fd --version` passed throughout. These
+ * assertions keep the three halves of the fix from rotting apart: no Debian
+ * package, a checksum-verified download, and a build step that runs Pi's flags.
+ */
+describe("fd accepts Pi's find flags", () => {
+  test("Debian's fd-find is not installed", () => {
+    expect(aptPackages(DOCKERFILE).has("fd-find")).toBe(false);
+  });
+
+  test("the fd download is verified against a pinned sha256 before it is installed", () => {
+    const shaIdx = DOCKERFILE.indexOf("sha256sum -c -");
+    const installIdx = DOCKERFILE.indexOf("install -m 0755 /tmp/fd/fd /usr/local/bin/fd");
+    expect(shaIdx, "expected a sha256sum -c check in docker/Dockerfile").toBeGreaterThan(-1);
+    expect(installIdx, "expected fd to be installed to /usr/local/bin/fd").toBeGreaterThan(-1);
+    expect(shaIdx).toBeLessThan(installIdx);
+    expect(DOCKERFILE).toMatch(/^ARG FD_SHA256_ARM64=[0-9a-f]{64}$/m);
+    expect(DOCKERFILE).toMatch(/^ARG FD_SHA256_AMD64=[0-9a-f]{64}$/m);
+  });
+
+  test("the smoke RUN block runs fd with --no-require-git", () => {
+    expect(smokeBlock()).toContain("--no-require-git");
+  });
+});
+
+/**
  * `observe-docker` is exercised at build time too (SRD-OBSERVER-ROLES task
  * 4.2), same reasoning as the
  * observe-ssh block above: a presence check does not prove the alias still
