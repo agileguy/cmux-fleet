@@ -24,6 +24,12 @@
  *     (`ObserverDockerChannelSchema`) and the real coverage/task words (`forbidden`,
  *     `indeterminate`, `blocked`, `not_attempted`)
  *
+ *  9. the skill's survey-then-filter rule ("Surveying containers when the brief names none"):
+ *     the worked command's jq projection keeps only fields that are in the real `ps` template
+ *     (read from `docker-forced-command`'s `PS_FORMAT` literal, never hard-coded here), the
+ *     worked command preserves `observe-docker`'s exit code through the pipe (`pipefail` or
+ *     `PIPESTATUS`), and the input table's `selector` default names the rule
+ *
  * Not covered, in general: when a channel is `forbidden` rather than a call to fix — that is prose
  * judgement, except for the one case choice 8 pins: an action verb (restart, stop, start, kill, rm,
  * exec, pause, or any other change to a container) is always `forbidden` on `state`.
@@ -428,5 +434,87 @@ describe("the skill's action-verb rule names a real channel for an action the ch
 
   test("the exit table's `77` unrecognised-verb row points to this rule", () => {
     expect(SKILL).toContain("the report artifact contract's coverage bullet below names the channel (`state`)");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 9. the survey-then-filter rule: the worked command's jq projection keeps
+//    only real `ps` template fields, the worked command preserves
+//    observe-docker's exit code through the pipe, and the input table's
+//    selector default points at the rule.
+// -----------------------------------------------------------------------------
+
+/**
+ * The "## Surveying containers when the brief names none" section, from its
+ * own heading to the next `## ` heading. Anchored on the heading text, so a
+ * mutation that drops the whole section turns this red rather than silently
+ * matching an unrelated part of the file.
+ */
+function surveySection(src: string): string {
+  const heading = "## Surveying containers when the brief names none";
+  const headingAt = src.indexOf(heading);
+  expect(headingAt, "the skill's 'Surveying containers when the brief names none' heading is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const after = src.slice(headingAt + heading.length);
+  const nextHeadingOffset = after.search(/\n## /);
+  return nextHeadingOffset === -1 ? after : after.slice(0, nextHeadingOffset);
+}
+
+/** The fenced worked command inside the survey section — the recipe itself, not prose about it. */
+function surveyWorkedCommand(src: string): string {
+  const section = surveySection(src);
+  const m = section.match(/```\n([\s\S]*?)\n```/);
+  expect(m, "the survey section's fenced worked command is gone — this probe has rotted").not.toBeNull();
+  return m![1]!;
+}
+
+/** The jq projection's field names, out of the worked command's `{Field, Field, ...}` object literal. */
+function jqProjectionFields(command: string): string[] {
+  const m = command.match(/jq\s+-c\s+'\{([^}]*)\}'/);
+  expect(m, "the worked command's jq projection literal is gone — this probe has rotted").not.toBeNull();
+  const fields = m![1]!.split(",").map((f) => f.trim()).filter(Boolean);
+  expect(fields.length, "no fields matched in the jq projection literal — the extractor has rotted").toBeGreaterThanOrEqual(1);
+  return fields;
+}
+
+/**
+ * The real `ps` template's field set: the keys in `docker-forced-command`'s
+ * `PS_FORMAT` literal, read from source — never retyped by hand here. This is
+ * the same 11-field template the skill's measured-facts bullet describes.
+ */
+function psTemplateFieldsFromForcedCommand(src: string): Set<string> {
+  const m = src.match(/^PS_FORMAT='(\{.*\})'$/m);
+  expect(m, "docker-forced-command's PS_FORMAT literal is gone — this probe has rotted").not.toBeNull();
+  const fields = [...m![1]!.matchAll(/"([A-Za-z]+)":\{\{json/g)].map((mm) => mm[1]!);
+  expect(fields.length, "no fields matched in PS_FORMAT — the extractor has rotted").toBeGreaterThanOrEqual(9);
+  return new Set(fields);
+}
+
+describe("the survey-then-filter rule's jq projection only ever keeps real ps template fields", () => {
+  test("every field the worked command's jq projection keeps is in the forced command's ps template", () => {
+    const command = surveyWorkedCommand(SKILL);
+    const projected = jqProjectionFields(command);
+    const real = psTemplateFieldsFromForcedCommand(FORCED_COMMAND);
+    const bogus = projected.filter((f) => !real.has(f));
+    expect(bogus, `the worked command's jq projection keeps these fields and docker-forced-command's ps template does not have them: ${bogus.join(", ")}`).toEqual([]);
+  });
+});
+
+describe("the survey-then-filter rule's worked command preserves observe-docker's exit code through the pipe", () => {
+  test("the worked command carries pipefail (or reads PIPESTATUS)", () => {
+    const command = surveyWorkedCommand(SKILL);
+    const preserves = /pipefail/.test(command) || /PIPESTATUS/.test(command);
+    expect(preserves, `the worked command does not preserve the exit code through the pipe: ${JSON.stringify(command)}`).toBe(true);
+  });
+});
+
+describe("the input table's selector default points at the survey-then-filter rule", () => {
+  test("the selector row's default cell names the rule's heading", () => {
+    const rows = [...SKILL.matchAll(/^\| selector \|.*\|$/gm)];
+    expect(rows.length, "the input table's selector row is gone — this probe has rotted").toBeGreaterThanOrEqual(1);
+    expect(rows[0]![0]!).toContain("Surveying containers when the brief names none");
+  });
+
+  test("the heading the pointer names actually exists in the skill", () => {
+    expect(SKILL).toContain("## Surveying containers when the brief names none");
   });
 });

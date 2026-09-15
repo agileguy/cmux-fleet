@@ -24,7 +24,7 @@ rather than guessing.
 |---|---|---|
 | target | a target TOKEN from the enrolled inventory, `^[a-z0-9][a-z0-9-]{0,31}$` | none — if the inventory holds exactly one target, use it and say so; otherwise the row is `indeterminate` |
 | containers | one or more container names, Docker's name grammar `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` | — |
-| selector | `label=<key>=<value>` or `name=<pattern>`, used instead of names | if neither names nor a selector is given: every running container, `ps` only, and the row says so |
+| selector | `label=<key>=<value>` or `name=<pattern>`, used instead of names | if neither names nor a selector is given: every running container, surveyed once and filtered per "Surveying containers when the brief names none" below, and the row says so |
 | checks | a closed subset of `state`, `health`, `logs`, `stats`, `events` | `state, health, logs` |
 | window | seconds, e.g. `300s` | `300s` |
 | question | one sentence | "is it healthy" |
@@ -66,6 +66,24 @@ had refused something. A target-side 77 is not one thing either: the stderr line
 VERB the credential refuses outright, or an ARGUMENT its grammar refused — only the first is
 `forbidden`. A refused argument is still your call to fix, from the reason the line gives, unless
 what the task needs has no form the grammar accepts at all.
+
+## Surveying containers when the brief names none
+
+Run `ps` exactly once, and never repeat an unfiltered call. On 2026-09-15, an unfiltered `ps`
+against a real host measured about 39KB of JSON, one line per container, full `Labels` and
+`Command` included. Pipe that one call through `jq`, in the worker's own shell (jq is in the
+image), and keep only `Names`, `State` and `Status`:
+
+```
+set -o pipefail; observe-docker <target> ps | jq -c '{Names, State, Status}'
+```
+
+`set -o pipefail` carries `observe-docker`'s own exit code through the pipe. Without it, the shell
+reports `jq`'s exit code instead of `observe-docker`'s, and the exit table above stops routing on
+the real result; with it, that same exit table still applies to this piped call, the same as to a
+bare one. Pick the containers the brief means from the trimmed survey, then query only those by
+name (`ps name=<n>`, `inspect`, `logs`). When the brief already names containers or gives a
+selector, skip the survey and go straight to name-scoped calls.
 
 ## The verb grammar — the whole of what the credential can do (§5.4)
 
