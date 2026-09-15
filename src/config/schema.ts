@@ -1997,20 +1997,55 @@ export function kubeconfigScopeWarning(workerIds: readonly string[]): string | n
 export const OBSERVER_K8S_ROLE = "observer-k8s";
 
 /**
- * Worker ids whose resolved role is `OBSERVER_K8S_ROLE` and whose resolved
- * `pane_mode` is `tui` (§6.2, §7.5).
+ * The name the shipped read-only Docker-host diagnostic role carries in
+ * `fleet.example.yaml` and `fleet.yaml` (SRD-OBSERVER-ROLES-001 §5).
  *
- * Keyed to the role's NAME rather than to a property this schema can derive,
- * because the hazard is a fact about what the `observer-ops` skill DOES —
- * repeatedly re-dispatching a near-identical watch task (§7.5) — and nothing
- * in a `RoleFields` object says that. A fleet is free to name its read-only
- * diagnostic role something else and accept a different risk profile; this
- * only watches the name the shipped role actually uses.
+ * Same reason as `OBSERVER_K8S_ROLE`: one constant rather than a literal at
+ * each site.
+ */
+export const OBSERVER_DOCKER_ROLE = "observer-docker";
+
+/**
+ * The name the shipped read-only VM diagnostic role carries in
+ * `fleet.example.yaml` and `fleet.yaml` (SRD-OBSERVER-ROLES-001 §6).
+ *
+ * Same reason as `OBSERVER_K8S_ROLE`: one constant rather than a literal at
+ * each site.
+ */
+export const OBSERVER_VM_ROLE = "observer-vm";
+
+/**
+ * The three observer role names `observerTuiWorkers` treats alike
+ * (SRD-TRIAGE-MIXED-OBSERVERS §7, D13).
+ *
+ * One exported list rather than three separate comparisons, so a fourth
+ * observer kind is one entry here instead of a hunt for every call site that
+ * enumerates the other three.
+ */
+export const OBSERVER_TUI_WARN_ROLES: readonly string[] = [
+  OBSERVER_K8S_ROLE,
+  OBSERVER_DOCKER_ROLE,
+  OBSERVER_VM_ROLE,
+];
+
+/**
+ * Worker ids whose resolved role is one of `OBSERVER_TUI_WARN_ROLES` and
+ * whose resolved `pane_mode` is `tui` (§6.2, §7.5; generalized from
+ * `OBSERVER_K8S_ROLE` alone by SRD-TRIAGE-MIXED-OBSERVERS §7, D13).
+ *
+ * Keyed to the roles' NAMES rather than to a property this schema can derive,
+ * because the hazard is a fact about how an observer is DISPATCHED —
+ * repeatedly re-dispatching a near-identical watch task (§7.5), regardless of
+ * whether the `observer-ops`, `observer-docker-ops` or `observer-vm-ops`
+ * skill is doing the watching — and nothing in a `RoleFields` object says
+ * that. A fleet is free to name its read-only diagnostic roles something else
+ * and accept a different risk profile; this only watches the names the
+ * shipped roles actually use.
  */
 export function observerTuiWorkers(cfg: FleetConfig): string[] {
   const out: string[] = [];
   for (const w of cfg.workers) {
-    if (w.role !== OBSERVER_K8S_ROLE) continue;
+    if (!OBSERVER_TUI_WARN_ROLES.includes(w.role)) continue;
     const role = cfg.roles[w.role];
     if (!role) continue;
     const mode = pickRoleField(w, role, cfg.defaults, "pane_mode") ?? "rpc";

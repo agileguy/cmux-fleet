@@ -43,6 +43,8 @@ import {
   effectiveToolGrant,
   kubeconfigScopeWarning,
   OBSERVER_K8S_ROLE,
+  OBSERVER_DOCKER_ROLE,
+  OBSERVER_VM_ROLE,
   observerTuiEpochWarning,
   observerTuiWorkers,
   DEFAULT_GIT_IDENTITY,
@@ -2421,6 +2423,53 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
     doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const loaded = await writeAndLoad(doc);
     expect(observerTuiWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * Generalized from `OBSERVER_K8S_ROLE` alone by SRD-TRIAGE-MIXED-OBSERVERS
+   * §7, D13: the hazard is a fact about how an observer is dispatched, not
+   * about which target kind it watches.
+   */
+  test("an observer-docker worker resolving pane_mode: tui is named", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { [OBSERVER_DOCKER_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-td1", role: OBSERVER_DOCKER_ROLE }];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-td1"]);
+  });
+
+  test("an observer-vm worker resolving pane_mode: tui is named", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { [OBSERVER_VM_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-tv1", role: OBSERVER_VM_ROLE }];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-tv1"]);
+  });
+
+  /**
+   * Declaration order deliberately does not follow role or alphabetical
+   * grouping, so a passing result cannot be an accident of sort order — and
+   * every rpc-mode observer (one per role) sits beside its tui sibling, so an
+   * implementation that returned every observer regardless of pane_mode would
+   * be caught here too.
+   */
+  test("a mixed fleet returns every tui observer of all three roles, in worker order, and no rpc observer", async () => {
+    const doc = baseDoc();
+    doc["roles"] = {
+      [OBSERVER_K8S_ROLE]: {},
+      [OBSERVER_DOCKER_ROLE]: {},
+      [OBSERVER_VM_ROLE]: {},
+    };
+    doc["workers"] = [
+      { id: "obs-tv1", role: OBSERVER_VM_ROLE, pane_mode: "tui" },
+      { id: "obs-2", role: OBSERVER_K8S_ROLE },
+      { id: "obs-td1", role: OBSERVER_DOCKER_ROLE, pane_mode: "tui" },
+      { id: "obs-v1", role: OBSERVER_VM_ROLE },
+      { id: "obs-t1", role: OBSERVER_K8S_ROLE, pane_mode: "tui" },
+      { id: "obs-d1", role: OBSERVER_DOCKER_ROLE },
+    ];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-tv1", "obs-td1", "obs-t1"]);
   });
 
   /**
