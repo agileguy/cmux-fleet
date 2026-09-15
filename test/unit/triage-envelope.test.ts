@@ -88,6 +88,7 @@ import {
   projectPreviousState,
   readObserverArtifactAt,
   readTriageDocumentAt,
+  renderCollationEnvelope,
   renderSweepEnvelope,
   sweepProducers,
   triageDocumentPath,
@@ -828,6 +829,59 @@ describe("SweepEnvironment: a vm service's units", () => {
         `  checks: ${withoutUnits.checks.join(", ")}`,
       ].join("\n"),
     );
+  });
+});
+
+/**
+ * `renderCollationEnvelope`'s `environment` field — SRD-TRIAGE-MIXED-OBSERVERS
+ * D21. The tracked `triage/targets.yaml` declares `grafana` and
+ * `prometheus` in both the k8s environment and `docker-host`, and
+ * `resolveRowEnvironment` (`triage-verdict.ts`) resolves a row naming no
+ * `environment` only when the sweep declares exactly one — with more than one
+ * declared, only the collator can say which environment a merged row is
+ * about, so this brief is the one place that can ask for the field.
+ */
+describe("renderCollationEnvelope: the environment field (SRD-TRIAGE-MIXED-OBSERVERS D21)", () => {
+  const SWEEP = sweepTaskId(80);
+  const k8sSeat = { worker: "obs-t1", aspect: "slice1" };
+  const dockerSeat = { worker: "obs-td1", aspect: "docker1" };
+  const vmSeat = { worker: "obs-tv1", aspect: "vm1" };
+
+  test("a single-environment collation brief does not ask for `environment`", () => {
+    const { brief } = renderCollationEnvelope({
+      sweepId: SWEEP,
+      environment: "cni-dev",
+      seats: [k8sSeat],
+      environments: [{ name: "cni-dev", kind: "k8s", services: [] }],
+    });
+    expect(brief).not.toContain("`environment`");
+    expect(brief).toContain(childTaskId(SWEEP, k8sSeat.aspect));
+    // No parenthetical label on the one reply path there is nothing to disambiguate.
+    expect(brief).not.toMatch(/\.json \(/);
+  });
+
+  test("a three-environment collation brief names `environment`, all three environment names, and labels each reply path", () => {
+    const environments: readonly SweepEnvironment[] = [
+      { name: "cni-dev", kind: "k8s", services: [] },
+      { name: "docker-host", kind: "docker", services: [] },
+      { name: "vm-fleet", kind: "vm", services: [] },
+    ];
+    const { brief } = renderCollationEnvelope({
+      sweepId: SWEEP,
+      environment: "cni-dev, docker-host, vm-fleet",
+      seats: [k8sSeat, dockerSeat, vmSeat],
+      environments,
+    });
+
+    expect(brief).toContain("`environment`");
+    for (const e of environments) expect(brief).toContain(`\`${e.name}\``);
+
+    // Each reply path is labelled with the environment its OWN seat belongs to.
+    expect(brief).toContain(`${childTaskId(SWEEP, k8sSeat.aspect)}.json (cni-dev)`);
+    expect(brief).toContain(`${childTaskId(SWEEP, dockerSeat.aspect)}.json (docker-host)`);
+    expect(brief).toContain(`${childTaskId(SWEEP, vmSeat.aspect)}.json (vm-fleet)`);
+
+    expect(envelopeIssues(brief, null)).toEqual([]);
   });
 });
 
@@ -1753,7 +1807,9 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
 
   /**
    * The vm sibling of the fixture above — `skills/observer-vm-ops/SKILL.md`
-   * §6.7's OWN worked example, copied verbatim: `uptime_s`, `system_state` and
+   * §6.7's worked example as it shipped before 2026-09-15, when its row `name`
+   * and `namespace` were corrected to the brief's service and target token (the
+   * join under test does not read either): `uptime_s`, `system_state` and
    * `failed_units` are fields no k8s or docker artifact carries, and
    * `window_opened_at` is `null` exactly as the skill ships it. Asserts the
    * other half of §7.4's pair: a null `window_opened_at` survives the join
@@ -2503,7 +2559,7 @@ describe("freshnessEchoDemand (ISC-1119, authored under ISC-1136)", () => {
     "`aodapnc-grafana-dev`. Both files, every time.";
 
   test("names both fields in their exact spellings, quoting the sweep id and the window", () => {
-    const demand = freshnessEchoDemand("T-sweep-1", WINDOW);
+    const demand = freshnessEchoDemand("T-sweep-1", WINDOW, "k8s");
     expect(demand).toContain('`sweep_id` exactly "T-sweep-1"');
     expect(demand).toContain(`\`window_opened_at\` exactly "${WINDOW}"`);
   });
@@ -2514,7 +2570,7 @@ describe("freshnessEchoDemand (ISC-1119, authored under ISC-1136)", () => {
    * `readWindowInstant` for why the host cannot supply one.
    */
   test("a null window produces no invented value", () => {
-    const demand = freshnessEchoDemand("T-sweep-9", null);
+    const demand = freshnessEchoDemand("T-sweep-9", null, "k8s");
     expect(demand).toContain('`sweep_id` exactly "T-sweep-9"');
     expect(demand).not.toMatch(/window_opened_at` exactly "/);
     expect(demand).toContain("as this brief states the observation window opening");
@@ -2526,10 +2582,26 @@ describe("freshnessEchoDemand (ISC-1119, authored under ISC-1136)", () => {
    * measured failure was five correct artifacts discarded whole.
    */
   test("it says what an artifact missing either one costs", () => {
-    const demand = freshnessEchoDemand("T-sweep-1", WINDOW);
+    const demand = freshnessEchoDemand("T-sweep-1", WINDOW, "k8s");
     expect(demand).toContain("discarded whole");
     expect(demand).toContain("recorded as unobserved");
     expect(demand).toContain("copied from this brief and from nowhere else");
+  });
+
+  /**
+   * **THE FILENAME IS PER KIND (SRD-TRIAGE-MIXED-OBSERVERS §5), and this is the
+   * revert check for it.** Before this fix the demand named `observer-ops.json`
+   * unconditionally, which told a docker or vm observer to echo its freshness
+   * fields into a file `joinSweep` never reads back for it.
+   */
+  test("names each kind's own artifact file, never another kind's", () => {
+    expect(freshnessEchoDemand("T-sweep-1", WINDOW, "k8s")).toContain("`observer-ops.json`");
+    const docker = freshnessEchoDemand("T-sweep-1", WINDOW, "docker");
+    expect(docker).toContain("`observer-docker-ops.json`");
+    expect(docker).not.toContain("observer-ops.json");
+    const vm = freshnessEchoDemand("T-sweep-1", WINDOW, "vm");
+    expect(vm).toContain("`observer-vm-ops.json`");
+    expect(vm).not.toContain("observer-ops.json");
   });
 
   test("readWindowInstant finds the instant in the collator's own prose", () => {
@@ -2842,7 +2914,7 @@ describe("the sweep envelope carries what the collator is asked to emit", () => 
       `Sweep ${sweepId}. Observation window opens ${window}. Check \`grafana\`. ` +
       `Write both files into /outbox/${child}/files/.`;
 
-    const composed = composeObserverBrief({ judgement, sweepId, childTaskId: child });
+    const composed = composeObserverBrief({ judgement, sweepId, childTaskId: child, kind: "k8s" });
     expect(composed.rewrote).toEqual([]);
     expect(composed.window).toBe(window);
     expect(composed.brief.startsWith(judgement)).toBe(true);
@@ -3069,7 +3141,8 @@ describe("dispatchObserver dispatches the COMPOSED brief (ISC-1131, ISC-1134, IS
       "the dispatch port did not receive composeObserverBrief's output — the composer is " +
         "not on the dispatch path (ISC-1104's shape: five green tests, no caller)",
     ).toBe(
-      composeObserverBrief({ judgement: collatorBrief, sweepId, childTaskId: childId }).brief,
+      composeObserverBrief({ judgement: collatorBrief, sweepId, childTaskId: childId, kind: "k8s" })
+        .brief,
     );
 
     // The seam between the collator's words and the host's is marked, so an
@@ -3078,6 +3151,121 @@ describe("dispatchObserver dispatches the COMPOSED brief (ISC-1131, ISC-1134, IS
     expect(brief.indexOf(OBSERVER_CONTRACT_HEADING)).toBeGreaterThan(
       brief.indexOf("aodapnc-grafana-dev"),
     );
+  });
+
+  /**
+   * **THE KIND MUST REACH THE REAL DISPATCH PATH — a unit test of
+   * `composeObserverBrief` alone cannot see a call site that forgot to pass it.**
+   * Before this fix `dispatchObserver` called the composer with no `kind` at
+   * all, so a docker seat got the k8s contract: told to echo into
+   * `observer-ops.json`, a file `joinSweep` never reads back for a docker reply
+   * (SRD-TRIAGE-MIXED-OBSERVERS §5).
+   */
+  test("obs-td1's dispatched brief names observer-docker-ops.json, never observer-ops.json", async () => {
+    const run = await seedRun("2026-09-15T00-00-90Z-9090");
+    const sweepId = sweepTaskId(90);
+    const dockerEnv: SweepEnvironment = {
+      name: DOCKER_ENV_NAME,
+      kind: "docker",
+      services: [DOCKER_ENV_SERVICE],
+    };
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: seatsForEnvironments([dockerEnv]),
+      environments: [dockerEnv],
+    };
+
+    const dir = join(workerOutboxDir(run.root, TRIAGE_COLLATOR), sweepId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, DISPATCH_REQUEST_FILE),
+      JSON.stringify({
+        schema: "pifleet.dispatchrequest/v1",
+        parent_task_id: sweepId,
+        requests: [
+          {
+            worker: "obs-td1",
+            title: "Health sweep",
+            brief: `Sweep ${sweepId}. Check \`${DOCKER_ENV_SERVICE.name}\` on ${DOCKER_ENV_SERVICE.namespace}.`,
+            services: [DOCKER_ENV_SERVICE.name],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const sent: Sent[] = [];
+    const producers = sweepProducers({
+      run,
+      environments: [dockerEnv],
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    await producers.dispatchObserver(sweepId, {
+      worker: "obs-td1",
+      services: [DOCKER_ENV_SERVICE.name],
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.brief).toContain("`observer-docker-ops.json`");
+    expect(sent[0]!.brief).not.toContain("observer-ops.json");
+    expect(sent[0]!.brief).not.toContain("kubectl");
+  });
+
+  /**
+   * The host invariant `dispatchObserver` refuses rather than guesses: a
+   * worker this console dispatches to but `TRIAGE_SEAT_KINDS` does not name is
+   * a configuration fault, never silently treated as k8s.
+   */
+  test("a seat with no known kind refuses rather than defaulting to k8s", async () => {
+    const run = await seedRun("2026-09-15T00-00-91Z-9091");
+    const sweepId = sweepTaskId(91);
+    const strayWorker = "obs-t9"; // not in TRIAGE_SEAT_KINDS
+    const strayPair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: [{ worker: strayWorker, aspect: "slice9" }],
+      environments: SWEEP_ENVIRONMENTS,
+    };
+    const dir = join(workerOutboxDir(run.root, TRIAGE_COLLATOR), sweepId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, DISPATCH_REQUEST_FILE),
+      JSON.stringify({
+        schema: "pifleet.dispatchrequest/v1",
+        parent_task_id: sweepId,
+        requests: [
+          { worker: strayWorker, title: "Health sweep", brief: "Sweep.", services: ["routing"] },
+        ],
+      }),
+      "utf8",
+    );
+    const sent: Sent[] = [];
+    const producers = sweepProducers({
+      run,
+      environments: SWEEP_ENVIRONMENTS,
+      pairs: [strayPair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    let thrown: unknown = null;
+    try {
+      await producers.dispatchObserver(sweepId, { worker: strayWorker, services: ["routing"] });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SweepEnvelopeError);
+    expect(sent).toHaveLength(0);
   });
 });
 
@@ -3105,8 +3293,9 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       judgement: `Sweep ${SWEEP}. Window opens ${WINDOW}. Look at grafana.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
-    expect(brief).toContain(freshnessEchoDemand(SWEEP, WINDOW));
+    expect(brief).toContain(freshnessEchoDemand(SWEEP, WINDOW, "k8s"));
     expect(brief).toContain(ROW_SHAPE_DEMAND);
     expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
     expect(brief).toContain(BOUNDED_CALLS_DEMAND);
@@ -3129,6 +3318,7 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
         `pass --request-timeout=5s on everything.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
     expect(brief).toContain(COVERAGE_VOCABULARY_DEMAND);
     expect(brief).toContain(BOUNDED_CALLS_DEMAND);
@@ -3143,7 +3333,12 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
   /** Judgement first, contract second — the old call site's own argument, kept. */
   test("the collator's judgement leads and the host's block follows it", () => {
     const judgement = `Sweep ${SWEEP}. Window opens ${WINDOW}. Look at grafana.`;
-    const { brief } = composeObserverBrief({ judgement, sweepId: SWEEP, childTaskId: CHILD });
+    const { brief } = composeObserverBrief({
+      judgement,
+      sweepId: SWEEP,
+      childTaskId: CHILD,
+      kind: "k8s",
+    });
     expect(brief.startsWith(judgement)).toBe(true);
     expect(brief.indexOf(OBSERVER_CONTRACT_HEADING)).toBeGreaterThan(0);
   });
@@ -3158,6 +3353,7 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       judgement: `Sweep ${SWEEP}. Write both files into /outbox/${SWEEP}/files/.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
     expect(r.rewrote).toEqual([SWEEP]);
     expect(r.brief).toContain(`/outbox/${CHILD}/files/`);
@@ -3175,10 +3371,99 @@ describe("composeObserverBrief: the host authors, the collator judges (ISC-1136)
       judgement: `Sweep ${SWEEP}. Look at grafana.`,
       sweepId: SWEEP,
       childTaskId: CHILD,
+      kind: "k8s",
     });
     expect(r.window).toBeNull();
     expect(r.brief).toContain('`sweep_id` exactly "T-sweep-31"');
     expect(r.brief).not.toMatch(/window_opened_at` exactly "/);
+  });
+});
+
+/**
+ * SRD-TRIAGE-MIXED-OBSERVERS §5 — the observer contract holds for every kind,
+ * not just k8s. `composeObserverBrief` used to hand a docker or vm seat the
+ * same four paragraphs a k8s seat gets, unconditionally: told to echo into
+ * `observer-ops.json` (a file `joinSweep` never reads back for it) and to
+ * bound its calls with `kubectl --request-timeout` (a flag neither credential
+ * has). These tests are the revert check for both halves of that defect.
+ */
+describe("composeObserverBrief is kind-aware (SRD-TRIAGE-MIXED-OBSERVERS §5)", () => {
+  const SWEEP = "T-sweep-90";
+  const WINDOW = "2026-09-15T09:00:00.000Z";
+  const judgementFor = (child: string): string =>
+    `Sweep ${SWEEP}. Window opens ${WINDOW}. Write both files into /outbox/${child}/files/.`;
+
+  /** The k8s brief keeps its current meaning — every existing k8s pin stays green. */
+  test("a k8s brief still names observer-ops.json and the kubectl timeout", () => {
+    const child = "T-sweep-90-slice1";
+    const { brief } = composeObserverBrief({
+      judgement: judgementFor(child),
+      sweepId: SWEEP,
+      childTaskId: child,
+      kind: "k8s",
+    });
+    expect(brief).toContain("`observer-ops.json`");
+    expect(brief).toContain(`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s`);
+    expect(brief).toContain("kubectl");
+  });
+
+  /**
+   * A docker brief names its own file and carries none of the three k8s-only
+   * strings a docker observer has no use for: it has no `kubectl`, no
+   * `--request-timeout`, and nothing tells it to write `observer-ops.json`.
+   */
+  test("a docker brief names observer-docker-ops.json and none of the k8s strings", () => {
+    const child = "T-sweep-90-docker1";
+    const { brief } = composeObserverBrief({
+      judgement: judgementFor(child),
+      sweepId: SWEEP,
+      childTaskId: child,
+      kind: "docker",
+    });
+    expect(brief).toContain("`observer-docker-ops.json`");
+    expect(brief).not.toContain("observer-ops.json");
+    expect(brief).not.toContain("kubectl");
+    expect(brief).not.toContain("--request-timeout");
+  });
+
+  /** The vm sibling of the docker test above. */
+  test("a vm brief names observer-vm-ops.json and none of the k8s strings", () => {
+    const child = "T-sweep-90-vm1";
+    const { brief } = composeObserverBrief({
+      judgement: judgementFor(child),
+      sweepId: SWEEP,
+      childTaskId: child,
+      kind: "vm",
+    });
+    expect(brief).toContain("`observer-vm-ops.json`");
+    expect(brief).not.toContain("observer-ops.json");
+    expect(brief).not.toContain("kubectl");
+    expect(brief).not.toContain("--request-timeout");
+  });
+
+  /**
+   * Each kind's own call-bound paragraph states the bound ITS OWN credential
+   * enforces, not a flag borrowed from another kind's grammar.
+   */
+  test("docker and vm each state their own read bound, never the other's", () => {
+    const docker = composeObserverBrief({
+      judgement: judgementFor("T-sweep-90-docker1"),
+      sweepId: SWEEP,
+      childTaskId: "T-sweep-90-docker1",
+      kind: "docker",
+    }).brief;
+    expect(docker).toContain("`tail=<M>`");
+    expect(docker).toContain("capped at");
+
+    const vm = composeObserverBrief({
+      judgement: judgementFor("T-sweep-90-vm1"),
+      sweepId: SWEEP,
+      childTaskId: "T-sweep-90-vm1",
+      kind: "vm",
+    }).brief;
+    expect(vm).toContain("`lines=<M>`");
+    expect(vm).not.toContain("`tail=<M>`");
+    expect(docker).not.toContain("`lines=<M>`");
   });
 });
 
@@ -3243,6 +3528,20 @@ describe("ROW_SHAPE_DEMAND (ISC-1166 follow-up)", () => {
   test("states the consequence the host actually applies", () => {
     expect(ROW_SHAPE_DEMAND).toContain("indeterminate");
     expect(ROW_SHAPE_DEMAND).toContain("unobserved");
+  });
+
+  /**
+   * **`name` IS THE BRIEF'S SERVICE NAME, NEVER A HOSTNAME OR AN ID
+   * (SRD-TRIAGE-MIXED-OBSERVERS phase 4-5 review).** Until 2026-09-15
+   * `skills/observer-vm-ops/SKILL.md` called `name` *"the VM's own name"* and
+   * gave a hostname where the tracked `triage/targets.yaml` declares the
+   * service `vm-1`; a row keyed on the hostname grades the declared service as
+   * unreported even though the VM answered. The skill now agrees, and this
+   * document still outranks any mounted skill that drifts from it.
+   */
+  test("says `name` is the brief's own service name, never a hostname or an id", () => {
+    expect(ROW_SHAPE_DEMAND).toContain("the service's name exactly as this brief names it");
+    expect(ROW_SHAPE_DEMAND).toContain("never a hostname");
   });
 });
 

@@ -392,15 +392,28 @@ export function normalizeSliceReportingPath(
  * information the observer did not have; it adds the sentence that says what to do
  * with them. The observer still has to copy them, and a replayed artifact still
  * fails the comparison.
+ *
+ * **`kind` selects the filename it names, and it is required rather than
+ * defaulted (SRD-TRIAGE-MIXED-OBSERVERS §5).** This demand used to name
+ * `observer-ops.json` unconditionally, which is correct for a k8s seat and
+ * actively wrong for a docker or vm one: `OBSERVER_ARTIFACT_FILE_BY_KIND`
+ * already exists so `joinSweep` reads each kind's reply from its own file, and
+ * a docker or vm observer told to echo these fields into `observer-ops.json`
+ * would be writing into a file the host never reads back for it.
  */
-export function freshnessEchoDemand(sweepId: string, window: string | null): string {
+export function freshnessEchoDemand(
+  sweepId: string,
+  window: string | null,
+  kind: TriageEnvironmentKind,
+): string {
   const windowClause =
     window === null
       ? "`window_opened_at` exactly as this brief states the observation window opening"
       : `\`window_opened_at\` exactly "${window}"`;
+  const file = OBSERVER_ARTIFACT_FILE_BY_KIND[kind];
   return (
     `Echo \`sweep_id\` exactly "${sweepId}" and ${windowClause} as top-level fields of ` +
-    `\`observer-ops.json\`, copied from this brief and from nowhere else. An artifact ` +
+    `\`${file}\`, copied from this brief and from nowhere else. An artifact ` +
     `missing either is discarded whole and every service in it is recorded as unobserved.`
   );
 }
@@ -572,6 +585,13 @@ export const CLUSTER_CALL_TIMEOUT_S = 30;
  * `--request-timeout` appears twice below and `CLUSTER_CALL_TIMEOUT_S` supplies
  * the value both times, so raising the bound cannot leave the worked example
  * quoting the old one.
+ *
+ * **k8s ONLY, and its two siblings below are not a respelling of this one for
+ * two more verb sets.** `kubectl --request-timeout` is a flag the k8s verbgate
+ * accepts and the docker and vm credentials have no equivalent of at all — see
+ * {@link DOCKER_BOUNDED_CALLS_DEMAND} and {@link VM_BOUNDED_CALLS_DEMAND} for
+ * what each of those actually bounds, read out of their own skills rather than
+ * guessed from this one's shape.
  */
 export const BOUNDED_CALLS_DEMAND: string =
   `Bound every cluster call: pass \`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s\` AFTER the ` +
@@ -580,6 +600,86 @@ export const BOUNDED_CALLS_DEMAND: string =
   `later: it is this channel's answer NOW, and its \`result\` is "unreachable". Do not retry it ` +
   `and do not wait longer. An environment you cannot reach must produce an artifact saying so ` +
   `inside your deadline; an artifact that never arrives tells the operator nothing at all.`;
+
+/**
+ * Docker's call bound (SRD-TRIAGE-MIXED-OBSERVERS §5) — the docker sibling of
+ * {@link BOUNDED_CALLS_DEMAND}, and deliberately not the same shape.
+ *
+ * ## There is no docker `--request-timeout`, and this does not invent one
+ *
+ * `docker/observe-ssh` already bounds the SSH round trip itself —
+ * `ConnectTimeout=10`, `ServerAliveInterval=15`, `ServerAliveCountMax=3` — before
+ * any argument the observer supplies is even read, so there is no flag for a
+ * brief to demand. What the observer DOES control is the size of a `logs` or
+ * `events` read, and that is where `skills/observer-docker-ops/SKILL.md`'s own
+ * "Bounded reads" section puts the load-bearing rule: `tail=<M>` is a REQUIRED
+ * argument of `logs`, capped at 500, because an uncapped pull hits the 50KB
+ * tool-output wall and is clipped from the FRONT — *"exactly the window the
+ * question was about"* — and `tail=500` of ordinary log lines alone measures
+ * to *"about 65KB — past the 50KB wall before a second container or a second
+ * check even enters the picture."* `events` carries the credential's own
+ * terminating bound (`--until 0s`) rather than a size cap the observer
+ * supplies. Neither `logs --follow` nor a streaming `stats` reaches a shell at
+ * all — refused before docker ever runs — so there is no unbounded read this
+ * demand would need to warn against separately.
+ *
+ * ## Why this is authored rather than left to the skill alone
+ *
+ * The skill already carries all of this (§5.6, "Bounded reads, and why every
+ * one of them is"), same as `skills/observer-ops/SKILL.md` already carried the
+ * k8s row shape before {@link ROW_SHAPE_DEMAND} restated it. That measured
+ * case is the reason for restating rather than trusting the skill alone: a
+ * worker can read a mounted skill in full and still not apply it under a
+ * deadline (`T-sweep-120`, ROW_SHAPE_DEMAND's own docblock). This is the same
+ * fact in the one document every dispatch guarantees the observer sees.
+ */
+export const DOCKER_BOUNDED_CALLS_DEMAND: string =
+  `Bound every read: \`logs\` requires both \`since=<N>s\` and \`tail=<M>\`, \`M\` capped at ` +
+  `500, and \`events\` requires \`since=<N>s\` and always ends at \`--until 0s\` rather than ` +
+  `streaming — no flag widens either past this credential's own grammar, and neither \`logs ` +
+  `--follow\` nor a streaming \`stats\` reaches a shell at all. Default to a narrow \`tail\`; ` +
+  `reach for 500 only when the question needs that much history. A verb the credential refuses ` +
+  `is "forbidden"; an argument it refuses means your call was malformed, so fix it and retry it ` +
+  `once. A call whose SSH round trip never completes is "unreachable", decided NOW: do not retry ` +
+  `it and do not wait longer. A container you cannot reach must produce ` +
+  `an artifact saying so inside your deadline; an artifact that never arrives tells the operator ` +
+  `nothing at all.`;
+
+/**
+ * The vm sibling of {@link DOCKER_BOUNDED_CALLS_DEMAND}, on the same reasoning
+ * and read out of `skills/observer-vm-ops/SKILL.md`'s own verb table instead.
+ *
+ * `journal` and `kernel` both REQUIRE `since=<N>s` and `lines=<M>`, capped at
+ * 500, for the same front-truncation reason docker's `logs` caps `tail`. A
+ * refused verb and a refused argument are different answers in that skill's
+ * exit table, and the paragraph keeps them apart: the first is `forbidden`,
+ * the second is a malformed call retried once.
+ * The SSH round trip itself is bounded the same way the docker one is —
+ * `docker/observe-ssh` serves both kinds — so a hung connection is
+ * `unreachable` on the same timeline, not a separate wait this demand invents
+ * a number for.
+ */
+export const VM_BOUNDED_CALLS_DEMAND: string =
+  `Bound every read: \`journal\` and \`kernel\` both require \`since=<N>s\` and \`lines=<M>\`, ` +
+  `\`M\` capped at 500, and no flag widens either past this credential's own grammar. Default to ` +
+  `a narrow \`lines\`; reach for 500 only when the question needs that much history. A verb the ` +
+  `credential refuses is "forbidden"; an argument it refuses means your call was malformed, so ` +
+  `fix it and retry it once. A call whose SSH round trip never completes is "unreachable", ` +
+  `decided NOW: do not retry it and do not wait longer. A VM you cannot reach must produce an ` +
+  `artifact saying so inside your ` +
+  `deadline; an artifact that never arrives tells the operator nothing at all.`;
+
+/**
+ * The call-bound paragraph {@link composeObserverBrief} appends, keyed by the
+ * seat's kind — the one paragraph of the four-part contract whose CONTENT
+ * differs per kind rather than just its target filename (contrast
+ * {@link freshnessEchoDemand}, which stays one function of `kind`).
+ */
+const CALL_BOUND_DEMAND_BY_KIND: Readonly<Record<TriageEnvironmentKind, string>> = Object.freeze({
+  k8s: BOUNDED_CALLS_DEMAND,
+  docker: DOCKER_BOUNDED_CALLS_DEMAND,
+  vm: VM_BOUNDED_CALLS_DEMAND,
+});
 
 /**
  * Each graded gap, in the spelling the OBSERVER writes rather than the one the
@@ -626,6 +726,20 @@ const GRADED_ROW_FIELD: Record<EvidenceGap, string> = {
  * shape was documented, readable and read, and the report still came back with its
  * rows under `coverage`. The collation brief's own repair is what BOUNDS that
  * failure; this narrows how often it happens.
+ *
+ * ## `name` IS THE BRIEF'S SERVICE NAME, AND THAT SENTENCE IS NEW
+ *
+ * Added in the SRD-TRIAGE-MIXED-OBSERVERS phase 4-5 review: the collator's
+ * `service` field and the host's own row-matching both key off the observer's
+ * `name`. Until 2026-09-15 `skills/observer-vm-ops/SKILL.md` called it *"the
+ * VM's own name"*, with a hostname in its worked example, where the tracked
+ * `triage/targets.yaml` declares the service as `vm-1`. A row keyed on the
+ * hostname grades the declared service `vm-1` as unreported even though the VM
+ * answered. `skills/observer-ops/SKILL.md` already tells the k8s observer
+ * `name` is *"the service name from your brief"*, so this sentence states, for
+ * every kind, the rule k8s already follows. The skill now agrees; the sentence
+ * stays here because this document wins over any mounted skill that drifts
+ * from it ({@link OBSERVER_CONTRACT_HEADING}).
  */
 export const ROW_SHAPE_DEMAND: string =
   `Write one row per service in a top-level \`services\` array. \`coverage\` is a field INSIDE ` +
@@ -634,7 +748,9 @@ export const ROW_SHAPE_DEMAND: string =
   `Those last four are why a \`healthy\` is believed at all: the host downgrades any row missing ` +
   `one of them to \`indeterminate\`, and three of those on one service opens an incident and ` +
   `sends a person to a cluster. A report whose rows are shaped differently is not a smaller ` +
-  `report — it is one the collator cannot carry, and every service in it is recorded unobserved.`;
+  `report — it is one the collator cannot carry, and every service in it is recorded unobserved. ` +
+  `\`name\` is the service's name exactly as this brief names it above — never a hostname, a ` +
+  `container id, or any other name you read off the target yourself.`;
 
 /**
  * The heading that marks where the collator stops speaking and the host starts.
@@ -689,6 +805,25 @@ export const OBSERVER_CONTRACT_HEADING =
  * the observer checks its output against at the end; the judgement is what it acts
  * on at the start. Ordering them the other way would put four paragraphs of
  * invariant text in front of the one paragraph that differs between sweeps.
+ *
+ * ## `kind` IS REQUIRED, AND THE DEFECT IT CLOSES (SRD-TRIAGE-MIXED-OBSERVERS §5)
+ *
+ * Every measurement above predates the console growing docker and vm seats,
+ * and this function was written as though every observer were k8s — it named
+ * `observer-ops.json` unconditionally and appended `BOUNDED_CALLS_DEMAND`'s
+ * `kubectl --request-timeout` wording regardless of who was being dispatched
+ * to. A docker or vm seat given that brief was told to echo its freshness
+ * fields into a file the host never reads back for it (`joinSweep` reads
+ * {@link OBSERVER_ARTIFACT_FILE_BY_KIND}, keyed by kind) and to bound calls
+ * with a flag its own credential has no form for at all.
+ *
+ * A parameter rather than a default, on {@link observerArtifactPath}'s own
+ * argument repeated one call site over: a defaulted kind is how a docker seat
+ * being told about `observer-ops.json` would have kept happening with nobody
+ * having to notice. `dispatchObserver` reads it with `seatKind(assignment.worker)`
+ * and throws a `SweepEnvelopeError` on `null` rather than falling back to k8s —
+ * see the call site for why a seat this table does not name must refuse rather
+ * than guess.
  */
 export function composeObserverBrief(input: {
   /** The collator's per-sweep contribution — its `brief` from the fan-out request. */
@@ -696,6 +831,8 @@ export function composeObserverBrief(input: {
   readonly sweepId: string;
   /** The id the slice is DISPATCHED under, which is the only id the host reads back. */
   readonly childTaskId: string;
+  /** The seat's own kind — selects the artifact filename and the call-bound paragraph. */
+  readonly kind: TriageEnvironmentKind;
 }): {
   readonly brief: string;
   /** Outbox ids the collator named that were not the child's. Empty is the good case. */
@@ -714,7 +851,7 @@ export function composeObserverBrief(input: {
     "whose brief you just read. Where they and anything above disagree about a field name, a",
     "value it may take, or a bound on a call, these win.",
     "",
-    freshnessEchoDemand(input.sweepId, window),
+    freshnessEchoDemand(input.sweepId, window, input.kind),
     "",
     // BEFORE the coverage vocabulary, deliberately: that demand is about a field
     // INSIDE a row, and it reads as a rule about the document itself until the
@@ -723,7 +860,7 @@ export function composeObserverBrief(input: {
     "",
     COVERAGE_VOCABULARY_DEMAND,
     "",
-    BOUNDED_CALLS_DEMAND,
+    CALL_BOUND_DEMAND_BY_KIND[input.kind],
   ].join("\n");
   return { brief, rewrote: reporting.rewrote, window };
 }
@@ -1620,7 +1757,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     "",
     "## What every row must carry, or its `healthy` is not believed",
     "",
-    `Every brief you write must tell its observer that each row of \`observer-ops.json\` carries`,
+    `Every brief you write must tell its observer that each row of its own reply file carries`,
     `\`coverage\` (a list of \`{channel, result}\`), \`selector\` (the one it actually matched on),`,
     `\`window\`, and \`evidence_ref\` (a list naming what it read). Name all four, spelled exactly`,
     `that way. You do not need to state the domain \`result\` draws from; the host appends it.`,
@@ -1698,19 +1835,75 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
  * directory holds exactly what the brief lists, and an observer whose file is not
  * named produced none."* Audited by the same function for the same four classes;
  * a collation brief is an envelope.
+ *
+ * ## `environment`, AND WHY THIS BRIEF IS THE ONLY PLACE THAT CAN STATE IT
+ * ## (SRD-TRIAGE-MIXED-OBSERVERS D21)
+ *
+ * A collator's own pair can cover more than one environment — a k8s slice and
+ * a docker slice under the same collator ({@link SweepPair.environments}) —
+ * and the tracked `triage/targets.yaml` declares `grafana` and `prometheus` in
+ * BOTH the k8s environment and `docker-host`. `resolveRowEnvironment`
+ * (`triage-verdict.ts`) resolves a row naming no `environment` only when the
+ * sweep declares exactly one; with more than one declared, such a row
+ * resolves to `null` and its service grades unreported even though an
+ * observer answered for it. The host cannot repair this the way it repairs
+ * the observer's contract: which of the two `grafana` a COLLATED row is about
+ * is the collator's own judgement, made while merging two observers' replies,
+ * not a fact the host can author into every dispatch the way
+ * {@link freshnessEchoDemand} authors a filename.
+ *
+ * So this brief demands `environment` only when `input.environments` — the
+ * OWNING PAIR's own slice, not the whole sweep's — names more than one. A
+ * pair that swept one environment has one legal answer, which the host
+ * already supplies, and its brief renders exactly as it did before.
+ *
+ * `seats`, not a precomputed id list: each reply path is labelled with the
+ * environment its OWN seat belongs to, read through {@link seatKind} and the
+ * pair's own `environments`, so the collator is told which name to copy into
+ * which row. It never has to work that mapping out from turn one's
+ * `## The seats` block, which this turn does not show it.
  */
 export function renderCollationEnvelope(input: {
   readonly sweepId: string;
   readonly environment: string;
-  readonly childTaskIds: readonly string[];
+  /** The owning pair's own seats — one reply path per seat, in this order. */
+  readonly seats: readonly AspectSeat[];
+  /**
+   * The owning pair's own environments (not necessarily the whole sweep's) —
+   * used only to build the `environment` field's legal spellings and to label
+   * each seat's reply path. Length 1 renders exactly as it always has.
+   */
+  readonly environments: readonly SweepEnvironment[];
 }): SweepEnvelope {
   const title = `${input.environment}: reconcile ${input.sweepId}`;
+  const multiEnv = input.environments.length > 1;
+  const nameByKind = new Map(input.environments.map((e) => [e.kind, e.name]));
+  const replyLines = input.seats.map((seat) => {
+    const id = childTaskId(input.sweepId, seat.aspect);
+    if (!multiEnv) return `- ${replyMountPath(id)}`;
+    const kind = seatKind(seat.worker);
+    const envName = kind === null ? null : (nameByKind.get(kind) ?? null);
+    return envName === null ? `- ${replyMountPath(id)}` : `- ${replyMountPath(id)} (${envName})`;
+  });
+  const environmentFieldNote: readonly string[] = !multiEnv
+    ? []
+    : [
+        "",
+        `This collation covers more than one environment, so every row you write in`,
+        `\`${TRIAGE_DOCUMENT_FILE}\` must also carry \`environment\`, spelled exactly as one of:`,
+        `${input.environments.map((e) => `\`${e.name}\``).join(", ")}. The name in parentheses`,
+        `beside a reply path above is the environment that seat observed — copy it into the`,
+        `\`environment\` field of every row you carry from that reply.`,
+      ];
+  const rowFieldsLine = multiEnv
+    ? `Every row of \`${TRIAGE_DOCUMENT_FILE}\` carries \`service\`, \`environment\`, \`assessment\`, \`coverage\`,`
+    : `Every row of \`${TRIAGE_DOCUMENT_FILE}\` carries \`service\`, \`assessment\`, \`coverage\`,`;
   const brief = [
     `Reconcile the observer reports for sweep ${input.sweepId} of ${input.environment}.`,
     "",
     "## The reports, and they are the only ones",
     "",
-    ...input.childTaskIds.map((id) => `- ${replyMountPath(id)}`),
+    ...replyLines,
     "",
     `Read those files and no others. A slice whose file is not listed produced no report, and`,
     `saying so is the correct outcome for it — name it in \`unaccounted\` rather than inferring`,
@@ -1734,7 +1927,7 @@ export function renderCollationEnvelope(input: {
     `coverage is empty, and do not decide whether anything should be notified — that decision`,
     `belongs to the host, which can see across sweeps and you cannot.`,
     "",
-    `Every row of \`${TRIAGE_DOCUMENT_FILE}\` carries \`service\`, \`assessment\`, \`coverage\`,`,
+    rowFieldsLine,
     `\`selector\`, \`window\` and \`evidence_ref\`, copied from the observer's row and NOT`,
     `reconstructed. Copy \`coverage\` as the list of \`{channel, result}\` objects it already is.`,
     `A row you write without them is a row the host cannot believe: it downgrades an`,
@@ -1742,6 +1935,7 @@ export function renderCollationEnvelope(input: {
     `observer gave you no evidence for a service, carry the empty value through rather than`,
     `inventing one — that is a true report about a report, and it is what \`unaccounted\` and the`,
     `downgrade are both for.`,
+    ...environmentFieldNote,
   ].join("\n");
 
   const issues = envelopeIssues(`${title}\n${brief}`, null);
@@ -2300,6 +2494,25 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
     }
     const childId = childTaskId(sweepId, seat.aspect);
     /*
+     * THE SEAT'S KIND — refused rather than guessed (SRD-TRIAGE-MIXED-OBSERVERS
+     * §5). `composeObserverBrief` needs it to pick the right artifact filename
+     * and the right call-bound paragraph, and `seatKind` answers `null` for any
+     * worker `TRIAGE_SEAT_KINDS` does not name rather than defaulting to k8s.
+     * `owner`/`seat` above already prove `assignment.worker` is a real seat of
+     * this console, so a `null` here means the console's own kind table and its
+     * seat roster have drifted apart — a host invariant violation, thrown the
+     * same way the two reads above are, never silently dispatched as k8s.
+     */
+    const kind = seatKind(assignment.worker);
+    if (kind === null) {
+      throw new SweepEnvelopeError(
+        `${assignment.worker} is a seat of the triage console but TRIAGE_SEAT_KINDS names no ` +
+          `kind for it, so no artifact filename or call-bound paragraph can be composed. This is ` +
+          `a host configuration fault — every worker a pair's seats can name must also be in ` +
+          `TRIAGE_SEAT_KINDS — never a seat this dispatch guesses a kind for.`,
+      );
+    }
+    /*
      * §6.3 step 5, as ISC-1136 divides it: `item.brief` is the collator's
      * per-sweep JUDGEMENT and nothing more, and the host composes the invariant
      * half around it. This replaced four sequential repairs on one document —
@@ -2310,6 +2523,7 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
       judgement: item.brief,
       sweepId,
       childTaskId: childId,
+      kind,
     });
     /*
      * The ONE warning left, and it survives because its repair does. The other
@@ -2630,7 +2844,11 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
          * published into the other collator's run — a path it cannot read, about
          * an observer it never briefed.
          */
-        childTaskIds: pair.seats.map((s) => childTaskId(sweepId, s.aspect)),
+        seats: pair.seats,
+        // ITS OWN environments — the kind-to-name mapping `renderCollationEnvelope`
+        // needs to label each seat's reply path and to decide whether `environment`
+        // is even ambiguous for this pair's own rows (SRD-TRIAGE-MIXED-OBSERVERS D21).
+        environments: pair.environments,
       });
       const outcome = await deps.dispatch({
         taskId: collateTaskId,

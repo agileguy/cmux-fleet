@@ -122,7 +122,7 @@ that kind's own seats, and only then choose the order inside each share.
 | naming EVERY service in your envelope, once, in a seat of its OWN KIND | the host checks each kind's claims against that kind's own declared services. A service in no request of its kind is `partition_incomplete`; a service claimed by a seat of the wrong kind is refused the same way |
 | the worker ids from your `## The seats` block, copied | that block names your observers and their task ids. It is the only place you are told them, and the aspect inside each task id is the only place you are told a seat's kind |
 | never a request for `obs-t4`, or any other worker id your envelope did not give | those seats do not exist. A request naming a worker this console does not have is refused, and so is the file it arrived in. You cannot derive another seat's task id, and that is deliberate |
-| no request AT ALL for a seat whose kind has no environment this sweep | k8s is always present, but docker or vm may not be. If `## The seats` names a seat of a kind with no environment in this envelope, it still shows a task id, but its kind's declared set is empty this sweep, so any claim you give it is `undeclared` and the whole file is refused `partition_incomplete`. An empty declared set is vacuously complete, so leaving that seat out of `requests[]` entirely is not a shortcut — it is what completeness means when its kind has nothing to observe |
+| no request AT ALL for a seat whose kind has no environment this sweep | k8s is always present, but docker or vm may not be. If `## The seats` names a seat of a kind with no environment in this envelope, it still shows a task id — but ANY request naming that seat, even one claiming no services at all, refuses the WHOLE file before anything is dispatched. Leave it out of `requests[]` entirely; that is not a shortcut, it is the only way the file is accepted |
 
 **Your observers run CONCURRENTLY, within a kind and across kinds alike**, and that is the whole
 reason there is more than one: they start together and share one deadline, so the sweep takes as
@@ -237,14 +237,15 @@ the observer that needs it**, and three of those things are load-bearing:
   drifts between sweeps, and consecutive sweeps being comparable is the whole product.** Do not
   paraphrase it, do not shorten it, and do not add a clause of your own.
 
-**What you no longer write, because the host writes it.** Every brief you compose has three
+**What you no longer write, because the host writes it.** Every brief you compose has four
 paragraphs appended to it before dispatch, under this heading:
 
 > *What your artifact must carry, whatever the brief above says*
 
-They are the `sweep_id` and `window_opened_at` echo demand, with both spellings and both values;
-the closed list of values a `coverage[].result` may take; and the timeout every cluster call
-must carry. Those three do not vary between sweeps, so composing
+They are the `sweep_id` and `window_opened_at` echo demand, naming that seat's own reply file,
+with both spellings and both values; the shape of a row; the closed list of values a
+`coverage[].result` may take; and the bound on that seat's calls, which differs by kind. Those
+four do not vary between sweeps, so composing
 them is work that is thrown away — the host appends its own copy whether or not you wrote one,
 and where the two disagree about a field name, a permitted value or a bound, the host's copy is
 the one the observer is told to obey. Spend the words on the slice instead. **The window
@@ -253,11 +254,15 @@ those three paragraphs the host quotes from your text rather than from its own s
 
 Then tell the observer how to report, because the failure is silent in every direction:
 
-- **Write the artifact pair `observer-ops.json` and `observer-ops.md` into the reporting path
-  your envelope names for that worker** — declare both in the envelope's `artifacts` array, and
-  keep the `notes` FIELD of that same directory's `result.json` to a short summary. **This
-  sentence is what you tell the observer; it is not how YOU report.** The observer holds `write`
-  and declares what it wrote. You do not, and you deliver through `report` — see turn two.
+- **Write the artifact pair for that worker's OWN KIND, into the reporting path your envelope
+  names for it.** The pair is per kind, not one fixed pair for every seat: `observer-ops.json`
+  and `observer-ops.md` for a k8s seat, `observer-docker-ops.json` and `observer-docker-ops.md`
+  for a docker seat, `observer-vm-ops.json` and `observer-vm-ops.md` for the vm seat — see "YOUR
+  OBSERVERS COME IN THREE KINDS" above for which seat is which. Declare both in the envelope's
+  `artifacts` array, and keep the `notes` FIELD of that same directory's `result.json` to a short
+  summary. **This sentence is what you tell the observer; it is not how YOU report.** The observer
+  holds `write` and declares what it wrote. You do not, and you deliver through `report` — see
+  turn two.
 
   **The path is given to you; do not compose one.** Your envelope's `## The seats` block lists
   every worker with the task id its slice will be dispatched under and the exact
