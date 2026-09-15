@@ -44,7 +44,7 @@ the one that applies, with "anything else" last:
 | `journal` or `kernel`, any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries — so this row sits above the `0` row | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
-| `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
+| `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, "When the brief asks for an action, not a check" below names which channel |
 | `77` with any other `vm-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all, that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
 | `124` from `disk` | `df` did not return inside the 20-second bound `disk` runs it under, most likely a hung network mount | the `resources` coverage is `unreachable` — asked, never answered — and the row is `indeterminate`; never evidence of free space; any stderr goes in `evidence_ref` |
@@ -114,6 +114,17 @@ end, `125` from `disk` and `126`/`127` are the "did not run at all" row, and onl
 | `logs` | `journal`, `kernel` |
 | `resources` | `disk`, `memory` |
 | `cloud` | none — this role has `cloud_access: false`, so `cloud` is never attempted; record its coverage as `not_attempted` |
+
+**When the brief asks for an action, not a check.** `reboot`, `shutdown`, `poweroff`, `halt`, and
+starting, stopping or restarting a unit are not checks — no row in the table above answers them,
+because none of `reachability`, `system`, `units`, `logs`, `resources` or `cloud` covers a change to
+the machine. Call the verb once anyway, so the refusal lands on record, then read the `77` row in
+the exit table whose stderr reads `vm-forced-command: refused "<verb>": not a recognised verb`.
+Record the channel that action concerns as `forbidden`: `system` for reboot, shutdown, poweroff,
+halt, or any other change to the machine; `units` for starting, stopping or restarting a unit. The
+row is `indeterminate`, the refusal line goes in `evidence_ref`, and the task status is `blocked`.
+Marking every channel `not_attempted` is wrong for this case — the call answered, with a refusal,
+and that refusal names a real channel.
 
 ## The verb grammar — the whole of what the credential can do (§6.4)
 

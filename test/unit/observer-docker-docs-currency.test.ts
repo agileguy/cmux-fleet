@@ -19,12 +19,26 @@
  *     stderr line (both docker versions), and `docker/observe-docker`'s `--help` text names every
  *     one of them plus "not a recognised verb"
  *
- * Not covered: when a channel is `forbidden` rather than a call to fix. That is prose judgement.
+ *  8. the skill's action-verb rule — an action the checks (`state`, `health`, `logs`, `stats`,
+ *     `events`) have no row for is recorded on `state` as `forbidden` — names a real channel
+ *     (`ObserverDockerChannelSchema`) and the real coverage/task words (`forbidden`,
+ *     `indeterminate`, `blocked`, `not_attempted`)
+ *
+ * Not covered, in general: when a channel is `forbidden` rather than a call to fix — that is prose
+ * judgement, except for the one case choice 8 pins: an action verb (restart, stop, start, kill, rm,
+ * exec, pause, or any other change to a container) is always `forbidden` on `state`.
  */
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
+import {
+  ObserverAssessmentSchema,
+  ObserverCoverageResultSchema,
+  ObserverDockerChannelSchema,
+} from "../../src/harvest/observer-target-artifacts.ts";
+import { StatusSchema } from "../../src/contracts.ts";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const read = (p: string): string => readFileSync(join(ROOT, p), "utf8");
@@ -360,5 +374,59 @@ describe("the skill's exit-1 fragments match measured docker_errors, and --help 
       OBSERVE_DOCKER.includes("not a recognised verb"),
       'docker/observe-docker\'s --help text does not name "not a recognised verb"',
     ).toBe(true);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 8. the action-verb rule: an action the checks have no row for still names a
+//    real channel, `forbidden`, and the other real coverage/task words
+// -----------------------------------------------------------------------------
+
+/**
+ * The action-verb rule bullet, anchored on its own lead sentence and closed
+ * at the next list item or blank line, so a mutation elsewhere in the file
+ * cannot satisfy anything below by accident.
+ */
+function actionVerbRuleBullet(src: string): string {
+  const marker = "**An action verb — restart, stop, start, kill, rm, exec, pause, or any other change to a";
+  const markerAt = src.indexOf(marker);
+  expect(markerAt, "the skill's action-verb rule bullet is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const after = src.slice(markerAt);
+  const ends = [after.indexOf("\n\n"), after.indexOf("\n- ")].filter((i) => i > 0);
+  expect(ends.length, "the action-verb rule bullet never ends — this probe has rotted").toBeGreaterThan(0);
+  return after.slice(0, Math.min(...ends));
+}
+
+describe("the skill's action-verb rule names a real channel for an action the checks have no row for", () => {
+  const DOCKER_CHANNELS = new Set<string>(ObserverDockerChannelSchema.options);
+
+  test("the rule records the channel as `state` — a real member of ObserverDockerChannelSchema", () => {
+    const bullet = actionVerbRuleBullet(SKILL);
+    const m = bullet.match(/Record `([a-z]+)` as `forbidden`/);
+    expect(m, "the rule's 'Record `<channel>` as `forbidden`' sentence is gone — this probe has rotted").not.toBeNull();
+    const channel = m![1]!;
+    expect(DOCKER_CHANNELS.has(channel), `the rule records "${channel}" as the channel, which is not a member of ObserverDockerChannelSchema (${[...DOCKER_CHANNELS].join(", ")})`).toBe(true);
+    expect(channel).toBe("state");
+  });
+
+  test("the rule marks the row `indeterminate`, the refusal in `evidence_ref`, the task `blocked` — and says `not_attempted` is wrong here", () => {
+    const bullet = actionVerbRuleBullet(SKILL);
+    const COVERAGE_RESULTS = new Set<string>(ObserverCoverageResultSchema.options);
+    const ASSESSMENTS = new Set<string>(ObserverAssessmentSchema.options);
+    const STATUSES = new Set<string>(StatusSchema.options);
+    expect(bullet).toContain("`forbidden`");
+    expect(bullet).toContain("`indeterminate`");
+    expect(bullet).toContain("`blocked`");
+    expect(bullet).toContain("`evidence_ref`");
+    expect(bullet).toContain("`not_attempted`");
+    expect(COVERAGE_RESULTS.has("forbidden")).toBe(true);
+    expect(ASSESSMENTS.has("indeterminate")).toBe(true);
+    expect(STATUSES.has("blocked")).toBe(true);
+    expect(COVERAGE_RESULTS.has("not_attempted")).toBe(true);
+    expect(bullet, "the rule does not say marking every channel not_attempted is wrong here").toMatch(/not_attempted`\s+is wrong/);
+  });
+
+  test("the exit table's `77` unrecognised-verb row points to this rule", () => {
+    expect(SKILL).toContain("the report artifact contract's coverage bullet below names the channel (`state`)");
   });
 });

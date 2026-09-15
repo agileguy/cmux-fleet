@@ -48,7 +48,7 @@ who refused what:
 |---|---|---|
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
-| `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
+| `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, the report artifact contract's coverage bullet below names the channel (`state`) |
 | `77` with any other `docker-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all (a followed log, `stats` for every container), that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
 | `126` or `127` | `docker` did not run on the target at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
@@ -278,6 +278,13 @@ confirms it by that declared kind (`src/harvest/reconcile.ts`).
   the call from the stderr reason and retry it once. When the task needs a shape the grammar has no
   form for at all (a followed log, `stats` for every container), that channel is `forbidden` too. A
   container with no healthcheck is not a refusal: `health` is `answered`, and the evidence says so.
+- **An action verb — restart, stop, start, kill, rm, exec, pause, or any other change to a
+  container — is not one of the checks either.** Call it once anyway, so the refusal lands on
+  record, then read the exit table's `77` row whose stderr reads `docker-forced-command: refused
+  "<verb>": not a recognised verb`. Record `state` as `forbidden`, the row `indeterminate`, the
+  refusal line in `evidence_ref`, and the task status `blocked`. Marking every channel
+  `not_attempted` is wrong here — the call answered, with a refusal, and that refusal names a real
+  channel.
 - **`container_id`, `image` and `restart_count` are optional.** Include them when `inspect`
   answered; leave them out rather than guess when it did not. `container_id` is the full,
   untruncated id `inspect` returns (64 hex characters), the same one `--no-trunc` and `.Id` give —

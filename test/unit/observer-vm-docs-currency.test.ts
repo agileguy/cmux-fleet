@@ -722,3 +722,60 @@ describe("the skill's per-token byte cap is derived from is_argument(), not type
     expect(SKILL).toContain("is_argument()");
   });
 });
+
+// -----------------------------------------------------------------------------
+// 7. the action-verb rule: an action the checks table has no row for still
+//    names a real channel, `forbidden`, and the other real coverage/task words
+// -----------------------------------------------------------------------------
+
+/**
+ * The action-verb rule paragraph, anchored on its own lead sentence and
+ * closed at the next blank line, so a mutation elsewhere in the file cannot
+ * satisfy anything below by accident.
+ */
+function actionVerbRuleParagraph(src: string): string {
+  const marker = "**When the brief asks for an action, not a check.**";
+  const markerAt = src.indexOf(marker);
+  expect(markerAt, "the skill's action-verb rule paragraph is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const after = src.slice(markerAt);
+  const endAt = after.indexOf("\n\n");
+  expect(endAt, "the action-verb rule paragraph never ends — this probe has rotted").toBeGreaterThan(0);
+  return after.slice(0, endAt);
+}
+
+describe("the skill's action-verb rule names real channels for an action the checks table has no row for", () => {
+  const VM_CHANNELS = new Set<string>(ObserverVmChannelSchema.options);
+
+  test("`system` maps to reboot/shutdown/poweroff/halt, `units` maps to starting/stopping/restarting a unit — both real channels", () => {
+    const paragraph = actionVerbRuleParagraph(SKILL);
+    const mapped = [...paragraph.matchAll(/`([a-z]+)` for ([^;.]+)/g)].map((m) => [m[1]!, m[2]!] as [string, string]);
+    expect(mapped.length, "no '`<channel>` for <actions>' mappings matched in the rule paragraph — the extractor has rotted").toBeGreaterThanOrEqual(2);
+    for (const [channel] of mapped) {
+      expect(VM_CHANNELS.has(channel), `the rule maps an action to "${channel}", which is not a member of ObserverVmChannelSchema (${[...VM_CHANNELS].join(", ")})`).toBe(true);
+    }
+    const byChannel = Object.fromEntries(mapped);
+    expect(byChannel["system"], "the rule's `system` mapping is missing, or does not mention reboot").toMatch(/reboot/);
+    expect(byChannel["units"], "the rule's `units` mapping is missing, or does not mention restarting a unit").toMatch(/restart/);
+  });
+
+  test("the rule marks the channel `forbidden`, the row `indeterminate`, the refusal in `evidence_ref`, the task `blocked` — and says `not_attempted` is wrong here", () => {
+    const paragraph = actionVerbRuleParagraph(SKILL);
+    const COVERAGE_RESULTS = new Set<string>(ObserverCoverageResultSchema.options);
+    const ASSESSMENTS = new Set<string>(ObserverAssessmentSchema.options);
+    const STATUSES = new Set<string>(StatusSchema.options);
+    expect(paragraph).toContain("`forbidden`");
+    expect(paragraph).toContain("`indeterminate`");
+    expect(paragraph).toContain("`blocked`");
+    expect(paragraph).toContain("`evidence_ref`");
+    expect(paragraph).toContain("`not_attempted`");
+    expect(COVERAGE_RESULTS.has("forbidden")).toBe(true);
+    expect(ASSESSMENTS.has("indeterminate")).toBe(true);
+    expect(STATUSES.has("blocked")).toBe(true);
+    expect(COVERAGE_RESULTS.has("not_attempted")).toBe(true);
+    expect(paragraph, "the rule does not say marking every channel not_attempted is wrong for this case").toMatch(/not_attempted`\s+is wrong/);
+  });
+
+  test("the exit table's `77` unrecognised-verb row points to this rule", () => {
+    expect(SKILL).toContain('"When the brief asks for an action, not a check" below names which channel');
+  });
+});
