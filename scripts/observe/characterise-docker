@@ -153,19 +153,30 @@ type RunOpts = { exempt?: boolean };
 
 /**
  * Signal a detached child's whole process group — its own pid, since `detached` makes it the leader —
- * rather than only the child. A group that is already gone (ESRCH) is not a failure; anything else is.
+ * rather than only the child. Two refusals are not failures, and neither is read as "stopped": every
+ * caller still waits on the child's own exit, and every such wait is bounded.
+ *
+ *  - ESRCH: the group is already gone.
+ *  - EPERM: on macOS, what `kill(-pgid)` answers for a group whose leader has exited but has not yet been
+ *    reaped (measured 2026-09-14, Darwin 25.6.0, three runs of three). Thrown, it rejected
+ *    `stopTrackedChildren()`, and `runCleanup()` with it, before the container was removed.
+ *
+ * Anything else still throws.
  */
 function signalGroup(pid: number, sig: NodeJS.Signals): void {
   try {
     process.kill(-pid, sig);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EPERM") throw err;
   }
 }
 
 /**
  * Stops every child `run()` currently has in flight — SIGTERM to its process group, SIGKILL to whichever
- * haven't exited within `KILL_GRACE_MS` — and waits for each to actually be gone before returning. The
+ * haven't exited within `KILL_GRACE_MS` — and waits for each to be gone before returning, for at most
+ * another `KILL_GRACE_MS` after a SIGKILL: a child that outlasts even that is left behind rather than
+ * holding up the container's removal. The
  * dind create's own child is never in `trackedChildren` (it runs with `exempt: true`), so this never
  * touches it; `cleanup()` awaits `starting` separately, in parallel with this. Safe to call with nothing
  * in flight. Exported so `characterise-signal.test.ts` can drive it directly against real children.
@@ -182,7 +193,7 @@ export async function stopTrackedChildren(): Promise<void> {
       ]);
       if (!exitedInTime) {
         signalGroup(pid, "SIGKILL");
-        await child.exited;
+        await Promise.race([child.exited, Bun.sleep(KILL_GRACE_MS)]);
       }
     }),
   );
@@ -198,8 +209,12 @@ export async function stopTrackedChildren(): Promise<void> {
  * one should have to wait on the other — then, only once both are done, runs `removeContainer`.
  */
 export async function runCleanup(awaitCreate: () => Promise<unknown>, removeContainer: () => Promise<void>): Promise<void> {
-  await Promise.all([awaitCreate(), stopTrackedChildren()]);
+  // allSettled, not all: a leg that rejects must still leave the container removed, and removal still waits
+  // for BOTH legs, so it never starts while a tracked child is being stopped. The rejection is rethrown after.
+  const settled = await Promise.allSettled([awaitCreate(), stopTrackedChildren()]);
   await removeContainer();
+  const failure = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+  if (failure) throw failure.reason;
 }
 
 /** How many signals this run has been told about so far. */
@@ -275,10 +290,10 @@ export async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS, stdinPath?
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
-    clearTimeout(timer);
-    clearTimeout(killTimer);
     return { code, stdout, stderr, ms: Date.now() - started, timedOut };
   } finally {
+    clearTimeout(timer);
+    clearTimeout(killTimer);
     trackedChildren.delete(proc.pid);
   }
 }

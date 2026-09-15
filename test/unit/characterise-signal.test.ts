@@ -21,13 +21,20 @@
  *  - `runCleanup()` is the shape `cleanup()` runs, and it calls `stopTrackedChildren()` directly. The
  *    test spawns a real tracked `sleep`, proves it is dead before `removeContainer` runs, and proves
  *    `removeContainer` never runs before `awaitCreate` settles.
+ *  - `stopTrackedChildren()` ends a tracked child's own child too, because it signals the group.
+ *  - a tracked child that has exited but is not yet reaped does not make the stop path reject. On macOS,
+ *    `kill(-pgid)` answers EPERM for that group, and thrown, it once kept the container from being removed.
+ *  - a leg of `runCleanup()` that rejects still gets the container removed, once every tracked child is
+ *    gone, and the rejection still reaches the caller.
  *  - the call sites inside `main()`, which none of the tests above can reach, are read as text: the
  *    container create and cleanup's `docker rm` pass `{ exempt: true }`, and the first signal calls
  *    `markStopping()` before `cleanup()`. Without `exempt` on `docker rm`, `run()` refuses it once
  *    stopping, and the container outlives the signal.
  *
- * Every `sleep` duration below carries the `7331.` (vm) / `7332.` (docker) prefix, so a leftover can be
- * found with `pgrep -fl 'sleep 733[12]\.'`.
+ * Every `sleep` duration below is `7331.` (vm) / `7332.` (docker), then this test process's pid, then a
+ * three-digit suffix per test, so a leftover can be found with `pgrep -fl 'sleep 733[12]\.'`. The pid keeps
+ * two runs of this file at the same time off each other's processes, and every match below is anchored to
+ * the whole command line, so one run's marker is never mistaken for a longer one.
  */
 
 import { describe, expect, test, afterAll } from "bun:test";
@@ -81,9 +88,14 @@ async function loadScript(name: "characterise-vm" | "characterise-docker"): Prom
   return (await import(pathToFileURL(file).href)) as SignalModule;
 }
 
-/** True while some process's command line contains `needle` — real `pgrep`, real processes. */
-function processAlive(needle: string): boolean {
-  return Bun.spawnSync(["pgrep", "-f", needle]).exitCode === 0;
+/** `command` as a `pgrep -f` / `pkill -f` pattern matching that whole command line, and nothing longer. */
+function exactly(command: string): string {
+  return `^${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+}
+
+/** True while some process's command line is exactly `command` — real `pgrep`, real processes. */
+function processAlive(command: string): boolean {
+  return Bun.spawnSync(["pgrep", "-f", exactly(command)]).exitCode === 0;
 }
 
 /** Polls `predicate` until it is true or `timeoutMs` elapses; returns the last read. */
@@ -96,9 +108,12 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number, intervalMs
   }
 }
 
-/** Forcibly ends anything left over from one of this file's own tests. Never touches an unrelated pid. */
-function killLeftovers(needle: string): void {
-  Bun.spawnSync(["pkill", "-9", "-f", needle]);
+/**
+ * Forcibly ends anything left over from one of this file's own tests. It matches a whole command line that
+ * carries this process's pid, so a second run of this file at the same time is never touched.
+ */
+function killLeftovers(command: string): void {
+  Bun.spawnSync(["pkill", "-9", "-f", exactly(command)]);
 }
 
 /**
@@ -127,7 +142,7 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
     };
 
     test("an in-flight non-create child is gone after the stop path runs", async () => {
-      const marker = `${markerPrefix}.101`;
+      const marker = `${markerPrefix}101`;
       const needle = `sleep ${marker}`;
       // A long run() timeout: only stopTrackedChildren() may end this child, never run()'s own timer.
       const runPromise = callRun(["sleep", marker], 60_000);
@@ -148,7 +163,7 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
     }, 15_000);
 
     test("a child standing in for the create is awaited, not killed", async () => {
-      const marker = `${markerPrefix}.102`;
+      const marker = `${markerPrefix}102`;
       const needle = `sleep ${marker}`;
       const runPromise = callRun(["sleep", marker], 60_000, /* exempt */ true);
       try {
@@ -163,7 +178,7 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
 
         // Stand in for cleanup()'s own `await starting`: end the create ourselves, the way the real
         // create ends on its own once docker finishes with it, and confirm run() settles.
-        Bun.spawnSync(["pkill", "-TERM", "-f", needle]);
+        Bun.spawnSync(["pkill", "-TERM", "-f", exactly(needle)]);
         const settled = await Promise.race([
           runPromise.then(() => true),
           Bun.sleep(5_000).then(() => false),
@@ -175,8 +190,8 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
     }, 15_000);
 
     test("a grandchild holding a pipe does not keep a timed-out run() waiting", async () => {
-      const outerMarker = `${markerPrefix}.103`;
-      const innerMarker = `${markerPrefix}.104`;
+      const outerMarker = `${markerPrefix}103`;
+      const innerMarker = `${markerPrefix}104`;
       const outerNeedle = `sleep ${outerMarker}`;
       const innerNeedle = `sleep ${innerMarker}`;
       // The tracked/immediate child execs straight into `sleep <outerMarker>` (still the same pid run()
@@ -188,11 +203,10 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
       const timeoutMs = 1_000;
       const runPromise = callRun(["sh", "-c", script], timeoutMs);
       try {
-        // Anchored: the wrapping `sh -c` command lines also contain `sleep <innerMarker>`, so an unanchored
-        // match would call the grandchild started before it exists.
-        const innerProcess = `^sleep ${innerMarker.replace(".", "\\.")}$`;
+        // processAlive() matches whole command lines: the wrapping `sh -c` lines also contain
+        // `sleep <innerMarker>`, and a substring match would call the grandchild started before it exists.
         expect(
-          await waitUntil(() => processAlive(innerProcess), 2_000),
+          await waitUntil(() => processAlive(innerNeedle), 2_000),
           `${innerNeedle} (the grandchild) never started`,
         ).toBe(true);
 
@@ -265,7 +279,7 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
     });
 
     test("runCleanup: stops a real tracked child before removing anything, in parallel with awaiting the create", async () => {
-      const marker = `${markerPrefix}.105`;
+      const marker = `${markerPrefix}105`;
       const needle = `sleep ${marker}`;
       // A real, non-exempt, tracked child — not a fake `stopOthers` callback. runCleanup() calls the
       // module's own stopTrackedChildren() directly, so this is the only way to prove that call is really
@@ -315,10 +329,81 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
       }
     }, 15_000);
 
+    test("the stop path ends a tracked child's whole process group, not just the child", async () => {
+      const innerMarker = `${markerPrefix}107`;
+      const innerNeedle = `sleep ${innerMarker}`;
+      // The tracked child is a shell waiting on a sleep it forked, in its own process group. A SIGTERM to the
+      // shell's pid alone ends the shell and leaves that sleep running; only a signal to the group ends both.
+      const runPromise = callRun(["sh", "-c", `sleep ${innerMarker} & wait`], 60_000);
+      try {
+        expect(await waitUntil(() => processAlive(innerNeedle), 2_000), `${innerNeedle} never started`).toBe(true);
+
+        await stop();
+
+        expect(
+          await waitUntil(() => !processAlive(innerNeedle), 3_000),
+          `${innerNeedle}, the tracked child's own child, outlived the stop path`,
+        ).toBe(true);
+        const settled = await Promise.race([runPromise.then(() => true), Bun.sleep(3_000).then(() => false)]);
+        expect(settled, "run() never settled after the stop path").toBe(true);
+      } finally {
+        killLeftovers(innerNeedle);
+      }
+    }, 15_000);
+
+    test("a tracked child that has exited but is not yet reaped does not stop the container being removed", async () => {
+      await ready;
+      // Called directly, not through callRun(), so nothing yields between the spawn and the block below.
+      const runPromise =
+        scriptName === "characterise-vm" ? mod.run(["true"], 60_000, {}) : mod.run(["true"], 60_000, undefined, {});
+      // `true` exits at once, and nothing can reap it while this blocks the event loop. On macOS, kill(-pgid)
+      // then answers EPERM (measured 2026-09-14, Darwin 25.6.0). On Linux the same call succeeds, so this
+      // test only discriminates on macOS.
+      Bun.sleepSync(300);
+      let removeCalls = 0;
+      await mod.runCleanup(
+        async () => undefined,
+        async () => {
+          removeCalls += 1;
+        },
+      );
+      expect(removeCalls, "removeContainer never ran").toBe(1);
+      expect((await runPromise).code).toBe(0);
+    }, 15_000);
+
+    test("runCleanup: a leg that rejects still gets the container removed, only once every tracked child is gone", async () => {
+      const marker = `${markerPrefix}108`;
+      const needle = `sleep ${marker}`;
+      // A tracked child that ignores SIGTERM, so the stop leg takes KILL_GRACE_MS: long enough that removal
+      // starting the moment the create leg rejects would find it still running.
+      const runPromise = callRun(["sh", "-c", `trap "" TERM; sleep ${marker}`], 60_000);
+      try {
+        expect(await waitUntil(() => processAlive(needle), 2_000), `${needle} never started`).toBe(true);
+
+        let removeCalls = 0;
+        let childAliveWhenRemoved: boolean | undefined;
+        const cleanupPromise = mod.runCleanup(
+          () => Promise.reject(new Error("create leg failed")),
+          async () => {
+            removeCalls += 1;
+            childAliveWhenRemoved = processAlive(needle);
+          },
+        );
+
+        await expect(cleanupPromise).rejects.toThrow("create leg failed");
+        expect(removeCalls, "removeContainer did not run because a leg rejected").toBe(1);
+        expect(childAliveWhenRemoved, "removeContainer ran while a tracked child was still alive").toBe(false);
+        const settled = await Promise.race([runPromise.then(() => true), Bun.sleep(3_000).then(() => false)]);
+        expect(settled, "the tracked child's own run() promise never settled").toBe(true);
+      } finally {
+        killLeftovers(needle);
+      }
+    }, 15_000);
+
     test("once markStopping() has run, run() refuses a new ordinary child and still runs an exempt one", async () => {
       // A fresh module copy: `stopping` never resets, so the copy the other tests share must never see it.
       const fresh = await loadScript(scriptName);
-      const marker = `${markerPrefix}.106`;
+      const marker = `${markerPrefix}106`;
       const needle = `sleep ${marker}`;
       const freshRun = (argv: string[], exempt: boolean): Promise<RunResult> =>
         scriptName === "characterise-vm" ? fresh.run(argv, 1_000, { exempt }) : fresh.run(argv, 1_000, undefined, { exempt });
@@ -336,8 +421,8 @@ function signalSuite(label: string, scriptName: "characterise-vm" | "characteris
   });
 }
 
-signalSuite("characterise-vm: signal handling", "characterise-vm", "7331");
-signalSuite("characterise-docker: signal handling", "characterise-docker", "7332");
+signalSuite("characterise-vm: signal handling", "characterise-vm", `7331.${process.pid}`);
+signalSuite("characterise-docker: signal handling", "characterise-docker", `7332.${process.pid}`);
 
 /**
  * The call sites inside each script's `main()`, read as text. `main()` needs docker or ssh, so no test

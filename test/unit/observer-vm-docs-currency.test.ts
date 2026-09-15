@@ -40,6 +40,7 @@ import {
   ObserverAssessmentSchema,
   ObserverCoverageResultSchema,
   ObserverVmChannelSchema,
+  ObserverVmOpsArtifactSchema,
 } from "../../src/harvest/observer-target-artifacts.ts";
 import { StatusSchema } from "../../src/contracts.ts";
 
@@ -579,6 +580,15 @@ describe("the exit table's third-column tokens are real enum members, imported f
     expect(tokens.length, "no 'the row is <assessment>' tokens matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(4);
     for (const assessment of tokens) {
       expect(ASSESSMENTS.has(assessment), `the exit table states the row is "${assessment}", which is not a member of ObserverAssessmentSchema (${[...ASSESSMENTS].join(", ")})`).toBe(true);
+    }
+  });
+
+  test("every 'goes in <field>' token names a real field of the VM artifact's row", () => {
+    const ROW_FIELDS = new Set<string>(Object.keys(ObserverVmOpsArtifactSchema.shape.services.element.shape));
+    const fields = rowsSays().flatMap((says) => [...says.matchAll(/goes in `([a-z_]+)`/g)].map((m) => m[1]!));
+    expect(fields.length, "no 'goes in <field>' tokens matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(3);
+    for (const field of fields) {
+      expect(ROW_FIELDS.has(field), `the exit table puts stderr in "${field}", which is not a field of an ObserverVmOpsArtifactSchema row (${[...ROW_FIELDS].join(", ")})`).toBe(true);
     }
   });
 });

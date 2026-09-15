@@ -428,12 +428,14 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
 
     test("journal: since=1s is the accepted lower boundary (a single digit, no leading zero)", () => {
       const r = runScript(shell, "journal since=1s lines=5");
+      expect(r.stderr).toBe("");
       expect(r.exitCode).toBe(0);
       expect(r.cmd).toEqual(journalArgv(5, 1));
     });
 
     test("journal: since=999999999s is the accepted upper boundary (9 digits)", () => {
       const r = runScript(shell, "journal since=999999999s lines=5");
+      expect(r.stderr).toBe("");
       expect(r.exitCode).toBe(0);
       expect(r.cmd).toEqual(journalArgv(5, 999999999));
     });
@@ -447,12 +449,14 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
 
     test("kernel: since=1s is the accepted lower boundary (a single digit, no leading zero)", () => {
       const r = runScript(shell, "kernel since=1s lines=5");
+      expect(r.stderr).toBe("");
       expect(r.exitCode).toBe(0);
       expect(r.cmd).toEqual(kernelArgv(5, 1));
     });
 
     test("kernel: since=999999999s is the accepted upper boundary (9 digits)", () => {
       const r = runScript(shell, "kernel since=999999999s lines=5");
+      expect(r.stderr).toBe("");
       expect(r.exitCode).toBe(0);
       expect(r.cmd).toEqual(kernelArgv(5, 999999999));
     });
