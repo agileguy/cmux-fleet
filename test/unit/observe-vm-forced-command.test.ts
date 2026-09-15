@@ -75,6 +75,21 @@ function sinceArg(n: number): string {
 /** One refusal message every case below can recognise, verb-agnostic. */
 const REFUSAL_PREFIX = 'vm-forced-command: refused';
 
+/**
+ * The FULL reason text the script prints for every `since=` grammar
+ * refusal — both the "no trailing 's'" branch and the `is_since_n` branch
+ * print this exact string. Asserted in full, not as a prefix: a prefix like
+ * "a since= value must be" would still match if one branch regressed to
+ * describing a different class (e.g. the stale `[0-9]{1,9}`,
+ * leading-zero-permitting grammar) than the other.
+ */
+const SINCE_REASON = "a since= value must be [1-9][0-9]{0,8} digits, no leading zero, followed by 's'";
+
+/** The other refusals' full reasons, held once so a stale word in any of them goes red, as `SINCE_REASON` does. */
+const VERB_REASON = "not a recognised verb; recognised verbs are uptime, os, system, failed, unit, journal, kernel, disk and memory";
+const LINES_REASON = "a lines= value must be 1-500, decimal digits only, no leading zero";
+const PRIORITY_REASON = "a priority= value must be exactly one digit 0-7";
+
 /** Reads a `NAME=<digits>` bare (unquoted) shell assignment out of the real script. */
 function extractBareDigits(varName: string): string {
   const match = SRC.match(new RegExp(`${varName}=([0-9]+)`));
@@ -375,16 +390,10 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       expect(r.cmd).toEqual(journalArgv(5, 300, { priority: 3 }));
     });
 
-    test("journal: priority=0 is the accepted lower boundary", () => {
-      const r = runScript(shell, "journal since=300s lines=5 priority=0");
+    test.each([0, 1, 2, 3, 4, 5, 6, 7])("journal: priority=%i is accepted (the full syslog 0-7 range, each digit pinned)", (priority) => {
+      const r = runScript(shell, `journal since=300s lines=5 priority=${priority}`);
       expect(r.exitCode).toBe(0);
-      expect(r.cmd).toEqual(journalArgv(5, 300, { priority: 0 }));
-    });
-
-    test("journal: priority=7 is the accepted upper boundary", () => {
-      const r = runScript(shell, "journal since=300s lines=5 priority=7");
-      expect(r.exitCode).toBe(0);
-      expect(r.cmd).toEqual(journalArgv(5, 300, { priority: 7 }));
+      expect(r.cmd).toEqual(journalArgv(5, 300, { priority }));
     });
 
     test("journal: with both unit= and priority=", () => {
@@ -417,11 +426,35 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       expect(r.cmd).toEqual(journalArgv(500, 60));
     });
 
+    test("journal: since=1s is the accepted lower boundary (a single digit, no leading zero)", () => {
+      const r = runScript(shell, "journal since=1s lines=5");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 1));
+    });
+
+    test("journal: since=999999999s is the accepted upper boundary (9 digits)", () => {
+      const r = runScript(shell, "journal since=999999999s lines=5");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(journalArgv(5, 999999999));
+    });
+
     test("kernel: since= and lines= only", () => {
       const r = runScript(shell, "kernel since=300s lines=5");
       expect(r.stderr).toBe("");
       expect(r.exitCode).toBe(0);
       expect(r.cmd).toEqual(kernelArgv(5, 300));
+    });
+
+    test("kernel: since=1s is the accepted lower boundary (a single digit, no leading zero)", () => {
+      const r = runScript(shell, "kernel since=1s lines=5");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(kernelArgv(5, 1));
+    });
+
+    test("kernel: since=999999999s is the accepted upper boundary (9 digits)", () => {
+      const r = runScript(shell, "kernel since=999999999s lines=5");
+      expect(r.exitCode).toBe(0);
+      expect(r.cmd).toEqual(kernelArgv(5, 999999999));
     });
 
     test("kernel: keys accepted in either order", () => {
@@ -443,15 +476,25 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
     });
   });
 
-  describe("IFS: the caller's IFS never changes vm-forced-command's parsing", () => {
-    // /bin/sh and dash both ignore an IFS inherited from the environment
-    // (measured on this machine: a shell spawned with IFS=":" exported
-    // still reports its own IFS as the POSIX default the instant it
-    // starts), so these cannot show the script's own top-of-file pin
-    // matters — only that the resplit's own local `IFS=" ${tab}"`
-    // assignment, set immediately before `set -- ${original}` runs, is
-    // what actually governs parsing, regardless of what the caller passed.
-    test("journal: unit= plus priority= produce the same argv whether or not IFS=: is inherited from the caller", () => {
+  describe(`IFS: ${shell} ignores an inherited IFS (these two tests cannot fail on any change to vm-forced-command)`, () => {
+    // sh, dash and `bash --posix` all discard an IFS inherited from the
+    // environment (measured on this machine: a shell spawned with IFS=":"
+    // exported still reports its own IFS as the POSIX default the instant
+    // it starts) — this describe.each block only ever runs under sh or
+    // dash (see shells() above), and both tests below run under whichever
+    // one this iteration is. So neither test can fail on any change to the
+    // script — including removing its own IFS pin entirely: the
+    // caller-supplied IFS=":" never reaches vm-forced-command's parsing
+    // regardless of what the script does. They exist only to SHOW that
+    // fact about the shell this iteration runs under, not to guard the
+    // script's pin.
+    //
+    // The real guard on the script's own IFS pin is the static test above,
+    // "pins IFS to the POSIX default before the unquoted re-split, …" —
+    // that is the one that goes red if the `IFS="${POSIX_IFS}"` pin is
+    // removed. skills/observer-docker-ops/SKILL.md:328-330 makes this same
+    // point for the Docker role's forced command.
+    test("shown, not guarded: journal: unit= plus priority= produce the same argv whether or not IFS=: is inherited, because this shell discards it before parsing — not because of vm-forced-command's own pin", () => {
       const withoutColonIfs = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3");
       const withColonIfs = runScript(shell, "journal since=300s lines=5 unit=nginx.service priority=3", {}, scratch, { IFS: ":" });
       expect(withoutColonIfs.exitCode).toBe(0);
@@ -460,7 +503,7 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       expect(withColonIfs.cmd).toEqual(journalArgv(5, 300, { unit: "nginx.service", priority: 3 }));
     });
 
-    test("a colon-joined token such as 'unit:nginx.service' is still refused as one bad verb, never split into a valid verb and argument, even when IFS=: is inherited from the caller", () => {
+    test("shown, not guarded: a colon-joined token such as 'unit:nginx.service' is still refused as one bad verb, never split into a valid verb and argument, when IFS=: is inherited — again because this shell discards the inherited IFS before parsing, not because of vm-forced-command's own pin", () => {
       const r = runScript(shell, "unit:nginx.service", {}, scratch, { IFS: ":" });
       expect(r.exitCode).toBe(77);
       expect(r.stderr).toContain(REFUSAL_PREFIX);
@@ -534,38 +577,39 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
   });
 
   describe("refusals: exit 77, the verb named on stderr, and no invocation recorded", () => {
-    // [label, SSH_ORIGINAL_COMMAND, verb stderr names, reason stderr contains].
+    const UNIT_REASON = `a unit name must match ^[a-zA-Z0-9][a-zA-Z0-9@._:-]*$, max ${UNIT_MAX} bytes`;
+    // [label, SSH_ORIGINAL_COMMAND, verb stderr names, the full reason the script prints].
     const cases: Array<[string, string, string, string]> = [
-      ["an unknown verb", "restart nginx.service", "restart", "not a recognised verb"],
-      ["stop as a top-level verb", "stop nginx.service", "stop", "not a recognised verb"],
-      ["start as a top-level verb", "start nginx.service", "start", "not a recognised verb"],
-      ["enable as a top-level verb", "enable nginx.service", "enable", "not a recognised verb"],
-      ["shutdown", "shutdown", "shutdown", "not a recognised verb"],
-      ["reboot", "reboot", "reboot", "not a recognised verb"],
-      ["poweroff", "poweroff", "poweroff", "not a recognised verb"],
-      ["halt", "halt", "halt", "not a recognised verb"],
-      ["sudo", "sudo systemctl restart nginx.service", "sudo", "not a recognised verb"],
-      ["kill", "kill nginx.service", "kill", "not a recognised verb"],
+      ["an unknown verb", "restart nginx.service", "restart", VERB_REASON],
+      ["stop as a top-level verb", "stop nginx.service", "stop", VERB_REASON],
+      ["start as a top-level verb", "start nginx.service", "start", VERB_REASON],
+      ["enable as a top-level verb", "enable nginx.service", "enable", VERB_REASON],
+      ["shutdown", "shutdown", "shutdown", VERB_REASON],
+      ["reboot", "reboot", "reboot", VERB_REASON],
+      ["poweroff", "poweroff", "poweroff", VERB_REASON],
+      ["halt", "halt", "halt", VERB_REASON],
+      ["sudo", "sudo systemctl restart nginx.service", "sudo", VERB_REASON],
+      ["kill", "kill nginx.service", "kill", VERB_REASON],
       ["journal: missing since=", "journal lines=10", "journal", "since=<N>s is required"],
       ["journal: missing lines=", "journal since=60s", "journal", "lines=<M> is required"],
-      ["journal: lines=501, one over the cap", "journal since=60s lines=501", "journal", "a lines= value must be 1-500"],
-      ["journal: lines=0", "journal since=60s lines=0", "journal", "a lines= value must be 1-500"],
-      ["journal: lines=1000, a 4-digit value far over the cap", "journal since=60s lines=1000", "journal", "a lines= value must be 1-500"],
-      ["journal: lines=99999, a 5-digit value far over the cap", "journal since=60s lines=99999", "journal", "a lines= value must be 1-500"],
-      ["kernel: lines=1000, a 4-digit value far over the cap", "kernel since=60s lines=1000", "kernel", "a lines= value must be 1-500"],
-      ["kernel: lines=99999, a 5-digit value far over the cap", "kernel since=60s lines=99999", "kernel", "a lines= value must be 1-500"],
-      ["journal: a leading-zero N", "journal since=007s lines=10", "journal", "a since= value must be"],
-      ["journal: a leading-zero M", "journal since=60s lines=007", "journal", "a lines= value must be 1-500"],
-      ["journal: N without a trailing 's'", "journal since=60 lines=10", "journal", "a since= value must be"],
-      ["journal: a 10-digit N", `journal since=${"1".repeat(10)}s lines=10`, "journal", "a since= value must be"],
-      ["journal: since=0s, a lone zero is refused (an empty lookback reads as \"nothing happened\")", "journal since=0s lines=5", "journal", "a since= value must be"],
-      ["kernel: since=0s, a lone zero is refused (an empty lookback reads as \"nothing happened\")", "kernel since=0s lines=5", "kernel", "a since= value must be"],
-      ["journal: priority=8, one over the range", "journal since=60s lines=10 priority=8", "journal", "priority= value must be exactly one digit"],
-      ["journal: priority=37, two digits", "journal since=60s lines=10 priority=37", "journal", "priority= value must be exactly one digit"],
-      ["journal: priority=3x, a digit followed by a non-digit", "journal since=60s lines=10 priority=3x", "journal", "priority= value must be exactly one digit"],
-      ["journal: priority=err, not a digit at all", "journal since=60s lines=10 priority=err", "journal", "priority= value must be exactly one digit"],
-      ["journal: unit= fails the unit-name grammar", "journal since=60s lines=10 unit=nginx!service", "journal", "a unit name must match"],
-      ["journal: unit= with a leading '-' fails the unit-name grammar", "journal since=60s lines=10 unit=-x", "journal", "a unit name must match"],
+      ["journal: lines=501, one over the cap", "journal since=60s lines=501", "journal", LINES_REASON],
+      ["journal: lines=0", "journal since=60s lines=0", "journal", LINES_REASON],
+      ["journal: lines=1000, a 4-digit value far over the cap", "journal since=60s lines=1000", "journal", LINES_REASON],
+      ["journal: lines=99999, a 5-digit value far over the cap", "journal since=60s lines=99999", "journal", LINES_REASON],
+      ["kernel: lines=1000, a 4-digit value far over the cap", "kernel since=60s lines=1000", "kernel", LINES_REASON],
+      ["kernel: lines=99999, a 5-digit value far over the cap", "kernel since=60s lines=99999", "kernel", LINES_REASON],
+      ["journal: a leading-zero N", "journal since=007s lines=10", "journal", SINCE_REASON],
+      ["journal: a leading-zero M", "journal since=60s lines=007", "journal", LINES_REASON],
+      ["journal: N without a trailing 's'", "journal since=60 lines=10", "journal", SINCE_REASON],
+      ["journal: a 10-digit N", `journal since=${"1".repeat(10)}s lines=10`, "journal", SINCE_REASON],
+      ["journal: since=0s, a lone zero is refused (an empty lookback reads as \"nothing happened\")", "journal since=0s lines=5", "journal", SINCE_REASON],
+      ["kernel: since=0s, a lone zero is refused (an empty lookback reads as \"nothing happened\")", "kernel since=0s lines=5", "kernel", SINCE_REASON],
+      ["journal: priority=8, one over the range", "journal since=60s lines=10 priority=8", "journal", PRIORITY_REASON],
+      ["journal: priority=37, two digits", "journal since=60s lines=10 priority=37", "journal", PRIORITY_REASON],
+      ["journal: priority=3x, a digit followed by a non-digit", "journal since=60s lines=10 priority=3x", "journal", PRIORITY_REASON],
+      ["journal: priority=err, not a digit at all", "journal since=60s lines=10 priority=err", "journal", PRIORITY_REASON],
+      ["journal: unit= fails the unit-name grammar", "journal since=60s lines=10 unit=nginx!service", "journal", UNIT_REASON],
+      ["journal: unit= with a leading '-' fails the unit-name grammar", "journal since=60s lines=10 unit=-x", "journal", UNIT_REASON],
       ["kernel: unit= is not a key kernel accepts", "kernel since=60s lines=10 unit=nginx.service", "kernel", "unrecognised argument key"],
       ["kernel: priority= is not a key kernel accepts", "kernel since=60s lines=10 priority=3", "kernel", "unrecognised argument key"],
       ["journal: a repeated key", "journal since=60s since=70s lines=10", "journal", "since= may be given only once"],
@@ -583,9 +627,9 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       ],
       ["unit with zero arguments", "unit", "unit", "unit takes exactly one argument, a unit name; got 0"],
       ["unit with three arguments", "unit a b c", "unit", "unit takes exactly one argument, a unit name; got 3"],
-      ["unit: unit name fails the grammar (bad character)", "unit nginx!service", "unit", "a unit name must match"],
-      ["unit: unit name fails the grammar (leading '-')", "unit -nginx.service", "unit", "a unit name must match"],
-      [`unit: unit name longer than ${UNIT_MAX} bytes`, `unit ${"a".repeat(UNIT_MAX + 1)}`, "unit", "a unit name must match"],
+      ["unit: unit name fails the grammar (bad character)", "unit nginx!service", "unit", UNIT_REASON],
+      ["unit: unit name fails the grammar (leading '-')", "unit -nginx.service", "unit", UNIT_REASON],
+      [`unit: unit name longer than ${UNIT_MAX} bytes`, `unit ${"a".repeat(UNIT_MAX + 1)}`, "unit", UNIT_REASON],
       ["uptime with an extra argument", "uptime extra", "uptime", "uptime takes no arguments; got 1"],
       ["os with an extra argument", "os extra", "os", "os takes no arguments; got 1"],
       ["system with an extra argument", "system extra", "system", "system takes no arguments; got 1"],
@@ -598,12 +642,13 @@ describe.each(shells())("scripts/observe/vm-forced-command under %s", (shell) =>
       ["a verb holding an uppercase letter", "Uptime", "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
       ["a path as a verb", "/bin/sh", "(unrecognised)", "the verb is not [a-z][a-z0-9-]{0,31}"],
     ];
-    test.each(cases)("%s", (_label, cmd, expectSubstring, reasonSubstring) => {
+    test.each(cases)("%s", (_label, cmd, expectSubstring, reason) => {
       const r = runScript(shell, cmd);
       expect(r.exitCode).toBe(77);
       expect(r.stderr).toContain(REFUSAL_PREFIX);
       expect(r.stderr).toContain(expectSubstring);
-      expect(r.stderr).toContain(reasonSubstring);
+      // The whole reason, from refuse()'s `": "` through its newline, so a stale or appended word goes red.
+      expect(r.stderr).toContain(`": ${reason}\n`);
       expect(r.cmd).toBeNull();
     });
   });

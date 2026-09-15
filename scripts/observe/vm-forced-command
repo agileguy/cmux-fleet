@@ -322,7 +322,7 @@ parse_journal_kernel_args() {
   [ "${seen_lines}" -eq 1 ] || refuse "${verb}" "lines=<M> is required"
   case ${since_val} in
     *s) since_n=${since_val%s} ;;
-    *) refuse "${verb}" "a since= value must be [0-9]{1,9} digits followed by 's'" ;;
+    *) refuse "${verb}" "a since= value must be [1-9][0-9]{0,8} digits, no leading zero, followed by 's'" ;;
   esac
   is_since_n "${since_n}" ||
     refuse "${verb}" "a since= value must be [1-9][0-9]{0,8} digits, no leading zero, followed by 's'"
