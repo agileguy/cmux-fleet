@@ -64,6 +64,8 @@ interface Relay {
   proc: Bun.Subprocess;
   port: number;
   stderr: () => Promise<string>;
+  /** True once the process's own "forwarding ..." line was observed on stdout. */
+  sawForwardingLine: boolean;
 }
 
 const running: Array<{ kill: () => void }> = [];
@@ -81,6 +83,14 @@ afterEach(async () => {
  * Start the relay forwarding `listenPort -> 127.0.0.1:upstreamPort` and wait
  * until it says it is listening. Waiting on the process's OWN announcement,
  * rather than sleeping, is what keeps these tests off the flake list.
+ *
+ * The 10 s deadline used to be checked only BETWEEN `reader.read()` calls —
+ * so a relay that neither prints "forwarding" nor exits (the exact shape of
+ * the bad-value defect once validation is removed: no stdout, no exit, just
+ * a process that sits there) left this function blocked inside a single
+ * `await reader.read()` with nothing to wake it, for the full 10 s no matter
+ * how the deadline variable was set. Racing the read itself against the
+ * deadline is what makes the deadline actually bound the wait.
  */
 async function startRelay(
   targets: Array<Record<string, unknown>>,
@@ -99,7 +109,14 @@ async function startRelay(
   let seen = "";
   const deadline = Date.now() + 10_000;
   while (!seen.includes("forwarding") && Date.now() < deadline) {
-    const { value, done } = await reader.read();
+    const remaining = deadline - Date.now();
+    const timedOut = Symbol("startRelay-read-timeout");
+    const result = await Promise.race([
+      reader.read(),
+      new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), remaining)),
+    ]);
+    if (result === timedOut) break;
+    const { value, done } = result;
     if (done) break;
     seen += decoder.decode(value, { stream: true });
   }
@@ -108,7 +125,37 @@ async function startRelay(
     proc,
     port: Number(targets[0]!.listenPort),
     stderr: () => stderrText,
+    sawForwardingLine: seen.includes("forwarding"),
   };
+}
+
+/**
+ * Race a relay expected to reject a bad startup value against a short
+ * deadline instead of just `await`ing `proc.exited` directly.
+ *
+ * With validation removed (the exact shape a regression takes), a relay
+ * that neither exits nor is otherwise misbehaving just sits there, so
+ * `await relay.proc.exited` alone doesn't fail — it hangs until the test
+ * framework's own timeout (`cliBudget(1)`, about 11 s) kills it, and that
+ * failure message is "test timed out", which says nothing about WHY. Racing
+ * against ~3 s and throwing a message that names the actual expectation
+ * turns an 11 s unexplained timeout into a fast, legible failure.
+ *
+ * Does not kill the process — `afterEach` already does that for everything
+ * `startRelay` pushed onto `running`, whether this helper throws or not.
+ */
+async function expectRejectsAtStartup(relay: Relay, ms = 3_000): Promise<number> {
+  const timedOut = Symbol("expectRejectsAtStartup-timeout");
+  const result = await Promise.race([
+    relay.proc.exited,
+    new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), ms)),
+  ]);
+  if (result === timedOut) {
+    throw new Error(
+      `relay kept running past ${ms}ms instead of exiting at startup — expected it to reject the bad env override and exit non-zero`,
+    );
+  }
+  return result as number;
 }
 
 /** A free localhost port, released before the caller binds it. */
@@ -452,15 +499,22 @@ describe("egress-relay.cjs — S2: only a LISTEN failure is fatal", () => {
 describe("egress-relay.cjs — bad IDLE_TIMEOUT_MS/ACTIVE_IDLE_TIMEOUT_MS/MAX_CONNECTIONS fail loudly at startup", () => {
   /**
    * The defect: `IDLE_TIMEOUT_MS`, `ACTIVE_IDLE_TIMEOUT_MS` and
-   * `MAX_CONNECTIONS` used to be `Number(process.env.X || default)` with no
-   * check on the result. A non-numeric or negative override started the
-   * process cleanly and then crashed on the very first byte with
-   * `ERR_OUT_OF_RANGE` — killing every connection and, under
-   * `--restart unless-stopped`, crash-looping the container. `"0"` is a
-   * truthy STRING, so it became the NUMBER 0 and silently disabled the
-   * bound instead of erroring. All three variables must now be validated
-   * before anything listens, and each rejection must name the variable on
-   * stderr — not just fail generically.
+   * `MAX_CONNECTIONS` used to be `Number(process.env.X || default)` with only
+   * an `isInteger && > 0` check — far looser than it reads. `Number("1e3")`
+   * is `1000`, `Number(" 5")` is `5`, `Number("0x10")` is `16`, and
+   * `Number("5.0")` is `5` — all pass `isInteger && > 0` and were silently
+   * accepted. Worse, so was `"2147483648"`, and `socket.setTimeout()`'s own
+   * ceiling is a signed 32-bit integer: going over it does not throw, it
+   * WARNS and truncates (measured on real Node 24.21.0:
+   * `socket.setTimeout(2147483648, cb)` prints `TimeoutOverflowWarning: …
+   * Timer duration was truncated to 2147483647.` and the connection stays
+   * open) — so an oversized `PIFLEET_RELAY_IDLE_TIMEOUT_MS` used to turn the
+   * zero-byte-flood guard into a ~24.86-day hold instead of failing at
+   * startup. All three variables must now be validated against a strict
+   * `^[1-9][0-9]*$` grammar (no sign, decimal point, exponent, leading zero,
+   * or whitespace — nothing is trimmed) AND a hard upper bound before
+   * anything listens, and each rejection must name the variable on stderr —
+   * not just fail generically.
    */
   const varNames = [
     "PIFLEET_RELAY_IDLE_TIMEOUT_MS",
@@ -471,6 +525,14 @@ describe("egress-relay.cjs — bad IDLE_TIMEOUT_MS/ACTIVE_IDLE_TIMEOUT_MS/MAX_CO
     ["non-numeric", "abc"],
     ["negative", "-5"],
     ["zero — a truthy string that used to silently disable the bound", "0"],
+    ["exponential notation — Number() coerces this to 1000", "1e3"],
+    ["leading whitespace — Number() coerces this to 5, nothing is trimmed", " 5"],
+    ["hex notation — Number() coerces this to 16", "0x10"],
+    ["trailing .0 — Number() coerces this to 5", "5.0"],
+    [
+      "one past the int32 timeout ceiling — also past MAX_CONNECTIONS' own, lower, bound",
+      "2147483648",
+    ],
   ];
 
   for (const name of varNames) {
@@ -480,7 +542,7 @@ describe("egress-relay.cjs — bad IDLE_TIMEOUT_MS/ACTIVE_IDLE_TIMEOUT_MS/MAX_CO
           [{ listenPort: await freePort(), host: "127.0.0.1", port: 8000, name: "omlx" }],
           { [name]: value },
         );
-        const code = await relay.proc.exited;
+        const code = await expectRejectsAtStartup(relay);
         expect(code).not.toBe(0);
         expect(await relay.stderr()).toContain(name);
       }, cliBudget(1));
@@ -496,6 +558,24 @@ describe("egress-relay.cjs — bad IDLE_TIMEOUT_MS/ACTIVE_IDLE_TIMEOUT_MS/MAX_CO
       PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: "6000",
       PIFLEET_RELAY_MAX_CONNECTIONS: "4",
     });
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("HELLO");
+    const reply = (await once(client, "data")) as Buffer;
+    expect(reply.toString()).toBe("ECHO:HELLO");
+    client.destroy();
+  }, cliBudget(1));
+
+  test("boundary: 2147483647 (the int32 ceiling) is accepted for both timeouts — relay starts and prints its forwarding line", async () => {
+    const up = await startUpstream();
+    upstreams.push(up);
+    const listenPort = await freePort();
+    const relay = await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_IDLE_TIMEOUT_MS: "2147483647",
+      PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: "2147483647",
+    });
+    expect(relay.sawForwardingLine).toBe(true);
 
     const client = open(listenPort);
     await once(client, "connect");

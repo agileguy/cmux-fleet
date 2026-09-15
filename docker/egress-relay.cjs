@@ -117,36 +117,94 @@ const { startProxy, fromEnv, POLICY_ENV } = require("./connect-proxy.cjs");
  * can drive them hard.
  *
  * `IDLE_TIMEOUT_MS`, `ACTIVE_IDLE_TIMEOUT_MS` and `MAX_CONNECTIONS` used to be
- * `Number(process.env.X || default)`, unchecked. Two failure modes, both
- * measured under real Node 24: a non-numeric or negative override (`"abc"`,
- * `"-5"`) started the process cleanly and then crashed on the very first byte
- * with `ERR_OUT_OF_RANGE` from `socket.setTimeout`/`server.maxConnections` —
- * taking down every connection and, under `--restart unless-stopped`,
- * crash-looping the container. And `"0"` is a truthy STRING, so it became the
- * NUMBER 0 and silently disabled the bound instead of erroring.
+ * `Number(process.env.X || default)` with only an `isInteger && > 0` check.
+ * That check's failure modes are NOT one failure. Each was measured
+ * separately under real Node 24.21.0:
  *
- * Validated here, before anything listens: each of the three must be a
- * finite positive integer. An invalid value writes one
- * `pifleet-egress-relay:` line naming the variable to stderr and exits
- * non-zero — the same fatal style as the `server.on("error", ...)` listen
- * failure below. An unset (or empty) variable still gets its default.
+ * - A bad `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (e.g. `"abc"`, `"-5"`) crashes on
+ *   CONNECT, before any byte — `client.setTimeout(IDLE_TIMEOUT_MS, teardown)`
+ *   runs at accept, in the PRE-DIAL phase below. Measured: a client that
+ *   connects and sends nothing still brings the relay down.
+ * - A bad `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS` crashes only once the FIRST
+ *   BYTE arrives — it feeds the `dial()` leg, reached only from
+ *   `client.once("data", ...)`. Measured: a connect-only client leaves the
+ *   relay running; a client that writes one byte brings it down. Both throw
+ *   `RangeError [ERR_OUT_OF_RANGE]` from `socket.setTimeout()`, uncaught —
+ *   nothing wraps the connection handler — so either one takes down the
+ *   WHOLE PROCESS (every other in-flight connection, every target), and
+ *   `--restart unless-stopped` turns that into a crash loop.
+ * - `server.maxConnections = NaN | negative`, BY CONTRAST, does not throw at
+ *   all. `NaN` silently disables the cap: every connection was accepted and
+ *   served normally in the measurement. A negative value instead refuses
+ *   every connection from the first one on: the server emits a `'drop'`
+ *   event and closes the client unserved, while the relay process itself
+ *   stays up.
+ * - `"0"` is a truthy STRING, so it became the NUMBER `0` — `isInteger && >
+ *   0` rejects that today, but the bare `Number(raw || fallback)` shape this
+ *   file had before even that check existed would have silently disabled
+ *   the bound instead of erroring (measured: `socket.setTimeout(0, cb)`
+ *   does not throw — Node treats `0` as "no timeout").
+ *
+ * A separate, non-crashing failure mode: `Number()` coerces far more than
+ * plain integers. `"1e3"`, `" 5"`, `"\t7\n"`, `"0x10"` and `"5.0"` all pass
+ * `isInteger && > 0` and were silently accepted. Worse, so does
+ * `"2147483648"` — and `socket.setTimeout()`'s own ceiling is a signed
+ * 32-bit integer (libuv's timer duration); going over it does not throw, it
+ * WARNS and truncates. Measured: `socket.setTimeout(2147483648, cb)` prints
+ * `TimeoutOverflowWarning: 2147483648 does not fit into a 32-bit signed
+ * integer. Timer duration was truncated to 2147483647.` to stderr, and the
+ * connection stays open with its timer silently capped at 2147483647 ms
+ * (~24.86 days) — so an oversized `PIFLEET_RELAY_IDLE_TIMEOUT_MS` would not
+ * fail loudly, it would just turn the zero-byte-flood guard into a
+ * ~24.86-day hold.
+ *
+ * Validated here, before anything listens, against both failure classes.
+ * `raw` must match `^[1-9][0-9]*$` — a plain decimal integer: no sign, no
+ * decimal point, no exponent, no leading zero, and (the anchors alone rule
+ * this out — nothing is trimmed first) no leading or trailing whitespace.
+ * The resulting number must also sit inside a hard ceiling: `MAX_TIMEOUT_MS`
+ * (2147483647) for the two timeouts — the same signed 32-bit ceiling
+ * `socket.setTimeout()` itself silently truncates to, so this now fails at
+ * startup instead of at runtime — and `MAX_RELAY_CONNECTIONS` (65536) for
+ * `MAX_CONNECTIONS`: comfortably under this process's own 1048576-file
+ * nofile limit even though each ACTIVE relayed connection costs 2 FDs
+ * (client leg + upstream leg), and far larger than any fleet this relay is
+ * sized for (default 256). An invalid value — either class — writes one
+ * `pifleet-egress-relay:` line naming the variable, the accepted form, and
+ * the range, then exits non-zero — the same fatal style as the
+ * `server.on("error", ...)` listen failure below. An unset (or empty)
+ * variable still gets its default.
  */
-function positiveIntEnv(name, fallback) {
+const MAX_TIMEOUT_MS = 2147483647; // 2^31 - 1: socket.setTimeout()'s own signed-32-bit ceiling — see measurement above.
+const MAX_RELAY_CONNECTIONS = 65536; // sane ceiling for MAX_CONNECTIONS — see measurement above (FD budget + fleet sizing).
+const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+
+function positiveIntEnv(name, fallback, max) {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
+  if (!POSITIVE_INT_RE.test(raw) || value > max) {
     process.stderr.write(
-      `pifleet-egress-relay: ${name} must be a positive integer, got ${JSON.stringify(raw)}\n`,
+      `pifleet-egress-relay: ${name} must be a plain positive decimal integer ` +
+        `in 1..${max} (digits only — no sign, decimal point, exponent, leading ` +
+        `zero, or whitespace), got ${JSON.stringify(raw)}\n`,
     );
     process.exit(1);
   }
   return value;
 }
 
-const IDLE_TIMEOUT_MS = positiveIntEnv("PIFLEET_RELAY_IDLE_TIMEOUT_MS", 120000);
-const ACTIVE_IDLE_TIMEOUT_MS = positiveIntEnv("PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS", 900000);
-const MAX_CONNECTIONS = positiveIntEnv("PIFLEET_RELAY_MAX_CONNECTIONS", 256);
+const IDLE_TIMEOUT_MS = positiveIntEnv("PIFLEET_RELAY_IDLE_TIMEOUT_MS", 120000, MAX_TIMEOUT_MS);
+const ACTIVE_IDLE_TIMEOUT_MS = positiveIntEnv(
+  "PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS",
+  900000,
+  MAX_TIMEOUT_MS,
+);
+const MAX_CONNECTIONS = positiveIntEnv(
+  "PIFLEET_RELAY_MAX_CONNECTIONS",
+  256,
+  MAX_RELAY_CONNECTIONS,
+);
 
 /** `1..65535`, mirroring `validPort` in `src/security/relay.ts`. */
 function validPort(port) {
