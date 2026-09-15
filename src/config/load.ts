@@ -482,6 +482,34 @@ export function providerContextWindow(
   return block.context_windows[model] ?? null;
 }
 
+/**
+ * The per-request output-token cap to send for `model` on `provider`, or
+ * `null` for "say nothing and let the request carry no cap" (SRD, the
+ * 2026-09-15 stall measurement in `config/schema.ts`'s `max_output_tokens`
+ * docblock).
+ *
+ * `null` rather than a number of our own, for the same reason
+ * {@link providerContextWindow} returns it: a wrong cap is worse than an
+ * absent one, and the only correct source is what the operator measured
+ * against the endpoint. Shaped identically to `providerContextWindow` — same
+ * §6.1 shorthand fallback, same "undeclared provider/model resolves to null"
+ * — because the two fields answer the same question ("what does THIS
+ * provider's THIS model need to be told") about two different parts of the
+ * request.
+ */
+export function providerMaxOutputTokens(
+  config: FleetConfig,
+  provider: string,
+  model: string,
+): number | null {
+  const providers = config.llm.providers;
+  // §6.1's shorthand fleet has no per-provider block to carry the map.
+  if (providers === undefined) return null;
+  const block = providers[provider];
+  if (block === undefined) return null;
+  return block.max_output_tokens[model] ?? null;
+}
+
 export function providerApiKeyEnv(config: FleetConfig, provider: string): string {
   const providers = config.llm.providers;
   // §6.1's shorthand: with no map the flat keys ARE this provider's block, so

@@ -997,7 +997,34 @@ jobs:
           # 152 skip, 0 fail, Ran 160 tests across 18 files: ten more skips and
           # the pass count unmoved at 8, the shape ten Docker-gated probes must
           # have.
-          TOTAL_EXPECTED: "170"
+          #
+          # 2026-09-15, 170 -> 172: extension-declarations-image.test.ts grew a
+          # fourth enrolled extension, output-token-cap.ts (the 213k-max_tokens
+          # stall measurement), and its per-extension loop contributes two
+          # `test.skipIf(!DOCKER)` cases per file — "declares only members the
+          # image's ExtensionAPI has" and "subscribes only to events the image
+          # still emits". EXTENSIONS went from three entries to four, so the
+          # loop's contribution went from six cases to eight; the three
+          # fixed-count tests above and below the loop are unchanged (their
+          # bodies grew a literal each — `before_provider_request` joined the
+          # emitted-events list — which is not an additional test case).
+          #
+          # NOT DERIVED BY THE HAND METHOD THIS TIME, and that gap is recorded
+          # rather than hidden: the environment this entry was written in has no
+          # Docker daemon and none of the host ADC/live-oMLX state the other
+          # seventeen files' gates read, both of which this repo's own
+          # constraints forbade standing up for the purpose of re-deriving a CI
+          # constant. What IS measured, isolating this file from the other
+          # eighteen so host-state drift in THIS sandbox cannot leak into the
+          # number: `bun test test/integration/extension-declarations-image.test.ts`
+          # alone, before the fourth EXTENSIONS entry, read 0 pass, 9 skip, Ran 9
+          # tests; the same command after read 0 pass, 11 skip, Ran 11 tests — a
+          # controlled A/B against identical host state, +2 and nothing else.
+          # 170 + 2 = 172 follows only if the other eighteen files' contribution
+          # to TOTAL_EXPECTED is unchanged, which this entry did not itself
+          # verify end to end. Confirm on the next real run of this job; if it
+          # disagrees, trust the job's own count over this arithmetic.
+          TOTAL_EXPECTED: "172"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

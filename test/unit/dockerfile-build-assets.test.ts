@@ -120,6 +120,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "pi-extensions/dispatch-trigger.ts",
         "pi-extensions/truncation-recovery.ts",
         "pi-extensions/report-tools.ts",
+        "pi-extensions/output-token-cap.ts",
         "ssh-connect.cjs",
         "observe-ssh",
         "observe-docker",
@@ -158,6 +159,15 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // moved, and reading `task_id`/`epoch` out of `/policy/task` by a recipe
       // that has moved. The harvester cannot tell the two apart.
       "pi-extensions/report-tools.ts",
+      // Added 2026-09-15. The output-token-cap extension, closing the stall
+      // measured that day: seats sent no output cap, the endpoint's own
+      // `max_tokens` averaged ~213k per request, and a seat could sit silent
+      // for 16 minutes with tokens still flowing — past Pi's own idle timeout,
+      // because idle is not what a runaway generation is. Stale in the same
+      // silent direction as the auto-trigger and truncation-recovery above: it
+      // finds nothing it recognises and returns every payload untouched, so a
+      // stale copy under an unmoved tag goes back to sending no cap at all.
+      "pi-extensions/output-token-cap.ts",
       // Added 2026-09-14 (SRD-OBSERVER-ROLES task 3.1). The SSH ProxyCommand
       // every observer SSH call runs; a stale copy is dangerous in the same
       // shape as the honeypot's staleness — it is the ONLY thing that carries

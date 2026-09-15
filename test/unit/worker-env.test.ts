@@ -1132,6 +1132,107 @@ describe("a worker's context window is its own provider's", () => {
 });
 
 /**
+ * A WORKER'S OUTPUT CAP IS ITS OWN PROVIDER'S, THE SAME SHAPE AS THE CONTEXT
+ * WINDOW ABOVE, AND FOR A RELATED BUT DISTINCT MEASURED FAILURE.
+ *
+ * Seats sent no `max_tokens` at all. vLLM's own metrics showed an average
+ * `max_tokens` of about 213k per request on 2026-09-15, and seats went silent
+ * mid-turn for 16 minutes — past Pi's 5-minute idle timeout, which never fired
+ * because tokens kept flowing the whole time. `docker/pi-extensions/output-
+ * token-cap.ts` is what reads this variable; this block only pins that
+ * `buildWorkerEnv` resolves and writes the right value for the right worker.
+ *
+ * Same asymmetric fixture as the context-window block above and for the same
+ * reason: `SharedModel` at two different caps on two providers is the one
+ * shape a fleet-wide (rather than per-provider) map would get wrong, because
+ * every fixture with each model id appearing once passes under either design.
+ */
+describe("a worker's max output tokens cap is its own provider's", () => {
+  const sharedModel = () =>
+    baseDoc({
+    llm: {
+      provider: "local",
+      model: "SharedModel",
+      providers: {
+        local: {
+          hosted: false,
+          base_url: "http://omlx.pifleet.internal:8000/v1",
+          api_key_env: "OMLX_API_KEY",
+          models_allowlist: ["SharedModel"],
+          max_output_tokens: { SharedModel: 4096 },
+        },
+        vendor: {
+          hosted: true,
+          base_url: "https://vendor.example/v1",
+          relay_upstream: "203.0.113.7:443",
+          api_key_env: "VENDOR_API_KEY",
+          models_allowlist: ["SharedModel", "Unmeasured"],
+          max_output_tokens: { SharedModel: 8192 },
+        },
+      },
+    },
+    roles: {
+      eng: {},
+      remote: { model: "vendor/SharedModel" },
+      quiet: { model: "vendor/Unmeasured" },
+    },
+    workers: [
+      { id: "w1", role: "eng" },
+      { id: "wv", role: "remote" },
+      { id: "wq", role: "quiet" },
+    ],
+    });
+
+  test("the same model id on two providers resolves to two different caps", async () => {
+    const loaded = await load(sharedModel());
+    const local = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const remote = buildWorkerEnv(loaded, resolveWorker(loaded, "wv"), {});
+
+    expect(local.vars["PIFLEET_PI_MAX_OUTPUT_TOKENS"]).toBe("4096");
+    expect(remote.vars["PIFLEET_PI_MAX_OUTPUT_TOKENS"]).toBe("8192");
+    // The arm a fleet-wide map would fail: they are not the same answer.
+    expect(local.vars["PIFLEET_PI_MAX_OUTPUT_TOKENS"]).not.toBe(
+      remote.vars["PIFLEET_PI_MAX_OUTPUT_TOKENS"],
+    );
+  });
+
+  /**
+   * An unmeasured model sends no cap, and the variable is EMPTY rather than a
+   * number of ours — the same "behave exactly as before" path the context
+   * window keeps, for the same reason: a guessed cap that is too small cuts
+   * off a legitimate long answer, and this field exists to fix a stall, not to
+   * trade it for a truncated one.
+   */
+  test("a model with no measured cap is left to send no max_tokens at all", async () => {
+    const loaded = await load(sharedModel());
+    const quiet = buildWorkerEnv(loaded, resolveWorker(loaded, "wq"), {});
+    expect(quiet.vars["PIFLEET_PI_MAX_OUTPUT_TOKENS"]).toBe("");
+  });
+
+  /** The variable is always present, so the extension's parse never guesses. */
+  test("the variable is written for every worker, measured or not", async () => {
+    const loaded = await load(sharedModel());
+    for (const id of ["w1", "wv", "wq"]) {
+      const vars = buildWorkerEnv(loaded, resolveWorker(loaded, id), {}).vars;
+      expect(Object.keys(vars), `${id} has no cap variable`).toContain(
+        "PIFLEET_PI_MAX_OUTPUT_TOKENS",
+      );
+    }
+  });
+
+  /**
+   * A fleet with no providers map still writes the variable, empty — the same
+   * §6.1 shorthand guarantee the context window carries, checked directly
+   * rather than inferred from the shared-model fixture above.
+   */
+  test("a fleet with no providers map still writes an empty cap", async () => {
+    const loaded = await load(baseDoc({ llm: { model: "TestModel" } }));
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    expect(plan.vars["PIFLEET_PI_MAX_OUTPUT_TOKENS"]).toBe("");
+  });
+});
+
+/**
  * A ROLE'S `thinking` HAS TO ARRIVE, and until 2026-09-05 it did not.
  *
  * `thinking` was resolved by `resolveWorker`, printed by `doctor` and `render`,

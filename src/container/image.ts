@@ -143,6 +143,14 @@ export const BUILD_CONTEXT_ASSETS = [
   // stale validator from one written by the current one. The two extensions
   // above at least fall silent; this one keeps answering.
   "pi-extensions/report-tools.ts",
+  // The output-token-cap extension (2026-09-15 stall measurement). The fourth
+  // in-process asset, and stale in the same silent direction as the auto-trigger
+  // and truncation-recovery above: it reads `PIFLEET_PI_MAX_OUTPUT_TOKENS` and
+  // returns every payload untouched on anything it does not recognise, so a
+  // copy that no longer matches the provider request shape simply stops
+  // capping and every worker goes back to sending no `max_tokens` at all —
+  // the exact runaway-generation stall this file exists to close.
+  "pi-extensions/output-token-cap.ts",
   // The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2; written and enrolled here
   // by §12 Phase 3 task 3.1). It is the only
   // thing that carries the proxy's `403` rule name past OpenSSH — OpenSSH

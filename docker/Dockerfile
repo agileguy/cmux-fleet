@@ -512,6 +512,23 @@ COPY --chmod=0444 docker/pi-extensions/truncation-recovery.ts /opt/pifleet/trunc
 # well-formed envelopes checked against a rule set that has since moved.
 COPY --chmod=0444 docker/pi-extensions/report-tools.ts /opt/pifleet/report-tools.ts
 
+# The output-token-cap extension (2026-09-15 stall measurement — see
+# src/config/schema.ts's max_output_tokens docblock and the extension's own
+# header). It registers `before_provider_request`, the one hook Pi exposes
+# over the fully-built request, and sets `max_tokens` from
+# PIFLEET_PI_MAX_OUTPUT_TOKENS when the request carries no cap of its own.
+# Same reasoning as the three files above on every count: in-process,
+# root-owned, 0444, denied to the worker — a writable copy would be a worker
+# able to strip its own output cap off every request it sends.
+#
+# ADDING THIS COPY MEANT ADDING "pi-extensions/output-token-cap.ts" TO
+# `BUILD_CONTEXT_ASSETS` in src/container/image.ts. Stale here is silent in
+# the same direction as the auto-trigger and truncation-recovery above: the
+# extension finds nothing it recognises and returns every payload untouched,
+# so every worker quietly goes back to sending no `max_tokens` at all — the
+# runaway-generation stall this file exists to close.
+COPY --chmod=0444 docker/pi-extensions/output-token-cap.ts /opt/pifleet/output-token-cap.ts
+
 # The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2 task 3.1). `observe-ssh`
 # (task 3.2, shipped and on PATH via task 3.3 above; no role calls it yet)
 # runs every observer SSH call as

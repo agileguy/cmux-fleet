@@ -975,6 +975,47 @@ export const ProviderSchema = z
      */
     context_windows: z.record(shortStr, z.number().int().positive()).default({}),
     /**
+     * Each model's per-request OUTPUT token cap, by model id. Absent means a
+     * worker's request carries no `max_tokens` at all — exactly the behaviour
+     * every fleet had before this field existed.
+     *
+     * ## The failure this exists for, measured live on 2026-09-15
+     *
+     * Worker seats run the Pi coding agent against an OpenAI-compatible
+     * endpoint. Seats went silent mid-turn for 16 minutes until the task
+     * deadline killed them; vLLM's own metrics showed an average `max_tokens`
+     * of about 213k per request, because with no output cap sent the server
+     * let a runaway generation run for most of the context. Pi's 5-minute idle
+     * timeout does not stop it — tokens keep flowing the whole time, so the
+     * agent is never idle by the definition that timeout uses. Measured over
+     * 363 completed assistant turns from the same seats: output tokens p50 99,
+     * p90 800, p99 3118, max 7395 — three orders of magnitude under the 213k
+     * the server was budgeting for, with only 3 turns ending `stop` and none
+     * ending `length`. A cap sized off the measured distribution, not off the
+     * context window, turns a runaway generation into an ordinary `length`
+     * finish instead of a silent 16-minute stall.
+     *
+     * ## Why this cannot travel the same route as `context_windows`
+     *
+     * `context_windows` reaches Pi through `models.json`'s `contextWindow`
+     * field, which Pi's own model registry reads regardless of provider. An
+     * output cap has no such path for an OpenAI-compatible endpoint: Pi's
+     * `openai-completions.js` sets `max_tokens` (or `max_completion_tokens`,
+     * per the model's `compat.maxTokensField`) only when the agent core passed
+     * a non-zero `maxTokens` option, and that option defaults to 0 and is read
+     * from `models.json` only by the anthropic and bedrock providers — never by
+     * the OpenAI-compatible path this fleet's providers use. So this field
+     * alone changes nothing; the value it resolves to is carried to the worker
+     * as `PIFLEET_PI_MAX_OUTPUT_TOKENS` and applied by
+     * `docker/pi-extensions/output-token-cap.ts`, which is the one hook Pi
+     * exposes over the fully-built request: `before_provider_request`.
+     *
+     * PER PROVIDER for the same reason `context_windows` is: the same weights
+     * behind two endpoints can be served under two different configurations,
+     * and the number that matters is the endpoint's, not the model's.
+     */
+    max_output_tokens: z.record(shortStr, z.number().int().positive()).default({}),
+    /**
      * Turns off `decomposeModel`'s `:thinking` suffix stripping for models on
      * this provider (D12, ISC-405). Off by default, so oMLX is unaffected and
      * no existing config changes meaning.

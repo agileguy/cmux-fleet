@@ -112,6 +112,7 @@ import {
   providerBaseUrl,
   providerContextWindow,
   providerIsHosted,
+  providerMaxOutputTokens,
 } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
@@ -629,6 +630,32 @@ export function buildWorkerEnv(
      */
     PIFLEET_LLM_CONTEXT_WINDOW: String(
       providerContextWindow(loaded.config, w.provider, w.model) ?? "",
+    ),
+    /*
+     * The model's per-request output-token cap, or "" for "send no cap".
+     *
+     * Empty rather than absent for the same reason `PIFLEET_LLM_CONTEXT_WINDOW`
+     * is: every value in this record is a string, and
+     * `docker/pi-extensions/output-token-cap.ts` treats an empty or invalid
+     * value as unset and returns every payload untouched — exactly the
+     * behaviour every worker had before this variable existed.
+     *
+     * `PIFLEET_LLM_CONTEXT_WINDOW` reaches Pi via `models.json`, read by every
+     * provider; this one cannot, because the OpenAI-compatible path never reads
+     * `model.maxTokens` back out of that file (`config/schema.ts`'s
+     * `max_output_tokens` docblock has the source lines). So the value has to
+     * travel as an environment variable an in-process extension reads, rather
+     * than as another key in the entrypoint's `jq` filter.
+     *
+     * Measured 2026-09-15: seats with no cap sent averaged a server-side
+     * `max_tokens` near 213k and stalled mid-turn for 16 minutes with tokens
+     * still flowing, past Pi's own 5-minute idle timeout. Completed turns from
+     * the same seats ran p50 99 / p90 800 / p99 3118 / max 7395 output tokens —
+     * the cap exists to turn the runaway case into an ordinary `length` finish
+     * at a budget the measured distribution says no real turn needs.
+     */
+    PIFLEET_PI_MAX_OUTPUT_TOKENS: String(
+      providerMaxOutputTokens(loaded.config, w.provider, w.model) ?? "",
     ),
     /*
      * Arms the escape-attempt honeypot (ISC-125). Unconditional: every worker
