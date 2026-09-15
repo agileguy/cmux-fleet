@@ -104,20 +104,25 @@ export interface WorkspaceSpec {
    */
   readonly topFraction: number | null;
   /**
-   * Fraction of the WIDTH each pane in the BOTTOM row gets, or `null` to leave
-   * the halves `new-split` produces alone.
+   * Fraction of the WIDTH each pane gets, in EVERY ROW OF TWO OR MORE PANES —
+   * or `null` to leave the halves `new-split` produces alone.
    *
    * A second field rather than a reuse of {@link topFraction}, because the two
    * say different things and only one of them is a ratio between rows: a top
-   * fraction divides ONE border, and this divides the N−1 borders inside a row.
-   * Folding them together would make `0.5` mean "half the height above" in one
-   * console and "two equal columns below" in another.
+   * fraction divides ONE border, and this divides the N−1 borders inside EACH
+   * qualifying row. Folding them together would make `0.5` mean "half the
+   * height above" in one console and "two equal columns below" in another.
    *
-   * `null` on every console but `triage`, and that is not an oversight to be
-   * tidied up later: the other three are 2x2s, where two columns each split once
-   * are already equal and a correction would be a no-op dressed as a decision.
-   * {@link DEVELOPMENT_TOP_FRACTION} records why a value that rounds to nothing
-   * must not stand in for a stated one, and the same rule governs here.
+   * **NOT `null` on every console but `triage`** — that was true once and is a
+   * stale claim now. `review` carries {@link REVIEW_REVIEWER_WIDTH_FRACTION}
+   * (`1/3`) too, since it took `triage`'s collator-over-a-row shape on
+   * 2026-09-13. It stays `null` on `operations` and `development`, and for
+   * different reasons: `operations`'s bottom row is the single merged monitor,
+   * with no internal border to divide, and `development` is a 2x2 where two
+   * columns each split once are already equal, so a correction there would be
+   * a no-op dressed as a decision. {@link DEVELOPMENT_TOP_FRACTION} records why
+   * a value that rounds to nothing must not stand in for a stated one, and the
+   * same rule governs here.
    */
   readonly bottomWidthFraction: number | null;
 }
@@ -791,12 +796,40 @@ async function applyTopFraction(
 }
 
 /**
- * Give every pane in the BOTTOM row an equal share of the width.
+ * Give every pane, in every row of two or more panes, an equal share of the
+ * width.
  *
  * The horizontal twin of {@link applyTopFraction}, and it exists for the same
  * reason one rung down: `new-split` has no size argument, so a row of three
  * arrives as 50/25/25 — each `right` split halving only what the pane before it
  * held — and thirds are not reachable by halving at any depth.
+ *
+ * ## MORE THAN ONE ROW — GENERALIZED 2026-09-14, SRD-TRIAGE-MIXED-OBSERVERS §4.4/D5
+ *
+ * This corrected only the row sharing the LARGEST `y` until the triage
+ * console grew a second full-width observer row (SRD-TRIAGE-MIXED-OBSERVERS
+ * §4.2): a collator over TWO rows of three, not one. With two rows only the
+ * lower one was ever settled, because "the bottom row" and "the largest `y`"
+ * were the same fact for every console this pass had ever run against — a
+ * premise that quietly stopped holding the moment a second row existed, with
+ * nothing to redden.
+ *
+ * The fix widens the ROW SELECTION rather than the per-row arithmetic below,
+ * which does not change at all. Group the first read's panes by distinct `y`
+ * (exact equality, the same comparison the single-row version already used),
+ * ASCENDING — top row first — and run the loop below once per group holding
+ * two or more panes; a row of one (the operations console's merged monitor,
+ * or a collator's own row here) has no internal border and is skipped.
+ *
+ * This is safe rather than merely convenient because EACH FULL-WIDTH ROW IS
+ * ITS OWN SPLIT SUBTREE: {@link triagePanes}' seven-pane table opens the two
+ * observer rows with two SEPARATE `down` splits, so a border moved inside one
+ * row's subtree is invisible to the other row's panes — settling row one
+ * first and row two second, or the other order, reaches the same end state
+ * either way. Backward compatible by construction: `review` has exactly one
+ * qualifying row, and reaches it exactly as before (`TRIAGE_OBSERVER_WIDTH_FRACTION`
+ * and `REVIEW_REVIEWER_WIDTH_FRACTION` both stay `1/3`, since every row still
+ * holds three panes).
  *
  * ## A ROW OF THREE IS A NESTED PAIR, NOT A FLAT SPLIT — MEASURED, NOT DERIVED
  *
@@ -831,13 +864,14 @@ async function applyTopFraction(
  * numbers and the tree model predicts the observed ones to the pixel**, which is
  * the only reason this docblock states the tree as fact rather than as a theory.
  *
- * ## SO: LEFT TO RIGHT, ONE BORDER AT A TIME, SIGN CHOOSES THE PANE
+ * ## SO, PER ROW: LEFT TO RIGHT, ONE BORDER AT A TIME, SIGN CHOOSES THE PANE
  *
- * Settle the leftmost border so pane 0 is exactly its share; whatever that
- * redistributes to the right is then settled by the next step, and so on. The
- * LAST pane is never addressed — it holds the remainder, which is correct once
- * every border to its left is. Nothing needs to predict the proportional
- * redistribution, because each step re-reads after it.
+ * Within a row, settle the leftmost border so pane 0 is exactly its share;
+ * whatever that redistributes to the right is then settled by the next step,
+ * and so on. The LAST pane in the row is never addressed — it holds the
+ * remainder, which is correct once every border to its left is. Nothing needs
+ * to predict the proportional redistribution, because each step re-reads
+ * after it.
  *
  * Direction comes from the sign, which is {@link applyTopFraction}'s own rule
  * rather than a new one — and it is what the first version reached past when it
@@ -877,42 +911,50 @@ async function applyBottomWidths(
   }
   try {
     if (first.panes.length < 2) return;
-    // The bottom row is the one with the largest `y`. Compared BETWEEN panes
-    // rather than against zero: `container_frame` is a size with no origin and
-    // pane coordinates carry the window's own offsets, so only the relative
-    // ordering means anything (`parse.ts`, `parsePaneGeometry`).
-    const bottomY = Math.max(...first.panes.map((p) => p.y));
-    const row = first.panes.filter((p) => p.y === bottomY).sort((a, b) => a.x - b.x);
-    // One pane in the bottom row has no internal border to divide — the
-    // operations console's merged monitor is exactly this shape. Nothing to do,
-    // and issuing a resize would address a border that is not there.
-    if (row.length < 2) return;
-    // LEFT TO RIGHT, and never the LAST pane: each step settles one border and
-    // leaves the rest of the row to the steps after it. The final pane is not
-    // addressed at all — it holds the remainder, which is its share once every
-    // border to its left is where it belongs.
-    for (let i = 0; i < row.length - 1; i += 1) {
-      const paneId = row[i]!.paneId;
-      const nextId = row[i + 1]!.paneId;
-      // Re-read before EVERY border — and for a stronger reason than
-      // {@link applyTopFraction}'s. There, one move shifted the neighbour the
-      // next delta was computed against. Here one move shifts SEVERAL panes at
-      // once, proportionally, and no snapshot taken beforehand can say by how
-      // much. Measuring after each step is what lets this pass stay ignorant of
-      // the redistribution rule rather than having to model it.
-      const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
-      const pane = geo.panes.find((p) => p.paneId === paneId);
-      if (pane === undefined) continue;
-      const delta = geo.containerWidth * fraction - pane.width;
-      // Sub-pixel deltas are what an already-correct row produces; issuing them
-      // would be a no-op command per border on every adoption.
-      if (Math.abs(delta) < 1) continue;
-      // The SIGN picks which pane to address, so the border is always adjacent
-      // in the direction it has to travel — the same rule, and the same reason,
-      // as choosing a ROW by the sign in {@link applyTopFraction}.
-      await (delta > 0
-        ? client.runOk(resizePaneArgv(paneId, "R", delta))
-        : client.runOk(resizePaneArgv(nextId, "L", -delta)));
+    // Every row, ASCENDING by `y` — top to bottom — grouped from this ONE
+    // read. Compared BETWEEN panes rather than against zero: `container_frame`
+    // is a size with no origin and pane coordinates carry the window's own
+    // offsets, so only the relative ordering means anything (`parse.ts`,
+    // `parsePaneGeometry`). Each distinct `y` is its own split subtree (see
+    // the docblock), so settling one row's borders never moves another row's,
+    // and the order rows are visited in does not change the end state.
+    const rowYs = [...new Set(first.panes.map((p) => p.y))].sort((a, b) => a - b);
+    for (const y of rowYs) {
+      const row = first.panes.filter((p) => p.y === y).sort((a, b) => a.x - b.x);
+      // A row of one pane has no internal border to divide — the operations
+      // console's merged monitor, and every collator's own row, are exactly
+      // this shape. Nothing to do there, and issuing a resize would address a
+      // border that is not there.
+      if (row.length < 2) continue;
+      // LEFT TO RIGHT WITHIN THE ROW, and never the LAST pane: each step
+      // settles one border and leaves the rest of the row to the steps after
+      // it. The final pane is not addressed at all — it holds the remainder,
+      // which is its share once every border to its left is where it belongs.
+      for (let i = 0; i < row.length - 1; i += 1) {
+        const paneId = row[i]!.paneId;
+        const nextId = row[i + 1]!.paneId;
+        // Re-read before EVERY border — and for a stronger reason than
+        // {@link applyTopFraction}'s. There, one move shifted the neighbour
+        // the next delta was computed against. Here one move shifts SEVERAL
+        // panes at once, proportionally, and no snapshot taken beforehand can
+        // say by how much. Measuring after each step is what lets this pass
+        // stay ignorant of the redistribution rule rather than having to
+        // model it.
+        const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+        const pane = geo.panes.find((p) => p.paneId === paneId);
+        if (pane === undefined) continue;
+        const delta = geo.containerWidth * fraction - pane.width;
+        // Sub-pixel deltas are what an already-correct row produces; issuing
+        // them would be a no-op command per border on every adoption.
+        if (Math.abs(delta) < 1) continue;
+        // The SIGN picks which pane to address, so the border is always
+        // adjacent in the direction it has to travel — the same rule, and the
+        // same reason, as choosing a ROW by the sign in
+        // {@link applyTopFraction}.
+        await (delta > 0
+          ? client.runOk(resizePaneArgv(paneId, "R", delta))
+          : client.runOk(resizePaneArgv(nextId, "L", -delta)));
+      }
     }
   } catch (err) {
     process.stderr.write(
