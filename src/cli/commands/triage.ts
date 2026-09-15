@@ -128,10 +128,13 @@ import {
 } from "../../run/dispatch-request.ts";
 import { evenSlices, partitionFromRequests } from "../../run/triage-partition.ts";
 import {
+  pairHasService,
   readTriageDocumentAt,
+  seatsForEnvironments,
   sweepProducers,
   triageDocumentPath,
   type SweepDispatch,
+  type SweepEnvironment,
   type SweepProducerDeps,
   type SweepProducers,
 } from "../../run/triage-envelope.ts";
@@ -728,7 +731,7 @@ export function buildTriageSweepDriver(
       : async (sweepId) => {
           const senders = await Promise.all(
             pairs
-              .filter((p) => p.services.length > 0)
+              .filter(pairHasService)
               .map(async (p) => ({
                 collator: p.collator,
                 run: await withSeatRun.seatRun!(p.collator),
@@ -1397,11 +1400,36 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
      */
     const collators = TRIAGE_CONSOLE_ROSTER.collators;
     const slices = evenSlices(target.services, collators.length);
-    const seatShares = evenSlices(TRIAGE_CONSOLE_ASPECTS, collators.length);
+    /*
+     * THE WHOLE SWEEP'S environments — still the ONE k8s environment until
+     * task 4.2's last step widens this call site to every kind
+     * `environmentsByKind` finds present (SRD-TRIAGE-MIXED-OBSERVERS §5, 5.1). Named once so `seatShares`
+     * below and `buildTriageSweepDriver`'s `environments` deps read the same
+     * value rather than two call sites each spelling `{name: environment,
+     * kind: "k8s"}` and risking the two disagreeing about which kind a seat
+     * belongs to.
+     */
+    const sweepEnvironments: readonly SweepEnvironment[] = [
+      { name: environment, kind: "k8s", services: target.services },
+    ];
+    /*
+     * ONLY THE SEATS OF THE KINDS THIS SWEEP DECLARES, task 4.2's fix for the
+     * trap task 4.1 left standing. `TRIAGE_CONSOLE_ASPECTS` names all six
+     * seats across three kinds; a k8s-only sweep whose envelope named the
+     * docker and vm seats too would show them a child task id they are never
+     * dispatched under, and since task 4.1 a collator handing a k8s service
+     * to one of them is refused whole for a kind mismatch it never had a
+     * service for. `seatsForEnvironments` (`triage-envelope.ts`) answers with
+     * only the three k8s seats today; it grows with `sweepEnvironments` above
+     * once this call site dispatches docker and vm.
+     */
+    const seatShares = evenSlices(seatsForEnvironments(sweepEnvironments), collators.length);
     const sweepPairs = collators.map((collator, i) => ({
       collator,
       seats: seatShares[i] ?? [],
-      services: slices[i] ?? [],
+      environments: [
+        { name: environment, kind: "k8s" as const, services: slices[i] ?? [] },
+      ] satisfies SweepEnvironment[],
     }));
 
     const outcome = await triagePass({
@@ -1437,8 +1465,7 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
       sweep: buildTriageSweepDriver(
         {
           run,
-          environment,
-          services: target.services,
+          environments: sweepEnvironments,
           pairs: sweepPairs,
           defaultWindowS: target.default_window,
           /*

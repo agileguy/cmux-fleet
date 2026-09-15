@@ -106,6 +106,7 @@ import {
   observerArtifactPath,
   triageDocumentPath,
   type SweepDispatch,
+  type SweepEnvironment,
   type SweepProducerDeps,
 } from "../../src/run/triage-envelope.ts";
 import type { NotifyRequest } from "../../src/run/triage-notify.ts";
@@ -1031,11 +1032,15 @@ describe("buildTriageSweepDriver: ten members from one dep set", () => {
     },
   ];
 
+  /** task 4.2's `environments`, replacing the flat `environment`/`services` pair. */
+  const ENVIRONMENTS: readonly SweepEnvironment[] = [
+    { name: "cni-dev", kind: "k8s", services: SERVICES },
+  ];
+
   function producerDeps(run: ReturnType<typeof runPaths>, sent: string[]): SweepProducerDeps {
     return {
       run,
-      environment: "cni-dev",
-      services: SERVICES,
+      environments: ENVIRONMENTS,
       defaultWindowS: 300,
       previousDocument: async () => null,
       dispatch: async (args) => {
@@ -1281,10 +1286,12 @@ function fixtureFleetDispatch(
   windows: (string | null)[],
   titles: string[],
   settled: string[],
+  briefs: string[],
 ): SweepDispatch {
   let sweepId = "";
   return async ({ taskId, worker, title, brief }) => {
     titles.push(title);
+    briefs.push(brief);
     log.push(`${worker}:${taskId}`);
     await writeJson(inboxTaskPath(run, taskId), { schema: "pifleet.task/v1", task_id: taskId });
 
@@ -1349,7 +1356,9 @@ function fixtureFleetDispatch(
       const seatId = seatRuns[worker];
       const seatTree =
         seatId === undefined ? run : runPaths(seatId, runsRoot(process.env));
-      await writeJson(observerArtifactPath(seatTree, worker, taskId), {
+      // "k8s" always: `SLICE_OF` names only `obs-t1`/`obs-t2`/`obs-t3` (see its
+      // own docblock), so every worker this branch ever sees is a k8s seat.
+      await writeJson(observerArtifactPath(seatTree, worker, taskId, "k8s"), {
         sweep_id: sweepId,
         window_opened_at: windows[windows.length - 1],
         status: "success",
@@ -1449,6 +1458,13 @@ interface FixtureFleet {
    */
   readonly titles: string[];
   /**
+   * Every dispatch BRIEF the console minted, in the same order as
+   * {@link dispatched} — task 4.2/5's `## The seats` check reads this rather
+   * than re-deriving the brief, so a fixture that only recorded whether a
+   * dispatch happened could not tell WHICH seats the envelope actually named.
+   */
+  readonly briefs: string[];
+  /**
    * The observation window the HOST minted, read back out of each sweep brief —
    * one per sweep, and `null` when the brief carried none (§13 task 6.9a).
    *
@@ -1545,6 +1561,7 @@ async function fixtureFleet(
   const delivered: NotifyRequest[] = [];
   const windows: (string | null)[] = [];
   const titles: string[] = [];
+  const briefs: string[] = [];
   const settled: string[] = [];
   const recycled: string[] = [];
   const deadlines: number[] = [];
@@ -1565,7 +1582,7 @@ async function fixtureFleet(
        * deadline, be wrong about it, and pass.
        */
       deadlines.push(opts.settleDeadlineMs);
-      return fixtureFleetDispatch(r, dispatched, windows, titles, settled);
+      return fixtureFleetDispatch(r, dispatched, windows, titles, settled, briefs);
     },
     /*
      * §6.3 step 7's publish-and-declare, recorded so a test can assert the
@@ -1616,6 +1633,7 @@ async function fixtureFleet(
     recycled,
     deadlines,
     titles,
+    briefs,
     windows,
     settled,
     settleDeadlineMs: fixture.settleDeadlineMs ?? 240_000,
@@ -1879,6 +1897,37 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     // over three observers separates them: the sweep reports THREE.
     expect(out).toContain(`T-sweep-1: swept ${seatsOf.length} observers`);
     // Deadline, titles, window and §12's closing anti-criterion, all out here.
+    expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
+  });
+
+  /**
+   * SRD-TRIAGE-MIXED-OBSERVERS task 4.2's trap, closed on the PRODUCTION path
+   * rather than only in `triage-envelope.test.ts`'s unit fixtures.
+   * `sweepPairs`'s seats used to come straight from `TRIAGE_CONSOLE_ASPECTS`
+   * whole — all six — so a k8s-only `triage/targets.yaml` (`FIXTURE_TARGETS`,
+   * the fixture every test in this file loads) still produced a `## The
+   * seats` block naming `obs-td1`, `obs-td2` and `obs-tv1`: seats the
+   * collator holds no child task id for, and — since task 4.1 — seats that
+   * would refuse the whole sweep if handed a k8s service. Production now
+   * names only the three k8s seats the sweep actually covers.
+   */
+  test("`## The seats` names only the k8s seats when targets.yaml declares only k8s", async () => {
+    const fleet = await fixtureFleet("2026-09-06T01-00-40Z-4040");
+    const deps = productionTriageDeps(async () => fleet.effects);
+    const { err } = await runTriage(["--once"], deps);
+    expect(err).toBeNull();
+
+    // The FIRST dispatch is the sweep envelope — `openSweep` runs, per pair,
+    // before any observer is fanned out to (asserted by position in the test
+    // above: `fleet.dispatched.slice(0, PAIRS.length)`).
+    expect(fleet.dispatched[0]).toBe(`${TRIAGE_COLLATOR}:T-sweep-1`);
+    const envelopeBrief = fleet.briefs[0]!;
+    for (const seat of ["obs-t1", "obs-t2", "obs-t3"]) {
+      expect(envelopeBrief).toContain(`- ${seat}: task id`);
+    }
+    for (const seat of ["obs-td1", "obs-td2", "obs-tv1"]) {
+      expect(envelopeBrief).not.toContain(`- ${seat}: task id`);
+    }
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
 

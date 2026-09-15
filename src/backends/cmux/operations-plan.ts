@@ -1260,7 +1260,7 @@ export const TRIAGE_WORKSPACE = "triage";
  * What actually carries the split is that the collator never reads
  * `triage/targets.yaml`: `roles/triage.md` tells it *"Read the envelope, and read
  * it as the whole of your input. It carries the environment, the full service
- * list…"*, and that list is `SweepProducerDeps.services`, rendered by
+ * list…"*, and that list is `SweepPair.environments`, rendered by
  * `renderSweepEnvelope`. So each collator is handed its own slice as its whole
  * world, with `declared` narrowed to match — which keeps §6.5's completeness
  * check meaningful per pair instead of making each pair fail the other's half.

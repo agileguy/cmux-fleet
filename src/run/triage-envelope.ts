@@ -80,6 +80,19 @@ import { readDispatchRequest, TRIAGE_CONSOLE_ROSTER } from "./dispatch-request.t
 import { taskRecordPath, workerOutboxDir, workerPaths, type RunPaths } from "./paths.ts";
 import { replyMountPath } from "./replies.ts";
 /**
+ * The docker/vm reply filenames — task 5.1's kind-to-filename mapping. This is
+ * the one place `OBSERVER_ARTIFACT_FILE_BY_KIND` (below) may name them: the
+ * module's own docblock claims it imports "only zod and the pure contracts
+ * module", so pulling two exported string constants out of it puts no
+ * filesystem, network or mutating capability into this console's closure —
+ * `test/unit/triage-readonly.test.ts`'s control-plane ban names
+ * `harvest/index.ts` and `harvest/adjudicate.ts`, never this file.
+ */
+import {
+  OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+  OBSERVER_VM_OPS_ARTIFACT_NAME,
+} from "../harvest/observer-target-artifacts.ts";
+/**
  * TYPE ONLY, and the distinction is what keeps §12's read-only block intact.
  *
  * `test/unit/triage-readonly.test.ts` bans control-plane MODULES by import and
@@ -104,6 +117,7 @@ import {
   type TriageDocumentRead,
 } from "./triage-document.ts";
 import type { PartitionAssignment } from "./triage-partition.ts";
+import { seatKind } from "./triage-seat-kinds.ts";
 import type { SweepCollation, SweepJoin, SweepOpen } from "./triage-pass.ts";
 import {
   TRIAGE_CHECKS,
@@ -153,12 +167,60 @@ export const SWEEP_FILES_DIR = "files";
 /** `skills/observer-ops/SKILL.md:26-33`'s pair, the half a host validates. */
 export const OBSERVER_ARTIFACT_FILE = "observer-ops.json";
 
+/**
+ * The reply filename each kind's observer writes, keyed by
+ * {@link TriageEnvironmentKind} — SRD-TRIAGE-MIXED-OBSERVERS §5, task 5.1.
+ *
+ * **One exported place, so `observerArtifactPath` and every future caller
+ * share it rather than each hand-writing the three names.** Before task 5.1
+ * `joinSweep` read every seat through {@link OBSERVER_ARTIFACT_FILE} alone —
+ * correct for the three k8s seats and wrong for the other three, which write
+ * `OBSERVER_DOCKER_OPS_ARTIFACT_NAME` and `OBSERVER_VM_OPS_ARTIFACT_NAME`
+ * instead (`skills/observer-docker-ops/SKILL.md` §5.6,
+ * `skills/observer-vm-ops/SKILL.md` §6.7). A docker or vm observer could do
+ * its job perfectly and its reply would never be found, because the join was
+ * asking the wrong directory for the wrong file.
+ *
+ * **The docker/vm names are imported, not respelled** — the same argument
+ * {@link COVERAGE_VOCABULARY_DEMAND} makes about `COVERAGE_RESULTS`: a second
+ * spelling of a name owned elsewhere is a second place for the two to drift.
+ * `harvest/observer-target-artifacts.ts` owns them because `reconcile.ts`
+ * selects each artifact by this exact filename; this map reuses that name
+ * rather than asserting a third copy agrees with the other two.
+ */
+export const OBSERVER_ARTIFACT_FILE_BY_KIND: Readonly<Record<TriageEnvironmentKind, string>> =
+  Object.freeze({
+    k8s: OBSERVER_ARTIFACT_FILE,
+    docker: OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+    vm: OBSERVER_VM_OPS_ARTIFACT_NAME,
+  });
+
 /** §7.5's document, written by `tri-1` on turn two beside a `triage.md`. */
 export const TRIAGE_DOCUMENT_FILE = "triage.json";
 
-/** Where one observer's reply artifact sits on the host. */
-export function observerArtifactPath(run: RunPaths, worker: string, taskId: string): string {
-  return join(workerOutboxDir(run.root, worker), taskId, SWEEP_FILES_DIR, OBSERVER_ARTIFACT_FILE);
+/**
+ * Where one observer's reply artifact sits on the host.
+ *
+ * **`kind` selects the filename, and it is required rather than defaulted to
+ * k8s.** A defaulted parameter is how the docker/vm reply went unread in the
+ * first place — every existing call site was written before a seat could be
+ * anything but k8s, and a default would have let this function keep answering
+ * `observer-ops.json` for a docker seat with nobody having to notice. Look the
+ * kind up with `seatKind(worker)` (`triage-seat-kinds.ts`) rather than
+ * guessing it from context.
+ */
+export function observerArtifactPath(
+  run: RunPaths,
+  worker: string,
+  taskId: string,
+  kind: TriageEnvironmentKind,
+): string {
+  return join(
+    workerOutboxDir(run.root, worker),
+    taskId,
+    SWEEP_FILES_DIR,
+    OBSERVER_ARTIFACT_FILE_BY_KIND[kind],
+  );
 }
 
 /** Where the collator's §7.5 document sits on the host. */
@@ -1898,25 +1960,46 @@ export interface SweepPair {
   readonly collator: string;
   /** The observers it may fan out to — and the only ones it is told exist. */
   readonly seats: readonly AspectSeat[];
-  /** Its slice of the environment, in `triage/targets.yaml` file order. */
-  readonly services: readonly TriageService[];
+  /**
+   * Its own slice of each environment it covers — SRD-TRIAGE-MIXED-OBSERVERS
+   * §5, §6.1, task 4.2. In `triage/targets.yaml` file order within each
+   * environment, and `environments` in the order the sweep declares them.
+   *
+   * **Replaces the flat `services` list this field held through task 4.1.**
+   * One pair can now carry a slice of more than one environment — a k8s slice
+   * and a docker slice under the same collator — which a single `services`
+   * array had no way to key: two environments can each declare a `grafana`
+   * (SRD-TRIAGE-MIXED-OBSERVERS D21), and only `(environment, service)` tells
+   * them apart.
+   */
+  readonly environments: readonly SweepEnvironment[];
 }
 
 export interface SweepProducerDeps {
   readonly run: RunPaths;
-  readonly environment: string;
-  readonly services: readonly TriageService[];
+  /**
+   * Every environment this console's collator(s) sweep, whole —
+   * SRD-TRIAGE-MIXED-OBSERVERS §5, §6.1, task 4.2.
+   *
+   * **Replaces the flat `environment`/`services` pair task 3.3 left standing.**
+   * `openSweep` used to hardcode a single `{name: deps.environment, kind:
+   * "k8s", services: pair.services}` element; this is the WHOLE declared list
+   * a pair's own `environments` slice (above) partitions, so a console that
+   * sweeps docker and vm alongside k8s states all three here once rather than
+   * `openSweep` inventing a kind it was never told.
+   */
+  readonly environments: readonly SweepEnvironment[];
   /**
    * The console's pairs. Defaults to the ONE pair this console shipped with —
-   * `TRIAGE_COLLATOR` over `TRIAGE_CONSOLE_ASPECTS`, sweeping {@link services}
-   * whole — so a caller that knows nothing about pairs gets exactly the
-   * behaviour it had before this field existed.
+   * `TRIAGE_COLLATOR` over the seats of the kinds {@link environments} names,
+   * sweeping {@link environments} whole — so a caller that knows nothing about
+   * pairs gets exactly the behaviour it had before this field existed.
    *
-   * {@link services} stays because it is still the environment's WHOLE declared
-   * list: the pairs' slices partition it, and a caller that supplies `pairs`
-   * supplies slices that must add up to it. Nothing here checks that — the host
-   * checks it where it already checks partitions, in `checkTriagePartition`
-   * against `declared`.
+   * {@link environments} stays because it is still every environment's WHOLE
+   * declared list: a pair's own `environments` slices partition it, and a
+   * caller that supplies `pairs` supplies slices that must add up to it.
+   * Nothing here checks that — the host checks it where it already checks
+   * partitions, in `checkTriagePartition` against `declared`.
    */
   readonly pairs?: readonly SweepPair[];
   readonly defaultWindowS: number;
@@ -2021,6 +2104,53 @@ export interface SweepProducers {
 }
 
 /**
+ * The seats of {@link TRIAGE_CONSOLE_ASPECTS} whose kind has an environment in
+ * `environments` — SRD-TRIAGE-MIXED-OBSERVERS §5, tasks 4.2 and 5.1's shared
+ * rule for which seats a sweep may name.
+ *
+ * **This closes the trap task 4.1 left standing.** `src/cli/commands/triage.ts`
+ * built `seatShares` from all six `TRIAGE_CONSOLE_ASPECTS` regardless of which
+ * kinds the sweep actually declared, so a k8s-only sweep's envelope still
+ * named `obs-td1`, `obs-td2` and `obs-tv1` in its `## The seats` block — and
+ * since task 4.1, a collator hands a k8s service to a seat and a docker/vm
+ * seat gets the whole sweep refused for a kind mismatch it never had a
+ * service for. Production passes only the seats whose kind this sweep
+ * actually covers.
+ *
+ * Exported so `buildTriageSweepDriver` computes the same set the default pair
+ * below does, rather than each re-deriving it and risking the two disagreeing
+ * about which seats a given sweep may address — `sweepProducers`'s own
+ * argument about `pairs` at a smaller scale.
+ */
+export function seatsForEnvironments(
+  environments: readonly SweepEnvironment[],
+  seats: readonly AspectSeat[] = TRIAGE_CONSOLE_ASPECTS,
+): readonly AspectSeat[] {
+  const kinds = new Set(environments.map((e) => e.kind));
+  return seats.filter((seat) => {
+    const kind = seatKind(seat.worker);
+    return kind !== null && kinds.has(kind);
+  });
+}
+
+/**
+ * Whether `pair` covers at least one service, over every environment its own
+ * slice names — SRD-TRIAGE-MIXED-OBSERVERS task 4.2.
+ *
+ * **The unit `openSweep`, `collate` and `buildTriageSweepDriver`'s
+ * `readPartition` all skip a pair for.** `pair.services.length === 0` was the
+ * check before {@link SweepPair.environments} replaced the flat `services`
+ * list; with more than one environment per pair a pair can be non-empty in
+ * one environment and empty in another, so the question is no longer "is the
+ * one list empty" but "does ANY environment in this pair's slice have a
+ * service" — an envelope naming an environment with nothing in it is still an
+ * envelope naming something.
+ */
+export function pairHasService(pair: SweepPair): boolean {
+  return pair.environments.some((e) => e.services.length > 0);
+}
+
+/**
  * Assemble the four, over one injected dispatch.
  *
  * A factory rather than four exported functions each taking the same six
@@ -2042,7 +2172,11 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
    * dispatched under one pairing and harvested under another.
    */
   const pairs: readonly SweepPair[] = deps.pairs ?? [
-    { collator: TRIAGE_COLLATOR, seats: TRIAGE_CONSOLE_ASPECTS, services: deps.services },
+    {
+      collator: TRIAGE_COLLATOR,
+      seats: seatsForEnvironments(deps.environments),
+      environments: deps.environments,
+    },
   ];
 
   const openSweep = async (sweepId: string, dispatchedAt: string): Promise<SweepOpen> => {
@@ -2066,26 +2200,18 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
      */
     for (const pair of pairs) {
       /*
-       * A pair with an EMPTY slice is not dispatched, and `evenSlices` promises
-       * this case exists: with fewer services than collators the trailing slice
-       * is `[]`. An envelope naming no services asks a model to partition
-       * nothing, and whatever it wrote would be refused as `partition_incomplete`
-       * against an empty declared list — a refusal naming the console rather
-       * than the environment.
+       * A pair whose every environment is EMPTY is not dispatched, and
+       * `evenSlices` promises this case exists: with fewer services than
+       * collators the trailing slice is `[]`. An envelope naming no services
+       * asks a model to partition nothing, and whatever it wrote would be
+       * refused as `partition_incomplete` against an empty declared list — a
+       * refusal naming the console rather than the environment.
        */
-      if (pair.services.length === 0) continue;
+      if (!pairHasService(pair)) continue;
       const envelope = renderSweepEnvelope({
         sweepId,
         windowOpenedAt: windowOpenedAt(dispatchedAt, deps.defaultWindowS),
-        /*
-         * ONE k8s environment, named from what this caller has today. Task
-         * 3.3's envelope half widens only the SHAPE `renderSweepEnvelope`
-         * accepts — this production caller still sweeps exactly one k8s
-         * environment per call. Sweeping docker/vm for real needs per-kind
-         * partition (task 4.1) and (environment, service) keying (task 4.1b),
-         * both Phase 4's job, which is what widens this call site.
-         */
-        environments: [{ name: deps.environment, kind: "k8s", services: pair.services }],
+        environments: pair.environments,
         defaultWindowS: deps.defaultWindowS,
         previousDocument: await deps.previousDocument(pair.collator),
         seats: pair.seats,
@@ -2256,10 +2382,34 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
      * that read `/policy/replies` mid-join would see a truthful-looking subset.
      */
     const publishable: (DeclaredReply & { reply: unknown })[] = [];
-    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+    /*
+     * THE RESOLVED PAIRS' SEATS, not `TRIAGE_CONSOLE_ASPECTS` — task 5.1.
+     *
+     * Reading every console seat regardless of which pair (if any) claims it
+     * is the other half of the trap `seatsForEnvironments` closes at dispatch:
+     * a seat this sweep never dispatched to has no reply to find, and reading
+     * `TRIAGE_CONSOLE_ASPECTS` whole would ask `observerArtifactPath` for a
+     * path under a task id `childTaskId` never minted for that seat. Flattened
+     * across pairs rather than nested, because nothing below this line needs
+     * to know which pair a seat belongs to — only its kind, which `seatKind`
+     * answers directly.
+     */
+    for (const seat of pairs.flatMap((p) => p.seats)) {
+      const kind = seatKind(seat.worker);
+      if (kind === null) {
+        // Unreachable in production: every seat here came from a pair's own
+        // `seats`, and `seatsForEnvironments` (or a caller-supplied `pairs`)
+        // only ever names a seat `TRIAGE_SEAT_KINDS` recognises. Thrown rather
+        // than skipped so a future caller that hands `sweepProducers` a seat
+        // outside that table fails loudly instead of losing its reply silently.
+        throw new SweepEnvelopeError(
+          `${seat.worker} is a seat of this sweep's pairs, but triage-seat-kinds.ts names no ` +
+            `kind for it, so no reply filename can be chosen for it.`,
+        );
+      }
       const taskId = childTaskId(sweepId, seat.aspect);
       const seatTree = await seatRun(seat.worker);
-      const path = observerArtifactPath(seatTree, seat.worker, taskId);
+      const path = observerArtifactPath(seatTree, seat.worker, taskId, kind);
       const found = await readObserverArtifactAt(path, { worker: seat.worker, path }, read);
       if (found.kind === "ok") {
         replies.push(found.reply);
@@ -2456,11 +2606,24 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
 
     for (const pair of pairs) {
       // Not dispatched, so nothing to collate — `openSweep` skipped it too.
-      if (pair.services.length === 0) continue;
+      if (!pairHasService(pair)) continue;
+
+      /*
+       * THE LABEL `renderCollationEnvelope` NAMES — one environment's own
+       * name when the pair covers exactly one, the names joined with `, `
+       * when it covers more, mirroring how `renderSweepEnvelope`'s title
+       * names several (`:1426-1429` above). `deps.environment` does not
+       * exist any more — a pair can now cover more than one environment, so
+       * there is no longer one flat name to read off `deps`.
+       */
+      const environmentLabel =
+        pair.environments.length === 1
+          ? pair.environments[0]!.name
+          : pair.environments.map((e) => e.name).join(", ");
 
       const envelope = renderCollationEnvelope({
         sweepId,
-        environment: deps.environment,
+        environment: environmentLabel,
         /*
          * ITS OWN seats only. A collation brief naming the other pair's child id
          * would point this collator at `/replies/<id>.json` files that were
