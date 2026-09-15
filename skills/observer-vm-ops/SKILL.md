@@ -48,6 +48,16 @@ awk 'NF && $1 !~ /^#/ {print $1}' "$OBSERVER_VM_TARGETS_FILE"
 `#`-comment lines; this command tolerates the same repeated whitespace, for the same reason.
 Only the token belongs in an artifact — never the host, port or user the same line carries.
 
+**A malformed targets file refuses the whole file, not just its own listing.** `docker/observe-ssh`
+validates every line of the targets file before ssh ever runs, and one malformed line, a duplicate
+token or a bad field refuses the WHOLE file (77) — the `awk` command above has no such check, so it
+can still print tokens read from a file `observe-ssh` would refuse outright. A refusal whose text
+names `<targets_var> line <n>` (`docker/observe-ssh`'s own `parse_line`, one `refuse` call per check)
+is a FLEET CONFIGURATION FAULT, not something your call caused or can retry its way past: the task
+status is `blocked`, the row is `indeterminate`, and the call is not retried. This is a different
+shape of `77` from the exit table's "your own call was malformed" row below — that row is about a
+call this worker itself built wrong; this one names a targets file an operator has to fix.
+
 A word in the brief that names one of the listed tokens is the target. If the file lists
 exactly one token, use it and say so in the artifact; with more than one token and no matching
 word in the brief, the row is `indeterminate`. A `not enrolled` refusal from `observe-ssh` is
@@ -137,13 +147,22 @@ end, `125` from `disk` and `126`/`127` are the "did not run at all" row, and onl
 **When the brief asks for an action, not a check.** `reboot`, `shutdown`, `poweroff`, `halt`, and
 starting, stopping or restarting a unit are not checks — no row in the table above answers them,
 because none of `reachability`, `system`, `units`, `logs`, `resources` or `cloud` covers a change to
-the machine. Call the verb once anyway, so the refusal lands on record, then read the `77` row in
-the exit table whose stderr reads `vm-forced-command: refused "<verb>": not a recognised verb`.
-Record the channel that action concerns as `forbidden`: `system` for reboot, shutdown, poweroff,
-halt, or any other change to the machine; `units` for starting, stopping or restarting a unit. The
-row is `indeterminate`, the refusal line goes in `evidence_ref`, and the task status is `blocked`.
-Marking every channel `not_attempted` is wrong for this case — the call answered, with a refusal,
-and that refusal names a real channel.
+the machine. **The action word is itself the verb**: `observe-vm <target> reboot`, `observe-vm
+<target> shutdown`, `observe-vm <target> poweroff`, `observe-vm <target> halt`, `observe-vm <target>
+start <unit>`, `observe-vm <target> stop <unit>`, `observe-vm <target> restart <unit>` — never a
+second argument tacked onto `unit`, whose own grammar takes exactly one argument, a unit name, and
+refuses a second one on ARGUMENT COUNT before any verb question is even asked. None of `reboot`,
+`shutdown`, `poweroff`, `halt`, `start`, `stop` or `restart` is one of `vm-forced-command`'s own
+verbs, so the call form above always lands on its catch-all. Call it once anyway, so the refusal
+lands on record, then read the `77` row in the exit table whose stderr reads `vm-forced-command:
+refused "<verb>": not a recognised verb`. **When the brief asked for an action, a `77` shaped like an
+ARGUMENT refusal is never "fixed" into a read**: that shape means the call form above was not used,
+not that the arguments need adjusting, and retrying it as `unit <name>` answers a different question
+(is the unit loaded?) than the action the brief asked for. Record the channel that action concerns as
+`forbidden`: `system` for reboot, shutdown, poweroff, halt, or any other change to the machine;
+`units` for starting, stopping or restarting a unit. The row is `indeterminate`, the refusal line
+goes in `evidence_ref`, and the task status is `blocked`. Marking every channel `not_attempted` is
+wrong for this case — the call answered, with a refusal, and that refusal names a real channel.
 
 ## The verb grammar — the whole of what the credential can do (§6.4)
 

@@ -3,7 +3,10 @@
  * only enforcement (SRD-OBSERVER-ROLES §6.2-6.4), and to the two other places that restate the same
  * verb set in prose: `roles/observer-vm.md`'s role prompt and `docker/observe-vm`'s `--help` usage
  * text. Every file is read as text, in the style of `docs-currency.test.ts` and
- * `observer-docker-docs-currency.test.ts`; `vm-forced-command` is `sh` and cannot be imported.
+ * `observer-docker-docs-currency.test.ts`; `vm-forced-command` is `sh` and cannot be imported. Every
+ * extraction below proves it found something before it is used, so a moved heading or a rewritten
+ * sentence fails loudly instead of letting a comparison pass on an empty set — that discipline runs
+ * through every section below, not just one of them, so it is stated here once rather than numbered.
  *
  *  1. the skill's verb table, `roles/observer-vm.md`'s verb list and `docker/observe-vm`'s usage
  *     text each equal `vm-forced-command`'s verb `case` arms (the extractor fails loudly, rather
@@ -28,16 +31,30 @@
  *     common to both roles
  *  6. the skill's per-token byte cap and its derived `unit=` ceiling equal `is_argument()`'s real
  *     `-le` bound in `docker/observe-ssh`, read from that function's own body, not typed here
- *  7. every extraction proves it found something before it is used, so a moved heading or a
- *     rewritten sentence fails loudly instead of letting a comparison pass on an empty set
- *  8. the variable name the skill's "Where the enrolled tokens live" passage tells the worker to
- *     read equals the one `docker/observe-ssh` assigns to `targets_var` in its own `vm)` case arm;
- *     the worked command in that passage reads that variable rather than a hard-coded `/secrets/`
- *     path; and the brief-inputs table's `target` row points at the passage
+ *  7. the action-verb rule names real channels for an action the checks table has no row for —
+ *     `system` for reboot/shutdown/poweroff/halt, `units` for starting/stopping/restarting a unit —
+ *     and the real coverage/assessment/task-status words that go with it
+ *  8. the action-verb rule's CALL FORM: every action word it names (`reboot`, `shutdown`,
+ *     `poweroff`, `halt`, `start`, `stop`, `restart`) is not one of `vm-forced-command`'s own verb
+ *     arms, so each lands on the catch-all rather than being folded into `unit`'s argument list;
+ *     `unit`'s own arm is pinned refusing a second argument on ARGUMENT COUNT, confirming the call
+ *     form the rule forbids (`unit <action> <name>`) really would be misrouted, not just refused
+ *  9. a malformed targets file is a FLEET CONFIGURATION FAULT, not a malformed call: pinned against
+ *     every `refuse()` call inside `docker/observe-ssh`'s own `parse_line()`, which all name
+ *     `${targets_var} line ${lineno}`; the skill's sentence sits inside the enrolled-tokens
+ *     passage, before the exit table, never inside its "your own call was malformed" row
+ *  10. the skill's fenced `awk` token-listing command is actually EXECUTED, under `sh`, against a
+ *      real targets file (a comment line, a blank line, space- and tab-separated fields, two
+ *      targets) and must print exactly the two tokens, one per line, nothing else
+ *  11. the variable name the skill's "Where the enrolled tokens live" passage tells the worker to
+ *      read equals the one `docker/observe-ssh` assigns to `targets_var` in its own `vm)` case arm;
+ *      the worked command in that passage reads that variable rather than a hard-coded `/secrets/`
+ *      path; and the brief-inputs table's `target` row points at the passage
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -776,7 +793,10 @@ describe("the skill's action-verb rule names real channels for an action the che
     expect(ASSESSMENTS.has("indeterminate")).toBe(true);
     expect(STATUSES.has("blocked")).toBe(true);
     expect(COVERAGE_RESULTS.has("not_attempted")).toBe(true);
-    expect(paragraph, "the rule does not say marking every channel not_attempted is wrong for this case").toMatch(/not_attempted`\s+is wrong/);
+    // Whitespace-normalised: a markdown re-flow that moves where "is wrong"
+    // wraps must not change what this requires.
+    const normalized = paragraph.replace(/\s+/g, " ");
+    expect(normalized, "the rule does not say marking every channel not_attempted is wrong for this case").toMatch(/not_attempted`\s+is wrong/);
   });
 
   test("the exit table's `77` unrecognised-verb row points to this rule", () => {
@@ -785,8 +805,153 @@ describe("the skill's action-verb rule names real channels for an action the che
 });
 
 // -----------------------------------------------------------------------------
-// 8. where the enrolled tokens live: the variable name, the worked command, and
-//    the inputs table's pointer to it
+// 8. the action-verb rule's call form: the action word IS the verb, so it lands
+//    on the catch-all — never a second argument tacked onto `unit`
+// -----------------------------------------------------------------------------
+
+/** Every action word `reboot`/`shutdown`/`poweroff`/`halt` take no unit argument; `start`/`stop`/`restart` take one. */
+const ACTION_WORDS = ["reboot", "shutdown", "poweroff", "halt", "start", "stop", "restart"] as const;
+const ACTION_WORDS_WITH_UNIT_ARGUMENT = new Set(["start", "stop", "restart"]);
+
+/** `vm-forced-command`'s own `unit)` case arm — its whole body, from the arm head through its own `;;`. */
+function unitArmFromForcedCommand(src: string): string {
+  const start = src.indexOf("\n  unit)");
+  expect(start, "vm-forced-command's `unit)` arm is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const end = src.indexOf(";;", start);
+  expect(end, "no closing ';;' found after the `unit)` arm — this probe has rotted").toBeGreaterThan(start);
+  return src.slice(start, end);
+}
+
+describe("the action-verb rule's call form names the action word as the verb itself — not a second argument to `unit`", () => {
+  test("none of the rule's action words is one of vm-forced-command's own verb arms — each lands on the catch-all, not a real verb", () => {
+    const verbs = verbsFromForcedCommand(FORCED_COMMAND);
+    for (const word of ACTION_WORDS) {
+      expect(
+        verbs.has(word),
+        `"${word}" IS one of vm-forced-command's verb arms (${[...verbs].join(", ")}) — the action-verb call form would resolve to a real verb, not the catch-all refusal the rule relies on`,
+      ).toBe(false);
+    }
+  });
+
+  test("the skill's action-verb rule paragraph shows the exact call form for every action word", () => {
+    // Whitespace-normalised first (`s.replace(/\s+/g, " ")`), so a markdown
+    // re-flow that moves where one of these `observe-vm <target> <word>`
+    // phrases wraps cannot change what this requires — the same defence
+    // `observer-vm-skill-example.test.ts`'s bullet assertions use.
+    const normalized = actionVerbRuleParagraph(SKILL).replace(/\s+/g, " ");
+    for (const word of ACTION_WORDS) {
+      const expected = ACTION_WORDS_WITH_UNIT_ARGUMENT.has(word)
+        ? `observe-vm <target> ${word} <unit>`
+        : `observe-vm <target> ${word}`;
+      expect(
+        normalized,
+        `the action-verb rule does not show "${expected}" as the call form for "${word}"`,
+      ).toContain(expected);
+    }
+  });
+
+  test("vm-forced-command's `unit)` arm refuses a second argument on ARGUMENT COUNT, before any verb question is asked", () => {
+    // CONTROL: read straight from source, so a rewritten arm turns this red
+    // rather than the skill's own text alone (which could say the same thing
+    // by coincidence without the script actually enforcing it).
+    const arm = unitArmFromForcedCommand(FORCED_COMMAND);
+    expect(arm).toContain('[ "$#" -eq 1 ]');
+    expect(arm).toContain("unit takes exactly one argument, a unit name; got $#");
+  });
+
+  test("the rule states the argument-refusal shape is never 'fixed' into a read, when the brief asked for an action", () => {
+    const paragraph = actionVerbRuleParagraph(SKILL);
+    expect(paragraph, 'the rule does not say an ARGUMENT-shaped refusal is never "fixed" into a read').toMatch(
+      /ARGUMENT refusal is never "fixed" into a read/,
+    );
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 9. a malformed targets file: a fleet configuration fault, not a malformed
+//    call — pinned against observe-ssh's own parse_line() refusals
+// -----------------------------------------------------------------------------
+
+/** `docker/observe-ssh`'s `parse_line()` function body, `parse_line() {` through its own closing `}` at column 0. */
+function parseLineBody(src: string): string {
+  const start = src.indexOf("parse_line() {");
+  expect(start, "docker/observe-ssh's parse_line() is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const end = src.indexOf("\n}", start);
+  expect(end, "no closing '}' found after parse_line() — this probe has rotted").toBeGreaterThan(start);
+  return src.slice(start, end);
+}
+
+describe("a malformed targets file is a fleet configuration fault, not a malformed call", () => {
+  test("every refuse() call inside observe-ssh's parse_line() names `${targets_var} line ${lineno}`", () => {
+    const body = parseLineBody(OBSERVE_SSH);
+    const refuseCalls = [...body.matchAll(/refuse "([^"]*)"/g)].map((m) => m[1]!);
+    expect(refuseCalls.length, "no refuse() calls found inside parse_line() — the extractor has rotted").toBeGreaterThanOrEqual(6);
+    for (const msg of refuseCalls) {
+      expect(
+        msg,
+        `a parse_line() refusal does not name "\${targets_var} line \${lineno}": ${JSON.stringify(msg)}`,
+      ).toContain("${targets_var} line ${lineno}");
+    }
+  });
+
+  test("the skill states the rule, inside the enrolled-tokens passage: blocked, indeterminate, not retried", () => {
+    const marker = "**A malformed targets file refuses the whole file, not just its own listing.**";
+    const markerAt = SKILL.indexOf(marker);
+    expect(markerAt, "the skill's malformed-targets-file rule is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+    const after = SKILL.slice(markerAt);
+    const endAt = after.indexOf("\n\n");
+    expect(endAt, "the malformed-targets-file rule paragraph never ends — this probe has rotted").toBeGreaterThan(0);
+    const paragraph = after.slice(0, endAt);
+    expect(paragraph).toContain("`<targets_var> line <n>`");
+    expect(paragraph).toContain("`blocked`");
+    expect(paragraph).toContain("`indeterminate`");
+    expect(paragraph, "the rule does not say the call is not retried").toMatch(/not retried/);
+    // Placement: inside the same bounded passage the enrolled-tokens tests
+    // (section 11) already anchor on, and therefore before the exit table —
+    // never folded into its "your own call was malformed" row.
+    expect(enrolledTokensPassage(SKILL)).toContain(marker);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 10. the token-listing command is EXECUTED, not just named
+// -----------------------------------------------------------------------------
+
+describe("the skill's fenced awk token-listing command actually extracts tokens when run", () => {
+  test("running it under sh against a real targets file yields exactly the two tokens", () => {
+    const command = enrolledTokensCommandFromSkill(SKILL);
+    expect(command, "the extracted command no longer names OBSERVER_VM_TARGETS_FILE — this probe has rotted").toContain(
+      "OBSERVER_VM_TARGETS_FILE",
+    );
+
+    const dir = mkdtempSync(join(tmpdir(), "observer-vm-targets-"));
+    const targetsFile = join(dir, "targets");
+    try {
+      // A comment line, a blank line, space-separated fields, tab-separated
+      // fields, and two targets — the shapes `observe-ssh`'s own parser (and
+      // this command) must both tolerate.
+      const contents = ["# a comment line", "", "vm-1  10.0.0.1 22 obs", "\tvm-2\t10.0.0.2\t2222\tobs", ""].join("\n");
+      writeFileSync(targetsFile, contents);
+
+      const proc = Bun.spawnSync(["/bin/sh", "-c", command], {
+        env: { OBSERVER_VM_TARGETS_FILE: targetsFile },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(
+        proc.exitCode,
+        `the command exited ${proc.exitCode}; stderr: ${proc.stderr.toString()}`,
+      ).toBe(0);
+      expect(proc.stdout.toString()).toBe("vm-1\nvm-2\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 11. where the enrolled tokens live: the variable name, the worked command, and
+//     the inputs table's pointer to it
 // -----------------------------------------------------------------------------
 
 /**
