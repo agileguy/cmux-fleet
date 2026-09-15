@@ -85,26 +85,68 @@ const { startProxy, fromEnv, POLICY_ENV } = require("./connect-proxy.cjs");
  * to a shared local model server, where a long prefill streams no bytes back
  * while it runs. The short timeout is right for a connection that has said
  * nothing; it is wrong for one that HAS spoken and is waiting on a slow but
- * legitimate answer. So: before the first byte, both legs are bounded by the
- * SHORT `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (unchanged — it is still what closes
- * the zero-byte-flood case above). Once that first byte triggers the dial,
- * both legs move to the LONG `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`, sized to
- * the observer tasks' own 900 s deadline so the relay never kills a request
- * the task could still use.
+ * legitimate answer. So: before the first byte there is no upstream leg
+ * yet — only the client socket exists, and it alone is bounded by the SHORT
+ * `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (unchanged — it is still what closes the
+ * zero-byte-flood case above). Once that first byte triggers the dial, BOTH
+ * legs move to the LONG `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`. That bound
+ * applies to every relayed target and every role that speaks through this
+ * relay, not only observer tasks — the observer tasks' own 900 s deadline is
+ * only where the number came from, as the sizing reference, so the relay
+ * never kills a request they could still use.
+ *
+ * ONE-BYTE RESIDUAL, left open by this change. A single byte ends the short
+ * phase, so a client that sends one byte and then goes silent now holds a
+ * relay slot — and a dialled upstream socket — for ACTIVE_IDLE_TIMEOUT_MS
+ * (900 s) instead of the previous 120 s. One container doing that across
+ * MAX_CONNECTIONS connections on one listener can hold every slot that long.
+ * The trigger was already possible before this change — a client could
+ * always send one byte and go quiet — but the hold time is now 7.5x longer
+ * (900000 / 120000). No per-source connection cap is added in this change to
+ * bound how many slots one container can occupy this way; that stays an open
+ * follow-up.
  *
  * The CONNECT proxy (`connect-proxy.cjs`, SSH and Google traffic) is
  * SEPARATE and UNCHANGED by either constant below: its own
  * `PIFLEET_PROXY_IDLE_TIMEOUT_MS` stays at 120000.
  *
  * The defaults are generous for a dozen workers talking to one inference
- * server, and small enough that the failure mode is a queued connection
- * rather than a wedged daemon. Overridable so a test can drive them hard.
+ * server. Measured under real Node 24: a connection past MAX_CONNECTIONS is
+ * not queued and not refused at the TCP level — see the note above
+ * `server.maxConnections` below for the measurement. Overridable so a test
+ * can drive them hard.
+ *
+ * `IDLE_TIMEOUT_MS`, `ACTIVE_IDLE_TIMEOUT_MS` and `MAX_CONNECTIONS` used to be
+ * `Number(process.env.X || default)`, unchecked. Two failure modes, both
+ * measured under real Node 24: a non-numeric or negative override (`"abc"`,
+ * `"-5"`) started the process cleanly and then crashed on the very first byte
+ * with `ERR_OUT_OF_RANGE` from `socket.setTimeout`/`server.maxConnections` —
+ * taking down every connection and, under `--restart unless-stopped`,
+ * crash-looping the container. And `"0"` is a truthy STRING, so it became the
+ * NUMBER 0 and silently disabled the bound instead of erroring.
+ *
+ * Validated here, before anything listens: each of the three must be a
+ * finite positive integer. An invalid value writes one
+ * `pifleet-egress-relay:` line naming the variable to stderr and exits
+ * non-zero — the same fatal style as the `server.on("error", ...)` listen
+ * failure below. An unset (or empty) variable still gets its default.
  */
-const IDLE_TIMEOUT_MS = Number(process.env.PIFLEET_RELAY_IDLE_TIMEOUT_MS || 120000);
-const ACTIVE_IDLE_TIMEOUT_MS = Number(
-  process.env.PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS || 900000,
-);
-const MAX_CONNECTIONS = Number(process.env.PIFLEET_RELAY_MAX_CONNECTIONS || 256);
+function positiveIntEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    process.stderr.write(
+      `pifleet-egress-relay: ${name} must be a positive integer, got ${JSON.stringify(raw)}\n`,
+    );
+    process.exit(1);
+  }
+  return value;
+}
+
+const IDLE_TIMEOUT_MS = positiveIntEnv("PIFLEET_RELAY_IDLE_TIMEOUT_MS", 120000);
+const ACTIVE_IDLE_TIMEOUT_MS = positiveIntEnv("PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS", 900000);
+const MAX_CONNECTIONS = positiveIntEnv("PIFLEET_RELAY_MAX_CONNECTIONS", 256);
 
 /** `1..65535`, mirroring `validPort` in `src/security/relay.ts`. */
 function validPort(port) {
@@ -271,9 +313,18 @@ function main() {
 
     /**
      * A hard cap so the FD table cannot be exhausted by connection count
-     * alone. Node stops ACCEPTING past this; pending connections wait in the
-     * kernel backlog rather than being refused, which is what a transient
-     * burst wants.
+     * alone. MEASURED under real Node 24 (2026-09-14), not assumed: with
+     * `MAX_CONNECTIONS=2` and a 3rd client connecting, the 3rd client's TCP
+     * handshake still completes — its `connect` event fired with no
+     * measurable delay (0 ms in the run that produced these numbers) — and
+     * Node then destroyed that socket about 1 ms later, before a single byte
+     * crossed it; a write attempted right after failed because the socket
+     * was already destroyed. It is NOT held pending in the kernel accept
+     * backlog — freeing a slot by closing one of the first two connections
+     * did not revive it, it stayed destroyed — and it is NOT refused at the
+     * TCP level either, since the handshake completes. So the failure mode
+     * this cap produces for the `(cap+1)`th connection is
+     * accept-then-instant-close, not a queued connection and not a refusal.
      */
     server.maxConnections = MAX_CONNECTIONS;
 
