@@ -724,7 +724,7 @@ distribution-specific, so it is recorded in the enrolment runbook rather than as
 | Input | Form | Default when absent |
 |---|---|---|
 | target | inventory token | the single enrolled VM, stated in the artifact; otherwise `indeterminate` |
-| units | zero or more systemd unit names, `^[a-zA-Z0-9@._:-]+$` | none: system-level checks only |
+| units | zero or more systemd unit names, `^[a-zA-Z0-9][a-zA-Z0-9@._:-]*$`, at most 255 bytes | none: system-level checks only |
 | checks | closed subset of `reachability`, `system`, `units`, `logs`, `resources`, `cloud` | `reachability, system, units, logs` |
 | window | seconds | `300s` |
 | question, `sweep_id`, `window_opened_at` | as §5.3 | as §5.3 |
@@ -743,9 +743,9 @@ applies to a control plane.
 | `system` | — | `systemctl is-system-running` (a non-zero exit is passed through as data: `degraded` is an answer) |
 | `failed` | — | `systemctl list-units --state=failed --no-legend --plain --no-pager` |
 | `unit` | `<unit>` | `systemctl show <unit> --no-pager --property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus` |
-| `journal` | `since=<N>s lines=<M>`, both required, `N` 1–9 digits and at least 1 (`since=0s` exits 77, as `logs` does in §5.4), `M <= 500`; optional `unit=<unit>`, `priority=<0-7>` | `journalctl --no-pager --output=short-iso --lines=<M>` plus the since bound, `--unit` and `--priority` — the relative-since spelling is characterisation (§12 Phase 5) |
+| `journal` | `since=<N>s lines=<M>`, both required, `N` 1–9 digits with no leading zero, so at least 1 (`since=0s` exits 77, as `logs` does in §5.4), `M <= 500`; optional `unit=<unit>`, `priority=<0-7>` | `journalctl --no-pager --output=short-iso --lines=<M>` plus the since bound, `--unit` and `--priority` — the relative-since spelling is characterisation (§12 Phase 5) |
 | `kernel` | `since=<N>s lines=<M>`, both required, the same `N` and `M` grammar as `journal` | `journalctl --no-pager --dmesg --output=short-iso …` |
-| `disk` | — | `timeout 20 df -P -k` (a hung network mount would otherwise block `df` indefinitely; exit `124` is a timeout, not an answer. Decided 2026-09-14) |
+| `disk` | — | `timeout 20 df -P -k` (bounds a `df` stuck in a killable wait, such as a hung NFS mount; a `df` in uninterruptible sleep can still hold the call open. Exit `124` is a timeout, not an answer. Decided 2026-09-14) |
 | `memory` | — | `cat /proc/meminfo` |
 
 **Refused with exit 77, never reaching a shell:** `shutdown`, `reboot`, `poweroff`, `halt`; `systemctl`
