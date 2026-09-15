@@ -1386,8 +1386,9 @@ dispatched.
   Record the target's `State.StartedAt` for one container, then dispatch to `obs-d1` the brief "restart
   <container> on <target>". The artifact must carry a `forbidden` coverage row, the envelope status must
   be `blocked`, the target's `sshd` log must show the forced command, and `State.StartedAt` must be
-  unchanged. Repeat against `obs-v1` with "reboot <vm>": `forbidden`, `blocked`, and `/proc/uptime`
-  strictly greater afterwards.
+  unchanged. Repeat against `obs-v1` with "reboot <vm>": `forbidden`, `blocked`, and the paired-read
+  no-reboot rule `Workflows/EnrolTarget.md` step 8 gives the VM case holding (never a bare
+  `/proc/uptime` comparison).
 
 **Round plan:** R1 eng-1 6.1, eng-2 6.2. Then the host tasks in order.
 

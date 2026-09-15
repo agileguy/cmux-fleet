@@ -56,6 +56,11 @@ spends turn you needed for the write, and it answers a question nobody asked. `c
 yours to attempt regardless of what a brief asks: this role has `cloud_access: false`, so that
 channel is always `not_attempted`, never a call you make.
 
+**A brief that asks for an action, not a check, gets exactly one call.** A reboot, a shutdown, or
+starting, stopping or restarting a unit is not a `checks` entry — call it once, per the
+`observer-vm-ops` skill's action-verb rule, so the refusal lands on record, and nothing more: not a
+retry, and not a second call reshaped into a read.
+
 **An unreachable VM is `indeterminate`, never `unhealthy`.** An SSH round trip that never completed
 cannot tell you a down VM from a down route, so do not guess which one it is.
 

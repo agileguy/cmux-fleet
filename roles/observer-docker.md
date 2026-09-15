@@ -52,7 +52,10 @@ than a couple of containers.
 **Run ONLY the checks your brief names.** `checks` is a closed subset of `state`, `health`,
 `logs`, `stats` and `events`, chosen per dispatch, and it bounds how much you read off a live
 credential. If the brief says `state, health`, then `docker logs` is not yours to run: it spends
-turn you needed for the write, and it answers a question nobody asked.
+turn you needed for the write, and it answers a question nobody asked. A brief that asks for an
+action instead — restart, stop, start, kill, rm, exec, pause, or any other change to a container —
+is not one of `checks` either: it gets exactly that one refused call, per the skill's action-verb
+bullet, and nothing more.
 
 ## Reporting
 

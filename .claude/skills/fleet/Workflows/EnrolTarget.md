@@ -37,7 +37,8 @@ describes are reused here without repeating them.
 ## 1. Create the account and the forced command on each target
 
 The settings themselves — the account, the forced command, the
-`authorized_keys` line, and the four `sshd` settings that keep the client's
+`authorized_keys` line, and the four settings (`AcceptEnv`, `SetEnv`,
+`PermitUserEnvironment`, plus the account's PAM stack) that keep the client's
 environment out of the forced command's way — are specified once each, not
 copied here a third time. Follow them from the source, in order:
 
@@ -47,8 +48,8 @@ copied here a third time. Follow them from the source, in order:
   operator reference, never a worker's task"
 
 Both sections walk the same five things in the same order: the non-root
-account, the forced command's install, the one `authorized_keys` line, the four
-`sshd` settings (`AcceptEnv`, `SetEnv`, `PermitUserEnvironment`, and the
+account, the forced command's install, the one `authorized_keys` line, the
+four settings (`AcceptEnv`, `SetEnv`, `PermitUserEnvironment`, plus the
 account's PAM stack), and a verify-afterward check. Do them in that order —
 each step assumes the one before it is already true on the target.
 
@@ -94,13 +95,38 @@ session you already trust for another reason. Do not fetch it by SSHing to the
 target through the fleet's CONNECT proxy; that is the exact trust-on-first-use
 path this design refuses to take.
 
+**One host name, three places, and it has to be the identical string in
+each.** The inventory line's `host` field (step 3), the `egress.allow`
+entry's `host` (step 4), and this known_hosts line's own hostname field all
+name the same target, and nothing cross-checks the other two for you:
+
+- `docker/observe-ssh` dials `found_host` — the inventory line's `host` field
+  and nothing else — as the literal ssh target.
+- `docker/connect-proxy.cjs` matches the CONNECT authority's host against
+  `egress.allow` exactly, with no DNS lookup done first — a name that does
+  not match what `observe-ssh` just dialled is refused before a byte reaches
+  the target.
+- With `StrictHostKeyChecking=yes`, ssh looks the key up in the known_hosts
+  file under the exact name it dialled — written `[host]:port` when the port
+  is not 22 — so a known_hosts line captured under any other name never
+  matches.
+
+A key captured from a trusted channel almost always carries the machine's own
+name or address, from whatever console or fingerprint tool produced it, not
+the inventory token or alias you are about to give this target in steps 3 and
+4. Rewrite the known_hosts line's hostname field to that exact string before
+it goes anywhere near `OBSERVER_..._KNOWN_HOSTS`.
+
 Once you have a key you trust, its known_hosts line goes in
 `OBSERVER_DOCKER_KNOWN_HOSTS` (Docker) or `OBSERVER_VM_KNOWN_HOSTS` (VM) — see
 step 5 for how these values actually reach the seat. `observer-docker-ops`'s
 exit-code table gives you the failure mode to expect if this step is wrong or
 skipped: exit `255`, "ssh's own failure — a host-key mismatch or a proxy
 refusal," reported as the target being unreachable. If every call to a target
-comes back `255` after enrolment, re-check the key before anything else.
+comes back `255` after enrolment, re-check the key before anything else — and
+check the name match above first: a known_hosts line whose hostname field
+still carries the machine's own name, rather than the name from steps 3 and
+4, produces exactly this failure.
 
 ---
 
@@ -122,9 +148,13 @@ vm-a vm-1.example.com 22 svc-vm-ro
 ```
 
 (`docker-host.example.com`, `vm-1.example.com`, and both account names above
-are placeholders — SRD-OBSERVER-ROLES §0.3. Use your real target's hostname,
-port and account, never a name that has to stay private in a tracked file; see
-step 4 on why that constraint exists.)
+are placeholders — SRD-OBSERVER-ROLES §0.3. What goes here for real is either
+your target's real hostname, or an alias resolved on the machine that runs
+the fleet — see step 4 for the pattern the live `fleet.yaml` actually uses,
+and why an alias is a legitimate answer here rather than a workaround.
+Whichever you use, it must be the exact same string as the `egress.allow`
+entry in step 4 and the known_hosts line's hostname field in step 2 — see
+step 2's "one host name, three places.")
 
 If the inventory ends up holding exactly one target, a brief that never names
 one still resolves — both skills default `target` to "the single enrolled
@@ -144,15 +174,39 @@ tracks.
 ```yaml
 egress:
   allow:
-    - {host: docker-host.example.com, port: 22}
-    - {host: vm-1.example.com, port: 22}
+    - {host: docker-host.example.com, port: 22}   # a real, non-sensitive hostname
+    - {host: pifleet-vm, port: 22}                 # or an /etc/hosts alias — see below
 ```
 
 SRD-OBSERVER-ROLES §10 Q3 is why this is where a target hostname is allowed to
 live in a tracked file at all: accepted 2026-09-13, and only for targets whose
-hostnames are not sensitive. If your target's hostname itself has to stay
-private, that is a repository-visibility problem this file cannot solve for
-you — do not paper over it by pointing the rule at a name that lies.
+hostnames are not sensitive.
+
+**A name here does not have to be a public DNS name.** The live `fleet.yaml`
+enrols its own `observer-docker` and `observer-vm` targets this way, and its
+`egress.allow` comment states the pattern plainly: each name is an
+`/etc/hosts` alias on the machine that runs the fleet, not a DNS name — the
+proxy matches the CONNECT name before any lookup, then the relay resolves it
+through Colima's host resolver, which reads that machine's `/etc/hosts`. A
+machine without the alias will usually fail closed: the name does not
+resolve and the target reads as unreachable. That is the common case, not
+the guarantee — the next paragraph is. Use `pifleet-docker`/`pifleet-vm`-style aliases the same way when your
+target's real hostname or address is what has to stay private; a real,
+resolvable hostname is equally legitimate when it is not sensitive.
+
+What actually makes either one safe is `StrictHostKeyChecking=yes` (step 2),
+not whether the name resolves at all: whatever name you write here, and
+however it resolves, ssh only proceeds past the host-key check for a target
+whose key you captured and trusted yourself, so an alias — or a name pointed
+somewhere it should not be — cannot be quietly repointed at a different
+machine without every subsequent call refusing at that check. This file makes
+no claim about how your resolver handles a bare alias versus a search domain
+— that is unmeasured; what is measured is the alias-in-this-machine's-
+`/etc/hosts` shape the fleet itself runs.
+
+If your target's hostname itself has to stay private and an alias is not an
+option for you either, that is a repository-visibility problem this file
+cannot solve for you.
 
 `egress.allow` is fleet-wide, not per-role (SRD-OBSERVER-ROLES §7.2 layer 5):
 every routed worker gets a route to this host and port. The key that actually
@@ -207,23 +261,61 @@ actually builds each worker's environment (`src/run/materialize.ts`) both pass
 set in the shell you run `up` from — nothing in this repository reads it from
 anywhere else.
 
+**The value also lands on the host's disk, for the life of the run.** `up`
+writes each granted secret to its own file under
+`<run>/workers/<id>/secrets/`, mode `0444`, inside a worker directory `up`
+tightens to `0700` for exactly this reason (`src/run/materialize.ts`, around
+lines 1111-1138). The container's read-only `/secrets` mount reads from this
+same directory. So the key is not confined to the container: it sits as a
+plaintext file on the host for as long as the run exists, readable by
+whichever host account can reach that `0700` directory.
+
 **A multiline value is a value, not a file path, with embedded LF line
 endings and no carriage return.** `buildWorkerEnv` refuses a newline in any
 granted value unless its `secrets.env_allowlist` entry says `multiline: true`
 (step 4 already marked all six that way), and even a marked entry refuses a
 value that contains `\r` — a CRLF key or line list is malformed to the tools
-that read it (`src/run/worker-env.ts`). Concretely: export the SSH private key
-and the known_hosts and inventory files' contents as ordinary shell variables
-before running `up`, with LF endings preserved and no CR — reading a file
+that read it (`src/run/worker-env.ts`). Concretely: the SSH private key and
+the known_hosts and inventory files' contents need to reach `up`'s own
+process environment, with LF endings preserved and no CR — reading a file
 straight into a variable with your shell's own command substitution keeps
-embedded newlines intact:
+embedded newlines intact.
+
+**Scope these to the one command that needs them, never to a bare `export`
+in your interactive shell** — a variable exported there is inherited by
+every later child process for the rest of the session, which is a much wider
+hold on a private key than `up` needs. A one-command environment prefix does
+it:
 
 ```bash
-export OBSERVER_DOCKER_SSH_KEY="$(cat /path/to/key)"
-export OBSERVER_DOCKER_KNOWN_HOSTS="$(cat /path/to/known_hosts-line)"
-export OBSERVER_DOCKER_TARGETS="$(cat /path/to/targets-file)"
-# and the same three for OBSERVER_VM_*
+cd ~/repos/cmux-fleet && \
+OBSERVER_DOCKER_SSH_KEY="$(cat /path/to/key)" \
+OBSERVER_DOCKER_KNOWN_HOSTS="$(cat /path/to/known_hosts-line)" \
+OBSERVER_DOCKER_TARGETS="$(cat /path/to/targets-file)" \
+OBSERVER_VM_SSH_KEY="$(cat /path/to/vm-key)" \
+OBSERVER_VM_KNOWN_HOSTS="$(cat /path/to/vm-known_hosts-line)" \
+OBSERVER_VM_TARGETS="$(cat /path/to/vm-targets-file)" \
+bun run src/cli/index.ts up --workers <id>
 ```
+
+or the same values `export`ed inside a subshell that also runs `up`, so
+nothing survives past the closing parenthesis:
+
+```bash
+(
+  export OBSERVER_DOCKER_SSH_KEY="$(cat /path/to/key)"
+  export OBSERVER_DOCKER_KNOWN_HOSTS="$(cat /path/to/known_hosts-line)"
+  export OBSERVER_DOCKER_TARGETS="$(cat /path/to/targets-file)"
+  export OBSERVER_VM_SSH_KEY="$(cat /path/to/vm-key)"
+  export OBSERVER_VM_KNOWN_HOSTS="$(cat /path/to/vm-known_hosts-line)"
+  export OBSERVER_VM_TARGETS="$(cat /path/to/vm-targets-file)"
+  cd ~/repos/cmux-fleet && bun run src/cli/index.ts up --workers <id>
+)
+```
+
+Either form is what step 6's `up --workers obs-d1`/`obs-v1` command actually
+means to run — reapply the same wrapping there rather than typing a bare
+`export` first and running `up` as a separate, later command.
 
 If your key file has CRLF endings, convert it first — `buildWorkerEnv` refuses
 a CR unconditionally, marked or not. This file does not specify a particular
@@ -235,6 +327,25 @@ check step 1 deferred — `version` (Docker) or `uptime` (VM) through the key,
 by hand from wherever you can reach the target with the same key and known
 host. A refusal here is the key, the `authorized_keys` line, or the sshd
 settings; it is not yet anything this repository's own tooling touches.
+
+**Then make a second call, by hand, with any harmless nonsense word in place
+of the verb** — something that is not `version`/`uptime` and matches no verb
+the grammar actually has (e.g. `frobnicate`). It must come back exit `77`,
+with the forced command's own refusal on stderr: `docker-forced-command:
+refused "frobnicate": not a recognised verb...` or `vm-forced-command:
+refused "frobnicate": not a recognised verb...`. That refusal is the proof
+the `authorized_keys` line really carries `command=` and the key cannot reach
+a shell — a key that opened a shell would not answer an unrecognised word
+this way at all.
+
+**This second call is a hard prerequisite for steps 7 and 8, not an optional
+extra.** Both `observer-docker-ops` and `observer-vm-ops` tell a dispatched
+worker to call one refused action verb itself, once, so the refusal lands on
+the record as a `forbidden` coverage row (`skills/observer-docker-ops/SKILL.md`,
+`skills/observer-vm-ops/SKILL.md`) — and handing a worker that instruction is
+only safe against a target whose forced command has actually been proven to
+refuse rather than fall through to a shell. Do not go on to step 7 until this
+call has come back exit 77 with that exact refusal shape.
 
 ---
 
@@ -252,6 +363,26 @@ launch set to exactly the worker you name:
 cd ~/repos/cmux-fleet && bun run src/cli/index.ts up --workers obs-d1
 # or: --workers obs-v1
 ```
+
+**This is the same `up` invocation step 5 showed wrapped with the six secret
+values — run it that way**, as a one-command prefix or inside a subshell,
+rather than as a bare command relying on an earlier `export` in your
+interactive shell.
+
+**If `obs-d1` or `obs-v1` already has a run from an earlier enrolment
+attempt, tear it down before you run this again.** `up` calls `newRunId()`
+unconditionally on every invocation (`src/cli/commands/up.ts`), and
+`config/render.ts` names each worker's container
+`workerContainerName(opts.run.runId, w.id)` (`src/config/render.ts:380`) — so
+a bare `up --workers <id>` against a seat that already has a run does not
+recreate that run in place and does not collide with it either. It creates a
+second run, with its own container, both still answering to the same worker
+id. These two seats have no console `--restart` path, so nothing gives them
+the idle-wait-then-teardown safety that protects a console worker. Check
+`status --all --json` for an existing run against this seat first; if one is
+there, tear it down (`down --run <run-id>`) before bringing the seat up
+again, so the earlier run is never left running with its own delivered copy
+of the key.
 
 Run this from `~/repos/cmux-fleet` so `fleet.yaml` resolves from the current
 directory without a `--config` flag (`src/config/load.ts`). No `--backend` is
@@ -322,11 +453,19 @@ cd ~/repos/cmux-fleet && bun run src/cli/index.ts artifacts \
 **Pass here means the pair harvest produces is valid, and nothing in it reads
 as a leak.** SRD-OBSERVER-ROLES §5.6/§6.7: harvest validates the artifact
 pair by its declared `schema`, and separately sweeps the JSON for the SSH
-key's own value — a plain read should never come near that value, since the
-worker never holds it as text (it is delivered as a file path, not a
-variable), but the sweep is what confirms that rather than assuming it. If
-either seat comes back `unreachable` with exit `255` on the shim's stderr,
-return to step 2: that is a host-key or proxy failure, not a coverage result.
+key's own value. What is true is narrower than "the worker never holds it as
+text": the worker process can read `/secrets` like anything else in its
+container, and `docker/observe-ssh` copies the delivered key to a `0600` file
+under `/tmp` before it ever runs `ssh` — OpenSSH refuses the key at its
+delivered mode, so the shim stages a private copy to use it at all
+(`docker/observe-ssh`'s header and its key-copy code). What actually holds is
+narrower and still worth having: the model never types or prints the key — it
+calls `observe-docker`/`observe-vm` with a target token and a verb, never an
+ssh flag or a key path — so nothing in its own reasoning or output should
+carry the value, and the harvest sweep is what confirms that happened rather
+than something the delivery mechanism guarantees by itself. If either seat
+comes back `unreachable` with exit `255` on the shim's stderr, return to step
+2: that is a host-key or proxy failure, not a coverage result.
 
 ---
 
@@ -413,13 +552,49 @@ Then the mutation attempt:
 
 Pass means three things hold:
 
-1. `forbidden` coverage — `reboot` is on `vm-forced-command`'s refused list by
-   name (SRD-OBSERVER-ROLES §6.4: "Refused with exit 77, never reaching a
-   shell: shutdown, reboot, poweroff, halt…").
+1. `forbidden` coverage — `reboot` refuses with exit 77. Read from
+   `scripts/observe/vm-forced-command` itself: there is no by-name refused
+   list. The script recognises nine verbs (`uptime`, `os`, `system`,
+   `failed`, `unit`, `journal`, `kernel`, `disk`, `memory`), and every other
+   word — `reboot` included — falls through to the catch-all `*)` arm and
+   exits 77 with `vm-forced-command: refused "reboot": not a recognised
+   verb; recognised verbs are uptime, os, system, failed, unit, journal,
+   kernel, disk and memory`. SRD-OBSERVER-ROLES §6.4's "Refused with exit
+   77, never reaching a shell: shutdown, reboot, poweroff, halt…" is the
+   design statement this implements; the mechanism on the target today is an
+   allowlist of what runs, not a blocklist of what is refused.
 2. `blocked` envelope status, same reasoning as the Docker case.
-3. `/proc/uptime` read afterward is **strictly greater** than the baseline —
-   the VM kept running the whole time, uninterrupted, rather than merely
-   "unchanged."
+3. **A rule from each read's dispatch and completion time, not a bare
+   comparison of the two `/proc/uptime` numbers, and not a read timed by when
+   the artifact was collected.** The artifact carries no timestamp for the
+   moment `/proc/uptime` was actually read — that read happened somewhere
+   between when the task was dispatched and when it completed, and within
+   this step's 900 s task deadline that window can be minutes wide, so timing
+   a read by its collection time is not sound. A plain "strictly greater"
+   check has its own failure: it can pass even after a real reboot, whenever
+   the baseline uptime was smaller than the wall-clock time that elapsed
+   between the two reads.
+
+   - **Inputs.** For each of the two uptime reads (baseline, then after the
+     refused reboot), you have three things: the task's dispatch time `d`,
+     its completion time `c` (when `wait` reported it finished), and the
+     uptime `u` in its artifact.
+   - **Preconditions.** Record each `d` before you dispatch that task, not
+     after the dispatch call returns: a `d1` recorded late shrinks the window
+     condition (a) checks, and a reboot can then pass. And dispatch the second
+     task only after the first has completed, `d2 ≥ c1`: one seat working
+     through both reads in series, never two overlapping dispatches. Break
+     either and a reboot inside the gap the rule can't see still passes.
+   - **Pass** only if both hold:
+     - (a) `u1 ≥ c2 − d1`: the baseline uptime exceeds the whole window from
+       the baseline dispatch to the after-read's completion.
+     - (b) `u2 ≥ u1 + (d2 − c1)`.
+   - **Why it's sound.** Without a reboot, `u2 − u1` equals the time between
+     the two reads, which is at least `d2 − c1`, so (b) holds. With a reboot
+     at any point after the baseline read, `u2 < c2 − d1 ≤ u1`, so (b) fails.
+   - **Inconclusive, never a pass.** If (a) does not hold because the VM was
+     up too briefly, the probe is inconclusive — wait and repeat it, do not
+     pass it.
 
 If any of these does not hold — the mutation went through, the status came
 back anything other than `blocked`, or the artifact does not carry a
@@ -427,3 +602,9 @@ back anything other than `blocked`, or the artifact does not carry a
 route around; it means a layer SRD-OBSERVER-ROLES §7.2 describes did not do
 what it was built to do, on a real target, and the fix belongs in the
 forced command or the account, not in a retry.
+
+The one thing that is not a reason to stop: the VM timing rule's condition
+(a) failing. That result is inconclusive, not a failure, because the
+baseline read came too soon after boot to prove anything.
+Rerun the pair with a longer baseline and read both uptimes again before
+deciding anything either way.

@@ -22,9 +22,9 @@ rather than guessing.
 
 | Input | Form | Default when absent |
 |---|---|---|
-| target | a target TOKEN from the enrolled inventory, `^[a-z0-9][a-z0-9-]{0,31}$` | none — if the inventory holds exactly one target, use it and say so; otherwise the row is `indeterminate` |
+| target | a target TOKEN from the enrolled inventory — list them with the command in "Calling the target, and reading its exit" below, `^[a-z0-9][a-z0-9-]{0,31}$` | none — a word in the brief that is a listed token is the target; if the file lists exactly one token, use it and say so; otherwise the row is `indeterminate` |
 | containers | one or more container names, Docker's name grammar `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` | — |
-| selector | `label=<key>=<value>` or `name=<pattern>`, used instead of names | if neither names nor a selector is given: every running container, `ps` only, and the row says so |
+| selector | `label=<key>=<value>` or `name=<pattern>`, used instead of names | if neither names nor a selector is given: every running container, surveyed once and filtered per "Surveying containers when the brief names none" below, and the row says so |
 | checks | a closed subset of `state`, `health`, `logs`, `stats`, `events` | `state, health, logs` |
 | window | seconds, e.g. `300s` | `300s` |
 | question | one sentence | "is it healthy" |
@@ -36,25 +36,49 @@ volume, and a check nobody asked for spends turn the artifact needed.
 ## Calling the target, and reading its exit
 
 The call form is `observe-docker <target> <verb> [key=value ...]`. `target` is one of the TOKENs
-enrolled on this fleet, read from the file named by `OBSERVER_DOCKER_TARGETS_FILE` — one
-`token host port user` per line. `observe-docker` is a thin alias for
-`observe-ssh docker <target> <verb> [key=value ...]`; it does not itself enforce the verb grammar
-below, the target's forced command does.
+enrolled on this fleet. They live in the file whose PATH is the value of the environment variable
+`OBSERVER_DOCKER_TARGETS_FILE` — one `token host port user` line per target, the same file
+`docker/observe-ssh` itself reads for the docker kind. The token is the first field on each line.
+
+List them by reading the variable — never a hard-coded `/secrets/...` path — and split fields the
+same way `docker/observe-ssh`'s own parser does: on runs of spaces or tabs, skipping any line that
+is blank or whose first field starts with `#`:
+
+```
+awk 'NF && $1 !~ /^#/ {print $1}' "$OBSERVER_DOCKER_TARGETS_FILE"
+```
+
+Only the token belongs in an artifact — never the host, port or user from that same line.
+
+`observe-docker` is a thin alias for `observe-ssh docker <target> <verb> [key=value ...]`; it does
+not itself enforce the verb grammar below, the target's forced command does.
+
+A refusal naming the target as not enrolled (`observe-ssh`'s `target <target> is not enrolled in
+OBSERVER_DOCKER_TARGETS_FILE` line) is answered by reading the targets file above and calling
+again with a token it actually lists — never by guessing another name.
 
 Read the exit status AND the stderr text before you write a row — the exit code alone does not say
-who refused what:
+who refused what. The table is read top to bottom; the first row whose condition matches is the one
+that applies, with "anything else" last:
 
 | Exit | What it means | What the row says |
 |---|---|---|
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
+| `77` with `observe-ssh: refused before ssh ran` on stderr, naming `<targets_var> line <n>` (`OBSERVER_DOCKER_TARGETS_FILE` for this kind) | the targets file itself is malformed — a bad field, a bad line, or a duplicate token, not something your own call caused | this is a fleet configuration fault: the task is `blocked`, the row is `indeterminate`, and there is no retry — the file needs fixing by whoever enrols targets |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
-| `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
+| `77` with `docker-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, the report artifact contract's action-verb bullet below (`An action verb — restart, stop, start, kill, rm, exec, pause…`) names the channel (`state`) |
 | `77` with any other `docker-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all (a followed log, `stats` for every container), that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
 | `126` or `127` | `docker` did not run on the target at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | `255` | ssh's own failure — a host-key mismatch or a proxy refusal | the target is `unreachable` |
 | `1` with `failed to connect to the docker API`, `Cannot connect to the Docker daemon`, or `permission denied while trying to connect to the` on stderr | `docker` on the target could not reach its own daemon — a stopped daemon, an account outside the socket's group, or `DOCKER_HOST` pointing elsewhere | the same as the `126`/`127` row: rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
 | anything else | docker's own exit, returned from the target (e.g. no such container) | the channel is `answered`, and the error text goes in `evidence_ref` |
+
+A `77` whose `observe-ssh: refused before ssh ran` line goes on to name `<targets_var> line <n>`
+(`docker/observe-ssh` refuses the WHOLE targets file when one line is malformed, holds a duplicate
+token, or has a bad field) is the fleet configuration fault the table's row above names, not your
+own call malformed: the task is `blocked`, the row is `indeterminate`, and there is no retry — the
+file needs fixing by whoever enrols targets, calling again with the same broken file cannot help.
 
 Measured on both docker versions: `.docker_errors` in the rendered fixture. A missing container
 (`.docker_errors.no_such_container`) also exits 1, with `No such container:` on stderr, and that is
@@ -66,6 +90,33 @@ had refused something. A target-side 77 is not one thing either: the stderr line
 VERB the credential refuses outright, or an ARGUMENT its grammar refused — only the first is
 `forbidden`. A refused argument is still your call to fix, from the reason the line gives, unless
 what the task needs has no form the grammar accepts at all.
+
+## Surveying containers when the brief names none
+
+Run the UNFILTERED survey exactly once, and never repeat it. A name-scoped follow-up
+(`ps name=<n>`) is a different call, not a repeat of this one, and stays allowed as many times as
+the task needs. On 2026-09-15, an unfiltered `ps` against a real host measured about 39KB of JSON,
+one line per container, full `Labels` and `Command` included. Capture that one call's output, then
+filter it in the worker's own shell (jq is in the image), keeping only `Names`, `State` and
+`Status`:
+
+```
+out=$(observe-docker <target> ps); rc=$?; printf '%s\n' "$out" | jq -c '{Names, State, Status}'; printf 'observe-docker exit: %s\n' "$rc"
+```
+
+The worker's bash tool starts a new shell for each call, so `$rc` itself does not survive past this
+one call — read the `observe-docker exit: <n>` line the command prints on its own, at the end,
+against the exit table above. That line is `observe-docker`'s own exit status, captured before
+anything is piped through `jq`. A piped form (`observe-docker <target> ps | jq -c '...'`), even with
+`set -o pipefail`, reports whichever command in the pipe fails LAST — pipefail is rightmost-failure,
+not `observe-docker`'s status — so an ssh drop mid-stream, or a 77 with non-JSON output, would route
+as `jq`'s failure instead of `observe-docker`'s. Measured: `bash -c 'set -o pipefail; (printf
+"{\"Names\":\"a\"}\n{trunc"; exit 255) | jq -c "{Names}"; echo $?'` prints 5, not 255. A `jq` failure
+on `$out` on its own, with the printed status at 0, means the output was not the expected JSON —
+never an answer about the target either way. Pick the containers the brief
+means from the trimmed survey, then query only those by name (`ps name=<n>`, `inspect`, `logs`).
+When the brief already names containers or gives a selector, skip the survey and go straight to
+name-scoped calls.
 
 ## The verb grammar — the whole of what the credential can do (§5.4)
 
@@ -278,8 +329,20 @@ confirms it by that declared kind (`src/harvest/reconcile.ts`).
   the call from the stderr reason and retry it once. When the task needs a shape the grammar has no
   form for at all (a followed log, `stats` for every container), that channel is `forbidden` too. A
   container with no healthcheck is not a refusal: `health` is `answered`, and the evidence says so.
-- **`container_id`, `image` and `restart_count` are optional.** Include them when `inspect`
-  answered; leave them out rather than guess when it did not. `container_id` is the full,
+- **An action verb — restart, stop, start, kill, rm, exec, pause, or any other change to a
+  container — is not one of the checks either.** Call it once anyway, so the refusal lands on
+  record, then read the exit table's `77` row whose stderr reads `docker-forced-command: refused
+  "<verb>": not a recognised verb`. Record `state` as `forbidden`, the row `indeterminate`, the
+  refusal line in `evidence_ref`, and the task status `blocked`. Marking every channel
+  `not_attempted` is wrong here — the call answered, with a refusal, and that refusal names a real
+  channel.
+- **`container_id`, `image` and `restart_count` are optional, and optional means OMITTED.**
+  Include a key when `inspect` answered; when it did not, leave the key out of the JSON entirely —
+  never write `null` in its place. Harvest's schema accepts an absent key but refuses a `null`
+  value for any of the three, and that refusal fails the whole artifact, not just the row. A row
+  whose only call was refused (see "An action verb" above) carries none of these three keys.
+  Contrast `sweep_id` and `window_opened_at` below: those two are required keys whose value MAY be
+  `null` — that allowance does not carry over to these three. `container_id` is the full,
   untruncated id `inspect` returns (64 hex characters), the same one `--no-trunc` and `.Id` give —
   never the 12-character short form.
 - **Copy `sweep_id` and `window_opened_at` out of the brief, verbatim, and from nowhere else** —

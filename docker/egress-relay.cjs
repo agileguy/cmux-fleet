@@ -75,14 +75,136 @@ const { startProxy, fromEnv, POLICY_ENV } = require("./connect-proxy.cjs");
  * first byte. Each of those was an unauthenticated connection against oMLX,
  * which is a Python server and exhausts long before this process's 1048576
  * nofile — so one unprivileged container on the bridge could deny the whole
- * fleet its model server without sending a single request.
+ * fleet its model server without sending a single request. That measurement
+ * is why the PRE-dial phase below stays short: a connection that has sent
+ * nothing has no legitimate reason to sit open, and the fix is to reap it
+ * fast — not to widen the window a zero-byte flood gets to live in.
+ *
+ * TWO PHASES, not one, since 2026-09-15. A worker's model turn was
+ * `terminated` exactly 120 s after its request went out: a large context sent
+ * to a shared local model server, where a long prefill streams no bytes back
+ * while it runs. The short timeout is right for a connection that has said
+ * nothing; it is wrong for one that HAS spoken and is waiting on a slow but
+ * legitimate answer. So: before the first byte there is no upstream leg
+ * yet — only the client socket exists, and it alone is bounded by the SHORT
+ * `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (unchanged — it is still what closes the
+ * zero-byte-flood case above). Once that first byte triggers the dial, BOTH
+ * legs move to the LONG `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`. That bound
+ * applies to every relayed target and every role that speaks through this
+ * relay, not only observer tasks — the observer tasks' own 900 s deadline is
+ * only where the number came from, as the sizing reference, so the relay
+ * never kills a request they could still use.
+ *
+ * ONE-BYTE RESIDUAL, left open by this change. A single byte ends the short
+ * phase, so a client that sends one byte and then goes silent now holds a
+ * relay slot — and a dialled upstream socket — for ACTIVE_IDLE_TIMEOUT_MS
+ * (900 s) instead of the previous 120 s. One container doing that across
+ * MAX_CONNECTIONS connections on one listener can hold every slot that long.
+ * The trigger was already possible before this change — a client could
+ * always send one byte and go quiet — but the hold time is now 7.5x longer
+ * (900000 / 120000). No per-source connection cap is added in this change to
+ * bound how many slots one container can occupy this way; that stays an open
+ * follow-up.
+ *
+ * The CONNECT proxy (`connect-proxy.cjs`, SSH and Google traffic) is
+ * SEPARATE and UNCHANGED by either constant below: its own
+ * `PIFLEET_PROXY_IDLE_TIMEOUT_MS` stays at 120000.
  *
  * The defaults are generous for a dozen workers talking to one inference
- * server, and small enough that the failure mode is a queued connection
- * rather than a wedged daemon. Overridable so a test can drive them hard.
+ * server. Measured under real Node 24: a connection past MAX_CONNECTIONS is
+ * not queued and not refused at the TCP level — see the note above
+ * `server.maxConnections` below for the measurement. Overridable so a test
+ * can drive them hard.
+ *
+ * `IDLE_TIMEOUT_MS`, `ACTIVE_IDLE_TIMEOUT_MS` and `MAX_CONNECTIONS` used to be
+ * `Number(process.env.X || default)` with only an `isInteger && > 0` check.
+ * That check's failure modes are NOT one failure. Each was measured
+ * separately under real Node 24.21.0:
+ *
+ * - A bad `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (e.g. `"abc"`, `"-5"`) crashes on
+ *   CONNECT, before any byte — `client.setTimeout(IDLE_TIMEOUT_MS, teardown)`
+ *   runs at accept, in the PRE-DIAL phase below. Measured: a client that
+ *   connects and sends nothing still brings the relay down.
+ * - A bad `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS` crashes only once the FIRST
+ *   BYTE arrives — it feeds the `dial()` leg, reached only from
+ *   `client.once("data", ...)`. Measured: a connect-only client leaves the
+ *   relay running; a client that writes one byte brings it down. Both throw
+ *   `RangeError [ERR_OUT_OF_RANGE]` from `socket.setTimeout()`, uncaught —
+ *   nothing wraps the connection handler — so either one takes down the
+ *   WHOLE PROCESS (every other in-flight connection, every target), and
+ *   `--restart unless-stopped` turns that into a crash loop.
+ * - `server.maxConnections = NaN | negative`, BY CONTRAST, does not throw at
+ *   all. `NaN` silently disables the cap: every connection was accepted and
+ *   served normally in the measurement. A negative value instead refuses
+ *   every connection from the first one on: the server emits a `'drop'`
+ *   event and closes the client unserved, while the relay process itself
+ *   stays up.
+ * - `"0"` is a truthy STRING, so it became the NUMBER `0` — `isInteger && >
+ *   0` rejects that today, but the bare `Number(raw || fallback)` shape this
+ *   file had before even that check existed would have silently disabled
+ *   the bound instead of erroring (measured: `socket.setTimeout(0, cb)`
+ *   does not throw — Node treats `0` as "no timeout").
+ *
+ * A separate, non-crashing failure mode: `Number()` coerces far more than
+ * plain integers. `"1e3"`, `" 5"`, `"\t7\n"`, `"0x10"` and `"5.0"` all pass
+ * `isInteger && > 0` and were silently accepted. Worse, so does
+ * `"2147483648"` — and `socket.setTimeout()`'s own ceiling is a signed
+ * 32-bit integer (libuv's timer duration); going over it does not throw, it
+ * WARNS and truncates. Measured: `socket.setTimeout(2147483648, cb)` prints
+ * `TimeoutOverflowWarning: 2147483648 does not fit into a 32-bit signed
+ * integer. Timer duration was truncated to 2147483647.` to stderr, and the
+ * connection stays open with its timer silently capped at 2147483647 ms
+ * (~24.86 days) — so an oversized `PIFLEET_RELAY_IDLE_TIMEOUT_MS` would not
+ * fail loudly, it would just turn the zero-byte-flood guard into a
+ * ~24.86-day hold.
+ *
+ * Validated here, before anything listens, against both failure classes.
+ * `raw` must match `^[1-9][0-9]*$` — a plain decimal integer: no sign, no
+ * decimal point, no exponent, no leading zero, and (the anchors alone rule
+ * this out — nothing is trimmed first) no leading or trailing whitespace.
+ * The resulting number must also sit inside a hard ceiling: `MAX_TIMEOUT_MS`
+ * (2147483647) for the two timeouts — the same signed 32-bit ceiling
+ * `socket.setTimeout()` itself silently truncates to, so this now fails at
+ * startup instead of at runtime — and `MAX_RELAY_CONNECTIONS` (65536) for
+ * `MAX_CONNECTIONS`: comfortably under this process's own 1048576-file
+ * nofile limit even though each ACTIVE relayed connection costs 2 FDs
+ * (client leg + upstream leg), and far larger than any fleet this relay is
+ * sized for (default 256). An invalid value — either class — writes one
+ * `pifleet-egress-relay:` line naming the variable, the accepted form, and
+ * the range, then exits non-zero — the same fatal style as the
+ * `server.on("error", ...)` listen failure below. An unset (or empty)
+ * variable still gets its default.
  */
-const IDLE_TIMEOUT_MS = Number(process.env.PIFLEET_RELAY_IDLE_TIMEOUT_MS || 120000);
-const MAX_CONNECTIONS = Number(process.env.PIFLEET_RELAY_MAX_CONNECTIONS || 256);
+const MAX_TIMEOUT_MS = 2147483647; // 2^31 - 1: socket.setTimeout()'s own signed-32-bit ceiling — see measurement above.
+const MAX_RELAY_CONNECTIONS = 65536; // sane ceiling for MAX_CONNECTIONS — see measurement above (FD budget + fleet sizing).
+const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+
+function positiveIntEnv(name, fallback, max) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!POSITIVE_INT_RE.test(raw) || value > max) {
+    process.stderr.write(
+      `pifleet-egress-relay: ${name} must be a plain positive decimal integer ` +
+        `in 1..${max} (digits only — no sign, decimal point, exponent, leading ` +
+        `zero, or whitespace), got ${JSON.stringify(raw)}\n`,
+    );
+    process.exit(1);
+  }
+  return value;
+}
+
+const IDLE_TIMEOUT_MS = positiveIntEnv("PIFLEET_RELAY_IDLE_TIMEOUT_MS", 120000, MAX_TIMEOUT_MS);
+const ACTIVE_IDLE_TIMEOUT_MS = positiveIntEnv(
+  "PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS",
+  900000,
+  MAX_TIMEOUT_MS,
+);
+const MAX_CONNECTIONS = positiveIntEnv(
+  "PIFLEET_RELAY_MAX_CONNECTIONS",
+  256,
+  MAX_RELAY_CONNECTIONS,
+);
 
 /** `1..65535`, mirroring `validPort` in `src/security/relay.ts`. */
 function validPort(port) {
@@ -173,14 +295,30 @@ function main() {
         if (upstream !== null) upstream.destroy();
       };
 
-      // Applied to BOTH legs: a client that connects and says nothing, and an
-      // upstream that accepts and never answers, are the same leak from
-      // opposite ends.
+      // PRE-DIAL phase: the short timeout. A client that connects and says
+      // nothing is the zero-byte-flood case in the header, and there is no
+      // upstream leg yet to bound alongside it. Re-armed to the long ACTIVE
+      // timeout — for this leg AND the upstream leg — the instant the first
+      // byte triggers a dial, below.
       client.setTimeout(IDLE_TIMEOUT_MS, teardown);
       client.on("error", teardown);
       client.on("close", teardown);
 
       const dial = (firstChunk) => {
+        // ACTIVE phase begins here: the client has said something, so
+        // teardown moves off the short DoS-guarding clock and onto the long
+        // one the header describes. Duration only, no callback — `teardown`
+        // is already registered as a one-time 'timeout' listener from the
+        // PRE-dial `client.setTimeout(IDLE_TIMEOUT_MS, teardown)` call above,
+        // and it is still armed (it has not fired). `socket.setTimeout(ms,
+        // cb)` calls `once('timeout', cb)` on every invocation that passes a
+        // callback, so passing `teardown` again here would stack a SECOND
+        // listener for the same event; both would run — harmlessly, since
+        // `teardown` is idempotent on `torn` — but there is no reason to
+        // carry a listener that adds nothing. Passing no callback just resets
+        // the timer's duration and leaves the existing listener in place.
+        client.setTimeout(ACTIVE_IDLE_TIMEOUT_MS);
+
         // `allowHalfOpen` on THIS leg too, for the mirror-image reason: when
         // the upstream finishes its response and sends FIN, the default would
         // close our socket outright and take with it anything the client still
@@ -188,7 +326,7 @@ function main() {
         // handlers do the teardown explicitly — that is the trade
         // `allowHalfOpen` makes, not an oversight to be tidied away.
         upstream = net.connect({ host: t.host, port: t.port, allowHalfOpen: true });
-        upstream.setTimeout(IDLE_TIMEOUT_MS, teardown);
+        upstream.setTimeout(ACTIVE_IDLE_TIMEOUT_MS, teardown);
         upstream.on("error", teardown);
         upstream.on("close", teardown);
         upstream.on("connect", () => {
@@ -233,9 +371,18 @@ function main() {
 
     /**
      * A hard cap so the FD table cannot be exhausted by connection count
-     * alone. Node stops ACCEPTING past this; pending connections wait in the
-     * kernel backlog rather than being refused, which is what a transient
-     * burst wants.
+     * alone. MEASURED under real Node 24 (2026-09-14), not assumed: with
+     * `MAX_CONNECTIONS=2` and a 3rd client connecting, the 3rd client's TCP
+     * handshake still completes — its `connect` event fired with no
+     * measurable delay (0 ms in the run that produced these numbers) — and
+     * Node then destroyed that socket about 1 ms later, before a single byte
+     * crossed it; a write attempted right after failed because the socket
+     * was already destroyed. It is NOT held pending in the kernel accept
+     * backlog — freeing a slot by closing one of the first two connections
+     * did not revive it, it stayed destroyed — and it is NOT refused at the
+     * TCP level either, since the handshake completes. So the failure mode
+     * this cap produces for the `(cap+1)`th connection is
+     * accept-then-instant-close, not a queued connection and not a refusal.
      */
     server.maxConnections = MAX_CONNECTIONS;
 

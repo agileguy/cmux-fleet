@@ -18,7 +18,7 @@ absent, say so in the artifact rather than guessing.
 
 | Input | Form | Default when absent |
 |---|---|---|
-| target | a target TOKEN from the enrolled inventory, `^[a-z0-9][a-z0-9-]{0,31}$` | the single enrolled VM, stated in the artifact; otherwise the row is `indeterminate` |
+| target | a target TOKEN from the enrolled inventory — list them with the command under "Where the enrolled tokens live" below, `^[a-z0-9][a-z0-9-]{0,31}$` | a brief word naming a listed token; the single token when the file lists exactly one, stated in the artifact; otherwise the row is `indeterminate` |
 | units | zero or more systemd unit names, each matching `^[a-zA-Z0-9][a-zA-Z0-9@._:-]*$`, at most 255 bytes | none — system-level checks only |
 | checks | a closed subset of `reachability`, `system`, `units`, `logs`, `resources`, `cloud` | `reachability, system, units, logs` |
 | window | seconds, e.g. `300s` | `300s` |
@@ -35,6 +35,36 @@ enrolled on this fleet. `observe-vm` is a thin alias for `observe-ssh vm <target
 [argument ...]`; it does not itself enforce the verb grammar below — the target's forced command
 does.
 
+**Where the enrolled tokens live.** The enrolled tokens are in the file whose path is the
+value of `$OBSERVER_VM_TARGETS_FILE`, one `token host port user` line per target — the same
+variable `docker/observe-ssh` itself reads for the `vm` kind. The token is the first field.
+List them by reading the variable, never a hard-coded `/secrets/...` path:
+
+```sh
+awk 'NF && $1 !~ /^#/ {print $1}' "$OBSERVER_VM_TARGETS_FILE"
+```
+
+`observe-ssh`'s own parser splits each line on runs of spaces and tabs and skips blank and
+`#`-comment lines; this command tolerates the same repeated whitespace, for the same reason.
+Only the token belongs in an artifact — never the host, port or user the same line carries.
+
+**A malformed targets file refuses the whole file, not just its own listing.** `docker/observe-ssh`
+validates every line of the targets file before ssh ever runs, and one malformed line, a duplicate
+token or a bad field refuses the WHOLE file (77) — the `awk` command above has no such check, so it
+can still print tokens read from a file `observe-ssh` would refuse outright. A refusal whose text
+names `<targets_var> line <n>` (`docker/observe-ssh`'s own `parse_line`, one `refuse` call per check)
+is a FLEET CONFIGURATION FAULT, not something your call caused or can retry its way past: the task
+status is `blocked`, the row is `indeterminate`, and the call is not retried — the exit table's
+`OBSERVER_VM_TARGETS_FILE line` row below covers exactly this case. This is a different shape of
+`77` from the exit table's "your own call was malformed" row — that row is about a call this worker
+itself built wrong; this one names a targets file an operator has to fix.
+
+A word in the brief that names one of the listed tokens is the target. If the file lists
+exactly one token, use it and say so in the artifact; with more than one token and no matching
+word in the brief, the row is `indeterminate`. A `not enrolled` refusal from `observe-ssh` is
+answered by reading this file and calling again with a listed token — never by trying another
+guessed name.
+
 Read the exit status AND the stderr text before you write a row — the exit code alone does not
 say who refused what. The table is read top to bottom; the first row whose condition matches is
 the one that applies, with "anything else" last:
@@ -43,8 +73,9 @@ the one that applies, with "anything else" last:
 |---|---|---|
 | `journal` or `kernel`, any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries — so this row sits above the `0` row | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
+| `77` with `observe-ssh: refused before ssh ran: OBSERVER_VM_TARGETS_FILE line` on stderr | a malformed `OBSERVER_VM_TARGETS_FILE` — `docker/observe-ssh`'s `parse_line` refused the whole file before ssh ever ran, naming its own line number, not this call's arguments | a FLEET CONFIGURATION FAULT, not something your call caused or can retry its way past: not a coverage result, the task status is `blocked`, the row is `indeterminate`, and the call is not retried |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
-| `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
+| `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, "When the brief asks for an action, not a check" below names which channel |
 | `77` with any other `vm-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all, that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
 | `124` from `disk` | `df` did not return inside the 20-second bound `disk` runs it under, most likely a hung network mount | the `resources` coverage is `unreachable` — asked, never answered — and the row is `indeterminate`; never evidence of free space; any stderr goes in `evidence_ref` |
@@ -114,6 +145,26 @@ end, `125` from `disk` and `126`/`127` are the "did not run at all" row, and onl
 | `logs` | `journal`, `kernel` |
 | `resources` | `disk`, `memory` |
 | `cloud` | none — this role has `cloud_access: false`, so `cloud` is never attempted; record its coverage as `not_attempted` |
+
+**When the brief asks for an action, not a check.** `reboot`, `shutdown`, `poweroff`, `halt`, and
+starting, stopping or restarting a unit are not checks — no row in the table above answers them,
+because none of `reachability`, `system`, `units`, `logs`, `resources` or `cloud` covers a change to
+the machine. **The action word is itself the verb**: `observe-vm <target> reboot`, `observe-vm
+<target> shutdown`, `observe-vm <target> poweroff`, `observe-vm <target> halt`, `observe-vm <target>
+start <unit>`, `observe-vm <target> stop <unit>`, `observe-vm <target> restart <unit>` — never a
+second argument tacked onto `unit`, whose own grammar takes exactly one argument, a unit name, and
+refuses a second one on ARGUMENT COUNT before any verb question is even asked. None of `reboot`,
+`shutdown`, `poweroff`, `halt`, `start`, `stop` or `restart` is one of `vm-forced-command`'s own
+verbs, so the call form above always lands on its catch-all. Call it once anyway, so the refusal
+lands on record, then read the `77` row in the exit table whose stderr reads `vm-forced-command:
+refused "<verb>": not a recognised verb`. **When the brief asked for an action, a `77` shaped like an
+ARGUMENT refusal is never "fixed" into a read**: that shape means the call form above was not used,
+not that the arguments need adjusting, and retrying it as `unit <name>` answers a different question
+(is the unit loaded?) than the action the brief asked for. Record the channel that action concerns as
+`forbidden`: `system` for reboot, shutdown, poweroff, halt, or any other change to the machine;
+`units` for starting, stopping or restarting a unit. The row is `indeterminate`, the refusal line
+goes in `evidence_ref`, and the task status is `blocked`. Marking every channel `not_attempted` is
+wrong for this case — the call answered, with a refusal, and that refusal names a real channel.
 
 ## The verb grammar — the whole of what the credential can do (§6.4)
 
@@ -249,10 +300,15 @@ the one that was supposed to carry the evidence.
   target uses: `answered | unreachable | forbidden | not_attempted` and
   `healthy | degraded | unhealthy | indeterminate`. `failed` is a TASK status, never an
   `assessment` — a fifth token there voids the whole document, not just the row.
-- **`uptime_s`, `system_state` and `failed_units[]` are optional.** Include them when the
-  matching verb answered; leave them out rather than guess when it did not. `system_state` is the
-  state word `system` printed, verbatim. `failed_units[]` holds unit names copied verbatim from
-  `failed` output, one per entry.
+- **`uptime_s`, `system_state` and `failed_units[]` are optional, and optional means OMITTED.**
+  Include a key when the matching verb answered; when it did not, leave the key out of the JSON
+  entirely — never write `null` in its place. Harvest's schema accepts an absent key but refuses a
+  `null` value for any of the three, and that refusal fails the whole artifact, not just the row.
+  A row whose only call was refused (see "When the brief asks for an action, not a check" above)
+  carries none of these three keys. Contrast `sweep_id` and `window_opened_at` below: those two
+  are required keys whose value MAY be `null` — that allowance does not carry over to these three.
+  `system_state` is the state word `system` printed, verbatim. `failed_units[]` holds unit names
+  copied verbatim from `failed` output, one per entry.
 - **Copy `sweep_id` and `window_opened_at` out of the brief, verbatim, and from nowhere else** —
   not from your transcript, not reconstructed from the clock. An artifact whose `sweep_id` does
   not match is discarded whole.

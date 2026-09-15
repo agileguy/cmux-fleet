@@ -12,6 +12,12 @@
  * about Docker networking — the alias, the internal bridge, the gateway
  * residual. This file owns everything that is about the forwarder.
  *
+ * RUNTIME: the relay runs under real Node 24 in production, but plain
+ * `node` on PATH is not guaranteed to be that — on this project's own dev
+ * Mac it resolves to Bun's `node` shim. Set `PIFLEET_NODE` to a real Node 24
+ * binary to run this suite against it; unset, `startRelay` below falls back
+ * to whatever `node` resolves to locally so a bare `bun test` still works.
+ *
  * The measurements these tests replace were taken by hand against a running
  * relay: 300 idle client connections that sent zero bytes took it from 19 open
  * FDs to 619, with 603 TCP sockets, because the upstream was dialled on accept
@@ -58,6 +64,8 @@ interface Relay {
   proc: Bun.Subprocess;
   port: number;
   stderr: () => Promise<string>;
+  /** True once the process's own "forwarding ..." line was observed on stdout. */
+  sawForwardingLine: boolean;
 }
 
 const running: Array<{ kill: () => void }> = [];
@@ -75,12 +83,20 @@ afterEach(async () => {
  * Start the relay forwarding `listenPort -> 127.0.0.1:upstreamPort` and wait
  * until it says it is listening. Waiting on the process's OWN announcement,
  * rather than sleeping, is what keeps these tests off the flake list.
+ *
+ * The 10 s deadline used to be checked only BETWEEN `reader.read()` calls —
+ * so a relay that neither prints "forwarding" nor exits (the exact shape of
+ * the bad-value defect once validation is removed: no stdout, no exit, just
+ * a process that sits there) left this function blocked inside a single
+ * `await reader.read()` with nothing to wake it, for the full 10 s no matter
+ * how the deadline variable was set. Racing the read itself against the
+ * deadline is what makes the deadline actually bound the wait.
  */
 async function startRelay(
   targets: Array<Record<string, unknown>>,
   env: Record<string, string> = {},
 ): Promise<Relay> {
-  const proc = Bun.spawn(["node", SCRIPT], {
+  const proc = Bun.spawn([process.env.PIFLEET_NODE ?? "node", SCRIPT], {
     env: { ...process.env, PIFLEET_RELAY_TARGETS: JSON.stringify(targets), ...env },
     stdout: "pipe",
     stderr: "pipe",
@@ -93,7 +109,14 @@ async function startRelay(
   let seen = "";
   const deadline = Date.now() + 10_000;
   while (!seen.includes("forwarding") && Date.now() < deadline) {
-    const { value, done } = await reader.read();
+    const remaining = deadline - Date.now();
+    const timedOut = Symbol("startRelay-read-timeout");
+    const result = await Promise.race([
+      reader.read(),
+      new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), remaining)),
+    ]);
+    if (result === timedOut) break;
+    const { value, done } = result;
     if (done) break;
     seen += decoder.decode(value, { stream: true });
   }
@@ -102,7 +125,37 @@ async function startRelay(
     proc,
     port: Number(targets[0]!.listenPort),
     stderr: () => stderrText,
+    sawForwardingLine: seen.includes("forwarding"),
   };
+}
+
+/**
+ * Race a relay expected to reject a bad startup value against a short
+ * deadline instead of just `await`ing `proc.exited` directly.
+ *
+ * With validation removed (the exact shape a regression takes), a relay
+ * that neither exits nor is otherwise misbehaving just sits there, so
+ * `await relay.proc.exited` alone doesn't fail — it hangs until the test
+ * framework's own timeout (`cliBudget(1)`, about 11 s) kills it, and that
+ * failure message is "test timed out", which says nothing about WHY. Racing
+ * against ~3 s and throwing a message that names the actual expectation
+ * turns an 11 s unexplained timeout into a fast, legible failure.
+ *
+ * Does not kill the process — `afterEach` already does that for everything
+ * `startRelay` pushed onto `running`, whether this helper throws or not.
+ */
+async function expectRejectsAtStartup(relay: Relay, ms = 3_000): Promise<number> {
+  const timedOut = Symbol("expectRejectsAtStartup-timeout");
+  const result = await Promise.race([
+    relay.proc.exited,
+    new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), ms)),
+  ]);
+  if (result === timedOut) {
+    throw new Error(
+      `relay kept running past ${ms}ms instead of exiting at startup — expected it to reject the bad env override and exit non-zero`,
+    );
+  }
+  return result as number;
 }
 
 /** A free localhost port, released before the caller binds it. */
@@ -227,6 +280,11 @@ describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", (
   }, cliBudget(1));
 
   test("an idle client is reaped by the idle timeout", async () => {
+    // PRE-DIAL phase: no byte is ever sent, so there is no upstream leg to
+    // speak of and only the SHORT `PIFLEET_RELAY_IDLE_TIMEOUT_MS` can be
+    // governing here — the long `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS` is
+    // left at its default (900000) and the test still closes in well under a
+    // second, which is itself part of the proof.
     const up = await startUpstream();
     upstreams.push(up);
     const listenPort = await freePort();
@@ -239,6 +297,87 @@ describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", (
     // No bytes ever sent: the socket must be closed by the relay, not held.
     await once(client, "close", 5_000);
     expect(up.connections).toBe(0);
+  }, cliBudget(1));
+});
+
+describe("egress-relay.cjs — active idle phase (long timeout once dialled)", () => {
+  /**
+   * These pin the two-phase behaviour added for the 2026-09-15 incident: a
+   * worker's model turn was `terminated` exactly 120 s after its request went
+   * out, because a large-context prefill against a shared model server can
+   * legitimately stream zero bytes for longer than that. Before the first
+   * byte, a connection is still governed by the short, DoS-guarding
+   * `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (S1 above); once that byte triggers the
+   * dial, both legs move to the long `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`.
+   */
+  test("a slow-but-legitimate reply — silent past the short idle, inside the active idle — still arrives", async () => {
+    const REPLY_DELAY_MS = 400;
+    const up = await startUpstream((sock, chunk) => {
+      // Silent for REPLY_DELAY_MS: longer than the short idle configured
+      // below, shorter than the active one, so only the correct (active)
+      // timeout on the post-dial legs lets this reply survive to be sent.
+      setTimeout(() => sock.write(`REPLY:${chunk.toString()}`), REPLY_DELAY_MS);
+    });
+    upstreams.push(up);
+    const listenPort = await freePort();
+    await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_IDLE_TIMEOUT_MS: "150",
+      PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: "700",
+    });
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("REQ");
+    const reply = (await once(client, "data", 2_000)) as Buffer;
+    expect(reply.toString()).toBe("REPLY:REQ");
+    client.destroy();
+  }, cliBudget(1));
+
+  test("an upstream silent past the active idle gets the connection torn down", async () => {
+    const up = await startUpstream(() => {
+      // Deliberately never replies — the connection must be reaped by the
+      // active idle timeout on its own, not by anything the client does.
+    });
+    upstreams.push(up);
+    const listenPort = await freePort();
+    const ACTIVE_IDLE_TIMEOUT_MS = 300;
+    await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_IDLE_TIMEOUT_MS: "150",
+      PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: String(ACTIVE_IDLE_TIMEOUT_MS),
+    });
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    const dialedAt = Date.now();
+    client.write("REQ"); // triggers the dial — now in the ACTIVE phase
+    // Neither side ever sends anything else: the relay itself must tear the
+    // connection down once ACTIVE_IDLE_TIMEOUT_MS elapses with no traffic.
+    await once(client, "close", 2_000);
+    const elapsedMs = Date.now() - dialedAt;
+    expect(up.connections).toBe(1); // the dial DID happen…
+
+    // The close must not land materially earlier than the ACTIVE timeout. A
+    // single short clock (IDLE_TIMEOUT_MS=150 alone, i.e. the post-dial legs
+    // never actually moving to the long timeout) also closes inside the 2s
+    // wait above, so without a timing floor this test passes either way —
+    // exactly the vacuous-pass this assertion exists to close. Measured
+    // under real Node 24 (8 runs at ACTIVE_IDLE_TIMEOUT_MS=300): close landed
+    // at 301-303ms, i.e. 1-3ms of scheduler jitter over the configured
+    // duration. SLACK_MS is far more generous than that measured jitter
+    // needs — enough headroom to stay flake-free under CI load — while still
+    // rejecting a 150ms-governed close (elapsedMs ~150-152) with room to
+    // spare.
+    const SLACK_MS = 100;
+    expect(elapsedMs).toBeGreaterThanOrEqual(ACTIVE_IDLE_TIMEOUT_MS - SLACK_MS);
+
+    // …and was then torn down. The relay destroys both of its own legs in
+    // the same synchronous teardown, but the upstream TEST server's socket
+    // (a separate TCP connection, observed from the other process) closing
+    // in response is one more async hop — poll rather than assume it has
+    // already landed the instant the client side observed its own close.
+    const deadline = Date.now() + 1_000;
+    while (!up.sockets[0]!.destroyed && Date.now() < deadline) await Bun.sleep(10);
+    expect(up.sockets[0]!.destroyed).toBe(true);
   }, cliBudget(1));
 });
 
@@ -354,5 +493,132 @@ describe("egress-relay.cjs — S2: only a LISTEN failure is fatal", () => {
     } finally {
       await new Promise<void>((res) => blocker.close(() => res()));
     }
+  }, cliBudget(1));
+});
+
+describe("egress-relay.cjs — bad IDLE_TIMEOUT_MS/ACTIVE_IDLE_TIMEOUT_MS/MAX_CONNECTIONS fail loudly at startup", () => {
+  /**
+   * The defect: `IDLE_TIMEOUT_MS`, `ACTIVE_IDLE_TIMEOUT_MS` and
+   * `MAX_CONNECTIONS` used to be `Number(process.env.X || default)` with only
+   * an `isInteger && > 0` check — far looser than it reads. `Number("1e3")`
+   * is `1000`, `Number(" 5")` is `5`, `Number("0x10")` is `16`, and
+   * `Number("5.0")` is `5` — all pass `isInteger && > 0` and were silently
+   * accepted. Worse, so was `"2147483648"`, and `socket.setTimeout()`'s own
+   * ceiling is a signed 32-bit integer: going over it does not throw, it
+   * WARNS and truncates (measured on real Node 24.21.0:
+   * `socket.setTimeout(2147483648, cb)` prints `TimeoutOverflowWarning: …
+   * Timer duration was truncated to 2147483647.` and the connection stays
+   * open) — so an oversized `PIFLEET_RELAY_IDLE_TIMEOUT_MS` used to turn the
+   * zero-byte-flood guard into a ~24.86-day hold instead of failing at
+   * startup. All three variables must now be validated against a strict
+   * `^[1-9][0-9]*$` grammar (no sign, decimal point, exponent, leading zero,
+   * or whitespace — nothing is trimmed) AND a hard upper bound before
+   * anything listens, and each rejection must name the variable on stderr —
+   * not just fail generically.
+   */
+  const varNames = [
+    "PIFLEET_RELAY_IDLE_TIMEOUT_MS",
+    "PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS",
+    "PIFLEET_RELAY_MAX_CONNECTIONS",
+  ];
+  const badValues: Array<[string, string]> = [
+    ["non-numeric", "abc"],
+    ["negative", "-5"],
+    ["zero — a truthy string that used to silently disable the bound", "0"],
+    ["exponential notation — Number() coerces this to 1000", "1e3"],
+    ["leading whitespace — Number() coerces this to 5, nothing is trimmed", " 5"],
+    ["hex notation — Number() coerces this to 16", "0x10"],
+    ["trailing .0 — Number() coerces this to 5", "5.0"],
+    [
+      "one past the int32 timeout ceiling — also past MAX_CONNECTIONS' own, lower, bound",
+      "2147483648",
+    ],
+  ];
+
+  for (const name of varNames) {
+    for (const [why, value] of badValues) {
+      test(`${name}=${JSON.stringify(value)} (${why}) exits non-zero, naming ${name} on stderr`, async () => {
+        const relay = await startRelay(
+          [{ listenPort: await freePort(), host: "127.0.0.1", port: 8000, name: "omlx" }],
+          { [name]: value },
+        );
+        const code = await expectRejectsAtStartup(relay);
+        expect(code).not.toBe(0);
+        expect(await relay.stderr()).toContain(name);
+      }, cliBudget(1));
+    }
+  }
+
+  test("a valid override for all three still serves", async () => {
+    const up = await startUpstream();
+    upstreams.push(up);
+    const listenPort = await freePort();
+    await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_IDLE_TIMEOUT_MS: "5000",
+      PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: "6000",
+      PIFLEET_RELAY_MAX_CONNECTIONS: "4",
+    });
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("HELLO");
+    const reply = (await once(client, "data")) as Buffer;
+    expect(reply.toString()).toBe("ECHO:HELLO");
+    client.destroy();
+  }, cliBudget(1));
+
+  test("boundary: 2147483647 (the int32 ceiling) is accepted for both timeouts — relay starts and prints its forwarding line", async () => {
+    const up = await startUpstream();
+    upstreams.push(up);
+    const listenPort = await freePort();
+    const relay = await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_IDLE_TIMEOUT_MS: "2147483647",
+      PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: "2147483647",
+    });
+    expect(relay.sawForwardingLine).toBe(true);
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("HELLO");
+    const reply = (await once(client, "data")) as Buffer;
+    expect(reply.toString()).toBe("ECHO:HELLO");
+    client.destroy();
+  }, cliBudget(1));
+
+  /**
+   * `PIFLEET_RELAY_MAX_CONNECTIONS`'s own ceiling is `MAX_RELAY_CONNECTIONS`
+   * (65536, see `docker/egress-relay.cjs`) — a DIFFERENT, lower bound than the
+   * two timeouts' `MAX_TIMEOUT_MS` (2147483647) pinned just above. Nothing
+   * before this pair of tests notices if `MAX_RELAY_CONNECTIONS` itself moves:
+   * the `badValues` loop's `"2147483648"` case is past BOTH ceilings at once,
+   * so it stays red whichever one governs, and every other case in that loop
+   * is nowhere near 65536 either. Pinning 65536 accepted / 65537 refused is
+   * what actually catches `MAX_RELAY_CONNECTIONS` drifting.
+   */
+  test("boundary: 65536 (MAX_RELAY_CONNECTIONS) is accepted for PIFLEET_RELAY_MAX_CONNECTIONS — relay starts, prints its forwarding line, and echoes traffic", async () => {
+    const up = await startUpstream();
+    upstreams.push(up);
+    const listenPort = await freePort();
+    const relay = await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_MAX_CONNECTIONS: "65536",
+    });
+    expect(relay.sawForwardingLine).toBe(true);
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("HELLO");
+    const reply = (await once(client, "data")) as Buffer;
+    expect(reply.toString()).toBe("ECHO:HELLO");
+    client.destroy();
+  }, cliBudget(1));
+
+  test("boundary: 65537 (one past MAX_RELAY_CONNECTIONS) is rejected at startup, naming PIFLEET_RELAY_MAX_CONNECTIONS", async () => {
+    const relay = await startRelay(
+      [{ listenPort: await freePort(), host: "127.0.0.1", port: 8000, name: "omlx" }],
+      { PIFLEET_RELAY_MAX_CONNECTIONS: "65537" },
+    );
+    const code = await expectRejectsAtStartup(relay);
+    expect(code).not.toBe(0);
+    expect(await relay.stderr()).toContain("PIFLEET_RELAY_MAX_CONNECTIONS");
   }, cliBudget(1));
 });

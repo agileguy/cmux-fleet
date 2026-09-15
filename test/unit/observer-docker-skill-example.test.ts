@@ -37,11 +37,14 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { z, ZodError } from "zod";
 
-import { parseObserverDockerOpsArtifact } from "../../src/harvest/observer-target-artifacts.ts";
+import { ObserverDockerOpsArtifactSchema, parseObserverDockerOpsArtifact } from "../../src/harvest/observer-target-artifacts.ts";
 
 const SKILL = "skills/observer-docker-ops/SKILL.md";
 const HEADING = "## The report artifact contract (§5.6)";
+const OPTIONAL_BULLET_START =
+  "- **`container_id`, `image` and `restart_count` are optional, and optional means OMITTED.**";
 
 /**
  * Extracts the sole ```json block filed under `HEADING` in `src` and parses
@@ -72,6 +75,127 @@ function documentedExample(src: string): unknown {
 function realExample(): unknown {
   const src = readFileSync(join(import.meta.dir, "..", "..", SKILL), "utf8");
   return documentedExample(src);
+}
+
+/**
+ * Extracts just the optional-fields bullet from `src`, from `OPTIONAL_BULLET_START` up to the
+ * next top-level bullet or the next `## ` heading, whichever comes first. Anchored on the bullet
+ * itself — not the whole file — so a mutation anywhere else in the document cannot satisfy a test
+ * that reads this slice, and a mutation that only removes a sentence INSIDE the bullet can.
+ */
+function optionalFieldsBullet(src: string): string {
+  const idx = src.indexOf(OPTIONAL_BULLET_START);
+  if (idx === -1) {
+    throw new Error(`bullet starting "${OPTIONAL_BULLET_START}" not found`);
+  }
+  const rest = src.slice(idx + OPTIONAL_BULLET_START.length);
+  const nextBulletOffset = rest.search(/\n- \*\*/);
+  const nextHeadingOffset = rest.search(/\n## /);
+  const offsets = [nextBulletOffset, nextHeadingOffset].filter((n) => n !== -1);
+  const end = offsets.length > 0 ? Math.min(...offsets) : rest.length;
+  return OPTIONAL_BULLET_START + rest.slice(0, end);
+}
+
+/** Collapses every run of whitespace (a markdown line wrap included) to a single space, so a
+ * prose assertion checks the words, not the column Markdown happened to wrap them at. */
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
+/**
+ * The optional-fields bullet's own extraction-and-assertions, shared so the revert check below
+ * can run this EXACT function against mutated source and expect it to throw — rather than a
+ * hand-rolled restatement of the same assertions, which could drift from what the real test above
+ * actually checks.
+ */
+function runBulletAssertions(src: string): void {
+  const bullet = normalizeWhitespace(optionalFieldsBullet(src));
+  expect(bullet).toContain("optional means OMITTED");
+  expect(bullet).toContain("never write `null` in its place");
+  expect(bullet).toContain("refuses a `null` value");
+  expect(bullet).toContain("fails the whole artifact, not just the row");
+  expect(bullet).toContain("carries none of these three keys");
+}
+
+/**
+ * Whether `schema` still validates `sample` with `key` removed entirely — the actual meaning of
+ * "optional" for a schema field, independent of which zod wrapper expresses it. `.optional()`,
+ * `.default(...)`, `.optional().transform(...)`, `.optional().pipe(...)` and `.exactOptional()`
+ * all accept an absent key; only `instanceof z.ZodOptional` singles out the first of those.
+ * `sample` must be a value the FULL schema already accepts, so removing one key at a time isolates
+ * that key's own optionality rather than tripping over some other missing or invalid field.
+ */
+function absentKeyValidates(schema: z.ZodObject<z.ZodRawShape>, sample: Record<string, unknown>, key: string): boolean {
+  const withoutKey = { ...sample };
+  delete withoutKey[key];
+  return schema.safeParse(withoutKey).success;
+}
+
+/**
+ * Confirms the installed zod still exposes `.optional()`'s own internal `_zod.optin === "optional"`
+ * marker the way `rowOptionalKeys()` cross-checks against below — a canary against an
+ * `instanceof z.ZodOptional` check (which only recognises exactly one wrapper shape and silently
+ * misses every other one a field can be omittable through: `.default()`, `.optional().transform()`,
+ * `.optional().pipe()` and zod 4's `.exactOptional()`). Measured directly against the installed
+ * zod (4.4.3, `bun -e`): `.optional()`, `.default()` and `.optional().transform()` all carry
+ * `_zod.optin === "optional"`. If a zod upgrade renames or drops the marker, this throws here
+ * rather than silently making every key look "not optional".
+ */
+function assertOptinMarkerAvailable(): void {
+  const canary = z.string().optional() as unknown as { _zod?: { optin?: unknown } };
+  expect(canary._zod && "optin" in canary._zod, "the installed zod no longer sets field._zod.optin on `.optional()`").toBe(true);
+  expect(canary._zod!.optin, "the installed zod's `.optional()` no longer marks _zod.optin as 'optional'").toBe("optional");
+}
+
+/**
+ * The row schema's own OPTIONAL field names — a key that may be OMITTED from a real, valid row and
+ * still validate. Selected BEHAVIOURALLY: remove the key from the documented example row and
+ * re-parse with the real row schema ("what the schema accepts: absent validates") — rather than
+ * typed here or inferred from a single zod wrapper class. That tracks `ObserverDockerOpsArtifactSchema`
+ * even if a field's optionality comes to be expressed with `.default()`, `.optional().transform()`,
+ * `.optional().pipe()` or `.exactOptional()` instead of a bare `.optional()`, and even if a field is
+ * added, renamed or removed.
+ *
+ * Cross-checked against zod 4's own internal `field._zod.optin` marker (truthy whenever a field's
+ * own shape tolerates omission) after `assertOptinMarkerAvailable()` confirms the installed zod
+ * still exposes it. A key the behavioural test selects but the marker disagrees with fails loudly,
+ * by name, rather than being trusted on one signal alone.
+ *
+ * Nullability is a SEPARATE question from optionality — `.nullable().optional()` is optional by
+ * this same test, and still gets selected here; whether a selected key also accepts `null` is
+ * checked per key with `safeParse`, below, not assumed from membership in this list.
+ */
+function rowOptionalKeys(): string[] {
+  assertOptinMarkerAvailable();
+  const servicesField = ObserverDockerOpsArtifactSchema.shape.services as z.ZodArray<z.ZodObject<z.ZodRawShape>>;
+  const rowSchema = servicesField.element;
+  const sampleRow = (realExample() as { services: Array<Record<string, unknown>> }).services[0]!;
+
+  // Anti-vacuity: the documented example row must itself validate BEFORE any
+  // key is removed, or every key below would look "not optional" for a
+  // reason unrelated to its own optionality.
+  const baseline = rowSchema.safeParse(sampleRow);
+  expect(
+    baseline.success,
+    `the documented example row does not itself validate: ${baseline.success ? "" : baseline.error.message}`,
+  ).toBe(true);
+
+  const keys: string[] = [];
+  for (const [key, field] of Object.entries(rowSchema.shape)) {
+    if (!absentKeyValidates(rowSchema, sampleRow, key)) continue; // omitting it breaks validation: required
+    const optin = (field as unknown as { _zod: { optin?: unknown } })._zod.optin;
+    expect(
+      optin,
+      `"${key}" validates when omitted, but zod's own _zod.optin marker disagrees (reads ${JSON.stringify(optin)}) — the behavioural and internal signals conflict`,
+    ).toBeTruthy();
+    keys.push(key);
+  }
+  return keys;
+}
+
+/** A deep-enough clone for mutating one row of the documented example without touching the original. */
+function cloneExample(): { services: Array<Record<string, unknown>>; [key: string]: unknown } {
+  return structuredClone(realExample()) as { services: Array<Record<string, unknown>>; [key: string]: unknown };
 }
 
 describe("observer-docker-ops skill's §5.6 JSON example is a valid artifact (task 4.6)", () => {
@@ -176,5 +300,111 @@ describe("observer-docker-ops skill's §5.6 JSON example is a valid artifact (ta
     expect(mutated).not.toBe(src);
     const example = documentedExample(mutated);
     expect(() => parseObserverDockerOpsArtifact(example)).toThrow();
+  });
+
+  // -------------------------------------------------------------------------
+  // Optional row fields: OMITTED validates, `null` does not (P6-NULLS).
+  // -------------------------------------------------------------------------
+
+  const optionalKeys = rowOptionalKeys();
+
+  test("the schema really does carry the three optional row fields this suite exercises", () => {
+    // Anti-vacuity for every loop below: if the schema's shape ever stops
+    // reporting these three as optional, the loops below would silently run
+    // zero iterations and pass by doing nothing. (Nullability is checked
+    // separately, per key, inside the loop below — not assumed here.)
+    expect(optionalKeys.sort()).toEqual(["container_id", "image", "restart_count"]);
+  });
+
+  const rowSchema = (ObserverDockerOpsArtifactSchema.shape.services as z.ZodArray<z.ZodObject<z.ZodRawShape>>).element;
+
+  for (const key of optionalKeys) {
+    test(`omitting optional field "${key}" from the example still validates`, () => {
+      const doc = cloneExample();
+      delete doc.services[0]![key];
+      expect(() => parseObserverDockerOpsArtifact(doc)).not.toThrow();
+    });
+
+    test(`setting optional field "${key}" to null fails validation and names "${key}"`, () => {
+      const doc = cloneExample();
+      const sampleRow = doc.services[0]!;
+
+      // Checked with safeParse, per key, rather than assumed from `key`'s
+      // membership in `optionalKeys`: an `.optional()` field can also be
+      // `.nullable()`, and that is a DIFFERENT property from being omittable.
+      // A key that unexpectedly accepts null is reported BY NAME here, loudly,
+      // instead of this test silently passing or failing on a confusing
+      // generic ZodError mismatch below.
+      const nullAccepted = rowSchema.safeParse({ ...sampleRow, [key]: null }).success;
+      expect(
+        nullAccepted,
+        `optional field "${key}" unexpectedly accepts a null value — the skill's "optional means OMITTED, never null" claim does not hold for it`,
+      ).toBe(false);
+
+      sampleRow[key] = null;
+      let thrown: unknown;
+      try {
+        parseObserverDockerOpsArtifact(doc);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(ZodError);
+      const issues = (thrown as ZodError).issues;
+      expect(issues.some((i) => i.path.join(".") === `services.0.${key}`)).toBe(true);
+    });
+  }
+
+  test("a row whose only call was refused (action-verb rule) validates with no optional keys", () => {
+    const doc = cloneExample();
+    const row = doc.services[0]!;
+    row["assessment"] = "indeterminate";
+    row["coverage"] = [
+      { channel: "state", result: "forbidden" },
+      { channel: "health", result: "not_attempted" },
+      { channel: "logs", result: "not_attempted" },
+      { channel: "stats", result: "not_attempted" },
+      { channel: "events", result: "not_attempted" },
+    ];
+    row["evidence_ref"] = ['docker-forced-command: refused "restart": not a recognised verb'];
+    for (const key of optionalKeys) delete row[key];
+
+    const parsed = parseObserverDockerOpsArtifact(doc);
+    expect(parsed.services[0]!.assessment).toBe("indeterminate");
+    expect(parsed.services[0]!.coverage).toContainEqual({ channel: "state", result: "forbidden" });
+    for (const key of optionalKeys) {
+      expect(Object.prototype.hasOwnProperty.call(parsed.services[0]!, key)).toBe(false);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // The skill's own text says `null` is refused — anchored on the bullet
+  // itself so a mutation elsewhere in the file cannot satisfy this.
+  // -------------------------------------------------------------------------
+
+  test("the optional-fields bullet says an unanswered field is omitted, and `null` fails validation", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "..", SKILL), "utf8");
+    runBulletAssertions(src);
+  });
+
+  test("revert check: moving the null-is-refused sentence outside the bullet turns the bullet test red", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "..", SKILL), "utf8");
+    const sentence =
+      "Harvest's schema accepts an absent key but refuses a `null`\n  value for any of the three, and that refusal fails the whole artifact, not just the row. A row\n  ";
+    expect(src).toContain(sentence); // the sentence is really there, verbatim
+
+    // Moved out — appended past the end of the document — rather than
+    // deleted. This pins that `optionalFieldsBullet`'s own boundary (the
+    // bullet's end) is what makes the real bullet test catch the regression,
+    // not a hand-rolled restatement of that test's assertions: deleting the
+    // sentence would make `bullet.not.toContain(...)` trivially true (of
+    // course absent text is absent), which cannot fail no matter how the
+    // extractor is written. Moving it lets `runBulletAssertions` — the exact
+    // function the real test above calls — decide, by actually throwing.
+    const mutated = src.replace(sentence, "") + "\n\n" + sentence;
+    expect(mutated).not.toBe(src);
+    expect(mutated).toContain(sentence); // still in the document, just relocated
+
+    expect(() => runBulletAssertions(src)).not.toThrow(); // sanity: passes on the real source
+    expect(() => runBulletAssertions(mutated)).toThrow();
   });
 });
