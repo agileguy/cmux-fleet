@@ -1144,17 +1144,25 @@ current-context: gke-cni-dev
  * against the slice it was actually given. The division was not a free choice.
  *
  * With ONE collator it is. `evenSlices(3 services, 1 collator)` hands `tri-1`
- * the whole environment and `evenSlices(3 aspects, 1)` hands it all three seats,
- * so the partition among those seats is the collator's own judgement — §6.5's
- * ⌈N/3⌉, *"the partition is the triage worker's to make"*. The host checks only
- * that the union covers every declared service exactly once; it does not choose
- * the shares and does not refuse a lopsided one.
+ * the whole environment and `evenSlices(6 aspects, 1)` hands it all six seats
+ * (SRD-TRIAGE-MIXED-OBSERVERS grew the aspect table from three to six on
+ * 2026-09-14), so the partition among those seats is the collator's own
+ * judgement — §6.5's ⌈N/3⌉, *"the partition is the triage worker's to make"*.
+ * The host checks only that the union covers every declared service exactly
+ * once; it does not choose the shares and does not refuse a lopsided one.
  *
  * So this table is now the FIXTURE COLLATOR's decision rather than a transcript
  * of the host's arithmetic, and one service each is the even split the role
  * prompt asks for. What still constrains it is the completeness check: drop a
  * service here and the sweep is refused `partition_incomplete`, name one twice
  * and it is refused `partition_duplicate`.
+ *
+ * **STILL ONLY THREE ENTRIES, below, though the collator now holds six seats.**
+ * `FIXTURE_TARGETS` declares one k8s environment and nothing for docker or vm
+ * to observe, so this fixture's own partition — unlike the collator's full
+ * seat list — covers only the three k8s seats. `PAIRS`, below, filters
+ * `TRIAGE_CONSOLE_ASPECTS` down to the seats named here for exactly that
+ * reason.
  */
 const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
   "obs-t1": ["routing"],
@@ -1175,13 +1183,23 @@ const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
  * than left to rot.** `expectDispatchesWereWellFormed` derives its dispatch
  * count from `p.seats.length` per pair, so a second collator would not silently
  * produce wrong expectations — but the flat `seats: TRIAGE_CONSOLE_ASPECTS`
- * below WOULD hand both collators all three seats, which is not what
- * `evenSlices` would do. If `TRIAGE_CONSOLE_ROSTER.collators` ever grows, this
- * line has to share the aspects out rather than copy them.
+ * below WOULD hand both collators every seat the filter below admits, which is
+ * not what `evenSlices` would do. If `TRIAGE_CONSOLE_ROSTER.collators` ever
+ * grows, this line has to share the aspects out rather than copy them.
+ *
+ * **FILTERED TO THE SEATS `SLICE_OF` NAMES, since 2026-09-14
+ * (SRD-TRIAGE-MIXED-OBSERVERS Phase 2).** `TRIAGE_CONSOLE_ASPECTS` now also
+ * lists `obs-td1`, `obs-td2` and `obs-tv1`, but `FIXTURE_TARGETS` above
+ * declares only a k8s environment — this fixture has no docker or vm service
+ * of its own kind to hand those seats, and won't until the target inventory
+ * and its per-kind partition land (SRD Phases 3-4). A fixture collator that
+ * claimed them would write a slice `SLICE_OF` cannot answer, so this filter
+ * keeps the fixture honest about what it can fan out to rather than papering
+ * over the gap with an entry `SLICE_OF` does not really have.
  */
 const PAIRS = TRIAGE_CONSOLE_ROSTER.collators.map((collator) => ({
   collator,
-  seats: TRIAGE_CONSOLE_ASPECTS,
+  seats: TRIAGE_CONSOLE_ASPECTS.filter((seat) => seat.worker in SLICE_OF),
 }));
 
 const isCollator = (worker: string): boolean =>
@@ -1876,6 +1894,9 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     // settle in is a schedule rather than a fact worth asserting. Sorting was
     // already the right call when there were two; at three it is what keeps this
     // from failing on a scheduler rather than on a defect.
+    // Still three, not six: this fixture's collator only fans out to the seats
+    // `SLICE_OF` names (k8s), because `FIXTURE_TARGETS` declares no docker or
+    // vm environment for the new seats to observe (see `PAIRS` above).
     expect([...outcome.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     // §12: *"A first `unhealthy` observation notifies nothing."*
     expect(outcome.notifications).toEqual([]);
@@ -2083,6 +2104,9 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     const doc = JSON.parse(out) as { schema: string; kind: string; dispatched: string[] };
     expect(doc.schema).toBe("pifleet.triagepass/v1");
     expect(doc.kind).toBe("swept");
+    // Still three: the docker/vm seats are absent from this fixture's fan-out
+    // for the same reason as above — no docker/vm environment in
+    // `FIXTURE_TARGETS` for `SLICE_OF` to name them against.
     expect([...doc.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });

@@ -548,9 +548,9 @@ export function servesConsole(
    * takes `--once`, `--poll`, `--status` and `--json` and **no `--workers`**; its
    * record is written from the constant `TRIAGE_CONSOLE_ROSTER`
    * (`cli/commands/triage.ts:1375-1378`). `scripts/triage` compares that against
-   * `opts.workers ?? DEFAULT_TRIAGE_WORKERS`. Those spell the same pair today —
-   * `["tri-1", "obs-t1"]` — so the DEFAULT adopts, and every `--workers`
-   * override is permanently unequal. `./scripts/triage --workers …` therefore
+   * `opts.workers ?? DEFAULT_TRIAGE_WORKERS`. Those two spell the same seat SET
+   * today, so the DEFAULT adopts, and every `--workers` override is permanently
+   * unequal. `./scripts/triage --workers …` therefore
    * stopped a healthy actor and started an identical one on EVERY invocation,
    * quietly, on a console nobody watches.
    *

@@ -166,9 +166,9 @@ export const TRIAGE_CONSOLE_ASPECTS: readonly AspectSeat[] = [
   { worker: "obs-t1", aspect: "slice1" },
   { worker: "obs-t2", aspect: "slice2" },
   /*
-   * THREE SLICES UNDER ONE COLLATOR, 2026-09-13 — and the shape this list had
-   * for one day in between is worth recording, because both edits were made on
-   * purpose and the second reverses the first.
+   * THREE K8S SLICES UNDER ONE COLLATOR, 2026-09-13 — and the shape this list
+   * had for one day in between is worth recording, because both edits were
+   * made on purpose and the second reverses the first.
    *
    * On 2026-09-12 this held `slice1`/`slice2` as TWO PAIRS: `tri-1` over
    * `obs-t1`, `tri-2` over `obs-t2`, each collator shown only its own seat. That
@@ -187,13 +187,25 @@ export const TRIAGE_CONSOLE_ASPECTS: readonly AspectSeat[] = [
    *
    * What DID die with the second collator is the pairing. One collator now holds
    * every seat in this list, so `renderSweepEnvelope`'s `seats` parameter shows
-   * it all three ids and the `## The seats` block lists three. The partition
-   * across them is §6.5's ⌈N/3⌉ — *"the partition is the triage worker's to
-   * make"* — which is a model judgement the host checks rather than arithmetic
-   * the host performs. `checkTriagePartition` still refuses an incomplete or
-   * duplicated one; it does not refuse a lopsided one.
+   * it all three k8s ids and the `## The seats` block listed three, as of
+   * 2026-09-13. Three more (docker/vm, below) joined 2026-09-14, so the block
+   * lists six today. The partition across the k8s three is §6.5's ⌈N/3⌉ —
+   * *"the partition is the triage worker's to make"* — which is a model
+   * judgement the host checks rather than arithmetic the host performs.
+   * `checkTriagePartition` still refuses an incomplete or duplicated one; it
+   * does not refuse a lopsided one.
    */
   { worker: "obs-t3", aspect: "slice3" },
+  /*
+   * `docker1`, `docker2`, `vm1` — SRD-TRIAGE-MIXED-OBSERVERS §5, §8 D7,
+   * added 2026-09-14. The new seats get their own prefix rather than
+   * continuing the `sliceN` sequence, so a child task id like
+   * `T-sweep-7-docker1` is legible about which kind it covers on its own.
+   * The k8s aspects above keep their `sliceN` names unchanged (D7).
+   */
+  { worker: "obs-td1", aspect: "docker1" },
+  { worker: "obs-td2", aspect: "docker2" },
+  { worker: "obs-tv1", aspect: "vm1" },
 ];
 
 /**
