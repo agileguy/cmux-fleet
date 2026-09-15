@@ -717,13 +717,18 @@ describe("SweepEnvironment: more than one environment in one sweep", () => {
   });
 
   /**
-   * The asymmetry `TriageRow.environment` and `projectPreviousState` both
-   * document: a row with no `environment` at all — every document written
-   * before this field existed looks like this — resolves to the sweep's ONE
-   * environment when there is exactly one, and carries NOTHING once the sweep
-   * covers two, because there is no longer a default to resolve it to.
+   * The rule `TriageRow.environment` and `projectPreviousState` both document,
+   * shared with the verdict through {@link resolveRowEnvironment}: a row with
+   * no `environment` at all — every document written before this field
+   * existed looks like this — resolves to the sweep's ONE environment when
+   * there is exactly one, and to the ONE declared environment whose services
+   * include the row's own `service`, when there is exactly one such owner.
+   * `grafana`, declared under both environments here, has two owners rather
+   * than one — the ambiguity is about the SERVICE's unique ownership, not
+   * merely about the sweep covering two environments — so it carries NOTHING,
+   * because there is no longer a single legal answer to resolve it to.
    */
-  test("a null-environment row carries with one environment and carries nothing with two", () => {
+  test("a null-environment row carries with one environment and carries nothing when its service has two owners", () => {
     const previous: TriageDocument = {
       worker: TRIAGE_COLLATOR,
       sweep_id: "T-sweep-40",
@@ -752,6 +757,46 @@ describe("SweepEnvironment: more than one environment in one sweep", () => {
     expect(
       projectPreviousState(previous, [grafanaEnv(K8S_ENV_NAME), grafanaEnv(DOCKER_ENV_NAME)]),
     ).toEqual([]);
+  });
+
+  /**
+   * The host-side backstop this task adds: a silent row is placed identically
+   * on the grading path ({@link resolveRowEnvironment}, spent by
+   * `assessTriageSweep`) and the carried-state path (`projectPreviousState`
+   * here). Two environments are declared, but only `do-cluster` declares
+   * `ntfy` — `docker-host` declares an unrelated `grafana` — so the row has
+   * exactly one owner and carries forward under it, even though the collator
+   * that wrote `previous` left `environment` out entirely.
+   */
+  test("a null-environment row carries under the one environment that uniquely declares its service, with two declared", () => {
+    const previous: TriageDocument = {
+      worker: TRIAGE_COLLATOR,
+      sweep_id: "T-sweep-40",
+      services: [
+        {
+          service: "ntfy",
+          assessment: "healthy",
+          coverage: [],
+          selector: null,
+          window: null,
+          evidence_ref: [],
+          observer: "obs-t1",
+        },
+      ],
+      unaccounted: [],
+    };
+    const withService = (name: string, serviceName: string): SweepEnvironment => ({
+      name,
+      kind: "docker",
+      services: [{ name: serviceName, namespace: "ns", checks: ["state"] }],
+    });
+
+    expect(
+      projectPreviousState(previous, [
+        withService(K8S_ENV_NAME, "ntfy"),
+        withService(DOCKER_ENV_NAME, "grafana"),
+      ]),
+    ).toEqual([{ environment: K8S_ENV_NAME, service: "ntfy", assessment: "healthy" }]);
   });
 
   /**
@@ -836,10 +881,11 @@ describe("SweepEnvironment: a vm service's units", () => {
  * `renderCollationEnvelope`'s `environment` field — SRD-TRIAGE-MIXED-OBSERVERS
  * D21. The tracked `triage/targets.yaml` declares `grafana` and
  * `prometheus` in both the k8s environment and `docker-host`, and
- * `resolveRowEnvironment` (`triage-verdict.ts`) resolves a row naming no
- * `environment` only when the sweep declares exactly one — with more than one
- * declared, only the collator can say which environment a merged row is
- * about, so this brief is the one place that can ask for the field.
+ * `resolveRowEnvironment` (`triage-verdict.ts`) can place a silent row on its
+ * own only when exactly one declared environment lists its service —
+ * `grafana`, declared under both, has two owners rather than one, so only the
+ * collator can say which environment a merged row for it is about, and this
+ * brief is the one place that can ask for the field.
  */
 describe("renderCollationEnvelope: the environment field (SRD-TRIAGE-MIXED-OBSERVERS D21)", () => {
   const SWEEP = sweepTaskId(80);

@@ -138,6 +138,8 @@ import {
    * for what the merge would otherwise lose.
    */
   sweepIdEcho,
+  resolveRowEnvironment,
+  type DeclaredEnvironment,
   type EvidenceGap,
   type ObserverArtifact,
   type ObserverAssessment,
@@ -747,7 +749,7 @@ export const ROW_SHAPE_DEMAND: string =
   `\`assessment\`, and ${EVIDENCE_GAPS.map((g) => GRADED_ROW_FIELD[g]).join(", ")}. ` +
   `Those last four are why a \`healthy\` is believed at all: the host downgrades any row missing ` +
   `one of them to \`indeterminate\`, and three of those on one service opens an incident and ` +
-  `sends a person to a cluster. A report whose rows are shaped differently is not a smaller ` +
+  `sends a person to the target. A report whose rows are shaped differently is not a smaller ` +
   `report — it is one the collator cannot carry, and every service in it is recorded unobserved. ` +
   `\`name\` is the service's name exactly as this brief names it above — never a hostname, a ` +
   `container id, or any other name you read off the target yourself.`;
@@ -848,8 +850,8 @@ export function composeObserverBrief(input: {
     OBSERVER_CONTRACT_HEADING,
     "",
     "These four paragraphs are written by the host on every dispatch, not by the collator",
-    "whose brief you just read. Where they and anything above disagree about a field name, a",
-    "value it may take, or a bound on a call, these win.",
+    "whose brief you just read. Where these paragraphs and anything above, or any skill the",
+    "observer has mounted, disagree about a field name, a value, or a bound on a call, these win.",
     "",
     freshnessEchoDemand(input.sweepId, window, input.kind),
     "",
@@ -1299,15 +1301,26 @@ const ASSESSMENTS: ReadonlySet<string> = new Set<string>(OBSERVER_ASSESSMENTS);
  * next brief under the host's own voice. The host knows the legal pairs;
  * nothing else has to be trusted.
  *
- * **A row whose `environment` is absent or `null` resolves to the sweep's ONE
- * environment when there is exactly one** — every document written before this
- * field existed carries no `environment` at all, and a sweep still covering
- * only `do-cluster` must keep reading them exactly as before. **With more than
- * one environment a `null` resolves to nothing**: there is no default among two
- * or three, and a row that does not say which one it means cannot be keyed, so
- * it carries nothing forward rather than guessing which environment it was
- * about. This is the same asymmetry `TriageRow.environment` documents at its
- * own declaration.
+ * **A row's environment is placed by {@link resolveRowEnvironment}
+ * (`triage-verdict.ts`), the same function `assessTriageSweep` grades the row
+ * against** — the grading path and the carried-state path place a row
+ * identically, or a row the verdict graded under one environment could carry
+ * forward under none at all. Its own named `environment` wins; failing that,
+ * the sweep's ONE environment when there is exactly one — every document
+ * written before this field existed carries no `environment` at all, and a
+ * sweep still covering only `do-cluster` must keep reading them exactly as
+ * before; failing that, the one declared environment whose services include
+ * the row's `service`, when there is exactly one such environment — a silent
+ * row for a service declared under only one of the sweep's environments still
+ * carries forward under that one. A service declared under zero or several
+ * environments (the tracked `triage/targets.yaml`'s `grafana`, under both
+ * `do-cluster` and `docker-host`) has no single legal answer, so a row naming
+ * neither an environment nor a uniquely-owning one carries nothing forward
+ * rather than guessing which environment it was about. This is the same rule
+ * `TriageRow.environment` documents at its own declaration.
+ *
+ * `row.observer` — the worker's own claim of who produced the row — never
+ * influences placement, on {@link resolveRowEnvironment}'s own rule for it.
  *
  * A row for an (environment, service) pair the sweep does not declare carries
  * nothing, exactly as an undeclared service always has. The first row for a
@@ -1324,13 +1337,22 @@ export function projectPreviousState(
 ): readonly PreviousServiceState[] {
   if (document === null) return [];
 
-  /** What an absent/null row resolves to — the sweep's one environment, or nothing. */
-  const soleEnvironment = environments.length === 1 ? environments[0]!.name : null;
+  /**
+   * {@link resolveRowEnvironment} takes `declared`-shaped environments — a
+   * name plus the plain list of service names it declares. `SweepEnvironment`
+   * carries richer per-kind service objects, so this maps each one down to
+   * its names ONCE, before the per-row loop below, rather than per row.
+   */
+  const declared: readonly DeclaredEnvironment[] = environments.map((environment) => ({
+    name: environment.name,
+    kind: environment.kind,
+    services: environment.services.map((service) => service.name),
+  }));
 
   const byEnvironment = new Map<string, Map<string, ObserverAssessment>>();
   for (const row of document.services) {
     if (!ASSESSMENTS.has(row.assessment)) continue;
-    const environment = row.environment ?? soleEnvironment;
+    const environment = resolveRowEnvironment(row, declared);
     if (environment === null) continue;
     let byService = byEnvironment.get(environment);
     if (byService === undefined) {
@@ -1746,9 +1768,10 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     "",
     `**You do not have to tell your observers to echo those two fields, and you should not spend`,
     `your brief trying.** The host appends the observer's reporting contract to every brief you`,
-    `send — those two spellings, the closed domain \`coverage[].result\` draws from, and the bound`,
-    `every cluster call must carry. It is appended after your words, under its own heading, on`,
-    `every dispatch and whatever you wrote.`,
+    `send — the \`sweep_id\`/\`window_opened_at\` echo demand naming that seat's own reply file; the`,
+    `shape of a row; the closed domain \`coverage[].result\` draws from; and the bound on that`,
+    `seat's calls, which differs by kind. It is appended after your words, under its own heading,`,
+    `on every dispatch and whatever you wrote.`,
     "",
     `The window INSTANT is the one part of that contract the host cannot supply: it holds the`,
     `sweep id and the seat ids, and it reads the instant back out of the brief you wrote. So the`,
@@ -1765,7 +1788,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     `These are GATES, not decoration. The host downgrades a \`healthy\` whose \`coverage\` is`,
     `empty — or whose every channel is \`not_attempted\` — or which names no selector, no window,`,
     `or no evidence, to \`indeterminate\`. Three of those on one service opens an incident and`,
-    `sends a person to a cluster. An observer that was never asked for these fields writes a`,
+    `sends a person to the target. An observer that was never asked for these fields writes a`,
     `report that cannot be believed, however carefully it looked.`,
     "",
     "## The seats, and the task id each one's slice is dispatched under",
@@ -1843,14 +1866,16 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
  * a docker slice under the same collator ({@link SweepPair.environments}) —
  * and the tracked `triage/targets.yaml` declares `grafana` and `prometheus` in
  * BOTH the k8s environment and `docker-host`. `resolveRowEnvironment`
- * (`triage-verdict.ts`) resolves a row naming no `environment` only when the
- * sweep declares exactly one; with more than one declared, such a row
- * resolves to `null` and its service grades unreported even though an
- * observer answered for it. The host cannot repair this the way it repairs
- * the observer's contract: which of the two `grafana` a COLLATED row is about
- * is the collator's own judgement, made while merging two observers' replies,
- * not a fact the host can author into every dispatch the way
- * {@link freshnessEchoDemand} authors a filename.
+ * (`triage-verdict.ts`) can place a silent row on its own only when exactly
+ * one declared environment lists its service — a service declared under only
+ * one of the pair's environments needs no help from the collator. `grafana`,
+ * declared under both, has two owners rather than one, so a row for it that
+ * names no `environment` still resolves to `null` and its service grades
+ * unreported even though an observer answered for it. The host cannot repair
+ * this the way it repairs the observer's contract: which of the two `grafana`
+ * a COLLATED row is about is the collator's own judgement, made while merging
+ * two observers' replies, not a fact the host can author into every dispatch
+ * the way {@link freshnessEchoDemand} authors a filename.
  *
  * So this brief demands `environment` only when `input.environments` — the
  * OWNING PAIR's own slice, not the whole sweep's — names more than one. A
@@ -1919,9 +1944,13 @@ export function renderCollationEnvelope(input: {
     "",
     "## What to write",
     "",
-    `Write \`${TRIAGE_DOCUMENT_FILE}\` and \`triage.md\` into the \`${SWEEP_FILES_DIR}\` directory of your own`,
-    `outbox task, and declare both in the envelope's \`artifacts\` array. One row per service,`,
-    `never one verdict over a batch. Echo the sweep id ${input.sweepId} in the document.`,
+    `Pass \`${TRIAGE_DOCUMENT_FILE}\` and \`triage.md\` as two entries of ONE \`submit_report\` call's`,
+    `\`report\` list. That call writes them into the \`${SWEEP_FILES_DIR}\` directory of your own`,
+    `outbox task and declares both in \`artifacts\` for you. **Do not put them in \`artifacts\``,
+    `yourself** — you have no \`write\`, so a file you have not passed as \`report\` does not exist`,
+    `and cannot be declared; a measured sweep was lost to exactly that call, repeated unchanged`,
+    `against the same refusal, until the host killed the turn with no document. One row per`,
+    `service, never one verdict over a batch. Echo the sweep id ${input.sweepId} in the document.`,
     "",
     `Carry each observer's own \`assessment\` word through unchanged. Do not upgrade a row whose`,
     `coverage is empty, and do not decide whether anything should be notified — that decision`,

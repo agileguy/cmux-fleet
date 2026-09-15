@@ -303,18 +303,23 @@ export interface TriageRow {
    * The environment this row is about, spelled as the envelope names it —
    * SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
    *
-   * A service name alone stops being unique the moment one sweep covers two
+   * A service name alone can stop being unique once one sweep covers two
    * environments: the tracked `triage/targets.yaml` declares a `grafana` and a
-   * `prometheus` under both `do-cluster` and `docker-host`. The row, not the
-   * host, has to say which one it means, because the collator writes both rows
-   * into one document and nothing else on the row separates them.
+   * `prometheus` under both `do-cluster` and `docker-host`. When a name is
+   * declared under more than one, the row, not the host, has to say which one
+   * it means, because the collator writes both rows into one document and
+   * nothing else on the row separates them.
    *
    * OPTIONAL for the reason `note` is: a sweep over ONE environment has exactly
    * one legal answer, so an absent value resolves to that environment and every
    * existing single-environment document stays valid. A sweep over more than one
-   * environment has no default, and a row without it cannot be keyed. Resolving
-   * it is the verdict's job, not the parser's; `parseTriageDocument` only checks
-   * the spelling and `.default(null)`s the key.
+   * environment falls back to {@link resolveRowEnvironment}'s other rule: a
+   * silent row resolves to the one declared environment whose services include
+   * `row.service`, when there is exactly one such environment. A service
+   * declared under zero or several environments has no default, and a row
+   * naming neither an environment nor a uniquely-owning one cannot be keyed.
+   * Resolving it is the verdict's job, not the parser's; `parseTriageDocument`
+   * only checks the spelling and `.default(null)`s the key.
    */
   readonly environment?: string | null;
 }
@@ -1294,6 +1299,18 @@ function censusLabel(environment: string, service: string, declaredEnvironments:
  * collator that leaves out the `environment` its brief asks for has a
  * host-side backstop rather than a single point of failure.
  *
+ * **Exported so the grading path and the carried-state path place a row
+ * identically.** `assessTriageSweep` (below) grades a row against this
+ * function's answer; `projectPreviousState` (`triage-envelope.ts`) carries a
+ * row into the NEXT sweep's brief against the same answer. Two
+ * implementations of "where does this row belong" would be two rules, and a
+ * row the verdict graded under one environment carrying forward under none —
+ * or a different one — is exactly the drift a single exported function
+ * closes off. `SweepEnvironment` (the envelope's own shape) carries richer
+ * per-kind service objects than {@link DeclaredEnvironment} does, so that
+ * caller maps its own environments down to `{name, kind, services: string[]}`
+ * once before calling, rather than this function taking on a second shape.
+ *
  * `row.environment`, verbatim, whenever the worker named one — WHETHER OR NOT
  * `declared` contains it. Resolution and declaration are separate questions,
  * on the same argument this function's caller already makes for `row.service`:
@@ -1329,7 +1346,7 @@ function censusLabel(environment: string, service: string, declaredEnvironments:
  * exists — more than one candidate, or none, so there is no single legal
  * guess, which is the row's own docblock's *"never guessed"*.
  */
-function resolveRowEnvironment(
+export function resolveRowEnvironment(
   row: TriageRow,
   declared: readonly DeclaredEnvironment[],
 ): string | null {

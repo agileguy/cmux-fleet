@@ -250,7 +250,7 @@ them is work that is thrown away — the host appends its own copy whether or no
 and where the two disagree about a field name, a permitted value or a bound, the host's copy is
 the one the observer is told to obey. Spend the words on the slice instead. **The window
 instant above is the exception and that is why it is still yours**: it is the only part of
-those three paragraphs the host quotes from your text rather than from its own state.
+those four paragraphs the host quotes from your text rather than from its own state.
 
 Then tell the observer how to report, because the failure is silent in every direction:
 
@@ -489,10 +489,11 @@ does not exist.
 - **`environment` names which of your envelope's environments this row is about, and whether
   you may omit it depends on how many your envelope named.** With ONE environment, omitting it
   is legal — the host resolves the omission to that one environment, so every document written
-  before this field existed stays valid. With MORE than one, omitting it breaks the row:
-  `do-cluster` and `docker-host` in the tracked `triage/targets.yaml` can each declare a
-  `grafana` and a `prometheus`, and a row that does not say which one it is about cannot be told
-  from the other's. **Spell it exactly as your envelope names that environment, never the
+  before this field existed stays valid. With MORE than one, name it anyway: the host can place
+  a silent row only when exactly one environment declares its service, so a name declared in two
+  environments — `do-cluster` and `docker-host` in the tracked `triage/targets.yaml` can each
+  declare a `grafana` and a `prometheus` — cannot be placed at all, and the row is lost rather
+  than misattributed. **Spell it exactly as your envelope names that environment, never the
   `(kind)` shown beside it** — your envelope tells you the field is required, and the legal
   spellings, directly, whenever it needs this field at all.
 - **`assessment` is the observer's word, carried through — never a word of your own.** Copy
