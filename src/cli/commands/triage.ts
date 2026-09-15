@@ -116,12 +116,7 @@ import {
 } from "../../run/paths.ts";
 import { readBudgetState, readTaskRecord } from "../../run/state.ts";
 import { processStartTime } from "../../run/registry.ts";
-import {
-  collationTaskId,
-  sweepNumber,
-  sweepTaskId,
-  TRIAGE_CONSOLE_ASPECTS,
-} from "../../run/task-ids.ts";
+import { collationTaskId, sweepNumber, sweepTaskId } from "../../run/task-ids.ts";
 import {
   TRIAGE_CONSOLE_ROSTER,
   readDispatchRequest,
@@ -1359,14 +1354,14 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
      * Docker and vm environments are validated HERE — `environmentsByKind` runs
      * the refusals above over all three kinds, so a mixed-kind targets file with
      * two docker environments or no k8s one is refused before a sweep is ever
-     * opened. This call site still sweeps only the k8s environment: the envelope,
-     * the declared list and `triagePass`'s environment facts all cover it alone
-     * until Phase 4 widens this site — the per-kind partition (task 4.1) and the
-     * `(environment, service)` keying (task 4.1b). `SweepEnvelopeInput` and
-     * `TriagePassDeps` already take lists of environments, which is the seam
-     * Phase 4 grows into.
+     * opened. This call site now sweeps every kind `environmentsByKind` finds
+     * present, task 4.2's last step: the envelope (`sweepEnvironments` below),
+     * the declared list and `triagePass`'s environment facts all cover k8s,
+     * docker (when declared) and vm (when declared), in that order — the
+     * per-kind partition (task 4.1) and the `(environment, service)` keying
+     * (task 4.1b) already read a list this wide.
      */
-    const { k8s } = environmentsByKind(pair.targets.environments);
+    const { k8s, docker, vm } = environmentsByKind(pair.targets.environments);
     const { name: environment, environment: target } = k8s;
 
     /*
@@ -1375,43 +1370,62 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
      * **This was positional pairing until 2026-09-13 and deliberately is not any
      * more.** The text here used to call "collator `i` owns aspect seat `i`" the
      * invariant the whole design rests on, and with two collators over one seat
-     * each it was. The console now runs ONE collator over THREE observers, so
-     * there is no pairing left to assert: `tri-1` is shown every seat in
-     * `TRIAGE_CONSOLE_ASPECTS` and decides the partition across them itself.
+     * each it was. The console now runs ONE collator over up to SIX observers —
+     * three k8s, two docker, one vm — so there is no pairing left to assert:
+     * `tri-1` is shown every seat whose kind this sweep declares
+     * (`seatsForEnvironments`, below) and decides the partition across them
+     * itself.
      *
      * Splitting both lists by `collators.length` keeps this general rather than
      * hard-coding the one. At a count of 1 it is the identity — every seat and
-     * every service to the single collator — and if a second collator is ever
-     * added back it divides seats and services the same way, front-loaded, with
-     * no second code path to discover. `evenSlices` is already the function that
-     * says "as even as the count allows" (operator, 2026-09-12).
+     * every service of every present kind to the single collator — and if a
+     * second collator is ever added back it divides seats and services the same
+     * way, front-loaded, with no second code path to discover. `evenSlices` is
+     * already the function that says "as even as the count allows" (operator,
+     * 2026-09-12).
      *
-     * WHAT THE HOST STILL DOES AND WHAT IT NO LONGER DOES: it hands `tri-1` the
-     * whole environment and checks the union that comes back. It does NOT decide
-     * which observer gets which service — that is §6.5's ⌈N/3⌉, *"the partition
-     * is the triage worker's to make"*, and `checkTriagePartition` refuses an
-     * incomplete or duplicated partition without refusing a lopsided one.
+     * WHAT THE HOST STILL DOES AND WHAT IT NO LONGER DOES: it hands `tri-1`
+     * every present environment whole and checks the union that comes back, per
+     * kind. It does NOT decide which observer gets which service — that is
+     * §6.5's ⌈N/3⌉, *"the partition is the triage worker's to make"*, and
+     * `checkTriagePartition` refuses an incomplete or duplicated partition
+     * without refusing a lopsided one.
      *
      * `declared` below stays the WHOLE list for the reason it always did: it is
      * what the union is counted against, so §6.5's question — *"is this a
-     * partition OF the declared set?"* — is asked once over the environment
-     * rather than degrading into per-slice checks that could each pass while a
+     * partition OF the declared set?"* — is asked once per environment rather
+     * than degrading into per-slice checks that could each pass while a
      * service fell down the gap between them.
      */
     const collators = TRIAGE_CONSOLE_ROSTER.collators;
-    const slices = evenSlices(target.services, collators.length);
     /*
-     * THE WHOLE SWEEP'S environments — still the ONE k8s environment until
-     * task 4.2's last step widens this call site to every kind
-     * `environmentsByKind` finds present (SRD-TRIAGE-MIXED-OBSERVERS §5, 5.1). Named once so `seatShares`
-     * below and `buildTriageSweepDriver`'s `environments` deps read the same
-     * value rather than two call sites each spelling `{name: environment,
-     * kind: "k8s"}` and risking the two disagreeing about which kind a seat
-     * belongs to.
+     * THE WHOLE SWEEP'S environments — every kind `environmentsByKind` finds
+     * present, k8s always and docker/vm when the targets file declares them
+     * (SRD-TRIAGE-MIXED-OBSERVERS §5, §6.1, task 4.2's last step). Named once
+     * so `declared` below, `seatShares` and `buildTriageSweepDriver`'s
+     * `environments` deps all read the SAME value rather than three call sites
+     * each re-deriving which kinds are present and risking two of them
+     * disagreeing about which environments this sweep actually covers.
      */
-    const sweepEnvironments: readonly SweepEnvironment[] = [
-      { name: environment, kind: "k8s", services: target.services },
+    const declaredEnvironments: readonly (SweepEnvironment | null)[] = [
+      { name: k8s.name, kind: "k8s", services: k8s.environment.services },
+      docker === null
+        ? null
+        : { name: docker.name, kind: "docker", services: docker.environment.services },
+      vm === null ? null : { name: vm.name, kind: "vm", services: vm.environment.services },
     ];
+    const sweepEnvironments: readonly SweepEnvironment[] = declaredEnvironments.filter(
+      (e): e is SweepEnvironment => e !== null,
+    );
+    /*
+     * EACH ENVIRONMENT'S OWN `evenSlices` SHARE, by collator count. One
+     * collator's `SweepPair` carries a slice of EVERY sweep environment, not
+     * one flat services list, because two environments can each declare a
+     * `grafana` (D21) and only keeping them apart per environment lets
+     * `evenSlices` divide each one on its own terms rather than one shared
+     * list that loses which environment a service came from.
+     */
+    const environmentShares = sweepEnvironments.map((e) => evenSlices(e.services, collators.length));
     /*
      * ONLY THE SEATS OF THE KINDS THIS SWEEP DECLARES, task 4.2's fix for the
      * trap task 4.1 left standing. `TRIAGE_CONSOLE_ASPECTS` names all six
@@ -1420,30 +1434,37 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
      * dispatched under, and since task 4.1 a collator handing a k8s service
      * to one of them is refused whole for a kind mismatch it never had a
      * service for. `seatsForEnvironments` (`triage-envelope.ts`) answers with
-     * only the three k8s seats today; it grows with `sweepEnvironments` above
-     * once this call site dispatches docker and vm.
+     * only the seats of the kinds `sweepEnvironments` names — the three k8s
+     * seats alone when the targets file declares only k8s, and every present
+     * kind's seats once docker or vm join it.
      */
     const seatShares = evenSlices(seatsForEnvironments(sweepEnvironments), collators.length);
     const sweepPairs = collators.map((collator, i) => ({
       collator,
       seats: seatShares[i] ?? [],
-      environments: [
-        { name: environment, kind: "k8s" as const, services: slices[i] ?? [] },
-      ] satisfies SweepEnvironment[],
+      environments: sweepEnvironments.map((e, envIndex) => ({
+        name: e.name,
+        kind: e.kind,
+        services: environmentShares[envIndex]?.[i] ?? [],
+      })) satisfies SweepEnvironment[],
     }));
 
     const outcome = await triagePass({
       environment,
       /*
-       * Exactly the environments this sweep covers, today the one k8s
-       * environment; the next round widens it to every kind
-       * `environmentsByKind` finds present. A fact for an environment nobody
+       * Exactly the environments this sweep covers — every kind
+       * `environmentsByKind` found present, mapped from `sweepEnvironments`
+       * above so the two cannot disagree. A fact for an environment nobody
        * swept would be a clear citing a sweep that never looked (§6.8's
        * asymmetry). Services stay in FILE order, which `checkTriagePartition`
        * compares against: sorting would make `partition_incomplete`'s list
        * disagree with the file an operator is about to open.
        */
-      declared: [{ name: environment, kind: "k8s", services: target.services.map((s) => s.name) }],
+      declared: sweepEnvironments.map((e) => ({
+        name: e.name,
+        kind: e.kind,
+        services: e.services.map((s) => s.name),
+      })),
       /*
        * §7.4's legal window range, assembled from the two files that fix it —
        * the targets file supplies `default_window` (already seconds) and §7.8
