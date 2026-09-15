@@ -14,19 +14,34 @@
  *     and the printf prefix are typed here, as the Docker twin types them
  *  3. every numeric/shape cap the skill states — the `journal`/`kernel` `lines=` ceiling, the
  *     unit-name byte cap, the `since=` digit-count ceiling and its no-leading-zero first digit,
- *     the `priority=` digit range, and `disk`'s `timeout` bound — equals what the script enforces
- *     or runs, each value read from both files rather than hard-coded here
- *  4. every extraction proves it found something before it is used, so a moved heading or a
+ *     the `priority=` digit range (compared to the script's bracket expression digit for digit,
+ *     not by endpoints alone, so a bracket missing an interior digit cannot pass), and `disk`'s
+ *     `timeout` bound — equals what the script enforces or runs, each value read from both files
+ *     rather than hard-coded here
+ *  4. the exit table's third column ("What the row says") names only real schema members —
+ *     `ObserverCoverageResultSchema`, `ObserverAssessmentSchema` and `ObserverVmChannelSchema`
+ *     (`src/harvest/observer-target-artifacts.ts`) and `StatusSchema` (`src/contracts.ts`),
+ *     imported rather than retyped here. The table's first-match order is pinned too: the
+ *     journal-permission row sits above the `0` row, and "anything else" is last
+ *  5. `docker/observe-ssh` prints `observe-ssh: refused before ssh ran`, and the skill quotes it —
+ *     pinned here as well as by `observer-docker-docs-currency.test.ts`, because the shim is
+ *     common to both roles
+ *  6. the skill's per-token byte cap and its derived `unit=` ceiling equal `is_argument()`'s real
+ *     `-le` bound in `docker/observe-ssh`, read from that function's own body, not typed here
+ *  7. every extraction proves it found something before it is used, so a moved heading or a
  *     rewritten sentence fails loudly instead of letting a comparison pass on an empty set
- *
- * Not covered: `docker/observe-ssh`'s own refusal text (`observe-ssh: refused before ssh ran`) —
- * that shim is shared with `observer-docker-ops` and is already pinned by
- * `observer-docker-docs-currency.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
+import {
+  ObserverAssessmentSchema,
+  ObserverCoverageResultSchema,
+  ObserverVmChannelSchema,
+} from "../../src/harvest/observer-target-artifacts.ts";
+import { StatusSchema } from "../../src/contracts.ts";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const read = (p: string): string => readFileSync(join(ROOT, p), "utf8");
@@ -35,11 +50,13 @@ const SKILL_PATH = "skills/observer-vm-ops/SKILL.md";
 const FORCED_COMMAND_PATH = "scripts/observe/vm-forced-command";
 const ROLE_PATH = "roles/observer-vm.md";
 const USAGE_PATH = "docker/observe-vm";
+const OBSERVE_SSH_PATH = "docker/observe-ssh";
 
 const SKILL = read(SKILL_PATH);
 const FORCED_COMMAND = read(FORCED_COMMAND_PATH);
 const ROLE = read(ROLE_PATH);
 const USAGE = read(USAGE_PATH);
+const OBSERVE_SSH = read(OBSERVE_SSH_PATH);
 
 // -----------------------------------------------------------------------------
 // 1. verb set: the forced command's `case` arms vs. the skill, the role and the usage text
@@ -344,11 +361,11 @@ function diskSecondsMentionsFromSkill(src: string): number[] {
   return nums;
 }
 
-describe("the skill's lines= cap matches is_lines()'s real upper bound", () => {
-  test("every 'M <= N' / '1 to N' / 'capped at N' statement equals the script's real cap", () => {
+describe("the skill's lines= cap matches the literal 3-digit case arm inside is_lines() — the real accept/reject boundary (500 accepted, 501 refused) is pinned by observe-vm-forced-command.test.ts", () => {
+  test("every 'M <= N' / '1 to N' / 'capped at N' statement equals the case arm's literal", () => {
     const real = linesCapFromScript(FORCED_COMMAND);
     for (const stated of linesCapMentionsFromSkill(SKILL)) {
-      expect(stated, `the skill states a lines= cap of ${stated}, is_lines() enforces ${real}`).toBe(real);
+      expect(stated, `the skill states a lines= cap of ${stated}, is_lines()'s case arm reads ${real}`).toBe(real);
     }
   });
 });
@@ -378,7 +395,7 @@ describe("the skill's since= digit-count ceiling and no-leading-zero first digit
     );
   });
 
-  test("the real first-digit charset excludes '0' — since=0s is genuinely refused by the script, not just described that way", () => {
+  test("is_since_n()'s first-digit charset literal, read as text, excludes '0' — since=0s's actual refusal by the running script is pinned by observe-vm-forced-command.test.ts, not here", () => {
     const charset = sinceFirstDigitCharsetFromScript(FORCED_COMMAND);
     expect(charset.includes("0"), `is_since_n()'s first-digit charset "${charset}" includes '0'`).toBe(false);
   });
@@ -388,16 +405,25 @@ describe("the skill's since= digit-count ceiling and no-leading-zero first digit
   });
 });
 
-describe("the skill's priority= digit range matches is_priority()'s real bracket expression", () => {
-  test("every stated low-high pair equals the script's real bounds", () => {
+/** Expands an inclusive digit-range pair like ["0", "7"] into its full ascending digit string, "01234567". A partial bracket such as "0347" is a DIFFERENT string from the full expansion of "0"-"7" and fails an exact comparison against it, where an endpoints-only comparison would not. */
+function expandDigitRange(low: string, high: string): string {
+  const lo = Number(low);
+  const hi = Number(high);
+  expect(lo, `cannot expand a digit range starting at "${low}"`).toBeLessThanOrEqual(hi);
+  let out = "";
+  for (let d = lo; d <= hi; d++) out += String(d);
+  return out;
+}
+
+describe("the skill's priority= digit range matches is_priority()'s real bracket expression, digit for digit", () => {
+  test("every stated range, expanded to its full digit string, equals the script's real bracket-expression digits", () => {
     const chars = priorityCharsFromScript(FORCED_COMMAND);
-    const realLow = chars[0]!;
-    const realHigh = chars[chars.length - 1]!;
     for (const [low, high] of priorityRangeMentionsFromSkill(SKILL)) {
+      const expanded = expandDigitRange(low, high);
       expect(
-        [low, high],
-        `the skill states a priority range of ${low}-${high}, is_priority() enforces ${realLow}-${realHigh}`,
-      ).toEqual([realLow, realHigh]);
+        expanded,
+        `the skill states a priority range of ${low}-${high} (full digit string "${expanded}"), is_priority()'s bracket expression is "${chars}"`,
+      ).toBe(chars);
     }
   });
 });
@@ -413,5 +439,247 @@ describe("the skill's disk timeout bound matches the script's real exec line", (
   test("the skill's disk row's quoted command exactly matches the script's real exec line", () => {
     const real = diskTimeoutFromScript(FORCED_COMMAND);
     expect(SKILL).toContain(`\`timeout ${real} df -P -k\``);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 4. the exit table: its third column names only real enum members, and its
+//    first-match order is pinned
+// -----------------------------------------------------------------------------
+
+/**
+ * The exit table's own data rows, `skills/observer-vm-ops/SKILL.md`'s
+ * "## Calling the target, and reading its exit" section, sliced from directly
+ * after the header row to directly before the section's own closing bold
+ * paragraph ("**The unreachable rule...") so a mutation elsewhere in the file
+ * cannot satisfy anything below by accident. Every row here has exactly three
+ * data columns (measured: every `|`-starting line in this slice splits into 5
+ * pieces on `|`, the leading and trailing pieces empty), so column 3 — "What
+ * the row says" — is always `cols[3]`. The separator row (`|---|---|---|`) is
+ * dropped; it has the same column count but no letters.
+ */
+function exitTableRows(src: string): Array<{ full: string; rowSays: string }> {
+  const heading = "| Exit | What it means | What the row says |";
+  const headingAt = src.indexOf(heading);
+  expect(headingAt, "the skill's exit table header is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const after = src.slice(headingAt + heading.length);
+  const endMarker = "**The unreachable rule";
+  const endAt = after.indexOf(endMarker);
+  expect(endAt, "the 'The unreachable rule' paragraph after the exit table is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const tableBlock = after.slice(0, endAt);
+  const pipeLines = tableBlock.split("\n").filter((l) => l.trim().startsWith("|"));
+  const dataLines = pipeLines.filter((l) => !/^\s*\|[\s-]*\|[\s-]*\|[\s-]*\|\s*$/.test(l));
+  expect(dataLines.length, "no exit-table data rows found below the header — the extractor has rotted").toBeGreaterThanOrEqual(14);
+  return dataLines.map((line) => {
+    const cols = line.split("|");
+    expect(cols.length, `an exit-table row does not split into exactly 3 '|'-delimited data columns: ${JSON.stringify(line)}`).toBe(5);
+    return { full: line, rowSays: cols[3]! };
+  });
+}
+
+/** Every (channel, result) pair from "the `<channel>` channel is `<result>`" in one row's third column. */
+function channelIsPairs(rowSays: string): Array<[string, string]> {
+  return [...rowSays.matchAll(/the `([a-z]+)` channel is `([a-z_]+)`/g)].map((m) => [m[1]!, m[2]!] as [string, string]);
+}
+
+/** Every (channel, result) pair from "the `<channel>` coverage is `<result>`". */
+function coverageIsPairs(rowSays: string): Array<[string, string]> {
+  return [...rowSays.matchAll(/the `([a-z]+)` coverage is `([a-z_]+)`/g)].map((m) => [m[1]!, m[2]!] as [string, string]);
+}
+
+/** Every bare (channel, result) pair from "`<channel>` is `<result>`" — no "channel"/"coverage" word between the closing backtick and "is", so this cannot double-match the two patterns above. */
+function bareIsPairs(rowSays: string): Array<[string, string]> {
+  return [...rowSays.matchAll(/`([a-z]+)`\s+is\s+`([a-z_]+)`/g)].map((m) => [m[1]!, m[2]!] as [string, string]);
+}
+
+/** Every bare coverage-result token from "the channel is `<result>`" / "that channel is `<result>`" — no channel name given, so only the result half is checkable. */
+function genericChannelResultTokens(rowSays: string): string[] {
+  return [...rowSays.matchAll(/\b(?:the|that) channel is `([a-z_]+)`/g)].map((m) => m[1]!);
+}
+
+/** Every task-status token from "the task status is `<status>`". */
+function taskStatusTokens(rowSays: string): string[] {
+  return [...rowSays.matchAll(/the task status is `([a-z]+)`/g)].map((m) => m[1]!);
+}
+
+/** Every (assessment, coverage-result) pair from "`<assessment>` with coverage `<result>`". */
+function assessmentWithCoveragePairs(rowSays: string): Array<[string, string]> {
+  return [...rowSays.matchAll(/`([a-z]+)` with coverage `([a-z_]+)`/g)].map((m) => [m[1]!, m[2]!] as [string, string]);
+}
+
+/** Every assessment token from "the row is `<assessment>`". */
+function rowIsAssessmentTokens(rowSays: string): string[] {
+  return [...rowSays.matchAll(/\bthe row is `([a-z]+)`/g)].map((m) => m[1]!);
+}
+
+describe("the exit table's third-column tokens are real enum members, imported from source", () => {
+  const VM_CHANNELS = new Set<string>(ObserverVmChannelSchema.options);
+  const COVERAGE_RESULTS = new Set<string>(ObserverCoverageResultSchema.options);
+  const ASSESSMENTS = new Set<string>(ObserverAssessmentSchema.options);
+  const STATUSES = new Set<string>(StatusSchema.options);
+
+  function rowsSays(): string[] {
+    return exitTableRows(SKILL).map((r) => r.rowSays);
+  }
+
+  test("every 'the <channel> channel is <result>' pair names real enum members", () => {
+    const pairs = rowsSays().flatMap(channelIsPairs);
+    expect(pairs.length, "no 'the <channel> channel is <result>' pairs matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(2);
+    for (const [channel, result] of pairs) {
+      expect(VM_CHANNELS.has(channel), `the exit table names channel "${channel}", which is not a member of ObserverVmChannelSchema (${[...VM_CHANNELS].join(", ")})`).toBe(true);
+      expect(COVERAGE_RESULTS.has(result), `the exit table states the ${channel} channel is "${result}", which is not a member of ObserverCoverageResultSchema (${[...COVERAGE_RESULTS].join(", ")})`).toBe(true);
+    }
+  });
+
+  test("every 'the <channel> coverage is <result>' pair names real enum members", () => {
+    const pairs = rowsSays().flatMap(coverageIsPairs);
+    expect(pairs.length, "no 'the <channel> coverage is <result>' pairs matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(2);
+    for (const [channel, result] of pairs) {
+      expect(VM_CHANNELS.has(channel), `the exit table names channel "${channel}", which is not a member of ObserverVmChannelSchema (${[...VM_CHANNELS].join(", ")})`).toBe(true);
+      expect(COVERAGE_RESULTS.has(result), `the exit table states a ${channel} coverage result of "${result}", which is not a member of ObserverCoverageResultSchema (${[...COVERAGE_RESULTS].join(", ")})`).toBe(true);
+    }
+  });
+
+  test("the bare '<channel> is <result>' pair names real enum members", () => {
+    const pairs = rowsSays().flatMap(bareIsPairs);
+    expect(pairs.length, "no bare '<channel> is <result>' pair matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(1);
+    for (const [channel, result] of pairs) {
+      expect(VM_CHANNELS.has(channel), `the exit table names channel "${channel}", which is not a member of ObserverVmChannelSchema (${[...VM_CHANNELS].join(", ")})`).toBe(true);
+      expect(COVERAGE_RESULTS.has(result), `the exit table states "${channel}" is "${result}", which is not a member of ObserverCoverageResultSchema (${[...COVERAGE_RESULTS].join(", ")})`).toBe(true);
+    }
+  });
+
+  test("every generic '(the|that) channel is <result>' token names a real coverage result", () => {
+    const tokens = rowsSays().flatMap(genericChannelResultTokens);
+    expect(tokens.length, "no generic '(the|that) channel is <result>' tokens matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(4);
+    for (const result of tokens) {
+      expect(COVERAGE_RESULTS.has(result), `the exit table states a channel result of "${result}", which is not a member of ObserverCoverageResultSchema (${[...COVERAGE_RESULTS].join(", ")})`).toBe(true);
+    }
+  });
+
+  test("every 'the task status is <status>' token names a real task status", () => {
+    const tokens = rowsSays().flatMap(taskStatusTokens);
+    expect(tokens.length, "no 'the task status is <status>' tokens matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(5);
+    for (const status of tokens) {
+      expect(STATUSES.has(status), `the exit table states a task status of "${status}", which is not a member of StatusSchema (${[...STATUSES].join(", ")})`).toBe(true);
+    }
+  });
+
+  test("every '<assessment> with coverage <result>' pair names real enum members", () => {
+    const pairs = rowsSays().flatMap(assessmentWithCoveragePairs);
+    expect(pairs.length, "no '<assessment> with coverage <result>' pairs matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(4);
+    for (const [assessment, result] of pairs) {
+      expect(ASSESSMENTS.has(assessment), `the exit table names assessment "${assessment}", which is not a member of ObserverAssessmentSchema (${[...ASSESSMENTS].join(", ")})`).toBe(true);
+      expect(COVERAGE_RESULTS.has(result), `the exit table states coverage "${result}" alongside assessment ${assessment}, which is not a member of ObserverCoverageResultSchema (${[...COVERAGE_RESULTS].join(", ")})`).toBe(true);
+    }
+  });
+
+  test("every 'the row is <assessment>' token names a real assessment", () => {
+    const tokens = rowsSays().flatMap(rowIsAssessmentTokens);
+    expect(tokens.length, "no 'the row is <assessment>' tokens matched in the exit table — the extractor has rotted").toBeGreaterThanOrEqual(5);
+    for (const assessment of tokens) {
+      expect(ASSESSMENTS.has(assessment), `the exit table states the row is "${assessment}", which is not a member of ObserverAssessmentSchema (${[...ASSESSMENTS].join(", ")})`).toBe(true);
+    }
+  });
+});
+
+describe("the exit table's first-match order is pinned", () => {
+  test("the journal-permission row sits above the `0` row", () => {
+    const rows = exitTableRows(SKILL).map((r) => r.full);
+    const permissionIdx = rows.findIndex((r) => r.includes("No journal files were opened due to insufficient permissions."));
+    const zeroIdx = rows.findIndex((r) => /^\|\s*`0`\s*\|/.test(r));
+    expect(permissionIdx, "the journal-permission row is missing from the exit table — this probe has rotted").toBeGreaterThanOrEqual(0);
+    expect(zeroIdx, "the `0` row is missing from the exit table — this probe has rotted").toBeGreaterThanOrEqual(0);
+    expect(
+      permissionIdx,
+      `the journal-permission row (position ${permissionIdx}) must sit above the \`0\` row (position ${zeroIdx}) — the table is read top to bottom, first match wins`,
+    ).toBeLessThan(zeroIdx);
+  });
+
+  test("the 'anything else' row is last", () => {
+    const rows = exitTableRows(SKILL).map((r) => r.full);
+    const lastRow = rows[rows.length - 1]!;
+    expect(lastRow.includes("anything else"), `the exit table's last row is not the 'anything else' row: ${JSON.stringify(lastRow)}`).toBe(true);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 5. observe-ssh's own refusal wording, pinned here too
+// -----------------------------------------------------------------------------
+
+describe("the skill quotes observe-ssh's own refusal text, and observe-ssh actually prints it", () => {
+  const NEEDLE = "observe-ssh: refused before ssh ran";
+
+  test("the skill quotes it", () => {
+    expect(SKILL).toContain(NEEDLE);
+  });
+
+  test("docker/observe-ssh actually prints it", () => {
+    // CONTROL: read straight from source, so a rewritten refuse() that drops
+    // the phrase turns this red rather than the assertion above alone (which
+    // the skill's own text could satisfy by coincidence if this test did not
+    // also read the shim).
+    expect(OBSERVE_SSH).toMatch(/printf 'observe-ssh: refused before ssh ran: /);
+    expect(OBSERVE_SSH).toContain(NEEDLE);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 6. the per-token byte cap: derived from is_argument(), not typed here
+// -----------------------------------------------------------------------------
+
+/**
+ * The real per-token byte cap: the numeric literal in `is_argument()`'s own
+ * `[ "${#1}" -le <N> ]` bound, scoped to that function's body (`is_argument()
+ * {` through its own closing `}`) so a different validator's literal
+ * (`docker/observe-ssh` defines several `is_*` functions, `is_host`'s
+ * `<= 253` among them) can never satisfy an extraction meant for this one.
+ */
+function argumentByteCapFromScript(src: string): number {
+  const marker = "is_argument() {";
+  const start = src.indexOf(marker);
+  expect(start, "docker/observe-ssh's is_argument() is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const end = src.indexOf("\n}", start);
+  expect(end, "no closing '}' found after is_argument() — this probe has rotted").toBeGreaterThan(start);
+  const body = src.slice(start, end);
+  const m = body.match(/\[\s*"\$\{#1\}"\s*-le\s*(\d+)\s*\]/);
+  expect(m, "is_argument()'s '-le <N>' byte-cap check is gone — this probe has rotted").not.toBeNull();
+  return Number(m![1]);
+}
+
+/** The skill's stated per-token byte cap: "at <N> bytes, in `is_argument()`" (the number and "bytes," wrap onto the next markdown line, hence `\s+`). */
+function argumentByteCapMentionFromSkill(src: string): number {
+  const m = src.match(/at (\d+)\s+bytes,\s+in `is_argument\(\)`/);
+  expect(m, "the skill's 'at <N> bytes, in `is_argument()`' statement is gone — this probe has rotted").not.toBeNull();
+  return Number(m![1]);
+}
+
+/** The skill's stated practical `unit=` byte ceiling: "tops out at <N> bytes in practice". */
+function unitPracticalCeilingMentionFromSkill(src: string): number {
+  const m = src.match(/tops out at (\d+) bytes in practice/);
+  expect(m, "the skill's 'tops out at <N> bytes in practice' statement is gone — this probe has rotted").not.toBeNull();
+  return Number(m![1]);
+}
+
+describe("the skill's per-token byte cap is derived from is_argument(), not typed independently", () => {
+  test("the skill states is_argument()'s real byte cap", () => {
+    const real = argumentByteCapFromScript(OBSERVE_SSH);
+    const stated = argumentByteCapMentionFromSkill(SKILL);
+    expect(stated, `the skill states a per-token byte cap of ${stated}, is_argument() enforces -le ${real}`).toBe(real);
+  });
+
+  test("the skill states the practical unit= ceiling as the byte cap minus 'unit='.length, not a separately typed number", () => {
+    const real = argumentByteCapFromScript(OBSERVE_SSH);
+    const stated = unitPracticalCeilingMentionFromSkill(SKILL);
+    const KEY = "unit=";
+    const expected = real - KEY.length;
+    expect(
+      stated,
+      `the skill states a practical unit= ceiling of ${stated}; is_argument()'s cap (${real}) minus "${KEY}".length (${KEY.length}) is ${expected}`,
+    ).toBe(expected);
+  });
+
+  test("the skill names is_argument() as the function that enforces the cap", () => {
+    expect(SKILL).toContain("is_argument()");
   });
 });
