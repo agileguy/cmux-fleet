@@ -297,6 +297,24 @@ export interface TriageRow {
    * the field would have been required and the literals updated.
    */
   readonly note?: string | null;
+  /**
+   * The environment this row is about, spelled as the envelope names it —
+   * SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
+   *
+   * A service name alone stops being unique the moment one sweep covers two
+   * environments: the tracked `triage/targets.yaml` declares a `grafana` and a
+   * `prometheus` under both `do-cluster` and `docker-host`. The row, not the
+   * host, has to say which one it means, because the collator writes both rows
+   * into one document and nothing else on the row separates them.
+   *
+   * OPTIONAL for the reason `note` is: a sweep over ONE environment has exactly
+   * one legal answer, so an absent value resolves to that environment and every
+   * existing single-environment document stays valid. A sweep over more than one
+   * environment has no default, and a row without it cannot be keyed. Resolving
+   * it is the verdict's job, not the parser's; `parseTriageDocument` only checks
+   * the spelling and `.default(null)`s the key.
+   */
+  readonly environment?: string | null;
 }
 
 /**

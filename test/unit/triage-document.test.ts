@@ -1288,3 +1288,28 @@ describe("roles/triage.md's example against the schema it is supposed to satisfy
     expect(read(goodDocument({ services: [asItArrives] })).kind).toBe("refused");
   });
 });
+
+/**
+ * SRD-TRIAGE-MIXED-OBSERVERS D21: once one sweep covers two environments, a
+ * service name alone no longer picks out one row, so a row may carry the
+ * environment it is about. The parser checks the spelling only. Which
+ * environment an absent value means is the verdict's question, because only
+ * the verdict knows how many environments the sweep covered.
+ */
+describe("SRD-TRIAGE-MIXED-OBSERVERS D21: a row may name its environment", () => {
+  test("absent parses as null, and a named environment arrives as written", () => {
+    const absent = read(goodDocument());
+    if (absent.kind !== "ok") throw new Error(absent.reason);
+    expect(absent.document.services[0]!.environment).toBeNull();
+
+    const named = read(goodDocument({ services: [goodRow({ environment: "docker-host" })] }));
+    if (named.kind !== "ok") throw new Error(named.reason);
+    expect(named.document.services[0]!.environment).toBe("docker-host");
+  });
+
+  test("an environment that is not a bare token is refused at its own path", () => {
+    const got = refusalFor(goodDocument({ services: [goodRow({ environment: "../do-cluster" })] }));
+    expect(got.code).toBe("schema");
+    expect(got.issues.map((i) => i.path)).toContain("services.0.environment");
+  });
+});

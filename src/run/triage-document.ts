@@ -287,6 +287,13 @@ const TriageRowSchema = z
     observer: shortStr.nullable().default(null),
     /** §13 task 5.8's one prose field. See {@link noteField}. */
     note: noteField,
+    /**
+     * SRD-TRIAGE-MIXED-OBSERVERS D21's key half. Spelled to the same grammar as
+     * `service`, since both become incident-record path segments. Absent is
+     * `null`; which environment that means is decided downstream, where the
+     * sweep's environments are known. See `TriageRow.environment`.
+     */
+    environment: triageToken.nullable().default(null),
   })
   .strict();
 
