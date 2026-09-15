@@ -569,6 +569,16 @@ egress:
     # This line is reachability, not authority.
     - {host: ac8b9a1d-4b7a-417b-b38e-b62aab92ea3f.k8s.ondigitalocean.com, port: 443}
 
+    # The enrolled observer-docker and observer-vm targets (SRD-OBSERVER-ROLES
+    # §5.7, §6.6). Each name is an /etc/hosts alias on the machine that runs the
+    # fleet, not a DNS name: the proxy matches the CONNECT name before any
+    # lookup, then the relay resolves it through Colima's host resolver, which
+    # reads this Mac's /etc/hosts. A machine without the alias fails closed, the
+    # name does not resolve and the target reads as unreachable. The account on
+    # the far side can only run its forced command; this is reachability again.
+    - {host: pifleet-docker, port: 22}
+    - {host: pifleet-vm, port: 22}
+
 cloud:
   adc: false                  # inherit the launching Claude instance's Google identity
   adc_mode: token            # token (1h, default) | file (refresh token — opt-in)
