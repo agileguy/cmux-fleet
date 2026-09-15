@@ -1696,33 +1696,15 @@ describe("the triage console is a second ROSTER, not a second mechanism", () => 
      * the other way round. Both lists are now the console's seats, so they must
      * agree as SETS — `REVIEW_CONSOLE_ROSTER`'s pin at :240, over this console.
      *
-     * Sorted rather than ordered on purpose: `DEFAULT_TRIAGE_WORKERS` is in PANE
-     * order (both collators, then both observers, which is what pairs each
-     * observer under its own collator) and the roster is grouped by ROLE. The
-     * two orders are different facts and neither is wrong.
-     *
-     * **TEMPORARY TRIPWIRE, not a weakened check.** SRD-TRIAGE-MIXED-OBSERVERS
-     * task 2.2 grew `TRIAGE_CONSOLE_ROSTER.reviewers` to six; task 2.1, which
-     * grows `DEFAULT_TRIAGE_WORKERS` to match, lands later on another branch.
-     * Rather than let the set equality go red for a gap this document already
-     * knows about, `AWAITING_PANE_PLAN` names the three seats the pane plan
-     * hasn't caught up to yet, and the FIRST assertion below fails the day
-     * `DEFAULT_TRIAGE_WORKERS` catches up — which is the cue to delete
-     * `AWAITING_PANE_PLAN` and restore the plain set equality against
-     * `DEFAULT_TRIAGE_WORKERS` alone. It runs first so that its message, not a
-     * set diff, is what the operator reads when task 2.1 lands.
+     * Sorted rather than ordered on purpose: `DEFAULT_TRIAGE_WORKERS` is the
+     * seven-seat PANE CREATION order (SRD-TRIAGE-MIXED-OBSERVERS §4.2, D3 —
+     * both full-width rows are opened before either is split into columns, so
+     * the array interleaves the two observer rows' leading panes) and the
+     * roster is grouped by ROLE, in the owner's READING order. The two orders
+     * are different facts and neither is wrong.
      */
     const rostered = [...TRIAGE_CONSOLE_ROSTER.collators, ...TRIAGE_CONSOLE_ROSTER.reviewers];
-    const AWAITING_PANE_PLAN = ["obs-td1", "obs-td2", "obs-tv1"];
-    expect(
-      AWAITING_PANE_PLAN.filter((id) => DEFAULT_TRIAGE_WORKERS.includes(id)),
-      "DEFAULT_TRIAGE_WORKERS now carries a seat AWAITING_PANE_PLAN also names — that means " +
-        "SRD-TRIAGE-MIXED-OBSERVERS task 2.1 has landed. Delete AWAITING_PANE_PLAN and restore " +
-        "the plain set-equality check against DEFAULT_TRIAGE_WORKERS alone.",
-    ).toEqual([]);
-    expect([...rostered].sort()).toEqual(
-      [...DEFAULT_TRIAGE_WORKERS, ...AWAITING_PANE_PLAN].sort(),
-    );
+    expect([...rostered].sort()).toEqual([...DEFAULT_TRIAGE_WORKERS].sort());
   });
 
   /**

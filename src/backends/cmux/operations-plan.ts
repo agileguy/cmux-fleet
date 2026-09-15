@@ -1205,33 +1205,30 @@ export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
 export const TRIAGE_WORKSPACE = "triage";
 
 /**
- * The four workers the triage console stands up, in PANE ORDER.
+ * The seven workers the triage console stands up, in PANE CREATION order —
+ * not the owner's READING order. {@link triagePanes} carries the split
+ * table, the diagram and the creation-vs-reading explanation
+ * (SRD-TRIAGE-MIXED-OBSERVERS §4.2, D3); this array only has to agree with
+ * it, not repeat it.
  *
- * ```
- * +-----------------------------------+
- * |               tri-1               |
- * +----------+-----------+------------+
- * |  obs-t1  |  obs-t2   |   obs-t3   |
- * +----------+-----------+------------+
- * ```
+ * ONE COLLATOR OVER TWO ROWS OF THREE OBSERVERS as of 2026-09-15, up from
+ * three observers in one row, and the ORDER is still what puts the collator
+ * across the top rather than in a corner: pane 0 must be `tri-1`, or the
+ * full-width pane holds an observer instead.
  *
- * ONE COLLATOR OVER THREE OBSERVERS as of 2026-09-13, and the ORDER is what puts
- * the collator across the top rather than in a corner. {@link triagePanes}' own
- * table is `[null, down-from-0, right-from-1, right-from-2]`: pane 1 takes the
- * workspace's initial surface, pane 2 splits `down` off it to create the
- * observer row, and panes 3 and 4 walk `right` along that row. The collator
- * must therefore be FIRST; any other position and the full-width pane holds an
- * observer.
- *
- * **THIS DOCBLOCK HAS NOW DESCRIBED THREE DIFFERENT CONSOLES, and the last two
- * were wrong at the moment they were read rather than when they were written.**
- * It described a collator beside one observer, then a 2x2 of two pairs whose
- * argument turned on {@link agentSquarePanes}' split table — a table this
- * console no longer uses. It also asserted that {@link TRIAGE_TOP_FRACTION}
- * *"survives this change rather than becoming a number"*; that constant is now
- * `1/3`. Both claims went stale in place, with nothing to redden, because a
- * prose diagram is not checked against the list beneath it. `triage-plan.test.ts`
- * pins the shape; this paragraph is the warning that the PICTURE is not pinned.
+ * **THIS DOCBLOCK HAS NOW DESCRIBED FOUR DIFFERENT CONSOLES, and the middle
+ * two were wrong at the moment they were read rather than when they were
+ * written.** It described a collator beside one observer, then a 2x2 of two
+ * pairs whose argument turned on {@link agentSquarePanes}' split table — a
+ * table this console no longer uses. It also asserted that
+ * {@link TRIAGE_TOP_FRACTION} *"survives this change rather than becoming a
+ * number"*; that constant is now `1/3`. Both claims went stale in place, with
+ * nothing to redden, because a prose diagram is not checked against the list
+ * beneath it. `triage-plan.test.ts` pins the shape; this paragraph is the
+ * warning that the PICTURE is not pinned — which is why this revision
+ * (2026-09-15, growing three observers to six) stopped drawing one: the
+ * diagram now lives once, in {@link triagePanes}' own docblock, and this file
+ * points to it instead of keeping a second copy in sync.
  *
  * THE COLLATOR IS PANE 1, on {@link DEFAULT_REVIEW_WORKERS}' precedent and for a
  * weaker version of its reason. Pane 1 consumes the workspace's initial surface
@@ -1288,8 +1285,8 @@ export const TRIAGE_WORKSPACE = "triage";
  * NEITHER SEAT IS ATTENDED, and that is the whole difference from `development`
  * and `review`. Both of those are four keyboards and therefore four runs; this
  * console is ONE run of `rpc` seats
- * (`pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3`, spelled that way in
- * `fleet.example.yaml`'s "ONE RUN" comment), because a console that
+ * (`pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3,obs-td1,obs-td2,obs-tv1`,
+ * spelled that way in `fleet.example.yaml`'s "ONE RUN" comment), because a console that
  * dispatches on a clock — 96 sweeps a day at `triage/console.yaml`'s
  * `cadence_s: 900`, 288 at the schema default of 300 — cannot afford a `tui`
  * seat: `tui` allocates no epoch, so without the `already_completed` fence a
@@ -1319,25 +1316,29 @@ export const TRIAGE_WORKSPACE = "triage";
  * carries `--attach-here`, which is the opposite disposition from
  * `scripts/review`.
  *
- * THE COST, stated as its two siblings state theirs — and it is the one line
- * here that got CHEAPER rather than merely shorter. One run at
- * `run.max_concurrent: 4` (in `fleet.example.yaml`) is an admission budget of
- * four spent by FOUR seats, so this console fits exactly with nothing spare —
- * which is the size that key was raised for, not a size it has outgrown. Its own
- * comment says so: *"The triage console is the first run holding four seats, and
- * three of them fan out at once"*, text written for this shape that outlived the
- * 2026-09-11 shrink to one pair and became correct again on 2026-09-12.
+ * THE COST, stated as its two siblings state theirs — and it no longer traces
+ * to seat arithmetic at all. `run.max_concurrent` is `12` in both
+ * `fleet.example.yaml` and `fleet.yaml`, set there as an owner decision
+ * (SRD-TRIAGE-MIXED-OBSERVERS D16) rather than derived from this array's
+ * length. Earlier revisions of this paragraph sized the key to exactly the
+ * seat count — four seats, an admission budget of four, nothing spare — and
+ * that reasoning does not carry forward: twelve is not seven plus headroom
+ * computed here, it is a number the owner chose, so neither "fits exactly"
+ * nor "leaves slack" is a claim this paragraph gets to make about seven
+ * seats under it.
  *
- * **This paragraph claimed SLACK between those two dates and no longer does.**
- * The slack was real while the console held two seats and is gone now. Do not
- * lower this key by reading either version: it bounds a RUN rather
- * than the host, and a hand-run `up` over a wider worker set is the same run.
+ * Do not lower this key by reading this array's length: it bounds a RUN
+ * rather than the host, and a hand-run `up` over a wider worker set is the
+ * same run.
  */
 export const DEFAULT_TRIAGE_WORKERS: readonly string[] = [
   "tri-1",
   "obs-t1",
+  "obs-td1",
   "obs-t2",
   "obs-t3",
+  "obs-td2",
+  "obs-tv1",
 ];
 
 /**
@@ -1463,44 +1464,36 @@ export const TRIAGE_OBSERVER_ROW_FRACTION: number | null = 1 / 2;
 /**
  * The triage console's panes, in creation order.
  *
- * `DEFAULT_TRIAGE_WORKERS` still holds four ids — Phase 2.1 of
- * `Docs/SRD-TRIAGE-MIXED-OBSERVERS.md` moves it to seven — so this function
- * branches on the WORKER COUNT it is actually handed, rather than assuming a
- * single shape:
+ * The console holds exactly SEVEN workers, one collator over two full-width
+ * rows of three, built from a HARDCODED table
+ * (SRD-TRIAGE-MIXED-OBSERVERS §4.2), never {@link collatorOverRowPanes} —
+ * the builder SHARED with {@link reviewPanes} — and never a computed
+ * sequence:
  *
- *  - **Four** workers still delegate to {@link collatorOverRowPanes}, the
- *    builder SHARED with {@link reviewPanes}: one collator across the top,
- *    its workers in one row beneath. Phase 2.1 deletes this branch once
- *    `DEFAULT_TRIAGE_WORKERS` moves to seven and every call takes the table
- *    below instead.
- *  - **Seven** workers build from a HARDCODED table
- *    (SRD-TRIAGE-MIXED-OBSERVERS §4.2), never `collatorOverRowPanes` and never
- *    a computed sequence — the collator full width, TWO full-width rows of
- *    three beneath it:
+ *     +-----------------------------------+
+ *     |                 0                 |
+ *     +----------+-----------+------------+
+ *     |    1     |     3     |     4      |
+ *     +----------+-----------+------------+
+ *     |    2     |     5     |     6      |
+ *     +----------+-----------+------------+
  *
- *        +-----------------------------------+
- *        |                 0                 |
- *        +----------+-----------+------------+
- *        |    1     |     3     |     4      |
- *        +----------+-----------+------------+
- *        |    2     |     5     |     6      |
- *        +----------+-----------+------------+
+ * CREATION order is not READING order. A full-width row can only be
+ * peeled off a pane BEFORE the row above it is divided into columns — once
+ * a pane has been split `right`, a later `down` off it only narrows that
+ * one cell, not the whole row. So both `down` splits that open the two
+ * observer rows (indices 1 and 2) happen before either row's own `right`
+ * splits (3 and 4 on row one; 5 and 6 on row two), even though the rows
+ * read out left to right as `1, 3, 4` and `2, 5, 6`.
  *
- *    CREATION order is not READING order. A full-width row can only be
- *    peeled off a pane BEFORE the row above it is divided into columns — once
- *    a pane has been split `right`, a later `down` off it only narrows that
- *    one cell, not the whole row. So both `down` splits that open the two
- *    observer rows (indices 1 and 2) happen before either row's own `right`
- *    splits (3 and 4 on row one; 5 and 6 on row two), even though the rows
- *    read out left to right as `1, 3, 4` and `2, 5, 6`.
- *  - **Any other count** — 0 gets its own message; 1, 2, 3, 5, 6, 8 and up do
- *    not — is refused by name: the console holds exactly four or seven
- *    workers and has no sensible degraded shape in between or beyond them.
+ * Any other count — 0 gets its own message; 1-6, 8 and up do not — is
+ * refused by name: the console holds exactly seven workers and has no
+ * sensible degraded shape in between or beyond that.
  *
  * Panes are built the way {@link collatorOverRowPanes} builds one (same
  * `title`/`worker`/`command` shape, same `backend`/`configPath` defaults, same
- * `assertPlainValue` checks) so the seven-pane branch differs from the
- * four-pane one only in geometry, not in how a pane is assembled.
+ * `assertPlainValue` checks); this function differs from that builder only in
+ * geometry, not in how a pane is assembled.
  */
 export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
   const workers = opts.workers ?? DEFAULT_TRIAGE_WORKERS;
@@ -1509,17 +1502,10 @@ export function triagePanes(opts: OperationsPlanOptions): OperationsPane[] {
     throw new Error("triage: refusing an empty --workers set — name at least one worker");
   }
 
-  if (workers.length === 4) {
-    // Phase 2.1 of Docs/SRD-TRIAGE-MIXED-OBSERVERS.md removes this branch
-    // once DEFAULT_TRIAGE_WORKERS moves to seven and every call falls through
-    // to the seven-pane table below.
-    return collatorOverRowPanes(opts, DEFAULT_TRIAGE_WORKERS, "triage");
-  }
-
   if (workers.length !== 7) {
     throw new Error(
-      `triage: refusing ${workers.length} workers — the console holds exactly four workers ` +
-        `(one collator, one row of three) or seven (one collator, two rows of three)`,
+      `triage: refusing ${workers.length} workers — the console holds exactly seven workers: ` +
+        `one collator over two rows of three`,
     );
   }
 

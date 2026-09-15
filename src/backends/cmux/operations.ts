@@ -211,10 +211,12 @@ export const REVIEW_SPEC: WorkspaceSpec = {
 };
 
 /**
- * The scheduled triage console: ONE collator across the top, THREE observers in
- * a row beneath it — and, in the tracked `fleet.example.yaml`, no keyboard in
- * any of them. (A reconciler and ONE observer in a single row until 2026-09-12;
- * two such pairs in a 2x2 for one day after that.)
+ * The scheduled triage console: ONE collator across the top, SIX observers in
+ * two rows of three beneath it (SRD-TRIAGE-MIXED-OBSERVERS §4.2, since
+ * 2026-09-15 — three observers in one row before that, since 2026-09-13) —
+ * and, in the tracked `fleet.example.yaml`, no keyboard in any of them. (A
+ * reconciler and ONE observer in a single row until 2026-09-12; two such
+ * pairs in a 2x2 for one day after that.)
  *
  * The FOURTH value in this file and still not a fourth builder, which is the
  * whole of what {@link WorkspaceSpec} was written to buy and the whole of what
@@ -232,7 +234,7 @@ export const REVIEW_SPEC: WorkspaceSpec = {
  * one full-width row over a row of three is the first layout in this repository
  * that `new-split` cannot produce correctly on its own. Halving gives 50/50
  * vertically and 50/25/25 horizontally, and neither is what this console means —
- * the three observers are handed EVEN slices of the environment, so a row that
+ * each row's three observers are handed EVEN slices, so a row that
  * renders one at twice the width of its siblings describes work that is not
  * being done. {@link TRIAGE_TOP_FRACTION} and
  * {@link TRIAGE_OBSERVER_WIDTH_FRACTION} carry the arguments.
@@ -776,8 +778,9 @@ export async function createWorkspace(
  * rather than against the container's complement. The two are the same number
  * when there is one row below and no divider between the rows — top-row height
  * plus that row's height is then the whole container — which is why a
- * one-lower-row console (`operations`, `review`, `triage` at four workers)
- * issues the same verbs, to the same panes, with the same amounts in the
+ * one-lower-row console (`operations`, `review` — `triage` no longer has a
+ * one-lower-row shape at any worker count, SRD-TRIAGE-MIXED-OBSERVERS §4.2,
+ * D3) issues the same verbs, to the same panes, with the same amounts in the
  * split-tree model the geometry suite runs. A live divider is the one place the
  * two can differ, by at most its width: the old target counted the divider into
  * the lower row and this one does not. Where they diverge is the
@@ -943,8 +946,9 @@ async function applyTopFraction(
  * `middleRowFraction` is optional and `null`/`undefined` returns before any
  * geometry is read, on the same reasoning {@link applyTopFraction} and
  * {@link applyBottomWidths} both give for their own gates: a console with only
- * one row below its top row (`operations`, `review`, `triage` at four
- * workers, `development`) has nothing for this pass to divide between, and
+ * one row below its top row (`operations`, `review`, `development` —
+ * `triage` no longer has a one-lower-row shape at any worker count) has
+ * nothing for this pass to divide between, and
  * running it there would be a no-op dressed as a decision rather than a
  * stated absence of one. The row-count check below is the second half of the
  * same gate — a spec could carry a fraction while `--workers` resolves to a
