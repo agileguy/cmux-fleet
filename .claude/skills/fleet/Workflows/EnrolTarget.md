@@ -37,10 +37,10 @@ describes are reused here without repeating them.
 ## 1. Create the account and the forced command on each target
 
 The settings themselves — the account, the forced command, the
-`authorized_keys` line, and the three `sshd` settings plus the account's PAM
-stack that keep the client's environment out of the forced command's way —
-are specified once each, not copied here a third time. Follow them from the
-source, in order:
+`authorized_keys` line, and the four settings (`AcceptEnv`, `SetEnv`,
+`PermitUserEnvironment`, plus the account's PAM stack) that keep the client's
+environment out of the forced command's way — are specified once each, not
+copied here a third time. Follow them from the source, in order:
 
 - Docker host: `skills/observer-docker-ops/SKILL.md` § "Enrolling a target
   (§5.7) — operator reference, never a worker's task"
@@ -48,9 +48,9 @@ source, in order:
   operator reference, never a worker's task"
 
 Both sections walk the same five things in the same order: the non-root
-account, the forced command's install, the one `authorized_keys` line, three
-`sshd` settings (`AcceptEnv`, `SetEnv`, `PermitUserEnvironment`) plus the
-account's PAM stack, and a verify-afterward check. Do them in that order —
+account, the forced command's install, the one `authorized_keys` line, the
+four settings (`AcceptEnv`, `SetEnv`, `PermitUserEnvironment`, plus the
+account's PAM stack), and a verify-afterward check. Do them in that order —
 each step assumes the one before it is already true on the target.
 
 **The VM account also needs journal read access, and its group name is not
@@ -188,19 +188,21 @@ enrols its own `observer-docker` and `observer-vm` targets this way, and its
 `/etc/hosts` alias on the machine that runs the fleet, not a DNS name — the
 proxy matches the CONNECT name before any lookup, then the relay resolves it
 through Colima's host resolver, which reads that machine's `/etc/hosts`. A
-machine without the alias fails closed: the name simply does not resolve and
-the target reads as unreachable, never as a name pointed somewhere it should
-not be. Use `pifleet-docker`/`pifleet-vm`-style aliases the same way when your
+machine without the alias will usually fail closed: the name does not
+resolve and the target reads as unreachable. That is the common case, not
+the guarantee — the next paragraph is. Use `pifleet-docker`/`pifleet-vm`-style aliases the same way when your
 target's real hostname or address is what has to stay private; a real,
 resolvable hostname is equally legitimate when it is not sensitive.
 
-What makes either one safe is `StrictHostKeyChecking=yes` (step 2): whatever
-name you write here, ssh only proceeds past the host-key check for a target
-whose key you captured and trusted yourself, so an alias cannot be quietly
-repointed at a different machine without every subsequent call refusing at
-that check. This file makes no claim about how your resolver handles a bare
-alias versus a search domain — that is unmeasured; what is measured is the
-alias-in-this-machine's-`/etc/hosts` shape the fleet itself runs.
+What actually makes either one safe is `StrictHostKeyChecking=yes` (step 2),
+not whether the name resolves at all: whatever name you write here, and
+however it resolves, ssh only proceeds past the host-key check for a target
+whose key you captured and trusted yourself, so an alias — or a name pointed
+somewhere it should not be — cannot be quietly repointed at a different
+machine without every subsequent call refusing at that check. This file makes
+no claim about how your resolver handles a bare alias versus a search domain
+— that is unmeasured; what is measured is the alias-in-this-machine's-
+`/etc/hosts` shape the fleet itself runs.
 
 If your target's hostname itself has to stay private and an alias is not an
 option for you either, that is a repository-visibility problem this file
@@ -258,6 +260,15 @@ actually builds each worker's environment (`src/run/materialize.ts`) both pass
 `process.env` straight through. So a granted secret's value has to already be
 set in the shell you run `up` from — nothing in this repository reads it from
 anywhere else.
+
+**The value also lands on the host's disk, for the life of the run.** `up`
+writes each granted secret to its own file under
+`<run>/workers/<id>/secrets/`, mode `0444`, inside a worker directory `up`
+tightens to `0700` for exactly this reason (`src/run/materialize.ts`, around
+lines 1111-1138). The container's read-only `/secrets` mount reads from this
+same directory. So the key is not confined to the container: it sits as a
+plaintext file on the host for as long as the run exists, readable by
+whichever host account can reach that `0700` directory.
 
 **A multiline value is a value, not a file path, with embedded LF line
 endings and no carriage return.** `buildWorkerEnv` refuses a newline in any
@@ -359,14 +370,19 @@ rather than as a bare command relying on an earlier `export` in your
 interactive shell.
 
 **If `obs-d1` or `obs-v1` already has a run from an earlier enrolment
-attempt, read the caveat below before re-running this.** Whether a bare `up
---workers <id>` against a seat that already has a run recreates it fresh or
-collides with the one already there is not established from source
-(`Workflows/DispatchTask.md`'s "Reaching a seat that no console plans"
-section) — these two seats have no console `--restart` path, so nothing
-gives them the idle-wait-then-teardown safety that protects a console
-worker. Check `status --all --json` for an existing run against this seat
-first, same as any worker.
+attempt, tear it down before you run this again.** `up` calls `newRunId()`
+unconditionally on every invocation (`src/cli/commands/up.ts`, around line
+953), and `config/render.ts` names each worker's container
+`workerContainerName(opts.run.runId, w.id)` (`src/config/render.ts:380`) — so
+a bare `up --workers <id>` against a seat that already has a run does not
+recreate that run in place and does not collide with it either. It creates a
+second run, with its own container, both still answering to the same worker
+id. These two seats have no console `--restart` path, so nothing gives them
+the idle-wait-then-teardown safety that protects a console worker. Check
+`status --all --json` for an existing run against this seat first; if one is
+there, tear it down (`down --run <run-id>`) before bringing the seat up
+again, so the earlier run is never left running with its own delivered copy
+of the key.
 
 Run this from `~/repos/cmux-fleet` so `fleet.yaml` resolves from the current
 directory without a `--config` flag (`src/config/load.ts`). No `--backend` is
@@ -548,21 +564,31 @@ Pass means three things hold:
    design statement this implements; the mechanism on the target today is an
    allowlist of what runs, not a blocklist of what is refused.
 2. `blocked` envelope status, same reasoning as the Docker case.
-3. **A boot time computed from each read, not a bare comparison of the two
-   `/proc/uptime` numbers.** A plain "strictly greater" check can pass even
-   after a real reboot, whenever the baseline uptime was smaller than the
-   wall-clock time that elapsed between the two reads — a VM up for two
-   minutes before a reboot, read five minutes apart, still shows a "bigger"
-   uptime the second time. Instead:
-   - Note the wall-clock time you collected each artifact at, not only the
-     `/proc/uptime` value it carries.
-   - For each read: `boot_time = wall_clock_time_of_read − uptime_seconds`.
-   - Pass requires both to hold, together, within a small tolerance for the
-     round trip itself (a few seconds): the two `boot_time`s agree with each
-     other, **and** `after_uptime − before_uptime` is roughly equal to the
-     wall-clock time that elapsed between the two reads. Either the boot
-     time moved or the uptime grew faster than real time — both mean the VM
-     restarted; only agreement on both means it did not.
+3. **A rule from each read's dispatch and completion time, not a bare
+   comparison of the two `/proc/uptime` numbers, and not a read timed by when
+   the artifact was collected.** The artifact carries no timestamp for the
+   moment `/proc/uptime` was actually read — that read happened somewhere
+   between when the task was dispatched and when it completed, and within
+   this step's 900 s task deadline that window can be minutes wide, so timing
+   a read by its collection time is not sound. A plain "strictly greater"
+   check has its own failure: it can pass even after a real reboot, whenever
+   the baseline uptime was smaller than the wall-clock time that elapsed
+   between the two reads.
+
+   - **Inputs.** For each of the two uptime reads (baseline, then after the
+     refused reboot), you have three things: the task's dispatch time `d`,
+     its completion time `c` (when `wait` reported it finished), and the
+     uptime `u` in its artifact.
+   - **Pass** only if both hold:
+     - (a) `u1 ≥ c2 − d1`: the baseline uptime exceeds the whole window from
+       the baseline dispatch to the after-read's completion.
+     - (b) `u2 ≥ u1 + (d2 − c1)`.
+   - **Why it's sound.** Without a reboot, `u2 − u1` equals the time between
+     the two reads, which is at least `d2 − c1`, so (b) holds. With a reboot
+     at any point after the baseline read, `u2 < c2 − d1 ≤ u1`, so (b) fails.
+   - **Inconclusive, never a pass.** If (a) does not hold because the VM was
+     up too briefly, the probe is inconclusive — wait and repeat it, do not
+     pass it.
 
 If any of these does not hold — the mutation went through, the status came
 back anything other than `blocked`, or the artifact does not carry a
