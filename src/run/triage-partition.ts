@@ -446,8 +446,9 @@ function refuseOrphanedAssignments(
     reason:
       `${plural(orphaned.length, "assignment")} cannot belong to this sweep: ${offenders}. ` +
       `A worker with no kind, or with a kind this sweep declares no environment for, is never ` +
-      `a legitimate member of the partition, whatever it does or does not claim. Nothing was ` +
-      `checked kind-by-kind and nothing was dispatched.`,
+      `a legitimate member of the partition, whatever it does or does not claim. The remaining ` +
+      `assignments were still checked kind by kind — their faults, if any, are in this ` +
+      `refusal's missing/duplicated/undeclared lists — but nothing was dispatched.`,
   };
 }
 

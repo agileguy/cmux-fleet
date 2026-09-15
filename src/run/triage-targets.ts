@@ -154,9 +154,10 @@ export type TriageVmCheck = (typeof TRIAGE_VM_CHECKS)[number];
  * written, all 20 collations harvested carried exactly 3 services or none, so 8
  * was 2.6x the observed maximum. There are 109 on disk now and still no
  * collation wider than 3 rows, but the environment went to 9 services the same
- * day this cap went to 16, so that old ratio no longer describes the headroom:
- * nine services split 5/4 across two collators, and 16 is 3.2x the largest
- * slice either one can be handed. Raising it again is legitimate and cheap —
+ * day this cap went to 16, so that old ratio no longer described the headroom:
+ * on that day nine services split 5/4 across two collators, and 16 was 3.2x the
+ * largest slice either one could be handed. One collator now holds every row,
+ * as the history note below records. Raising it again is legitimate and cheap —
  * but it has to move with the byte cap, and `triage-document.test.ts` fails if
  * the two stop agreeing.
  *
@@ -170,13 +171,24 @@ export type TriageVmCheck = (typeof TRIAGE_VM_CHECKS)[number];
  * "has to move with the byte cap" and this is that rule being obeyed rather
  * than excepted.
  *
- * **The raise is cheap for a reason that did not exist when the warning was
- * written.** The coupling it warns about was that ONE collator wrote ONE
- * document covering every declared service, so the service count and the
- * document size were the same number twice. The triage console now runs TWO
- * pairs (`DEFAULT_TRIAGE_WORKERS`), the host splits the declared list between
- * the collators with `evenSlices`, and each collator collates only its own
- * half — so 16 declared services is two 8-row documents, not one 16-row one.
+ * **HISTORY — why the raise was cheap at the time it was made, 2026-09-12 to
+ * 2026-09-14.** The coupling the warning above warns about was that ONE
+ * collator wrote ONE document covering every declared service, so the
+ * service count and the document size were the same number twice. For those
+ * two days the triage console ran TWO pairs (`DEFAULT_TRIAGE_WORKERS`), the
+ * host split the declared list between the collators with `evenSlices`, and
+ * each collator collated only its own half — so 16 declared services was two
+ * 8-row documents, not one 16-row one.
+ *
+ * PRESENT: the roster is back to a single collator (`tri-1`, since
+ * 2026-09-14), which writes ONE `triage.json` per sweep holding a row for
+ * every declared service of every environment. The coupling the warning
+ * above describes is therefore back too — this same 16 now also bounds the
+ * SUM of services across every declared environment, not just one
+ * environment's own list (the total check in `TriageTargetsSchema`'s
+ * `superRefine` enforces that), and one
+ * document holds at most 16 rows. Read this comment together with the one on
+ * that check; they have to agree.
  *
  * WHAT THIS UNBLOCKS, concretely: the `monitoring` namespace holds 8 workloads,
  * and at the old ceiling `monitoring` + `ntfy` was 9 and refused at load — the

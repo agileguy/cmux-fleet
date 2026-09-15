@@ -75,7 +75,9 @@ SEVEN on 2026-09-14 when `obs-td1`, `obs-td2` (docker) and `obs-tv1` (vm) joined
 applies to this sentence too: **verify the count against one of those before
 repeating it.**
 
-All seven seats run a **local** `gemma-4-26b-a4b-it-bf16`. The model has moved twice —
+All seven seats run `gabe/gemma-4-26b-a4b-it`, served over the LAN (`hosted: false` in
+`fleet.yaml`) rather than sent to a third party — **local** in that D1 sense, not on the
+seat's own machine. The model has moved twice —
 `gpt-oss-20b-MXFP4-Q8` under the 2026-09-03 decision, then a hosted trial on
 `obs-t1` that was taken and withdrawn on the same day — but D1 has not moved: it
 is about whether an observer's context may leave the machine, not about speed.
