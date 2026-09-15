@@ -36,20 +36,24 @@ enrolled on this fleet. `observe-vm` is a thin alias for `observe-ssh vm <target
 does.
 
 Read the exit status AND the stderr text before you write a row — the exit code alone does not
-say who refused what:
+say who refused what. The table is read top to bottom; the first row whose condition matches is
+the one that applies, with "anything else" last:
 
 | Exit | What it means | What the row says |
 |---|---|---|
+| any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries — so this row sits above the `0` row | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
 | `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` |
 | `77` with any other `vm-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all, that channel is `forbidden` instead |
 | `78` | the fleet did not deliver this worker's configuration | every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted`, and the task status is `blocked` |
-| `124` or `125` from `disk` | `124`: `df` did not return inside the 20-second bound `disk` runs it under, most likely a hung network mount. `125`: `timeout` itself failed | the `resources` channel is `indeterminate`, never evidence of free space; any stderr goes in `evidence_ref` |
-| `126` or `127` | the target command did not run at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
+| `124` from `disk` | `df` did not return inside the 20-second bound `disk` runs it under, most likely a hung network mount | the `resources` coverage is `unreachable` — asked, never answered — and the row is `indeterminate`; never evidence of free space; any stderr goes in `evidence_ref` |
+| `125` from `disk`, or `126` or `127` from any verb | `125`: `timeout` itself failed, so `df` never ran. `126`/`127`: the target command did not run at all — for example, it is not on the account's PATH | rows you cannot otherwise answer are `indeterminate` with coverage `not_attempted`, stderr goes in `evidence_ref`, and the task status is `blocked` |
+| `128` or above from `disk` | `df` was killed by something other than `timeout`'s own expiry — for example `137` — so that is not `df`'s answer either | the `resources` coverage is `unreachable`, and the row is `indeterminate`; never evidence of free space; any stderr goes in `evidence_ref` |
 | `255` | ssh's own failure — a host-key mismatch or a proxy refusal | `reachability` is `unreachable`, and the row is `indeterminate` |
-| any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
-| `1` with `This account is currently not available.` on stdout | the account's login shell is `nologin` (measured: `/usr/sbin/nologin` on Ubuntu 24.04 writes that line to stdout, nothing to stderr, and exits 1), so the forced command never ran and the target is mis-enrolled | the task status is `blocked`, and every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted` |
+| `1` with stdout exactly `This account is currently not available.` and stderr empty | the account's login shell is `nologin` (measured: `/usr/sbin/nologin` on Ubuntu 24.04 writes that line to stdout, nothing to stderr, and exits 1), so the forced command never ran and the target is mis-enrolled | the task status is `blocked`, and every row you cannot otherwise answer is `indeterminate` with coverage `not_attempted` |
+| any non-zero exit from any verb with both stdout and stderr empty | no §6.4 command fails silently, so this is not a real command's own answer — a login shell of `/bin/false` produces exactly this shape | the task status is `blocked`, and every row not otherwise answered is `indeterminate` with coverage `not_attempted` |
+| any other non-zero exit from `journal` or `kernel` | measured to exit `0` in every case this project has data for, so a non-zero exit here is never a quiet window | the `logs` channel is `unreachable`, the row is `indeterminate`, and stderr goes in `evidence_ref` |
 | anything else | the target command's own exit, returned from the target | the channel is `answered`; the error or state text goes in `evidence_ref` |
 
 **The unreachable rule (§6.3), stated plainly.** An SSH round trip that never completed (exit
@@ -60,13 +64,40 @@ cannot tell a down VM from a down route, so do not guess which one it is.
 state word (for example `degraded`) and can exit non-zero for it; that is `answered` coverage
 with the state word as evidence, not a reason to retry the call or mark it `unreachable`.
 
-**`disk`'s timeout, stated plainly.** `disk` runs `df` under a 20-second `timeout` (§6.4,
-principal decision 2026-09-14) so a hung network mount cannot block the call indefinitely.
-Measured on Ubuntu 24.04, coreutils' `timeout` exits `124` when it has to kill `df`, `125` when
-`timeout` itself fails, `126` when `df` cannot be executed and `127` when it is not found, and
-otherwise passes `df`'s own exit straight through. So `124` is the hung-mount case in the table
-above, `126`/`127` are the "did not run at all" row, and only an exit outside `124`-`127` is
-`df`'s own answer.
+**Fail closed on `journal` and `kernel`.** In every case `test/fixtures/observe/vm-tool-shapes.json`
+measures — `.journal.oldest.exit`, `.journal.oldest_empty_window.exit`, `.journal.target.exit`,
+`.kernel.oldest.exit` and `.kernel.target.exit` — both verbs exit `0`, including the empty-window
+case. So a non-zero exit from either one is never a quiet window; it is refused or broken, not
+silence. The permission-refusal row above is measured on systemd 255 only — the systemd 239 floor
+this project also tracks is unmeasured for it — and that is exactly why the fail-closed row exists:
+any other non-zero exit from `journal` or `kernel` is `unreachable` coverage and an `indeterminate`
+row, with stderr recorded rather than the gap assumed empty.
+
+**A silent mis-enrolment never reads as `answered`.** A login shell of `/bin/false` makes every
+call exit `1` with empty stdout and empty stderr — no verb ever runs. No §6.4 command fails this
+quietly on its own: `system` prints its state word even when it exits non-zero, and every refusal
+this credential can produce names itself on stderr. So an exit with nothing on either stream is
+never a command's own answer; it reads as a broken account, not a result. The `nologin` row above
+is measured against `/usr/sbin/nologin` on Ubuntu 24.04; util-linux's `nologin` instead prints the
+contents of `/etc/nologin.txt` on stdout when that file exists, which is unmeasured here. The
+enrolment verify step's `getent passwd <account>` showing `/bin/sh` is the guard against mistaking
+either shape for a working account.
+
+**`disk`'s timeout, stated plainly.** `timeout 20` ends a `df` stuck in a killable wait, such as a
+hung NFS mount, with exit `124` inside that 20-second bound. It does not end every hang: a `df` in
+uninterruptible sleep ignores every signal `timeout` sends it, its kill included, until the
+kernel's own I/O wait resolves — so `timeout` waits on it too, and the whole call can run past its
+20-second bound with no exit code at all. `observe-ssh`'s keepalives (the `ServerAliveInterval` and
+`ServerAliveCountMax` options it passes to `ssh`) do not help here: they end a connection that
+stops answering, not one whose remote command is still running but has not returned. A `disk` call
+that never returns is never evidence of free space — nor of anything else.
+
+Measured on Ubuntu 24.04, coreutils' `timeout` exits `124` when it kills `df` and the kill
+succeeds, `125` when `timeout` itself fails, `126` when `df` cannot be executed and `127` when it
+is not found, `128` or above when `df` is killed by a signal `timeout` did not send, and otherwise
+passes `df`'s own exit straight through. So `124` is the hung-mount case the table above can
+actually kill, `125` from `disk` and `126`/`127` are the "did not run at all" row, `128` or above
+is `df` killed by something else, and only an exit below `124` is `df`'s own answer.
 
 ## Checks, and the verbs that answer them
 
@@ -111,7 +142,8 @@ tokens, in any order, and a repeated key is refused:
   as an unrecognised key would be.
 - A `unit=<unit>` value tops out at 251 bytes in practice, not the 255-byte cap the unit-name
   grammar itself allows: `observe-ssh` caps every argument token, key and value together, at 256
-  bytes (`docker/observe-ssh:197`), and `unit=` is 5 of those bytes before the value starts.
+  bytes, in `is_argument()` (`docker/observe-ssh`), and `unit=` is 5 of those bytes before the
+  value starts.
 - A unit name starting with `-`, or one carrying a backslash escape (for example the `\x2d`
   escaping systemd gives device and mount units — names that can turn up verbatim in `failed`
   output), cannot be queried through this grammar: `observe-ssh`'s own argument grammar has no
@@ -234,11 +266,41 @@ rewrite its own `authorized_keys` line.
 
 `scripts/observe/vm-forced-command` is installed root-owned, mode `0755`, at a path the account
 cannot write, named in the account's one `authorized_keys` line: `restrict,command="<installed
-path>" ssh-ed25519 <public key> pifleet-observer-vm`. sshd is configured so no environment
-reaches the forced command from the client for this account: no `AcceptEnv`, no `SetEnv`,
-`PermitUserEnvironment no`, no `user_readenv` in its PAM stack. The target's host key goes in
-`OBSERVER_VM_KNOWN_HOSTS`, one `token host port user` line in `OBSERVER_VM_TARGETS`, and
-`{host, port}` in `egress.allow`.
+path>" ssh-ed25519 <public key> pifleet-observer-vm`.
+
+**sshd is configured so no environment reaches the forced command from the client — this is four
+settings, not one, the same four §5.7 gives the Docker role:**
+
+- `AcceptEnv` passes nothing through for this account — name one no client ever sends, e.g.
+  `OBSERVER_VM_UNUSED`, rather than a real one. That inside a `Match User` block, OpenSSH's
+  `AcceptEnv` directive itself needs at least one variable name to parse (checked with `sshd -T`
+  on OpenSSH 10.3p1) is measured in the Docker role's own enrolment note
+  (`skills/observer-docker-ops/SKILL.md`), not here — the measurement is about `sshd`, not about
+  which role's account it is checked against.
+- No `SetEnv` for the account. `SetEnv` hands the forced command a value regardless of what the
+  client asks for, and does not go through `AcceptEnv` at all.
+- `PermitUserEnvironment no` (the default). With it off, an `environment=` option on the
+  `authorized_keys` line and the account's `~/.ssh/environment` file are both ignored.
+- No `user_readenv` in this account's PAM stack, so `~/.pam_environment` is never read, and the
+  account's root-owned home leaves it nowhere to write one.
+
+**PATH, for this role's own binaries.** `vm-forced-command` resolves `systemctl`, `journalctl`,
+`cat`, `df` and `timeout` through PATH — it names none of them by an absolute path. That PATH must
+come from sshd's own default, a root-owned `pam_env` directive or `/etc/environment`, never from
+the account itself: an accepted `PATH` could make any of those five resolve to another binary.
+
+**IFS, ENV and BASH_ENV.** `vm-forced-command` pins its own `IFS` before it re-splits
+`SSH_ORIGINAL_COMMAND` (the `IFS=" ${tab}"` assignment set immediately before `set -- ${original}`,
+restored to the script's own pinned constant right after), so an inherited `IFS` never reaches its
+argument parsing. `ENV` and `BASH_ENV` rely on this account's `/bin/sh` login shell the same way
+the Docker role's note gives: a `bash` started as `bash -c` reads `BASH_ENV`, but a `bash` started
+as `sh` (as `/bin/sh` may itself be) does not.
+
+A login shell of `/bin/false` or `nologin` makes every call fail the same way; the exit table above
+says how that reads.
+
+The target's host key goes in `OBSERVER_VM_KNOWN_HOSTS`, one `token host port user` line in
+`OBSERVER_VM_TARGETS`, and `{host, port}` in `egress.allow`.
 
 **Verify afterward, the same three checks §5.7 gives the Docker role, adapted to this one:**
 `sshd -T -C user=<account>,host=<host>,addr=<addr>` for this account's effective `AcceptEnv`,
