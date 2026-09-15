@@ -57,9 +57,13 @@ has no shape for a second one. `TRIAGE_OBSERVER_WIDTH_FRACTION = 1/3` (`:1440`) 
 `TRIAGE_TOP_FRACTION = 1/3` (`:1404`) both assume one observer row.
 
 `applyTopFraction` (`operations.ts:717-`) groups panes by `y` into "the top row" and "everything
-else," then resizes whichever side needs it. With two rows below the collator, "everything else" is
-both of them together, so this pass still settles the collator's own share correctly; what it does NOT
-do is settle the boundary BETWEEN the two rows, since that border is invisible to a two-way split.
+else," then resizes whichever side needs it. The grow branch moves only the top row and is unaffected
+by how many rows sit below it. The shrink branch is not: it moves EVERY pane in "everything else" with
+`-U`, each against `containerHeight * (1 - fraction)`, a target sized for a single row below the
+collator. With two observer rows, a row-one pane's height is roughly half that target, so its computed
+delta over-moves the collator's border, and a row-two pane's `-U` addresses the border BETWEEN the two
+observer rows, not the collator's. So this pass does NOT settle the collator's own share when the top
+row must shrink over two lower rows; see §4.3.
 `applyBottomWidths` (`operations.ts:859-899`) corrects widths only in "the bottom row," the panes
 sharing the LARGEST `y`; with two observer rows only the lower one would be corrected today.
 
@@ -195,14 +199,39 @@ sensible degraded shape for five or six workers the way a flat row degrades to a
 
 ### 4.3 Height: two passes, not one
 
-`applyTopFraction` keeps settling the collator's own row unchanged, at `TRIAGE_TOP_FRACTION = 1/3`; its
-top-vs-rest grouping already tolerates more than one row underneath (§2). A second, new pass settles
-the boundary between the two observer rows: the SAME per-pane delta logic, restricted to panes not at
-the collator's own `y`, target fraction ONE HALF, so half of the remaining two-thirds is a third of the
-container each and all three rows end up equal. A small, additive change, a second call rather than a
-rewrite; every console but triage leaves the new field unset and gets a no-op, as `null` already means
-for `applyTopFraction`. Whether the live boundary actually lands at thirds is not yet measured the way
-the width fraction was on 2026-09-13; §9's remaining question is verifying this live.
+The earlier draft of this section said `applyTopFraction`'s top-vs-rest grouping tolerates more than
+one row underneath; that premise turned out false, and the owner chose the fix below on 2026-09-15.
+
+`applyTopFraction`'s shrink branch narrows from "every pane below the top row" to "the panes at the
+smallest `y` below the top row" — the row directly beneath the collator. It moves those panes `-U` by
+`topHeight - topTarget` (the current top-row height minus `containerHeight * fraction`), re-reading
+geometry before each pane exactly as today. For a console with exactly one row below the top — review,
+operations; development sets `topFraction: null` and never runs this pass — this issues the same
+command sequence as before: the amount is identical in a layout with no divider between the rows, and
+on a live console can differ by at most the divider's width, since the old target counted the divider
+into the lower row and the new one does not. The grow branch is unchanged: top-row panes still move
+`-D`.
+
+A second, new pass, `applyMiddleRowFraction`, runs in `createWorkspace` right after `applyTopFraction`
+and before `applyBottomWidths`. It is gated on a new optional `WorkspaceSpec` field,
+`middleRowFraction?: number | null`; only `TRIAGE_SPEC` sets it, to a new constant
+`TRIAGE_OBSERVER_ROW_FRACTION = 1/2` in `operations-plan.ts`. Unset or `null` means the pass returns
+before reading geometry, a no-op for every console but triage. It acts only when the layout has exactly
+three rows — the top row plus two below; on any other shape it reads geometry and does nothing. Its
+target is `middleRowFraction` of the two lower rows' COMBINED height (middle-row height plus
+bottom-row height, so a divider between them does not skew the split). It applies the same per-pane
+rule as `applyTopFraction`, one level down: middle row too short moves the middle-row panes `-D`;
+middle row too tall moves the bottom-row panes `-U`; geometry is re-read before each pane, sub-pixel and
+wrong-sign deltas are skipped, and it is best-effort, with a stderr line on a refused resize. At `1/2`
+the two observer rows end equal, so with the collator at `1/3` every row is a third of the container.
+
+The first pass has to run first: moving the collator's border redistributes the lower region
+proportionally across both observer rows, because each full-width row is a subtree of one vertical
+split, so the second pass has to run after it to see the settled region rather than the one it was
+planned against.
+
+Whether the live boundary actually lands at thirds is not yet measured the way the width fraction was
+on 2026-09-13; §9's remaining question is verifying this live.
 
 ### 4.4 Width: one function, more rows
 
@@ -329,7 +358,7 @@ generalizes to match all three observer roles.
 | D1 | Triage's layout is a dedicated, hardcoded seven-pane table local to `triagePanes`, not a parameter on `collatorOverRowPanes`. `reviewPanes` and its builder are untouched. | Two full-width rows are a different shape from a longer single row; the shared builder cannot express it at any pane count. |
 | D2 | `AspectSeat` stays `{worker, aspect}`; a seat's kind lives in a separate, triage-only lookup. | Keeps `REVIEW_CONSOLE_ASPECTS` and its schema untouched. |
 | D3 | `DEFAULT_TRIAGE_WORKERS`'s array order is pane CREATION order, which differs from the owner's stated READING order; `TRIAGE_CONSOLE_ASPECTS`/`TRIAGE_CONSOLE_ROSTER` stay in reading order. | A full-width second row can only be split off before its row's own columns exist; creation order and reading order cannot both be satisfied by one array here. |
-| D4 | Row height settles in two passes: the existing top-vs-rest correction, then a new pass scoped to the panes below the collator, splitting them evenly. | Reuses `applyTopFraction`'s tested per-pane logic on a narrower pane set instead of a new mechanism. |
+| D4 | `applyTopFraction`'s shrink branch narrows to the row directly beneath the top row; a second, gated pass (`applyMiddleRowFraction`) splits the two observer rows evenly. | The old shrink resized every lower pane against a one-row target, which crushes the collator with two rows below; narrowing keeps one-lower-row consoles' command sequence, and the second pass reuses the same per-pane rule one level down. |
 | D5 | Row width correction generalizes from "the single bottom row" to "every row with two or more panes." | Backward compatible: review still has exactly one such row. |
 | D6 | `TRIAGE_OBSERVER_WIDTH_FRACTION` stays `1/3`. | Each row still holds three panes. |
 | D7 | k8s aspects keep their `sliceN` names; new seats get `dockerN`/`vmN`. | `obs-t1..3`'s task ids should not move; the new prefix makes a task id legible about its kind. |
@@ -390,9 +419,10 @@ engineer.
 ### Phase 1: two-row layout (`triage-two-row-layout`)
 
 **Goal.** `triagePanes` builds §4.2's seven-pane table over synthetic worker ids, not yet the real
-roster. `applyTopFraction`'s second pass and `applyBottomWidths`'s generalization land, tested against
-review's one-row shape as a regression guard. Does not touch `DEFAULT_TRIAGE_WORKERS`, the roster, or
-any config file.
+roster. `applyTopFraction`'s shrink branch narrows to the row directly beneath the top row, the second
+height pass (`applyMiddleRowFraction`) lands, and `applyBottomWidths`'s generalization lands, tested
+against review's and operations' one-lower-row command sequences as a regression guard. Does not touch
+`DEFAULT_TRIAGE_WORKERS`, the roster, or any config file.
 
 - **1.1** Replace `triagePanes`'s body with §4.2's own seven-entry table (no longer calling
   `collatorOverRowPanes`). Refuse any `--workers` count other than seven, naming the console. Files:
@@ -400,12 +430,17 @@ any config file.
   synthetic ids) and `bun test test/unit/review-plan.test.ts` unchanged and green.
   Revert check: pass seven workers in the OLD flat-row order; the pane-order assertions catch a single
   wide row where two were expected.
-- **1.2** Add the second height-correction pass (§4.3) to `createWorkspace`, gated on a new optional
-  field every console but triage leaves unset. Generalize `applyBottomWidths` to loop over every row
-  with two or more panes (§4.4). Files: `operations.ts`. Acceptance: `bun test test/unit` for the
-  operations plan/geometry suites.
+- **1.2** Narrow `applyTopFraction`'s shrink branch to the row directly beneath the top row (§4.3). Add
+  the second height-correction pass, `applyMiddleRowFraction`, gated on the new optional
+  `middleRowFraction` field that only `TRIAGE_SPEC` sets. Generalize `applyBottomWidths` to loop over
+  every row with two or more panes (§4.4). Files: `operations.ts`, `operations-plan.ts` (the constant),
+  `test/unit/operations-geometry.test.ts`, `test/unit/operations-workspace.test.ts`.
+  Acceptance: `bun test test/unit/operations-geometry.test.ts test/unit/operations-workspace.test.ts`.
+  Revert check: reverting the shrink branch to resize every lower pane, removing the second pass's call
+  from `createWorkspace`, or setting `middleRowFraction` on a one-lower-row console each reddens the
+  geometry suite.
 
-Round plan: single engineer, two sequential tasks (both touch the same two files).
+Round plan: single engineer, two sequential tasks (1.2 also touches its own test files).
 
 ---
 
