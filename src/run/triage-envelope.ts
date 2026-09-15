@@ -146,7 +146,7 @@ import {
   type TriageDocument,
 } from "./triage-verdict.ts";
 
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Names on disk
@@ -196,6 +196,40 @@ export const OBSERVER_ARTIFACT_FILE_BY_KIND: Readonly<Record<TriageEnvironmentKi
     docker: OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
     vm: OBSERVER_VM_OPS_ARTIFACT_NAME,
   });
+
+/**
+ * Every `observer-*.json` / `observer-*.md` spelling a brief can name,
+ * correct or invented — SRD-TRIAGE-MIXED-OBSERVERS §5, sweeps 146 and 147.
+ *
+ * Sweep 146 sent every k8s brief `observer-k8s.json`/`observer-k8s.md`; sweep
+ * 147 sent `observer-k8s-ops.json`/`observer-k8s-ops.md` — neither pair is
+ * spelled anywhere in `skills/observer-ops/SKILL.md` or in this codebase.
+ * `obs-t2` obeyed the brief it was given both times, wrote the invented name,
+ * ran out of its deadline, and delivered nothing the host could read.
+ *
+ * Deliberately wider than any one kind's pair, so a checker can find whatever
+ * a brief actually names and compare it against {@link observerArtifactPair}
+ * rather than searching the text for one hardcoded wrong answer among
+ * infinitely many. **`src/run/dispatch-request.ts` keeps its own pinned copy
+ * of this pattern rather than importing it** — see that module's own header
+ * for why it names no triage-specific module in its import list — and
+ * `dispatch-request.test.ts` holds the two together.
+ */
+export const OBSERVER_ARTIFACT_TOKEN_RE = /\bobserver-[a-z0-9-]+\.(?:json|md)\b/g;
+
+/**
+ * The pair a seat of `kind` may legally write: its
+ * {@link OBSERVER_ARTIFACT_FILE_BY_KIND} entry and that entry's `.md`
+ * sibling, derived the way `harvest/reconcile.ts:206` derives
+ * `TICKET_OPS_DOCUMENT_NAME` from `TICKET_OPS_ARTIFACT_NAME`, rather than
+ * spelled a second time.
+ */
+export function observerArtifactPair(
+  kind: TriageEnvironmentKind,
+): readonly [json: string, md: string] {
+  const json = OBSERVER_ARTIFACT_FILE_BY_KIND[kind];
+  return [json, `${basename(json, ".json")}.md`];
+}
 
 /** §7.5's document, written by `tri-1` on turn two beside a `triage.md`. */
 export const TRIAGE_DOCUMENT_FILE = "triage.json";

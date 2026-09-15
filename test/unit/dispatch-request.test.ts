@@ -80,6 +80,7 @@ import {
   MAX_DISPATCH_REQUEST_ITEMS,
   MAX_DISPATCH_SERVICES,
   MAX_DISPATCH_TEXT,
+  OBSERVER_ARTIFACT_JSON_BY_WORKER,
   REVIEW_CONSOLE_ROSTER,
   TRIAGE_CONSOLE_ROSTER,
   type ConsoleRoster,
@@ -94,6 +95,8 @@ import {
   MAX_SERVICES_PER_ENVIRONMENT,
   TriageServiceSchema,
 } from "../../src/run/triage-targets.ts";
+import { OBSERVER_ARTIFACT_FILE_BY_KIND } from "../../src/run/triage-envelope.ts";
+import { TRIAGE_SEAT_KINDS } from "../../src/run/triage-seat-kinds.ts";
 import { ROOT, exampleConfig } from "../support/role-docs.ts";
 
 const PARENT = "T-review-1";
@@ -2331,5 +2334,143 @@ describe("§7.3 — the shape of a service list, and the two constants behind it
       expect(declared.success, `declared "${name}"`).toBe(legal);
       expect(claimed.kind, `claimed "${name}"`).toBe(legal ? "ok" : "refused");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SRD-TRIAGE-MIXED-OBSERVERS §5, sweeps 146 and 147 — a brief that names
+// another seat's reply artifact.
+//
+// Sweep 146 sent every k8s brief `observer-k8s.json`/`observer-k8s.md`; sweep
+// 147 sent `observer-k8s-ops.json`/`observer-k8s-ops.md` — neither pair is
+// spelled anywhere in `skills/observer-ops/SKILL.md` or in this codebase.
+// `obs-t2` obeyed the brief it was given both times, wrote the invented name,
+// ran out of its deadline, and delivered nothing the host could read. The
+// docker and vm briefs named their own pair correctly on both sweeps.
+// ---------------------------------------------------------------------------
+
+describe("SRD-TRIAGE-MIXED-OBSERVERS §5 — a brief naming the wrong seat's reply artifact", () => {
+  /**
+   * `OBSERVER_ARTIFACT_JSON_BY_WORKER` is a deliberate second spelling of
+   * `OBSERVER_ARTIFACT_FILE_BY_KIND` (`triage-envelope.ts`), keyed by worker
+   * rather than by kind, for the reason its own docblock gives: this module
+   * names no triage-specific module in its import list. This is the
+   * assertion that keeps the two from drifting apart — the same role this
+   * file's own header gives `SWEEP_FILES_DIR` against `OUTBOX_FILES_DIR`
+   * (`triage-envelope.test.ts`).
+   */
+  test("the local pair table agrees with TRIAGE_SEAT_KINDS and OBSERVER_ARTIFACT_FILE_BY_KIND", () => {
+    const expected: Record<string, string> = {};
+    for (const [worker, kind] of Object.entries(TRIAGE_SEAT_KINDS)) {
+      expected[worker] = OBSERVER_ARTIFACT_FILE_BY_KIND[kind];
+    }
+    expect(OBSERVER_ARTIFACT_JSON_BY_WORKER).toEqual(expected);
+  });
+
+  /** The exact fixture the incident measured, on the exact seat it hit. */
+  test("sweep 146/147's invented k8s pair is refused, naming the seat, the wrong tokens and its own pair", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [
+        item("obs-t1", {
+          services: ["mia"],
+          brief:
+            "Write both observer-k8s.json and observer-k8s.md into /outbox/T-sweep-288/files/. " +
+            "If that pair looks stale, write observer-k8s-ops.json and observer-k8s-ops.md instead.",
+        }),
+      ],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("observer_artifact_mismatch");
+    expect(read.reason).toContain("obs-t1");
+    expect(read.reason).toContain("observer-k8s.json");
+    expect(read.reason).toContain("observer-k8s.md");
+    expect(read.reason).toContain("observer-k8s-ops.json");
+    expect(read.reason).toContain("observer-k8s-ops.md");
+    expect(read.reason).toContain("observer-ops.json");
+    expect(read.reason).toContain("observer-ops.md");
+  });
+
+  test("the seat's own pair, observer-ops.json and observer-ops.md, is accepted on a k8s brief", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [
+        item("obs-t1", {
+          services: ["mia"],
+          brief: "Write observer-ops.json and observer-ops.md into your own outbox files directory.",
+        }),
+      ],
+    });
+
+    expect(parseDispatchRequest(body, triageCtx(SWEEP)).kind).toBe("ok");
+  });
+
+  test("a docker seat's own pair, observer-docker-ops.json, is accepted on obs-td1's brief", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [
+        item("obs-td1", {
+          services: ["mia"],
+          brief: "Write observer-docker-ops.json into your own outbox files directory.",
+        }),
+      ],
+    });
+
+    expect(parseDispatchRequest(body, triageCtx(SWEEP)).kind).toBe("ok");
+  });
+
+  /** A seat's pair is not console-wide: the k8s name is still wrong on a docker seat's brief. */
+  test("the k8s pair in a docker seat's brief is refused", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      requests: [
+        item("obs-td1", {
+          services: ["mia"],
+          brief: "Write observer-ops.json into your own outbox files directory.",
+        }),
+      ],
+    });
+
+    const read = parseDispatchRequest(body, triageCtx(SWEEP));
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("observer_artifact_mismatch");
+  });
+
+  test("a brief naming no artifact file at all is accepted", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: SWEEP,
+      // item()'s default brief ("Read src/run/dispatch-request.ts and report
+      // what it refuses.") names no observer-*.json/.md token.
+      requests: [item("obs-t1", { services: ["mia"] })],
+    });
+
+    expect(parseDispatchRequest(body, triageCtx(SWEEP)).kind).toBe("ok");
+  });
+
+  /**
+   * §7.3's gate again: the check is `roster.services === "required"`, exactly
+   * `checkServices`'s own gate, so a review-console brief that happens to
+   * mention an artifact filename is untouched prose rather than a refusal —
+   * the review console's reviewers write no reply artifact at all.
+   */
+  test("the review console does not run this check — an artifact-shaped brief is just prose there", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: PARENT,
+      requests: [item("rev-arch-1", { brief: "See observer-k8s.json for context." })],
+    });
+
+    expect(parseDispatchRequest(body, CTX).kind).toBe("ok");
   });
 });

@@ -83,6 +83,8 @@ import {
   describeIssues,
   envelopeIssues,
   MIN_PROSE_LENGTH,
+  OBSERVER_ARTIFACT_TOKEN_RE,
+  observerArtifactPair,
   observerArtifactPath,
   parseObserverArtifact,
   projectPreviousState,
@@ -1399,6 +1401,33 @@ describe("§7.4: observer-ops.json → ObserverArtifact", () => {
     });
     expect(OBSERVER_DOCKER_OPS_ARTIFACT_NAME).toBe("observer-docker-ops.json");
     expect(OBSERVER_VM_OPS_ARTIFACT_NAME).toBe("observer-vm-ops.json");
+  });
+
+  /**
+   * SRD-TRIAGE-MIXED-OBSERVERS §5, sweeps 146 and 147 — the pair a seat may
+   * legally write, one call per kind. `dispatch-request.ts` keeps its own
+   * pinned copy of this table rather than importing it; see
+   * `dispatch-request.test.ts`'s pin against `OBSERVER_ARTIFACT_FILE_BY_KIND`
+   * and `TRIAGE_SEAT_KINDS` for why the two cannot drift apart.
+   */
+  test("observerArtifactPair derives each kind's own pair, .md sibling included", () => {
+    expect(observerArtifactPair("k8s")).toEqual(["observer-ops.json", "observer-ops.md"]);
+    expect(observerArtifactPair("docker")).toEqual([
+      "observer-docker-ops.json",
+      "observer-docker-ops.md",
+    ]);
+    expect(observerArtifactPair("vm")).toEqual(["observer-vm-ops.json", "observer-vm-ops.md"]);
+  });
+
+  test("the artifact-token pattern finds a brief's real and invented spellings alike", () => {
+    const text =
+      "Write observer-k8s.json and observer-k8s.md, or observer-ops.json and observer-ops.md.";
+    expect([...text.matchAll(OBSERVER_ARTIFACT_TOKEN_RE)].map((m) => m[0])).toEqual([
+      "observer-k8s.json",
+      "observer-k8s.md",
+      "observer-ops.json",
+      "observer-ops.md",
+    ]);
   });
 
   test("an absent artifact file is `absent`, never an empty artifact", async () => {

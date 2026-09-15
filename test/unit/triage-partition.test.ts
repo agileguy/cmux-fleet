@@ -760,6 +760,50 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
   });
 
   /**
+   * SRD-TRIAGE-MIXED-OBSERVERS §5, sweeps 146 and 147 — the artifact check
+   * itself runs INSIDE `parseDispatchRequest`, not here: `entry.brief` is
+   * gone by the time a {@link PartitionAssignment} exists, which is exactly
+   * what this file's own anchor states — `{worker, services}`, no brief. The
+   * refusal still reaches THIS gate, through the arm the two tests above
+   * already exercise: a refused request contributes nothing to the
+   * partition, so `dispatchPartition`'s dispatch effect is never called for
+   * it — `readSweepPartition`'s existing contract for EVERY refusal
+   * (`cli/commands/triage.ts`, the `read.kind === "refused"` arm), reused
+   * here rather than duplicated.
+   */
+  test("a brief naming another seat's artifact pair never reaches the fan-out", async () => {
+    const badEntry = {
+      worker: OBS[0],
+      title: `sweep ${OBS[0]}`,
+      brief:
+        "Write both observer-k8s.json and observer-k8s.md into /outbox/T-sweep-288/files/. " +
+        "If that pair looks stale, use observer-k8s-ops.json and observer-k8s-ops.md instead.",
+      services: ["ntfy"],
+    } as DispatchRequestItem;
+
+    const read = parseDispatchRequest(fanOutBody(SWEEP, [badEntry]), {
+      sender: "tri-1",
+      taskId: SWEEP,
+      roster: TRIAGE_CONSOLE_ROSTER,
+    });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("observer_artifact_mismatch");
+
+    // `readSweepPartition`'s documented arm for a refused request: an EMPTY
+    // partition for this collator, never a throw. `checkTriagePartition` is
+    // what turns that into `partition_incomplete`; the assertion below is on
+    // the dispatch spy, which is `dispatchPartition`'s own contract whatever
+    // check upstream produced the empty list.
+    const { dispatch, calls } = spy();
+    const outcome = await dispatchPartition(K8S_DECLARED, [], dispatch);
+
+    expect(outcome.kind).toBe("refused");
+    expect(calls).toEqual([]);
+  });
+
+  /**
    * `DECLARED` IS A SERVICE LIST THE TARGETS SCHEMA WOULD ACTUALLY ADMIT.
    *
    * `DECLARED` is a bare array, and every fixture above trusts it to be
