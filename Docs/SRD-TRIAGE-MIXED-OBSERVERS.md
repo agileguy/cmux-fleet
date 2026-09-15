@@ -252,8 +252,13 @@ names (`slice1`/`slice2`/`slice3`); the three new entries get their own prefix, 
 kind it covers on its own.
 
 `AspectSeat` stays exactly `{worker, aspect}`, shared unchanged with the review console (D2). A seat's
-kind lives in a new, triage-only lookup keyed by worker id, consulted by the partition check and the
-reply reader (§7); keeping it out of the shared type means review's aspects need no schema change.
+kind lives in `src/run/triage-seat-kinds.ts`, a triage-only lookup keyed by worker id: `TRIAGE_SEAT_KINDS`
+maps the six seats to their kind, `seatKind` answers one worker's kind or `null` for a seat this table does
+not name (the collator included, since it observes no environment itself), and `seatsOfKind` and
+`workersOfKind` filter a seat or worker list down to one kind. It lands in Phase 3, where task 3.3 first
+needs it for per-environment `observerBlocked`; Phase 4's partition check and Phase 5's reply reader both
+reuse it rather than building their own. Keeping it out of the shared `AspectSeat` type means review's
+aspects need no schema change.
 
 Partitioning becomes three independent checks per sweep, one per kind, each against its own declared
 inventory (§6): k8s unchanged (`obs-t1..3` split the environment's services, ceil(N/3) each); docker
@@ -278,8 +283,12 @@ and a new sentence states a k8s service, a docker container and a VM unit never 
 three shapes differ enough (`kube_context` versus a target token, a different closed `checks`
 vocabulary) that a discriminated union on `kind` is the cleanest fit: a loader-side preprocessing step
 fills in the default `kind` before the union discriminates, then three sibling schemas replace the
-single one. The duplicate-service-name check stays shared across all three, since incident state keys
-on the service name within its own environment regardless of kind.
+single one. `duplicateServiceNameIssues` (`triage-targets.ts`) stays shared across all three kind schemas,
+and it checks one environment's own service list only: a name repeated within `do-cluster`, or within
+`docker-host`, is refused, but the same name declared once each in two different environments is not,
+because incident state keys on (environment, service) rather than the name alone (task 4.1b). That is why
+`do-cluster` and `docker-host` can each declare a `grafana` and a `prometheus` in the tracked
+`triage/targets.yaml`, and both validate today.
 
 ```yaml
 version: 1
@@ -329,12 +338,22 @@ environments:
 `soleEnvironment` refuses anything other than exactly one declared environment. With three kinds
 possibly present at once, it is replaced by a kind-aware function (working name `environmentsByKind`)
 requiring exactly one k8s environment (preserving today's "at least one, not two," scoped to k8s) and
-at most one docker and at most one vm. `triage.ts:1298`'s call site and the
-`triage-command.test.ts:2172-2174` pins move to it. Downstream, `sweepProducers`'s
-`openSweep`/`dispatchObserver` (today one `deps.environment`) and `triage-pass.ts`'s `settle()` (today
-one `ConsoleEnvironmentFacts` element) widen to loop over whichever kinds are present, one dispatch
-pass and one facts entry per kind, the seam §2 notes `ConsoleHealthFacts.environments` already left
-open as an array.
+at most one docker and at most one vm. Every present environment must also declare the same
+`default_window`: `environmentsByKind` refuses a mismatch by name, listing each environment against its
+own window, because one sweep has exactly one `window_opened_at` and every artifact's window gate
+compares against that single value. This check runs when a sweep starts, inside `productionTriageDeps`'s
+`pass` closure; `config validate` does not run it (§9 Q2). The call site in `src/cli/commands/triage.ts`
+and the `environmentsByKind` pins in `test/unit/triage-command.test.ts` move to it.
+
+One sweep sends ONE task id to `tri-1`, owner decision 2: the inbox and fan-out paths are keyed by task
+id, so a second task id would split the collated document rather than add to it. `sweepProducers`'s
+`openSweep` (today one `deps.environment`) widens so its one envelope lists every environment
+`environmentsByKind` returns, each with its name, kind and services; a single k8s environment renders
+exactly as it does today. `triage-pass.ts`'s `settle()` (today one `ConsoleEnvironmentFacts` element)
+emits one entry per present kind, and computes that entry's `observerBlocked` from that kind's own
+seats, `workersOfKind(kind, s.join.blocked)` (`triage-seat-kinds.ts`, §5), so a blocked k8s seat never
+marks the docker or vm environment `observer_blocked`. The seam §2 notes `ConsoleHealthFacts.environments`
+already left open as an array.
 
 ## 7. Design: reading a reply per kind
 
@@ -356,7 +375,7 @@ generalizes to match all three observer roles.
 | # | Decision | Reason |
 |---|---|---|
 | D1 | Triage's layout is a dedicated, hardcoded seven-pane table local to `triagePanes`, not a parameter on `collatorOverRowPanes`. `reviewPanes` and its builder are untouched. | Two full-width rows are a different shape from a longer single row; the shared builder cannot express it at any pane count. |
-| D2 | `AspectSeat` stays `{worker, aspect}`; a seat's kind lives in a separate, triage-only lookup. | Keeps `REVIEW_CONSOLE_ASPECTS` and its schema untouched. |
+| D2 | `AspectSeat` stays `{worker, aspect}`; a seat's kind lives in `triage-seat-kinds.ts`, a separate, triage-only lookup built in Phase 3 and reused by Phase 4's partition check and Phase 5's reply reader. | Keeps `REVIEW_CONSOLE_ASPECTS` and its schema untouched. |
 | D3 | `DEFAULT_TRIAGE_WORKERS`'s array order is pane CREATION order, which differs from the owner's stated READING order; `TRIAGE_CONSOLE_ASPECTS`/`TRIAGE_CONSOLE_ROSTER` stay in reading order. | A full-width second row can only be split off before its row's own columns exist; creation order and reading order cannot both be satisfied by one array here. |
 | D4 | `applyTopFraction`'s shrink branch narrows to the row directly beneath the top row; a second, gated pass (`applyMiddleRowFraction`) splits the two observer rows evenly. | The old shrink resized every lower pane against a one-row target, which crushes the collator with two rows below; narrowing keeps one-lower-row consoles' command sequence, and the second pass reuses the same per-pane rule one level down. |
 | D5 | Row width correction generalizes from "the single bottom row" to "every row with two or more panes." | Backward compatible: review still has exactly one such row. |
@@ -372,12 +391,17 @@ generalizes to match all three observer roles.
 | D15 | Docker's two seats split five containers three and two; the VM's one seat takes its whole declared set. | Owner decisions 4 and 5. |
 | D16 | `run.max_concurrent` becomes 12 in both configs. | Owner decision 6, not derived from seat-count arithmetic. |
 | D17 | VM checks fix to `[system, units, resources]` plus three named units; docker rows default to `[state, health, logs]`. | Owner decision 5 for the VM; the docker default matches the skill's own default when a brief omits `checks`. |
+| D18 | A sweep sends ONE task id to `tri-1`; its envelope lists every present environment by name, kind and services, and `settle()` computes each kind's `observerBlocked` from that kind's own seats via `workersOfKind`. | Owner decision 2, one sweep one collated document; the inbox and fan-out are keyed by task id, so a second id would split the document. |
+| D19 | The seat-to-kind lookup, `src/run/triage-seat-kinds.ts`, lands in Phase 3, not Phase 4. | Task 3.3 needs it for per-environment `observerBlocked`; task 4.1 only reuses it. |
+| D20 | `environmentsByKind`'s kind-count and shared-window checks run when a sweep starts, inside `triage.ts`'s dispatch path; `config validate` does not run them today. | Whether `config validate` should also run them is left open, §9 Q2. |
+| D21 | The merged sweep assessment, `projectPreviousState`, and the collated document's rows key on (environment, service), not the service name alone. | `do-cluster` and `docker-host` both declare `grafana` and `prometheus`; task 4.1b. |
 
 ## 9. Open questions
 
 | # | Question | Recommended default | Reasoning |
 |---|---|---|---|
 | Q1 | Do the two observer rows actually land at equal thirds of height, and is a third-width, third-height pane legible? | Proceed with the §4.3/§4.4 design, verify visually at the live host task | The width correction was measured live once before (2026-09-13, single row); the new row-height pass has not been, and this console runs unattended, so the first real look at it is the host task that recreates it. |
+| Q2 | Should `config validate` run `environmentsByKind`'s kind-count and shared-window checks? | Yes, as a follow-up; until then, a mismatch is refused at the first sweep, naming both environments | `config validate` runs earlier and cheaper than a sweep, and sweep start already fails closed, so the gap costs one wasted sweep at worst rather than a live mismatch. |
 
 ## 10. Acceptance criteria hooks
 
@@ -388,7 +412,9 @@ generalizes to match all three observer roles.
 - **Inventory:** `triage/targets.yaml` validates with three environments, one per kind; a k8s field on
   a docker environment, or vice versa, is refused by `.strict()`.
 - **Partition:** a k8s service claimed by a docker seat's request is refused, and vice versa; an
-  incomplete or duplicated claim within one kind is refused, naming that kind.
+  incomplete or duplicated claim within one kind is refused, naming that kind. A service name declared
+  in two environments, `grafana` in both `do-cluster` and `docker-host`, is claimed once per environment
+  with no duplicate refusal, and gets one row per environment in the collated document (task 4.1b).
 - **Reply reading:** a docker or vm seat's artifact is present in the joined sweep's replies, not
   silently absent as it is today.
 - **Freshness:** a null `sweep_id` from a docker or vm seat grades `stale_replay`, exactly as it does
@@ -410,7 +436,7 @@ engineer.
 | 1 | `triage-two-row-layout` | Seven-pane, two-row builder; height and width corrections generalized | (none) |
 | 2 | `triage-mixed-roster` | Six-seat roster, aspects, new seats in both configs, `max_concurrent: 12` | 1 |
 | 3 | `triage-targets-kind` | `triage/targets.yaml` gains `kind`; `soleEnvironment` replaced | 2 |
-| 4 | `triage-mixed-partition` | Per-kind completeness check; `roles/triage.md` rewritten | 3 |
+| 4 | `triage-mixed-partition` | Per-kind completeness check; rows keyed on (environment, service); `roles/triage.md` rewritten | 3 |
 | 5 | `triage-mixed-reader` | Collator reads all three artifact filenames; tui warning generalized | 3, 4 |
 | 6 | `triage-mixed-live` | Recreate the console at seven panes, one live sweep across all three kinds | 1-5, and observer SRD 6.H3/6.H4 |
 
@@ -486,13 +512,20 @@ not change partition logic or the reply reader (Phases 4-5).
   Acceptance: `bun test test/unit/triage-targets.test.ts`. Revert check: today's unmodified
   `triage/targets.yaml` still parses, as a k8s environment.
 - **3.2** Replace `soleEnvironment` with a kind-aware `environmentsByKind` per §6.1: exactly one k8s,
-  at most one docker, at most one vm. Move `triage.ts:1298`'s call site and the
-  `triage-command.test.ts:2172-2174` pins onto it. Files: `triage.ts`, `triage-command.test.ts`.
+  at most one docker, at most one vm. Move the call site inside `productionTriageDeps`'s `pass` closure
+  and the pins in `triage-command.test.ts` onto it. Files: `triage.ts`, `triage-command.test.ts`.
   Acceptance: `bun test test/unit/triage-command.test.ts`.
-- **3.3** Widen `sweepProducers`'s `openSweep`/`dispatchObserver` and `triage-pass.ts`'s `settle()` to
-  loop the kinds `environmentsByKind` returns, one dispatch pass and one `ConsoleEnvironmentFacts`
-  entry per present kind. Files: `triage-envelope.ts`, `triage-pass.ts`, their tests.
-  Acceptance: `bun test test/unit/triage-envelope.test.ts test/unit/triage-pass.test.ts`.
+- **3.3** Add `src/run/triage-seat-kinds.ts`, the triage-only lookup from a seat's worker id to the
+  environment kind it observes: `TRIAGE_SEAT_KINDS`, `seatKind`, `seatsOfKind`, `workersOfKind`. Widen
+  `sweepProducers`'s `openSweep` so it still sends ONE task id to `tri-1`, with its one envelope now
+  listing every environment `environmentsByKind` returns, each with its name, kind and services (a
+  single k8s environment renders exactly as it does today). Widen `triage-pass.ts`'s `settle()` to emit
+  one `ConsoleEnvironmentFacts` entry per present kind, computing each entry's `observerBlocked` from
+  `workersOfKind(kind, s.join.blocked)` rather than the flat list, so a blocked k8s seat never marks the
+  docker or vm environment `observer_blocked`. Files: `triage-seat-kinds.ts`, `triage-envelope.ts`,
+  `triage-pass.ts`, their tests.
+  Acceptance: `bun test test/unit/triage-seat-kinds.test.ts test/unit/triage-envelope.test.ts
+  test/unit/triage-pass.test.ts`.
 - **3.4** Write `docker-host`/`vm-host` into the tracked `triage/targets.yaml` per §6's worked example,
   five containers and the VM's fixed checks and named units. Files: `triage/targets.yaml`.
   Acceptance: `bun run src/cli/index.ts config validate --config fleet.yaml` (the targets file is
@@ -505,17 +538,34 @@ stub and reconciles at review). R2 eng-1 3.2, eng-2 3.3. R3 eng-1 3.4 (small, si
 
 ### Phase 4: per-kind partition (`triage-mixed-partition`)
 
-**Goal.** Three independent completeness checks per sweep, each named correctly in its refusal.
-`roles/triage.md` rewritten for three kinds. Does not touch the reply reader (Phase 5) or run against a
-real target (Phase 6).
+**Goal.** Three independent completeness checks per sweep, each named correctly in its refusal. The
+merged sweep assessment and the one collated document key their rows on (environment, service), not the
+service name alone, so `do-cluster`'s `grafana` and `docker-host`'s `grafana` each get their own row
+instead of colliding. `roles/triage.md` rewritten for three kinds. Does not touch the reply reader
+(Phase 5) or run against a real target (Phase 6).
 
-- **4.1** A small worker-id-to-kind lookup for the six triage seats. Change the call site that invokes
-  `checkTriagePartition` once per sweep to invoke it once per kind (k8s, then docker, then vm),
-  stopping at the first refusal. Add the `context: {kind, width}` argument to `checkTriagePartition`
-  and rewrite its `:309` refusal text to use it. Files: the new lookup module, `triage-partition.ts`,
-  its caller, its test. Acceptance: `bun test test/unit/triage-partition.test.ts`.
+- **4.1** Change the call site that invokes `checkTriagePartition` once per sweep, inside `triagePass`'s
+  call to `dispatchPartition` in `triage-pass.ts`, to invoke it once per kind (k8s, then docker, then
+  vm), reusing Phase 3's `seatsOfKind`/`workersOfKind` (`triage-seat-kinds.ts`) to split the assignments
+  and the declared set by kind, and stopping at the first refusal. Add the `context: {kind, width}`
+  argument to `checkTriagePartition` and rewrite its `:309` refusal text to use it. Files:
+  `triage-partition.ts`, `triage-pass.ts`, `test/unit/triage-partition.test.ts`. Acceptance:
+  `bun test test/unit/triage-partition.test.ts`.
   Revert check: a docker container fed into the k8s kind's declared set still reports
   `partition_incomplete` for k8s rather than being silently accepted.
+- **4.1b** Key `declared` and `projectPreviousState` (`triage-envelope.ts`), `assessTriageSweep` and
+  `sweepObservations` (`triage-verdict.ts`), and the collated document's rows on (environment, service),
+  not the service name alone. `do-cluster` and `docker-host` both declare a `grafana` and a `prometheus`
+  in the tracked `triage/targets.yaml`, and once decision A merges every present kind's reply into the
+  sweep's one collated document, a plain service name is no longer unique within it.
+  `checkTriagePartition` needs no change for this: task 4.1 already scopes it to one kind's own declared
+  set, so a docker `grafana` claim and a k8s `grafana` claim are never compared against each other at
+  partition time, and the collision this task closes sits downstream, in the merged assessment. Files:
+  `triage-envelope.ts`, `triage-verdict.ts`, `test/unit/triage-envelope.test.ts`,
+  `test/unit/triage-verdict.test.ts`. Acceptance: `bun test test/unit/triage-envelope.test.ts
+  test/unit/triage-verdict.test.ts`. Revert check: with `do-cluster` and `docker-host` both present, a
+  correct fan-out claiming both `grafana` services is not refused `partition_duplicate`, and each gets
+  its own row in the collated document.
 - **4.2** Wire the per-kind inventory from Phase 3 into the triage CLI actor; refuse to start a sweep
   if a seat's kind has no matching environment. Files: the triage command module.
   Acceptance: `bun test` on the actor's existing test file.
@@ -523,7 +573,11 @@ real target (Phase 6).
   `roles/triage.md`. Acceptance: `bun test test/unit/worker-docs-currency.test.ts` if it covers this
   file, otherwise a manual read-through noted in the phase report.
 
-Round plan: R1 eng-1 4.1, eng-2 4.2. R2 eng-1 4.3 (small, single task).
+Round plan: R1 eng-1 4.1, eng-2 4.3. R2 eng-1 4.1b, eng-2 4.2. 4.1b follows 4.1 because its
+revert check needs the partition already scoped to one kind: against today's single flat declared set,
+two `grafana` claims are refused `partition_duplicate` whatever the downstream keying does. No file is
+owned twice within a round: 4.1 takes `triage-partition.ts` and `triage-pass.ts`, 4.3 takes
+`roles/triage.md`, 4.1b takes `triage-envelope.ts` and `triage-verdict.ts`, and 4.2 takes `triage.ts`.
 
 ---
 
@@ -534,8 +588,9 @@ Freshness gates apply to both. The tui warning covers all three observer roles. 
 harvest's own validation (`src/harvest/reconcile.ts`), which already covers both new artifacts.
 
 - **5.1** Add a filename parameter to `parseObserverArtifact`, `readObserverArtifactAt` and the
-  `joinSweep` loop, resolved per seat from Phase 4.1's kind lookup. Switch `joinSweep`'s read of
-  `TRIAGE_CONSOLE_ASPECTS` to the resolved `pairs` its sibling functions already use. Files:
+  `joinSweep` loop, resolved per seat from Phase 3.3's kind lookup (`triage-seat-kinds.ts`). Switch
+  `joinSweep`'s read of `TRIAGE_CONSOLE_ASPECTS` to the resolved `pairs` its sibling functions already
+  use. Files:
   `triage-envelope.ts`. Acceptance: `bun test test/unit/triage-envelope.test.ts`.
   Revert check: hardcoding `OBSERVER_ARTIFACT_FILE` back into the docker/vm path reddens a new test
   asserting a docker seat's reply appears in the joined sweep.
