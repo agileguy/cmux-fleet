@@ -51,7 +51,10 @@ about; run it from `~/repos/cmux-fleet` and the worker gets cmux-fleet. See
 **Choosing a worker's platform** in `SKILL.md`.
 
 *Dispatching into a worker's existing session instead* — only when the user
-asks for it, or when the worker has never been dispatched to since it came up:
+asks for it, or when the worker has never been dispatched to since it came up
+(for `obs-d1` and `obs-v1` that condition is not something to check: this is
+the only path there is for either seat, dispatched-before or not — see
+"Reaching a seat that no console plans" below):
 
 ```bash
 cd ~/repos/cmux-fleet && bun run src/cli/index.ts status --all --json   # run id
@@ -149,6 +152,11 @@ What belongs in a VM inquiry brief (`Docs/SRD-OBSERVER-ROLES.md` §6.3):
   `resources`, `cloud`
 - the **window**
 
+`cloud` is listed for completeness, not because `obs-v1` can act on it:
+`roles/observer-vm.md` gives this role `cloud_access: false`, so `cloud` is
+always recorded `not_attempted` by this role regardless of what the brief
+asks — not a channel its worker will ever actually call.
+
 **None of these is yours to supply.** If the user's instruction leaves one out,
 leave it out of the brief too — `obs-d1` and `obs-v1` hold the defaults (a lone
 enrolled target, `state, health, logs` or `reachability, system, units, logs`,
@@ -171,6 +179,11 @@ cd ~/repos/cmux-fleet && bun run src/cli/index.ts status --all --json   # run id
 cd ~/repos/cmux-fleet && bun run src/cli/index.ts dispatch \
   --worker <obs-d1|obs-v1> --run <run-id> --task <path> --json
 ```
+
+This is not the "only when…" alternative step 2 describes for a console
+worker — for `obs-d1` and `obs-v1` it is unconditional. Neither seat has a
+`--restart` path to prefer over it, whether or not the seat has been
+dispatched to before.
 
 If `status --all --json` shows no run holding the seat yet, bring it up first.
 `up --workers <ids>` takes a comma-separated subset of `workers:`
