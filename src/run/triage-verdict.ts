@@ -1106,10 +1106,10 @@ export function assessTriageSweep(
    *
    * **Grouped on (environment, service), not service alone — D21, task 4.1b.**
    * A row `resolveRowEnvironment` cannot place — no `environment` of its own,
-   * and `declared` names more than one so there is no default to fall back to
-   * — is reported in `undeclaredRows`, bare, and never grouped here at all:
-   * duplication is a fact about a KEY two rows share, and an unkeyable row has
-   * no key to share with anything.
+   * `declared` names more than one, and its `service` names zero or several of
+   * them rather than exactly one — is reported in `undeclaredRows`, bare, and
+   * never grouped here at all: duplication is a fact about a KEY two rows
+   * share, and an unkeyable row has no key to share with anything.
    */
   const declaredKeys = new Set<string>();
   for (const env of coverage.declared) {
@@ -1290,7 +1290,9 @@ function censusLabel(environment: string, service: string, declaredEnvironments:
 
 /**
  * The environment ONE row is about, resolved — SRD-TRIAGE-MIXED-OBSERVERS D21,
- * task 4.1b.
+ * task 4.1b; widened for the silent row in a multi-environment sweep, so a
+ * collator that leaves out the `environment` its brief asks for has a
+ * host-side backstop rather than a single point of failure.
  *
  * `row.environment`, verbatim, whenever the worker named one — WHETHER OR NOT
  * `declared` contains it. Resolution and declaration are separate questions,
@@ -1301,19 +1303,40 @@ function censusLabel(environment: string, service: string, declaredEnvironments:
  * see {@link assessTriageSweep}'s own undeclared-row handling for where that
  * distinction is spent.
  *
- * `null` only when the row is silent and `declared` cannot supply a default —
- * more than one environment, so there is no single legal guess, which is the
- * row's own docblock's *"never guessed"*. A sweep over exactly one environment
- * has exactly one legal answer, so a silent row resolves to it and every
- * existing single-environment document keeps parsing exactly as it did before
- * this task.
+ * A sweep over exactly one environment has exactly one legal answer, so a
+ * silent row resolves to it and every existing single-environment document
+ * keeps parsing exactly as it did before this task.
+ *
+ * **Otherwise, a silent row asks the same question of its own service name
+ * that `declared.length === 1` already answers for the whole sweep**: how
+ * many legal answers are there. `declared.length === 1` is the case where the
+ * SWEEP has exactly one; this is the case where the ROW's own `service` does —
+ * exactly one declared environment lists it among its `services`. Both are the
+ * same shape of fact (one candidate, so no guess is required) and both are
+ * trusted for the same reason. A service declared nowhere, or under two
+ * environments at once — the tracked `triage/targets.yaml`'s `grafana` and
+ * `prometheus`, each declared under both `do-cluster` and `docker-host` — has
+ * zero or several candidates, which is exactly the shape `null` already means:
+ * no single legal guess, so none is made. Those two stay unplaced under either
+ * environment, precisely as they did before this widening.
+ *
+ * `row.observer` — the WORKER's own claim of who produced the row — is never
+ * read here, on the document schema's own rule for that field: *"Recorded,
+ * never trusted."* Only `declared`, the host's own inventory, and `row.service`,
+ * the one fact a silent row does carry, decide the answer.
+ *
+ * `null` when neither a named environment nor a unique service-name owner
+ * exists — more than one candidate, or none, so there is no single legal
+ * guess, which is the row's own docblock's *"never guessed"*.
  */
 function resolveRowEnvironment(
   row: TriageRow,
   declared: readonly DeclaredEnvironment[],
 ): string | null {
   if (named(row.environment)) return row.environment as string;
-  return declared.length === 1 ? (declared[0] as DeclaredEnvironment).name : null;
+  if (declared.length === 1) return (declared[0] as DeclaredEnvironment).name;
+  const owners = declared.filter((environment) => environment.services.includes(row.service));
+  return owners.length === 1 ? (owners[0] as DeclaredEnvironment).name : null;
 }
 
 /**

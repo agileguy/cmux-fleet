@@ -3716,6 +3716,105 @@ describe("a sweep across two environments — keyed on (environment, service), n
 });
 
 /**
+ * A silent row — no `environment` of its own — placed by its unique service
+ * name, in a sweep declaring all three kinds. SRD-TRIAGE-MIXED-OBSERVERS D21;
+ * the host-side backstop for a collator that leaves out the field its
+ * collation brief asks for. `resolveRowEnvironment`'s own docblock
+ * carries the argument: a silent row's `service` is asked the same
+ * one-candidate question `declared.length === 1` already answers for the
+ * whole sweep, and it is trusted for the same reason.
+ */
+describe("a silent row resolves by its own unique service name — D21 host-side backstop", () => {
+  /**
+   * `grafana` is declared under BOTH `do-cluster` and `docker-host` — the
+   * tracked `triage/targets.yaml`'s own collision — so it has two candidate
+   * owners and stays ambiguous. `prometheus`, `cadvisor` and `vm-svc` each
+   * have exactly one.
+   */
+  const DECLARED: readonly DeclaredEnvironment[] = [
+    { name: "do-cluster", kind: "k8s", services: ["grafana", "prometheus"] },
+    { name: "docker-host", kind: "docker", services: ["grafana", "cadvisor"] },
+    { name: "vm-host", kind: "vm", services: ["vm-svc"] },
+  ];
+
+  /**
+   * One k8s seat covering both of `do-cluster`'s services, one docker seat
+   * covering both of `docker-host`'s, one vm seat — every declared service
+   * has a fresh, assigned observer, so a row's placement is the only thing
+   * any test in this block varies.
+   */
+  function coverage(): SweepCoverage {
+    return {
+      declared: DECLARED,
+      assignments: [
+        assign("obs-t1", "grafana", "prometheus"),
+        assign("obs-td1", "grafana", "cadvisor"),
+        assign("obs-tv1", "vm-svc"),
+      ],
+      artifacts: [artifact("obs-t1"), artifact("obs-td1"), artifact("obs-tv1")],
+      window: WINDOW,
+    };
+  }
+
+  function assessmentOf(
+    result: ReturnType<typeof assessTriageSweep>,
+    environment: string,
+    service: string,
+  ): ServiceAssessment {
+    const found = result.services.find(
+      (s) => s.environment === environment && s.service === service,
+    );
+    if (found === undefined) throw new Error(`no assessment for ${environment}/${service}`);
+    return found;
+  }
+
+  test("a silent cadvisor row — declared only in docker-host — is observed under docker-host", () => {
+    const result = assessTriageSweep(SWEEP, coverage(), doc([row("cadvisor")]));
+
+    const cadvisor = assessmentOf(result, "docker-host", "cadvisor");
+    expect(cadvisor.reason).toBe("observed");
+    expect(cadvisor.assessment).toBe("healthy");
+    // Placed cleanly — nothing for the census to call undeclared.
+    expect(result.census.undeclared_rows).toEqual([]);
+  });
+
+  test("a silent row naming a service declared in two environments is placed in neither, and both pairs stay unreported", () => {
+    const result = assessTriageSweep(SWEEP, coverage(), doc([row("grafana")]));
+
+    // Bare — there is no resolved environment to prefix it with.
+    expect(result.census.undeclared_rows).toEqual(["grafana"]);
+    expect(result.census.duplicate_rows).toEqual([]);
+
+    // Both assigned, fresh observers wrote no usable row for their own key.
+    expect(assessmentOf(result, "do-cluster", "grafana").reason).toBe("unreported");
+    expect(assessmentOf(result, "docker-host", "grafana").reason).toBe("unreported");
+  });
+
+  test("a named environment wins over the inference, even when it disagrees with the unique owner", () => {
+    // cadvisor's only declared owner is docker-host — but this row names
+    // do-cluster outright, and a named environment is read verbatim (task
+    // 4.1b), never second-guessed against what inference would have said.
+    const result = assessTriageSweep(SWEEP, coverage(), doc([row("cadvisor", { environment: "do-cluster" })]));
+
+    // Bound to the NAMED environment, which do-cluster does not declare —
+    // spelled `environment/service` because `declared` names three.
+    expect(result.census.undeclared_rows).toEqual(["do-cluster/cadvisor"]);
+    // The row never reached docker-host/cadvisor, which is what inference
+    // alone would have produced.
+    expect(assessmentOf(result, "docker-host", "cadvisor").reason).toBe("unreported");
+  });
+
+  test("a silent row naming a service no environment declares stays bare, truthfully, in undeclared_rows", () => {
+    const result = assessTriageSweep(SWEEP, coverage(), doc([row("mystery-service")]));
+
+    // Bare, not `environment/service` — there is no resolved environment at
+    // all, never mind that `declared` happens to hold three.
+    expect(result.census.undeclared_rows).toEqual(["mystery-service"]);
+    expect(result.services.every((s) => s.reason !== "observed")).toBe(true);
+  });
+});
+
+/**
  * SRD-TRIAGE-MIXED-OBSERVERS §5, §7; §11 task 5.2. Until this task, both of
  * §6.6 layer 3's freshness gates — the `sweep_id` echo and the
  * `window_opened_at` echo — had been proven only for the three k8s seats,

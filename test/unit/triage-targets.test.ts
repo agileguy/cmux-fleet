@@ -50,6 +50,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { ConfigValidationError } from "../../src/config/load.ts";
 import {
@@ -648,6 +650,90 @@ environments:
     const issues = kubeContextIssues(combined, REACHES_DEV_AND_VERIFY);
     expect(issues).toHaveLength(1);
     expect(issues[0]!.path).toBe("environments.prod.kube_context");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The sweep-wide total (SRD-TRIAGE-MIXED-OBSERVERS §5) — a bound the
+// per-environment `.max(MAX_SERVICES_PER_ENVIRONMENT)` checks above cannot
+// see, because it is a fact about the SUM, not about any one environment.
+// ---------------------------------------------------------------------------
+
+/** A k8s environment block naming `count` services, each unique within it. */
+function k8sServicesBlock(env: string, context: string, count: number): string {
+  const rows = Array.from(
+    { length: count },
+    (_, i) => `      - {name: ${env}-svc-${i}, namespace: ns, checks: [rollout]}`,
+  ).join("\n");
+  return `  ${env}:\n    kube_context: ${context}\n    services:\n${rows}\n`;
+}
+
+/** A docker environment block naming `count` services. */
+function dockerServicesBlock(env: string, count: number): string {
+  const rows = Array.from(
+    { length: count },
+    (_, i) => `      - {name: ${env}-svc-${i}, namespace: docker}`,
+  ).join("\n");
+  return `  ${env}:\n    kind: docker\n    target: docker\n    default_window: 5m\n    services:\n${rows}\n`;
+}
+
+/** A vm environment block naming `count` services. */
+function vmServicesBlock(env: string, count: number): string {
+  const rows = Array.from(
+    { length: count },
+    (_, i) => `      - {name: ${env}-svc-${i}, namespace: vm, checks: [system]}`,
+  ).join("\n");
+  return `  ${env}:\n    kind: vm\n    target: vm\n    default_window: 5m\n    services:\n${rows}\n`;
+}
+
+describe(`the sweep-wide total is bounded at MAX_SERVICES_PER_ENVIRONMENT too — one collation document carries every row of the sweep`, () => {
+  test("17 services split across TWO environments, each under its own per-environment cap, is refused naming the total, the bound, and the one document", () => {
+    const yaml =
+      `version: 1\nenvironments:\n` +
+      k8sServicesBlock("cni-dev", "gke-cni-dev", 9) +
+      dockerServicesBlock("docker-host", 8);
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+
+    expect(issues[0]!.path).toBe("environments");
+    expect(issues[0]!.message).toContain("17");
+    expect(issues[0]!.message).toContain(String(MAX_SERVICES_PER_ENVIRONMENT));
+    expect(issues[0]!.message).toContain("triage.json");
+    expect(issues[0]!.message).toContain("one collation document");
+  });
+
+  test("17 services split across THREE environments — one per kind — is refused the same way", () => {
+    const yaml =
+      `version: 1\nenvironments:\n` +
+      k8sServicesBlock("cni-dev", "gke-cni-dev", 6) +
+      dockerServicesBlock("docker-host", 6) +
+      vmServicesBlock("vm-host", 5);
+    const issues = issuesFrom(() => parseTriageTargets(yaml, TARGETS_PATH));
+
+    expect(issues[0]!.path).toBe("environments");
+    expect(issues[0]!.message).toContain("17");
+    expect(issues[0]!.message).toContain(String(MAX_SERVICES_PER_ENVIRONMENT));
+  });
+
+  test(`${MAX_SERVICES_PER_ENVIRONMENT} services split across kinds — right at the bound — is accepted`, () => {
+    // 9 + 5 + 2 = MAX_SERVICES_PER_ENVIRONMENT exactly.
+    const yaml =
+      `version: 1\nenvironments:\n` +
+      k8sServicesBlock("cni-dev", "gke-cni-dev", 9) +
+      dockerServicesBlock("docker-host", 5) +
+      vmServicesBlock("vm-host", 2);
+    const envs = envsOf(parseTriageTargets(yaml, TARGETS_PATH));
+    const total = Object.values(envs).reduce((sum, e) => sum + e.services.length, 0);
+
+    expect(total).toBe(MAX_SERVICES_PER_ENVIRONMENT);
+  });
+
+  test("the tracked triage/targets.yaml still parses", () => {
+    const text = readFileSync(join(import.meta.dir, "..", "..", "triage", "targets.yaml"), "utf8");
+    const envs = envsOf(parseTriageTargets(text, "triage/targets.yaml"));
+    const total = Object.values(envs).reduce((sum, e) => sum + e.services.length, 0);
+
+    // 9 (do-cluster) + 5 (docker-host) + 1 (vm-host) = 15, inside the bound.
+    expect(total).toBeLessThanOrEqual(MAX_SERVICES_PER_ENVIRONMENT);
   });
 });
 

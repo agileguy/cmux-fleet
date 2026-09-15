@@ -568,6 +568,50 @@ export const TriageTargetsSchema = z
         });
       }
     }
+
+    /*
+     * The SUM of every environment's `services`, bounded at
+     * MAX_SERVICES_PER_ENVIRONMENT — SRD-TRIAGE-MIXED-OBSERVERS phase 4-5 review.
+     *
+     * A different question from the per-environment `.max(MAX_SERVICES_PER_
+     * ENVIRONMENT)` each of `TriageK8sEnvironmentSchema` and its docker/vm
+     * siblings already carries: those refuse ONE environment alone naming too
+     * many services, and say nothing about the sweep as a whole. This console
+     * has a single collator (`tri-1` in `dispatch-request.ts`'s
+     * `TRIAGE_CONSOLE_ROSTER`, since 2026-09-14), which writes ONE `triage.json` per sweep,
+     * holding a row for every service of every declared environment; the
+     * split-by-half arithmetic `MAX_SERVICES_PER_ENVIRONMENT`'s own docblock
+     * above still describes (two collators, each handed half the list) is
+     * this console's HISTORY, not its present shape. `TriageDocumentSchema`
+     * (`triage-document.ts`) caps that one document's `services` at the same
+     * MAX_SERVICES_PER_ENVIRONMENT, so a targets file whose environments sum
+     * past it declares a sweep no collation document this console ever writes
+     * could hold whole — 10 k8s services and 10 docker services each pass
+     * their own environment's cap and are refused only here.
+     *
+     * Reuses MAX_SERVICES_PER_ENVIRONMENT rather than minting a third figure:
+     * `triage-document.ts`'s own rule is that the services cap and the byte
+     * cap move TOGETHER, and a distinct sweep-total bound would be one more
+     * number to keep in step with both.
+     */
+    const totalServices = Object.values(doc.environments).reduce(
+      (sum, environment) => sum + environment.services.length,
+      0,
+    );
+    if (totalServices > MAX_SERVICES_PER_ENVIRONMENT) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["environments"],
+        message:
+          `this file declares ${totalServices} services across all environments combined, ` +
+          `which is more than MAX_SERVICES_PER_ENVIRONMENT (${MAX_SERVICES_PER_ENVIRONMENT}) ` +
+          `allows in total. The console's single collator writes ONE triage.json per sweep, ` +
+          `holding a row for every service of every declared environment, and that document's ` +
+          `own services cap (TriageDocumentSchema, triage-document.ts) is the same ` +
+          `${MAX_SERVICES_PER_ENVIRONMENT} — so a sweep this wide could never fit in the one ` +
+          `collation document it produces. Remove services from one or more environments.`,
+      });
+    }
   });
 
 export type TriageService = z.infer<typeof TriageServiceSchema>;
