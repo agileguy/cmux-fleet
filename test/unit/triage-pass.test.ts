@@ -47,6 +47,7 @@ import {
   type SweepDriver,
   type SweepJoin,
   type SweepOpen,
+  type SweptEnvironment,
   type TriagePassDeps,
   type TriagePassOutcome,
 } from "../../src/run/triage-pass.ts";
@@ -311,13 +312,21 @@ interface DepsOptions {
   readonly transport?: TriagePassDeps["transport"];
   readonly now?: number;
   readonly notify?: TriagePassDeps["notify"];
+  /** Defaults to {@link ENVIRONMENT}. Only task 3.3's own tests override it. */
+  readonly environment?: string;
+  /** Defaults to the one k8s environment the rest of this fixture world sweeps. */
+  readonly environments?: readonly SweptEnvironment[];
 }
+
+/** {@link deps}'s default {@link TriagePassDeps.environments} — the one k8s environment. */
+const K8S_ENVIRONMENTS: readonly SweptEnvironment[] = [{ name: ENVIRONMENT, kind: "k8s" }];
 
 function deps(opts: DepsOptions = {}): TriagePassDeps {
   const config = defaultTriageConsoleConfig();
   clock.at = opts.now ?? T0;
   return {
-    environment: ENVIRONMENT,
+    environment: opts.environment ?? ENVIRONMENT,
+    environments: opts.environments ?? K8S_ENVIRONMENTS,
     declared: [...SERVICES],
     windowPolicy: { default_window_s: DEFAULT_WINDOW_S, reserve_s: config.reserve_s },
     config,
@@ -1902,5 +1911,154 @@ describe("the memo is a value in and a value out", () => {
   test("FRESH_SATURATION_MEMO and the factory agree, and the factory does not alias", () => {
     expect(freshSaturationMemo()).toEqual(FRESH_SATURATION_MEMO);
     expect(freshSaturationMemo()).not.toBe(freshSaturationMemo());
+  });
+});
+
+/**
+ * Task 3.3's settle half (SRD-TRIAGE-MIXED-OBSERVERS §6.1) — `settle()` emits one
+ * `ConsoleEnvironmentFacts` entry per `deps.environments` element, and each
+ * entry's `observerBlocked` is computed ONLY from that entry's own kind, through
+ * `workersOfKind` (`./triage-seat-kinds.ts`) over the sweep's one flat
+ * `join.blocked` list.
+ *
+ * ## Where the settled fact is observable
+ *
+ * `TriagePassOutcome` carries no `environments` field of its own — the facts
+ * feed `consoleHealthObservations` and from there `advanceIncident`, exactly
+ * like every other console-health fact this file already asserts (see "a skip
+ * says NOTHING about any environment" above). A FRESH incident record's
+ * `state` is `"clear"`; a first `issue` observation (an environment whose
+ * `observerBlocked` came back `true`) moves it to `"provisional"` on this one
+ * sweep, and a first `observed_clear` observation (`observerBlocked: false`)
+ * leaves it `"clear"`. That is enough to tell the two apart in a single pass,
+ * with no need to drive a second sweep for `"firing"`.
+ */
+describe("task 3.3's settle half — one environment fact per swept kind", () => {
+  /** Two kinds present at once: the fixture's existing k8s seats, plus a docker one. */
+  const MIXED_ENVIRONMENTS: readonly SweptEnvironment[] = [
+    { name: "do-cluster", kind: "k8s" },
+    { name: "docker-host", kind: "docker" },
+  ];
+
+  test("a blocked docker seat opens observer_blocked on docker only, never on k8s", async () => {
+    const records = store();
+    const spy = driver({ blocked: ["obs-td1"] });
+    await triagePass(
+      deps({ driver: spy.driver, records, environment: "do-cluster", environments: MIXED_ENVIRONMENTS }),
+    );
+    // do-cluster (k8s): obs-td1 is not a k8s seat, so workersOfKind("k8s", ...) is
+    // empty and the record stays clear.
+    expect(records.held.get("console_health:do-cluster/observer_blocked")?.state).toBe("clear");
+    // docker-host: obs-td1 IS a docker seat, so this one moves.
+    expect(records.held.get("console_health:docker-host/observer_blocked")?.state).toBe("provisional");
+  });
+
+  test("the twin: a blocked k8s seat flips the assignment the OTHER way", async () => {
+    const records = store();
+    const spy = driver({ blocked: ["obs-t2"] });
+    await triagePass(
+      deps({ driver: spy.driver, records, environment: "do-cluster", environments: MIXED_ENVIRONMENTS }),
+    );
+    expect(records.held.get("console_health:do-cluster/observer_blocked")?.state).toBe("provisional");
+    expect(records.held.get("console_health:docker-host/observer_blocked")?.state).toBe("clear");
+  });
+
+  test("a blocked worker the seat-kind lookup does not name opens observer_blocked on NEITHER environment", async () => {
+    const records = store();
+    // obs-d1 is a docker-ROLE worker, but not a triage seat at all — TRIAGE_SEAT_KINDS
+    // has no entry for it, so seatKind("obs-d1") is null and workersOfKind excludes
+    // it from every kind, k8s and docker alike.
+    const spy = driver({ blocked: ["obs-d1"] });
+    await triagePass(
+      deps({ driver: spy.driver, records, environment: "do-cluster", environments: MIXED_ENVIRONMENTS }),
+    );
+    expect(records.held.get("console_health:do-cluster/observer_blocked")?.state).toBe("clear");
+    expect(records.held.get("console_health:docker-host/observer_blocked")?.state).toBe("clear");
+  });
+
+  test("one entry per deps.environments element, in deps.environments order", async () => {
+    const records = store();
+    // Deliberately neither alphabetical nor deps.environment-first, so an
+    // implementation that assumes an order (or sorts) is caught rather than
+    // coincidentally agreeing with it. Only the vm seat is blocked, so the
+    // pairing is checked alongside the order rather than assumed from it.
+    const ordered: readonly SweptEnvironment[] = [
+      { name: "vm-host", kind: "vm" },
+      { name: "do-cluster", kind: "k8s" },
+      { name: "docker-host", kind: "docker" },
+    ];
+    const spy = driver({ blocked: ["obs-tv1"] });
+    const out = await triagePass(
+      deps({ driver: spy.driver, records, environment: "do-cluster", environments: ordered }),
+    );
+
+    const scopes = out.written.flatMap((r) =>
+      r.subject.kind === "console_health" && r.subject.health === "observer_blocked" ? [r.subject.scope] : [],
+    );
+    expect(scopes).toEqual(["vm-host", "do-cluster", "docker-host"]);
+
+    expect(records.held.get("console_health:vm-host/observer_blocked")?.state).toBe("provisional");
+    expect(records.held.get("console_health:do-cluster/observer_blocked")?.state).toBe("clear");
+    expect(records.held.get("console_health:docker-host/observer_blocked")?.state).toBe("clear");
+  });
+
+  /**
+   * Each refusal is a HOST wiring fault, checked once before anything reaches
+   * the driver — every case below asserts `spy.opened`/`spy.dispatched` stay
+   * empty alongside the throw, so a refusal that fired AFTER a dispatch would
+   * fail here too.
+   */
+  describe("triagePass refuses a miswired deps.environments before anything is dispatched", () => {
+    test("an empty environments list", async () => {
+      const spy = driver();
+      await expect(triagePass(deps({ driver: spy.driver, environments: [] }))).rejects.toThrow(
+        /deps\.environments is empty/,
+      );
+      expect(spy.opened).toHaveLength(0);
+      expect(spy.dispatched).toHaveLength(0);
+    });
+
+    test("environments that omit an entry named deps.environment", async () => {
+      const spy = driver();
+      await expect(
+        triagePass(deps({ driver: spy.driver, environments: [{ name: "not-cni-dev", kind: "k8s" }] })),
+      ).rejects.toThrow(/does not contain an entry named "cni-dev"/);
+      expect(spy.opened).toHaveLength(0);
+      expect(spy.dispatched).toHaveLength(0);
+    });
+
+    test("two entries that share a name", async () => {
+      const spy = driver();
+      await expect(
+        triagePass(
+          deps({
+            driver: spy.driver,
+            environments: [
+              { name: ENVIRONMENT, kind: "k8s" },
+              { name: ENVIRONMENT, kind: "docker" },
+            ],
+          }),
+        ),
+      ).rejects.toThrow(/names "cni-dev" more than once/);
+      expect(spy.opened).toHaveLength(0);
+      expect(spy.dispatched).toHaveLength(0);
+    });
+
+    test("two entries that share a kind", async () => {
+      const spy = driver();
+      await expect(
+        triagePass(
+          deps({
+            driver: spy.driver,
+            environments: [
+              { name: ENVIRONMENT, kind: "k8s" },
+              { name: "second-k8s", kind: "k8s" },
+            ],
+          }),
+        ),
+      ).rejects.toThrow(/kind "k8s" more than once/);
+      expect(spy.opened).toHaveLength(0);
+      expect(spy.dispatched).toHaveLength(0);
+    });
   });
 });

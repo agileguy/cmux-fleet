@@ -69,7 +69,7 @@ import {
 import { DISPATCH_REQUEST_FILE } from "../../src/run/dispatch-request.ts";
 import { TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
 import type { TriageDocument } from "../../src/run/triage-verdict.ts";
-import type { TriageService } from "../../src/run/triage-targets.ts";
+import type { TriageDockerService, TriageService, TriageVmService } from "../../src/run/triage-targets.ts";
 import {
   FORBIDDEN_ENVELOPE_CLASSES,
   OBSERVER_ARTIFACT_FILE,
@@ -94,6 +94,7 @@ import {
   type ForbiddenEnvelopeClass,
   type SweepDispatchOutcome,
   type SweepEnvelopeInput,
+  type SweepEnvironment,
   type SweepProducerDeps,
   normalizeSliceReportingPath,
   CLUSTER_CALL_TIMEOUT_S,
@@ -507,13 +508,216 @@ function envelopeInput(over: Partial<SweepEnvelopeInput> = {}): SweepEnvelopeInp
   return {
     sweepId: sweepTaskId(41),
     windowOpenedAt: "2026-09-06T12:00:00.000Z",
-    environment: "cni-dev",
-    services: SERVICES,
+    environments: [{ name: "cni-dev", kind: "k8s", services: SERVICES }],
     defaultWindowS: 300,
     previousDocument: null,
     ...over,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Task 3.3's envelope half — SweepEnvironment: a LIST of environments
+// ---------------------------------------------------------------------------
+
+/**
+ * Pulls one `serviceBlock` back out of a rendered brief by its heading line,
+ * stopping at the first blank line — `serviceBlock` never emits one internally,
+ * so this recovers exactly the lines that function produced, whichever kind
+ * rendered them.
+ */
+function extractServiceBlock(brief: string, serviceName: string): string {
+  const marker = `- service: ${serviceName}`;
+  const at = brief.indexOf(marker);
+  expect(at, `"${marker}" not found in the brief`).toBeGreaterThanOrEqual(0);
+  const lines: string[] = [];
+  for (const line of brief.slice(at).split("\n")) {
+    if (line === "") break;
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+const K8S_ENV_NAME = "do-cluster";
+const K8S_ENV_SERVICE: TriageService = {
+  name: "routing",
+  namespace: "aodapn-routing",
+  workload: "routing-api",
+  checks: ["rollout", "logs"],
+  window: null,
+};
+
+const DOCKER_ENV_NAME = "docker-host";
+const DOCKER_ENV_SERVICE: TriageDockerService = {
+  name: "sidecar",
+  namespace: "docker",
+  checks: ["state", "health"],
+};
+
+describe("SweepEnvironment: more than one environment in one sweep", () => {
+  const k8sEnv: SweepEnvironment = { name: K8S_ENV_NAME, kind: "k8s", services: [K8S_ENV_SERVICE] };
+  const dockerEnv: SweepEnvironment = {
+    name: DOCKER_ENV_NAME,
+    kind: "docker",
+    services: [DOCKER_ENV_SERVICE],
+  };
+
+  test("the title names both, in list order", () => {
+    const { title } = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    expect(title).toBe(`${K8S_ENV_NAME}, ${DOCKER_ENV_NAME}: health sweep ${sweepTaskId(41)}`);
+  });
+
+  test("the brief names both environments with their kinds", () => {
+    const { brief } = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    expect(brief).toContain(`${K8S_ENV_NAME} (k8s)`);
+    expect(brief).toContain(`${DOCKER_ENV_NAME} (docker)`);
+  });
+
+  test("the docker service block shows its checks and namespace, with no workload or window line", () => {
+    const { brief } = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    const block = extractServiceBlock(brief, DOCKER_ENV_SERVICE.name);
+    expect(block).toBe(
+      [
+        `- service: ${DOCKER_ENV_SERVICE.name}`,
+        `  namespace: ${DOCKER_ENV_SERVICE.namespace}`,
+        `  checks: ${DOCKER_ENV_SERVICE.checks.join(", ")}`,
+      ].join("\n"),
+    );
+    expect(block).not.toContain("workload");
+    expect(block).not.toContain("window");
+  });
+
+  /**
+   * **The premise this whole file rests on for the multi-environment case.**
+   * `serviceBlock` is a pure function of the service and `defaultWindowS`, so a
+   * k8s row's own lines must read identically whether it is the sweep's only
+   * environment or one of several — extracted by heading from each brief and
+   * compared byte-for-byte, not merely asserted equal by construction.
+   */
+  test("the k8s block is byte-identical to that service's block in a one-environment render", () => {
+    const solo = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv] }));
+    const soloBlock = extractServiceBlock(solo.brief, K8S_ENV_SERVICE.name);
+
+    const multi = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    const multiBlock = extractServiceBlock(multi.brief, K8S_ENV_SERVICE.name);
+
+    expect(multiBlock).toBe(soloBlock);
+    // Premise: the k8s block really carries the fields a docker block lacks —
+    // the comparison above would be worth nothing over two empty strings.
+    expect(soloBlock).toContain("workload:");
+    expect(soloBlock).toContain("window:");
+  });
+
+  test("an empty environments list is refused", () => {
+    expect(() => renderSweepEnvelope(envelopeInput({ environments: [] }))).toThrow(
+      SweepEnvelopeError,
+    );
+  });
+
+  test("a duplicated environment name is refused", () => {
+    const twice: SweepEnvironment = { name: "cni-dev", kind: "k8s", services: SERVICES };
+    expect(() =>
+      renderSweepEnvelope(envelopeInput({ environments: [twice, twice] })),
+    ).toThrow(SweepEnvelopeError);
+  });
+
+  test("order follows the list: reversing the environments reverses the title and section order", () => {
+    const forward = renderSweepEnvelope(envelopeInput({ environments: [k8sEnv, dockerEnv] }));
+    const reversed = renderSweepEnvelope(envelopeInput({ environments: [dockerEnv, k8sEnv] }));
+
+    expect(forward.title).toBe(`${K8S_ENV_NAME}, ${DOCKER_ENV_NAME}: health sweep ${sweepTaskId(41)}`);
+    expect(reversed.title).toBe(`${DOCKER_ENV_NAME}, ${K8S_ENV_NAME}: health sweep ${sweepTaskId(41)}`);
+
+    const forwardK8s = forward.brief.indexOf(`### ${K8S_ENV_NAME} (k8s)`);
+    const forwardDocker = forward.brief.indexOf(`### ${DOCKER_ENV_NAME} (docker)`);
+    expect(forwardK8s).toBeGreaterThanOrEqual(0);
+    expect(forwardDocker).toBeGreaterThan(forwardK8s);
+
+    const reversedK8s = reversed.brief.indexOf(`### ${K8S_ENV_NAME} (k8s)`);
+    const reversedDocker = reversed.brief.indexOf(`### ${DOCKER_ENV_NAME} (docker)`);
+    expect(reversedDocker).toBeGreaterThanOrEqual(0);
+    expect(reversedK8s).toBeGreaterThan(reversedDocker);
+  });
+
+  /**
+   * The declared list is flat across every environment, so a previous row for a
+   * service declared only in the SECOND environment still carries. Keying it by
+   * (environment, service) is task 4.1b's job, not this one's.
+   */
+  test("a previous row carries for a service declared in any environment, not only the first", () => {
+    const authzInDocker: SweepEnvironment = {
+      name: DOCKER_ENV_NAME,
+      kind: "docker",
+      services: [{ name: "authorization", namespace: "docker", checks: ["state"] }],
+    };
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({ environments: [k8sEnv, authzInDocker], previousDocument: PREVIOUS }),
+    );
+    expect(brief).toContain("- routing: unhealthy");
+    expect(brief).toContain("- authorization: healthy");
+  });
+
+  /** The namespace half: the declared namespaces are flat across environments too. */
+  test("a previous selector that degraded to a namespace declared in the second environment is not worker prose", () => {
+    const second: SweepEnvironment = {
+      name: DOCKER_ENV_NAME,
+      kind: "docker",
+      services: [{ name: "authorization", namespace: "container-ns", checks: ["state"] }],
+    };
+    const previous = {
+      ...PREVIOUS,
+      services: [{ ...PREVIOUS.services[1]!, selector: "container-ns" }],
+      unaccounted: [],
+    } as TriageDocument;
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({ environments: [k8sEnv, second], previousDocument: previous }),
+    );
+    expect(brief).toContain("container-ns");
+  });
+});
+
+describe("SweepEnvironment: a vm service's units", () => {
+  const VM_ENV_NAME = "vm-fleet";
+  const withUnits: TriageVmService = {
+    name: "queue",
+    namespace: "vm-host",
+    checks: ["reachability", "system"],
+    units: ["queue.service", "queue-worker.service"],
+  };
+  const withoutUnits: TriageVmService = {
+    name: "cache",
+    namespace: "vm-host",
+    checks: ["reachability", "system"],
+    units: [],
+  };
+
+  test("every unit name renders", () => {
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({
+        environments: [{ name: VM_ENV_NAME, kind: "vm", services: [withUnits] }],
+      }),
+    );
+    const block = extractServiceBlock(brief, withUnits.name);
+    expect(block).toContain(`units: ${withUnits.units.join(", ")}`);
+    for (const unit of withUnits.units) expect(block).toContain(unit);
+  });
+
+  test("the twin with units: [] renders no units line", () => {
+    const { brief } = renderSweepEnvelope(
+      envelopeInput({
+        environments: [{ name: VM_ENV_NAME, kind: "vm", services: [withoutUnits] }],
+      }),
+    );
+    const block = extractServiceBlock(brief, withoutUnits.name);
+    expect(block).not.toContain("units");
+    expect(block).toBe(
+      [
+        `- service: ${withoutUnits.name}`,
+        `  namespace: ${withoutUnits.namespace}`,
+        `  checks: ${withoutUnits.checks.join(", ")}`,
+      ].join("\n"),
+    );
+  });
+});
 
 // ---------------------------------------------------------------------------
 // §12.6 — the four forbidden classes, BY NAME
@@ -1080,6 +1284,39 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
     expect(sent[0]!.brief).toContain(TRIAGE_VERDICT_RULE);
     // The brief the actor sends is the one the renderer audited.
     expect(envelopeIssues(sent[0]!.brief, null)).toEqual([]);
+  });
+
+  /**
+   * Task 3.3's envelope half widens {@link SweepEnvelopeInput}'s SHAPE only —
+   * the production caller still passes exactly one (k8s) environment. This
+   * pins `openSweep`'s call site to `renderSweepEnvelope` over
+   * `environments: [{ name: deps.environment, kind: "k8s", services:
+   * pair.services }]`, so mutating that call site to pass a second
+   * environment — or to add a `(k8s)` suffix a one-environment render never
+   * had — turns this test red.
+   */
+  test("openSweep still sends the one-environment envelope", async () => {
+    const run = await seedRun("2026-09-14T00-00-01Z-9001");
+    const { sent, producers } = producerFixture(run);
+    const sweepId = sweepTaskId(41);
+    const dispatchedAt = "2026-09-06T12:05:00.000Z";
+
+    await producers.openSweep(sweepId, dispatchedAt);
+
+    expect(sent).toHaveLength(1);
+    const expected = renderSweepEnvelope({
+      sweepId,
+      windowOpenedAt: windowOpenedAt(dispatchedAt, 300),
+      environments: [{ name: "cni-dev", kind: "k8s", services: SERVICES }],
+      defaultWindowS: 300,
+      previousDocument: null,
+      seats: TRIAGE_CONSOLE_ASPECTS,
+    });
+    expect(sent[0]!.brief).toBe(expected.brief);
+    expect(sent[0]!.title).toBe(expected.title);
+    // One environment renders as today — no ` (k8s)` suffix anywhere.
+    expect(sent[0]!.brief).not.toContain("(k8s)");
+    expect(sent[0]!.title).not.toContain("(k8s)");
   });
 
   /**

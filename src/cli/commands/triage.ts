@@ -1353,11 +1353,15 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
       kubeconfigPath: e.kubeconfigPath,
     });
     /*
-     * Docker and vm environments are validated here — `environmentsByKind`
-     * runs the refusals above over all three kinds — but this pass sweeps
-     * only the k8s one. Widening the dispatch and settlement per kind is
-     * SRD-TRIAGE-MIXED-OBSERVERS task 3.3, which needs Phase 4's
-     * seat-to-kind lookup.
+     * Docker and vm environments are validated HERE — `environmentsByKind` runs
+     * the refusals above over all three kinds, so a mixed-kind targets file with
+     * two docker environments or no k8s one is refused before a sweep is ever
+     * opened. This call site still sweeps only the k8s environment: the envelope,
+     * the declared list and `triagePass`'s environment facts all cover it alone
+     * until Phase 4 widens this site — the per-kind partition (task 4.1) and the
+     * `(environment, service)` keying (task 4.1b). `SweepEnvelopeInput` and
+     * `TriagePassDeps` already take lists of environments, which is the seam
+     * Phase 4 grows into.
      */
     const { k8s } = environmentsByKind(pair.targets.environments);
     const { name: environment, environment: target } = k8s;
@@ -1402,6 +1406,14 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
 
     const outcome = await triagePass({
       environment,
+      /*
+       * Exactly the environments this sweep actually covers — today the one
+       * k8s environment, matching `environment` above. A fact for an
+       * environment nobody swept would be a clear citing a sweep that never
+       * looked (§6.8's asymmetry), so this stays a one-element list until
+       * Phase 4 widens the call site above to dispatch docker and vm too.
+       */
+      environments: [{ name: environment, kind: "k8s" }],
       /*
        * FILE order, which `TriageEnvironment.services` preserves and
        * `checkTriagePartition` compares against. Sorting here would make
