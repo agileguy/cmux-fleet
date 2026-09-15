@@ -103,7 +103,13 @@ import {
 } from "./triage-document.ts";
 import type { PartitionAssignment } from "./triage-partition.ts";
 import type { SweepCollation, SweepJoin, SweepOpen } from "./triage-pass.ts";
-import { TRIAGE_CHECKS, type TriageService } from "./triage-targets.ts";
+import {
+  TRIAGE_CHECKS,
+  type TriageDockerService,
+  type TriageEnvironmentKind,
+  type TriageService,
+  type TriageVmService,
+} from "./triage-targets.ts";
 import {
   COVERAGE_RESULTS,
   EVIDENCE_GAPS,
@@ -780,7 +786,14 @@ const COMMAND_PATTERNS: readonly { readonly re: RegExp; readonly what: string }[
   { re: /```(?:bash|sh|zsh|shell|console)\b/, what: "a shell code fence" },
   { re: /\$\(/, what: "a shell command substitution" },
   {
-    re: /(^|[\s`'"([])(kubectl|gcloud|docker|helm|curl|wget|psql|bash|sh|rm|chmod|ssh)\s+-{0,2}[A-Za-z]/,
+    /*
+     * `[ \t]+`, not `\s+`: a leader and its argument sit on one line. `\s`
+     * also matches a newline, and the enrolled docker target token is the word
+     * `docker`, so a docker service block's `namespace: docker` line followed
+     * by `  checks: …` was refused as a command leader. A word at the end of
+     * one line and another at the start of the next is not a command.
+     */
+    re: /(^|[\s`'"([])(kubectl|gcloud|docker|helm|curl|wget|psql|bash|sh|rm|chmod|ssh)[ \t]+-{0,2}[A-Za-z]/,
     what: "a command leader",
   },
 ];
@@ -1099,15 +1112,52 @@ export function projectPreviousState(
   return out;
 }
 
+/**
+ * One service row, whichever kind its environment is
+ * (SRD-TRIAGE-MIXED-OBSERVERS §6). k8s, docker and vm each carry their own
+ * fields; {@link renderSweepEnvelope}'s `serviceBlock` renders only the ones
+ * the row actually has.
+ */
+export type SweepService = TriageService | TriageDockerService | TriageVmService;
+
+/**
+ * One environment a sweep covers, and its own slice of services — the LIST
+ * shape task 3.3's envelope half widens {@link SweepEnvelopeInput} to (SRD
+ * -TRIAGE-MIXED-OBSERVERS §6, §6.1 owner decision 2, §7).
+ *
+ * `renderSweepEnvelope` refuses an empty list and a duplicated `name`: an
+ * envelope over nothing, or over one environment counted twice, asks a model
+ * to partition a set it cannot make sense of.
+ */
+export interface SweepEnvironment {
+  readonly name: string;
+  readonly kind: TriageEnvironmentKind;
+  readonly services: readonly SweepService[];
+}
+
 /** What §7.2's renderer is handed. Every member is host-owned or host-checkable. */
 export interface SweepEnvelopeInput {
   readonly sweepId: string;
   /** ISO-8601 UTC. The lower bound of this sweep's observation window. */
   readonly windowOpenedAt: string;
-  readonly environment: string;
-  /** The environment's services, in FILE order, with their own bounds. */
-  readonly services: readonly TriageService[];
-  /** §7.1's `default_window`, resolved to seconds. */
+  /**
+   * Every environment this sweep covers, in the order they are dispatched and
+   * rendered (owner decision 2: one envelope names every environment the
+   * sweep covers, rather than one task id per kind).
+   *
+   * **ONE k8s environment renders BYTE-FOR-BYTE what a lone
+   * `environment`/`services` pair rendered before this shape widened** — see
+   * {@link renderSweepEnvelope}. More than one environment changes the title,
+   * the opening line, the `## This sweep` block and the `## The services …`
+   * section to name each environment with its kind.
+   */
+  readonly environments: readonly SweepEnvironment[];
+  /**
+   * §7.1's `default_window`, resolved to seconds — ONE value for the whole
+   * sweep. `environmentsByKind` (`cli/commands/triage.ts`) refuses present
+   * environments whose `default_window` differ, so a single window is correct
+   * for every environment this envelope names.
+   */
   readonly defaultWindowS: number;
   /**
    * The previous sweep's document, handed over WHOLE so this function can
@@ -1171,8 +1221,47 @@ export function windowOpenedAt(dispatchedAt: string, defaultWindowS: number): st
   return new Date(at - defaultWindowS * 1000).toISOString();
 }
 
-/** One service's line, with its OWN window rather than the environment's. */
-function serviceBlock(service: TriageService, defaultWindowS: number): string {
+/**
+ * True for a k8s service — the only {@link SweepService} shape carrying
+ * `workload` (SRD-TRIAGE-MIXED-OBSERVERS §6). Narrows on the SHAPE rather
+ * than on the environment's `kind`, so this stays correct even if a caller
+ * ever mismatched the two.
+ */
+function isK8sService(service: SweepService): service is TriageService {
+  return "workload" in service;
+}
+
+/** True for a vm service — the only {@link SweepService} shape carrying `units` (§6). */
+function isVmService(service: SweepService): service is TriageVmService {
+  return "units" in service;
+}
+
+/**
+ * One service's line. k8s carries its own window and workload; docker and vm
+ * carry neither (§6) — {@link renderSweepEnvelope}'s per-kind rendering rule.
+ */
+function serviceBlock(service: SweepService, defaultWindowS: number): string {
+  if (isVmService(service)) {
+    const lines = [
+      `- service: ${service.name}`,
+      `  namespace: ${service.namespace}`,
+      `  checks: ${service.checks.join(", ")}`,
+    ];
+    // `units` only when non-empty — an empty list is a vm row with no named
+    // systemd unit beyond its whole-system checks, and a blank line would read
+    // as a unit named nothing.
+    if (service.units.length > 0) lines.push(`  units: ${service.units.join(", ")}`);
+    return lines.join("\n");
+  }
+  if (!isK8sService(service)) {
+    // docker: name, namespace (the target token), checks — a container has no
+    // workload to resolve and no per-service window override (§6).
+    return [
+      `- service: ${service.name}`,
+      `  namespace: ${service.namespace}`,
+      `  checks: ${service.checks.join(", ")}`,
+    ].join("\n");
+  }
   const windowS = service.window ?? defaultWindowS;
   /*
    * **An undeclared workload is an instruction, not a blank.**
@@ -1248,12 +1337,87 @@ function serviceBlock(service: TriageService, defaultWindowS: number): string {
  * away — or, far more likely, nowhere.
  */
 export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
-  const declared = input.services.map((s) => s.name);
+  /* An envelope over nothing asks a model to partition nothing. */
+  if (input.environments.length === 0) {
+    throw new SweepEnvelopeError(
+      `the sweep envelope for ${input.sweepId} names no environments to sweep — an envelope ` +
+        `over nothing asks a model to partition nothing.`,
+    );
+  }
+  {
+    const seen = new Set<string>();
+    for (const environment of input.environments) {
+      if (seen.has(environment.name)) {
+        throw new SweepEnvelopeError(
+          `the sweep envelope for ${input.sweepId} names environment "${environment.name}" ` +
+            `twice. Each environment this sweep covers must be named once.`,
+        );
+      }
+      seen.add(environment.name);
+    }
+  }
+
+  const environments = input.environments;
+  /** Non-null only for the ONE-environment case, which renders byte-for-byte what it always has. */
+  const single = environments.length === 1 ? environments[0]! : null;
+
+  /*
+   * FLAT, ACROSS EVERY ENVIRONMENT, in list order. Keying these by
+   * (environment, service) — so two environments cannot collide on a shared
+   * service name — is task 4.1b's job (Phase 4); this round widens the
+   * envelope's SHAPE only and does not fix the keying.
+   */
+  const declared = environments.flatMap((e) => e.services.map((s) => s.name));
+  const declaredNamespaces = environments.flatMap((e) => e.services.map((s) => s.namespace));
+
   const carried = projectPreviousState(input.previousDocument, declared);
   const rule = input.verdictRule ?? TRIAGE_VERDICT_RULE;
   const seats = input.seats ?? TRIAGE_CONSOLE_ASPECTS;
 
-  const title = `${input.environment}: health sweep ${input.sweepId}`;
+  const title =
+    single !== null
+      ? `${single.name}: health sweep ${input.sweepId}`
+      : `${environments.map((e) => e.name).join(", ")}: health sweep ${input.sweepId}`;
+
+  /** The opening sentence's object — unadorned for one environment, name+kind for more. */
+  const envLabel =
+    single !== null
+      ? `the ${single.name} environment`
+      : environments.map((e) => `${e.name} (${e.kind})`).join(", ");
+
+  /** The `## This sweep` block's environment row(s) — one per environment when there is more than one. */
+  const envLines =
+    single !== null
+      ? [`- environment: ${single.name}`]
+      : environments.map((e) => `- environment: ${e.name} (${e.kind})`);
+
+  /** The `## The services …` section — one flat list for one environment, one sub-section per environment for more. */
+  const servicesSection: readonly string[] =
+    single !== null
+      ? [
+          "## The services, and the bounds each one was given",
+          "",
+          `Every service below appears in exactly one of your requests. The checks and the window are`,
+          `this service's own: copy them, do not widen them, and do not tidy them.`,
+          "",
+          ...single.services.map((s) => serviceBlock(s, input.defaultWindowS)),
+          "",
+        ]
+      : [
+          "## The services, and the bounds each one was given",
+          "",
+          `Every service below appears in exactly one of your requests. The checks and the window are`,
+          `this service's own: copy them, do not widen them, and do not tidy them. A service belongs`,
+          `to its own environment, and a k8s service, a Docker container and a vm unit never share a`,
+          `request (SRD-TRIAGE-MIXED-OBSERVERS §5).`,
+          "",
+          ...environments.flatMap((e) => [
+            `### ${e.name} (${e.kind})`,
+            "",
+            ...e.services.map((s) => serviceBlock(s, input.defaultWindowS)),
+            "",
+          ]),
+        ];
 
   const previousLines =
     carried.length === 0
@@ -1270,12 +1434,12 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
         ];
 
   const brief = [
-    `You are running health sweep ${input.sweepId} of the ${input.environment} environment.`,
+    `You are running health sweep ${input.sweepId} of ${envLabel}.`,
     "",
     "## This sweep",
     "",
     `- sweep id: ${input.sweepId}`,
-    `- environment: ${input.environment}`,
+    ...envLines,
     `- observation window opens at: ${input.windowOpenedAt}`,
     "",
     `Copy the sweep id and the window instant from this brief into every artifact this sweep`,
@@ -1325,13 +1489,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     `the host looks only under the id the slice was dispatched with, so a report filed at your`,
     `id is indistinguishable from a seat that reported nothing at all.`,
     "",
-    "## The services, and the bounds each one was given",
-    "",
-    `Every service below appears in exactly one of your requests. The checks and the window are`,
-    `this service's own: copy them, do not widen them, and do not tidy them.`,
-    "",
-    ...input.services.map((s) => serviceBlock(s, input.defaultWindowS)),
-    "",
+    ...servicesSection,
     "## The verdict rule, verbatim",
     "",
     rule,
@@ -1352,21 +1510,19 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
   ].join("\n");
 
   /*
-   * The declared names are passed to the audit so a previous document that merely
+   * `declared` and `declaredNamespaces` (computed above, flat across every
+   * environment) are passed to the audit so a previous document that merely
    * ECHOED them — `unaccounted[]` is exactly that — is not mistaken for prose
    * crossing between sweeps. The host wrote these names into this very brief.
+   * The namespaces travel with the names because the host writes both into
+   * every brief, and a `selector` that degraded to either is a token the host
+   * handed over rather than prose the worker wrote — see
+   * `workerAuthoredStrings`, and the three sweeps 2026-09-09 spent refusing on
+   * `alert-notifier`.
    */
-  const declaredNames = input.services.map((s) => s.name);
-  /*
-   * The namespaces travel with the names because the host writes both into every
-   * brief, and a `selector` that degraded to either is a token the host handed
-   * over rather than prose the worker wrote — see `workerAuthoredStrings`, and
-   * the three sweeps 2026-09-09 spent refusing on `alert-notifier`.
-   */
-  const declaredNamespaces = input.services.map((s) => s.namespace);
   const issues = [
-    ...envelopeIssues(title, input.previousDocument, declaredNames, declaredNamespaces),
-    ...envelopeIssues(brief, input.previousDocument, declaredNames, declaredNamespaces),
+    ...envelopeIssues(title, input.previousDocument, declared, declaredNamespaces),
+    ...envelopeIssues(brief, input.previousDocument, declared, declaredNamespaces),
   ];
   if (issues.length > 0) {
     throw new SweepEnvelopeError(
@@ -1826,8 +1982,15 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
       const envelope = renderSweepEnvelope({
         sweepId,
         windowOpenedAt: windowOpenedAt(dispatchedAt, deps.defaultWindowS),
-        environment: deps.environment,
-        services: pair.services,
+        /*
+         * ONE k8s environment, named from what this caller has today. Task
+         * 3.3's envelope half widens only the SHAPE `renderSweepEnvelope`
+         * accepts — this production caller still sweeps exactly one k8s
+         * environment per call. Sweeping docker/vm for real needs per-kind
+         * partition (task 4.1) and (environment, service) keying (task 4.1b),
+         * both Phase 4's job, which is what widens this call site.
+         */
+        environments: [{ name: deps.environment, kind: "k8s", services: pair.services }],
         defaultWindowS: deps.defaultWindowS,
         previousDocument: await deps.previousDocument(pair.collator),
         seats: pair.seats,
