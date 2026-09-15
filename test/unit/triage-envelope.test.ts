@@ -70,6 +70,14 @@ import { DISPATCH_REQUEST_FILE } from "../../src/run/dispatch-request.ts";
 import { TRIAGE_COLLATOR } from "../../src/run/triage-actor.ts";
 import type { TriageDocument } from "../../src/run/triage-verdict.ts";
 import type { TriageDockerService, TriageService, TriageVmService } from "../../src/run/triage-targets.ts";
+/*
+ * The namespace form, alongside the named type-only import above, so the
+ * coverage-audit test below (T-sweep-151) can discover every `*_CHECKS`
+ * vocabulary `triage-targets.ts` exports BY REFLECTION rather than naming
+ * them — a fourth kind's check list then joins the audit the moment it is
+ * exported, with no edit to this file required.
+ */
+import * as triageTargets from "../../src/run/triage-targets.ts";
 import {
   FORBIDDEN_ENVELOPE_CLASSES,
   OBSERVER_ARTIFACT_FILE,
@@ -82,6 +90,7 @@ import {
   blockedObservers,
   describeIssues,
   envelopeIssues,
+  HOST_VOCABULARY,
   MIN_PROSE_LENGTH,
   OBSERVER_ARTIFACT_TOKEN_RE,
   observerArtifactPair,
@@ -418,6 +427,78 @@ describe("the prose audit exempts names the HOST declared, and only those", () =
   });
 
   /**
+   * The same shape again, one field over from a DECLARED token: a coverage
+   * channel that is a member of a NON-k8s closed check vocabulary — measured
+   * 2026-09-15 as `T-sweep-151`'s lost render.
+   *
+   * The previous sweep's collation carried `coverage[].channel: "resources"`
+   * on a VM row — a correct member of `TRIAGE_VM_CHECKS`, not a declared
+   * service name or namespace — and the brief was refused
+   * `worker_prose [resources]`, because `HOST_VOCABULARY` only ever carried
+   * k8s's `TRIAGE_CHECKS`. The mixed-observers work gave docker and VM their
+   * own closed check lists and never widened the host's vocabulary to match,
+   * so any of THEIR check names past `MIN_PROSE_LENGTH` tripped the identical
+   * false positive `T-sweep-79` recorded for a namespace.
+   */
+  test("a docker or VM check name used as a coverage channel does not trip the audit", () => {
+    for (const channel of ["resources", "reachability"]) {
+      expect(channel.length).toBeGreaterThanOrEqual(MIN_PROSE_LENGTH);
+      const doc = {
+        ...PREVIOUS,
+        services: [
+          {
+            ...PREVIOUS.services[1]!,
+            selector: null,
+            note: null,
+            evidence_ref: [],
+            coverage: [{ channel, result: "answered" }],
+          },
+        ],
+        unaccounted: [],
+      } as unknown as TriageDocument;
+      const issues = envelopeIssues(
+        `Check the \`${channel}\` channel.`,
+        doc,
+        declared,
+        declaredNamespaces,
+      );
+      expect(issues, `${channel} should not trip the audit`).toEqual([]);
+    }
+  });
+
+  /**
+   * The control this fixture needs: prose of the SAME length that is not a
+   * member of any host vocabulary must still refuse. Without it, a fix that
+   * widened the exemption to "anything long enough" would pass the assertion
+   * above vacuously.
+   */
+  test("worker-authored prose of the same length still refuses", () => {
+    const prose = "unhealthy-recheck";
+    expect(prose.length).toBeGreaterThanOrEqual(MIN_PROSE_LENGTH);
+    const doc = {
+      ...PREVIOUS,
+      services: [
+        {
+          ...PREVIOUS.services[1]!,
+          selector: null,
+          note: null,
+          evidence_ref: [],
+          coverage: [{ channel: prose, result: "answered" }],
+        },
+      ],
+      unaccounted: [],
+    } as unknown as TriageDocument;
+    const issues = envelopeIssues(
+      `Check the \`${prose}\` channel.`,
+      doc,
+      declared,
+      declaredNamespaces,
+    );
+    expect(issues.map((i) => i.forbidden)).toEqual(["worker_prose"]);
+    expect(issues[0]!.evidence).toBe(prose);
+  });
+
+  /**
    * The anti-criterion, and it is what stops the exemption from being a hole.
    * MEMBERSHIP, never containment — a channel the collator COMPOSED out of a
    * declared token is still the collator's own string.
@@ -522,6 +603,50 @@ describe("the prose audit exempts names the HOST declared, and only those", () =
       expect(issues.map((i) => i.forbidden), `${invented} should be worker_prose`).toContain(
         "worker_prose",
       );
+    }
+  });
+});
+
+/**
+ * The audit that stops `HOST_VOCABULARY` falling behind `triage-targets.ts`
+ * again — the second half of T-sweep-151's fix, and the reason the fixture
+ * above is a regression test rather than the whole story.
+ *
+ * **Driven by reflection, not by naming `TRIAGE_CHECKS`, `TRIAGE_DOCKER_CHECKS`
+ * and `TRIAGE_VM_CHECKS` here.** Every export of `triage-targets.ts` whose
+ * name ends `_CHECKS` and whose value is an array IS a closed check
+ * vocabulary for some environment kind, by that module's own naming
+ * convention (`TRIAGE_CHECKS`, `TRIAGE_DOCKER_CHECKS`,
+ * `TRIAGE_DOCKER_DEFAULT_CHECKS`, `TRIAGE_VM_CHECKS` today). A fourth kind's
+ * check list joins this test's discovery the moment it is exported — no
+ * edit to this file required — so the only way to add one without turning
+ * this test red is to also add it to `HOST_VOCABULARY`, which is the
+ * property task 2 asks for.
+ */
+describe("HOST_VOCABULARY covers every check vocabulary triage-targets.ts exports", () => {
+  const checkVocabularies: readonly (readonly [string, readonly string[]])[] = Object.entries(
+    triageTargets as Record<string, unknown>,
+  )
+    .filter((entry): entry is [string, unknown[]] => entry[0].endsWith("_CHECKS") && Array.isArray(entry[1]))
+    .map(([name, value]) => [name, value as readonly string[]] as const);
+
+  test("discovery actually found the closed check vocabularies", () => {
+    // A guard against the discovery itself silently finding nothing — a
+    // reflection loop over zero vocabularies would pass every assertion
+    // below and prove nothing.
+    const names = checkVocabularies.map(([name]) => name);
+    expect(names).toContain("TRIAGE_CHECKS");
+    expect(names).toContain("TRIAGE_DOCKER_CHECKS");
+    expect(names).toContain("TRIAGE_VM_CHECKS");
+  });
+
+  test("every member of every discovered check vocabulary is in HOST_VOCABULARY", () => {
+    for (const [name, checks] of checkVocabularies) {
+      for (const check of checks) {
+        expect(HOST_VOCABULARY.has(check), `${name}'s "${check}" is missing from HOST_VOCABULARY`).toBe(
+          true,
+        );
+      }
     }
   });
 });

@@ -121,6 +121,8 @@ import { seatKind } from "./triage-seat-kinds.ts";
 import type { SweepCollation, SweepJoin, SweepOpen } from "./triage-pass.ts";
 import {
   TRIAGE_CHECKS,
+  TRIAGE_DOCKER_CHECKS,
+  TRIAGE_VM_CHECKS,
   type TriageDockerService,
   type TriageEnvironmentKind,
   type TriageService,
@@ -1058,9 +1060,25 @@ const ABSOLUTE_PATH_RE = /(?:^|[\s`'"(<])(\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._<>{}
  */
 export const MIN_PROSE_LENGTH = 8;
 
-/** Every token the HOST owns, which a document echoing one has not authored. */
-const HOST_VOCABULARY: ReadonlySet<string> = new Set<string>([
+/**
+ * Every token the HOST owns, which a document echoing one has not authored.
+ *
+ * **All three kinds' closed check vocabularies, not just k8s's.** Measured
+ * 2026-09-15, `T-sweep-151`: the previous collation carried
+ * `coverage[].channel: "resources"` on a VM row — a correct member of
+ * {@link TRIAGE_VM_CHECKS} — and the render was refused `worker_prose
+ * [resources]`, because only {@link TRIAGE_CHECKS} (k8s) was ever added here.
+ * The mixed-observers work gave docker and VM their own check lists but never
+ * widened this set to match, so any of their check names past
+ * {@link MIN_PROSE_LENGTH} tripped the same false positive `T-sweep-79`
+ * recorded for a namespace. Exported so `triage-envelope.test.ts` can audit
+ * it against every check vocabulary `triage-targets.ts` exports, rather than
+ * trust that the next kind remembers to come back here.
+ */
+export const HOST_VOCABULARY: ReadonlySet<string> = new Set<string>([
   ...TRIAGE_CHECKS,
+  ...TRIAGE_DOCKER_CHECKS,
+  ...TRIAGE_VM_CHECKS,
   ...OBSERVER_ASSESSMENTS,
   ...COVERAGE_RESULTS,
 ]);
