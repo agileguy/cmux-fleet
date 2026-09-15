@@ -300,10 +300,11 @@ function duplicateUnitIssues(units: readonly string[], ctx: z.RefinementCtx): vo
 }
 
 /**
- * A service name repeated within one environment, for any kind: the name
- * keys this service's incident state (§6.8) regardless of what kind of
- * target the service lives on, so two rows sharing one name are still two
- * services sharing one incident.
+ * A service name repeated within one environment, for any kind. Incident state
+ * keys on (environment, service) (§6.8, SRD-TRIAGE-MIXED-OBSERVERS D21), so the
+ * same name in two DIFFERENT environments is legal and is two services; inside
+ * one environment the name is the whole of what tells two rows apart, so two
+ * rows sharing it are two services sharing one incident.
  */
 function duplicateServiceNameIssues(
   services: readonly { readonly name: string }[],
@@ -318,8 +319,8 @@ function duplicateServiceNameIssues(
         path: ["services", i, "name"],
         message:
           `duplicate service name "${service.name}" — already declared at services.${first}. ` +
-          `The name keys this service's incident state (§6.8), so two rows sharing one name ` +
-          `are two services sharing one incident`,
+          `Incident state keys on (environment, service) (§6.8), so inside one environment two ` +
+          `rows sharing one name are two services sharing one incident`,
       });
     } else {
       firstAt.set(service.name, i);
