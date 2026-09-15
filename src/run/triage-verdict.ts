@@ -165,6 +165,8 @@ import type {
   ObservedIssueReason,
 } from "./triage-incident.ts";
 import type { PartitionAssignment } from "./triage-partition.ts";
+import { seatKind } from "./triage-seat-kinds.ts";
+import type { TriageEnvironmentKind } from "./triage-targets.ts";
 
 /**
  * SRD-OBSERVER-001 §9.1's `assessment` domain, entire.
@@ -391,6 +393,22 @@ export interface SweepWindow extends WindowPolicy {
 }
 
 /**
+ * One environment `SweepCoverage.declared` names, with the services it
+ * declares — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
+ *
+ * `kind` is what {@link resolveAssignmentEnvironment} matches a worker's
+ * {@link seatKind} against, so an assignment can be attributed to the right
+ * entry without the entry carrying a worker list of its own — the partition
+ * already IS that list, per kind, upstream in `triage-partition.ts`.
+ */
+export interface DeclaredEnvironment {
+  readonly name: string;
+  readonly kind: TriageEnvironmentKind;
+  /** Every service this environment declares, in file order. */
+  readonly services: readonly string[];
+}
+
+/**
  * The host's own account of what this sweep covered — §6.7's *"counted
  * host-side"*.
  *
@@ -399,8 +417,16 @@ export interface SweepWindow extends WindowPolicy {
  * below trustworthy: `triage.json` is checked AGAINST this and never the reverse.
  */
 export interface SweepCoverage {
-  /** Every service `triage/targets.yaml` declares for this environment, in file order. */
-  readonly declared: readonly string[];
+  /**
+   * Every environment this sweep covers, in file order, each with its own
+   * declared services — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
+   *
+   * ONE entry until Phase 4 task 4.2 widens the console's own caller; a
+   * single-entry list is what makes every pre-4.1b fixture and caller still
+   * legal, because `resolveRowEnvironment` and `resolveAssignmentEnvironment`
+   * both fall back to the sole entry when there is only one.
+   */
+  readonly declared: readonly DeclaredEnvironment[];
   /** The partition the actor dispatched — the journal's `children[]`, with their shares. */
   readonly assignments: readonly PartitionAssignment[];
   /** The observers whose reply artifact is present. Never the worker's claim of same. */
@@ -689,6 +715,14 @@ export type AssessmentReason = (typeof ASSESSMENT_REASONS)[number];
 export interface ServiceAssessment {
   readonly service: string;
   /**
+   * The environment this service belongs to — SRD-TRIAGE-MIXED-OBSERVERS D21,
+   * task 4.1b. `assessTriageSweep` mints it from the {@link DeclaredEnvironment}
+   * entry the service came from, never from the row: a `blank` row has no row
+   * to read at all, and this field is what lets {@link sweepObservations} key
+   * every subject on `(environment, service)` without re-deriving it.
+   */
+  readonly environment: string;
+  /**
    * The HOST's verdict, post-gate. This is the field §6.8's machine reads, and
    * a `healthy` here has already survived §6.7 rule 2.
    */
@@ -895,13 +929,27 @@ export interface SweepAssessment {
 }
 
 /**
- * `triage.json` + host-counted coverage → one assessment per declared service.
+ * `triage.json` + host-counted coverage → one assessment per declared
+ * (environment, service) pair.
  *
  * Pure and total: every input produces a verdict rather than a throw. The
  * document is untrusted input a container wrote and is expected to be wrong
  * sometimes, which is `dispatch-request.ts`'s rule for that shape of failure —
  * a value, with throwing reserved for host arguments that are wrong for the life
  * of the run.
+ *
+ * ## Keyed by (environment, service), not service alone — D21, task 4.1b
+ *
+ * `triage/targets.yaml` can declare the same service name under two
+ * environments of different kind — `do-cluster` and `docker-host` both hold a
+ * `grafana` — and once one sweep can cover more than one environment (§6.1), a
+ * plain service name stops being unique inside it. Every place this function
+ * used to group, assign or count by `service` now does it by the pair instead:
+ * {@link resolveRowEnvironment} and {@link resolveAssignmentEnvironment} are
+ * the two places a name is resolved to one, and {@link environmentServiceKey}
+ * is the one spelling both of them, and every internal `Map`, key on. A row or
+ * an assignment that cannot be resolved to an environment is never guessed
+ * into one — see each resolver's own docblock for what happens to it instead.
  *
  * ## Precedence, and every step of it is a host fact beating a worker claim
  *
@@ -942,12 +990,19 @@ export function assessTriageSweep(
   coverage: SweepCoverage,
   document: TriageDocument,
 ): SweepAssessment {
-  // Host assignment, first-wins. `checkTriagePartition` has already refused a
-  // second claim on the same service; this only keeps the function total.
+  // Host assignment, first-wins, keyed on (environment, service) — D21, task
+  // 4.1b. `checkTriagePartition` has already refused a second claim on the
+  // same service WITHIN ONE KIND (task 4.1); this only keeps the function
+  // total. An assignment `resolveAssignmentEnvironment` cannot place is
+  // dropped rather than guessed: its services simply gain no assignment here,
+  // which is the same total answer an unreached service already gets below.
   const assignedTo = new Map<string, string>();
   for (const assignment of coverage.assignments) {
+    const environment = resolveAssignmentEnvironment(assignment, coverage.declared);
+    if (environment === null) continue;
     for (const service of assignment.services) {
-      if (!assignedTo.has(service)) assignedTo.set(service, assignment.worker);
+      const key = environmentServiceKey(environment, service);
+      if (!assignedTo.has(key)) assignedTo.set(key, assignment.worker);
     }
   }
 
@@ -1048,101 +1103,139 @@ export function assessTriageSweep(
    * inverted). **Agreement is not consulted**, deliberately: a host that accepted
    * two rows because they happened to match would be reconciling them, and
    * reconciling is judging.
+   *
+   * **Grouped on (environment, service), not service alone — D21, task 4.1b.**
+   * A row `resolveRowEnvironment` cannot place — no `environment` of its own,
+   * and `declared` names more than one so there is no default to fall back to
+   * — is reported in `undeclaredRows`, bare, and never grouped here at all:
+   * duplication is a fact about a KEY two rows share, and an unkeyable row has
+   * no key to share with anything.
    */
-  const rows = new Map<string, TriageRow[]>();
-  for (const row of document.services) {
-    const held = rows.get(row.service);
-    if (held === undefined) rows.set(row.service, [row]);
-    else held.push(row);
+  const declaredKeys = new Set<string>();
+  for (const env of coverage.declared) {
+    for (const service of env.services) declaredKeys.add(environmentServiceKey(env.name, service));
   }
 
-  const declaredSet = new Set(coverage.declared);
+  const keyedRows = new Map<string, { readonly environment: string; readonly service: string; rows: TriageRow[] }>();
+  const undeclaredRows: string[] = [];
+  const seenUndeclared = new Set<string>();
   // Deduplicated, first-appearance order: this is a defect list an operator
   // reads, and a document spamming one name should not fill it. The multiplicity
   // is still visible — `census.declared` is the document's raw row count.
-  const undeclaredRows = [...rows.keys()].filter((service) => !declaredSet.has(service));
-  const duplicateRows = [...rows.entries()].filter(([, held]) => held.length > 1).map(([s]) => s);
+  const noteUndeclared = (label: string): void => {
+    if (seenUndeclared.has(label)) return;
+    seenUndeclared.add(label);
+    undeclaredRows.push(label);
+  };
+
+  for (const row of document.services) {
+    const environment = resolveRowEnvironment(row, coverage.declared);
+    if (environment === null) {
+      noteUndeclared(row.service);
+      continue;
+    }
+
+    const key = environmentServiceKey(environment, row.service);
+    const held = keyedRows.get(key);
+    if (held === undefined) keyedRows.set(key, { environment, service: row.service, rows: [row] });
+    else held.rows.push(row);
+
+    if (!declaredKeys.has(key)) {
+      noteUndeclared(censusLabel(environment, row.service, coverage.declared.length));
+    }
+  }
+
+  const duplicateRows = [...keyedRows.values()]
+    .filter((group) => group.rows.length > 1)
+    .map((group) => censusLabel(group.environment, group.service, coverage.declared.length));
 
   const misattributed: string[] = [];
   let counted = 0;
 
-  const services = coverage.declared.map((service): ServiceAssessment => {
-    const observer = assignedTo.get(service) ?? null;
-    if (observer === null) return blank(service, null, "unassigned");
+  const services = coverage.declared.flatMap((env) =>
+    env.services.map((service): ServiceAssessment => {
+      const key = environmentServiceKey(env.name, service);
+      const observer = assignedTo.get(key) ?? null;
+      if (observer === null) return blank(service, env.name, null, "unassigned");
 
-    const echo = echoes.get(observer);
-    if (echo === undefined) return blank(service, observer, "no_artifact");
-    if (echo !== "fresh" || !documentFresh) return blank(service, observer, "stale_replay");
-    /*
-     * §7.4's second echo, ARTIFACT-LEVEL: *"a wrong window applies to every row
-     * the document carries"*, so it discards here — where the whole of an
-     * observer's assigned share falls — rather than gapping a row inside the
-     * gate below.
-     *
-     * Ordered BELOW `stale_replay` deliberately, and the argument is the one
-     * this docblock already makes for `no_artifact` sitting above it. When both
-     * are wrong, the id is the narrower and more actionable fact: a replaying
-     * session returns last sweep's answer entire and last sweep's window comes
-     * with it, so the window fault is a consequence rather than a second
-     * finding, and the operator's next move is decided by the id.
-     */
-    if (badWindow(observer)) return blank(service, observer, "stale_window");
+      const echo = echoes.get(observer);
+      if (echo === undefined) return blank(service, env.name, observer, "no_artifact");
+      if (echo !== "fresh" || !documentFresh) return blank(service, env.name, observer, "stale_replay");
+      /*
+       * §7.4's second echo, ARTIFACT-LEVEL: *"a wrong window applies to every row
+       * the document carries"*, so it discards here — where the whole of an
+       * observer's assigned share falls — rather than gapping a row inside the
+       * gate below.
+       *
+       * Ordered BELOW `stale_replay` deliberately, and the argument is the one
+       * this docblock already makes for `no_artifact` sitting above it. When both
+       * are wrong, the id is the narrower and more actionable fact: a replaying
+       * session returns last sweep's answer entire and last sweep's window comes
+       * with it, so the window fault is a consequence rather than a second
+       * finding, and the operator's next move is decided by the id.
+       */
+      if (badWindow(observer)) return blank(service, env.name, observer, "stale_window");
 
-    const held = rows.get(service);
-    if (held === undefined) return blank(service, observer, "unreported");
-    if (held.length > 1) return blank(service, observer, "duplicate_rows");
-    const row = held[0] as TriageRow;
+      const held = keyedRows.get(key)?.rows;
+      if (held === undefined) return blank(service, env.name, observer, "unreported");
+      if (held.length > 1) return blank(service, env.name, observer, "duplicate_rows");
+      const row = held[0] as TriageRow;
 
-    /*
-     * Counted BEFORE the gate, and the two axes are genuinely different
-     * questions. `counted` answers §7.5's census question — *"how many
-     * independent readers reported"*, with services in place of lenses — and a
-     * fresh observer that wrote a row for this service reported on it. The
-     * QUALITY of that report is the assessment axis, and §6.7 rule 2 answers it
-     * three lines down.
-     *
-     * Folding the gate into the count would make one number mean both, and the
-     * pair `declared`-versus-`counted` exists precisely so that the worker's
-     * claim and the host's count can disagree in public. A gate failure is not
-     * a disagreement about whether the worker answered.
-     */
-    counted += 1;
-    if (named(row.observer) && row.observer !== observer) misattributed.push(service);
+      /*
+       * Counted BEFORE the gate, and the two axes are genuinely different
+       * questions. `counted` answers §7.5's census question — *"how many
+       * independent readers reported"*, with services in place of lenses — and a
+       * fresh observer that wrote a row for this service reported on it. The
+       * QUALITY of that report is the assessment axis, and §6.7 rule 2 answers it
+       * three lines down.
+       *
+       * Folding the gate into the count would make one number mean both, and the
+       * pair `declared`-versus-`counted` exists precisely so that the worker's
+       * claim and the host's count can disagree in public. A gate failure is not
+       * a disagreement about whether the worker answered.
+       */
+      counted += 1;
+      if (named(row.observer) && row.observer !== observer) {
+        misattributed.push(censusLabel(env.name, service, coverage.declared.length));
+      }
 
-    /*
-     * Read AFTER the gate has been computed and never as an input to it —
-     * `ServiceAssessment.note`'s docblock states the rule and this is the line
-     * that keeps it: `evidenceGaps(row)` above is handed the row and reads four
-     * structured fields, and widening it to consult prose would let a worker
-     * clear its own downgrade by writing a paragraph.
-     */
-    const note = rowNote(row);
+      /*
+       * Read AFTER the gate has been computed and never as an input to it —
+       * `ServiceAssessment.note`'s docblock states the rule and this is the line
+       * that keeps it: `evidenceGaps(row)` above is handed the row and reads four
+       * structured fields, and widening it to consult prose would let a worker
+       * clear its own downgrade by writing a paragraph.
+       */
+      const note = rowNote(row);
 
-    const gaps = evidenceGaps(row);
-    if (row.assessment === "healthy" && gaps.length > 0) {
+      const gaps = evidenceGaps(row);
+      if (row.assessment === "healthy" && gaps.length > 0) {
+        return {
+          service,
+          environment: env.name,
+          assessment: "indeterminate",
+          reason: "unevidenced_healthy",
+          observer,
+          claimed: "healthy",
+          gaps,
+          evidence_ref: firstEvidenceRef(row),
+          note,
+        };
+      }
+
       return {
         service,
-        assessment: "indeterminate",
-        reason: "unevidenced_healthy",
+        environment: env.name,
+        assessment: row.assessment,
+        reason: "observed",
         observer,
-        claimed: "healthy",
+        claimed: row.assessment,
         gaps,
         evidence_ref: firstEvidenceRef(row),
         note,
       };
-    }
-
-    return {
-      service,
-      assessment: row.assessment,
-      reason: "observed",
-      observer,
-      claimed: row.assessment,
-      gaps,
-      evidence_ref: firstEvidenceRef(row),
-      note,
-    };
-  });
+    }),
+  );
 
   return {
     sweep_id: dispatchedSweepId,
@@ -1167,6 +1260,93 @@ export function assessTriageSweep(
 }
 
 /**
+ * The one spelling of an (environment, service) pair — SRD-TRIAGE-MIXED-OBSERVERS
+ * D21, task 4.1b.
+ *
+ * Every internal `Map` in {@link assessTriageSweep} keys on this, and
+ * `triage-pass.ts`'s `noteFor` map keys on it too, so a service's note and its
+ * verdict can never disagree about which pair they mean by spelling it
+ * differently. Not exposed to an operator directly — {@link censusLabel} is
+ * that spelling, and the two agree only when `declared` names more than one
+ * environment.
+ */
+export function environmentServiceKey(environment: string, service: string): string {
+  return `${environment}/${service}`;
+}
+
+/**
+ * One census entry's spelling — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
+ *
+ * Bare when `declared` holds exactly one environment: there is only one legal
+ * meaning a bare name could have, so every single-environment fixture this
+ * module already had reads byte-identical to what it asserted before this
+ * task. `environment/service` — {@link environmentServiceKey}'s own spelling —
+ * otherwise, because a document covering more than one environment has a real
+ * ambiguity a bare name would put back.
+ */
+function censusLabel(environment: string, service: string, declaredEnvironments: number): string {
+  return declaredEnvironments === 1 ? service : environmentServiceKey(environment, service);
+}
+
+/**
+ * The environment ONE row is about, resolved — SRD-TRIAGE-MIXED-OBSERVERS D21,
+ * task 4.1b.
+ *
+ * `row.environment`, verbatim, whenever the worker named one — WHETHER OR NOT
+ * `declared` contains it. Resolution and declaration are separate questions,
+ * on the same argument this function's caller already makes for `row.service`:
+ * a row naming an environment `declared` does not hold is still a row the host
+ * can identify, so it is named in `census.undeclared_rows` as
+ * `environment/service` rather than dropped into the bare, unkeyable pile —
+ * see {@link assessTriageSweep}'s own undeclared-row handling for where that
+ * distinction is spent.
+ *
+ * `null` only when the row is silent and `declared` cannot supply a default —
+ * more than one environment, so there is no single legal guess, which is the
+ * row's own docblock's *"never guessed"*. A sweep over exactly one environment
+ * has exactly one legal answer, so a silent row resolves to it and every
+ * existing single-environment document keeps parsing exactly as it did before
+ * this task.
+ */
+function resolveRowEnvironment(
+  row: TriageRow,
+  declared: readonly DeclaredEnvironment[],
+): string | null {
+  if (named(row.environment)) return row.environment as string;
+  return declared.length === 1 ? (declared[0] as DeclaredEnvironment).name : null;
+}
+
+/**
+ * The environment ONE assignment belongs to — SRD-TRIAGE-MIXED-OBSERVERS D21,
+ * task 4.1b.
+ *
+ * A {@link PartitionAssignment} carries no environment of its own —
+ * `checkTriagePartition` scopes assignments to one kind's own declared set
+ * (task 4.1), so the fact lives on the WORKER, through {@link seatKind}, and is
+ * recovered here by matching that kind against `declared`'s own. `declared`
+ * holding exactly one environment is the same escape hatch
+ * {@link resolveRowEnvironment} takes, for the same reason — today's
+ * single-environment fixtures and callers stay valid whatever worker id they
+ * used, because there is only one legal answer to give any of them.
+ *
+ * `null` when `declared` names more than one environment and the worker's
+ * kind matches none of them — an unrecognised worker, or a kind no declared
+ * environment carries. Such an assignment is folded into NO environment's
+ * `assignedTo`, so its services stay `unassigned` everywhere, the same total
+ * answer {@link blank}'s `"unassigned"` arm already gives a service no
+ * assignment reached at all.
+ */
+function resolveAssignmentEnvironment(
+  assignment: PartitionAssignment,
+  declared: readonly DeclaredEnvironment[],
+): string | null {
+  if (declared.length === 1) return (declared[0] as DeclaredEnvironment).name;
+  const kind = seatKind(assignment.worker);
+  if (kind === null) return null;
+  return declared.find((e) => e.kind === kind)?.name ?? null;
+}
+
+/**
  * A service the host could not get an answer for.
  *
  * `indeterminate` and never `healthy` — SRD-OBSERVER-001 §9.2, and §6.5 says it
@@ -1187,11 +1367,13 @@ export function assessTriageSweep(
  */
 function blank(
   service: string,
+  environment: string,
   observer: string | null,
   reason: Exclude<AssessmentReason, "observed" | "unevidenced_healthy">,
 ): ServiceAssessment {
   return {
     service,
+    environment,
     assessment: "indeterminate",
     reason,
     observer,
@@ -1614,10 +1796,18 @@ export function inferenceSaturationProbe(
   return () => probeNativeToolCalls(baseUrl, apiKey, model, fetchImpl, timeoutMs);
 }
 
-/** What one sweep's service observations need that the assessment does not carry. */
+/**
+ * What one sweep's service observations need that the assessment does not
+ * carry.
+ *
+ * **No `environment` field — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b
+ * retired it.** §6.8's `(environment, service)` key now comes entirely off
+ * each {@link ServiceAssessment.environment}, one sweep of which can name more
+ * than one environment; a single flat value here would have been wrong for
+ * every service but the first environment's. {@link sweepObservations} reads
+ * it per service instead.
+ */
 export interface SweepObservationContext {
-  /** The environment these services belong to — §6.8's `(environment, service)` key. */
-  readonly environment: string;
   /** Epoch milliseconds. A PARAMETER — Phase 5 has no clock. */
   readonly at: number;
   /**
@@ -1702,7 +1892,7 @@ export function sweepObservations(
   return assessment.services.map((service) => ({
     subject: {
       kind: "service" as const,
-      environment: context.environment,
+      environment: service.environment,
       service: service.service,
     },
     sweepId: assessment.sweep_id,

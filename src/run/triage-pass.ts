@@ -100,6 +100,7 @@ import {
 } from "./triage-notify.ts";
 import {
   assessTriageSweep,
+  environmentServiceKey,
   saturationVerdict,
   sweepObservations,
   SATURATION_MIN_MISSING,
@@ -473,13 +474,18 @@ export interface SweptEnvironment {
 
 export interface TriagePassDeps {
   /**
-   * The environment `declared`, `sweepObservations` and every notification's
-   * extras are keyed under — the one identity a SERVICE-scoped fact hangs off.
+   * The environment `declared` and every notification's extras are keyed
+   * under — the one identity a SERVICE-scoped fact hangs off, for as long as
+   * this pass dispatches only one environment.
    *
-   * **SERVICES STILL BELONG TO ONE ENVIRONMENT.** `assessTriageSweep` counts one
-   * `declared` list and `sweepObservations` takes one `environment`, so every
-   * service-scoped fact hangs off this name. Task 4.1b (Phase 4) re-keys them by
-   * `(environment, service)`.
+   * **SERVICES STILL BELONG TO ONE ENVIRONMENT, in THIS caller.** `completeSweep`
+   * builds `coverage.declared` (`triage-verdict.ts`) as the single-entry list
+   * `[{name: this, kind: …, services: declared}]`, so `assessTriageSweep` mints
+   * this name onto every `ServiceAssessment.environment` it emits and
+   * `sweepObservations` reads it back off each one — task 4.1b (Phase 4) keyed
+   * both on `(environment, service)`, and a one-entry `declared` is what keeps
+   * that key equal to this single name everywhere in one pass. Task 4.2 widens
+   * this call site to more than one entry.
    *
    * Console-health facts are per environment instead: {@link environments}
    * lists every environment the sweep covered, and `triagePass` refuses a list
@@ -1202,7 +1208,20 @@ async function completeSweep(
         { document: null, evidenceRef: s.sweepId, staleCollators: [] };
 
   const coverage: SweepCoverage = {
-    declared: deps.declared,
+    // Phase 4 task 4.1b: `coverage.declared` names every environment the
+    // sweep covers. This pass still dispatches only its one k8s environment
+    // (`deps.environment`/`deps.declared`) until task 4.2 widens the call
+    // site to wire docker and vm environments through too, so one entry is
+    // the whole list.
+    declared: [
+      {
+        name: deps.environment,
+        // `refuseMiswiredEnvironments` has already thrown if `deps.environments`
+        // names no entry called `deps.environment`, so this lookup always finds one.
+        kind: (deps.environments.find((e) => e.name === deps.environment) as SweptEnvironment).kind,
+        services: deps.declared,
+      },
+    ],
     assignments: s.assignments,
     artifacts: s.join.artifacts,
     window: {
@@ -1252,8 +1271,9 @@ async function completeSweep(
   const correlated = saturation.correlated.length >= SATURATION_MIN_MISSING;
   const nextMemo = correlated ? memo.taken() : freshSaturationMemo();
 
+  // §13 task 4.1b: `SweepObservationContext` no longer carries `environment` —
+  // each observation's subject takes it off its own `ServiceAssessment`.
   const serviceObservations = sweepObservations(assessment, saturation, {
-    environment: deps.environment,
     at: s.at,
     evidenceRef: collation.evidenceRef,
   });
@@ -1412,11 +1432,14 @@ async function settle(deps: TriagePassDeps, s: Settlement): Promise<TriagePassOu
   /*
    * §13 task 5.8 — the row's own `note`, carried into `Announcement.evidence`.
    *
-   * Keyed by SERVICE because an announcement is about one subject and a note is
-   * about one row: a sweep-level note would attribute one service's prose to
-   * another service's incident, in the host's own voice, on somebody's phone.
-   * `s.assessment` is null on the three exits that dispatched nothing, and a
-   * sweep that read no rows has no prose to quote.
+   * Keyed by (ENVIRONMENT, SERVICE), not service alone — task 4.1b, because an
+   * incident subject carries both and a plain service key would collide the
+   * same way `assessTriageSweep`'s own grouping used to. An announcement is
+   * about one subject and a note is about one row: a sweep-level note would
+   * attribute one service's prose to another service's incident, in the
+   * host's own voice, on somebody's phone. `s.assessment` is null on the
+   * three exits that dispatched nothing, and a sweep that read no rows has no
+   * prose to quote.
    *
    * The `inference_saturated` arm above deliberately carries no `evidence`: a
    * console-health incident is about the CONSOLE, and a note belongs to a
@@ -1424,11 +1447,12 @@ async function settle(deps: TriagePassDeps, s: Settlement): Promise<TriagePassOu
    * arm is unchanged in behaviour.
    */
   const noteFor = new Map<string, string | null>(
-    (s.assessment?.services ?? []).map((a) => [a.service, a.note]),
+    (s.assessment?.services ?? []).map((a) => [environmentServiceKey(a.environment, a.service), a.note]),
   );
   const pairs = notifications.map((notification) => {
     const subj = notification.subject;
-    const note = subj.kind === "service" ? (noteFor.get(subj.service) ?? null) : null;
+    const note =
+      subj.kind === "service" ? (noteFor.get(environmentServiceKey(subj.environment, subj.service)) ?? null) : null;
     const { extras, subject } = extrasFor(notification, deps.environment, saturationSubject, note);
     const composed = announcementFacts(notification, extras);
     return {

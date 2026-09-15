@@ -461,7 +461,9 @@ describe("§13 task 5.5a's three acceptance cases, each refused by NAME", () => 
  * seam asserted against a discarded artifact grades nothing.
  */
 const COVERAGE: SweepCoverage = {
-  declared: ["authorization"],
+  // SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b: `declared` names environments,
+  // each with its own services, rather than a flat service-name list.
+  declared: [{ name: "cni-dev", kind: "k8s", services: ["authorization"] }],
   assignments: [{ worker: "obs-t2", services: ["authorization"] }],
   artifacts: [
     { worker: "obs-t2", sweep_id: "T-sweep-41", window_opened_at: "2026-09-06T11:56:00.000Z" },

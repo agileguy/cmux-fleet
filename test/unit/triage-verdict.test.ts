@@ -62,10 +62,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { PartitionAssignment } from "../../src/run/triage-partition.ts";
+import type { TriageEnvironmentKind } from "../../src/run/triage-targets.ts";
 import {
   ASSESSMENT_REASONS,
   assessTriageSweep,
   COVERAGE_RESULTS,
+  environmentServiceKey,
   EVIDENCE_GAPS,
   type EvidenceGap,
   evidenceGaps,
@@ -82,12 +84,14 @@ import {
   windowEcho,
   type CoverageEntry,
   type CoverageResult,
+  type DeclaredEnvironment,
   type InferenceEndpoint,
   type ObserverArtifact,
   type ObserverAssessment,
   type SaturationOutcome,
   type SaturationProbe,
   type SaturationVerdict,
+  type ServiceAssessment,
   type SweepAssessment,
   type SweepCoverage,
   type SweepWindow,
@@ -133,6 +137,15 @@ import type {
  * `a`/`b`/`c` makes an order-dependent bug read as an alphabetisation bug.
  */
 const DECLARED = ["mia", "authorization", "authentication"] as const;
+
+/**
+ * The kind `oneEnv` declares `ENV` as — SRD-TRIAGE-MIXED-OBSERVERS D21, task
+ * 4.1b. `ENV` itself is declared once, below, alongside the saturation
+ * fixtures that already named it "cni-dev"; every single-environment
+ * `SweepCoverage` in this file now shares that one name and kind rather than
+ * inventing a second.
+ */
+const ENV_KIND: TriageEnvironmentKind = "k8s";
 
 /** `TRIAGE_CONSOLE_ROSTER`, spelled out so a roster edit is visible here. */
 const TRI = "tri-1";
@@ -220,9 +233,19 @@ function artifact(
  * outside the window block ran with no policy, so an implementation that spent
  * `stale_window` on a perfectly good artifact was invisible to all of them.
  */
+/**
+ * `SweepCoverage.declared` naming ONE environment — SRD-TRIAGE-MIXED-OBSERVERS
+ * D21, task 4.1b. Every fixture in this file that has not opted into the
+ * mixed-environment tests below uses this, so a plain service-name array reads
+ * exactly as it did before this task existed.
+ */
+function oneEnv(services: readonly string[]): readonly DeclaredEnvironment[] {
+  return [{ name: ENV, kind: ENV_KIND, services }];
+}
+
 function fullCoverage(over: Partial<SweepCoverage> = {}): SweepCoverage {
   return {
-    declared: [...DECLARED],
+    declared: oneEnv([...DECLARED]),
     assignments: [
       assign(OBS[0], DECLARED[0]),
       assign(OBS[1], DECLARED[1]),
@@ -1204,7 +1227,7 @@ describe("§7.4 — the window_opened_at echo (task 5.3c)", () => {
           assign(OBS[2], DECLARED[2]),
           assign("obs-t4", "ingest"),
         ],
-        declared: [...DECLARED, "ingest"],
+        declared: oneEnv([...DECLARED, "ingest"]),
         artifacts: [
           artifact(OBS[0], PREVIOUS, OPENED), // stale id, good window
           artifact(OBS[1], SWEEP, TOO_LATE), // good id, bad window
@@ -1321,7 +1344,7 @@ describe("§7.4 — the window_opened_at echo (task 5.3c)", () => {
 
     // @ts-expect-error — `window` is required: a coverage with no policy would
     // leave §7.4's echo unrun, which is the skip task 5.3d removed.
-    const noPolicy: SweepCoverage = { declared: [...DECLARED], assignments: [], artifacts };
+    const noPolicy: SweepCoverage = { declared: oneEnv([...DECLARED]), assignments: [], artifacts };
 
     // @ts-expect-error — `window_opened_at` is required: an artifact that simply
     // omitted §7.4's third field would be indistinguishable from one the host
@@ -1330,7 +1353,8 @@ describe("§7.4 — the window_opened_at echo (task 5.3c)", () => {
 
     // Referenced so neither binding is dead code, and so a reader can see that the
     // claim is about the TYPES rather than about anything these values do.
-    expect(noPolicy.declared).toHaveLength(3);
+    expect(noPolicy.declared).toHaveLength(1);
+    expect(noPolicy.declared[0]?.services).toHaveLength(3);
     expect(noWindowEcho.worker).toBe(OBS[0]);
   });
 
@@ -1422,7 +1446,7 @@ describe("§6.7 — coverage is counted host-side, never from triage.json's clai
     const result = assessTriageSweep(
       SWEEP,
       {
-        declared: ["mia", "authorization"],
+        declared: oneEnv(["mia", "authorization"]),
         assignments: [assign(OBS[0], "mia", "authorization")],
         artifacts: [artifact(OBS[0])],
         window: WINDOW,
@@ -1689,7 +1713,7 @@ describe("§6.7 — coverage is counted host-side, never from triage.json's clai
     const result = assessTriageSweep(
       SWEEP,
       {
-        declared: ["mia"],
+        declared: oneEnv(["mia"]),
         assignments: [assign(OBS[0], "mia"), assign(OBS[1], "mia")],
         artifacts: [artifact(OBS[0])],
         window: WINDOW,
@@ -1887,7 +1911,13 @@ const ENDPOINT: InferenceEndpoint = { provider: "omlx", model: "gpt-oss-20b-MXFP
 
 const AT = Date.UTC(2026, 8, 6, 12, 0, 0);
 const EVIDENCE = "outbox/T-sweep-42/files/triage.json";
-const CTX = { environment: ENV, at: AT, evidenceRef: EVIDENCE };
+/**
+ * §13 task 4.1b retired `SweepObservationContext.environment` — every
+ * observation's subject now takes it off its own `ServiceAssessment`, minted
+ * by `assessTriageSweep` from the coverage the fixture below assesses with
+ * (`fullCoverage`'s `ENV`). `CTX` carries only what the interface still does.
+ */
+const CTX = { at: AT, evidenceRef: EVIDENCE };
 
 /** The shipped defaults, read from the schema rather than re-typed (§7.8). */
 const POLICY: IncidentPolicy = defaultTriageConsoleConfig();
@@ -2136,7 +2166,7 @@ describe("§6.7 rule 3 — the correlation, and what it is a statement about", (
     const fourth = "obs-t4";
     const assessment = assess(
       fullCoverage({
-        declared: [...DECLARED, "ingest"],
+        declared: oneEnv([...DECLARED, "ingest"]),
         assignments: [
           assign(OBS[0], DECLARED[0]),
           assign(OBS[1], DECLARED[1]),
@@ -2824,7 +2854,7 @@ describe("the unsuppressed mapping, and what §6.7 rule 2 has already done to it
     const fourth = "obs-t4";
     const assessment = assess(
       fullCoverage({
-        declared: [...DECLARED, "ingest"],
+        declared: oneEnv([...DECLARED, "ingest"]),
         assignments: [
           assign(OBS[0], DECLARED[0]),
           assign(OBS[1], DECLARED[1]),
@@ -3013,7 +3043,7 @@ describe("§6.8's citation is the ROW's, not the sweep's (task 5.3e)", () => {
     const result = assessTriageSweep(
       SWEEP,
       fullCoverage({
-        declared: [...DECLARED, "ingest"],
+        declared: oneEnv([...DECLARED, "ingest"]),
         artifacts: [artifact(OBS[0], PREVIOUS, OPENED), artifact(OBS[1], SWEEP, TOO_EARLY)],
       }),
       doc([row(DECLARED[0]), row(DECLARED[1]), row(DECLARED[2])]),
@@ -3040,7 +3070,7 @@ describe("§6.8's citation is the ROW's, not the sweep's (task 5.3e)", () => {
     const result = assessTriageSweep(
       SWEEP,
       fullCoverage({
-        declared: ["billing", "search"],
+        declared: oneEnv(["billing", "search"]),
         assignments: [assign(OBS[0], "billing", "search")],
         artifacts: [artifact(OBS[0])],
       }),
@@ -3355,7 +3385,7 @@ describe("§13 task 5.8's `note` on the host's own row", () => {
     const result = assessTriageSweep(
       SWEEP,
       fullCoverage({
-        declared: [...DECLARED, "ingest"],
+        declared: oneEnv([...DECLARED, "ingest"]),
         artifacts: [artifact(OBS[0], PREVIOUS, OPENED), artifact(OBS[1], SWEEP, TOO_EARLY)],
       }),
       doc([
@@ -3377,7 +3407,7 @@ describe("§13 task 5.8's `note` on the host's own row", () => {
     const result = assessTriageSweep(
       SWEEP,
       fullCoverage({
-        declared: ["billing", "search"],
+        declared: oneEnv(["billing", "search"]),
         assignments: [assign(OBS[0], "billing", "search")],
         artifacts: [artifact(OBS[0])],
       }),
@@ -3557,5 +3587,130 @@ describe("the observer's documented row satisfies the gate it is graded by (ISC-
     const gaps = new Set<EvidenceGap>(evidenceGaps(asWritten));
     expect([...EVIDENCE_GAPS].every((g) => gaps.has(g))).toBe(true);
     expect(gaps.size).toBe(EVIDENCE_GAPS.length);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b — keyed on (environment, service)
+// ─────────────────────────────────────────────────────────────────────────
+
+/** `[environment, service, reason]`, for a table-shaped assertion. */
+function envService(s: ServiceAssessment): readonly [string, string, string] {
+  return [s.environment, s.service, s.reason];
+}
+
+describe("a sweep across two environments — keyed on (environment, service), not service alone", () => {
+  /**
+   * The tracked `triage/targets.yaml` declares a `grafana` and a `prometheus`
+   * under BOTH `do-cluster` (k8s) and `docker-host` (docker) — SRD §6. The two
+   * environments are DIFFERENT kinds so `resolveAssignmentEnvironment` can
+   * place an assignment by its worker's `seatKind`: `obs-t1`/`obs-t2` are k8s
+   * seats, `obs-td1`/`obs-td2` are docker seats (`triage-seat-kinds.ts`).
+   */
+  const MIXED_DECLARED: readonly DeclaredEnvironment[] = [
+    { name: "do-cluster", kind: "k8s", services: ["grafana", "prometheus"] },
+    { name: "docker-host", kind: "docker", services: ["grafana", "prometheus"] },
+  ];
+
+  function mixedCoverage(over: Partial<SweepCoverage> = {}): SweepCoverage {
+    return {
+      declared: MIXED_DECLARED,
+      assignments: [
+        assign("obs-t1", "grafana"),
+        assign("obs-t2", "prometheus"),
+        assign("obs-td1", "grafana"),
+        assign("obs-td2", "prometheus"),
+      ],
+      artifacts: [artifact("obs-t1"), artifact("obs-t2"), artifact("obs-td1"), artifact("obs-td2")],
+      window: WINDOW,
+      ...over,
+    };
+  }
+
+  /** The fresh document task 4.1b's fixture describes: four rows, each naming its environment. */
+  function mixedDoc(): TriageDocument {
+    return doc([
+      row("grafana", { environment: "do-cluster" }),
+      row("prometheus", { environment: "do-cluster" }),
+      row("grafana", { environment: "docker-host" }),
+      row("prometheus", { environment: "docker-host" }),
+    ]);
+  }
+
+  /**
+   * THE REVERT CHECK. §6's own words: *"a correct fan-out claiming both
+   * `grafana` services is not refused `partition_duplicate`, and each gets its
+   * own row in the collated document"* — the downstream half of that, at the
+   * merged assessment.
+   *
+   * Falsified by hand: reverting `assessTriageSweep`'s row grouping to key on
+   * `row.service` alone collapses the two `grafana` rows and the two
+   * `prometheus` rows into one group apiece, so both services come back
+   * `duplicate_rows` here instead of `observed` — this test goes red.
+   */
+  test("do-cluster's grafana and docker-host's grafana each get their own row", () => {
+    const result = assessTriageSweep(SWEEP, mixedCoverage(), mixedDoc());
+
+    expect(result.services).toHaveLength(4);
+    expect(result.services.map(envService)).toEqual([
+      ["do-cluster", "grafana", "observed"],
+      ["do-cluster", "prometheus", "observed"],
+      ["docker-host", "grafana", "observed"],
+      ["docker-host", "prometheus", "observed"],
+    ]);
+    // Two DIFFERENT environments, not two claims on one service — neither is a
+    // duplicate of the other.
+    expect(result.census.duplicate_rows).toEqual([]);
+  });
+
+  test("with every row's environment removed, none of the four rows can be keyed — all land in undeclared_rows, bare, and no declared service comes back observed", () => {
+    const stripped = doc([row("grafana"), row("prometheus"), row("grafana"), row("prometheus")]);
+
+    const result = assessTriageSweep(SWEEP, mixedCoverage(), stripped);
+
+    expect(result.services.every((s) => s.reason !== "observed")).toBe(true);
+    // Deduplicated, first-appearance order — `census.declared` (the document's
+    // raw row count) is where the multiplicity of four rows over two names
+    // still shows up. Bare because there is no resolved environment to
+    // prefix with, never because `declared` happens to hold one (it holds two).
+    expect(result.census.undeclared_rows).toEqual(["grafana", "prometheus"]);
+    expect(result.census.duplicate_rows).toEqual([]);
+  });
+
+  test("a row naming an environment declared does not contain is undeclared, spelled environment/service", () => {
+    const badEnvironment = doc([
+      row("grafana", { environment: "do-cluster" }),
+      row("prometheus", { environment: "docker-host" }),
+      row("grafana", { environment: "vm-host" }),
+    ]);
+
+    const result = assessTriageSweep(SWEEP, mixedCoverage(), badEnvironment);
+
+    expect(result.census.undeclared_rows).toEqual(["vm-host/grafana"]);
+  });
+
+  test("sweepObservations gives each subject the right environment per service", () => {
+    const assessment = assessTriageSweep(SWEEP, mixedCoverage(), mixedDoc());
+    const outcome: SaturationOutcome = {
+      verdict: "clear",
+      saturated: false,
+      suppressed: false,
+      subject: inferenceSubject(ENDPOINT),
+      correlated: [],
+      probe: null,
+    };
+
+    const observations = sweepObservations(assessment, outcome, { at: AT, evidenceRef: EVIDENCE });
+
+    expect(
+      observations.map((o) =>
+        o.subject.kind === "service" ? [o.subject.environment, o.subject.service] : null,
+      ),
+    ).toEqual([
+      ["do-cluster", "grafana"],
+      ["do-cluster", "prometheus"],
+      ["docker-host", "grafana"],
+      ["docker-host", "prometheus"],
+    ]);
   });
 });
