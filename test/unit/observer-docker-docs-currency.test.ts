@@ -30,6 +30,12 @@
  *     worked command preserves `observe-docker`'s exit code through the pipe (`pipefail` or
  *     `PIPESTATUS`), and the input table's `selector` default names the rule
  *
+ * 10. the skill's "where the tokens are" passage: the variable it tells the worker to read for
+ *     the docker kind equals the one `docker/observe-ssh` assigns in its `docker)` case arm (read
+ *     from that file's text, never hard-coded here), the worked listing command reads that
+ *     variable rather than a literal `/secrets/...` path, and the input table's `target` row
+ *     points at the passage
+ *
  * Not covered, in general: when a channel is `forbidden` rather than a call to fix — that is prose
  * judgement, except for the one case choice 8 pins: an action verb (restart, stop, start, kill, rm,
  * exec, pause, or any other change to a container) is always `forbidden` on `state`.
@@ -516,5 +522,93 @@ describe("the input table's selector default points at the survey-then-filter ru
 
   test("the heading the pointer names actually exists in the skill", () => {
     expect(SKILL).toContain("## Surveying containers when the brief names none");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 10. the tokens-file variable: the skill tells the worker to read the same
+//     variable `docker/observe-ssh` assigns for the docker kind, the worked
+//     listing command reads that variable rather than a literal path, and the
+//     input table's `target` row points at the passage.
+// -----------------------------------------------------------------------------
+
+/**
+ * `docker/observe-ssh`'s `targets_var=<NAME>` assignment inside the `docker)`
+ * arm of `case ${kind} in`. Sliced to that arm alone (up to the `vm)` arm that
+ * follows it), so a mutation that only touched the `vm)` arm's variable cannot
+ * satisfy this by accident.
+ */
+function targetsVarFromObserveSsh(src: string): string {
+  const armAt = src.indexOf("\n  docker)\n");
+  expect(armAt, "docker/observe-ssh's `docker)` case arm is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const nextArmAt = src.indexOf("\n  vm)\n", armAt);
+  expect(nextArmAt, "docker/observe-ssh's `vm)` case arm is gone — this probe has rotted").toBeGreaterThan(armAt);
+  const block = src.slice(armAt, nextArmAt);
+  const m = block.match(/targets_var=(\S+)/);
+  expect(m, "no `targets_var=` assignment found in the docker) arm — this probe has rotted").not.toBeNull();
+  return m![1]!;
+}
+
+/**
+ * The "## Calling the target, and reading its exit" section, from its own
+ * heading to the next `## ` heading. Anchored on the heading text, so a
+ * mutation that drops the whole section turns this red rather than silently
+ * matching an unrelated part of the file. (This section is not the one
+ * choice 9's `surveySection`/`surveyWorkedCommand` read — that is "##
+ * Surveying containers when the brief names none" — so the two probes never
+ * compete for the same fenced block.)
+ */
+function callingTargetSection(src: string): string {
+  const heading = "## Calling the target, and reading its exit";
+  const headingAt = src.indexOf(heading);
+  expect(headingAt, "the skill's 'Calling the target, and reading its exit' heading is gone — this probe has rotted").toBeGreaterThanOrEqual(0);
+  const after = src.slice(headingAt + heading.length);
+  const nextHeadingOffset = after.search(/\n## /);
+  return nextHeadingOffset === -1 ? after : after.slice(0, nextHeadingOffset);
+}
+
+/** The fenced worked command that lists the enrolled tokens, inside that section. */
+function tokensWorkedCommand(src: string): string {
+  const section = callingTargetSection(src);
+  const m = section.match(/```\n([\s\S]*?)\n```/);
+  expect(m, "the 'Calling the target' section's fenced worked command is gone — this probe has rotted").not.toBeNull();
+  return m![1]!;
+}
+
+/**
+ * The shell variable name the worked command reads, e.g. `OBSERVER_DOCKER_TARGETS_FILE`
+ * out of `"$OBSERVER_DOCKER_TARGETS_FILE"`. Matched as a whole uppercase/underscore
+ * identifier (never a bare substring check), so a rename to a merely-prefixed or
+ * merely-suffixed variant is caught rather than passing by coincidence — the same
+ * reason choice 6's numeric extractors read a full assignment, not a fragment.
+ */
+function tokensVarFromWorkedCommand(command: string): string {
+  const m = command.match(/\$\{?([A-Z][A-Z0-9_]*)\}?/);
+  expect(m, "no shell variable reference found in the worked command — this probe has rotted").not.toBeNull();
+  return m![1]!;
+}
+
+describe("the skill points the worker at the same tokens-file variable docker/observe-ssh reads for the docker kind", () => {
+  test("the variable named in observe-ssh's docker) arm is the one the skill's worked command reads", () => {
+    const real = targetsVarFromObserveSsh(OBSERVE_SSH);
+    expect(real).toBe("OBSERVER_DOCKER_TARGETS_FILE");
+    const command = tokensWorkedCommand(SKILL);
+    const named = tokensVarFromWorkedCommand(command);
+    expect(named, `the worked command reads $${named}, docker/observe-ssh's docker) arm assigns ${real}`).toBe(real);
+  });
+
+  test("the worked command reads the variable, not a literal /secrets/ path", () => {
+    const command = tokensWorkedCommand(SKILL);
+    expect(command, `the worked command names a literal /secrets/ path instead of reading the variable: ${JSON.stringify(command)}`).not.toMatch(/\/secrets\//);
+  });
+
+  test("the input table's target row points at the 'Calling the target' passage", () => {
+    const rows = [...SKILL.matchAll(/^\| target \|.*\|$/gm)];
+    expect(rows.length, "the input table's target row is gone — this probe has rotted").toBeGreaterThanOrEqual(1);
+    expect(rows[0]![0]!).toContain("Calling the target, and reading its exit");
+  });
+
+  test("the heading the pointer names actually exists in the skill", () => {
+    expect(SKILL).toContain("## Calling the target, and reading its exit");
   });
 });

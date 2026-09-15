@@ -22,7 +22,7 @@ rather than guessing.
 
 | Input | Form | Default when absent |
 |---|---|---|
-| target | a target TOKEN from the enrolled inventory, `^[a-z0-9][a-z0-9-]{0,31}$` | none — if the inventory holds exactly one target, use it and say so; otherwise the row is `indeterminate` |
+| target | a target TOKEN from the enrolled inventory — list them with the command in "Calling the target, and reading its exit" below, `^[a-z0-9][a-z0-9-]{0,31}$` | none — a word in the brief that is a listed token is the target; if the file lists exactly one token, use it and say so; otherwise the row is `indeterminate` |
 | containers | one or more container names, Docker's name grammar `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` | — |
 | selector | `label=<key>=<value>` or `name=<pattern>`, used instead of names | if neither names nor a selector is given: every running container, surveyed once and filtered per "Surveying containers when the brief names none" below, and the row says so |
 | checks | a closed subset of `state`, `health`, `logs`, `stats`, `events` | `state, health, logs` |
@@ -36,10 +36,26 @@ volume, and a check nobody asked for spends turn the artifact needed.
 ## Calling the target, and reading its exit
 
 The call form is `observe-docker <target> <verb> [key=value ...]`. `target` is one of the TOKENs
-enrolled on this fleet, read from the file named by `OBSERVER_DOCKER_TARGETS_FILE` — one
-`token host port user` per line. `observe-docker` is a thin alias for
-`observe-ssh docker <target> <verb> [key=value ...]`; it does not itself enforce the verb grammar
-below, the target's forced command does.
+enrolled on this fleet. They live in the file whose PATH is the value of the environment variable
+`OBSERVER_DOCKER_TARGETS_FILE` — one `token host port user` line per target, the same file
+`docker/observe-ssh` itself reads for the docker kind. The token is the first field on each line.
+
+List them by reading the variable — never a hard-coded `/secrets/...` path — and split fields the
+same way `docker/observe-ssh`'s own parser does: on runs of spaces or tabs, skipping any line that
+is blank or whose first field starts with `#`:
+
+```
+awk 'NF && $1 !~ /^#/ {print $1}' "$OBSERVER_DOCKER_TARGETS_FILE"
+```
+
+Only the token belongs in an artifact — never the host, port or user from that same line.
+
+`observe-docker` is a thin alias for `observe-ssh docker <target> <verb> [key=value ...]`; it does
+not itself enforce the verb grammar below, the target's forced command does.
+
+A refusal naming the target as not enrolled (`observe-ssh`'s `target <target> is not enrolled in
+OBSERVER_DOCKER_TARGETS_FILE` line) is answered by reading the targets file above and calling
+again with a token it actually lists — never by guessing another name.
 
 Read the exit status AND the stderr text before you write a row — the exit code alone does not say
 who refused what:
