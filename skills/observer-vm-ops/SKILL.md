@@ -279,10 +279,15 @@ the one that was supposed to carry the evidence.
   target uses: `answered | unreachable | forbidden | not_attempted` and
   `healthy | degraded | unhealthy | indeterminate`. `failed` is a TASK status, never an
   `assessment` — a fifth token there voids the whole document, not just the row.
-- **`uptime_s`, `system_state` and `failed_units[]` are optional.** Include them when the
-  matching verb answered; leave them out rather than guess when it did not. `system_state` is the
-  state word `system` printed, verbatim. `failed_units[]` holds unit names copied verbatim from
-  `failed` output, one per entry.
+- **`uptime_s`, `system_state` and `failed_units[]` are optional, and optional means OMITTED.**
+  Include a key when the matching verb answered; when it did not, leave the key out of the JSON
+  entirely — never write `null` in its place. Harvest's schema accepts an absent key but refuses a
+  `null` value for any of the three, and that refusal fails the whole artifact, not just the row.
+  A row whose only call was refused (see "When the brief asks for an action, not a check" above)
+  carries none of these three keys. Contrast `sweep_id` and `window_opened_at` below: those two
+  are required keys whose value MAY be `null` — that allowance does not carry over to these three.
+  `system_state` is the state word `system` printed, verbatim. `failed_units[]` holds unit names
+  copied verbatim from `failed` output, one per entry.
 - **Copy `sweep_id` and `window_opened_at` out of the brief, verbatim, and from nowhere else** —
   not from your transcript, not reconstructed from the clock. An artifact whose `sweep_id` does
   not match is discarded whole.

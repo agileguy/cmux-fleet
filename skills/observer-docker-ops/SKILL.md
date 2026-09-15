@@ -319,8 +319,13 @@ confirms it by that declared kind (`src/harvest/reconcile.ts`).
   refusal line in `evidence_ref`, and the task status `blocked`. Marking every channel
   `not_attempted` is wrong here — the call answered, with a refusal, and that refusal names a real
   channel.
-- **`container_id`, `image` and `restart_count` are optional.** Include them when `inspect`
-  answered; leave them out rather than guess when it did not. `container_id` is the full,
+- **`container_id`, `image` and `restart_count` are optional, and optional means OMITTED.**
+  Include a key when `inspect` answered; when it did not, leave the key out of the JSON entirely —
+  never write `null` in its place. Harvest's schema accepts an absent key but refuses a `null`
+  value for any of the three, and that refusal fails the whole artifact, not just the row. A row
+  whose only call was refused (see "An action verb" above) carries none of these three keys.
+  Contrast `sweep_id` and `window_opened_at` below: those two are required keys whose value MAY be
+  `null` — that allowance does not carry over to these three. `container_id` is the full,
   untruncated id `inspect` returns (64 hex characters), the same one `--no-trunc` and `.Id` give —
   never the 12-character short form.
 - **Copy `sweep_id` and `window_opened_at` out of the brief, verbatim, and from nowhere else** —
