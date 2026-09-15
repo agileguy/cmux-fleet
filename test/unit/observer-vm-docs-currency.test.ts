@@ -627,12 +627,54 @@ describe("the exit table's first-match order is pinned", () => {
     ).toBeLessThan(zeroIdx);
   });
 
+  test("the malformed-targets-file `77` row sits above the generic 'your own call was malformed' `77` row", () => {
+    // Both rows match on the same `observe-ssh: refused before ssh ran` prefix
+    // (`refuse()` prints it for every shim-side refusal, `parse_line()`'s
+    // targets-file refusals included), so the more specific row — naming the
+    // targets-file line wording — must win the top-to-bottom, first-match race.
+    const rows = exitTableRows(SKILL).map((r) => r.full);
+    const targetsFileIdx = rows.findIndex((r) => r.includes("observe-ssh: refused before ssh ran: OBSERVER_VM_TARGETS_FILE line"));
+    const genericIdx = rows.findIndex(
+      (r) => r.includes("observe-ssh: refused before ssh ran` on stderr") && !r.includes("OBSERVER_VM_TARGETS_FILE line"),
+    );
+    expect(targetsFileIdx, "the malformed-targets-file row is missing from the exit table — this probe has rotted").toBeGreaterThanOrEqual(0);
+    expect(genericIdx, "the generic 'your own call was malformed' row is missing from the exit table — this probe has rotted").toBeGreaterThanOrEqual(0);
+    expect(
+      targetsFileIdx,
+      `the malformed-targets-file row (position ${targetsFileIdx}) must sit above the generic shim row (position ${genericIdx}) — otherwise the generic row's "fix the call and retry it once" wins the race and a worker retries a fleet configuration fault`,
+    ).toBeLessThan(genericIdx);
+  });
+
+  test("the malformed-targets-file row's exit condition is exactly what observe-ssh's parse_line() prints for the vm kind", () => {
+    // observe-ssh's refuse() prefixes every parse_line() reason with
+    // "${targets_var} line ${lineno}", and the vm kind's targets_var is
+    // OBSERVER_VM_TARGETS_FILE (asserted against the real source below, not
+    // hard-coded) — so this is the literal text a vm-kind worker sees on
+    // stderr for a malformed targets file, not an approximation of it.
+    const realTargetsVar = vmTargetsVarFromObserveSsh(OBSERVE_SSH);
+    const row = exitTableRows(SKILL).find((r) => r.full.includes("OBSERVER_VM_TARGETS_FILE line"));
+    expect(row, "the malformed-targets-file row is missing from the exit table — this probe has rotted").toBeDefined();
+    expect(row!.full).toContain(`observe-ssh: refused before ssh ran: ${realTargetsVar} line\` on stderr`);
+  });
+
+  test("the malformed-targets-file row's 'What the row says' column states blocked/indeterminate/no-retry, not a retry instruction", () => {
+    const row = exitTableRows(SKILL).find((r) => r.full.includes("OBSERVER_VM_TARGETS_FILE line"));
+    expect(row, "the malformed-targets-file row is missing from the exit table — this probe has rotted").toBeDefined();
+    expect(row!.rowSays).toContain("the task status is `blocked`");
+    expect(row!.rowSays).toContain("the row is `indeterminate`");
+    expect(row!.rowSays, "the malformed-targets-file row does not say the call is not retried").toMatch(/not retried/);
+    expect(row!.rowSays, "the malformed-targets-file row wrongly tells the worker to retry, like the generic shim row does").not.toMatch(
+      /retry it once/,
+    );
+  });
+
   test("every row sits in the order this list gives, and no row is added or removed without changing it", () => {
     // First match wins, so the order IS the contract: a broader row placed above a narrower one
     // silently takes its cases, as a `128`-or-above row once took every `255` from `disk`.
     const EXPECTED = [
       "`journal` or `kernel`, any exit, with `Hint:",
       "`0`",
+      "`77` with `observe-ssh: refused before ssh ran: OBSERVER_VM_TARGETS_FILE line`",
       "`77` with `observe-ssh: refused before ssh ran`",
       "`77` with `vm-forced-command: refused \"<verb>\": not a recognised verb",
       "`77` with any other `vm-forced-command: refused",
@@ -799,8 +841,21 @@ describe("the skill's action-verb rule names real channels for an action the che
     expect(normalized, "the rule does not say marking every channel not_attempted is wrong for this case").toMatch(/not_attempted`\s+is wrong/);
   });
 
-  test("the exit table's `77` unrecognised-verb row points to this rule", () => {
-    expect(SKILL).toContain('"When the brief asks for an action, not a check" below names which channel');
+  test("the exit table's `77` unrecognised-verb row points to this rule, and the rule paragraph it names really exists", () => {
+    const POINTER = '"When the brief asks for an action, not a check" below names which channel';
+    // Row-scoped: extract the specific `77` unrecognised-verb row and require
+    // the pointer inside ITS OWN third column, not just somewhere in the file
+    // — a pointer sentence dropped into an unrelated row would otherwise
+    // still satisfy a whole-file `toContain`.
+    const row = exitTableRows(SKILL).find((r) => r.full.includes('not a recognised verb'));
+    expect(row, "the exit table's not-a-recognised-verb row is missing — this probe has rotted").toBeDefined();
+    expect(row!.rowSays, `the not-a-recognised-verb row's own column does not carry the pointer: ${JSON.stringify(row!.rowSays)}`).toContain(
+      POINTER,
+    );
+    // The paragraph the pointer names must really exist — actionVerbRuleParagraph()
+    // itself asserts the "When the brief asks for an action, not a check." marker
+    // is present and the paragraph has a real end, so calling it is the check.
+    expect(actionVerbRuleParagraph(SKILL).length).toBeGreaterThan(0);
   });
 });
 
@@ -837,12 +892,16 @@ describe("the action-verb rule's call form names the action word as the verb its
     // Whitespace-normalised first (`s.replace(/\s+/g, " ")`), so a markdown
     // re-flow that moves where one of these `observe-vm <target> <word>`
     // phrases wraps cannot change what this requires — the same defence
-    // `observer-vm-skill-example.test.ts`'s bullet assertions use.
+    // `observer-vm-skill-example.test.ts`'s bullet assertions use. The skill
+    // backticks each call form as its own code span, so the expected string
+    // includes both the opening and the closing backtick as a right boundary:
+    // without the closing backtick, `observe-vm <target> reboot` would also
+    // match inside `observe-vm <target> rebooted`.
     const normalized = actionVerbRuleParagraph(SKILL).replace(/\s+/g, " ");
     for (const word of ACTION_WORDS) {
       const expected = ACTION_WORDS_WITH_UNIT_ARGUMENT.has(word)
-        ? `observe-vm <target> ${word} <unit>`
-        : `observe-vm <target> ${word}`;
+        ? `\`observe-vm <target> ${word} <unit>\``
+        : `\`observe-vm <target> ${word}\``;
       expect(
         normalized,
         `the action-verb rule does not show "${expected}" as the call form for "${word}"`,
@@ -860,8 +919,10 @@ describe("the action-verb rule's call form names the action word as the verb its
   });
 
   test("the rule states the argument-refusal shape is never 'fixed' into a read, when the brief asked for an action", () => {
-    const paragraph = actionVerbRuleParagraph(SKILL);
-    expect(paragraph, 'the rule does not say an ARGUMENT-shaped refusal is never "fixed" into a read').toMatch(
+    // Whitespace-normalised, so a markdown re-flow that moves where this
+    // sentence wraps cannot change what this requires.
+    const normalized = actionVerbRuleParagraph(SKILL).replace(/\s+/g, " ");
+    expect(normalized, 'the rule does not say an ARGUMENT-shaped refusal is never "fixed" into a read').toMatch(
       /ARGUMENT refusal is never "fixed" into a read/,
     );
   });
@@ -902,10 +963,13 @@ describe("a malformed targets file is a fleet configuration fault, not a malform
     const endAt = after.indexOf("\n\n");
     expect(endAt, "the malformed-targets-file rule paragraph never ends — this probe has rotted").toBeGreaterThan(0);
     const paragraph = after.slice(0, endAt);
-    expect(paragraph).toContain("`<targets_var> line <n>`");
-    expect(paragraph).toContain("`blocked`");
-    expect(paragraph).toContain("`indeterminate`");
-    expect(paragraph, "the rule does not say the call is not retried").toMatch(/not retried/);
+    // Whitespace-normalised: a markdown re-flow that moves where any of these
+    // phrases wrap must not change what this requires.
+    const normalized = paragraph.replace(/\s+/g, " ");
+    expect(normalized).toContain("`<targets_var> line <n>`");
+    expect(normalized).toContain("`blocked`");
+    expect(normalized).toContain("`indeterminate`");
+    expect(normalized, "the rule does not say the call is not retried").toMatch(/not retried/);
     // Placement: inside the same bounded passage the enrolled-tokens tests
     // (section 11) already anchor on, and therefore before the exit table —
     // never folded into its "your own call was malformed" row.

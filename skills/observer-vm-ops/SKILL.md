@@ -54,9 +54,10 @@ token or a bad field refuses the WHOLE file (77) — the `awk` command above has
 can still print tokens read from a file `observe-ssh` would refuse outright. A refusal whose text
 names `<targets_var> line <n>` (`docker/observe-ssh`'s own `parse_line`, one `refuse` call per check)
 is a FLEET CONFIGURATION FAULT, not something your call caused or can retry its way past: the task
-status is `blocked`, the row is `indeterminate`, and the call is not retried. This is a different
-shape of `77` from the exit table's "your own call was malformed" row below — that row is about a
-call this worker itself built wrong; this one names a targets file an operator has to fix.
+status is `blocked`, the row is `indeterminate`, and the call is not retried — the exit table's
+`OBSERVER_VM_TARGETS_FILE line` row below covers exactly this case. This is a different shape of
+`77` from the exit table's "your own call was malformed" row — that row is about a call this worker
+itself built wrong; this one names a targets file an operator has to fix.
 
 A word in the brief that names one of the listed tokens is the target. If the file lists
 exactly one token, use it and say so in the artifact; with more than one token and no matching
@@ -72,6 +73,7 @@ the one that applies, with "anything else" last:
 |---|---|---|
 | `journal` or `kernel`, any exit, with `Hint: You are currently not seeing messages from other users and the system.` or `No journal files were opened due to insufficient permissions.` on stderr | the account cannot read the journal as itself — measured 2026-09-14 on systemd 255 (Ubuntu 24.04), running as an account outside `adm`/`systemd-journal`: both `journal` and `kernel` exited 1 with zero stdout lines and both of these lines on stderr. Not measured: an account that holds user journal files of its own, which may get the Hint at exit 0 with only its own entries — so this row sits above the `0` row | the `logs` channel is `forbidden`, and the row is `indeterminate` — never evidence of a quiet window |
 | `0` | the call succeeded | the channel is `answered`, and its evidence is the output |
+| `77` with `observe-ssh: refused before ssh ran: OBSERVER_VM_TARGETS_FILE line` on stderr | a malformed `OBSERVER_VM_TARGETS_FILE` — `docker/observe-ssh`'s `parse_line` refused the whole file before ssh ever ran, naming its own line number, not this call's arguments | a FLEET CONFIGURATION FAULT, not something your call caused or can retry its way past: not a coverage result, the task status is `blocked`, the row is `indeterminate`, and the call is not retried |
 | `77` with `observe-ssh: refused before ssh ran` on stderr | your own call was malformed — no ssh connection was even attempted | not a coverage result; fix the call and retry it once |
 | `77` with `vm-forced-command: refused "<verb>": not a recognised verb...` on stderr | the credential itself refuses that verb | that channel is `forbidden`, and the task status is `blocked` — for an action verb, "When the brief asks for an action, not a check" below names which channel |
 | `77` with any other `vm-forced-command: refused ...` line on stderr | the target's grammar refused an ARGUMENT, not the verb | your call was malformed; the reason says how — fix it and retry it once, not a coverage result. When the task needs a shape the grammar has no form for at all, that channel is `forbidden` instead |

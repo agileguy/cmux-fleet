@@ -82,9 +82,12 @@ function optionalFieldsBullet(src: string): string {
  * against below — a canary against an `instanceof z.ZodOptional` check (what
  * this function used to be), which only recognises exactly one wrapper shape
  * and silently misses every other one a field can be omittable through:
- * `.default()` (zod 4 marks that `_zod.optin === "defaulted"`, a different
- * string, not `"optional"`), `.optional().transform()`, `.optional().pipe()`
- * and zod 4's `.exactOptional()`. If a zod upgrade renames or drops the
+ * `.default()`, `.optional().transform()`, `.optional().pipe()` and zod 4's
+ * `.exactOptional()`. Measured on the installed zod 4.4.3 (`bun -e`, reading
+ * each wrapper's own `._zod.optin`): every one of those, `.default()`
+ * included, marks `_zod.optin === "optional"` too — the same string
+ * `.optional()` itself uses; grepping `node_modules/zod` for `"defaulted"`
+ * turns up nothing on this version. If a zod upgrade renames or drops the
  * marker, this throws here rather than silently making every key look
  * "not optional".
  */
@@ -104,11 +107,12 @@ function assertOptinMarkerAvailable(): void {
  * missed.
  *
  * Cross-checked against zod 4's own internal `field._zod.optin` marker
- * (truthy whenever a field's own shape tolerates omission — `"optional"` or
- * `"defaulted"`, see above) after `assertOptinMarkerAvailable()` confirms the
- * installed zod still exposes it. A key the behavioural test selects but the
- * marker disagrees with fails loudly, by name, rather than being trusted on
- * one signal alone.
+ * (truthy whenever a field's own shape tolerates omission — measured above as
+ * the single string `"optional"` on the installed zod 4.4.3, `.default()`
+ * included; there is no separate `"defaulted"` value on this version) after
+ * `assertOptinMarkerAvailable()` confirms the installed zod still exposes it.
+ * A key the behavioural test selects but the marker disagrees with fails
+ * loudly, by name, rather than being trusted on one signal alone.
  *
  * This answers ONLY "may this key be omitted" — NULLABILITY is a separate
  * question, checked per key with `safeParse` in the tests below, because a
