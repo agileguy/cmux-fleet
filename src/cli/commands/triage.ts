@@ -136,7 +136,13 @@ import {
   type SweepProducers,
 } from "../../run/triage-envelope.ts";
 import { loadTriagePair, sweepDeadlineS } from "../../run/triage-config.ts";
-import type { TriageEnvironment, TriageFileNames } from "../../run/triage-targets.ts";
+import type {
+  TriageDockerEnvironment,
+  TriageEnvironments,
+  TriageFileNames,
+  TriageK8sEnvironment,
+  TriageVmEnvironment,
+} from "../../run/triage-targets.ts";
 import type { InferenceEndpoint, SaturationProbe, TriageDocument } from "../../run/triage-verdict.ts";
 import {
   freshDeliveryState,
@@ -982,39 +988,90 @@ export async function resolveCollatorRun(
   return run;
 }
 
+/** {@link environmentsByKind}'s return: one named environment per kind, docker/vm optional. */
+export interface EnvironmentsByKind {
+  readonly k8s: { readonly name: string; readonly environment: TriageK8sEnvironment };
+  readonly docker: { readonly name: string; readonly environment: TriageDockerEnvironment } | null;
+  readonly vm: { readonly name: string; readonly environment: TriageVmEnvironment } | null;
+}
+
 /**
- * §7.1's inventory projected onto the ONE environment a sweep is.
+ * §7.1's inventory projected onto the (up to) three environments one sweep
+ * can visit, one per kind (SRD-TRIAGE-MIXED-OBSERVERS §6.1). Replaces
+ * `soleEnvironment`, which refused anything other than exactly one declared
+ * environment — with three kinds possibly present at once, that rule is
+ * scoped to k8s alone: exactly one k8s environment is required (the same "at
+ * least one, not two" `soleEnvironment` enforced), and at most one docker and
+ * at most one vm.
  *
- * `triage-pass.ts` states the limit and this is where it becomes a refusal:
- * *"ONE SWEEP IS ONE ENVIRONMENT, and that is a limit rather than a law …
- * `ConsoleHealthFacts` takes a LIST of environments, which is the seam a
- * multi-environment console would grow into; nothing in Phase 6 asks for it and
- * nothing here forecloses it."*
+ * A mixed-kind sweep needs up to three environments present at once;
+ * `ConsoleHealthFacts.environments` (`triage-incident.ts`) is already a LIST
+ * for exactly this reason.
  *
- * **Refused by NAME on both sides**, because the two failures need different
- * answers: a targets file with no environments is one an operator has not
- * finished writing, and a file with two is one that outgrew a console this
- * design does not build yet. A loader that silently took the first would sweep
- * one environment and report health for a fleet, which is the most damaging
- * shape a message from this console can have.
+ * Every present environment must also declare the SAME `default_window`
+ * (operator decision): a sweep has one `window_opened_at`, derived from one
+ * default window, and every artifact's window gate compares against that
+ * single value, so a mismatch between kinds would make the gate wrong for
+ * whichever kind did not set the pace.
+ *
+ * **Refused by NAME, every violated rule in ONE message.** An operator fixing
+ * a targets file should see every rule it broke in one pass rather than
+ * re-running `config validate` once per correction.
  */
-export function soleEnvironment(environments: Readonly<Record<string, TriageEnvironment>>): {
-  readonly name: string;
-  readonly environment: TriageEnvironment;
-} {
-  const names = Object.keys(environments);
-  if (names.length !== 1) {
+export function environmentsByKind(environments: TriageEnvironments): EnvironmentsByKind {
+  const k8s: { name: string; environment: TriageK8sEnvironment }[] = [];
+  const docker: { name: string; environment: TriageDockerEnvironment }[] = [];
+  const vm: { name: string; environment: TriageVmEnvironment }[] = [];
+  for (const [name, environment] of Object.entries(environments)) {
+    if (environment.kind === "k8s") k8s.push({ name, environment });
+    else if (environment.kind === "docker") docker.push({ name, environment });
+    else vm.push({ name, environment });
+  }
+
+  const describe = (names: string[]) => (names.length === 0 ? "none" : names.join(", "));
+  const rules: string[] = [];
+  if (k8s.length !== 1) {
+    rules.push(
+      `exactly one k8s environment is required, found ${k8s.length} ` +
+        `(${describe(k8s.map((e) => e.name))})`,
+    );
+  }
+  if (docker.length > 1) {
+    rules.push(
+      `at most one docker environment is allowed, found ${docker.length} ` +
+        `(${describe(docker.map((e) => e.name))})`,
+    );
+  }
+  if (vm.length > 1) {
+    rules.push(
+      `at most one vm environment is allowed, found ${vm.length} ` +
+        `(${describe(vm.map((e) => e.name))})`,
+    );
+  }
+  /*
+   * Every present environment must share ONE default_window (operator
+   * decision). A sweep has one window_opened_at, derived from one default
+   * window, and every artifact's window gate (§7.4) compares against that
+   * single value — so a k8s environment at 5m beside a docker one at 10m
+   * would make §7.4's check wrong for whichever kind did not set the pace.
+   * Runs over every declared environment regardless of the count rules
+   * above (k8s first, then docker, then vm) so both kinds of refusal can
+   * appear together when both are true.
+   */
+  const present = [...k8s, ...docker, ...vm];
+  const distinctWindows = new Set(present.map((e) => e.environment.default_window));
+  if (distinctWindows.size > 1) {
+    const named = present.map((e) => `${e.name}=${e.environment.default_window}s`).join(", ");
+    rules.push(`environments must declare one shared default_window, found different values: ${named}`);
+  }
+  if (rules.length > 0) {
     throw new CliError(
-      `triage/targets.yaml declares ${names.length} environments (${
-        names.length === 0 ? "none" : names.join(", ")
-      }) and one sweep is ONE environment (SRD-TRIAGE-CONSOLE §12). A multi-environment console ` +
-        `is a seam this design leaves open and does not build: declare exactly one environment, ` +
-        `or run one console per environment.`,
+      `triage/targets.yaml: ${rules.join("; ")} (SRD-TRIAGE-MIXED-OBSERVERS §6.1).`,
       EXIT.USAGE,
     );
   }
-  const name = names[0]!;
-  return { name, environment: environments[name]! };
+
+  return { k8s: k8s[0]!, docker: docker[0] ?? null, vm: vm[0] ?? null };
 }
 
 /**
@@ -1295,7 +1352,15 @@ export function productionTriageDeps(effectsFor: TriageEffectsFor): TriageComman
       paths: e.triageFiles,
       kubeconfigPath: e.kubeconfigPath,
     });
-    const { name: environment, environment: target } = soleEnvironment(pair.targets.environments);
+    /*
+     * Docker and vm environments are validated here — `environmentsByKind`
+     * runs the refusals above over all three kinds — but this pass sweeps
+     * only the k8s one. Widening the dispatch and settlement per kind is
+     * SRD-TRIAGE-MIXED-OBSERVERS task 3.3, which needs Phase 4's
+     * seat-to-kind lookup.
+     */
+    const { k8s } = environmentsByKind(pair.targets.environments);
+    const { name: environment, environment: target } = k8s;
 
     /*
      * THE SPLIT — BOTH halves of it, by collator count.
