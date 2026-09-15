@@ -80,44 +80,62 @@ which sit under a dependency whose failure would explain several rows at once, a
 worth reaching before a sweep runs out of time. **Completeness is not part of that judgement —
 it is arithmetic**, and it is checked.
 
-## YOU HAVE EXACTLY ONE OBSERVER, AND YOUR ENVELOPE NAMES IT
+## YOUR OBSERVERS COME IN THREE KINDS, AND YOUR ENVELOPE NAMES THEM
 
-**Write ONE request. Name every service YOUR ENVELOPE gave you. There is nobody to share your
-slice with.**
+**Write ONE request. Name every service YOUR ENVELOPE gave you.** That one request is one
+`dispatch_request` call holding one entry per seat you use, and every service in it goes in a seat
+of THAT SERVICE'S OWN KIND. Two seats of the same kind share the split between them; two seats of
+different kinds never do.
 
 This is the single most important fact about your job and it is easy to get wrong in two
 opposite directions.
 
-**Split the environment, and split it EVENLY.** Every service in your envelope goes to exactly
-one observer — none twice, none nowhere. The host checks that and refuses the sweep whole if it
-does not hold: a service in no request is `partition_incomplete`, a service in two is
-`partition_duplicate`, and both take the entire file with them.
+**Read a seat's kind off the aspect baked into its task id, not off memory or an old example.**
+Your envelope's `## The seats` block names your seats: `obs-t1`/`obs-t2`/`obs-t3` are
+k8s seats, their task ids ending `slice1`/`slice2`/`slice3`; `obs-td1`/`obs-td2` are docker seats,
+ending `docker1`/`docker2`; `obs-tv1` is the vm seat, ending `vm1`. That suffix is the only place
+you are told a seat's kind — read it there, every sweep.
 
-**Even matters more than clever.** There is no table of angles here: your observers are not three
-readings of one thing, they are three workers looking at DIFFERENT services, and nothing you can
-learn about a service tells you which seat it belongs to. What decides the sweep is BALANCE,
-because every observer shares one deadline and the sweep is only as complete as its slowest
-share. An observer handed six services while another holds one will run out of time with services
-unlooked-at, and those come back `unobserved` — measured on 2026-09-12, when one observer spent a
-whole deadline on four services and reported nothing at all. Divide the count as evenly as it
-goes, and only then choose the order inside each share.
+**Split the environment by kind, and within each kind split it EVENLY.** A k8s service, a Docker
+container and a vm unit never share a request (SRD-TRIAGE-MIXED-OBSERVERS §5): every k8s service
+in your envelope goes to one of the three k8s seats, every Docker container goes to one of the two
+docker seats, and every vm service row, with its checks and named units, goes to the one vm seat (claim the row's service name, never a unit name) — none
+twice, none nowhere, and never into a seat of the wrong kind. The host checks each kind on its
+own, in the order k8s, then docker, then vm, and stops the sweep at the first one that does not
+hold: a service in no request of its own kind is `partition_incomplete`, a service in two is
+`partition_duplicate`, a service claimed by a seat of the wrong kind is refused the same way, and
+any one of them takes the entire file with it.
+
+**Even matters more than clever, inside each kind.** There is no table of angles here: your
+observers are not readings of one thing, they are workers looking at DIFFERENT services of their
+own kind, and nothing you can learn about a service tells you which seat of its kind it belongs
+to. What decides the sweep is BALANCE, because every observer — k8s, docker and vm alike — shares
+the same one deadline, and the sweep is only as complete as its slowest share. An observer handed
+six services while its kind-mate holds one will run out of time with services unlooked-at, and
+those come back `unobserved` — measured on 2026-09-12, when one observer spent a whole deadline on
+four services and reported nothing at all. Divide each kind's count as evenly as it goes among
+that kind's own seats, and only then choose the order inside each share.
 
 | What you write | Why |
 |---|---|
-| ONE entry per observer, all in ONE file | your `requests[]` holds one entry for each seat your envelope names. Two entries naming the same observer are refused as a duplicate, and the whole file goes with them |
-| naming EVERY service in your envelope, once | the host checks the union of your `services` lists against the environment it dispatched. A service in no request is `partition_incomplete` and the sweep is refused whole |
-| the worker ids from your `## The seats` block, copied | that block names your observers and their task ids. It is the only place you are told them |
-| never a request for `obs-t4`, or any other id you were not given | those seats do not exist. A request naming a worker this console does not have is refused, and so is the file it arrived in. You cannot derive another seat's task id, and that is deliberate |
+| ONE entry per seat you use, all in ONE file | your `requests[]` holds at most one entry per seat your envelope names. Two entries naming the same observer are refused as a duplicate, and the whole file goes with them |
+| naming EVERY service in your envelope, once, in a seat of its OWN KIND | the host checks each kind's claims against that kind's own declared services. A service in no request of its kind is `partition_incomplete`; a service claimed by a seat of the wrong kind is refused the same way |
+| the worker ids from your `## The seats` block, copied | that block names your observers and their task ids. It is the only place you are told them, and the aspect inside each task id is the only place you are told a seat's kind |
+| never a request for `obs-t4`, or any other worker id your envelope did not give | those seats do not exist. A request naming a worker this console does not have is refused, and so is the file it arrived in. You cannot derive another seat's task id, and that is deliberate |
+| no request AT ALL for a seat whose kind has no environment this sweep | k8s is always present, but docker or vm may not be. If `## The seats` names a seat of a kind with no environment in this envelope, it still shows a task id, but its kind's declared set is empty this sweep, so any claim you give it is `undeclared` and the whole file is refused `partition_incomplete`. An empty declared set is vacuously complete, so leaving that seat out of `requests[]` entirely is not a shortcut — it is what completeness means when its kind has nothing to observe |
 
-**Your observers run CONCURRENTLY**, and that is the whole reason there is more than one: they
-start together and share one deadline, so the sweep takes as long as the largest share rather
-than the sum of them. Inside one share the services are sequential — that observer works through
-its list in the order you wrote it — so put the services that matter most first in each brief,
-because a share that runs out of time will have looked at its head and not its tail.
+**Your observers run CONCURRENTLY, within a kind and across kinds alike**, and that is the whole
+reason there is more than one: they start together and share one deadline, so the sweep takes as
+long as the largest share rather than the sum of them. Inside one share the services are
+sequential — that observer works through its list in the order you wrote it — so put the services
+that matter most first in each brief, because a share that runs out of time will have looked at
+its head and not its tail.
 
-If you find yourself writing a second request, stop: you have mis-remembered your pair for the
-review console's three-lens fan-out. The count is not a judgement call and it is not in your
-envelope's service list — it is one.
+If you find yourself writing more entries for one kind than that kind has seats — a fourth k8s
+entry, a third docker entry, a second vm entry — stop: you have mis-remembered the split, not
+found a bigger share. Each kind's seat count is fixed, and it is not a judgement call and not in
+your envelope's service list — your envelope's `## The seats` block gives it to you directly, kind
+by kind, and it does not change between sweeps.
 
 **3. Understand what the host does with your partition, because it changes what a shortcut
 costs.** The host validates your request against its own copy of the service list before
