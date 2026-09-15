@@ -780,9 +780,9 @@ describe("parse → project → check, which is the chain §6.3 step 5 describes
     const declared = targets.environments_unchecked_against_kubeconfig;
 
     /*
-     * The SOLE environment, read out of the document rather than named here.
-     * `soleEnvironment` refuses any count but one, so "the one this document
-     * declares" is well defined without spelling the token a second time.
+     * The fixture declares exactly one environment, a k8s one, so it is read
+     * out of the document rather than named here, without spelling the token
+     * a second time.
      */
     const names = Object.keys(declared);
     expect(names).toHaveLength(1);

@@ -81,27 +81,40 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
  * has to change.
  */
 /*
- * IN `fleet.example.yaml`'S DECLARATION ORDER, which as of 2026-09-13 happens to
- * EQUAL pane order — and the coincidence is worth naming so nobody builds on it.
+ * IN `fleet.example.yaml`'S DECLARATION ORDER — no longer the same list as
+ * `DEFAULT_TRIAGE_WORKERS`, and that divergence is the point of this note now.
  *
  * This comment used to record a real divergence: the file declared two pairs,
  * `tri-1, obs-t1, tri-2, obs-t2`, while `DEFAULT_TRIAGE_WORKERS` listed both
  * collators before both observers, because that is what put each observer under
  * its own collator in the 2x2. Two orders, two constants, neither wrong.
  *
- * The console is now ONE collator over THREE observers, and `obs-t3` was
- * APPENDED after `obs-t2` rather than dropped into `tri-2`'s old slot — so both
- * orders read `tri-1, obs-t1, obs-t2, obs-t3` and the two constants agree
- * element for element. **They are still two different facts.** This list is
- * whatever `resolveAllWorkers` yields from the file; `DEFAULT_TRIAGE_WORKERS` is
- * the order that puts the collator in the full-width pane. Re-ordering the YAML
- * would move this and not that, and an assertion that leaned on today's
- * agreement would fail somewhere unrelated to the edit that caused it.
+ * It then went briefly quiet: the console became ONE collator over THREE
+ * observers, `obs-t3` was APPENDED after `obs-t2`, and both orders read
+ * `tri-1, obs-t1, obs-t2, obs-t3` element for element — a coincidence, not a
+ * rule. SRD-TRIAGE-MIXED-OBSERVERS broke it: `obs-td1`, `obs-td2` and
+ * `obs-tv1` were APPENDED to the file after `obs-t3`, so this list now reads
+ * `tri-1, obs-t1, obs-t2, obs-t3, obs-td1, obs-td2, obs-tv1`.
+ * `DEFAULT_TRIAGE_WORKERS` is UNCHANGED at this commit — still the four ids it
+ * always named — and grows to seven, in pane CREATION order rather than this
+ * declaration order, in a later phase (SRD-TRIAGE-MIXED-OBSERVERS §4.2). **They
+ * are still two different facts, and they no longer even agree on length.**
+ * This list is whatever `resolveAllWorkers` yields from the file;
+ * `DEFAULT_TRIAGE_WORKERS` is the order that puts the collator in the
+ * full-width pane. Re-ordering the YAML would move this and not that.
  */
-const TRIAGE_SEATS = ["tri-1", "obs-t1", "obs-t2", "obs-t3"] as const;
+const TRIAGE_SEATS = [
+  "tri-1",
+  "obs-t1",
+  "obs-t2",
+  "obs-t3",
+  "obs-td1",
+  "obs-td2",
+  "obs-tv1",
+] as const;
 
 /**
- * D1, settled 2026-09-06 as arm 3: all four seats run the LOCAL 20b, in both
+ * D1, settled 2026-09-06 as arm 3: all seven seats run the LOCAL 20b, in both
  * config files. Not a performance choice — §0.2's argument is that an
  * observer's context (namespaces, pod names, restart counts, log excerpts,
  * cluster endpoints from a live environment, 288 sweeps a day) may not leave
@@ -440,7 +453,7 @@ describe("worked example", () => {
  * reviewable DIFF between two tracked files rather than an invisible drift —
  * which is precisely what tracking `fleet.yaml` was for.
  */
-describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
+describe("the triage console's seven seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
   /**
    * The example's two seats, resolved, in the order `TRIAGE_SEATS` names them.
    *
@@ -468,7 +481,7 @@ describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.
     // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
     // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
     // of them pass while checking nothing.
-    expect(TRIAGE_SEATS).toHaveLength(4);
+    expect(TRIAGE_SEATS).toHaveLength(7);
 
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     // ONE set-shaped comparison rather than four independent expectations: a
@@ -713,7 +726,7 @@ describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.
     // THE ANTI-VACUITY THAT MAKES THIS AN ABSENCE WORTH ASSERTING. An absence
     // over an empty set is free: `tuiWorkerIds` SKIPS an id the config does not
     // define, so a file whose triage seats had been deleted would answer "no
-    // tui seats" and pass. The four have to be present before their having no
+    // tui seats" and pass. The seven have to be present before their having no
     // keyboard means anything at all.
     expect(seats.map((w) => w.id)).toEqual([...TRIAGE_SEATS]);
     expect(seats.map((w) => `${w.id}=${w.paneMode}`)).toEqual(

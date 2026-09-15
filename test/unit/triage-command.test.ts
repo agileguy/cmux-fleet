@@ -110,7 +110,12 @@ import {
 } from "../../src/run/triage-envelope.ts";
 import type { NotifyRequest } from "../../src/run/triage-notify.ts";
 import { statusOutcome } from "../../src/run/triage-notify.ts";
-import type { TriageEnvironment, TriageService } from "../../src/run/triage-targets.ts";
+import type {
+  TriageDockerEnvironment,
+  TriageK8sEnvironment,
+  TriageService,
+  TriageVmEnvironment,
+} from "../../src/run/triage-targets.ts";
 import {
   NO_COLLATOR_RUN,
   buildSweepDriver,
@@ -125,9 +130,9 @@ import {
   register,
   renderStatus,
   readSweepPartition,
+  environmentsByKind,
   resolveCollatorRun,
   resolveSeatRuns,
-  soleEnvironment,
   triageStatus,
   type TriageCommandDeps,
   type TriageProductionEffects,
@@ -1144,17 +1149,25 @@ current-context: gke-cni-dev
  * against the slice it was actually given. The division was not a free choice.
  *
  * With ONE collator it is. `evenSlices(3 services, 1 collator)` hands `tri-1`
- * the whole environment and `evenSlices(3 aspects, 1)` hands it all three seats,
- * so the partition among those seats is the collator's own judgement — §6.5's
- * ⌈N/3⌉, *"the partition is the triage worker's to make"*. The host checks only
- * that the union covers every declared service exactly once; it does not choose
- * the shares and does not refuse a lopsided one.
+ * the whole environment and `evenSlices(6 aspects, 1)` hands it all six seats
+ * (SRD-TRIAGE-MIXED-OBSERVERS grew the aspect table from three to six on
+ * 2026-09-14), so the partition among those seats is the collator's own
+ * judgement — §6.5's ⌈N/3⌉, *"the partition is the triage worker's to make"*.
+ * The host checks only that the union covers every declared service exactly
+ * once; it does not choose the shares and does not refuse a lopsided one.
  *
  * So this table is now the FIXTURE COLLATOR's decision rather than a transcript
  * of the host's arithmetic, and one service each is the even split the role
  * prompt asks for. What still constrains it is the completeness check: drop a
  * service here and the sweep is refused `partition_incomplete`, name one twice
  * and it is refused `partition_duplicate`.
+ *
+ * **STILL ONLY THREE ENTRIES, below, though the collator now holds six seats.**
+ * `FIXTURE_TARGETS` declares one k8s environment and nothing for docker or vm
+ * to observe, so this fixture's own partition — unlike the collator's full
+ * seat list — covers only the three k8s seats. `PAIRS`, below, filters
+ * `TRIAGE_CONSOLE_ASPECTS` down to the seats named here for exactly that
+ * reason.
  */
 const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
   "obs-t1": ["routing"],
@@ -1175,13 +1188,23 @@ const SLICE_OF: Readonly<Record<string, readonly string[]>> = {
  * than left to rot.** `expectDispatchesWereWellFormed` derives its dispatch
  * count from `p.seats.length` per pair, so a second collator would not silently
  * produce wrong expectations — but the flat `seats: TRIAGE_CONSOLE_ASPECTS`
- * below WOULD hand both collators all three seats, which is not what
- * `evenSlices` would do. If `TRIAGE_CONSOLE_ROSTER.collators` ever grows, this
- * line has to share the aspects out rather than copy them.
+ * below WOULD hand both collators every seat the filter below admits, which is
+ * not what `evenSlices` would do. If `TRIAGE_CONSOLE_ROSTER.collators` ever
+ * grows, this line has to share the aspects out rather than copy them.
+ *
+ * **FILTERED TO THE SEATS `SLICE_OF` NAMES, since 2026-09-14
+ * (SRD-TRIAGE-MIXED-OBSERVERS Phase 2).** `TRIAGE_CONSOLE_ASPECTS` now also
+ * lists `obs-td1`, `obs-td2` and `obs-tv1`, but `FIXTURE_TARGETS` above
+ * declares only a k8s environment — this fixture has no docker or vm service
+ * of its own kind to hand those seats, and won't until the target inventory
+ * and its per-kind partition land (SRD Phases 3-4). A fixture collator that
+ * claimed them would write a slice `SLICE_OF` cannot answer, so this filter
+ * keeps the fixture honest about what it can fan out to rather than papering
+ * over the gap with an entry `SLICE_OF` does not really have.
  */
 const PAIRS = TRIAGE_CONSOLE_ROSTER.collators.map((collator) => ({
   collator,
-  seats: TRIAGE_CONSOLE_ASPECTS,
+  seats: TRIAGE_CONSOLE_ASPECTS.filter((seat) => seat.worker in SLICE_OF),
 }));
 
 const isCollator = (worker: string): boolean =>
@@ -1876,6 +1899,9 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     // settle in is a schedule rather than a fact worth asserting. Sorting was
     // already the right call when there were two; at three it is what keeps this
     // from failing on a scheduler rather than on a defect.
+    // Still three, not six: this fixture's collator only fans out to the seats
+    // `SLICE_OF` names (k8s), because `FIXTURE_TARGETS` declares no docker or
+    // vm environment for the new seats to observe (see `PAIRS` above).
     expect([...outcome.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     // §12: *"A first `unhealthy` observation notifies nothing."*
     expect(outcome.notifications).toEqual([]);
@@ -2083,6 +2109,9 @@ describe("§13 task 6.1b: pifleet triage --once performs one real sweep", () => 
     const doc = JSON.parse(out) as { schema: string; kind: string; dispatched: string[] };
     expect(doc.schema).toBe("pifleet.triagepass/v1");
     expect(doc.kind).toBe("swept");
+    // Still three: the docker/vm seats are absent from this fixture's fan-out
+    // for the same reason as above — no docker/vm environment in
+    // `FIXTURE_TARGETS` for `SLICE_OF` to name them against.
     expect([...doc.dispatched].sort()).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
     expectDispatchesWereWellFormed(fleet, { sweeps: 1 });
   });
@@ -2159,20 +2188,144 @@ describe("§13 task 6.1b: what the production deps still REFUSE, and by name", (
   });
 
   /**
-   * **One sweep is ONE environment, and both wrong counts are refused by name.**
+   * **Exactly one k8s environment, at most one docker, at most one vm — every
+   * violated rule refused in one message, by name (SRD-TRIAGE-MIXED-OBSERVERS
+   * §6.1).**
    *
-   * `triage-pass.ts` states the limit — *"`ConsoleHealthFacts` takes a LIST of
-   * environments, which is the seam a multi-environment console would grow
-   * into; nothing in Phase 6 asks for it"* — and a loader that silently took the
-   * first would sweep one environment and report health for a fleet.
+   * `soleEnvironment`'s old rule — "one sweep is ONE environment" — is now
+   * scoped to k8s alone, because a mixed-kind sweep needs up to three
+   * environments declared at once. `ConsoleHealthFacts.environments`
+   * (`triage-incident.ts`) is already a LIST for exactly this reason.
    */
-  test("a targets file that declares zero or two environments is refused by name", () => {
-    const env = (kube: string): TriageEnvironment =>
-      ({ kube_context: kube, default_window: 120, services: [] }) as unknown as TriageEnvironment;
-    expect(soleEnvironment({ "cni-dev": env("a") }).name).toBe("cni-dev");
-    expect(() => soleEnvironment({})).toThrow(/declares 0 environments \(none\)/);
-    expect(() => soleEnvironment({ "cni-dev": env("a"), "cni-verify": env("b") })).toThrow(
-      /declares 2 environments \(cni-dev, cni-verify\)/,
+  const k8sFixture = (kube: string, defaultWindow = 120): TriageK8sEnvironment =>
+    ({
+      kind: "k8s",
+      kube_context: kube,
+      default_window: defaultWindow,
+      services: [],
+    }) as unknown as TriageK8sEnvironment;
+  const dockerFixture = (target: string, defaultWindow = 120): TriageDockerEnvironment =>
+    ({
+      kind: "docker",
+      target,
+      default_window: defaultWindow,
+      services: [],
+    }) as unknown as TriageDockerEnvironment;
+  const vmFixture = (target: string, defaultWindow = 120): TriageVmEnvironment =>
+    ({ kind: "vm", target, default_window: defaultWindow, services: [] }) as unknown as TriageVmEnvironment;
+
+  test("one k8s environment alone is accepted, docker and vm both null", () => {
+    const result = environmentsByKind({ "cni-dev": k8sFixture("a") });
+    expect(result.k8s.name).toBe("cni-dev");
+    expect(result.docker).toBeNull();
+    expect(result.vm).toBeNull();
+  });
+
+  test("k8s + docker + vm together are accepted, each returned by name", () => {
+    const result = environmentsByKind({
+      "cni-dev": k8sFixture("a"),
+      "docker-host": dockerFixture("docker"),
+      "vm-host": vmFixture("vm"),
+    });
+    expect(result.k8s.name).toBe("cni-dev");
+    expect(result.docker?.name).toBe("docker-host");
+    expect(result.vm?.name).toBe("vm-host");
+  });
+
+  test("an empty targets file is refused: zero k8s environments", () => {
+    expect(() => environmentsByKind({})).toThrow(
+      /exactly one k8s environment is required, found 0 \(none\)/,
+    );
+  });
+
+  test("a docker-only file is refused: it still has zero k8s environments", () => {
+    expect(() => environmentsByKind({ "docker-host": dockerFixture("docker") })).toThrow(
+      /exactly one k8s environment is required, found 0 \(none\)/,
+    );
+  });
+
+  test("two k8s environments are refused by name", () => {
+    expect(() =>
+      environmentsByKind({ "cni-dev": k8sFixture("a"), "cni-verify": k8sFixture("b") }),
+    ).toThrow(/exactly one k8s environment is required, found 2 \(cni-dev, cni-verify\)/);
+  });
+
+  test("two docker environments are refused by name, alongside the required k8s one", () => {
+    expect(() =>
+      environmentsByKind({
+        "cni-dev": k8sFixture("a"),
+        "docker-a": dockerFixture("docker-a"),
+        "docker-b": dockerFixture("docker-b"),
+      }),
+    ).toThrow(/at most one docker environment is allowed, found 2 \(docker-a, docker-b\)/);
+  });
+
+  test("two vm environments are refused by name, alongside the required k8s one", () => {
+    expect(() =>
+      environmentsByKind({
+        "cni-dev": k8sFixture("a"),
+        "vm-a": vmFixture("vm-a"),
+        "vm-b": vmFixture("vm-b"),
+      }),
+    ).toThrow(/at most one vm environment is allowed, found 2 \(vm-a, vm-b\)/);
+  });
+
+  test("every violated rule appears in the SAME message, not just the first", () => {
+    let thrown: unknown;
+    try {
+      environmentsByKind({
+        "docker-a": dockerFixture("docker-a"),
+        "docker-b": dockerFixture("docker-b"),
+        "vm-a": vmFixture("vm-a"),
+        "vm-b": vmFixture("vm-b"),
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CliError);
+    const message = (thrown as CliError).message;
+    expect((thrown as CliError).exitCode).toBe(EXIT.USAGE);
+    expect(message).toContain("exactly one k8s environment is required, found 0 (none)");
+    expect(message).toContain("at most one docker environment is allowed, found 2 (docker-a, docker-b)");
+    expect(message).toContain("at most one vm environment is allowed, found 2 (vm-a, vm-b)");
+    expect(message).toContain("SRD-TRIAGE-MIXED-OBSERVERS §6.1");
+    expect(message).toContain("triage/targets.yaml");
+  });
+
+  /**
+   * Operator decision: every present environment must share ONE
+   * `default_window`, because a sweep has one `window_opened_at` derived
+   * from one default window and every artifact's window gate (§7.4) compares
+   * against that single value.
+   */
+  test("a k8s environment and a docker environment at different default_window are refused, naming both", () => {
+    expect(() =>
+      environmentsByKind({
+        "do-cluster": k8sFixture("a", 300),
+        "docker-host": dockerFixture("docker", 600),
+      }),
+    ).toThrow(
+      /environments must declare one shared default_window, found different values: do-cluster=300s, docker-host=600s/,
+    );
+  });
+
+  test("and the twin: the same default_window on both is accepted", () => {
+    const result = environmentsByKind({
+      "do-cluster": k8sFixture("a", 300),
+      "docker-host": dockerFixture("docker", 300),
+    });
+    expect(result.k8s.name).toBe("do-cluster");
+    expect(result.docker?.name).toBe("docker-host");
+  });
+
+  test("a k8s environment and a vm environment at different default_window are refused too — not docker-specific", () => {
+    expect(() =>
+      environmentsByKind({
+        "do-cluster": k8sFixture("a", 300),
+        "vm-host": vmFixture("vm", 120),
+      }),
+    ).toThrow(
+      /environments must declare one shared default_window, found different values: do-cluster=300s, vm-host=120s/,
     );
   });
 });

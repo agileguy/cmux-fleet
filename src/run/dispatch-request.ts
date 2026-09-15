@@ -434,15 +434,16 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
  * SET, so a seat renamed in one and not the other is a red test rather than a
  * console that starts four healthy panes and refuses every dispatch. This console
  * has no such export yet — its pane plan is SRD-TRIAGE-CONSOLE Phase 4 — so the
- * suite pins these four ids against the tracked `fleet.example.yaml` instead, by
+ * suite pins these seven ids against the tracked `fleet.example.yaml` instead, by
  * id AND by role. **When `DEFAULT_TRIAGE_WORKERS` lands, that probe should become
  * the same set equality the review console has**, because the config check
  * catches a rename and does not catch a fifth seat added to only one of them.
  */
 export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
   /*
-   * ONE COLLATOR OVER THREE OBSERVERS as of 2026-09-13, and this constant is
-   * EXACT again rather than the wide half of a pairing.
+   * ONE COLLATOR OVER SIX OBSERVERS as of 2026-09-14 (SRD-TRIAGE-MIXED-OBSERVERS
+   * §5), and this constant is EXACT again rather than the wide half of a
+   * pairing.
    *
    * It held `collators: ["tri-1", "tri-2"]` for one day. That shape needed this
    * comment to admit a gap: a flat roster would accept `tri-1` naming `obs-t2`,
@@ -453,14 +454,18 @@ export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
    * `worker_not_in_console` is now the whole of the check rather than its wide
    * half.
    *
-   * The fan-out is three because §6.5 puts the partition in the collator's hands
-   * — ⌈N/3⌉ is that rule's own arithmetic — and because nine services across two
-   * observers was measured too slow: on T-sweep-116 `obs-t2` spent its whole
-   * deadline on four services and wrote nothing. Three observers make it three
-   * each, which is the load this console sustained for 115 sweeps.
+   * The k8s fan-out is three because §6.5 puts the partition in the collator's
+   * hands — ⌈N/3⌉ is that rule's own arithmetic — and because nine services
+   * across two observers was measured too slow: on T-sweep-116 `obs-t2` spent
+   * its whole deadline on four services and wrote nothing. Three k8s observers
+   * make it three each, which is the load this console sustained for 115
+   * sweeps. Three more seats (two docker, one vm) joined on 2026-09-14; they
+   * have no service of their own kind to partition yet — that is
+   * SRD-TRIAGE-MIXED-OBSERVERS Phase 4 — so this paragraph's arithmetic still
+   * describes only the k8s three.
    */
   collators: ["tri-1"],
-  reviewers: ["obs-t1", "obs-t2", "obs-t3"],
+  reviewers: ["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"],
   /*
    * §7.3's triage row, and the half that makes the completeness check
    * REACHABLE. §6.5 puts the count on the host — *"a model that partitions can

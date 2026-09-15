@@ -519,19 +519,18 @@ describe("the document no longer contradicts itself about how many observers exi
    * The premise every assertion below rests on, asserted first so that none of
    * them can pass vacuously over an empty or unexpected roster.
    */
-  test("the console this document describes has THREE observers under ONE collator", () => {
+  test("the console this document describes has SIX observers under ONE collator", () => {
     /*
      * THREE observers as of 2026-09-13, and this claim has now changed shape
      * twice in two days — which is the reason it is asserted against the roster
      * rather than spelled as prose. It said *"this console has exactly one
      * observer"*, then *"each COLLATOR has exactly one"* while there were two
-     * pairs, and now says one collator fans out to three. Every version was
-     * about the same underlying thing: the fan-out a single collator may write.
-     *
-     * This is §6.5's ⌈N/3⌉ shape restored — the ORIGINAL design, which the
-     * console shrank away from and has now come back to.
+     * pairs, then one collator fanning out to three. SRD-TRIAGE-MIXED-OBSERVERS
+     * grew it to six on 2026-09-14 — three k8s (the original ⌈N/3⌉ shape),
+     * two docker, one vm — and every version was about the same underlying
+     * thing: the fan-out a single collator may write.
      */
-    expect(ROSTER).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+    expect(ROSTER).toEqual(["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"]);
   });
 
   /**

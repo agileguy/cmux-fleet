@@ -541,12 +541,14 @@ describe("config validate — the triage pair", () => {
     const d = JSON.parse(r.stdout);
     expect(d.triage.targets_path).toBe(join(REPO_ROOT, "triage", "targets.yaml"));
     expect(d.triage.console_path).toBe(join(REPO_ROOT, "triage", "console.yaml"));
-    // The environment the OPERATOR currently declares, retargeted 2026-09-10 off
-    // a control plane that needs the corporate VPN. Asserted by value, like the
-    // 1020/120 below and for the same recorded reason: this test states what the
-    // tracked file says, and a test is not a reason to give the file back.
-    expect(d.triage.environments).toEqual(["do-cluster"]);
-    expect(d.triage.services).toBe(9);
+    // The file now holds one environment per kind (SRD-TRIAGE-MIXED-OBSERVERS
+    // §6.1, `environmentsByKind`): the k8s environment, retargeted 2026-09-10
+    // off a control plane that needs the corporate VPN, plus the docker and vm
+    // environments task 3.4 added. Asserted by value, like the 1020/120 below
+    // and for the same recorded reason: this test states what the tracked file
+    // says, and a test is not a reason to give the file back.
+    expect(d.triage.environments).toEqual(["do-cluster", "docker-host", "vm-host"]);
+    expect(d.triage.services).toBe(15);
     // The tracked file's own values, and the derivation between them:
     // `sweep_deadline_s` is `cadence_s - reserve_s` (§7.8 property 1) and is
     // not a field, so 1020 - 120 = 900 is the arithmetic being checked here as
@@ -644,8 +646,12 @@ describe("config validate — the triage pair", () => {
       expect(r.code).toBe(EXIT.SUCCESS);
       const d = JSON.parse(r.stdout);
       expect(d.triage.fenced).toBe(true);
-      expect(d.triage.environments).toEqual(["do-cluster"]);
-      expect(d.triage.services).toBe(9);
+      // The fence test's point stays the same with three kinds in the file:
+      // only the k8s environment's `kube_context` is checked against the
+      // kubeconfig (`kubeContextIssues`); the docker and vm environments carry
+      // no `kube_context` to check, so they pass through untouched.
+      expect(d.triage.environments).toEqual(["do-cluster", "docker-host", "vm-host"]);
+      expect(d.triage.services).toBe(15);
       // 1020 - 120, off the tracked console.yaml copied in above — see the
       // previous test for why this is no longer §7.8's default of 240, and for
       // why the cadence rather than the shared margin is what was moved.
