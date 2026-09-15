@@ -2197,6 +2197,51 @@ describe("§6.3 steps 2-3, 5, 6-9: the producers", () => {
   });
 
   /**
+   * The collate CALL SITE hands the pair's own environments to the brief. The
+   * `renderCollationEnvelope` tests call that function directly, so they cannot
+   * see a caller that passed one environment where the pair holds three.
+   */
+  test("a pair covering k8s, docker and vm gets a collation brief that asks for `environment`", async () => {
+    const run = await seedRun("2026-09-15T00-00-92Z-9092");
+    const sweepId = sweepTaskId(92);
+    const environments: readonly SweepEnvironment[] = [
+      ...SWEEP_ENVIRONMENTS,
+      { name: DOCKER_ENV_NAME, kind: "docker", services: [DOCKER_ENV_SERVICE] },
+      {
+        name: "vm-host",
+        kind: "vm",
+        services: [{ name: "vm-1", namespace: "vm", checks: ["system"], units: [] }],
+      },
+    ];
+    const pair: SweepPair = {
+      collator: TRIAGE_COLLATOR,
+      seats: seatsForEnvironments(environments),
+      environments,
+    };
+    const sent: Sent[] = [];
+    const producers = sweepProducers({
+      run,
+      environments,
+      pairs: [pair],
+      defaultWindowS: 300,
+      previousDocument: async () => null,
+      dispatch: async (args) => {
+        sent.push(args);
+        return { kind: "accepted" };
+      },
+    });
+
+    await producers.collate(sweepId);
+
+    expect(sent).toHaveLength(1);
+    const brief = sent[0]!.brief;
+    expect(brief).toContain("`environment`");
+    expect(brief).toContain(`${childTaskId(sweepId, "docker1")}.json (${DOCKER_ENV_NAME})`);
+    expect(brief).toContain(`${childTaskId(sweepId, "vm1")}.json (vm-host)`);
+    expect(envelopeIssues(brief, null)).toEqual([]);
+  });
+
+  /**
    * `T-sweep-120`, 2026-09-13 — the sweep that wedged the console.
    *
    * `obs-t1`'s report EXISTED and was read. It carried no `services` array at
