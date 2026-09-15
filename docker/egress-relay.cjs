@@ -75,13 +75,35 @@ const { startProxy, fromEnv, POLICY_ENV } = require("./connect-proxy.cjs");
  * first byte. Each of those was an unauthenticated connection against oMLX,
  * which is a Python server and exhausts long before this process's 1048576
  * nofile — so one unprivileged container on the bridge could deny the whole
- * fleet its model server without sending a single request.
+ * fleet its model server without sending a single request. That measurement
+ * is why the PRE-dial phase below stays short: a connection that has sent
+ * nothing has no legitimate reason to sit open, and the fix is to reap it
+ * fast — not to widen the window a zero-byte flood gets to live in.
+ *
+ * TWO PHASES, not one, since 2026-09-15. A worker's model turn was
+ * `terminated` exactly 120 s after its request went out: a large context sent
+ * to a shared local model server, where a long prefill streams no bytes back
+ * while it runs. The short timeout is right for a connection that has said
+ * nothing; it is wrong for one that HAS spoken and is waiting on a slow but
+ * legitimate answer. So: before the first byte, both legs are bounded by the
+ * SHORT `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (unchanged — it is still what closes
+ * the zero-byte-flood case above). Once that first byte triggers the dial,
+ * both legs move to the LONG `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`, sized to
+ * the observer tasks' own 900 s deadline so the relay never kills a request
+ * the task could still use.
+ *
+ * The CONNECT proxy (`connect-proxy.cjs`, SSH and Google traffic) is
+ * SEPARATE and UNCHANGED by either constant below: its own
+ * `PIFLEET_PROXY_IDLE_TIMEOUT_MS` stays at 120000.
  *
  * The defaults are generous for a dozen workers talking to one inference
  * server, and small enough that the failure mode is a queued connection
  * rather than a wedged daemon. Overridable so a test can drive them hard.
  */
 const IDLE_TIMEOUT_MS = Number(process.env.PIFLEET_RELAY_IDLE_TIMEOUT_MS || 120000);
+const ACTIVE_IDLE_TIMEOUT_MS = Number(
+  process.env.PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS || 900000,
+);
 const MAX_CONNECTIONS = Number(process.env.PIFLEET_RELAY_MAX_CONNECTIONS || 256);
 
 /** `1..65535`, mirroring `validPort` in `src/security/relay.ts`. */
@@ -173,14 +195,30 @@ function main() {
         if (upstream !== null) upstream.destroy();
       };
 
-      // Applied to BOTH legs: a client that connects and says nothing, and an
-      // upstream that accepts and never answers, are the same leak from
-      // opposite ends.
+      // PRE-DIAL phase: the short timeout. A client that connects and says
+      // nothing is the zero-byte-flood case in the header, and there is no
+      // upstream leg yet to bound alongside it. Re-armed to the long ACTIVE
+      // timeout — for this leg AND the upstream leg — the instant the first
+      // byte triggers a dial, below.
       client.setTimeout(IDLE_TIMEOUT_MS, teardown);
       client.on("error", teardown);
       client.on("close", teardown);
 
       const dial = (firstChunk) => {
+        // ACTIVE phase begins here: the client has said something, so
+        // teardown moves off the short DoS-guarding clock and onto the long
+        // one the header describes. Duration only, no callback — `teardown`
+        // is already registered as a one-time 'timeout' listener from the
+        // PRE-dial `client.setTimeout(IDLE_TIMEOUT_MS, teardown)` call above,
+        // and it is still armed (it has not fired). `socket.setTimeout(ms,
+        // cb)` calls `once('timeout', cb)` on every invocation that passes a
+        // callback, so passing `teardown` again here would stack a SECOND
+        // listener for the same event; both would run — harmlessly, since
+        // `teardown` is idempotent on `torn` — but there is no reason to
+        // carry a listener that adds nothing. Passing no callback just resets
+        // the timer's duration and leaves the existing listener in place.
+        client.setTimeout(ACTIVE_IDLE_TIMEOUT_MS);
+
         // `allowHalfOpen` on THIS leg too, for the mirror-image reason: when
         // the upstream finishes its response and sends FIN, the default would
         // close our socket outright and take with it anything the client still
@@ -188,7 +226,7 @@ function main() {
         // handlers do the teardown explicitly — that is the trade
         // `allowHalfOpen` makes, not an oversight to be tidied away.
         upstream = net.connect({ host: t.host, port: t.port, allowHalfOpen: true });
-        upstream.setTimeout(IDLE_TIMEOUT_MS, teardown);
+        upstream.setTimeout(ACTIVE_IDLE_TIMEOUT_MS, teardown);
         upstream.on("error", teardown);
         upstream.on("close", teardown);
         upstream.on("connect", () => {

@@ -227,6 +227,11 @@ describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", (
   }, cliBudget(1));
 
   test("an idle client is reaped by the idle timeout", async () => {
+    // PRE-DIAL phase: no byte is ever sent, so there is no upstream leg to
+    // speak of and only the SHORT `PIFLEET_RELAY_IDLE_TIMEOUT_MS` can be
+    // governing here — the long `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS` is
+    // left at its default (900000) and the test still closes in well under a
+    // second, which is itself part of the proof.
     const up = await startUpstream();
     upstreams.push(up);
     const listenPort = await freePort();
@@ -239,6 +244,70 @@ describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", (
     // No bytes ever sent: the socket must be closed by the relay, not held.
     await once(client, "close", 5_000);
     expect(up.connections).toBe(0);
+  }, cliBudget(1));
+});
+
+describe("egress-relay.cjs — active idle phase (long timeout once dialled)", () => {
+  /**
+   * These pin the two-phase behaviour added for the 2026-09-15 incident: a
+   * worker's model turn was `terminated` exactly 120 s after its request went
+   * out, because a large-context prefill against a shared model server can
+   * legitimately stream zero bytes for longer than that. Before the first
+   * byte, a connection is still governed by the short, DoS-guarding
+   * `PIFLEET_RELAY_IDLE_TIMEOUT_MS` (S1 above); once that byte triggers the
+   * dial, both legs move to the long `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`.
+   */
+  test("a slow-but-legitimate reply — silent past the short idle, inside the active idle — still arrives", async () => {
+    const REPLY_DELAY_MS = 400;
+    const up = await startUpstream((sock, chunk) => {
+      // Silent for REPLY_DELAY_MS: longer than the short idle configured
+      // below, shorter than the active one, so only the correct (active)
+      // timeout on the post-dial legs lets this reply survive to be sent.
+      setTimeout(() => sock.write(`REPLY:${chunk.toString()}`), REPLY_DELAY_MS);
+    });
+    upstreams.push(up);
+    const listenPort = await freePort();
+    await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_IDLE_TIMEOUT_MS: "150",
+      PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: "700",
+    });
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("REQ");
+    const reply = (await once(client, "data", 2_000)) as Buffer;
+    expect(reply.toString()).toBe("REPLY:REQ");
+    client.destroy();
+  }, cliBudget(1));
+
+  test("an upstream silent past the active idle gets the connection torn down", async () => {
+    const up = await startUpstream(() => {
+      // Deliberately never replies — the connection must be reaped by the
+      // active idle timeout on its own, not by anything the client does.
+    });
+    upstreams.push(up);
+    const listenPort = await freePort();
+    await startRelay([{ listenPort, host: "127.0.0.1", port: up.port, name: "omlx" }], {
+      PIFLEET_RELAY_IDLE_TIMEOUT_MS: "150",
+      PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS: "300",
+    });
+
+    const client = open(listenPort);
+    await once(client, "connect");
+    client.write("REQ"); // triggers the dial — now in the ACTIVE phase
+    // Neither side ever sends anything else: the relay itself must tear the
+    // connection down once ACTIVE_IDLE_TIMEOUT_MS elapses with no traffic.
+    await once(client, "close", 2_000);
+    expect(up.connections).toBe(1); // the dial DID happen…
+
+    // …and was then torn down. The relay destroys both of its own legs in
+    // the same synchronous teardown, but the upstream TEST server's socket
+    // (a separate TCP connection, observed from the other process) closing
+    // in response is one more async hop — poll rather than assume it has
+    // already landed the instant the client side observed its own close.
+    const deadline = Date.now() + 1_000;
+    while (!up.sockets[0]!.destroyed && Date.now() < deadline) await Bun.sleep(10);
+    expect(up.sockets[0]!.destroyed).toBe(true);
   }, cliBudget(1));
 });
 
