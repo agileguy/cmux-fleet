@@ -199,15 +199,18 @@ still takes the run's repository from the launch directory
 (`src/cli/commands/up.ts`), but neither seat has a checkout to put it in, so where
 you run `up --workers` from does not change what these two can see.
 
-**Not established from source, and worth flagging rather than guessing at:**
-whether a bare `up --workers <id>` against a seat that already has a run
-recreates it fresh or collides with the one already there. The console scripts'
-idle-wait-then-teardown behaviour (`SKILL.md`'s "A worker that has run before is
-not a clean worker") is implemented in each console script, not in `up` itself,
-and nothing else in the tree gives `obs-d1` or `obs-v1` an equivalent single
-command. Until that is answered, treat a seat `status` already shows busy the way
-the "existing session" caution above reads for any worker: check the transcript
-before trusting an answer that arrives fast.
+**From source, not a guess:** a bare `up --workers <id>` against a seat that
+already has a run neither recreates it fresh nor collides with it. `up` calls
+`newRunId()` unconditionally on every invocation, and each worker's container
+is named from that run id (`src/config/render.ts`) — so the seat gets a
+second container holding the same delivered key, while the earlier run is
+left running under the same worker id. The console scripts' idle-wait-then-
+teardown behaviour (`SKILL.md`'s "A worker that has run before is not a clean
+worker") is implemented in each console script, not in `up` itself, and
+`obs-d1`/`obs-v1` have no console to give them the equivalent. Check
+`status --all --json` for an existing run against the seat first, and tear it
+down (`down --run <run-id>`) before bringing it up again — see
+`Workflows/EnrolTarget.md` step 6 for the full reasoning.
 
 ## Dispatching to several workers
 

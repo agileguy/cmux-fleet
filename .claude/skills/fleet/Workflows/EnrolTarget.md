@@ -371,8 +371,8 @@ interactive shell.
 
 **If `obs-d1` or `obs-v1` already has a run from an earlier enrolment
 attempt, tear it down before you run this again.** `up` calls `newRunId()`
-unconditionally on every invocation (`src/cli/commands/up.ts`, around line
-953), and `config/render.ts` names each worker's container
+unconditionally on every invocation (`src/cli/commands/up.ts`), and
+`config/render.ts` names each worker's container
 `workerContainerName(opts.run.runId, w.id)` (`src/config/render.ts:380`) — so
 a bare `up --workers <id>` against a seat that already has a run does not
 recreate that run in place and does not collide with it either. It creates a
@@ -579,6 +579,12 @@ Pass means three things hold:
      refused reboot), you have three things: the task's dispatch time `d`,
      its completion time `c` (when `wait` reported it finished), and the
      uptime `u` in its artifact.
+   - **Preconditions.** Record each `d` before you dispatch that task, not
+     after the dispatch call returns: a `d1` recorded late shrinks the window
+     condition (a) checks, and a reboot can then pass. And dispatch the second
+     task only after the first has completed, `d2 ≥ c1`: one seat working
+     through both reads in series, never two overlapping dispatches. Break
+     either and a reboot inside the gap the rule can't see still passes.
    - **Pass** only if both hold:
      - (a) `u1 ≥ c2 − d1`: the baseline uptime exceeds the whole window from
        the baseline dispatch to the after-read's completion.
@@ -596,3 +602,9 @@ back anything other than `blocked`, or the artifact does not carry a
 route around; it means a layer SRD-OBSERVER-ROLES §7.2 describes did not do
 what it was built to do, on a real target, and the fix belongs in the
 forced command or the account, not in a retry.
+
+The one thing that is not a reason to stop: the VM timing rule's condition
+(a) failing. That result is inconclusive, not a failure, because the
+baseline read came too soon after boot to prove anything.
+Rerun the pair with a longer baseline and read both uptimes again before
+deciding anything either way.
