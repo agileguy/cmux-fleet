@@ -4,6 +4,93 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-15
+
+This release covers Phases 1-5 of `Docs/SRD-TRIAGE-MIXED-OBSERVERS.md`.
+The triage console grows from four panes to seven: `tri-1` on top, the
+three k8s observers in one row, and two docker observers and one vm
+observer in the row below. One sweep covers a k8s environment, a docker
+host and a vm under the one collator.
+
+### Added
+
+- **Seven-pane triage console.** `DEFAULT_TRIAGE_WORKERS` names `tri-1`,
+  `obs-t1`, `obs-td1`, `obs-t2`, `obs-t3`, `obs-td2` and `obs-tv1`, and the
+  plan lays them out as `tri-1` over two full-width rows of three.
+  Multi-pane rows get correct widths at every level, not only the lowest.
+- **Three new triage seats.** `obs-td1` and `obs-td2` run `observer-docker`
+  and `obs-tv1` runs `observer-vm`, declared in both fleet configs and in
+  the console roster.
+- **Environments carry a kind.** `triage/targets.yaml` environments are
+  `k8s`, `docker` or `vm`. `environmentsByKind` replaces
+  `soleEnvironment`: exactly one k8s environment, at most one docker and
+  one vm, and one shared `default_window`. The tracked targets file
+  declares the docker host and the vm.
+- **Seat-to-kind lookup** (`src/run/triage-seat-kinds.ts`) maps each
+  observer seat to its kind.
+
+### Changed
+
+- The sweep envelope takes a list of environments, and a sweep names only
+  the seats of the kinds it declares.
+- The partition check runs once per kind, so a docker service claimed by a
+  k8s seat is refused.
+- Rows, carried state and the sweep assessment key on (environment,
+  service). `do-cluster`'s `grafana` and `docker-host`'s `grafana` are two
+  services, not a duplicate. A document row may name its environment, and
+  the collator is told to when a sweep covers more than one.
+- Settlement reports each swept environment on its own. A blocked docker
+  seat opens `observer_blocked` on the docker environment only.
+- `triagePass` takes one declared list of environments and their services.
+- Each observer's reply is read from its own kind's file:
+  `observer-ops.json`, `observer-docker-ops.json` or
+  `observer-vm-ops.json`. Before this, a docker or vm reply was never
+  found.
+- Docker and vm replies go through the same `sweep_id` and
+  `window_opened_at` freshness gates as k8s.
+- The tui-mode warning covers all three observer roles.
+- `roles/triage.md` tells the collator to split each kind across its own
+  seats.
+- A duplicate service name refusal says the key is (environment, service).
+- The production triage pass sweeps every environment kind present in the
+  targets file. Before this it swept only the k8s environment, and the
+  docker host and vm were declared but never observed.
+
+### Fixed during review
+
+- Docker and vm observers were told to write `observer-ops.json` and to
+  bound kubectl calls. Each observer's brief now names its own kind's
+  reply file and states its own credential's read bounds.
+- The collation brief never asked for `environment`, so with more than one
+  environment every row was left unplaced. It now asks for the field and
+  labels each reply path with its environment. The host also places a row
+  that names no environment when exactly one environment declares its
+  service, and carries that row into the next sweep's brief by the same
+  rule.
+- The collation brief told the collator to declare its two documents in
+  `artifacts`, which it cannot do without `write`. It now says to pass both
+  as entries of one `submit_report` call, as the role does.
+- A targets file could declare more services than one collation document
+  can hold. The total across environments is now capped at 16.
+- A request entry for a seat outside the sweep, even one claiming nothing,
+  could dispatch its siblings and then fail. It is now refused before any
+  dispatch.
+- `seatKind` could return `Object.prototype` members for ids like
+  `toString`.
+- The vm observer skill named rows by hostname, which the targets file
+  never declares. The k8s observer skill asked for a row per component,
+  which grades the declared service unreported; it now asks for one row
+  under the brief's service name. The fleet operator skill described four
+  panes.
+
+### Not yet verified live
+
+Nothing in this release has run on the live console. It was checked
+locally: typecheck, the full unit suite, and two review iterations with no
+correctness findings. A 15-row collation's size is projected, not measured:
+about 6.2 KB at the average row cost seen so far and 9.3 KB at the worst,
+against the 8192-byte document cap.
+
 ## [1.0.6] — 2026-09-15
 
 This release is Phase 6 of `Docs/SRD-OBSERVER-ROLES.md`
