@@ -103,7 +103,7 @@ recycle_after_sweeps: 0
 # wrong, not the observer: 474 tool calls and 13 writes is what checking three
 # services against a live control plane actually costs on a 35B.
 #
-# 1020 - 120 = 900s, and the OBSERVER's own bound is 900 - 300 = 600s.
+# 1620 - 120 = 1500s, and the OBSERVER's own bound is 1500 - 300 = 1200s.
 #
 # RAISED 2026-09-13 by operator instruction ("make deadline for an observer be
 # 600s"), and this file is the only lever that reaches it. The observer's
@@ -129,7 +129,17 @@ recycle_after_sweeps: 0
 # THE COST IS TICK FREQUENCY: a sweep every seventeen minutes rather than every
 # fifteen. It does not slow a sweep down -- a sweep already spans several passes
 # by design, and 116 ran about twenty-three minutes wall at the old deadline.
-cadence_s: 1020
+#
+# RAISED AGAIN 2026-09-15 by operator instruction ("raise the observer
+# deadline"): 1020 -> 1620, so the observer's bound goes from 600s to 1200s.
+# MEASURED CAUSE, T-sweep-146: the partition was balanced (three k8s services per
+# seat) and every observer still settled `timed_out`. Each transcript ends on a
+# tool result with no next turn, 5-6 minutes before the deadline, at about
+# 10 tok/s decode on the shared model. The docker seats had already grown to
+# 48k-112k input tokens on raw `docker inspect` and `docker logs` output.
+# T-sweep-145 lost the same way. The child bound also covers the collation, which
+# timed out in 146 as well. The cost is a 27-minute tick.
+cadence_s: 1620
 reserve_s: 120
 
 # The channel. Only the env var NAME is here — §6.9 requirement 4 and the block

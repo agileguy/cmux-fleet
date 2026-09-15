@@ -57,7 +57,8 @@ reason.** All six observers run concurrently against one shared deadline, so a
 sweep costs the largest share rather than the sum. On T-sweep-116 — the last
 sweep of the two-pair arrangement — an observer handed four services spent its
 entire 480s deadline and wrote no artifact, so all four came back `unobserved`.
-The deadline is now 600s (`triage/console.yaml`), and three k8s seats make nine
+The deadline is now 1200s (`triage/console.yaml`, cadence 1620s since 2026-09-15,
+after T-sweep-146's six observers all timed out at 600s), and three k8s seats make nine
 k8s services three each; the docker and vm seats added 2026-09-14 divide their
 own kinds by the same rule.
 

@@ -544,26 +544,27 @@ describe("config validate — the triage pair", () => {
     // The file now holds one environment per kind (SRD-TRIAGE-MIXED-OBSERVERS
     // §6.1, `environmentsByKind`): the k8s environment, retargeted 2026-09-10
     // off a control plane that needs the corporate VPN, plus the docker and vm
-    // environments task 3.4 added. Asserted by value, like the 1020/120 below
+    // environments task 3.4 added. Asserted by value, like the 1620/120 below
     // and for the same recorded reason: this test states what the tracked file
     // says, and a test is not a reason to give the file back.
     expect(d.triage.environments).toEqual(["do-cluster", "docker-host", "vm-host"]);
     expect(d.triage.services).toBe(15);
     // The tracked file's own values, and the derivation between them:
     // `sweep_deadline_s` is `cadence_s - reserve_s` (§7.8 property 1) and is
-    // not a field, so 1020 - 120 = 900 is the arithmetic being checked here as
+    // not a field, so 1620 - 120 = 1500 is the arithmetic being checked here as
     // much as the two numbers are.
     //
-    // **1020 SINCE 2026-09-13, AND THE CADENCE IS THE KNOB FOR A REASON.** The
+    // **1620 SINCE 2026-09-15, AND THE CADENCE IS THE KNOB FOR A REASON.** The
     // observer deadline is what actually moved: `childDeadlineS` is
     // `sweep_deadline_s - RELAY_CHILD_DEADLINE_MARGIN_MS`, so this cadence puts
-    // it at 900 - 300 = 600s. The 300s margin is SHARED with the review console
+    // it at 1500 - 300 = 1200s. The 300s margin is SHARED with the review console
     // and pinned by `collator-relay-adapter.test.ts`, which makes it the wrong
-    // thing to move; the cadence is this console's alone. It was raised because
-    // T-sweep-116 lost every service an observer held when 480s expired
-    // mid-`kubectl logs`. The cost is a 17-minute tick, ~85 sweeps a day.
-    expect(d.triage.cadence_s).toBe(1020);
-    expect(d.triage.sweep_deadline_s).toBe(900);
+    // thing to move; the cadence is this console's alone. It went to 1020 on
+    // 2026-09-13 after T-sweep-116 lost every service an observer held when 480s
+    // expired mid-`kubectl logs`, then to 1620 after T-sweep-146's six observers
+    // all timed out at 600s. The cost is a 27-minute tick.
+    expect(d.triage.cadence_s).toBe(1620);
+    expect(d.triage.sweep_deadline_s).toBe(1500);
     // Not fenced, and never silently so.
     expect(d.triage.fenced).toBe(false);
     expect(r.stderr).toContain("was NOT fenced");
@@ -652,10 +653,10 @@ describe("config validate — the triage pair", () => {
       // no `kube_context` to check, so they pass through untouched.
       expect(d.triage.environments).toEqual(["do-cluster", "docker-host", "vm-host"]);
       expect(d.triage.services).toBe(15);
-      // 1020 - 120, off the tracked console.yaml copied in above — see the
+      // 1620 - 120, off the tracked console.yaml copied in above — see the
       // previous test for why this is no longer §7.8's default of 240, and for
       // why the cadence rather than the shared margin is what was moved.
-      expect(d.triage.sweep_deadline_s).toBe(900);
+      expect(d.triage.sweep_deadline_s).toBe(1500);
       expect(r.stderr).not.toContain("was NOT fenced");
     } finally {
       await rm(dir, { recursive: true, force: true });
