@@ -25,6 +25,7 @@ import {
   newSplitArgv,
   readScreenArgv,
   renameTabArgv,
+  resizePaneArgv,
   respawnPaneArgv,
   sendArgv,
   sendKeyArgv,
@@ -217,6 +218,31 @@ describe("argv builders produce exactly the documented command line", () => {
     ]);
   });
 
+  /**
+   * `--workspace` is not optional here either — the same finding
+   * `focusPaneArgv`'s comment above records, reached live via a different
+   * verb. `./scripts/triage --recreate` on 2026-09-15 left both observer rows
+   * at the 50/25/25 `new-split` produces and printed `Error: not_found: Pane
+   * not found` for pane UUIDs `list-panes` had just reported. Reproduced live
+   * against that workspace: `resize-pane --pane <uuid> -L --amount 1` (no
+   * `--workspace`) answered `not_found: Pane not found`, exit 1; the identical
+   * call with `--workspace <workspace-uuid>` added answered `OK pane:67`,
+   * exit 0. Without it cmux resolves the pane against `$CMUX_WORKSPACE_ID`,
+   * unset outside cmux.
+   */
+  test("resize-pane addresses a pane scoped to its workspace", () => {
+    expect(resizePaneArgv("pane-uuid", "ws-uuid", "L", 175.4)).toEqual([
+      "resize-pane",
+      "--pane",
+      "pane-uuid",
+      "--workspace",
+      "ws-uuid",
+      "-L",
+      "--amount",
+      "175",
+    ]);
+  });
+
   test("read-screen addresses a surface", () => {
     expect(readScreenArgv("surf-uuid")).toEqual(["read-screen", "--surface", "surf-uuid"]);
   });
@@ -356,6 +382,8 @@ describe("argv builders produce exactly the documented command line", () => {
     expect(() => listPanesArgv("--rm")).toThrow(/refusing/);
     expect(() => focusPaneArgv("ws", "a b")).toThrow(/refusing/);
     expect(() => focusPaneArgv("-x", "pane")).toThrow(/refusing/);
+    expect(() => resizePaneArgv("a b", "ws", "L", 1)).toThrow(/refusing/);
+    expect(() => resizePaneArgv("pane", "-x", "L", 1)).toThrow(/refusing/);
     expect(() => workspaceCloseArgv("-x")).toThrow(/refusing/);
     expect(() => setStatusArgv("ws", "-k", "v")).toThrow(/refusing/);
     // `sendArgv`'s TEXT is no longer part of this sweep — it rides after `--`

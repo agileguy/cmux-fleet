@@ -848,7 +848,7 @@ async function applyTopFraction(
         // either way reversing here would fight the border from the row that
         // cannot reach it.
         if (delta < 0) continue;
-        await client.runOk(resizePaneArgv(paneId, "D", delta));
+        await client.runOk(resizePaneArgv(paneId, wsId, "D", delta));
       }
       return;
     }
@@ -885,7 +885,7 @@ async function applyTopFraction(
       // either way reversing here would fight the border from the row that
       // cannot reach it.
       if (delta < 0) continue;
-      await client.runOk(resizePaneArgv(paneId, "U", delta));
+      await client.runOk(resizePaneArgv(paneId, wsId, "U", delta));
     }
   } catch (err) {
     // See the docblock: layout is cosmetic, the console is not. But a silent
@@ -1017,7 +1017,7 @@ async function applyMiddleRowFraction(
       const delta = growMiddle ? targetNow - midNow : midNow - targetNow;
       if (Math.abs(delta) < 1) continue;
       if (delta < 0) continue;
-      await client.runOk(resizePaneArgv(paneId, dir, delta));
+      await client.runOk(resizePaneArgv(paneId, wsId, dir, delta));
     }
   } catch (err) {
     process.stderr.write(
@@ -1184,8 +1184,8 @@ async function applyBottomWidths(
         // same reason, as choosing a ROW by the sign in
         // {@link applyTopFraction}.
         await (delta > 0
-          ? client.runOk(resizePaneArgv(paneId, "R", delta))
-          : client.runOk(resizePaneArgv(nextId, "L", -delta)));
+          ? client.runOk(resizePaneArgv(paneId, wsId, "R", delta))
+          : client.runOk(resizePaneArgv(nextId, wsId, "L", -delta)));
       }
     }
   } catch (err) {

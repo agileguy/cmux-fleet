@@ -194,20 +194,48 @@ export function newSplitArgv(workspaceId: string, surfaceId: string, dir: SplitD
 }
 
 /**
- * `resize-pane --pane <id> -U|-D|-L|-R --amount <n>`.
+ * `resize-pane --pane <id> --workspace <id> -U|-D|-L|-R --amount <n>`.
  *
  * `--amount` is PIXELS, not rows or cells, measured against the container
  * frame `list-panes --json` reports. That is not documented in `--help` and it
  * is the sort of thing a caller assumes wrongly: an `--amount 5` meant as five
  * rows moves the divider five pixels, which looks like the command silently
  * doing nothing on a 34px cell.
+ *
+ * `--workspace` is NOT OPTIONAL, the same finding `focusPaneArgv` and
+ * `respawnPaneArgv` already record for their own verbs. This one shipped
+ * without it and it reached a live triage rebuild: `./scripts/triage
+ * --recreate` on 2026-09-15 left both observer rows at the 50/25/25
+ * `new-split` produces and printed, for the layout-correction pane and the
+ * width pane alike, `Error: not_found: Pane not found` — the pane UUIDs cmux
+ * had just reported moments earlier. Reproduced live against the same
+ * workspace: `resize-pane --pane <uuid> -L --amount 1` (no `--workspace`)
+ * answered `not_found: Pane not found`, exit 1; the identical call with
+ * `--workspace <workspace-uuid>` added answered `OK pane:67`, exit 0. Without
+ * it, cmux resolves the pane against `$CMUX_WORKSPACE_ID`, which is unset
+ * outside cmux — so every resize this backend issues while building a console
+ * was failing, silently narrowed to a stderr line by the caller's own catch
+ * (`applyTopFraction`, `applyMiddleRowFraction`, `applyBottomWidths`), and no
+ * test caught it because none existed for this builder.
  */
 export function resizePaneArgv(
   paneId: string,
+  workspaceId: string,
   dir: "U" | "D" | "L" | "R",
   amount: number,
 ): string[] {
-  return ["resize-pane", "--pane", paneId, `-${dir}`, "--amount", String(Math.round(amount))];
+  assertCmuxValue("pane id", paneId);
+  assertCmuxValue("workspace id", workspaceId);
+  return [
+    "resize-pane",
+    "--pane",
+    paneId,
+    "--workspace",
+    workspaceId,
+    `-${dir}`,
+    "--amount",
+    String(Math.round(amount)),
+  ];
 }
 
 /**

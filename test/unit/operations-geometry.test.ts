@@ -396,16 +396,22 @@ const GEOM_SPEC: WorkspaceSpec = {
   bottomWidthFraction: null,
 };
 
-/** Exactly `applyBottomWidths`' 9-call sequence, captured against the UNMODIFIED pass on `REVIEW_SPEC`. */
+/**
+ * Exactly `applyBottomWidths`' 9-call sequence, captured against the UNMODIFIED
+ * pass on `REVIEW_SPEC`. Every `resize-pane` entry carries `--workspace
+ * ws-new` — `resizePaneArgv` used to omit it, which is exactly the bug that
+ * reached a live triage rebuild on 2026-09-15; see that builder's own docblock
+ * for the reproduction.
+ */
 const GOLDEN_REVIEW_SEQUENCE: string[][] = [
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-1", "-U", "--amount", "175"],
+  ["resize-pane", "--pane", "pane-1", "--workspace", "ws-new", "-U", "--amount", "175"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-2", "-L", "--amount", "133"],
+  ["resize-pane", "--pane", "pane-2", "--workspace", "ws-new", "-L", "--amount", "133"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
 ];
 
@@ -427,33 +433,33 @@ const SEVEN = ["top", "r1c1", "r2c1", "r1c2", "r1c3", "r2c2", "r2c3"];
 const GOLDEN_REVIEW_BIG_SHRINK: string[][] = [
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-1", "-U", "--amount", "449"],
+  ["resize-pane", "--pane", "pane-1", "--workspace", "ws-new", "-U", "--amount", "449"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-2", "-L", "--amount", "133"],
+  ["resize-pane", "--pane", "pane-2", "--workspace", "ws-new", "-L", "--amount", "133"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
 ];
 const GOLDEN_REVIEW_GROW: string[][] = [
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-0", "-D", "--amount", "151"],
+  ["resize-pane", "--pane", "pane-0", "--workspace", "ws-new", "-D", "--amount", "151"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-2", "-L", "--amount", "133"],
+  ["resize-pane", "--pane", "pane-2", "--workspace", "ws-new", "-L", "--amount", "133"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
 ];
 const GOLDEN_OPERATIONS_DEFAULT: string[][] = [
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-0", "-D", "--amount", "158"],
+  ["resize-pane", "--pane", "pane-0", "--workspace", "ws-new", "-D", "--amount", "158"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
 ];
 const GOLDEN_OPERATIONS_SHRINK: string[][] = [
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
   ["list-panes", "--workspace", "ws-new", "--json", "--id-format", "uuids"],
-  ["resize-pane", "--pane", "pane-1", "-U", "--amount", "216"],
+  ["resize-pane", "--pane", "pane-1", "--workspace", "ws-new", "-U", "--amount", "216"],
 ];
 
 describe("the split-tree model", () => {
@@ -791,6 +797,39 @@ describe("applyTopFraction + applyMiddleRowFraction, through createWorkspace: th
     }
 
     expect(written).toEqual([]);
+  });
+
+  /**
+   * Every `resize-pane` call carries `--workspace`, pinned as an invariant
+   * over the FULL call log rather than any one golden sequence — this build
+   * exercises all three sizing passes at once (`applyTopFraction`,
+   * `applyMiddleRowFraction`, `applyBottomWidths`), so a builder that dropped
+   * `--workspace` on any one of them would still be caught here even if a
+   * golden sequence elsewhere in this file only ever ran a subset. This is the
+   * regression this suite exists to pin: `resizePaneArgv` used to omit
+   * `--workspace` entirely, and cmux then resolved the pane against
+   * `$CMUX_WORKSPACE_ID` — unset outside cmux — so every one of these calls
+   * was failing on the live console the moment the builder omitted it (see
+   * `resizePaneArgv`'s own docblock for the 2026-09-15 reproduction).
+   */
+  test("every resize-pane call is scoped to the workspace being built", async () => {
+    const model = new LayoutModel();
+    const { client, calls, titleByPane } = fakeCmux(model, {
+      afterBuild: (m) => {
+        m.resize(paneIdFor(titleByPane, "r1c1"), "U", 300);
+        m.resize(paneIdFor(titleByPane, "r2c1"), "U", 150);
+      },
+    });
+
+    await createWorkspace(client, TRIAGE_SPEC, { ...OPTS, workers: SEVEN });
+
+    const resizeCalls = calls.filter((c) => c[0] === "resize-pane");
+    expect(resizeCalls.length).toBeGreaterThan(0);
+    for (const c of resizeCalls) {
+      const wsIdx = c.indexOf("--workspace");
+      expect(wsIdx).toBeGreaterThan(-1);
+      expect(c[wsIdx + 1]).toBe("ws-new");
+    }
   });
 });
 
