@@ -403,6 +403,86 @@ jq -n '{
   that is the shim's whole point — so there is nothing to elide, and a `commands` entry containing
   an `--apikey` is evidence you bypassed the shim.
 
+### The shape of `updates[]`, because the query example above is not enough
+
+**This is a second, measured gap, not a variant of the first.** The example above is a
+`query` — its only populated array is `queried`, and `queried[]`'s shape is `{ticket,
+fields: [{field, value}]}`. A worker moving four tickets between iterations copied that
+shape into `updates[]` faithfully and failed validation on every one of six required keys,
+because `updates[]` entries are not `queried[]` entries with a different name. Here is the
+shape that actually validates:
+
+```bash
+jq -n '{
+  schema:       "pifleet.ticket-ops/v1",
+  task_id:      "<the id from ## This task — NOT a name you pick>",
+  worker:       "<the worker from ## This task>",
+  epoch:        0,
+  operation:    "update",
+  ticket_host:  "rally1.rallydev.com",
+  generated_at: (now | todateiso8601),
+  no_change_needed: false,
+  queried:      [],
+  updates: [
+    {
+      ticket:    "S511387",
+      requested: "move to FY26-Q4 PI Sprint 4 (20), the sprint the task named",
+      fields: [
+        {
+          field:     "iteration",
+          mode:      "replace",
+          sent:      "FY26-Q4 PI Sprint 4 (20)",
+          read_back: "FY26-Q4 PI Sprint 4 (20)",
+          match:     "exact",
+          detail:    ""
+        }
+      ],
+      verdict: "success"
+    }
+  ],
+  commands: [
+    "rally-cli tickets update S511387 --iteration \"FY26-Q4 PI Sprint 4 (20)\""
+  ],
+  verdict: "success",
+  notes: ""
+}' > /outbox/<task-id>/files/ticket-ops.json
+```
+
+- **Every entry in `updates[]` needs `ticket`, `requested`, `fields[]` and its own
+  `verdict`.** `requested` is prose, not measurement — a sentence or two on what the task
+  asked for on THIS ticket — because it is the one thing a reader who was not there cannot
+  get from the round trip below: the round trip proves what was SENT, not that it was the
+  RIGHT thing to send.
+- **Each entry in `fields[]` carries six keys: `field`, `mode`, `sent`, `read_back`, `match`,
+  `detail`.** `mode` is `replace` or `append` — nothing else — record which one you actually
+  did, per field, every time, the same distinction the append-versus-replace section above
+  makes. `sent` is exactly what went over the wire, after the block renderer ran on a
+  rich-text field. `read_back` is what the second GET returned: a string, or `null`, and a
+  `null` means exactly one thing (next bullet). `detail` defaults to `""` and is REQUIRED —
+  non-empty — for anything other than `match: "exact"`.
+- **A `null` `read_back` and `match: "unverified"` are the same fact spelled two ways, and the
+  schema enforces that they are spelled together** — one without the other is a parse-time
+  rejection, not a warning. This is the case the read-back section above already calls "the
+  important one": a write you sent and could not re-read is a change of unknown extent, not a
+  success with a gap in it.
+
+  ```json
+  { "field": "notes", "mode": "append", "sent": "Blocked on S511200; escalated to on-call.",
+    "read_back": null, "match": "unverified",
+    "detail": "the re-read timed out twice after the write; stored value not confirmed" }
+  ```
+
+- **`match: "exact"` requires `read_back` to equal `sent` byte-for-byte. `sanitized` and
+  `mismatch` both require `read_back` to DIFFER from `sent`.** Recording `exact` next to two
+  values that differ, or `sanitized`/`mismatch` next to two values that are identical, fails
+  validation — the schema holds `sent` and `read_back` side by side and re-derives the
+  comparison itself, rather than trusting the label you put on it.
+- **A ticket's `verdict` may be no better than its worst field's `match` supports, and never
+  better.** The floor, per `match`: `exact` → `success`, `sanitized` → `partial`, `mismatch` →
+  `partial`, `unverified` → `failed`. Claiming `success` on a ticket carrying an `unverified`
+  field fails validation. Downgrade yourself for a reason the fields don't carry if you must —
+  you cannot upgrade past what the read-backs prove.
+
 **The harvester selects on the filename `ticket-ops.json` and on nothing else** — not on your
 role, not on what the document turns out to contain. That exact string is what puts a file through
 `TicketOpsArtifactSchema` in `src/contracts.ts`, and through the sweep that looks for the
