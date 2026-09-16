@@ -417,7 +417,7 @@ jobs:
           # named probe rather than making ten look broken.
           PIFLEET_DIND: "1"
           LABEL: container
-          # All ten PIFLEET_DOCKER-gated files, run ONCE by this step, which
+          # Every PIFLEET_DOCKER-gated file, run ONCE by this step, which
           # both prints their output and grades it. This used to be two
           # separate steps — a "probes" step that ran these files for
           # their own sake, and a "guard" step below it that ran the SAME
@@ -977,7 +977,72 @@ jobs:
           # RUNS with it open, so the collection total moves and the pass total
           # does not. A new row that ran here with the gate closed would be a
           # row that does not need the daemon and does not belong in this job.
-          TOTAL_EXPECTED: "160"
+          #
+          # 2026-09-14, 160 -> 170: ssh-connect-node.test.ts, SRD-OBSERVER-ROLES
+          # §5.2 task 3.1. It runs docker/ssh-connect.cjs under
+          # node:24-bookworm-slim by the digest RELAY_IMAGE pins, which the
+          # "Pull the relay image" step above already pulls, so it needs no
+          # pull of its own. All ten of its probes need a daemon, and nothing
+          # else pins that script's runtime: test/unit/ssh-connect.test.ts
+          # spawns whatever `node` is on PATH, which the fast `test` job never
+          # pins and which on a development Mac is Bun's wrapper.
+          #
+          # DERIVED BY THE HAND METHOD, the eighteen listed paths plus this one
+          # with every gate variable UNSET (bun 1.3.11, no listener on :8000),
+          # not by adding 10 to 160:
+          #
+          #   -> 8 pass, 162 skip, 0 fail. Ran 170 tests across 19 files.
+          #
+          # The eighteen without it, re-measured the same day, read 8 pass,
+          # 152 skip, 0 fail, Ran 160 tests across 18 files: ten more skips and
+          # the pass count unmoved at 8, the shape ten Docker-gated probes must
+          # have.
+          #
+          # 2026-09-15, 170 -> 172: extension-declarations-image.test.ts grew a
+          # fourth enrolled extension, output-token-cap.ts (the 213k-max_tokens
+          # stall measurement), and its per-extension loop contributes two
+          # `test.skipIf(!DOCKER)` cases per file — "declares only members the
+          # image's ExtensionAPI has" and "subscribes only to events the image
+          # still emits". EXTENSIONS went from three entries to four, so the
+          # loop's contribution went from six cases to eight; the three
+          # fixed-count tests above and below the loop are unchanged (their
+          # bodies grew a literal each — `before_provider_request` joined the
+          # emitted-events list — which is not an additional test case).
+          #
+          # NOT DERIVED BY THE HAND METHOD THIS TIME, and that gap is recorded
+          # rather than hidden: the environment this entry was written in has no
+          # Docker daemon and none of the host ADC/live-oMLX state the other
+          # seventeen files' gates read, both of which this repo's own
+          # constraints forbade standing up for the purpose of re-deriving a CI
+          # constant. What IS measured, isolating this file from the other
+          # eighteen so host-state drift in THIS sandbox cannot leak into the
+          # number: `bun test test/integration/extension-declarations-image.test.ts`
+          # alone, before the fourth EXTENSIONS entry, read 0 pass, 9 skip, Ran 9
+          # tests; the same command after read 0 pass, 11 skip, Ran 11 tests — a
+          # controlled A/B against identical host state, +2 and nothing else.
+          # 170 + 2 = 172 follows only if the other eighteen files' contribution
+          # to TOTAL_EXPECTED is unchanged, which this entry did not itself
+          # verify end to end. Confirm on the next real run of this job; if it
+          # disagrees, trust the job's own count over this arithmetic.
+          #
+          # 2026-09-15, 172 -> 173: the hand method above was finally run end
+          # to end, closing that entry's own "confirm on the next real run"
+          # caveat. On a clean checkout of committed 3d0dab5, the nineteen
+          # listed files with every gate variable UNSET read 8 pass, 165
+          # skip, 0 fail — "Ran 173 tests across 19 files", one more than the
+          # 172 this arithmetic landed on. Cross-checked against real CI: the
+          # same method at pushed tip bf51521 reads "Ran 160 tests across 18
+          # files", and GitHub Actions run 34780451749's container job
+          # printed that exact line. Per file, bf51521 -> 3d0dab5:
+          # image.test.ts 29 -> 30, extension-declarations-image.test.ts 9 ->
+          # 11, ssh-connect-node.test.ts new at 10, every other file
+          # unchanged — 160 + 10 + 2 = 172, not 173. The missed +1 is inside
+          # image.test.ts: dabc88d ("image: pin fd 10.5.0 so Pi's find tool
+          # works") added an "fd accepts Pi's find flags" entry to the
+          # toolchain `probes` array, which the per-probe `it(...)` loop
+          # turns into one more test, and TOTAL_EXPECTED was never bumped
+          # for it.
+          TOTAL_EXPECTED: "173"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -1160,7 +1225,8 @@ jobs:
               test/integration/mount-preflight-remote.test.ts \
               test/integration/relay-provider-containment.test.ts \
               test/integration/report-tools-image.test.ts \
-              test/integration/extension-declarations-image.test.ts
+              test/integration/extension-declarations-image.test.ts \
+              test/integration/ssh-connect-node.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
@@ -1234,7 +1300,10 @@ jobs:
     # probes structurally incapable of naming different models — inheritance,
     # not two lines that agree today.
     env:
-      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
+      # [2026-09-15] The live endpoint moved from the operator's laptop to a
+      # different self-hosted server. That server serves `gemma-4-26b-a4b-it`
+      # (no `-bf16` suffix) and only that name, so the pin below moved to match.
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -1423,6 +1492,12 @@ jobs:
           # name the server does not list, so a typo here is a red job and not a
           # silent fallback.
           #
+          # [2026-09-15] The paragraph above is superseded, and left rather than
+          # rewritten: CI and the fleet no longer dial the same server (see this
+          # job's `env:` block), so the pin now matches the model the server CI
+          # dials serves — it is no longer necessarily the model `fleet.yaml`'s
+          # live seats run.
+          #
           # [MOVED 2026-09-09] The assignment itself now lives at JOB level — see
           # the job header. The warmup step needs the same value and used to
           # hardcode a different one; inheriting is what stops the two drifting.
@@ -1512,7 +1587,11 @@ jobs:
       # about, made deliberately and left visible rather than dressed up: the
       # chain measurement for gemma is what THIS JOB is now for, and if the
       # chain goes intermittently red the diagnosis is written directly above.
-      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it-bf16
+      #
+      # [2026-09-15] The live endpoint moved from the operator's laptop to a
+      # different self-hosted server. That server serves `gemma-4-26b-a4b-it`
+      # (no `-bf16` suffix) and only that name, so the pin below moved to match.
+      PIFLEET_OMLX_MODEL: gemma-4-26b-a4b-it
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

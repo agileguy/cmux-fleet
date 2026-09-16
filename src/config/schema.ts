@@ -186,10 +186,11 @@ const shortStr = z.string().min(1).max(4096);
  *
  * These values are delivered through `GIT_CONFIG_VALUE_1`/`_2` in the
  * container's env FILE, and docker's `--env-file` has no escaping: a newline
- * does not escape, it terminates the declaration. `worker-env.ts:1199`
- * already refuses one, so nothing unsanitised has ever reached a container —
- * but it refuses at `up`, naming `GIT_CONFIG_VALUE_1`, the env key the value
- * landed in rather than `run.git_identity.name`, the line the operator wrote.
+ * does not escape, it terminates the declaration. `serializeEnvFile`
+ * (`worker-env.ts`) already refuses one, so nothing unsanitised has ever
+ * reached a container — but it refuses at `up`, naming `GIT_CONFIG_VALUE_1`,
+ * the env key the value landed in rather than `run.git_identity.name`, the
+ * line the operator wrote.
  * Tracing one to the other means knowing the `GIT_CONFIG_*` mapping by heart.
  *
  * Refusing here moves the same failure to `config validate`, where the field
@@ -974,6 +975,47 @@ export const ProviderSchema = z
      */
     context_windows: z.record(shortStr, z.number().int().positive()).default({}),
     /**
+     * Each model's per-request OUTPUT token cap, by model id. Absent means a
+     * worker's request carries no `max_tokens` at all — exactly the behaviour
+     * every fleet had before this field existed.
+     *
+     * ## The failure this exists for, measured live on 2026-09-15
+     *
+     * Worker seats run the Pi coding agent against an OpenAI-compatible
+     * endpoint. Seats went silent mid-turn for 16 minutes until the task
+     * deadline killed them; vLLM's own metrics showed an average `max_tokens`
+     * of about 213k per request, because with no output cap sent the server
+     * let a runaway generation run for most of the context. Pi's 5-minute idle
+     * timeout does not stop it — tokens keep flowing the whole time, so the
+     * agent is never idle by the definition that timeout uses. Measured over
+     * 363 completed assistant turns from the same seats: output tokens p50 99,
+     * p90 800, p99 3118, max 7395 — three orders of magnitude under the 213k
+     * the server was budgeting for, with only 3 turns ending `stop` and none
+     * ending `length`. A cap sized off the measured distribution, not off the
+     * context window, turns a runaway generation into an ordinary `length`
+     * finish instead of a silent 16-minute stall.
+     *
+     * ## Why this cannot travel the same route as `context_windows`
+     *
+     * `context_windows` reaches Pi through `models.json`'s `contextWindow`
+     * field, which Pi's own model registry reads regardless of provider. An
+     * output cap has no such path for an OpenAI-compatible endpoint: Pi's
+     * `openai-completions.js` sets `max_tokens` (or `max_completion_tokens`,
+     * per the model's `compat.maxTokensField`) only when the agent core passed
+     * a non-zero `maxTokens` option, and that option defaults to 0 and is read
+     * from `models.json` only by the anthropic and bedrock providers — never by
+     * the OpenAI-compatible path this fleet's providers use. So this field
+     * alone changes nothing; the value it resolves to is carried to the worker
+     * as `PIFLEET_PI_MAX_OUTPUT_TOKENS` and applied by
+     * `docker/pi-extensions/output-token-cap.ts`, which is the one hook Pi
+     * exposes over the fully-built request: `before_provider_request`.
+     *
+     * PER PROVIDER for the same reason `context_windows` is: the same weights
+     * behind two endpoints can be served under two different configurations,
+     * and the number that matters is the endpoint's, not the model's.
+     */
+    max_output_tokens: z.record(shortStr, z.number().int().positive()).default({}),
+    /**
      * Turns off `decomposeModel`'s `:thinking` suffix stripping for models on
      * this provider (D12, ISC-405). Off by default, so oMLX is unaffected and
      * no existing config changes meaning.
@@ -1423,6 +1465,28 @@ export const CloudSchema = z
  * The DEFAULT is `true`, and a bare string means `true`. An operator who adds
  * a real credential and writes nothing extra gets it swept, which is the
  * direction a mistake has to fall.
+ *
+ * ## `multiline: true` — the second flag, and what it permits
+ *
+ * `buildWorkerEnv` refuses a granted value that contains a newline, because
+ * `skills/ticket-ops/SKILL.md` concatenates a secret file's bytes into a curl
+ * `header = "..."` line and a newline there ends the header and starts a
+ * directive. That refusal is right for a token and wrong for a file: the
+ * observer roles are granted an OpenSSH private key, a known_hosts list and a
+ * targets list (SRD-OBSERVER-ROLES §5.5), each one entry per line by nature.
+ *
+ * `multiline: true` permits exactly one thing: **the value may contain LF.**
+ * The file receives the exact bytes, trailing newline included. A carriage
+ * return is still refused, because a CRLF key or line list is malformed to the
+ * tools that read it. Nothing else changes: the grant, the pointer, the
+ * reserved-name and allowlist checks, and the sweep (a multi-line credential is
+ * swept line by line, see `harvest/needles.ts`).
+ *
+ * **It is only for a value no consumer concatenates into a single line.** A
+ * token spliced into a header, a URL or a command line must not be marked,
+ * whatever its value happens to contain; for one of those the newline is the
+ * defect. The DEFAULT is `false` and a bare string means `false`, so the
+ * refusal stays on for every name nobody deliberately marked.
  */
 export const SecretEntrySchema = z.union([
   shortStr,
@@ -1435,6 +1499,13 @@ export const SecretEntrySchema = z.union([
        * add a comment does not silently disarm the sweep for X.
        */
       credential: z.boolean().default(true),
+      /**
+       * `true` means "the value may contain LF" — for a key file or a
+       * one-entry-per-line list, never for a value spliced into one line. CR
+       * stays refused either way. Defaults to `false`, for the same reason
+       * `credential` defaults to `true`: the default keeps the check.
+       */
+      multiline: z.boolean().default(false),
     })
     .strict(),
 ]);
@@ -1451,6 +1522,11 @@ export function nonCredentialSecretNames(entries: readonly SecretEntry[]): strin
   return entries.flatMap((e) => (typeof e === "string" || e.credential ? [] : [e.name]));
 }
 
+/** The subset declared `multiline: true` — the names whose values may contain LF. */
+export function multilineSecretNames(entries: readonly SecretEntry[]): string[] {
+  return entries.flatMap((e) => (typeof e !== "string" && e.multiline ? [e.name] : []));
+}
+
 export const SecretsSchema = z
   .object({
     /** NEVER provider keys — see SRD §12.4. */
@@ -1465,14 +1541,21 @@ export const SecretsSchema = z
    * operator's intent is unrecoverable from the document. Refusing at
    * `config validate` is cheap; a fleet that quietly disarmed a sweep because
    * of list order is not.
+   *
+   * `multiline` gets the same rule for the same reason: list order must not
+   * decide whether a newline is refused. The two are checked separately, so a
+   * conflict on each is reported on its own.
    */
   .superRefine((v, ctx) => {
-    const seen = new Map<string, boolean>();
+    const seen = new Map<string, { credential: boolean; multiline: boolean }>();
     for (const e of v.env_allowlist) {
       const name = typeof e === "string" ? e : e.name;
-      const isCredential = typeof e === "string" ? true : e.credential;
+      const answer =
+        typeof e === "string"
+          ? { credential: true, multiline: false }
+          : { credential: e.credential, multiline: e.multiline };
       const prior = seen.get(name);
-      if (prior !== undefined && prior !== isCredential) {
+      if (prior !== undefined && prior.credential !== answer.credential) {
         ctx.addIssue({
           code: "custom",
           path: ["env_allowlist"],
@@ -1481,7 +1564,16 @@ export const SecretsSchema = z
             `say once whether it is swept`,
         });
       }
-      seen.set(name, isCredential);
+      if (prior !== undefined && prior.multiline !== answer.multiline) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["env_allowlist"],
+          message:
+            `secrets.env_allowlist lists ${name} twice with different multiline settings — ` +
+            `say once whether its value may span lines`,
+        });
+      }
+      seen.set(name, answer);
     }
   })
   .prefault({});
@@ -1853,13 +1945,14 @@ export type FleetConfig = z.infer<typeof FleetConfigSchema>;
 // is the finding rather than an oversight: both name a document a real fleet
 // must stay free to run. `sre` ships with `cloud_access: true` and no
 // `cloud:` block in THIS file — refusing that would refuse the shipped
-// default. `pane_mode: tui` on `observer` is a choice an operator can make on
-// purpose — `scripts/operations` reads `resolveWorker(loaded, agent).paneMode
-// === "tui"` to decide whether its console owns a pane for exactly this role
-// — so a schema that refused it would make that console unbuildable. What
-// must not stay silent is the MECHANISM each one gives up, so both compute
-// text a caller prints, on `cli/commands/up.ts`'s `unattendedTuiWarning`
-// pattern, rather than an issue this schema could add.
+// default. `pane_mode: tui` on `observer-k8s` is a choice an operator can
+// make on purpose — `scripts/operations` filters its whole worker list with
+// `set.filter((w) => resolveWorker(loaded, w).paneMode === "tui")`, not just
+// this role's, so a schema that refused `tui` here would stop that console
+// building the obs-1 pane it defaults to. What must not stay silent is the
+// MECHANISM each one gives up, so both compute text a caller prints, on
+// `cli/commands/up.ts`'s `unattendedTuiWarning` pattern, rather than an issue
+// this schema could add.
 
 /**
  * Resolve one `RoleFields` key through `defaults <- role <- worker`.
@@ -1934,20 +2027,66 @@ export function kubeconfigScopeWarning(workerIds: readonly string[]): string | n
 }
 
 /**
- * Worker ids whose resolved role is literally `observer` and whose resolved
- * `pane_mode` is `tui` (§6.2, §7.5).
+ * The name the shipped read-only Kubernetes diagnostic role carries in
+ * `fleet.example.yaml` and `fleet.yaml` (SRD-OBSERVER-ROLES-001 §4.1).
  *
- * Keyed to the role's NAME rather than to a property this schema can derive,
- * because the hazard is a fact about what the `observer-ops` skill DOES —
- * repeatedly re-dispatching a near-identical watch task (§7.5) — and nothing
- * in a `RoleFields` object says that. A fleet is free to name its read-only
- * diagnostic role something else and accept a different risk profile; this
- * only watches the name the shipped role actually uses.
+ * One constant rather than a literal at each site, so the rename to
+ * `observer-k8s` was a change to this value and the two configs, not a hunt for
+ * every place that compares against the old string. The rename has landed, and
+ * `test/unit/observer-rename.test.ts` pins this literal and refuses the old name.
+ */
+export const OBSERVER_K8S_ROLE = "observer-k8s";
+
+/**
+ * The name the shipped read-only Docker-host diagnostic role carries in
+ * `fleet.example.yaml` and `fleet.yaml` (SRD-OBSERVER-ROLES-001 §5).
+ *
+ * Same reason as `OBSERVER_K8S_ROLE`: one constant rather than a literal at
+ * each site.
+ */
+export const OBSERVER_DOCKER_ROLE = "observer-docker";
+
+/**
+ * The name the shipped read-only VM diagnostic role carries in
+ * `fleet.example.yaml` and `fleet.yaml` (SRD-OBSERVER-ROLES-001 §6).
+ *
+ * Same reason as `OBSERVER_K8S_ROLE`: one constant rather than a literal at
+ * each site.
+ */
+export const OBSERVER_VM_ROLE = "observer-vm";
+
+/**
+ * The three observer role names `observerTuiWorkers` treats alike
+ * (SRD-TRIAGE-MIXED-OBSERVERS §7, D13).
+ *
+ * One exported list rather than three separate comparisons, so a fourth
+ * observer kind is one entry here instead of a hunt for every call site that
+ * enumerates the other three.
+ */
+export const OBSERVER_TUI_WARN_ROLES: readonly string[] = [
+  OBSERVER_K8S_ROLE,
+  OBSERVER_DOCKER_ROLE,
+  OBSERVER_VM_ROLE,
+];
+
+/**
+ * Worker ids whose resolved role is one of `OBSERVER_TUI_WARN_ROLES` and
+ * whose resolved `pane_mode` is `tui` (§6.2, §7.5; generalized from
+ * `OBSERVER_K8S_ROLE` alone by SRD-TRIAGE-MIXED-OBSERVERS §7, D13).
+ *
+ * Keyed to the roles' NAMES rather than to a property this schema can derive,
+ * because the hazard is a fact about how an observer is DISPATCHED —
+ * repeatedly re-dispatching a near-identical watch task (§7.5), regardless of
+ * whether the `observer-ops`, `observer-docker-ops` or `observer-vm-ops`
+ * skill is doing the watching — and nothing in a `RoleFields` object says
+ * that. A fleet is free to name its read-only diagnostic roles something else
+ * and accept a different risk profile; this only watches the names the
+ * shipped roles actually use.
  */
 export function observerTuiWorkers(cfg: FleetConfig): string[] {
   const out: string[] = [];
   for (const w of cfg.workers) {
-    if (w.role !== "observer") continue;
+    if (!OBSERVER_TUI_WARN_ROLES.includes(w.role)) continue;
     const role = cfg.roles[w.role];
     if (!role) continue;
     const mode = pickRoleField(w, role, cfg.defaults, "pane_mode") ?? "rpc";
@@ -2001,8 +2140,9 @@ export function observerTuiEpochWarning(workerIds: readonly string[]): string | 
  *
  * `bash` is CARRIED rather than filtered on, because it is what decides what
  * the operator should DO about the line, and the two answers are opposite.
- * `fleet.yaml:542` gives the observer `read, write, bash, grep, find, ls`:
- * dropping `write` there removes a tool and not a capability, because
+ * The observer role's `tools:` line in `fleet.yaml` gives it
+ * `[read, write, bash, grep, find, ls, submit_report]`: dropping `write` there
+ * removes a tool and not a capability, because
  * `cat > /outbox/...` is two seconds of shell (§6.8). The bash-less roles are
  * the opposite case: there `write` IS the capability, and it is the whole of
  * what §6.3's layer 1 takes away.
@@ -2094,9 +2234,9 @@ export function submitReportWriteWarning(
     out +=
       `  Never available here, because bash can cat > a file (${shellWriters.join(", ")}): ` +
       `removing write takes away a tool and not a capability (§6.8). Worth doing anyway for the ` +
-      `smaller reason §6.8 gives — the failure at roles/observer.md:19-22 is a model reasoning ` +
-      `about which tools it holds and concluding wrongly, and a seat whose only writing verb is ` +
-      `named submit_report leaves that reasoning less room.\n`;
+      `smaller reason §6.8 gives — the failure at roles/observer-k8s.md:19-22 is a model ` +
+      `reasoning about which tools it holds and concluding wrongly, and a seat whose only ` +
+      `writing verb is named submit_report leaves that reasoning less room.\n`;
   }
   out +=
     `  Not a refusal: §13 phase 6 adds submit_report to every role and removes nothing, and ` +

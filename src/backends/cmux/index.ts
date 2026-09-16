@@ -292,7 +292,7 @@ export class CmuxBackend implements FleetBackend {
 
   /** `pifleet attach --worker <id>` lands here (ISC-130). */
   async focus(p: PaneRef): Promise<void> {
-    const { paneId } = splitPaneId(this.requirePaneId(p));
+    const { paneId, workspaceId } = splitPaneId(this.requirePaneId(p));
     if (paneId === null) {
       /*
        * A bare surface id — this worker was attached with `up --attach-here`,
@@ -311,7 +311,17 @@ export class CmuxBackend implements FleetBackend {
           "is the one it was started in.",
       );
     }
-    await this.client.runOk(focusPaneArgv(paneId));
+    if (workspaceId === null) {
+      // The 2-field id a pre-`--workspace` build persisted. A bare `--pane`
+      // resolves against the caller's `$CMUX_WORKSPACE_ID` (see
+      // `focusPaneArgv`), so emitting one would fail as `not_found` from inside
+      // any other workspace — refuse by name, as `attachViewer` does.
+      throw new Error(
+        "cmux: this pane was recorded by a pifleet build that predates the --workspace fix, " +
+          "so there is no workspace to scope focus-pane to; run `pifleet down` and `pifleet up` again",
+      );
+    }
+    await this.client.runOk(focusPaneArgv(workspaceId, paneId));
   }
 
   /** tui mode only (SRD §3.5): typed text, with the pane's shell doing the reading. */

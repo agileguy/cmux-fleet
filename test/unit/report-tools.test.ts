@@ -58,12 +58,24 @@ import { SESSION_ID_RE } from "../../src/contracts.ts";
 import {
   DISPATCH_REQUEST_FILE as HOST_DISPATCH_REQUEST_FILE,
   DISPATCH_REQUEST_SCHEMA as HOST_DISPATCH_REQUEST_SCHEMA,
+  type DispatchRequestContext,
   DispatchRequestSchema,
   MAX_DISPATCH_ID_CHARS as HOST_MAX_DISPATCH_ID_CHARS,
   MAX_DISPATCH_REQUEST_ITEMS as HOST_MAX_DISPATCH_REQUEST_ITEMS,
   MAX_DISPATCH_SERVICES as HOST_MAX_DISPATCH_SERVICES,
   MAX_DISPATCH_TEXT as HOST_MAX_DISPATCH_TEXT,
+  OBSERVER_ARTIFACT_JSON_BY_WORKER as HOST_OBSERVER_ARTIFACT_JSON_BY_WORKER,
+  parseDispatchRequest,
+  TRIAGE_CONSOLE_ROSTER,
 } from "../../src/run/dispatch-request.ts";
+/**
+ * The HOST's own artifact-token pattern, from the module that owns it —
+ * `src/run/dispatch-request.ts` keeps a pinned copy rather than importing this,
+ * and this test imports the original rather than that copy for the same reason
+ * every other `HOST_` import here does: the comparison must reach the source,
+ * not another mirror.
+ */
+import { OBSERVER_ARTIFACT_TOKEN_RE as HOST_OBSERVER_ARTIFACT_TOKEN_RE } from "../../src/run/triage-envelope.ts";
 
 import register, {
   artifactPathProblem,
@@ -92,6 +104,8 @@ import register, {
   NAG_TEXT,
   NO_REPLIES_DECLARED,
   NO_SUBMIT_ENTRY_SCHEMA,
+  OBSERVER_ARTIFACT_JSON_BY_WORKER,
+  OBSERVER_ARTIFACT_TOKEN_RE,
   OUTBOX_ROOT,
   parseRepliesPolicy,
   parseTaskPolicy,
@@ -815,7 +829,7 @@ describe("submitReport — the delivery", () => {
   /**
    * §12: *"A second `submit_report` in one epoch overwrites and does not throw.
    * This asserts a deliberate non-refusal and is the criterion that stops
-   * someone 'fixing' it into an error."* `roles/observer.md:56-58` asks for
+   * someone 'fixing' it into an error."* `roles/observer-k8s.md` asks for
    * exactly this behaviour in prose — *"A first version on disk at call twenty
    * and a second at call forty is strictly better than one perfect version that
    * never lands"* — so a tool that punished it would be punishing the thing the
@@ -3413,6 +3427,9 @@ describe("dispatch_request writes the fan-out a narrowed role cannot", () => {
     expect(MAX_DISPATCH_ID_CHARS).toBe(HOST_MAX_DISPATCH_ID_CHARS);
     expect(MAX_DISPATCH_SERVICES).toBe(HOST_MAX_DISPATCH_SERVICES);
     expect(DISPATCH_ID_RE.source).toBe(SESSION_ID_RE.source);
+    expect(OBSERVER_ARTIFACT_JSON_BY_WORKER).toEqual(HOST_OBSERVER_ARTIFACT_JSON_BY_WORKER);
+    expect(OBSERVER_ARTIFACT_TOKEN_RE.source).toBe(HOST_OBSERVER_ARTIFACT_TOKEN_RE.source);
+    expect(OBSERVER_ARTIFACT_TOKEN_RE.flags).toBe(HOST_OBSERVER_ARTIFACT_TOKEN_RE.flags);
   });
 
   /**
@@ -3432,5 +3449,171 @@ describe("dispatch_request writes the fan-out a narrowed role cannot", () => {
     expect(parsed.error?.issues ?? []).toEqual([]);
     expect(parsed.success).toBe(true);
     rmSync(f.dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * `dispatch_request` refuses an observer brief naming the wrong reply artifact
+ * — SRD-TRIAGE-MIXED-OBSERVERS §5, sweeps 146 and 147.
+ *
+ * ## Why this is a whole `describe` rather than three more cases above
+ *
+ * The host already refuses this document (`observer_artifact_mismatch`,
+ * `src/run/dispatch-request.ts`), but only AFTER the whole file is written and
+ * the dispatching task has settled — so it refuses the entire fan-out, and the
+ * model that wrote the bad brief has already ended its turn and never reads
+ * why. What this tool adds is the same check, at the same table, run inside
+ * the tool call itself, before a byte is written — so the model reads the
+ * refusal and can call `dispatch_request` again with the brief fixed. That
+ * difference in WHERE the check runs is the entire content of this suite; the
+ * WHAT is identical to the host's, which the "agreement with the host" test
+ * below checks directly rather than trusting the mirror assertions alone.
+ */
+describe("dispatch_request refuses a brief that names another seat's artifact pair", () => {
+  /** Sweeps 146 and 147's two invented spellings, neither ever correct for any seat. */
+  const SWEEP_146 = "Write both `observer-k8s.json` and `observer-k8s.md` into files/.";
+  const SWEEP_147 = "Write both `observer-k8s-ops.json` and `observer-k8s-ops.md` into files/.";
+
+  test("a k8s seat handed either sweep's invented name is refused, before anything is written", () => {
+    const f = fixture();
+    for (const brief of [SWEEP_146, SWEEP_147]) {
+      expect(() =>
+        dispatchRequest({ requests: [{ ...REQUEST, worker: "obs-t1", brief }] }, f.mounts),
+      ).toThrow(/artifact name/);
+    }
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("a docker seat handed the k8s pair is refused; its own pair is accepted", () => {
+    const f = fixture();
+    expect(() =>
+      dispatchRequest(
+        { requests: [{ ...REQUEST, worker: "obs-td1", brief: "Write observer-ops.json." }] },
+        f.mounts,
+      ),
+    ).toThrow(/artifact name/);
+    expect(listAll(f.outbox)).toEqual([]);
+
+    const out = dispatchRequest(
+      { requests: [{ ...REQUEST, worker: "obs-td1", brief: "Write observer-docker-ops.json." }] },
+      f.mounts,
+    );
+    expect(existsSync(out.path)).toBe(true);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("obs-t2 given its own correct pair, in both files, is accepted", () => {
+    const f = fixture();
+    const out = dispatchRequest(
+      {
+        requests: [
+          {
+            ...REQUEST,
+            worker: "obs-t2",
+            brief: "Write both observer-ops.json and observer-ops.md into files/.",
+          },
+        ],
+      },
+      f.mounts,
+    );
+    expect(existsSync(out.path)).toBe(true);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("a brief naming no artifact token at all is untouched by this check", () => {
+    const f = fixture();
+    const out = dispatchRequest({ requests: [{ ...REQUEST, worker: "obs-t1" }] }, f.mounts);
+    expect(existsSync(out.path)).toBe(true);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("a worker this table does not name is never checked, whatever the brief says", () => {
+    // `rev-arch-1` is a review-console reviewer, not a triage observer — it has
+    // no entry in `OBSERVER_ARTIFACT_JSON_BY_WORKER`, and requirement 1 is that
+    // such a worker is not checked at all, so the review console is untouched.
+    expect(OBSERVER_ARTIFACT_JSON_BY_WORKER["rev-arch-1"]).toBeUndefined();
+    const f = fixture();
+    const out = dispatchRequest(
+      { requests: [{ ...REQUEST, worker: "rev-arch-1", brief: SWEEP_146 }] },
+      f.mounts,
+    );
+    expect(existsSync(out.path)).toBe(true);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  test("the refusal names the worker, every wrong token found, the correct pair, and tells the model to retry", () => {
+    const f = fixture();
+    const brief = `${SWEEP_146} Also see observer-k8s-ops.json for context.`;
+    expect(() =>
+      dispatchRequest({ requests: [{ ...REQUEST, worker: "obs-t1", brief }] }, f.mounts),
+    ).toThrow(
+      /`brief` for `obs-t1` names 3 artifact names it does not own \(observer-k8s\.json, observer-k8s\.md, observer-k8s-ops\.json\)\. obs-t1's own reply pair is observer-ops\.json and observer-ops\.md .*dispatch_request. again\./,
+    );
+    expect(listAll(f.outbox)).toEqual([]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Requirement 4: agreement with the host, proven over one fixture set. Every
+   * case below is run through BOTH the tool (`dispatchRequest`) and the host's
+   * own `parseDispatchRequest` over the document the tool would write, on the
+   * `triage` console roster the host actually gates this check on
+   * (`roster.services === "required"`).
+   */
+  const AGREEMENT_CASES: readonly { readonly worker: string; readonly brief: string; readonly accepted: boolean }[] =
+    [
+      { worker: "obs-t1", brief: SWEEP_146, accepted: false },
+      { worker: "obs-t1", brief: SWEEP_147, accepted: false },
+      { worker: "obs-t2", brief: "Write observer-ops.json and observer-ops.md.", accepted: true },
+      { worker: "obs-td1", brief: "Write observer-docker-ops.json.", accepted: true },
+      { worker: "obs-td1", brief: "Write observer-ops.json.", accepted: false },
+      { worker: "obs-t3", brief: "Look at ntfy. No artifact named here.", accepted: true },
+    ];
+
+  test("agreement with the host: accepted by the tool iff accepted by parseDispatchRequest", () => {
+    for (const c of AGREEMENT_CASES) {
+      const f = fixture();
+      const item = { worker: c.worker, title: "Sweep slice", brief: c.brief, services: ["ntfy"] };
+
+      let toolPath: string | null = null;
+      let toolError: unknown = null;
+      try {
+        toolPath = dispatchRequest({ requests: [item] }, f.mounts).path;
+      } catch (err) {
+        toolError = err;
+      }
+
+      // The document the tool either wrote, or would have written had it not
+      // refused — the host is judged against the same bytes either way, so a
+      // refused case is not let off by never reaching the host's parser.
+      const doc = {
+        schema: HOST_DISPATCH_REQUEST_SCHEMA,
+        parent_task_id: TASK_ID,
+        requests: [item],
+      };
+      const ctx: DispatchRequestContext = {
+        sender: "tri-1",
+        taskId: TASK_ID,
+        roster: TRIAGE_CONSOLE_ROSTER,
+      };
+      const hostRead = parseDispatchRequest(JSON.stringify(doc), ctx);
+
+      if (c.accepted) {
+        expect(toolError).toBeNull();
+        expect(toolPath).not.toBeNull();
+        if (toolPath !== null) expect(existsSync(toolPath)).toBe(true);
+        expect(hostRead.kind).toBe("ok");
+      } else {
+        expect(toolError).toBeInstanceOf(SubmitRefusal);
+        expect(toolPath).toBeNull();
+        expect(listAll(f.outbox)).toEqual([]);
+        expect(hostRead.kind).toBe("refused");
+        if (hostRead.kind === "refused") {
+          expect(hostRead.code).toBe("observer_artifact_mismatch");
+        }
+      }
+      rmSync(f.dir, { recursive: true, force: true });
+    }
   });
 });

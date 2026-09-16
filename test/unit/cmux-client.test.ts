@@ -25,6 +25,7 @@ import {
   newSplitArgv,
   readScreenArgv,
   renameTabArgv,
+  resizePaneArgv,
   respawnPaneArgv,
   sendArgv,
   sendKeyArgv,
@@ -198,8 +199,48 @@ describe("argv builders produce exactly the documented command line", () => {
     ]);
   });
 
-  test("focus-pane addresses a pane, not a surface", () => {
-    expect(focusPaneArgv("pane-uuid")).toEqual(["focus-pane", "--pane", "pane-uuid"]);
+  /**
+   * `--workspace` is not optional here any more, and the 2026-08-18 note that
+   * `focus-pane` "isn't workspace-scoped" is what this replaces. Measured
+   * 2026-09-13 on cmux 0.64.22: without `--workspace` the pane resolves against
+   * `$CMUX_WORKSPACE_ID`, so from a shell inside ANOTHER workspace a pane that
+   * exists answers `not_found: Pane not found` — the same pane, same shell,
+   * resolved the moment that variable was unset. `--recreate` died there after
+   * stopping the old runs and before closing, grouping or colouring anything.
+   */
+  test("focus-pane addresses a pane scoped to its workspace", () => {
+    expect(focusPaneArgv("ws-uuid", "pane-uuid")).toEqual([
+      "focus-pane",
+      "--workspace",
+      "ws-uuid",
+      "--pane",
+      "pane-uuid",
+    ]);
+  });
+
+  /**
+   * `--workspace` is not optional here either — the same finding
+   * `focusPaneArgv`'s comment above records, reached live via a different
+   * verb. `./scripts/triage --recreate` on 2026-09-15 left both observer rows
+   * at the 50/25/25 `new-split` produces and printed `Error: not_found: Pane
+   * not found` for pane UUIDs `list-panes` had just reported. Reproduced live
+   * against that workspace: `resize-pane --pane <uuid> -L --amount 1` (no
+   * `--workspace`) answered `not_found: Pane not found`, exit 1; the identical
+   * call with `--workspace <workspace-uuid>` added answered `OK pane:67`,
+   * exit 0. Without it cmux resolves the pane against `$CMUX_WORKSPACE_ID`,
+   * unset outside cmux.
+   */
+  test("resize-pane addresses a pane scoped to its workspace", () => {
+    expect(resizePaneArgv("pane-uuid", "ws-uuid", "L", 175.4)).toEqual([
+      "resize-pane",
+      "--pane",
+      "pane-uuid",
+      "--workspace",
+      "ws-uuid",
+      "-L",
+      "--amount",
+      "175",
+    ]);
   });
 
   test("read-screen addresses a surface", () => {
@@ -339,7 +380,10 @@ describe("argv builders produce exactly the documented command line", () => {
 
   test("every builder refuses an injected identifier rather than emitting it", () => {
     expect(() => listPanesArgv("--rm")).toThrow(/refusing/);
-    expect(() => focusPaneArgv("a b")).toThrow(/refusing/);
+    expect(() => focusPaneArgv("ws", "a b")).toThrow(/refusing/);
+    expect(() => focusPaneArgv("-x", "pane")).toThrow(/refusing/);
+    expect(() => resizePaneArgv("a b", "ws", "L", 1)).toThrow(/refusing/);
+    expect(() => resizePaneArgv("pane", "-x", "L", 1)).toThrow(/refusing/);
     expect(() => workspaceCloseArgv("-x")).toThrow(/refusing/);
     expect(() => setStatusArgv("ws", "-k", "v")).toThrow(/refusing/);
     // `sendArgv`'s TEXT is no longer part of this sweep — it rides after `--`

@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,8 +24,13 @@ import {
   SECRET_NAMES_VAR,
   TRUNCATION_FLOOR,
 } from "../../src/security/redact.ts";
-import { buildWorkerEnv, writeWorkerSecretFiles } from "../../src/run/worker-env.ts";
+import {
+  buildWorkerEnv,
+  writeWorkerEnvFile,
+  writeWorkerSecretFiles,
+} from "../../src/run/worker-env.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
+import { appendJsonl } from "../../src/util/jsonl.ts";
 import { stringify } from "yaml";
 
 const CANARY = "NOTAREALSECRET-pifleet-test-canary-000001";
@@ -401,5 +406,1160 @@ describe("the names and the values travel in one file", () => {
     expect(plan.secretNames).toEqual(["TICKET_API_TOKEN"]);
     // The declaration carries NAMES only — never a value.
     expect(plan.vars[SECRET_NAMES_VAR]).not.toContain(CANARY);
+  });
+});
+
+/**
+ * A MULTI-LINE value, the kind `multiline: true` delivers (commit 8bcb1ed): an
+ * OpenSSH private key, a known_hosts list, a targets list.
+ *
+ * ## The two defects these probes were written against, both measured
+ *
+ * The redactor was built for single-line tokens. For a value spanning lines it
+ * compiled the whole value, escaped, as a truncatable stem of its first twelve
+ * characters. That fails in both directions at once.
+ *
+ * It MISSES a leak. Inside JSON the value's LF is `\n`, so the whole-value form
+ * is not a substring of a record that quotes one line of the key (`head -3`,
+ * an ssh error echoing a line). The stem does not help: it is the value's
+ * first twelve characters, which for a key are armor, not body.
+ *
+ * And it EATS honest text. That stem, `-----BEGIN O`, is public armor, the
+ * same in every key of the type, so a log line saying a BEGIN OPENSSH PRIVATE
+ * KEY block was rejected came back as a marker.
+ *
+ * ## The fixtures are synthetic, and say so
+ *
+ * The PEM body is base64 of fixture text, wrapped at 70 columns between armor
+ * lines with a trailing newline: the layout `ssh-keygen` writes, not its
+ * output. The known_hosts "keys" are base64 of fixture text too. Nothing here
+ * is key material and nothing reads the real environment.
+ */
+describe("a multi-line value is scrubbed line by line, and its armor is left alone", () => {
+  /** An invented base64-looking PEM body, wrapped at 70 columns. */
+  function fakeBody(seed: string): string[] {
+    return Buffer.from(
+      Array.from({ length: 9 }, (_, i) => `pifleet-redact-fixture-${seed}-not-a-key-${i};`).join(""),
+    )
+      .toString("base64")
+      .match(/.{1,70}/g)!;
+  }
+
+  function pemFake(label: string, seed: string): string {
+    return [`-----BEGIN ${label}-----`, ...fakeBody(seed), `-----END ${label}-----`, ""].join("\n");
+  }
+
+  const KEY_NAME = "OBSERVER_DOCKER_SSH_KEY";
+  const KEY = pemFake("OPENSSH PRIVATE KEY", "ssh");
+  const KEY_MARKER = `[redacted:${KEY_NAME}]`;
+
+  const KH_NAME = "OBSERVER_DOCKER_KNOWN_HOSTS";
+  // A blank and a whitespace-only line in the middle, as a hand-edited file has.
+  const KNOWN_HOSTS = [
+    `gw-1.example.invalid ssh-ed25519 ${Buffer.from("pifleet-fixture-hostkey-gw-1-not-real").toString("base64")}`,
+    "",
+    "   ",
+    `[bastion.example.invalid]:2222 ssh-ed25519 ${Buffer.from("pifleet-fixture-hostkey-bastion-not-real").toString("base64")}`,
+    "",
+  ].join("\n");
+
+  const TARGETS_NAME = "OBSERVER_DOCKER_TARGETS";
+  const TARGETS = "web-1 10.0.0.5 22 observer\nweb-1 10.0.0.5 22 observer-backup\n";
+
+  /**
+   * A line holding `"` and `\`, which JSON escapes. For base64 and host lines
+   * the escaped and double-escaped forms are the same string, so without this
+   * a probe of the double-escaped form could not tell the two apart.
+   */
+  const ESC_NAME = "SYNTHETIC_MULTILINE_ESCAPES";
+  const ESCAPING = 'first-line-no-escapes-0001\nlabel="edge\\west" host-a.example.invalid\n';
+
+  /**
+   * The test's OWN statement of a secret line, written from the brief rather
+   * than imported, so a helper that drifted would be caught rather than copied.
+   */
+  const TEST_ARMOR = /^-----(?:BEGIN|END) [A-Z0-9 ]+-----$/;
+  function secretLinesOf(value: string): string[] {
+    const lines = value
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "" && !TEST_ARMOR.test(l) && l.length >= MIN_REDACTABLE_LENGTH);
+    return [...new Set(lines)];
+  }
+
+  const CASES: Array<[string, string]> = [
+    [KEY_NAME, KEY],
+    [KH_NAME, KNOWN_HOSTS],
+    [ESC_NAME, ESCAPING],
+  ];
+
+  function jsonInner(s: string): string {
+    return JSON.stringify(s).slice(1, -1);
+  }
+
+  test("the fixtures have the shape they claim", () => {
+    const lines = KEY.split("\n");
+    expect(lines[0]).toBe("-----BEGIN OPENSSH PRIVATE KEY-----");
+    expect(lines.at(-2)).toBe("-----END OPENSSH PRIVATE KEY-----");
+    expect(lines.at(-1)).toBe("");
+    expect(secretLinesOf(KEY).length).toBeGreaterThanOrEqual(4);
+    expect(secretLinesOf(KNOWN_HOSTS)).toHaveLength(2);
+    expect(secretLinesOf(ESCAPING)).toHaveLength(2);
+    // The escaping line really is different once double-escaped.
+    const esc = secretLinesOf(ESCAPING)[1]!;
+    expect(jsonInner(jsonInner(esc))).not.toBe(jsonInner(esc));
+  });
+
+  test("each secret line is scrubbed when quoted whole, and the marker names the variable", () => {
+    for (const [name, value] of CASES) {
+      const r = one(value, name);
+      for (const line of secretLinesOf(value)) {
+        const out = r.redact(JSON.stringify({ text: `ssh said: ${line} (rejected)` }));
+        expect(out, `${name}: ${line.slice(0, 16)}`).toBe(
+          JSON.stringify({ text: `ssh said: [redacted:${name}] (rejected)` }),
+        );
+      }
+    }
+  });
+
+  /**
+   * Down to the floor, in the escaped AND the double-escaped form. A cut is a
+   * prefix of the RAW line, so its escaped form is a prefix of the line's
+   * escaped form; cuts are chosen so the next raw character is not a quote or a
+   * backslash, which keeps the expected record exact.
+   */
+  test("each secret line is scrubbed when TRUNCATED to the floor, escaped and double-escaped", () => {
+    for (const [name, value] of CASES) {
+      const r = one(value, name);
+      const marker = `[redacted:${name}]`;
+      for (const line of secretLinesOf(value)) {
+        const cuts = [...new Set([line.length, line.length - 1, 20, TRUNCATION_FLOOR])].filter(
+          (c) => c >= TRUNCATION_FLOOR && c <= line.length,
+        );
+        for (const cut of cuts) {
+          const frag = line.slice(0, cut);
+          const label = `${name} cut ${cut}: ${frag.slice(0, 16)}`;
+          expect(r.redact(JSON.stringify({ text: frag })), label).toBe(
+            JSON.stringify({ text: marker }),
+          );
+          expect(r.redact(JSON.stringify({ text: JSON.stringify({ line: frag }) })), label).toBe(
+            JSON.stringify({ text: JSON.stringify({ line: marker }) }),
+          );
+        }
+        // And below the floor, left alone, exactly as for a single-line value.
+        // The floor counts ESCAPED characters, so the cut is the longest raw
+        // prefix whose escaped form is still under it.
+        let k = 0;
+        while (jsonInner(line.slice(0, k + 1)).length < TRUNCATION_FLOOR) k++;
+        const short = JSON.stringify({ text: line.slice(0, k) });
+        expect(k).toBeGreaterThan(0);
+        expect(r.redact(short)).toBe(short);
+      }
+    }
+  });
+
+  test("the whole value quoted in full is ONE marker, not a marker per line", () => {
+    const r = one(KEY, KEY_NAME);
+    // Exact, so this also pins ordering: were the line forms tried first, the
+    // armor would survive between per-line markers.
+    expect(r.redact(JSON.stringify({ text: `$ cat key\n${KEY}` }))).toBe(
+      JSON.stringify({ text: `$ cat key\n${KEY_MARKER}` }),
+    );
+    expect(r.redact(JSON.stringify({ text: JSON.stringify({ key: KEY }) }))).toBe(
+      JSON.stringify({ text: JSON.stringify({ key: KEY_MARKER }) }),
+    );
+  });
+
+  test("a whole value missing its trailing newline still loses every secret line", () => {
+    // `cat` output a tool trimmed: the whole-value form no longer matches, so
+    // the per-line forms are what stands between the body and the log.
+    const trimmed = KEY.trimEnd();
+    const out = one(KEY, KEY_NAME).redact(JSON.stringify({ text: trimmed }));
+    for (const line of secretLinesOf(KEY)) expect(out).not.toContain(line);
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
+  /**
+   * Armor is public. A record whose ONLY overlap with the key is armor comes
+   * back byte-identical, for every common key type, including every leading
+   * run of the whole value that stops before twelve characters of body.
+   */
+  test("honest armor text is byte-identical, for every key type and every armor stem", () => {
+    const labels = [
+      "OPENSSH PRIVATE KEY",
+      "RSA PRIVATE KEY",
+      "EC PRIVATE KEY",
+      "DSA PRIVATE KEY",
+      "PRIVATE KEY",
+      "ENCRYPTED PRIVATE KEY",
+      "PGP PRIVATE KEY BLOCK",
+    ];
+    for (const label of labels) {
+      const value = pemFake(label, label.replaceAll(" ", "-"));
+      const r = one(value, KEY_NAME);
+      const begin = `-----BEGIN ${label}-----`;
+      const end = `-----END ${label}-----`;
+      const firstBody = value.split("\n")[1]!;
+      const texts = [
+        `sshd said: ${begin} block rejected`,
+        begin,
+        end,
+        `${begin}\n${end}`,
+        `${end}\n`,
+        // Every leading run of the whole value up to the body, plus a body
+        // fragment below the floor: the stems a truncated whole-value form
+        // would have matched.
+        ...Array.from({ length: begin.length + 1 }, (_, i) => value.slice(0, i + 1)),
+        `${begin}\n${firstBody.slice(0, TRUNCATION_FLOOR - 1)}`,
+      ];
+      for (const text of texts) {
+        for (const line of [
+          JSON.stringify({ text }),
+          JSON.stringify({ text: JSON.stringify({ text }) }),
+        ]) {
+          expect(r.redact(line), `${label}: ${JSON.stringify(text).slice(0, 40)}`).toBe(line);
+        }
+      }
+    }
+  });
+
+  test("a multi-line name is armed once, not once per line, beside a single-line one", () => {
+    const r = buildRedactor([
+      [KEY_NAME, KEY],
+      [KH_NAME, KNOWN_HOSTS],
+      ["TICKET_API_TOKEN", CANARY],
+    ]);
+    expect(r.armed).toEqual([KEY_NAME, KH_NAME, "TICKET_API_TOKEN"]);
+    expect(r.skipped).toEqual([]);
+    const body = secretLinesOf(KEY)[2]!;
+    const host = secretLinesOf(KNOWN_HOSTS)[1]!;
+    expect(r.redact(JSON.stringify({ a: body, b: host, c: CANARY }))).toBe(
+      JSON.stringify({ a: KEY_MARKER, b: `[redacted:${KH_NAME}]`, c: "[redacted:TICKET_API_TOKEN]" }),
+    );
+  });
+
+  test("LONGEST FIRST holds between lines: a line that begins with another leaves no tail", () => {
+    const r = one(TARGETS, TARGETS_NAME);
+    expect(r.redact(JSON.stringify({ text: "web-1 10.0.0.5 22 observer-backup" }))).toBe(
+      JSON.stringify({ text: `[redacted:${TARGETS_NAME}]` }),
+    );
+  });
+
+  /**
+   * THE COST, pinned so a change to it is deliberate. The redactor sees names
+   * and values, not `credential: false`, so a targets list is scrubbed like a
+   * key. Per-line matching means any leading run of twelve or more characters
+   * of a targets line is replaced, and that includes a DIFFERENT host that
+   * shares the first twelve characters.
+   */
+  test("the targets-file cost: any 12-character leading run of a target line is scrubbed", () => {
+    const r = one(TARGETS, TARGETS_NAME);
+    const m = `[redacted:${TARGETS_NAME}]`;
+    const cases: Array<[string, string]> = [
+      ["probe web-1 10.0.0.5 22 observer ok", `probe ${m} ok`],
+      ["ssh-connect: web-1 10.0.0.5 22 refused", `ssh-connect: ${m}refused`],
+      // The greedy tail takes the shared `.` too, so only the differing digit survives.
+      ["unrelated host web-1 10.0.0.7 is up", `unrelated host ${m}7 is up`],
+      // Under the floor, or not a leading run: untouched.
+      ["web-1 10.0. is short", "web-1 10.0. is short"],
+      ["10.0.0.5 22 observer", "10.0.0.5 22 observer"],
+    ];
+    for (const [input, expected] of cases) {
+      expect(r.redact(JSON.stringify({ text: input }))).toBe(JSON.stringify({ text: expected }));
+    }
+  });
+
+  /**
+   * END TO END, with no hand-built plan: a config whose allowlist entries say
+   * `multiline: true`, delivered by `buildWorkerEnv`, written by the two writers
+   * `materialize.ts` calls, armed by `redactorForWorkerEnv`, and applied by
+   * `appendJsonl` with the same `transform` the supervisor passes.
+   *
+   * SRD-OBSERVER-ROLES §5.5 grants `OBSERVER_DOCKER_KNOWN_HOSTS` AND
+   * `OBSERVER_DOCKER_TARGETS` as `credential: false` — this fixture matches
+   * that grant exactly, where an earlier version of this test marked only
+   * the targets list that way and left the known_hosts list a credential.
+   * Measured against the corrected fixture: `OBSERVER_DOCKER_KNOWN_HOSTS`
+   * host keys and `OBSERVER_DOCKER_TARGETS` tokens were being scrubbed like
+   * the key, so `ssh: connect to host [redacted:...] port 22: refused` named
+   * the wrong thing to rotate, and `$ observe-ssh docker <token> ps` lost the
+   * very token it was diagnosing.
+   */
+  test("a key delivered through multiline: true is scrubbed line by line from events.jsonl, and a credential: false grant never is", async () => {
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "redact-multiline-fleet",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: { model: "TestModel" },
+        secrets: {
+          env_allowlist: [
+            { name: KEY_NAME, multiline: true },
+            { name: KH_NAME, credential: false, multiline: true },
+            { name: TARGETS_NAME, credential: false, multiline: true },
+          ],
+        },
+        roles: { dockerobs: { secrets: [KEY_NAME, KH_NAME, TARGETS_NAME] } },
+        workers: [{ id: "wd", role: "dockerobs" }],
+      }),
+      "/tmp/fleet.yaml",
+    );
+    const apiKeyEnv = loaded.config.llm.api_key_env;
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wd"), {
+      [KEY_NAME]: KEY,
+      [KH_NAME]: KNOWN_HOSTS,
+      [TARGETS_NAME]: TARGETS,
+      [apiKeyEnv]: `omlx-${CANARY}`,
+    });
+
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-redact-multiline-"));
+    try {
+      const envPath = join(dir, "env");
+      const secretsDir = join(dir, "secrets");
+      const eventsPath = join(dir, "events.jsonl");
+      await writeWorkerSecretFiles(secretsDir, plan);
+      await writeWorkerEnvFile(envPath, plan);
+
+      const r = await redactorForWorkerEnv(envPath, secretsDir);
+      expect(r.source).toBe("store");
+      expect(r.unresolved).toEqual([]);
+      // Only the CREDENTIAL is armed. `writeWorkerSecretFiles` above already
+      // proves KH_NAME and TARGETS_NAME were DELIVERED to the worker — this
+      // is the sweep-side of the contract: delivered, but never a needle.
+      expect(r.armed).toContain(KEY_NAME);
+      expect(r.armed).toContain(apiKeyEnv);
+      expect(r.armed.filter((n) => n === KEY_NAME)).toHaveLength(1);
+      expect(r.armed).not.toContain(KH_NAME);
+      expect(r.armed).not.toContain(TARGETS_NAME);
+
+      // `head -3 key`; an ssh error quoting a known_hosts line the way
+      // `observe-ssh docker` would; and the targets token reviewers reported
+      // being eaten in `$ observe-ssh docker <token> ps`.
+      const head3 = KEY.split("\n").slice(0, 3).join("\n");
+      const host = secretLinesOf(KNOWN_HOSTS)[0]!;
+      const targetToken = secretLinesOf(TARGETS)[0]!.split(" ")[0]!;
+      const record = {
+        ts: "2026-09-14T00:00:00.000Z",
+        type: "tool_execution_end",
+        result: {
+          content: [
+            {
+              type: "text",
+              text:
+                `${head3}\nssh: bad host line ${host}\n` +
+                `$ observe-ssh docker ${targetToken} ps`,
+            },
+          ],
+        },
+      };
+      await appendJsonl(eventsPath, record, { transform: (line) => r.redact(line) });
+
+      const onDisk = await readFile(eventsPath, "utf8");
+      // CONTROL: the fixture really did put key material in the record.
+      expect(JSON.stringify(record)).toContain(secretLinesOf(KEY)[0]!);
+      // The KEY's own secret lines are still gone.
+      for (const line of secretLinesOf(KEY).slice(0, 2)) {
+        expect(onDisk).not.toContain(line);
+      }
+      // Neither of the credential: false grants left a marker behind.
+      expect(onDisk).not.toContain(`[redacted:${KH_NAME}]`);
+      expect(onDisk).not.toContain(`[redacted:${TARGETS_NAME}]`);
+      // THE CRITERION: the host name and the targets token SURVIVE, whole.
+      expect(onDisk).toContain(host);
+      expect(onDisk).toContain(targetToken);
+      const text = (JSON.parse(onDisk) as typeof record).result.content[0]!.text;
+      expect(text).toBe(
+        `-----BEGIN OPENSSH PRIVATE KEY-----\n${KEY_MARKER}\n${KEY_MARKER}\n` +
+          `ssh: bad host line ${host}\n` +
+          `$ observe-ssh docker ${targetToken} ps`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * THE CONTRACT ITSELF, pinned directly on `buildWorkerEnv`'s output rather
+   * than through a live supervisor: `config/schema.ts`'s `credential: false`
+   * "says one thing and only one thing: do not use this value as a needle."
+   * `PIFLEET_SECRET_NAMES` (`SECRET_NAMES_VAR`) IS the redactor's needle
+   * list, so a name declared `credential: false` must never appear in it —
+   * while `secretNames` (what `up` reports) and `nonCredentialSecretNames`
+   * (what the harvest sweep reads) both stay exactly as wide as the grant,
+   * because this fix narrows ONE list, not the delivery.
+   */
+  test("a credential: false grant is delivered and reported, but PIFLEET_SECRET_NAMES excludes it", async () => {
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "redact-noncred-fleet",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: { model: "TestModel" },
+        secrets: {
+          env_allowlist: ["TICKET_API_TOKEN", { name: "TICKET_BASE_URL", credential: false }],
+        },
+        roles: { tick: { secrets: ["TICKET_API_TOKEN", "TICKET_BASE_URL"] } },
+        workers: [{ id: "t1", role: "tick" }],
+      }),
+      "/tmp/fleet.yaml",
+    );
+    const apiKeyEnv = loaded.config.llm.api_key_env;
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "t1"), {
+      TICKET_API_TOKEN: CANARY,
+      TICKET_BASE_URL: "https://tickets.example.com/api/v2",
+      [apiKeyEnv]: `omlx-${CANARY}`,
+    });
+
+    // DELIVERY IS UNTOUCHED: both names are still granted and reported, and
+    // the harvest-facing exclusion list still names the one that is not a
+    // credential.
+    expect(plan.secretNames.sort()).toEqual(["TICKET_API_TOKEN", "TICKET_BASE_URL"]);
+    expect(plan.nonCredentialSecretNames).toEqual(["TICKET_BASE_URL"]);
+
+    // THE FIX: the redactor's OWN needle list excludes the non-credential.
+    const names = (plan.vars[SECRET_NAMES_VAR] ?? "").split(",").filter(Boolean);
+    expect(names).toContain("TICKET_API_TOKEN");
+    expect(names).not.toContain("TICKET_BASE_URL");
+  });
+});
+
+/**
+ * WHICH match is replaced when more than one compiled form matches at one spot.
+ *
+ * ## The defect these probes were written against, measured on c9bcf33
+ *
+ * Each value compiles an escaped form and a double-escaped one, and every
+ * truncatable form matches down to `TRUNCATION_FLOOR`. The forms were joined
+ * into one alternation, sorted longest first, and applied with one
+ * `String.replace`. Alternation is first-match-wins, not longest-match-wins.
+ * The double-escaped form is the longer, so it was tried first, and when the
+ * value held a `"` or `\` past the twelve-character stem that form still
+ * matched a SINGLE-escaped record: up to the escape, and one character into
+ * it. It won with the shorter match. `abcdefghijklmn"op-rest-of-fake-token`
+ * came back as `{"text":"[redacted:T]"op-rest-of-fake-token"}`, the tail in the
+ * log and the line no longer JSON. With a `\` in the same place the tail leaked
+ * and the line DID parse, which is the quieter of the two.
+ *
+ * The older escaping probe above passed only because its first escape sits at
+ * index 5, inside the stem, where the double-escaped form cannot match a
+ * single-escaped record at all.
+ *
+ * Every value here is synthetic.
+ */
+describe("the longest match wins at every position, and never ends inside an escape", () => {
+  const T = "[redacted:T]";
+  /** Control characters are built, not typed, so this source holds none. */
+  const SOH = String.fromCharCode(1);
+  const STX = String.fromCharCode(2);
+  const REPRODUCTIONS = [
+    'abcdefghijklmn"op-rest-of-fake-token',
+    "abcdefghijklmn\\op-rest-of-fake-token",
+    'abcde"fghijklmnop-rest-of-fake-token',
+  ];
+
+  const escaped = (s: string): string => JSON.stringify({ text: s });
+  const doubleEscaped = (s: string): string => JSON.stringify({ text: JSON.stringify({ v: s }) });
+
+  test("the three measured reproductions come out fully redacted and parse", () => {
+    for (const value of REPRODUCTIONS) {
+      const out = one(value, "T").redact(escaped(value));
+      expect(out, value).toBe(escaped(T));
+      expect(() => JSON.parse(out)).not.toThrow();
+    }
+  });
+
+  test("a head -c 20 of each, escaped and embedded double-escaped, is fully redacted", () => {
+    for (const value of REPRODUCTIONS) {
+      const frag = value.slice(0, 20);
+      const r = one(value, "T");
+      expect(r.redact(escaped(frag)), `escaped ${frag}`).toBe(escaped(T));
+      expect(r.redact(doubleEscaped(frag)), `double-escaped ${frag}`).toBe(doubleEscaped(T));
+    }
+  });
+
+  test("a multi-line value's secret line with a quote past the floor is fully redacted", () => {
+    const name = "SYNTHETIC_MULTILINE_QUOTE";
+    const line = 'abcdefghijklmn"op-second-line-rest-0002';
+    const r = one(`first-line-without-escapes-0001\n${line}\n`, name);
+    const marker = `[redacted:${name}]`;
+    for (const frag of [line, line.slice(0, 20)]) {
+      const text = (s: string) => `ssh said: ${s} (rejected)`;
+      expect(r.redact(escaped(text(frag))), frag).toBe(escaped(text(marker)));
+      expect(r.redact(doubleEscaped(text(frag))), frag).toBe(doubleEscaped(text(marker)));
+    }
+  });
+
+  /**
+   * The case LONGEST alone does not settle. The double-escaped form is the
+   * longest match here, because the cut holds an escape the single-escaped form
+   * cannot get past. The raw character after the cut needs escaping too, so the
+   * double-escaped form's next character is a backslash, and so is the record's:
+   * the start of the inner JSON's closing `\"`. A truncation that steps one
+   * character at a time takes that backslash and ends the replacement inside
+   * the escape, and the outer line stops parsing.
+   */
+  test("a truncation never takes a partial escape, even when it is the longest match", () => {
+    const cases: Array<[string, string]> = [
+      // [value, the raw character the cut stops just before]
+      ['ab"cdefghijklmnop"qrst-rest-of-fake', '"'],
+      ["ab\\cdefghijklmnop\\qrst-rest-of-fake", "\\"],
+      ['ab"cdefghijklmnop\tqrst-rest-of-fake', "\t"],
+      [`ab"cdefghijklmnop${SOH}qrst-rest-of-fake`, SOH],
+    ];
+    for (const [value, next] of cases) {
+      const frag = value.slice(0, value.indexOf(next, 3));
+      expect(frag.length, JSON.stringify(value)).toBe(17);
+      expect(one(value, "T").redact(doubleEscaped(frag)), JSON.stringify(value)).toBe(doubleEscaped(T));
+    }
+  });
+
+  test("a partial unicode escape is never taken when the record holds a different control character", () => {
+    // Fourteen characters of the value, then a DIFFERENT control character from
+    // the one the value holds. the fourteen are the leak; the U+0002 after
+    // them belongs to the record and must survive whole.
+    const value = `abcdefghijklmn${SOH}op-rest-of-fake-token`;
+    expect(one(value, "T").redact(escaped(`abcdefghijklmn${STX}op`))).toBe(escaped(`${T}${STX}op`));
+  });
+
+  test("between values sharing a stem, the longer MATCH wins, not the longer value", () => {
+    const longer = "SHAREDSTEM12-long-value-aaaaaaaaaaaaaaaaaaaaaaaa";
+    const shorter = "SHAREDSTEM12-bbbbbbbbbbbbbbbbbbbbbb";
+    const r = buildRedactor([
+      ["LONGER", longer],
+      ["SHORTER", shorter],
+    ]);
+    expect(r.redact(escaped(shorter))).toBe(escaped("[redacted:SHORTER]"));
+    expect(r.redact(escaped(longer))).toBe(escaped("[redacted:LONGER]"));
+  });
+
+  /**
+   * A PIN, green before the fix and after it: on a tie the marker is the one
+   * the alternation used to pick, the longer value's, so marker text does not
+   * change for anyone. Choosing longest-match could have flipped it silently,
+   * and a mutant that gave ties to the later form survived every other probe.
+   */
+  test("on a tie between two names, the longer value's marker wins, as before", () => {
+    const r = buildRedactor([
+      ["SHORTER", "SAMESTEM1234-bbbbbbbbbbbbbbbbb"],
+      ["LONGER", "SAMESTEM1234-aaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    ]);
+    // Both match the same thirteen characters and stop.
+    expect(r.redact(escaped("SAMESTEM1234-zz"))).toBe(escaped("[redacted:LONGER]zz"));
+  });
+
+  /**
+   * A match may only START where a JSON string's characters start. Here a value
+   * beginning `nn` lines up with a record holding LF and then the value minus
+   * its first character, so the pattern matches from the `n` of the `\n`
+   * escape. Replacing from there leaves a lone backslash and a line that does
+   * not parse. The record does not hold a leading run of the value, so nothing
+   * is replaced.
+   */
+  test("a match never starts inside an escape", () => {
+    const value = "nnabcdefghijklmnop-fake";
+    const line = escaped(`\n${value.slice(1)}`);
+    const out = one(value, "T").redact(line);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect(out).toBe(line);
+  });
+
+  /**
+   * The same rule for a UNICODE escape, which the backslash-parity check alone
+   * does not see: the match would start on a hex digit, four characters past
+   * the backslash. A value beginning `0001` lines up with a record holding
+   * U+0001 and then the value minus those four characters. Replacing from the
+   * `0` leaves `\u` and a marker, and the line stops parsing.
+   */
+  test("a match never starts inside a unicode escape", () => {
+    const value = "0001abcdefghijklmnop-fake-token";
+    const line = escaped(`ctl ${SOH}${value.slice(4)} end`);
+    const out = one(value, "T").redact(line);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect(out).toBe(line);
+  });
+
+  /**
+   * The test above places a hit at ONE offset inside an escaped U+0001, and a look-back
+   * that stopped two characters short of the backslash passed it. A hit can
+   * start on any of the five characters after the backslash, so this places
+   * one on each: values beginning `u001f`, `001f`, `01f`, `1f` and `f`, each
+   * followed by a tail past the floor, against a record holding U+001F and
+   * then that tail. None of them is a leading run of the value.
+   *
+   * Measured with the look-back shortened to `pos - 2`, the record came back
+   * as `a\u0[redacted:T]`, `a\u00[redacted:T]` and `a\u001[redacted:T]`, and
+   * none of those lines parses.
+   */
+  test("a match never starts at any offset inside a unicode escape", () => {
+    const US = String.fromCharCode(0x1f);
+    const tail = "ghijklmnopqrst-fake-tail";
+    expect(tail.length).toBeGreaterThanOrEqual(TRUNCATION_FLOOR);
+    const line = escaped(`a${US}${tail}`);
+    expect(line).toContain(`a\\u001f${tail}`);
+    for (const head of ["u001f", "001f", "01f", "1f", "f"]) {
+      const out = one(`${head}${tail}`, "T").redact(line);
+      expect(out, head).toBe(line);
+      expect(() => JSON.parse(out), head).not.toThrow();
+    }
+  });
+
+  /**
+   * The double-escaped form used to truncate one token OF THE LINE at a time,
+   * and one escape of an embedded document is several of those: the document's
+   * escaped quote is an escaped backslash and then an escaped quote in the line.
+   * A truncated match could stop between the two and take half of the
+   * document's escape with it. The line still parsed; the document inside it
+   * did not.
+   *
+   * Measured on 1b9c932 and 640eb1e with the value below, in a record whose
+   * embedded document holds the value cut just after its quote, then a quote
+   * and `C`, then the whole value, then its first eight characters: the marker
+   * swallowed the backslash of the record's own escaped quote, and the embedded
+   * string was no longer JSON.
+   */
+  test("a double-escaped truncation never ends inside an escape of the embedded document", () => {
+    const TAB = String.fromCharCode(9);
+    const BACKSLASH = String.fromCharCode(0x5c);
+    const value = `5ejk${BACKSLASH}h9r/m"${TAB}a28w81`;
+    const text = `${value.slice(0, 11)}"C${value}${value.slice(0, 8)}`;
+    const out = buildRedactor([["S0", value]]).redact(JSON.stringify({ b: JSON.stringify({ x: text }) }));
+    const embedded = (JSON.parse(out) as { b: string }).b;
+
+    expect(() => JSON.parse(embedded), embedded).not.toThrow();
+    // The quote after the cut is the record's, and it survives beside the
+    // marker. The last eight characters are under the floor in every form.
+    expect(embedded).toBe(JSON.stringify({ x: `[redacted:S0]"C[redacted:S0]${value.slice(0, 8)}` }));
+  });
+
+  /**
+   * Two armed values whose forms are the same TEXT but not the same TOKENS. Y
+   * is X with its tab written out as a backslash and a `t`, so Y's escaped form
+   * is X's double-escaped form character for character. For X that backslash
+   * and `t` are one escape of an embedded document; for Y they are two
+   * characters of raw text. The redactor keys what it compiles on the pattern,
+   * not the text, so both are kept. Keyed on the text, X's pattern stands in
+   * for Y's, and since it truncates by the document's tokens, a cut of Y
+   * ending on its backslash (twelve characters, a real leading run) passes
+   * through untouched. On 640eb1e every pattern stepped the line's tokens, and
+   * Y's double-escaped form replaced the run.
+   */
+  test("a value whose escaped form is another's double-escaped form is still matched by its own tokens", () => {
+    const BACKSLASH = String.fromCharCode(0x5c);
+    const TAB = String.fromCharCode(9);
+    const x = `abcdefghijk${TAB}lmnop-fake-value`;
+    const y = `abcdefghijk${BACKSLASH}tlmnop-fake-value`;
+    expect(JSON.stringify(y)).toBe(JSON.stringify(JSON.stringify(x).slice(1, -1)));
+
+    const out = buildRedactor([
+      ["X", x],
+      ["Y", y],
+    ]).redact(escaped(`${y.slice(0, 12)}Z`));
+    expect(out).toBe(escaped("[redacted:Y]Z"));
+  });
+});
+
+/**
+ * A truncation or a stem must never end BETWEEN the two halves of a UTF-16
+ * surrogate pair.
+ *
+ * ## The defect, measured
+ *
+ * `JSON.stringify` does not escape an astral character (anything outside the
+ * BMP, an emoji among other things) — it serialises the JS string's own two
+ * UTF-16 code units, a high surrogate immediately followed by its low
+ * surrogate, literally. `tokenLength` stepped one code unit at a time for
+ * anything that was not a backslash escape, so those two units became two
+ * INDEPENDENT optional tokens in `truncationSource`'s nested structure
+ * instead of one atomic one. A stem that needed only the high surrogate to
+ * reach `TRUNCATION_FLOOR` — or a greedy tail that walked as far as the high
+ * surrogate and no further — could then match ANY codepoint sharing that
+ * high surrogate, because every astral codepoint in the same 1,024-wide
+ * block shares it. The record's own, different low surrogate was left
+ * orphaned beside the marker: valid to `JSON.parse` (which accepts a lone
+ * surrogate), invalid the moment anything re-encodes the line to UTF-8, where
+ * it becomes U+FFFD (`EF BF BD`) — bytes with no relation to either
+ * codepoint.
+ *
+ * Every value below is synthetic. U+1F600, U+1F601 and U+1F602 (grinning
+ * faces sharing high surrogate D83D) and U+1F44D (thumbs up, ALSO D83D) are
+ * public Unicode codepoints, not secrets.
+ */
+describe("a truncation or a stem never splits a UTF-16 surrogate pair", () => {
+  const GRINNING = "\u{1f600}"; // D83D DE00 — the secret's own astral character
+  const SMILING = "\u{1f601}"; // D83D DE01 — same high surrogate, different low
+  const CRYING = "\u{1f602}"; // D83D DE02 — likewise
+  const THUMBS_UP = "\u{1f44d}"; // D83D DC4D — a NON-secret emoji, same high surrogate
+
+  /**
+   * The floor lands exactly on the pair: 11 ASCII characters is one short of
+   * `TRUNCATION_FLOOR`, so the required stem must take the WHOLE codepoint to
+   * reach it. Measured on 1b9c932: the old code required only the high
+   * surrogate, matched the record's DIFFERENT emoji up through D83D, and left
+   * a lone DE01 beside the marker.
+   */
+  test("a cut right at the floor: a different record emoji is left untouched, not split", () => {
+    const value = `abcdefghijk${GRINNING}-rest-of-fake-secret`;
+    const record = JSON.stringify({ text: `abcdefghijk${SMILING} tail` });
+    const out = one(value, "T").redact(record);
+
+    // The required stem needs the record's OWN low surrogate to match, and it
+    // does not have it, so nothing matches at all: the record — the record's
+    // own emoji included — comes back byte-identical.
+    expect(out).toBe(record);
+    expect(out.isWellFormed()).toBe(true);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect((JSON.parse(out) as { text: string }).text).toContain(SMILING);
+  });
+
+  /**
+   * The floor lands well before the pair (16 ASCII characters), so the
+   * codepoint sits in the OPTIONAL tail. Measured on 1b9c932: the old code
+   * greedily matched the shared ASCII run plus the shared high surrogate,
+   * then stopped one unit short of the record's own, different low
+   * surrogate — replacing "abcdefghijklmnop" + D83D and orphaning the
+   * record's DE02.
+   */
+  test("a cut past the stem: the shared ASCII run is redacted, the record's own emoji is not split", () => {
+    const value = `abcdefghijklmnop${GRINNING}-rest-of-fake-secret`;
+    const record = JSON.stringify({ text: `abcdefghijklmnop${CRYING}!` });
+    const out = one(value, "T").redact(record);
+
+    expect(out.isWellFormed()).toBe(true);
+    expect(() => JSON.parse(out)).not.toThrow();
+    const text = (JSON.parse(out) as { text: string }).text;
+    // The genuine shared prefix is gone, replaced by exactly one marker...
+    expect(text).toBe(`[redacted:T]${CRYING}!`);
+    // ...and the record's own emoji survived as ONE codepoint, not a lone
+    // low surrogate glued to whatever followed it.
+    expect([...text]).toContain(CRYING);
+    expect(text.codePointAt("[redacted:T]".length)).toBe(CRYING.codePointAt(0));
+  });
+
+  /**
+   * The NON-secret case: nothing about the record's own emoji is a leading
+   * run of the secret at all, only its high surrogate happens to coincide.
+   * Measured on 1b9c932: the thumbs-up came back mangled the same way as the
+   * "cut right at the floor" case above.
+   */
+  test("a non-secret emoji beside a matching stem is never mangled", () => {
+    const value = `ZZZZZZZZZZZ${GRINNING}-rest-of-fake-secret`;
+    const record = JSON.stringify({ text: `ZZZZZZZZZZZ${THUMBS_UP} looks good` });
+    const out = one(value, "T").redact(record);
+
+    expect(out).toBe(record);
+    expect(out.isWellFormed()).toBe(true);
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect((JSON.parse(out) as { text: string }).text).toContain(THUMBS_UP);
+  });
+
+  test("the same three cases hold double-escaped", () => {
+    const cases: Array<[string, string]> = [
+      [`abcdefghijk${GRINNING}-rest-of-fake-secret`, `abcdefghijk${SMILING} tail`],
+      [`abcdefghijklmnop${GRINNING}-rest-of-fake-secret`, `abcdefghijklmnop${CRYING}!`],
+      [`ZZZZZZZZZZZ${GRINNING}-rest-of-fake-secret`, `ZZZZZZZZZZZ${THUMBS_UP} looks good`],
+    ];
+    for (const [value, recordText] of cases) {
+      const record = JSON.stringify({ text: JSON.stringify({ v: recordText }) });
+      const out = one(value, "T").redact(record);
+      expect(out.isWellFormed(), recordText).toBe(true);
+      expect(() => JSON.parse(out), recordText).not.toThrow();
+      const inner = JSON.parse((JSON.parse(out) as { text: string }).text) as { v: string };
+      expect(inner.v.isWellFormed(), recordText).toBe(true);
+    }
+  });
+});
+
+/**
+ * A SEEDED PROPERTY over values that need escaping, so the cases above are a
+ * sample of a rule rather than the rule.
+ *
+ * Values carry `"`, `\` and control characters at random positions, always
+ * with at least one PAST the floor, where the c9bcf33 defect lived. Every raw
+ * cut whose escaped form reaches `TRUNCATION_FLOOR` is embedded escaped and
+ * double-escaped, bare and inside prose. Each output must:
+ *
+ *   - parse as JSON;
+ *   - hold no leading run of the value's escaped or double-escaped form
+ *     `TRUNCATION_FLOOR` or more long; and
+ *   - be the record with the cut replaced by ONE marker that starts where the
+ *     cut starts. Greedy matching may also take context after the cut, where
+ *     that context continues the value, and nothing else.
+ *
+ * The third is stronger than the second. A replacement that stopped at the
+ * cut's first escape past the floor would leave no twelve-character leading run
+ * behind, and would still leave the rest of the cut in the log.
+ *
+ * LF is left out of the single-line alphabet on purpose: it makes a value
+ * multi-line, and a multi-line value's leading run past its first line is
+ * deliberately not a form. The second probe covers secret lines instead.
+ *
+ * ASTRAL CHARACTERS are in the alphabet too (added alongside the surrogate
+ * fix above), each an ATOMIC array entry so `makeValue` itself never
+ * constructs one by slicing a raw string mid-codepoint — that would just
+ * reintroduce this file's own copy of the bug under test. A raw cut of the
+ * generated VALUE (`secret.slice(0, k)`, stepping one UTF-16 code unit at a
+ * time, below) can still land between an astral character's two halves; a cut
+ * there is skipped for the "replaced whole" and "no leading run survived"
+ * checks, because such a `k` is not a leading run of any codepoint and
+ * `JSON.stringify`'s own well-formed-string guarantee escapes the trailing
+ * lone surrogate specially, so `frag`'s serialised form is no longer a
+ * genuine prefix of the value's. It is NOT skipped for well-formedness: every
+ * generated record, split cut or not, must come back a well-formed string.
+ *
+ * The seed is fixed, so a failure prints a case that reproduces.
+ */
+describe("a seeded property: every cut of an escaping value is scrubbed whole, and parses", () => {
+  const SEED = 20260914;
+
+  /** mulberry32: small, deterministic, and enough to spread positions. */
+  function prng(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const PLAIN = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:";
+  const NEEDS_ESCAPE = ['"', "\\", "\t", "\r", "\b", "\f", ...[0x00, 0x01, 0x1b, 0x1f].map((c) => String.fromCharCode(c))];
+  /**
+   * Astral characters from TWO different high-surrogate blocks (D83D and
+   * D83E), so a shared-prefix decoy (below) sometimes shares only the
+   * high-surrogate VALUE and not the block, and sometimes shares neither.
+   * Each entry is a whole codepoint — two UTF-16 code units — picked as ONE
+   * array element, never assembled from separately-picked units.
+   */
+  const ASTRAL = ["\u{1f600}", "\u{1f601}", "\u{1f602}", "\u{1f44d}", "\u{1f929}", "\u{1f9e0}"];
+
+  function jsonInner(s: string): string {
+    return JSON.stringify(s).slice(1, -1);
+  }
+
+  function isHighSurrogate(c: number): boolean {
+    return c >= 0xd800 && c <= 0xdbff;
+  }
+
+  function makeValue(rand: () => number, min: number, max: number): string {
+    const pick = (from: string | string[]): string => from[Math.floor(rand() * from.length)] as string;
+    const length = min + Math.floor(rand() * (max - min + 1));
+    const chars = Array.from({ length }, () => {
+      const r = rand();
+      if (r < 0.15) return pick(NEEDS_ESCAPE);
+      if (r < 0.3) return pick(ASTRAL);
+      return pick(PLAIN);
+    });
+    chars[TRUNCATION_FLOOR + Math.floor(rand() * (length - TRUNCATION_FLOOR))] = pick(NEEDS_ESCAPE);
+    return chars.join("");
+  }
+
+  /**
+   * `[label, split, construct]`. `split` gives the record as `[before, cut,
+   * after]` so the expected output is exact; `construct` builds the same record
+   * with plain `JSON.stringify`, which proves the split is honest.
+   */
+  const EMBEDDINGS: Array<
+    [string, (f: string) => [string, string, string], (f: string) => string]
+  > = [
+    ["escaped", (f) => ['{"text":"', jsonInner(f), '"}'], (f) => JSON.stringify({ text: f })],
+    [
+      "double-escaped",
+      (f) => ['{"text":"{\\"v\\":\\"', jsonInner(jsonInner(f)), '\\"}"}'],
+      (f) => JSON.stringify({ text: JSON.stringify({ v: f }) }),
+    ],
+    [
+      "escaped, in prose",
+      (f) => ['{"text":"$ echo ', jsonInner(f), ' | head"}'],
+      (f) => JSON.stringify({ text: `$ echo ${f} | head` }),
+    ],
+    [
+      "double-escaped, in prose",
+      (f) => ['{"text":"{\\"out\\":\\"got ', jsonInner(jsonInner(f)), ' back\\"}"}'],
+      (f) => JSON.stringify({ text: JSON.stringify({ out: `got ${f} back` }) }),
+    ],
+  ];
+
+  interface Tally {
+    records: number;
+    cutsWithEscapePastFloor: number;
+    failures: string[];
+  }
+
+  function check(
+    r: ReturnType<typeof buildRedactor>,
+    secret: string,
+    markers: readonly string[],
+    label: string,
+    tally: Tally,
+  ): void {
+    const heads = [jsonInner(secret), jsonInner(jsonInner(secret))].map((f) =>
+      f.slice(0, TRUNCATION_FLOOR),
+    );
+    for (let k = 1; k <= secret.length; k++) {
+      const frag = secret.slice(0, k);
+      if (jsonInner(frag).length < TRUNCATION_FLOOR) continue;
+      /*
+       * A cut landing strictly between an astral character's two UTF-16
+       * units is not a leading run of any codepoint (see the describe
+       * block's own header comment above). `JSON.stringify` escapes the
+       * orphaned high surrogate specially in THIS case, so `frag`'s own
+       * serialised form stops being a genuine prefix of the value's, and the
+       * two checks below that assume that prefix relationship do not apply.
+       * Well-formedness still does, unconditionally, a few lines down.
+       */
+      const splitsPair = isHighSurrogate(secret.charCodeAt(k - 1));
+      if (!splitsPair && [...frag.slice(TRUNCATION_FLOOR)].some((c) => NEEDS_ESCAPE.includes(c))) {
+        tally.cutsWithEscapePastFloor++;
+      }
+      for (const [how, split, construct] of EMBEDDINGS) {
+        const [before, cut, after] = split(frag);
+        const record = before + cut + after;
+        tally.records++;
+        const problems: string[] = [];
+        if (record !== construct(frag)) problems.push("the fixture's split is wrong");
+        const out = r.redact(record);
+        try {
+          JSON.parse(out);
+        } catch {
+          problems.push("does not parse");
+        }
+        if (!out.isWellFormed()) problems.push("output is not well-formed UTF-16");
+        if (!splitsPair) {
+          if (heads.some((h) => out.includes(h))) {
+            problems.push("a leading run of the floor or more survived");
+          }
+          const whole = markers.some(
+            (m) => out.startsWith(before + m) && after.endsWith(out.slice(before.length + m.length)),
+          );
+          if (!whole) problems.push("the cut was not replaced whole by one marker");
+        }
+        if (problems.length > 0) {
+          tally.failures.push(
+            `seed=${SEED} ${label} value=${JSON.stringify(secret)} cut=${k} ${how}: ` +
+              `${problems.join("; ")} -> ${out}`,
+          );
+        }
+      }
+    }
+  }
+
+  function assertHeld(tally: Tally, minRecords: number, minEscapedCuts: number): void {
+    expect(tally.failures.length, tally.failures.slice(0, 5).join("\n")).toBe(0);
+    // Not vacuous: many records, and many cuts that run past an escape beyond the floor.
+    expect(tally.records).toBeGreaterThan(minRecords);
+    expect(tally.cutsWithEscapePastFloor).toBeGreaterThan(minEscapedCuts);
+  }
+
+  test("single-line values, alone and beside a value sharing their leading run", () => {
+    const rand = prng(SEED);
+    const tally: Tally = { records: 0, cutsWithEscapePastFloor: 0, failures: [] };
+    for (let i = 0; i < 300; i++) {
+      const value = makeValue(rand, TRUNCATION_FLOOR + 2, 48);
+      const pairs: Array<[string, string]> = [["T", value]];
+      // Half the time a second value shares a leading run of the first, so the
+      // longest match has to be chosen across values as well as across forms.
+      if (rand() < 0.5) {
+        const shared = TRUNCATION_FLOOR + Math.floor(rand() * (value.length - TRUNCATION_FLOOR));
+        pairs.push(["DECOY", value.slice(0, shared) + makeValue(rand, TRUNCATION_FLOOR + 2, 24)]);
+      }
+      check(buildRedactor(pairs), value, ["[redacted:T]", "[redacted:DECOY]"], `case=${i}`, tally);
+    }
+    assertHeld(tally, 10_000, 1_000);
+  });
+
+  /**
+   * RANDOMIZED over the same shape as the three PINNED cases in "a
+   * truncation or a stem never splits a UTF-16 surrogate pair" above: an
+   * ASCII prefix shared between an armed secret and an HONEST record, each
+   * ending in a DIFFERENT astral codepoint from the SAME high-surrogate
+   * block. `check()`'s own fragments are always a true prefix of the secret,
+   * so they cannot exercise this — the defect needs a record that diverges
+   * from the secret exactly at the pair, which only a second, independent
+   * codepoint provides. `ASTRAL` carries two such blocks (D83D and D83E) for
+   * exactly this test.
+   */
+  test("a record's own astral codepoint, sharing a high surrogate with the secret's, is never split", () => {
+    const rand = prng(SEED + 2);
+    const blocks = new Map<string, string[]>();
+    for (const ch of ASTRAL) {
+      const hi = ch.slice(0, 1);
+      blocks.set(hi, [...(blocks.get(hi) ?? []), ch]);
+    }
+    const shareable = [...blocks.values()].filter((list) => list.length >= 2);
+    // CONTROL: the alphabet really has a block with more than one codepoint.
+    expect(shareable.length).toBeGreaterThan(0);
+
+    let checked = 0;
+    for (let i = 0; i < 200; i++) {
+      const block = shareable[Math.floor(rand() * shareable.length)]!;
+      const a = block[Math.floor(rand() * block.length)]!;
+      let b = a;
+      while (b === a) b = block[Math.floor(rand() * block.length)]!;
+      // Spans below, at, and above TRUNCATION_FLOOR, so the pair sometimes
+      // falls in the required stem and sometimes in the optional tail.
+      const prefixLen = 8 + Math.floor(rand() * 12);
+      const prefix = Array.from(
+        { length: prefixLen },
+        () => PLAIN[Math.floor(rand() * PLAIN.length)],
+      ).join("");
+      const value = `${prefix}${a}-rest-of-fake-secret-${Math.floor(rand() * 1e6)}`;
+      const recordText = `${prefix}${b} tail-${Math.floor(rand() * 1e6)}`;
+      const record = JSON.stringify({ text: recordText });
+      const out = one(value, "T").redact(record);
+      checked++;
+      const ctx = `prefix=${prefixLen} a=${a} b=${b}`;
+      expect(out.isWellFormed(), ctx).toBe(true);
+      expect(() => JSON.parse(out), ctx).not.toThrow();
+      const text = (JSON.parse(out) as { text: string }).text;
+      // The record's OWN codepoint always survives, whole, whatever else the
+      // shared ASCII prefix does.
+      expect(text, ctx).toContain(b);
+    }
+    // Not vacuous.
+    expect(checked).toBe(200);
+  });
+
+  test("each secret line of a multi-line value", () => {
+    const rand = prng(SEED + 1);
+    const tally: Tally = { records: 0, cutsWithEscapePastFloor: 0, failures: [] };
+    for (let i = 0; i < 120; i++) {
+      const raw = Array.from({ length: 2 + Math.floor(rand() * 3) }, () =>
+        makeValue(rand, TRUNCATION_FLOOR + 2, 40),
+      );
+      const value = raw.join("\n") + (rand() < 0.5 ? "\n" : "");
+      const r = buildRedactor([["ML", value]]);
+      // This test's own statement of a secret line; no armor is generated.
+      const lines = new Set(raw.map((l) => l.trim()).filter((l) => l.length >= MIN_REDACTABLE_LENGTH));
+      for (const line of lines) check(r, line, ["[redacted:ML]"], `case=${i}`, tally);
+    }
+    assertHeld(tally, 5_000, 500);
+  });
+
+  /**
+   * EMBEDDED DOCUMENTS. A record carries a JSON document as a string, built
+   * from context and cuts of the armed values, as an object and as an array.
+   * Every line must parse, and no raw leading run of a value whose
+   * double-escaped form reaches the floor may survive in a document that
+   * parses. `values` picks the alphabet; context between cuts holds anything,
+   * a double quote and a backslash included.
+   */
+  function embeddedCuts(seed: number, alphabet: readonly string[]) {
+    const rand = prng(seed);
+    const pick = <T,>(from: readonly T[]): T => from[Math.floor(rand() * from.length)] as T;
+    const ch = (n: number) => String.fromCharCode(n);
+    const CONTEXT = [..."ABC xyz/{}", '"', ch(0x5c), ch(10), ch(9), ch(1), ch(0x1f), ASTRAL[1] as string];
+    const makeOne = (): string =>
+      Array.from({ length: 10 + Math.floor(rand() * 22) }, () => pick(alphabet)).join("");
+    const context = (): string => Array.from({ length: Math.floor(rand() * 3) }, () => pick(CONTEXT)).join("");
+    /** The shortest raw leading run whose double-escaped form reaches the floor, or null. */
+    const shortestRun = (v: string): string | null => {
+      for (let k = 1; k <= v.length; k++) {
+        if (isHighSurrogate(v.charCodeAt(k - 1))) continue;
+        if (jsonInner(jsonInner(v.slice(0, k))).length >= TRUNCATION_FLOOR) return v.slice(0, k);
+      }
+      return null;
+    };
+    const tally = { records: 0, changed: 0, cutsBeforeAnEscape: 0, unparsed: [] as string[], failures: [] as string[] };
+
+    for (let i = 0; i < 3000; i++) {
+      const values = Array.from({ length: 1 + Math.floor(rand() * 2) }, makeOne);
+      const r = buildRedactor(values.map((v, k) => [`S${k}`, v] as [string, string]));
+      let text = "";
+      const cuts: Array<[string, number]> = [];
+      for (let k = 0; k < 3; k++) {
+        text += context();
+        const v = pick(values);
+        const cut = v.slice(0, 1 + Math.floor(rand() * v.length));
+        text += cut;
+        cuts.push([cut, text.length]);
+      }
+      text += context();
+      // Not vacuous: cuts long enough to truncate, followed by a character the document escapes.
+      for (const [cut, end] of cuts) {
+        if (end >= text.length || jsonInner(jsonInner(cut)).length < TRUNCATION_FLOOR) continue;
+        const next = String.fromCodePoint(text.codePointAt(end) as number);
+        if (jsonInner(next).length > next.length) tally.cutsBeforeAnEscape++;
+      }
+      const docs: Array<[string, string, (d: unknown) => string]> = [
+        ["object", JSON.stringify({ x: text }), (d) => (d as { x: string }).x],
+        ["array", JSON.stringify(["k", text, 1]), (d) => (d as string[])[1] as string],
+      ];
+      for (const [how, doc, read] of docs) {
+        tally.records++;
+        const record = JSON.stringify({ b: doc });
+        const out = r.redact(record);
+        if (out !== record) tally.changed++;
+        const where = `seed=${seed} case=${i} ${how} values=${JSON.stringify(values)} text=${JSON.stringify(text)}`;
+        let embedded: string;
+        try {
+          embedded = (JSON.parse(out) as { b: string }).b;
+        } catch {
+          tally.failures.push(`${where}: the line does not parse -> ${out}`);
+          continue;
+        }
+        let raw: string;
+        try {
+          raw = read(JSON.parse(embedded));
+        } catch {
+          tally.unparsed.push(`${where}: the embedded document does not parse -> ${embedded}`);
+          continue;
+        }
+        for (const v of values) {
+          const run = shortestRun(v);
+          if (run !== null && raw.includes(run)) {
+            tally.failures.push(`${where}: a leading run of the floor or more survived -> ${embedded}`);
+          }
+        }
+      }
+    }
+    return tally;
+  }
+
+  /**
+   * The double-escaped form truncates by the EMBEDDED DOCUMENT's tokens, so a
+   * match never ends inside one of the document's escapes.
+   *
+   * The values need escaping (control characters) and hold neither a double
+   * quote nor a backslash, which isolates that form's truncation. Measured on
+   * 640eb1e at this seed, before the fix: 138 of 6,000 records came back with
+   * an embedded document that did not parse, and no leading run survived in
+   * any of them.
+   */
+  test("an embedded document built from cuts still parses, and keeps no leading run", () => {
+    const ch = (n: number) => String.fromCharCode(n);
+    const escaping = [9, 8, 12, 13, 0, 1, 0x1b, 0x1f].map(ch);
+    const alphabet = [...PLAIN, ...escaping, ...escaping, ...ASTRAL];
+    const t = embeddedCuts(SEED + 3, alphabet);
+    const summary = `${t.unparsed.length} unparsed and ${t.failures.length} failures over ${t.records} records (${t.changed} changed, ${t.cutsBeforeAnEscape} cuts before an escape)`;
+    expect(t.unparsed.length, `${summary}\n${t.unparsed.slice(0, 3).join("\n")}`).toBe(0);
+    expect(t.failures.length, `${summary}\n${t.failures.slice(0, 3).join("\n")}`).toBe(0);
+    expect(t.records).toBe(6_000);
+    expect(t.changed, summary).toBeGreaterThan(5_000);
+    expect(t.cutsBeforeAnEscape, summary).toBeGreaterThan(1_000);
+  });
+
+  /**
+   * The same generator with a double quote and a backslash in the VALUES, which
+   * is where truncating by the document's tokens could have let a leading run
+   * survive: none does, and every line parses.
+   *
+   * What is NOT asserted here is that every embedded document parses. A value
+   * holding a quote or a backslash can line its single-escaped form up with the
+   * document's own closing quote or escape, and that match is replaced whole;
+   * the module header's residual section says why that is still open.
+   */
+  test("values holding a quote or a backslash: every line parses, and no leading run survives", () => {
+    const ch = (n: number) => String.fromCharCode(n);
+    const escaping = ['"', ch(0x5c), ch(9), ch(1), ch(0x1f)];
+    const alphabet = [...PLAIN, ...escaping, ...escaping, ...ASTRAL];
+    const t = embeddedCuts(SEED + 4, alphabet);
+    const summary = `${t.failures.length} failures over ${t.records} records (${t.changed} changed, ${t.unparsed.length} unparsed)`;
+    expect(t.failures.length, `${summary}\n${t.failures.slice(0, 3).join("\n")}`).toBe(0);
+    expect(t.records).toBe(6_000);
+    expect(t.changed, summary).toBeGreaterThan(5_000);
   });
 });

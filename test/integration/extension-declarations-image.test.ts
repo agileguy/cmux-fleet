@@ -3,7 +3,7 @@
  *
  * ## What this closes
  *
- * All three files in `docker/pi-extensions/` declare Pi's extension surface
+ * Every file in `docker/pi-extensions/` declares Pi's extension surface
  * STRUCTURALLY — each writes its own `interface ExtensionAPI` naming the members
  * it calls — because `@earendil-works/pi-coding-agent` is installed in the IMAGE
  * and is not a dependency of this repository. Nothing can typecheck those
@@ -11,7 +11,9 @@
  * `registerTool`, or retiring the `tool_result` event, would leave every unit
  * test green and every worker silently short of the behaviour the extension was
  * written for. `dispatch-trigger.ts` and `truncation-recovery.ts` carried that
- * exposure from the day they were written.
+ * exposure from the day they were written; `output-token-cap.ts` (2026-09-15)
+ * is the fourth file this check covers, and the first built on an event none
+ * of the other three subscribe to (`before_provider_request`).
  *
  * `Docs/SRD-WORKER-DISPATCH-EXTENSION.md` asserted three times that
  * `test/integration/auto-trigger-image.test.ts` already read the real `.d.ts`
@@ -28,7 +30,7 @@
  * an equality would go red on every upgrade that added a capability nobody here
  * uses, which is noise that trains a reader to re-baseline without looking. The
  * question worth asking is narrower and is the one that actually breaks a
- * worker: **is every member and every event name these three files depend on
+ * worker: **is every member and every event name these four files depend on
  * still there?** So the assertion is containment, and its failure message names
  * the missing spelling.
  *
@@ -90,8 +92,13 @@ workers:
   - { id: w1, role: eng }
 `;
 
-/** The three files under test, and the event each subscribes to. */
-const EXTENSIONS = ["report-tools", "dispatch-trigger", "truncation-recovery"] as const;
+/** The four files under test, and the event each subscribes to. */
+const EXTENSIONS = [
+  "report-tools",
+  "dispatch-trigger",
+  "truncation-recovery",
+  "output-token-cap",
+] as const;
 
 /**
  * Strip block and line comments before parsing.
@@ -269,10 +276,19 @@ describe("the extensions' structural Pi declarations against the image's own .d.
     }
   }, containerBudget(1));
 
-  /** The three events this fleet's extensions are built on, by name. */
-  it("the image still emits the four events these extensions subscribe to", () => {
+  /** The five events this fleet's extensions are built on, by name. */
+  it("the image still emits the five events these extensions subscribe to", () => {
     const emitted = eventNames(realApi);
-    for (const e of ["agent_end", "tool_call", "tool_result", "session_start"]) {
+    for (const e of [
+      "agent_end",
+      "tool_call",
+      "tool_result",
+      "session_start",
+      // output-token-cap.ts (2026-09-15 stall measurement). The one hook Pi
+      // exposes over the FULLY-BUILT provider request rather than over a tool
+      // call or a session lifecycle point — see the extension's own header.
+      "before_provider_request",
+    ]) {
       expect(emitted, `the image's ExtensionAPI has no ${e} overload`).toContain(e);
     }
   }, containerBudget(1));

@@ -26,11 +26,13 @@
  * {@link renderSweepEnvelope} takes the previous sweep's `triage.json` as a WHOLE
  * DOCUMENT and projects it itself — a caller cannot hand it prose because there
  * is no parameter that accepts any. {@link projectPreviousState} keeps exactly
- * two things per row: a service name **the host itself declared**, and an
- * `assessment` token from a closed four-member enum. The selector, the window
- * spelling, the evidence ledger, the coverage channel names and the
- * `unaccounted[]` list are worker-authored strings and none of them has anywhere
- * to sit.
+ * three things per row: an environment and a service name **the host itself
+ * declared** (SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b — a service name alone
+ * stopped being unique the moment one sweep could cover more than one
+ * environment), and an `assessment` token from a closed four-member enum. The
+ * selector, the window spelling, the evidence ledger, the coverage channel
+ * names and the `unaccounted[]` list are worker-authored strings and none of
+ * them has anywhere to sit.
  *
  * **2. The audit, which is the tripwire for the day somebody adds a field.**
  * {@link envelopeIssues} re-reads the rendered text against the very document it
@@ -78,6 +80,19 @@ import { readDispatchRequest, TRIAGE_CONSOLE_ROSTER } from "./dispatch-request.t
 import { taskRecordPath, workerOutboxDir, workerPaths, type RunPaths } from "./paths.ts";
 import { replyMountPath } from "./replies.ts";
 /**
+ * The docker/vm reply filenames — task 5.1's kind-to-filename mapping. This is
+ * the one place `OBSERVER_ARTIFACT_FILE_BY_KIND` (below) may name them: the
+ * module's own docblock claims it imports "only zod and the pure contracts
+ * module", so pulling two exported string constants out of it puts no
+ * filesystem, network or mutating capability into this console's closure —
+ * `test/unit/triage-readonly.test.ts`'s control-plane ban names
+ * `harvest/index.ts` and `harvest/adjudicate.ts`, never this file.
+ */
+import {
+  OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+  OBSERVER_VM_OPS_ARTIFACT_NAME,
+} from "../harvest/observer-target-artifacts.ts";
+/**
  * TYPE ONLY, and the distinction is what keeps §12's read-only block intact.
  *
  * `test/unit/triage-readonly.test.ts` bans control-plane MODULES by import and
@@ -102,8 +117,17 @@ import {
   type TriageDocumentRead,
 } from "./triage-document.ts";
 import type { PartitionAssignment } from "./triage-partition.ts";
+import { seatKind } from "./triage-seat-kinds.ts";
 import type { SweepCollation, SweepJoin, SweepOpen } from "./triage-pass.ts";
-import { TRIAGE_CHECKS, type TriageService } from "./triage-targets.ts";
+import {
+  TRIAGE_CHECKS,
+  TRIAGE_DOCKER_CHECKS,
+  TRIAGE_VM_CHECKS,
+  type TriageDockerService,
+  type TriageEnvironmentKind,
+  type TriageService,
+  type TriageVmService,
+} from "./triage-targets.ts";
 import {
   COVERAGE_RESULTS,
   EVIDENCE_GAPS,
@@ -116,13 +140,15 @@ import {
    * for what the merge would otherwise lose.
    */
   sweepIdEcho,
+  resolveRowEnvironment,
+  type DeclaredEnvironment,
   type EvidenceGap,
   type ObserverArtifact,
   type ObserverAssessment,
   type TriageDocument,
 } from "./triage-verdict.ts";
 
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Names on disk
@@ -145,12 +171,94 @@ export const SWEEP_FILES_DIR = "files";
 /** `skills/observer-ops/SKILL.md:26-33`'s pair, the half a host validates. */
 export const OBSERVER_ARTIFACT_FILE = "observer-ops.json";
 
+/**
+ * The reply filename each kind's observer writes, keyed by
+ * {@link TriageEnvironmentKind} — SRD-TRIAGE-MIXED-OBSERVERS §5, task 5.1.
+ *
+ * **One exported place, so `observerArtifactPath` and every future caller
+ * share it rather than each hand-writing the three names.** Before task 5.1
+ * `joinSweep` read every seat through {@link OBSERVER_ARTIFACT_FILE} alone —
+ * correct for the three k8s seats and wrong for the other three, which write
+ * `OBSERVER_DOCKER_OPS_ARTIFACT_NAME` and `OBSERVER_VM_OPS_ARTIFACT_NAME`
+ * instead (`skills/observer-docker-ops/SKILL.md` §5.6,
+ * `skills/observer-vm-ops/SKILL.md` §6.7). A docker or vm observer could do
+ * its job perfectly and its reply would never be found, because the join was
+ * asking the wrong directory for the wrong file.
+ *
+ * **The docker/vm names are imported, not respelled** — the same argument
+ * {@link COVERAGE_VOCABULARY_DEMAND} makes about `COVERAGE_RESULTS`: a second
+ * spelling of a name owned elsewhere is a second place for the two to drift.
+ * `harvest/observer-target-artifacts.ts` owns them because `reconcile.ts`
+ * selects each artifact by this exact filename; this map reuses that name
+ * rather than asserting a third copy agrees with the other two.
+ */
+export const OBSERVER_ARTIFACT_FILE_BY_KIND: Readonly<Record<TriageEnvironmentKind, string>> =
+  Object.freeze({
+    k8s: OBSERVER_ARTIFACT_FILE,
+    docker: OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+    vm: OBSERVER_VM_OPS_ARTIFACT_NAME,
+  });
+
+/**
+ * Every `observer-*.json` / `observer-*.md` spelling a brief can name,
+ * correct or invented — SRD-TRIAGE-MIXED-OBSERVERS §5, sweeps 146 and 147.
+ *
+ * Sweep 146 sent every k8s brief `observer-k8s.json`/`observer-k8s.md`; sweep
+ * 147 sent `observer-k8s-ops.json`/`observer-k8s-ops.md` — neither pair is
+ * spelled anywhere in `skills/observer-ops/SKILL.md` or in this codebase.
+ * `obs-t2` obeyed the brief it was given both times, wrote the invented name,
+ * ran out of its deadline, and delivered nothing the host could read.
+ *
+ * Deliberately wider than any one kind's pair, so a checker can find whatever
+ * a brief actually names and compare it against {@link observerArtifactPair}
+ * rather than searching the text for one hardcoded wrong answer among
+ * infinitely many. **`src/run/dispatch-request.ts` keeps its own pinned copy
+ * of this pattern rather than importing it** — see that module's own header
+ * for why it names no triage-specific module in its import list — and
+ * `dispatch-request.test.ts` holds the two together.
+ */
+export const OBSERVER_ARTIFACT_TOKEN_RE = /\bobserver-[a-z0-9-]+\.(?:json|md)\b/g;
+
+/**
+ * The pair a seat of `kind` may legally write: its
+ * {@link OBSERVER_ARTIFACT_FILE_BY_KIND} entry and that entry's `.md`
+ * sibling, derived the way `harvest/reconcile.ts:206` derives
+ * `TICKET_OPS_DOCUMENT_NAME` from `TICKET_OPS_ARTIFACT_NAME`, rather than
+ * spelled a second time.
+ */
+export function observerArtifactPair(
+  kind: TriageEnvironmentKind,
+): readonly [json: string, md: string] {
+  const json = OBSERVER_ARTIFACT_FILE_BY_KIND[kind];
+  return [json, `${basename(json, ".json")}.md`];
+}
+
 /** §7.5's document, written by `tri-1` on turn two beside a `triage.md`. */
 export const TRIAGE_DOCUMENT_FILE = "triage.json";
 
-/** Where one observer's reply artifact sits on the host. */
-export function observerArtifactPath(run: RunPaths, worker: string, taskId: string): string {
-  return join(workerOutboxDir(run.root, worker), taskId, SWEEP_FILES_DIR, OBSERVER_ARTIFACT_FILE);
+/**
+ * Where one observer's reply artifact sits on the host.
+ *
+ * **`kind` selects the filename, and it is required rather than defaulted to
+ * k8s.** A defaulted parameter is how the docker/vm reply went unread in the
+ * first place — every existing call site was written before a seat could be
+ * anything but k8s, and a default would have let this function keep answering
+ * `observer-ops.json` for a docker seat with nobody having to notice. Look the
+ * kind up with `seatKind(worker)` (`triage-seat-kinds.ts`) rather than
+ * guessing it from context.
+ */
+export function observerArtifactPath(
+  run: RunPaths,
+  worker: string,
+  taskId: string,
+  kind: TriageEnvironmentKind,
+): string {
+  return join(
+    workerOutboxDir(run.root, worker),
+    taskId,
+    SWEEP_FILES_DIR,
+    OBSERVER_ARTIFACT_FILE_BY_KIND[kind],
+  );
 }
 
 /** Where the collator's §7.5 document sits on the host. */
@@ -192,7 +300,7 @@ export function triageDocumentPath(
  * *"its own task id, not yours"* — **the wording MEASURED here, since reworded
  * away; the file now records the supersession rather than the instruction, at
  * *"against an earlier version of this line that said"*. Cited as history, not
- * as a live line**; `roles/observer.md:139` tells the observer to
+ * as a live line**; `roles/observer-k8s.md` tells the observer to
  * write *"in the directory named by the id you were dispatched under"*. Measured
  * 2026-09-07 on `T-sweep-1`: `tri-1` wrote `/outbox/T-sweep-1/files/` — its OWN
  * id, the one word its instruction excludes — and `obs-t1` believed the brief
@@ -322,15 +430,28 @@ export function normalizeSliceReportingPath(
  * information the observer did not have; it adds the sentence that says what to do
  * with them. The observer still has to copy them, and a replayed artifact still
  * fails the comparison.
+ *
+ * **`kind` selects the filename it names, and it is required rather than
+ * defaulted (SRD-TRIAGE-MIXED-OBSERVERS §5).** This demand used to name
+ * `observer-ops.json` unconditionally, which is correct for a k8s seat and
+ * actively wrong for a docker or vm one: `OBSERVER_ARTIFACT_FILE_BY_KIND`
+ * already exists so `joinSweep` reads each kind's reply from its own file, and
+ * a docker or vm observer told to echo these fields into `observer-ops.json`
+ * would be writing into a file the host never reads back for it.
  */
-export function freshnessEchoDemand(sweepId: string, window: string | null): string {
+export function freshnessEchoDemand(
+  sweepId: string,
+  window: string | null,
+  kind: TriageEnvironmentKind,
+): string {
   const windowClause =
     window === null
       ? "`window_opened_at` exactly as this brief states the observation window opening"
       : `\`window_opened_at\` exactly "${window}"`;
+  const file = OBSERVER_ARTIFACT_FILE_BY_KIND[kind];
   return (
     `Echo \`sweep_id\` exactly "${sweepId}" and ${windowClause} as top-level fields of ` +
-    `\`observer-ops.json\`, copied from this brief and from nowhere else. An artifact ` +
+    `\`${file}\`, copied from this brief and from nowhere else. An artifact ` +
     `missing either is discarded whole and every service in it is recorded as unobserved.`
   );
 }
@@ -502,6 +623,13 @@ export const CLUSTER_CALL_TIMEOUT_S = 30;
  * `--request-timeout` appears twice below and `CLUSTER_CALL_TIMEOUT_S` supplies
  * the value both times, so raising the bound cannot leave the worked example
  * quoting the old one.
+ *
+ * **k8s ONLY, and its two siblings below are not a respelling of this one for
+ * two more verb sets.** `kubectl --request-timeout` is a flag the k8s verbgate
+ * accepts and the docker and vm credentials have no equivalent of at all — see
+ * {@link DOCKER_BOUNDED_CALLS_DEMAND} and {@link VM_BOUNDED_CALLS_DEMAND} for
+ * what each of those actually bounds, read out of their own skills rather than
+ * guessed from this one's shape.
  */
 export const BOUNDED_CALLS_DEMAND: string =
   `Bound every cluster call: pass \`--request-timeout=${CLUSTER_CALL_TIMEOUT_S}s\` AFTER the ` +
@@ -510,6 +638,86 @@ export const BOUNDED_CALLS_DEMAND: string =
   `later: it is this channel's answer NOW, and its \`result\` is "unreachable". Do not retry it ` +
   `and do not wait longer. An environment you cannot reach must produce an artifact saying so ` +
   `inside your deadline; an artifact that never arrives tells the operator nothing at all.`;
+
+/**
+ * Docker's call bound (SRD-TRIAGE-MIXED-OBSERVERS §5) — the docker sibling of
+ * {@link BOUNDED_CALLS_DEMAND}, and deliberately not the same shape.
+ *
+ * ## There is no docker `--request-timeout`, and this does not invent one
+ *
+ * `docker/observe-ssh` already bounds the SSH round trip itself —
+ * `ConnectTimeout=10`, `ServerAliveInterval=15`, `ServerAliveCountMax=3` — before
+ * any argument the observer supplies is even read, so there is no flag for a
+ * brief to demand. What the observer DOES control is the size of a `logs` or
+ * `events` read, and that is where `skills/observer-docker-ops/SKILL.md`'s own
+ * "Bounded reads" section puts the load-bearing rule: `tail=<M>` is a REQUIRED
+ * argument of `logs`, capped at 500, because an uncapped pull hits the 50KB
+ * tool-output wall and is clipped from the FRONT — *"exactly the window the
+ * question was about"* — and `tail=500` of ordinary log lines alone measures
+ * to *"about 65KB — past the 50KB wall before a second container or a second
+ * check even enters the picture."* `events` carries the credential's own
+ * terminating bound (`--until 0s`) rather than a size cap the observer
+ * supplies. Neither `logs --follow` nor a streaming `stats` reaches a shell at
+ * all — refused before docker ever runs — so there is no unbounded read this
+ * demand would need to warn against separately.
+ *
+ * ## Why this is authored rather than left to the skill alone
+ *
+ * The skill already carries all of this (§5.6, "Bounded reads, and why every
+ * one of them is"), same as `skills/observer-ops/SKILL.md` already carried the
+ * k8s row shape before {@link ROW_SHAPE_DEMAND} restated it. That measured
+ * case is the reason for restating rather than trusting the skill alone: a
+ * worker can read a mounted skill in full and still not apply it under a
+ * deadline (`T-sweep-120`, ROW_SHAPE_DEMAND's own docblock). This is the same
+ * fact in the one document every dispatch guarantees the observer sees.
+ */
+export const DOCKER_BOUNDED_CALLS_DEMAND: string =
+  `Bound every read: \`logs\` requires both \`since=<N>s\` and \`tail=<M>\`, \`M\` capped at ` +
+  `500, and \`events\` requires \`since=<N>s\` and always ends at \`--until 0s\` rather than ` +
+  `streaming — no flag widens either past this credential's own grammar, and neither \`logs ` +
+  `--follow\` nor a streaming \`stats\` reaches a shell at all. Default to a narrow \`tail\`; ` +
+  `reach for 500 only when the question needs that much history. A verb the credential refuses ` +
+  `is "forbidden"; an argument it refuses means your call was malformed, so fix it and retry it ` +
+  `once. A call whose SSH round trip never completes is "unreachable", decided NOW: do not retry ` +
+  `it and do not wait longer. A container you cannot reach must produce ` +
+  `an artifact saying so inside your deadline; an artifact that never arrives tells the operator ` +
+  `nothing at all.`;
+
+/**
+ * The vm sibling of {@link DOCKER_BOUNDED_CALLS_DEMAND}, on the same reasoning
+ * and read out of `skills/observer-vm-ops/SKILL.md`'s own verb table instead.
+ *
+ * `journal` and `kernel` both REQUIRE `since=<N>s` and `lines=<M>`, capped at
+ * 500, for the same front-truncation reason docker's `logs` caps `tail`. A
+ * refused verb and a refused argument are different answers in that skill's
+ * exit table, and the paragraph keeps them apart: the first is `forbidden`,
+ * the second is a malformed call retried once.
+ * The SSH round trip itself is bounded the same way the docker one is —
+ * `docker/observe-ssh` serves both kinds — so a hung connection is
+ * `unreachable` on the same timeline, not a separate wait this demand invents
+ * a number for.
+ */
+export const VM_BOUNDED_CALLS_DEMAND: string =
+  `Bound every read: \`journal\` and \`kernel\` both require \`since=<N>s\` and \`lines=<M>\`, ` +
+  `\`M\` capped at 500, and no flag widens either past this credential's own grammar. Default to ` +
+  `a narrow \`lines\`; reach for 500 only when the question needs that much history. A verb the ` +
+  `credential refuses is "forbidden"; an argument it refuses means your call was malformed, so ` +
+  `fix it and retry it once. A call whose SSH round trip never completes is "unreachable", ` +
+  `decided NOW: do not retry it and do not wait longer. A VM you cannot reach must produce an ` +
+  `artifact saying so inside your ` +
+  `deadline; an artifact that never arrives tells the operator nothing at all.`;
+
+/**
+ * The call-bound paragraph {@link composeObserverBrief} appends, keyed by the
+ * seat's kind — the one paragraph of the four-part contract whose CONTENT
+ * differs per kind rather than just its target filename (contrast
+ * {@link freshnessEchoDemand}, which stays one function of `kind`).
+ */
+const CALL_BOUND_DEMAND_BY_KIND: Readonly<Record<TriageEnvironmentKind, string>> = Object.freeze({
+  k8s: BOUNDED_CALLS_DEMAND,
+  docker: DOCKER_BOUNDED_CALLS_DEMAND,
+  vm: VM_BOUNDED_CALLS_DEMAND,
+});
 
 /**
  * Each graded gap, in the spelling the OBSERVER writes rather than the one the
@@ -556,6 +764,20 @@ const GRADED_ROW_FIELD: Record<EvidenceGap, string> = {
  * shape was documented, readable and read, and the report still came back with its
  * rows under `coverage`. The collation brief's own repair is what BOUNDS that
  * failure; this narrows how often it happens.
+ *
+ * ## `name` IS THE BRIEF'S SERVICE NAME, AND THAT SENTENCE IS NEW
+ *
+ * Added in the SRD-TRIAGE-MIXED-OBSERVERS phase 4-5 review: the collator's
+ * `service` field and the host's own row-matching both key off the observer's
+ * `name`. Until 2026-09-15 `skills/observer-vm-ops/SKILL.md` called it *"the
+ * VM's own name"*, with a hostname in its worked example, where the tracked
+ * `triage/targets.yaml` declares the service as `vm-1`. A row keyed on the
+ * hostname grades the declared service `vm-1` as unreported even though the VM
+ * answered. `skills/observer-ops/SKILL.md` already tells the k8s observer
+ * `name` is *"the service name from your brief"*, so this sentence states, for
+ * every kind, the rule k8s already follows. The skill now agrees; the sentence
+ * stays here because this document wins over any mounted skill that drifts
+ * from it ({@link OBSERVER_CONTRACT_HEADING}).
  */
 export const ROW_SHAPE_DEMAND: string =
   `Write one row per service in a top-level \`services\` array. \`coverage\` is a field INSIDE ` +
@@ -563,8 +785,10 @@ export const ROW_SHAPE_DEMAND: string =
   `\`assessment\`, and ${EVIDENCE_GAPS.map((g) => GRADED_ROW_FIELD[g]).join(", ")}. ` +
   `Those last four are why a \`healthy\` is believed at all: the host downgrades any row missing ` +
   `one of them to \`indeterminate\`, and three of those on one service opens an incident and ` +
-  `sends a person to a cluster. A report whose rows are shaped differently is not a smaller ` +
-  `report — it is one the collator cannot carry, and every service in it is recorded unobserved.`;
+  `sends a person to the target. A report whose rows are shaped differently is not a smaller ` +
+  `report — it is one the collator cannot carry, and every service in it is recorded unobserved. ` +
+  `\`name\` is the service's name exactly as this brief names it above — never a hostname, a ` +
+  `container id, or any other name you read off the target yourself.`;
 
 /**
  * The heading that marks where the collator stops speaking and the host starts.
@@ -619,6 +843,25 @@ export const OBSERVER_CONTRACT_HEADING =
  * the observer checks its output against at the end; the judgement is what it acts
  * on at the start. Ordering them the other way would put four paragraphs of
  * invariant text in front of the one paragraph that differs between sweeps.
+ *
+ * ## `kind` IS REQUIRED, AND THE DEFECT IT CLOSES (SRD-TRIAGE-MIXED-OBSERVERS §5)
+ *
+ * Every measurement above predates the console growing docker and vm seats,
+ * and this function was written as though every observer were k8s — it named
+ * `observer-ops.json` unconditionally and appended `BOUNDED_CALLS_DEMAND`'s
+ * `kubectl --request-timeout` wording regardless of who was being dispatched
+ * to. A docker or vm seat given that brief was told to echo its freshness
+ * fields into a file the host never reads back for it (`joinSweep` reads
+ * {@link OBSERVER_ARTIFACT_FILE_BY_KIND}, keyed by kind) and to bound calls
+ * with a flag its own credential has no form for at all.
+ *
+ * A parameter rather than a default, on {@link observerArtifactPath}'s own
+ * argument repeated one call site over: a defaulted kind is how a docker seat
+ * being told about `observer-ops.json` would have kept happening with nobody
+ * having to notice. `dispatchObserver` reads it with `seatKind(assignment.worker)`
+ * and throws a `SweepEnvelopeError` on `null` rather than falling back to k8s —
+ * see the call site for why a seat this table does not name must refuse rather
+ * than guess.
  */
 export function composeObserverBrief(input: {
   /** The collator's per-sweep contribution — its `brief` from the fan-out request. */
@@ -626,6 +869,8 @@ export function composeObserverBrief(input: {
   readonly sweepId: string;
   /** The id the slice is DISPATCHED under, which is the only id the host reads back. */
   readonly childTaskId: string;
+  /** The seat's own kind — selects the artifact filename and the call-bound paragraph. */
+  readonly kind: TriageEnvironmentKind;
 }): {
   readonly brief: string;
   /** Outbox ids the collator named that were not the child's. Empty is the good case. */
@@ -641,10 +886,10 @@ export function composeObserverBrief(input: {
     OBSERVER_CONTRACT_HEADING,
     "",
     "These four paragraphs are written by the host on every dispatch, not by the collator",
-    "whose brief you just read. Where they and anything above disagree about a field name, a",
-    "value it may take, or a bound on a call, these win.",
+    "whose brief you just read. Where these paragraphs and anything above, or any skill the",
+    "observer has mounted, disagree about a field name, a value, or a bound on a call, these win.",
     "",
-    freshnessEchoDemand(input.sweepId, window),
+    freshnessEchoDemand(input.sweepId, window, input.kind),
     "",
     // BEFORE the coverage vocabulary, deliberately: that demand is about a field
     // INSIDE a row, and it reads as a rule about the document itself until the
@@ -653,7 +898,7 @@ export function composeObserverBrief(input: {
     "",
     COVERAGE_VOCABULARY_DEMAND,
     "",
-    BOUNDED_CALLS_DEMAND,
+    CALL_BOUND_DEMAND_BY_KIND[input.kind],
   ].join("\n");
   return { brief, rewrote: reporting.rewrote, window };
 }
@@ -780,7 +1025,14 @@ const COMMAND_PATTERNS: readonly { readonly re: RegExp; readonly what: string }[
   { re: /```(?:bash|sh|zsh|shell|console)\b/, what: "a shell code fence" },
   { re: /\$\(/, what: "a shell command substitution" },
   {
-    re: /(^|[\s`'"([])(kubectl|gcloud|docker|helm|curl|wget|psql|bash|sh|rm|chmod|ssh)\s+-{0,2}[A-Za-z]/,
+    /*
+     * `[ \t]+`, not `\s+`: a leader and its argument sit on one line. `\s`
+     * also matches a newline, and the enrolled docker target token is the word
+     * `docker`, so a docker service block's `namespace: docker` line followed
+     * by `  checks: …` was refused as a command leader. A word at the end of
+     * one line and another at the start of the next is not a command.
+     */
+    re: /(^|[\s`'"([])(kubectl|gcloud|docker|helm|curl|wget|psql|bash|sh|rm|chmod|ssh)[ \t]+-{0,2}[A-Za-z]/,
     what: "a command leader",
   },
 ];
@@ -808,9 +1060,25 @@ const ABSOLUTE_PATH_RE = /(?:^|[\s`'"(<])(\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._<>{}
  */
 export const MIN_PROSE_LENGTH = 8;
 
-/** Every token the HOST owns, which a document echoing one has not authored. */
-const HOST_VOCABULARY: ReadonlySet<string> = new Set<string>([
+/**
+ * Every token the HOST owns, which a document echoing one has not authored.
+ *
+ * **All three kinds' closed check vocabularies, not just k8s's.** Measured
+ * 2026-09-15, `T-sweep-151`: the previous collation carried
+ * `coverage[].channel: "resources"` on a VM row — a correct member of
+ * {@link TRIAGE_VM_CHECKS} — and the render was refused `worker_prose
+ * [resources]`, because only {@link TRIAGE_CHECKS} (k8s) was ever added here.
+ * The mixed-observers work gave docker and VM their own check lists but never
+ * widened this set to match, so any of their check names past
+ * {@link MIN_PROSE_LENGTH} tripped the same false positive `T-sweep-79`
+ * recorded for a namespace. Exported so `triage-envelope.test.ts` can audit
+ * it against every check vocabulary `triage-targets.ts` exports, rather than
+ * trust that the next kind remembers to come back here.
+ */
+export const HOST_VOCABULARY: ReadonlySet<string> = new Set<string>([
   ...TRIAGE_CHECKS,
+  ...TRIAGE_DOCKER_CHECKS,
+  ...TRIAGE_VM_CHECKS,
   ...OBSERVER_ASSESSMENTS,
   ...COVERAGE_RESULTS,
 ]);
@@ -1052,15 +1320,22 @@ export class SweepEnvelopeError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * One service's carried state — TWO FIELDS, and the shortness is the point.
+ * One service's carried state — THREE FIELDS, and the shortness is still the
+ * point.
  *
  * §7.2 carries *"the previous sweep's per-service state, as **structured state
- * only**"*. Both members are host-checkable: the name against the targets file,
- * the assessment against a closed enum. There is deliberately no `note`, no
- * `summary` and no `evidence` member, because a field that admits free text is
- * where the next person will put the last sweep's paragraph.
+ * only**"*. Every member is host-checkable: the environment and the service
+ * name against the sweep's own declared environments (SRD-TRIAGE-MIXED-OBSERVERS
+ * D21, task 4.1b — a service name alone stopped being unique the moment one
+ * sweep could cover more than one environment, since `do-cluster` and
+ * `docker-host` both declare a `grafana` and a `prometheus` in the tracked
+ * `triage/targets.yaml`), and the assessment against a closed enum. There is
+ * deliberately no `note`, no `summary` and no `evidence` member, because a
+ * field that admits free text is where the next person will put the last
+ * sweep's paragraph.
  */
 export interface PreviousServiceState {
+  readonly environment: string;
   readonly service: string;
   readonly assessment: ObserverAssessment;
 }
@@ -1068,35 +1343,113 @@ export interface PreviousServiceState {
 const ASSESSMENTS: ReadonlySet<string> = new Set<string>(OBSERVER_ASSESSMENTS);
 
 /**
- * Project the previous sweep's `triage.json` down to what may cross.
+ * Project the previous sweep's `triage.json` down to what may cross, keyed on
+ * (environment, service) — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
  *
- * **Filtered against `declared` rather than deduplicated or sanitised**, because
- * a service name is worker-authored too: `triage.json`'s rows are whatever `tri-1`
- * wrote, and a row naming a service the targets file never declared would put an
- * attacker-chosen token into the next brief under the host's own voice. The host
- * knows the legal names; nothing else has to be trusted.
+ * **Filtered against the sweep's declared (environment, service) pairs rather
+ * than deduplicated or sanitised**, because a service name is worker-authored
+ * too: `triage.json`'s rows are whatever `tri-1` wrote, and a row naming a pair
+ * the targets file never declared would put an attacker-chosen token into the
+ * next brief under the host's own voice. The host knows the legal pairs;
+ * nothing else has to be trusted.
  *
- * Order follows `declared` rather than the document, so two sweeps whose worker
- * happened to order its rows differently produce the same brief — the
+ * **A row's environment is placed by {@link resolveRowEnvironment}
+ * (`triage-verdict.ts`), the same function `assessTriageSweep` grades the row
+ * against** — the grading path and the carried-state path place a row
+ * identically, or a row the verdict graded under one environment could carry
+ * forward under none at all. Its own named `environment` wins; failing that,
+ * the sweep's ONE environment when there is exactly one — every document
+ * written before this field existed carries no `environment` at all, and a
+ * sweep still covering only `do-cluster` must keep reading them exactly as
+ * before; failing that, the one declared environment whose services include
+ * the row's `service`, when there is exactly one such environment — a silent
+ * row for a service declared under only one of the sweep's environments still
+ * carries forward under that one. A service declared under zero or several
+ * environments (the tracked `triage/targets.yaml`'s `grafana`, under both
+ * `do-cluster` and `docker-host`) has no single legal answer, so a row naming
+ * neither an environment nor a uniquely-owning one carries nothing forward
+ * rather than guessing which environment it was about. This is the same rule
+ * `TriageRow.environment` documents at its own declaration.
+ *
+ * `row.observer` — the worker's own claim of who produced the row — never
+ * influences placement, on {@link resolveRowEnvironment}'s own rule for it.
+ *
+ * A row for an (environment, service) pair the sweep does not declare carries
+ * nothing, exactly as an undeclared service always has. The first row for a
+ * given pair wins — a duplicate is a worker's replay, not a second opinion.
+ *
+ * Order follows `environments` — each in the sweep's own order, and each one's
+ * own services in ITS order — rather than the document, so two sweeps whose
+ * worker happened to order its rows differently produce the same brief: the
  * comparability §6.6 is about, applied to the one input a worker controls.
  */
 export function projectPreviousState(
   document: TriageDocument | null,
-  declared: readonly string[],
+  environments: readonly SweepEnvironment[],
 ): readonly PreviousServiceState[] {
   if (document === null) return [];
-  const byName = new Map<string, ObserverAssessment>();
+
+  /**
+   * {@link resolveRowEnvironment} takes `declared`-shaped environments — a
+   * name plus the plain list of service names it declares. `SweepEnvironment`
+   * carries richer per-kind service objects, so this maps each one down to
+   * its names ONCE, before the per-row loop below, rather than per row.
+   */
+  const declared: readonly DeclaredEnvironment[] = environments.map((environment) => ({
+    name: environment.name,
+    kind: environment.kind,
+    services: environment.services.map((service) => service.name),
+  }));
+
+  const byEnvironment = new Map<string, Map<string, ObserverAssessment>>();
   for (const row of document.services) {
     if (!ASSESSMENTS.has(row.assessment)) continue;
-    if (byName.has(row.service)) continue;
-    byName.set(row.service, row.assessment);
+    const environment = resolveRowEnvironment(row, declared);
+    if (environment === null) continue;
+    let byService = byEnvironment.get(environment);
+    if (byService === undefined) {
+      byService = new Map<string, ObserverAssessment>();
+      byEnvironment.set(environment, byService);
+    }
+    if (byService.has(row.service)) continue;
+    byService.set(row.service, row.assessment);
   }
+
   const out: PreviousServiceState[] = [];
-  for (const name of declared) {
-    const assessment = byName.get(name);
-    if (assessment !== undefined) out.push({ service: name, assessment });
+  for (const environment of environments) {
+    const byService = byEnvironment.get(environment.name);
+    if (byService === undefined) continue;
+    for (const service of environment.services) {
+      const assessment = byService.get(service.name);
+      if (assessment !== undefined) {
+        out.push({ environment: environment.name, service: service.name, assessment });
+      }
+    }
   }
   return out;
+}
+
+/**
+ * One service row, whichever kind its environment is
+ * (SRD-TRIAGE-MIXED-OBSERVERS §6). k8s, docker and vm each carry their own
+ * fields; {@link renderSweepEnvelope}'s `serviceBlock` renders only the ones
+ * the row actually has.
+ */
+export type SweepService = TriageService | TriageDockerService | TriageVmService;
+
+/**
+ * One environment a sweep covers, and its own slice of services — the LIST
+ * shape task 3.3's envelope half widens {@link SweepEnvelopeInput} to (SRD
+ * -TRIAGE-MIXED-OBSERVERS §6, §6.1 owner decision 2, §7).
+ *
+ * `renderSweepEnvelope` refuses an empty list and a duplicated `name`: an
+ * envelope over nothing, or over one environment counted twice, asks a model
+ * to partition a set it cannot make sense of.
+ */
+export interface SweepEnvironment {
+  readonly name: string;
+  readonly kind: TriageEnvironmentKind;
+  readonly services: readonly SweepService[];
 }
 
 /** What §7.2's renderer is handed. Every member is host-owned or host-checkable. */
@@ -1104,10 +1457,24 @@ export interface SweepEnvelopeInput {
   readonly sweepId: string;
   /** ISO-8601 UTC. The lower bound of this sweep's observation window. */
   readonly windowOpenedAt: string;
-  readonly environment: string;
-  /** The environment's services, in FILE order, with their own bounds. */
-  readonly services: readonly TriageService[];
-  /** §7.1's `default_window`, resolved to seconds. */
+  /**
+   * Every environment this sweep covers, in the order they are dispatched and
+   * rendered (owner decision 2: one envelope names every environment the
+   * sweep covers, rather than one task id per kind).
+   *
+   * **ONE k8s environment renders BYTE-FOR-BYTE what a lone
+   * `environment`/`services` pair rendered before this shape widened** — see
+   * {@link renderSweepEnvelope}. More than one environment changes the title,
+   * the opening line, the `## This sweep` block and the `## The services …`
+   * section to name each environment with its kind.
+   */
+  readonly environments: readonly SweepEnvironment[];
+  /**
+   * §7.1's `default_window`, resolved to seconds — ONE value for the whole
+   * sweep. `environmentsByKind` (`cli/commands/triage.ts`) refuses present
+   * environments whose `default_window` differ, so a single window is correct
+   * for every environment this envelope names.
+   */
   readonly defaultWindowS: number;
   /**
    * The previous sweep's document, handed over WHOLE so this function can
@@ -1171,8 +1538,47 @@ export function windowOpenedAt(dispatchedAt: string, defaultWindowS: number): st
   return new Date(at - defaultWindowS * 1000).toISOString();
 }
 
-/** One service's line, with its OWN window rather than the environment's. */
-function serviceBlock(service: TriageService, defaultWindowS: number): string {
+/**
+ * True for a k8s service — the only {@link SweepService} shape carrying
+ * `workload` (SRD-TRIAGE-MIXED-OBSERVERS §6). Narrows on the SHAPE rather
+ * than on the environment's `kind`, so this stays correct even if a caller
+ * ever mismatched the two.
+ */
+function isK8sService(service: SweepService): service is TriageService {
+  return "workload" in service;
+}
+
+/** True for a vm service — the only {@link SweepService} shape carrying `units` (§6). */
+function isVmService(service: SweepService): service is TriageVmService {
+  return "units" in service;
+}
+
+/**
+ * One service's line. k8s carries its own window and workload; docker and vm
+ * carry neither (§6) — {@link renderSweepEnvelope}'s per-kind rendering rule.
+ */
+function serviceBlock(service: SweepService, defaultWindowS: number): string {
+  if (isVmService(service)) {
+    const lines = [
+      `- service: ${service.name}`,
+      `  namespace: ${service.namespace}`,
+      `  checks: ${service.checks.join(", ")}`,
+    ];
+    // `units` only when non-empty — an empty list is a vm row with no named
+    // systemd unit beyond its whole-system checks, and a blank line would read
+    // as a unit named nothing.
+    if (service.units.length > 0) lines.push(`  units: ${service.units.join(", ")}`);
+    return lines.join("\n");
+  }
+  if (!isK8sService(service)) {
+    // docker: name, namespace (the target token), checks — a container has no
+    // workload to resolve and no per-service window override (§6).
+    return [
+      `- service: ${service.name}`,
+      `  namespace: ${service.namespace}`,
+      `  checks: ${service.checks.join(", ")}`,
+    ].join("\n");
+  }
   const windowS = service.window ?? defaultWindowS;
   /*
    * **An undeclared workload is an instruction, not a blank.**
@@ -1248,34 +1654,159 @@ function serviceBlock(service: TriageService, defaultWindowS: number): string {
  * away — or, far more likely, nowhere.
  */
 export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
-  const declared = input.services.map((s) => s.name);
-  const carried = projectPreviousState(input.previousDocument, declared);
+  /* An envelope over nothing asks a model to partition nothing. */
+  if (input.environments.length === 0) {
+    throw new SweepEnvelopeError(
+      `the sweep envelope for ${input.sweepId} names no environments to sweep — an envelope ` +
+        `over nothing asks a model to partition nothing.`,
+    );
+  }
+  {
+    const seen = new Set<string>();
+    for (const environment of input.environments) {
+      if (seen.has(environment.name)) {
+        throw new SweepEnvelopeError(
+          `the sweep envelope for ${input.sweepId} names environment "${environment.name}" ` +
+            `twice. Each environment this sweep covers must be named once.`,
+        );
+      }
+      seen.add(environment.name);
+    }
+  }
+
+  const environments = input.environments;
+  /** Non-null only for the ONE-environment case, which renders byte-for-byte what it always has. */
+  const single = environments.length === 1 ? environments[0]! : null;
+
+  /*
+   * FLAT, ACROSS EVERY ENVIRONMENT, in list order — but only for the audit
+   * below, which asks "is this string a name the HOST put in the brief"
+   * (`workerAuthoredStrings`'s `hostNames`/`hostTokens`) and does not care
+   * which environment a name belongs to: a name the host declared anywhere is
+   * not prose the worker wrote, wherever in the brief it turns up. The
+   * previous-state projection does not use this list — it needs a KEYED input,
+   * so it is handed `environments` itself, below, because that one DOES have
+   * to tell `do-cluster`'s `grafana` from `docker-host`'s
+   * (SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b).
+   */
+  const declaredNames = environments.flatMap((e) => e.services.map((s) => s.name));
+  const declaredNamespaces = environments.flatMap((e) => e.services.map((s) => s.namespace));
+
+  const carried = projectPreviousState(input.previousDocument, environments);
   const rule = input.verdictRule ?? TRIAGE_VERDICT_RULE;
   const seats = input.seats ?? TRIAGE_CONSOLE_ASPECTS;
 
-  const title = `${input.environment}: health sweep ${input.sweepId}`;
+  const title =
+    single !== null
+      ? `${single.name}: health sweep ${input.sweepId}`
+      : `${environments.map((e) => e.name).join(", ")}: health sweep ${input.sweepId}`;
 
+  /** The opening sentence's object — unadorned for one environment, name+kind for more. */
+  const envLabel =
+    single !== null
+      ? `the ${single.name} environment`
+      : environments.map((e) => `${e.name} (${e.kind})`).join(", ");
+
+  /** The `## This sweep` block's environment row(s) — one per environment when there is more than one. */
+  const envLines =
+    single !== null
+      ? [`- environment: ${single.name}`]
+      : environments.map((e) => `- environment: ${e.name} (${e.kind})`);
+
+  /** The `## The services …` section — one flat list for one environment, one sub-section per environment for more. */
+  const servicesSection: readonly string[] =
+    single !== null
+      ? [
+          "## The services, and the bounds each one was given",
+          "",
+          `Every service below appears in exactly one of your requests. The checks and the window are`,
+          `this service's own: copy them, do not widen them, and do not tidy them.`,
+          "",
+          ...single.services.map((s) => serviceBlock(s, input.defaultWindowS)),
+          "",
+        ]
+      : [
+          "## The services, and the bounds each one was given",
+          "",
+          `Every service below appears in exactly one of your requests. The checks and the window are`,
+          `this service's own: copy them, do not widen them, and do not tidy them. A service belongs`,
+          `to its own environment, and a k8s service, a Docker container and a vm unit never share a`,
+          `request (SRD-TRIAGE-MIXED-OBSERVERS §5).`,
+          "",
+          ...environments.flatMap((e) => [
+            `### ${e.name} (${e.kind})`,
+            "",
+            ...e.services.map((s) => serviceBlock(s, input.defaultWindowS)),
+            "",
+          ]),
+        ];
+
+  /**
+   * Single-environment renders exactly what it always has — `- service:
+   * assessment` — so the byte-for-byte guarantee holds without a branch that
+   * could drift. More than one environment prefixes each line with the
+   * environment it belongs to, on the same D21 reasoning `PreviousServiceState`
+   * carries the field for: a bare service name stopped being unique the moment
+   * `do-cluster` and `docker-host` could both carry a `grafana`.
+   */
   const previousLines =
     carried.length === 0
       ? [
-          "There is no previous state for this environment. Treat every service as unseen; do",
+          single !== null
+            ? "There is no previous state for this environment. Treat every service as unseen; do"
+            : "There is no previous state for these environments. Treat every service as unseen; do",
           "not infer one from anything above this line in your context.",
         ]
       : [
-          "One line per service, and these two fields are the WHOLE of what crossed from the",
+          single !== null
+            ? "One line per service, and these two fields are the WHOLE of what crossed from the"
+            : "One line per service, and these three fields are the WHOLE of what crossed from the",
           "last sweep. No finding, no recommendation and no sentence from the last report is",
           "here, deliberately — it is context for what to look at, never a finding to confirm.",
           "",
-          ...carried.map((p) => `- ${p.service}: ${p.assessment}`),
+          ...carried.map((p) =>
+            single !== null
+              ? `- ${p.service}: ${p.assessment}`
+              : `- ${p.environment}/${p.service}: ${p.assessment}`,
+          ),
+        ];
+
+  /**
+   * D21's collator-facing half — SRD-TRIAGE-MIXED-OBSERVERS D21, task 4.1b.
+   * **Empty for one environment**, so `single`'s branch above already
+   * guarantees this envelope's text does not change: an empty array splices
+   * into nothing, which is what keeps the single-environment brief
+   * byte-for-byte identical to what it rendered before this field existed.
+   *
+   * More than one environment gets told the CONSEQUENCE rather than left to
+   * infer it from `## This sweep`'s bulleted list above: `do-cluster` and
+   * `docker-host` can each declare a `grafana`, so a row this collator writes
+   * without `environment` cannot be told from the other's, and the verdict
+   * that keys on the pair has nothing to key it with. The legal values are
+   * spelled out explicitly — never "as shown above" — because the only other
+   * place this envelope names an environment on its own line pairs it with
+   * `(${environments[0]?.kind ?? "kind"})`, and that parenthesised kind is
+   * this brief's own annotation, not part of the name.
+   */
+  const environmentFieldNote: readonly string[] =
+    single !== null
+      ? []
+      : [
+          "",
+          `This sweep covers more than one environment, so every row you write in`,
+          `\`${TRIAGE_DOCUMENT_FILE}\` must also carry \`environment\`, spelled exactly as this`,
+          `envelope names it — one of: ${environments.map((e) => `\`${e.name}\``).join(", ")}. Never`,
+          `the kind shown in parentheses beside it above: that is this brief's own annotation, not`,
+          `part of the name.`,
         ];
 
   const brief = [
-    `You are running health sweep ${input.sweepId} of the ${input.environment} environment.`,
+    `You are running health sweep ${input.sweepId} of ${envLabel}.`,
     "",
     "## This sweep",
     "",
     `- sweep id: ${input.sweepId}`,
-    `- environment: ${input.environment}`,
+    ...envLines,
     `- observation window opens at: ${input.windowOpenedAt}`,
     "",
     `Copy the sweep id and the window instant from this brief into every artifact this sweep`,
@@ -1285,12 +1816,14 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     "",
     `**The two field names are \`sweep_id\` and \`window_opened_at\`, spelled exactly that way.**`,
     `Your own \`${TRIAGE_DOCUMENT_FILE}\` carries \`sweep_id\`, copied from the row above.`,
+    ...environmentFieldNote,
     "",
     `**You do not have to tell your observers to echo those two fields, and you should not spend`,
     `your brief trying.** The host appends the observer's reporting contract to every brief you`,
-    `send — those two spellings, the closed domain \`coverage[].result\` draws from, and the bound`,
-    `every cluster call must carry. It is appended after your words, under its own heading, on`,
-    `every dispatch and whatever you wrote.`,
+    `send — the \`sweep_id\`/\`window_opened_at\` echo demand naming that seat's own reply file; the`,
+    `shape of a row; the closed domain \`coverage[].result\` draws from; and the bound on that`,
+    `seat's calls, which differs by kind. It is appended after your words, under its own heading,`,
+    `on every dispatch and whatever you wrote.`,
     "",
     `The window INSTANT is the one part of that contract the host cannot supply: it holds the`,
     `sweep id and the seat ids, and it reads the instant back out of the brief you wrote. So the`,
@@ -1299,7 +1832,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     "",
     "## What every row must carry, or its `healthy` is not believed",
     "",
-    `Every brief you write must tell its observer that each row of \`observer-ops.json\` carries`,
+    `Every brief you write must tell its observer that each row of its own reply file carries`,
     `\`coverage\` (a list of \`{channel, result}\`), \`selector\` (the one it actually matched on),`,
     `\`window\`, and \`evidence_ref\` (a list naming what it read). Name all four, spelled exactly`,
     `that way. You do not need to state the domain \`result\` draws from; the host appends it.`,
@@ -1307,7 +1840,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     `These are GATES, not decoration. The host downgrades a \`healthy\` whose \`coverage\` is`,
     `empty — or whose every channel is \`not_attempted\` — or which names no selector, no window,`,
     `or no evidence, to \`indeterminate\`. Three of those on one service opens an incident and`,
-    `sends a person to a cluster. An observer that was never asked for these fields writes a`,
+    `sends a person to the target. An observer that was never asked for these fields writes a`,
     `report that cannot be believed, however carefully it looked.`,
     "",
     "## The seats, and the task id each one's slice is dispatched under",
@@ -1325,13 +1858,7 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
     `the host looks only under the id the slice was dispatched with, so a report filed at your`,
     `id is indistinguishable from a seat that reported nothing at all.`,
     "",
-    "## The services, and the bounds each one was given",
-    "",
-    `Every service below appears in exactly one of your requests. The checks and the window are`,
-    `this service's own: copy them, do not widen them, and do not tidy them.`,
-    "",
-    ...input.services.map((s) => serviceBlock(s, input.defaultWindowS)),
-    "",
+    ...servicesSection,
     "## The verdict rule, verbatim",
     "",
     rule,
@@ -1352,18 +1879,16 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
   ].join("\n");
 
   /*
-   * The declared names are passed to the audit so a previous document that merely
-   * ECHOED them — `unaccounted[]` is exactly that — is not mistaken for prose
-   * crossing between sweeps. The host wrote these names into this very brief.
+   * `declaredNames` and `declaredNamespaces` (computed above, flat across
+   * every environment) are passed to the audit so a previous document that
+   * merely ECHOED them — `unaccounted[]` is exactly that — is not mistaken for
+   * prose crossing between sweeps. The host wrote these names into this very
+   * brief. The namespaces travel with the names because the host writes both
+   * into every brief, and a `selector` that degraded to either is a token the
+   * host handed over rather than prose the worker wrote — see
+   * `workerAuthoredStrings`, and the three sweeps 2026-09-09 spent refusing on
+   * `alert-notifier`.
    */
-  const declaredNames = input.services.map((s) => s.name);
-  /*
-   * The namespaces travel with the names because the host writes both into every
-   * brief, and a `selector` that degraded to either is a token the host handed
-   * over rather than prose the worker wrote — see `workerAuthoredStrings`, and
-   * the three sweeps 2026-09-09 spent refusing on `alert-notifier`.
-   */
-  const declaredNamespaces = input.services.map((s) => s.namespace);
   const issues = [
     ...envelopeIssues(title, input.previousDocument, declaredNames, declaredNamespaces),
     ...envelopeIssues(brief, input.previousDocument, declaredNames, declaredNamespaces),
@@ -1385,19 +1910,77 @@ export function renderSweepEnvelope(input: SweepEnvelopeInput): SweepEnvelope {
  * directory holds exactly what the brief lists, and an observer whose file is not
  * named produced none."* Audited by the same function for the same four classes;
  * a collation brief is an envelope.
+ *
+ * ## `environment`, AND WHY THIS BRIEF IS THE ONLY PLACE THAT CAN STATE IT
+ * ## (SRD-TRIAGE-MIXED-OBSERVERS D21)
+ *
+ * A collator's own pair can cover more than one environment — a k8s slice and
+ * a docker slice under the same collator ({@link SweepPair.environments}) —
+ * and the tracked `triage/targets.yaml` declares `grafana` and `prometheus` in
+ * BOTH the k8s environment and `docker-host`. `resolveRowEnvironment`
+ * (`triage-verdict.ts`) can place a silent row on its own only when exactly
+ * one declared environment lists its service — a service declared under only
+ * one of the pair's environments needs no help from the collator. `grafana`,
+ * declared under both, has two owners rather than one, so a row for it that
+ * names no `environment` still resolves to `null` and its service grades
+ * unreported even though an observer answered for it. The host cannot repair
+ * this the way it repairs the observer's contract: which of the two `grafana`
+ * a COLLATED row is about is the collator's own judgement, made while merging
+ * two observers' replies, not a fact the host can author into every dispatch
+ * the way {@link freshnessEchoDemand} authors a filename.
+ *
+ * So this brief demands `environment` only when `input.environments` — the
+ * OWNING PAIR's own slice, not the whole sweep's — names more than one. A
+ * pair that swept one environment has one legal answer, which the host
+ * already supplies, and its brief renders exactly as it did before.
+ *
+ * `seats`, not a precomputed id list: each reply path is labelled with the
+ * environment its OWN seat belongs to, read through {@link seatKind} and the
+ * pair's own `environments`, so the collator is told which name to copy into
+ * which row. It never has to work that mapping out from turn one's
+ * `## The seats` block, which this turn does not show it.
  */
 export function renderCollationEnvelope(input: {
   readonly sweepId: string;
   readonly environment: string;
-  readonly childTaskIds: readonly string[];
+  /** The owning pair's own seats — one reply path per seat, in this order. */
+  readonly seats: readonly AspectSeat[];
+  /**
+   * The owning pair's own environments (not necessarily the whole sweep's) —
+   * used only to build the `environment` field's legal spellings and to label
+   * each seat's reply path. Length 1 renders exactly as it always has.
+   */
+  readonly environments: readonly SweepEnvironment[];
 }): SweepEnvelope {
   const title = `${input.environment}: reconcile ${input.sweepId}`;
+  const multiEnv = input.environments.length > 1;
+  const nameByKind = new Map(input.environments.map((e) => [e.kind, e.name]));
+  const replyLines = input.seats.map((seat) => {
+    const id = childTaskId(input.sweepId, seat.aspect);
+    if (!multiEnv) return `- ${replyMountPath(id)}`;
+    const kind = seatKind(seat.worker);
+    const envName = kind === null ? null : (nameByKind.get(kind) ?? null);
+    return envName === null ? `- ${replyMountPath(id)}` : `- ${replyMountPath(id)} (${envName})`;
+  });
+  const environmentFieldNote: readonly string[] = !multiEnv
+    ? []
+    : [
+        "",
+        `This collation covers more than one environment, so every row you write in`,
+        `\`${TRIAGE_DOCUMENT_FILE}\` must also carry \`environment\`, spelled exactly as one of:`,
+        `${input.environments.map((e) => `\`${e.name}\``).join(", ")}. The name in parentheses`,
+        `beside a reply path above is the environment that seat observed — copy it into the`,
+        `\`environment\` field of every row you carry from that reply.`,
+      ];
+  const rowFieldsLine = multiEnv
+    ? `Every row of \`${TRIAGE_DOCUMENT_FILE}\` carries \`service\`, \`environment\`, \`assessment\`, \`coverage\`,`
+    : `Every row of \`${TRIAGE_DOCUMENT_FILE}\` carries \`service\`, \`assessment\`, \`coverage\`,`;
   const brief = [
     `Reconcile the observer reports for sweep ${input.sweepId} of ${input.environment}.`,
     "",
     "## The reports, and they are the only ones",
     "",
-    ...input.childTaskIds.map((id) => `- ${replyMountPath(id)}`),
+    ...replyLines,
     "",
     `Read those files and no others. A slice whose file is not listed produced no report, and`,
     `saying so is the correct outcome for it — name it in \`unaccounted\` rather than inferring`,
@@ -1413,15 +1996,19 @@ export function renderCollationEnvelope(input: {
     "",
     "## What to write",
     "",
-    `Write \`${TRIAGE_DOCUMENT_FILE}\` and \`triage.md\` into the \`${SWEEP_FILES_DIR}\` directory of your own`,
-    `outbox task, and declare both in the envelope's \`artifacts\` array. One row per service,`,
-    `never one verdict over a batch. Echo the sweep id ${input.sweepId} in the document.`,
+    `Pass \`${TRIAGE_DOCUMENT_FILE}\` and \`triage.md\` as two entries of ONE \`submit_report\` call's`,
+    `\`report\` list. That call writes them into the \`${SWEEP_FILES_DIR}\` directory of your own`,
+    `outbox task and declares both in \`artifacts\` for you. **Do not put them in \`artifacts\``,
+    `yourself** — you have no \`write\`, so a file you have not passed as \`report\` does not exist`,
+    `and cannot be declared; a measured sweep was lost to exactly that call, repeated unchanged`,
+    `against the same refusal, until the host killed the turn with no document. One row per`,
+    `service, never one verdict over a batch. Echo the sweep id ${input.sweepId} in the document.`,
     "",
     `Carry each observer's own \`assessment\` word through unchanged. Do not upgrade a row whose`,
     `coverage is empty, and do not decide whether anything should be notified — that decision`,
     `belongs to the host, which can see across sweeps and you cannot.`,
     "",
-    `Every row of \`${TRIAGE_DOCUMENT_FILE}\` carries \`service\`, \`assessment\`, \`coverage\`,`,
+    rowFieldsLine,
     `\`selector\`, \`window\` and \`evidence_ref\`, copied from the observer's row and NOT`,
     `reconstructed. Copy \`coverage\` as the list of \`{channel, result}\` objects it already is.`,
     `A row you write without them is a row the host cannot believe: it downgrades an`,
@@ -1429,6 +2016,7 @@ export function renderCollationEnvelope(input: {
     `observer gave you no evidence for a service, carry the empty value through rather than`,
     `inventing one — that is a true report about a report, and it is what \`unaccounted\` and the`,
     `downgrade are both for.`,
+    ...environmentFieldNote,
   ].join("\n");
 
   const issues = envelopeIssues(`${title}\n${brief}`, null);
@@ -1627,8 +2215,8 @@ export type SweepDispatch = (args: {
  *
  * **A pair is the unit, and that is the whole design.** The console is not one
  * collator with two observers (which is what `TRIAGE_CONSOLE_ASPECTS` alone
- * would suggest) and it is not two environments (which `soleEnvironment` refuses,
- * correctly — an environment token is a path segment and the scope every
+ * would suggest) and it is not two k8s environments (which `environmentsByKind`
+ * refuses, correctly — an environment token is a path segment and the scope every
  * incident is reported against, so two tokens for one cluster would report health
  * for a fleet). It is ONE environment whose service list is divided between two
  * collators, each briefing its own observer.
@@ -1647,25 +2235,46 @@ export interface SweepPair {
   readonly collator: string;
   /** The observers it may fan out to — and the only ones it is told exist. */
   readonly seats: readonly AspectSeat[];
-  /** Its slice of the environment, in `triage/targets.yaml` file order. */
-  readonly services: readonly TriageService[];
+  /**
+   * Its own slice of each environment it covers — SRD-TRIAGE-MIXED-OBSERVERS
+   * §5, §6.1, task 4.2. In `triage/targets.yaml` file order within each
+   * environment, and `environments` in the order the sweep declares them.
+   *
+   * **Replaces the flat `services` list this field held through task 4.1.**
+   * One pair can now carry a slice of more than one environment — a k8s slice
+   * and a docker slice under the same collator — which a single `services`
+   * array had no way to key: two environments can each declare a `grafana`
+   * (SRD-TRIAGE-MIXED-OBSERVERS D21), and only `(environment, service)` tells
+   * them apart.
+   */
+  readonly environments: readonly SweepEnvironment[];
 }
 
 export interface SweepProducerDeps {
   readonly run: RunPaths;
-  readonly environment: string;
-  readonly services: readonly TriageService[];
+  /**
+   * Every environment this console's collator(s) sweep, whole —
+   * SRD-TRIAGE-MIXED-OBSERVERS §5, §6.1, task 4.2.
+   *
+   * **Replaces the flat `environment`/`services` pair task 3.3 left standing.**
+   * `openSweep` used to hardcode a single `{name: deps.environment, kind:
+   * "k8s", services: pair.services}` element; this is the WHOLE declared list
+   * a pair's own `environments` slice (above) partitions, so a console that
+   * sweeps docker and vm alongside k8s states all three here once rather than
+   * `openSweep` inventing a kind it was never told.
+   */
+  readonly environments: readonly SweepEnvironment[];
   /**
    * The console's pairs. Defaults to the ONE pair this console shipped with —
-   * `TRIAGE_COLLATOR` over `TRIAGE_CONSOLE_ASPECTS`, sweeping {@link services}
-   * whole — so a caller that knows nothing about pairs gets exactly the
-   * behaviour it had before this field existed.
+   * `TRIAGE_COLLATOR` over the seats of the kinds {@link environments} names,
+   * sweeping {@link environments} whole — so a caller that knows nothing about
+   * pairs gets exactly the behaviour it had before this field existed.
    *
-   * {@link services} stays because it is still the environment's WHOLE declared
-   * list: the pairs' slices partition it, and a caller that supplies `pairs`
-   * supplies slices that must add up to it. Nothing here checks that — the host
-   * checks it where it already checks partitions, in `checkTriagePartition`
-   * against `declared`.
+   * {@link environments} stays because it is still every environment's WHOLE
+   * declared list: a pair's own `environments` slices partition it, and a
+   * caller that supplies `pairs` supplies slices that must add up to it.
+   * Nothing here checks that — the host checks it where it already checks
+   * partitions, in `checkTriagePartition` against `declared`.
    */
   readonly pairs?: readonly SweepPair[];
   readonly defaultWindowS: number;
@@ -1675,8 +2284,8 @@ export interface SweepProducerDeps {
    *
    * **It takes the collator as of 2026-09-12, and a zero-arg version was a silent
    * half-blinding.** `renderSweepEnvelope` projects this through
-   * `projectPreviousState(previousDocument, declared)`, which keeps only rows
-   * whose service is in THIS pair's slice. Each collator writes a document
+   * `projectPreviousState(previousDocument, environments)`, which keeps only
+   * rows whose service is in THIS pair's slice. Each collator writes a document
    * covering only its own half, so handing `tri-2` the document `tri-1` wrote
    * leaves nothing that survives the projection: `tri-2` would open every sweep
    * with *"There is no previous state for this environment"* and lose the carried
@@ -1770,6 +2379,53 @@ export interface SweepProducers {
 }
 
 /**
+ * The seats of {@link TRIAGE_CONSOLE_ASPECTS} whose kind has an environment in
+ * `environments` — SRD-TRIAGE-MIXED-OBSERVERS §5, tasks 4.2 and 5.1's shared
+ * rule for which seats a sweep may name.
+ *
+ * **This closes the trap task 4.1 left standing.** `src/cli/commands/triage.ts`
+ * built `seatShares` from all six `TRIAGE_CONSOLE_ASPECTS` regardless of which
+ * kinds the sweep actually declared, so a k8s-only sweep's envelope still
+ * named `obs-td1`, `obs-td2` and `obs-tv1` in its `## The seats` block — and
+ * since task 4.1, a collator hands a k8s service to a seat and a docker/vm
+ * seat gets the whole sweep refused for a kind mismatch it never had a
+ * service for. Production passes only the seats whose kind this sweep
+ * actually covers.
+ *
+ * Exported so `buildTriageSweepDriver` computes the same set the default pair
+ * below does, rather than each re-deriving it and risking the two disagreeing
+ * about which seats a given sweep may address — `sweepProducers`'s own
+ * argument about `pairs` at a smaller scale.
+ */
+export function seatsForEnvironments(
+  environments: readonly SweepEnvironment[],
+  seats: readonly AspectSeat[] = TRIAGE_CONSOLE_ASPECTS,
+): readonly AspectSeat[] {
+  const kinds = new Set(environments.map((e) => e.kind));
+  return seats.filter((seat) => {
+    const kind = seatKind(seat.worker);
+    return kind !== null && kinds.has(kind);
+  });
+}
+
+/**
+ * Whether `pair` covers at least one service, over every environment its own
+ * slice names — SRD-TRIAGE-MIXED-OBSERVERS task 4.2.
+ *
+ * **The unit `openSweep`, `collate` and `buildTriageSweepDriver`'s
+ * `readPartition` all skip a pair for.** `pair.services.length === 0` was the
+ * check before {@link SweepPair.environments} replaced the flat `services`
+ * list; with more than one environment per pair a pair can be non-empty in
+ * one environment and empty in another, so the question is no longer "is the
+ * one list empty" but "does ANY environment in this pair's slice have a
+ * service" — an envelope naming an environment with nothing in it is still an
+ * envelope naming something.
+ */
+export function pairHasService(pair: SweepPair): boolean {
+  return pair.environments.some((e) => e.services.length > 0);
+}
+
+/**
  * Assemble the four, over one injected dispatch.
  *
  * A factory rather than four exported functions each taking the same six
@@ -1791,7 +2447,11 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
    * dispatched under one pairing and harvested under another.
    */
   const pairs: readonly SweepPair[] = deps.pairs ?? [
-    { collator: TRIAGE_COLLATOR, seats: TRIAGE_CONSOLE_ASPECTS, services: deps.services },
+    {
+      collator: TRIAGE_COLLATOR,
+      seats: seatsForEnvironments(deps.environments),
+      environments: deps.environments,
+    },
   ];
 
   const openSweep = async (sweepId: string, dispatchedAt: string): Promise<SweepOpen> => {
@@ -1815,19 +2475,18 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
      */
     for (const pair of pairs) {
       /*
-       * A pair with an EMPTY slice is not dispatched, and `evenSlices` promises
-       * this case exists: with fewer services than collators the trailing slice
-       * is `[]`. An envelope naming no services asks a model to partition
-       * nothing, and whatever it wrote would be refused as `partition_incomplete`
-       * against an empty declared list — a refusal naming the console rather
-       * than the environment.
+       * A pair whose every environment is EMPTY is not dispatched, and
+       * `evenSlices` promises this case exists: with fewer services than
+       * collators the trailing slice is `[]`. An envelope naming no services
+       * asks a model to partition nothing, and whatever it wrote would be
+       * refused as `partition_incomplete` against an empty declared list — a
+       * refusal naming the console rather than the environment.
        */
-      if (pair.services.length === 0) continue;
+      if (!pairHasService(pair)) continue;
       const envelope = renderSweepEnvelope({
         sweepId,
         windowOpenedAt: windowOpenedAt(dispatchedAt, deps.defaultWindowS),
-        environment: deps.environment,
-        services: pair.services,
+        environments: pair.environments,
         defaultWindowS: deps.defaultWindowS,
         previousDocument: await deps.previousDocument(pair.collator),
         seats: pair.seats,
@@ -1916,6 +2575,25 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
     }
     const childId = childTaskId(sweepId, seat.aspect);
     /*
+     * THE SEAT'S KIND — refused rather than guessed (SRD-TRIAGE-MIXED-OBSERVERS
+     * §5). `composeObserverBrief` needs it to pick the right artifact filename
+     * and the right call-bound paragraph, and `seatKind` answers `null` for any
+     * worker `TRIAGE_SEAT_KINDS` does not name rather than defaulting to k8s.
+     * `owner`/`seat` above already prove `assignment.worker` is a real seat of
+     * this console, so a `null` here means the console's own kind table and its
+     * seat roster have drifted apart — a host invariant violation, thrown the
+     * same way the two reads above are, never silently dispatched as k8s.
+     */
+    const kind = seatKind(assignment.worker);
+    if (kind === null) {
+      throw new SweepEnvelopeError(
+        `${assignment.worker} is a seat of the triage console but TRIAGE_SEAT_KINDS names no ` +
+          `kind for it, so no artifact filename or call-bound paragraph can be composed. This is ` +
+          `a host configuration fault — every worker a pair's seats can name must also be in ` +
+          `TRIAGE_SEAT_KINDS — never a seat this dispatch guesses a kind for.`,
+      );
+    }
+    /*
      * §6.3 step 5, as ISC-1136 divides it: `item.brief` is the collator's
      * per-sweep JUDGEMENT and nothing more, and the host composes the invariant
      * half around it. This replaced four sequential repairs on one document —
@@ -1926,6 +2604,7 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
       judgement: item.brief,
       sweepId,
       childTaskId: childId,
+      kind,
     });
     /*
      * The ONE warning left, and it survives because its repair does. The other
@@ -1998,10 +2677,34 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
      * that read `/policy/replies` mid-join would see a truthful-looking subset.
      */
     const publishable: (DeclaredReply & { reply: unknown })[] = [];
-    for (const seat of TRIAGE_CONSOLE_ASPECTS) {
+    /*
+     * THE RESOLVED PAIRS' SEATS, not `TRIAGE_CONSOLE_ASPECTS` — task 5.1.
+     *
+     * Reading every console seat regardless of which pair (if any) claims it
+     * is the other half of the trap `seatsForEnvironments` closes at dispatch:
+     * a seat this sweep never dispatched to has no reply to find, and reading
+     * `TRIAGE_CONSOLE_ASPECTS` whole would ask `observerArtifactPath` for a
+     * path under a task id `childTaskId` never minted for that seat. Flattened
+     * across pairs rather than nested, because nothing below this line needs
+     * to know which pair a seat belongs to — only its kind, which `seatKind`
+     * answers directly.
+     */
+    for (const seat of pairs.flatMap((p) => p.seats)) {
+      const kind = seatKind(seat.worker);
+      if (kind === null) {
+        // Unreachable in production: every seat here came from a pair's own
+        // `seats`, and `seatsForEnvironments` (or a caller-supplied `pairs`)
+        // only ever names a seat `TRIAGE_SEAT_KINDS` recognises. Thrown rather
+        // than skipped so a future caller that hands `sweepProducers` a seat
+        // outside that table fails loudly instead of losing its reply silently.
+        throw new SweepEnvelopeError(
+          `${seat.worker} is a seat of this sweep's pairs, but triage-seat-kinds.ts names no ` +
+            `kind for it, so no reply filename can be chosen for it.`,
+        );
+      }
       const taskId = childTaskId(sweepId, seat.aspect);
       const seatTree = await seatRun(seat.worker);
-      const path = observerArtifactPath(seatTree, seat.worker, taskId);
+      const path = observerArtifactPath(seatTree, seat.worker, taskId, kind);
       const found = await readObserverArtifactAt(path, { worker: seat.worker, path }, read);
       if (found.kind === "ok") {
         replies.push(found.reply);
@@ -2198,18 +2901,35 @@ export function sweepProducers(deps: SweepProducerDeps): SweepProducers {
 
     for (const pair of pairs) {
       // Not dispatched, so nothing to collate — `openSweep` skipped it too.
-      if (pair.services.length === 0) continue;
+      if (!pairHasService(pair)) continue;
+
+      /*
+       * THE LABEL `renderCollationEnvelope` NAMES — one environment's own
+       * name when the pair covers exactly one, the names joined with `, `
+       * when it covers more, mirroring how `renderSweepEnvelope`'s title
+       * names several (`:1426-1429` above). `deps.environment` does not
+       * exist any more — a pair can now cover more than one environment, so
+       * there is no longer one flat name to read off `deps`.
+       */
+      const environmentLabel =
+        pair.environments.length === 1
+          ? pair.environments[0]!.name
+          : pair.environments.map((e) => e.name).join(", ");
 
       const envelope = renderCollationEnvelope({
         sweepId,
-        environment: deps.environment,
+        environment: environmentLabel,
         /*
          * ITS OWN seats only. A collation brief naming the other pair's child id
          * would point this collator at `/replies/<id>.json` files that were
          * published into the other collator's run — a path it cannot read, about
          * an observer it never briefed.
          */
-        childTaskIds: pair.seats.map((s) => childTaskId(sweepId, s.aspect)),
+        seats: pair.seats,
+        // ITS OWN environments — the kind-to-name mapping `renderCollationEnvelope`
+        // needs to label each seat's reply path and to decide whether `environment`
+        // is even ambiguous for this pair's own rows (SRD-TRIAGE-MIXED-OBSERVERS D21).
+        environments: pair.environments,
       });
       const outcome = await deps.dispatch({
         taskId: collateTaskId,

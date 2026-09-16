@@ -211,6 +211,40 @@ describe("the trigger reaches a surface adopted by --attach-here", () => {
       /--attach-here/,
     );
   });
+
+  test("focus scopes focus-pane to the pane's own workspace, not the caller's", async () => {
+    // Without `--workspace`, cmux resolves the pane against `$CMUX_WORKSPACE_ID`,
+    // so `pifleet attach` run from inside another workspace reports a pane that
+    // exists as `not_found` (measured on 0.64.22, 2026-09-13).
+    const seen: string[][] = [];
+    const backend = new CmuxBackend({
+      exec: async (argv): Promise<ExecResult> => {
+        seen.push(argv);
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    });
+    await backend.focus({ backend: "cmux", id: "pane-1 surf-1 ws-1" });
+    const focus = seen.find((argv) => argv.includes("focus-pane"));
+    expect(focus, "no focus-pane call").toBeDefined();
+    expect(focus!.slice(focus!.indexOf("focus-pane"))).toEqual([
+      "focus-pane",
+      "--workspace",
+      "ws-1",
+      "--pane",
+      "pane-1",
+    ]);
+  });
+
+  test("focus refuses a pane recorded without its workspace BY NAME", async () => {
+    // The 2-field id a pre-`--workspace` build persisted. Emitting a bare
+    // `--pane` for it is the defect above; refusing names the repair.
+    const backend = new CmuxBackend({
+      exec: async (): Promise<ExecResult> => ({ code: 0, stdout: "", stderr: "", timedOut: false }),
+    });
+    await expect(backend.focus({ backend: "cmux", id: "pane-1 surf-1" })).rejects.toThrow(
+      /no workspace to scope focus-pane to/,
+    );
+  });
 });
 
 describe("the session is cleared AFTER the task settles", () => {

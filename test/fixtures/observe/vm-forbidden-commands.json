@@ -1,0 +1,849 @@
+{
+  "measured_with": {
+    "script": "scripts/observe/characterise-vm",
+    "git_head": "fa276f5",
+    "uncommitted_changes_to_measured_files": [],
+    "target": "operator-supplied; address and account not recorded",
+    "target_os": "Ubuntu 24.04.5 LTS",
+    "target_systemd": "systemd 255 (255.4-1ubuntu8.17)",
+    "oldest_image": "rockylinux:8",
+    "oldest_image_id": "sha256:9794037624aaa6212aeada1d28861ef5e0a935adaf93e4ef79837119f2a2d04c",
+    "oldest_systemd": "systemd 239 (239-78.el8)",
+    "measured_at": "2026-09-14T22:11:02.353Z"
+  },
+  "allowed_systemctl": [
+    "is-system-running",
+    "list-units",
+    "show"
+  ],
+  "entries": [
+    {
+      "command": "add-requires",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "add-wants",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "apt remove openssh-server",
+      "source": "SRD-OBSERVER-ROLES §6.4: a package manager"
+    },
+    {
+      "command": "apt-get remove openssh-server",
+      "source": "SRD-OBSERVER-ROLES §6.4: a package manager"
+    },
+    {
+      "command": "bind",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "cancel",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Job Commands"
+    },
+    {
+      "command": "cat",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "cat /etc/shadow",
+      "source": "SRD-OBSERVER-ROLES §6.4: a free-form path read"
+    },
+    {
+      "command": "clean",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "daemon-reexec",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Manager Lifecycle Commands"
+    },
+    {
+      "command": "daemon-reload",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Manager Lifecycle Commands"
+    },
+    {
+      "command": "default",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "disable",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "dnf remove openssh-server",
+      "source": "SRD-OBSERVER-ROLES §6.4: a package manager"
+    },
+    {
+      "command": "edit",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "emergency",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "enable",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "exit",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "freeze",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "get-default",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "halt",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "help",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "hibernate",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "hybrid-sleep",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "import-environment",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands"
+    },
+    {
+      "command": "is-active",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "is-enabled",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "is-failed",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "isolate",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --cursor-file=/etc/shadow",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Filtering Options, reads FILE"
+    },
+    {
+      "command": "journal since=60s lines=10 --directory=/etc/shadow",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Options, reads PATH"
+    },
+    {
+      "command": "journal since=60s lines=10 --disk-usage",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --dump-catalog",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --field=_PID",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --fields",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --file=/etc/shadow",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Options, reads PATH"
+    },
+    {
+      "command": "journal since=60s lines=10 --flush",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --header",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --help",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --image=/etc/shadow",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Source Options, reads PATH"
+    },
+    {
+      "command": "journal since=60s lines=10 --list-boots",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --list-catalog",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --new-id128",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --relinquish-var",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --root=/",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Options, reads ROOT"
+    },
+    {
+      "command": "journal since=60s lines=10 --root=/etc/shadow",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Source Options, reads PATH"
+    },
+    {
+      "command": "journal since=60s lines=10 --rotate",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --setup-keys",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --smart-relinquish-var",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --sync",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --update-catalog",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --vacuum-files=1",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --vacuum-size=1K",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --vacuum-time=1s",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --verify",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "journal since=60s lines=10 --version",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --cursor-file=/etc/shadow",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Filtering Options, reads FILE"
+    },
+    {
+      "command": "kernel since=60s lines=10 --directory=/etc/shadow",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Options, reads PATH"
+    },
+    {
+      "command": "kernel since=60s lines=10 --disk-usage",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --dump-catalog",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --field=_PID",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --fields",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --file=/etc/shadow",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Options, reads PATH"
+    },
+    {
+      "command": "kernel since=60s lines=10 --flush",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --header",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --help",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --image=/etc/shadow",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Source Options, reads PATH"
+    },
+    {
+      "command": "kernel since=60s lines=10 --list-boots",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --list-catalog",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --new-id128",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --relinquish-var",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --root=/",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Options, reads ROOT"
+    },
+    {
+      "command": "kernel since=60s lines=10 --root=/etc/shadow",
+      "source": "journalctl --help (systemd 255 (255.4-1ubuntu8.17)), Source Options, reads PATH"
+    },
+    {
+      "command": "kernel since=60s lines=10 --rotate",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --setup-keys",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --smart-relinquish-var",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --sync",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --update-catalog",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --vacuum-files=1",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --vacuum-size=1K",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --vacuum-time=1s",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --verify",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kernel since=60s lines=10 --version",
+      "source": "journalctl --help (systemd 239 (239-78.el8)), Commands"
+    },
+    {
+      "command": "kexec",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "kill",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "kill 1",
+      "source": "SRD-OBSERVER-ROLES §6.4: signals a process"
+    },
+    {
+      "command": "link",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "list-automounts",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "list-dependencies",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "list-jobs",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Job Commands"
+    },
+    {
+      "command": "list-machines",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Machine Commands"
+    },
+    {
+      "command": "list-paths",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "list-sockets",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "list-timers",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "list-unit-files",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "log-level",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Manager State Commands"
+    },
+    {
+      "command": "log-target",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Manager State Commands"
+    },
+    {
+      "command": "mask",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "mount-image",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "poweroff",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "preset",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "preset-all",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "reboot",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "reenable",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "reload",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "reload-or-restart",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "rescue",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "reset-failed",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "restart",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "revert",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "rpm -e openssh-server",
+      "source": "SRD-OBSERVER-ROLES §6.4: a package manager"
+    },
+    {
+      "command": "service-log-level",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "service-log-target",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "service-watchdogs",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Manager State Commands"
+    },
+    {
+      "command": "set-default",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "set-environment",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands"
+    },
+    {
+      "command": "set-property",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "show-environment",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands"
+    },
+    {
+      "command": "shutdown",
+      "source": "SRD-OBSERVER-ROLES §6.4: powers the VM off"
+    },
+    {
+      "command": "soft-reboot",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), System Commands"
+    },
+    {
+      "command": "start",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "status",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "stop",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "sudo systemctl restart sshd.service",
+      "source": "SRD-OBSERVER-ROLES §6.4: sudo"
+    },
+    {
+      "command": "suspend",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "suspend-then-hibernate",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "switch-root",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands"
+    },
+    {
+      "command": "systemctl restart sshd.service",
+      "source": "SRD-OBSERVER-ROLES §6.4: systemctl as a verb"
+    },
+    {
+      "command": "thaw",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "try-reload-or-restart",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "try-restart",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands"
+    },
+    {
+      "command": "unit add-requires sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit add-wants sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit bind sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit cancel sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Job Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit cat sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit clean sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit daemon-reexec sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Manager Lifecycle Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit daemon-reload sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Manager Lifecycle Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit default sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit disable sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit edit sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit emergency sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit enable sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit exit sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit freeze sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit get-default sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit halt sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit help sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit hibernate sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit hybrid-sleep sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit import-environment sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit is-active sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit is-enabled sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit is-failed sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit isolate sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit kexec sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit kill sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit link sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-automounts sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-dependencies sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-jobs sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Job Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-machines sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Machine Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-paths sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-sockets sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-timers sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit list-unit-files sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit log-level sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Manager State Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit log-target sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Manager State Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit mask sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit mount-image sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit poweroff sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit preset sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit preset-all sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit reboot sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit reenable sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit reload sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit reload-or-restart sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit rescue sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit reset-failed sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit restart sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit revert sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit service-log-level sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit service-log-target sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit service-watchdogs sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Manager State Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit set-default sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit set-environment sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit set-property sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit show-environment sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit soft-reboot sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit start sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit status sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit stop sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit suspend sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit suspend-then-hibernate sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit switch-root sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), System Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit thaw sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit try-reload-or-restart sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit try-restart sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit unmask sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit unset-environment sshd.service",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unit whoami sshd.service",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands, as a unit sub-verb"
+    },
+    {
+      "command": "unmask",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Unit File Commands"
+    },
+    {
+      "command": "unset-environment",
+      "source": "systemctl --help (systemd 239 (239-78.el8)), Environment Commands"
+    },
+    {
+      "command": "whoami",
+      "source": "systemctl --help (systemd 255 (255.4-1ubuntu8.17)), Unit Commands"
+    },
+    {
+      "command": "yum remove openssh-server",
+      "source": "SRD-OBSERVER-ROLES §6.4: a package manager"
+    },
+    {
+      "command": "zypper remove openssh",
+      "source": "SRD-OBSERVER-ROLES §6.4: a package manager"
+    }
+  ]
+}

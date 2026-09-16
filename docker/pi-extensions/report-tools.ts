@@ -322,7 +322,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
  * citation the SRD carried in three places about a different file that was also
  * never written. The check now reads the real `types.d.ts` out of the image and
  * compares this interface's members, and the events every `pi.on` call
- * subscribes to, against it — for all three extensions, not just this one.
+ * subscribes to, against it — for all four extensions, not just this one.
  */
 export interface ExtensionAPI {
   registerTool<Params>(tool: ToolDefinitionLike<Params>): void;
@@ -555,6 +555,42 @@ export const MAX_DISPATCH_SERVICES = 16;
  * that is not a name.
  */
 export const DISPATCH_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+/**
+ * Mirrors `OBSERVER_ARTIFACT_JSON_BY_WORKER` (`src/run/dispatch-request.ts`).
+ *
+ * The host's own `observer_artifact_mismatch` refusal (SRD-TRIAGE-MIXED-OBSERVERS
+ * §5) exists because sweeps 146 and 147 each sent every k8s brief an invented
+ * artifact name — `observer-k8s.json`/`.md`, then `observer-k8s-ops.json`/`.md` —
+ * and the observer that obeyed the brief delivered nothing the host could read.
+ * But that refusal runs on the HOST, after the whole file is written and the
+ * dispatching task has SETTLED: it refuses the entire fan-out, silently, to a
+ * model that has already ended its turn and never reads the reason — a sweep
+ * that used to lose one slice now loses all six. Checked HERE instead, inside
+ * the tool call and before anything is written (see the loop in
+ * `dispatchRequest` below), the same mistake is a validation error the model
+ * reads and can act on, by calling `dispatch_request` again with the brief
+ * fixed, before its turn ends.
+ */
+export const OBSERVER_ARTIFACT_JSON_BY_WORKER: Readonly<Record<string, string>> = Object.freeze({
+  "obs-t1": "observer-ops.json",
+  "obs-t2": "observer-ops.json",
+  "obs-t3": "observer-ops.json",
+  "obs-td1": "observer-docker-ops.json",
+  "obs-td2": "observer-docker-ops.json",
+  "obs-tv1": "observer-vm-ops.json",
+});
+
+/**
+ * Mirrors `OBSERVER_ARTIFACT_TOKEN_RE` (`src/run/triage-envelope.ts`), which
+ * `src/run/dispatch-request.ts` keeps its own pinned copy of rather than
+ * importing — this file re-spells it for the same reason that one does: wider
+ * than any one worker's pair, so the check below can find whatever a brief
+ * actually names and compare it against {@link OBSERVER_ARTIFACT_JSON_BY_WORKER},
+ * rather than search the text for one hardcoded wrong answer among infinitely
+ * many.
+ */
+export const OBSERVER_ARTIFACT_TOKEN_RE = /\bobserver-[a-z0-9-]+\.(?:json|md)\b/g;
 
 /** `submit_report`'s arguments — `schema`, `task_id`, `epoch` and `worker` are absent and that is the point. */
 export interface SubmitReportParams {
@@ -1987,6 +2023,29 @@ export function dispatchRequest(
           `\`services\` for \`${item.worker}\` holds \`${service}\`, which is not a service ` +
             `name. It keys an incident record under ~/.pifleet/triage/ on the host, so it is ` +
             `bounded like the path segment it becomes rather than like free text.`,
+        );
+      }
+    }
+    // The observer's own reply-artifact pair — SRD-TRIAGE-MIXED-OBSERVERS §5,
+    // sweeps 146 and 147 (see `OBSERVER_ARTIFACT_JSON_BY_WORKER` above for the
+    // measurement and for why this must be caught here rather than left to the
+    // host's `observer_artifact_mismatch`). Only a worker this table names has
+    // a reply artifact of its own; every other worker — a review-console
+    // reviewer, say — is untouched, so this never fires for a console that has
+    // no such seats.
+    const correctJson = OBSERVER_ARTIFACT_JSON_BY_WORKER[item.worker];
+    if (correctJson !== undefined) {
+      const correctMd = `${correctJson.slice(0, -".json".length)}.md`;
+      const found = new Set<string>();
+      for (const match of item.brief.matchAll(OBSERVER_ARTIFACT_TOKEN_RE)) found.add(match[0]);
+      const wrong = [...found].filter((name) => name !== correctJson && name !== correctMd);
+      if (wrong.length > 0) {
+        refuse(
+          `\`brief\` for \`${item.worker}\` names ${wrong.length} artifact ` +
+            `name${wrong.length === 1 ? "" : "s"} it does not own (${wrong.join(", ")}). ` +
+            `${item.worker}'s own reply pair is ${correctJson} and ${correctMd} ` +
+            `(SRD-TRIAGE-MIXED-OBSERVERS §5) — rewrite the brief naming exactly those two names ` +
+            `and call \`dispatch_request\` again.`,
         );
       }
     }

@@ -79,28 +79,28 @@ run:
   # bind on, at any value. The triage console is the first run holding MORE
   # THAN ONE seat, which is what finally gave this key something to bind on.
   #
-  # THE ARGUMENT THAT RAISED IT IS LIVE AGAIN AND THE VALUE FITS EXACTLY. That
-  # argument was a three-wide fan-out needing at least 3. It went stale on
-  # 2026-09-11 when the console shrank to `tri-1` + `obs-t1` and the fan-out
-  # became one observer wide, and it is true again as of 2026-09-13: the console
-  # is FOUR seats — `tri-1` over `obs-t1`, `obs-t2` and `obs-t3`
-  # (`DEFAULT_TRIAGE_WORKERS`, `src/backends/cmux/operations-plan.ts`) — and the
-  # fan-out really is three observers wide. An admission budget of four is spent
-  # by four, with nothing spare. Do not lower this key by reading the paragraph
-  # that called it slack; that paragraph described a console that no longer runs.
-  # `operations-plan.ts:1027-1035` reaches the same reading and names this
-  # block as the stale one.
+  # THE ARGUMENT THAT RAISED IT WAS LIVE AGAIN, BRIEFLY, THEN WENT STALE A
+  # SECOND TIME. That argument was a three-wide fan-out needing at least 3. It
+  # went stale on 2026-09-11 when the console shrank to `tri-1` + `obs-t1` and
+  # the fan-out became one observer wide, then true again as of 2026-09-13: the
+  # console was FOUR seats — `tri-1` over `obs-t1`, `obs-t2` and `obs-t3`
+  # (`DEFAULT_TRIAGE_WORKERS`, `src/backends/cmux/operations-plan.ts`) — an
+  # admission budget of four spent by four, with nothing spare. That reading is
+  # itself stale as of 2026-09-14: the triage console grew to SEVEN seats and
+  # this key moved to 12 as SRD-TRIAGE-MIXED-OBSERVERS owner decision 6 (D16),
+  # NOT derived from seat-count arithmetic — see below.
   #
   # DO NOT LOWER IT BY READING THAT. This bounds a RUN rather than the host,
   # and a hand-run `up` over a wider worker set is the same run — the slack is
   # the margin a widened roster spends instead of serialising.
   #
-  # THE COST, which is the reason this is 4 and not higher: the bound that
-  # actually matters is oMLX throughput, and both triage seats are LOCAL
-  # (D1 arm 3). Four concurrent local requests from this run is the ceiling
-  # this number sets --- a larger value would not make the sweep faster and
-  # would let some future multi-worker run outrun the server it shares.
-  max_concurrent: 4          # bounded by oMLX throughput, not pane count (§5.9)
+  # THE COST no longer sets this value. Four concurrent local requests was the
+  # ceiling while the value was 4 and both triage seats were LOCAL oMLX calls
+  # (D1 arm 3); SRD-TRIAGE-MIXED-OBSERVERS D16 raises it to 12 for the
+  # seven-seat console as an explicit owner decision, not a recomputed
+  # throughput bound. Whether 12 concurrent local requests still fits oMLX's
+  # throughput is unmeasured — revisit if a sweep starts queuing.
+  max_concurrent: 12          # bounded by oMLX throughput, not pane count (§5.9)
   # The F39 RUNTIME detector (§5.9 detector 2). A worker completing this many
   # consecutive turns with ZERO tool calls is failed `no_tool_calls` rather than
   # settling "successfully" — the startup probe catches a model that cannot emit
@@ -174,7 +174,7 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
   #     allow:
   #       - {host: 192.168.86.49, port: 8000}
   api_key_env: OMLX_API_KEY  # self-hosted server credential, injected by the supervisor
-  model: gemma-4-26b-a4b-it-bf16
+  model: gemma-4-26b-a4b-it
   thinking: medium
   models_allowlist:          # checked against GET /v1/models at `up`
     # The `triage` console's two seats, both LOCAL — see the role below.
@@ -195,7 +195,13 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
     # this change: `config validate CLI (ISC-58) > exits 0 on the shipped
     # example` went red the moment the seats moved and this line had not. The
     # guard did its job; the note above predicted the shape precisely.
-    - gemma-4-26b-a4b-it-bf16
+    #
+    # [2026-09-15] Moved again, this time dropping only the `-bf16` suffix:
+    # the live endpoint moved to the operator's other self-hosted server,
+    # which serves `gemma-4-26b-a4b-it` and only that name. The warning above
+    # still applies — this entry has to move in lockstep with every `model:`
+    # pin above and below or `up` refuses the seats that outrun it.
+    - gemma-4-26b-a4b-it
   require_native_tool_calls: true   # `up` probes each model — see §5.9
   #
   # PER-MODEL CONTEXT WINDOWS live on a PROVIDER block, so they appear under
@@ -340,7 +346,7 @@ secrets:
     - name: TICKET_PROJECT
       credential: false
     #
-    # `observer`'s own three pairs, added for the same delivery reason and
+    # `observer-k8s`'s own three pairs, added for the same delivery reason and
     # carrying the SAME trap one order of magnitude wider — three base URLs
     # instead of one. THE FAILURE THIS RECORDS: before the `credential: false`
     # erratum above existed, every `TICKET_BASE_URL` was granted as a bare
@@ -348,7 +354,7 @@ secrets:
     # legitimately NAME the endpoint they queried. Every `ticket-ops.json`
     # that did its job honestly was refused as leaking a credential, every
     # refusal was recorded as a discrepancy nothing caused, and every verdict
-    # clamped on evidence that was never a leak. `observer`'s reports are
+    # clamped on evidence that was never a leak. `observer-k8s`'s reports are
     # WORSE hit if this is not learned here: a build URL or a dashboard link
     # is close to the single most useful line in a deploy report, and this
     # role carries three base URLs rather than one. So the tokens are bare
@@ -363,6 +369,32 @@ secrets:
       credential: false
     - name: GRAFANA_BASE_URL
       credential: false
+    #
+    # `observer-docker`'s three (§5.5, §5.7) — an OpenSSH key, its target's
+    # host keys, and its target inventory (`token host port user` per line).
+    # ALL THREE marked `multiline: true`, because each is legitimately more
+    # than one line and `buildWorkerEnv` refuses a newline in any granted
+    # value unless its entry carries the mark — the ticket and observer-k8s
+    # secrets above are single-line values, which is why none of them do.
+    - name: OBSERVER_DOCKER_SSH_KEY        # credential: swept as a needle
+      multiline: true
+    - name: OBSERVER_DOCKER_KNOWN_HOSTS    # public host keys
+      credential: false
+      multiline: true
+    - name: OBSERVER_DOCKER_TARGETS        # "token host port user" per line
+      credential: false
+      multiline: true
+    #
+    # `observer-vm`'s three (§6.6) — the SSH twin of observer-docker's key,
+    # host keys and target inventory above. All three multiline, same reason.
+    - name: OBSERVER_VM_SSH_KEY            # credential: swept as a needle
+      multiline: true
+    - name: OBSERVER_VM_KNOWN_HOSTS        # public host keys
+      credential: false
+      multiline: true
+    - name: OBSERVER_VM_TARGETS            # "token host port user" per line
+      credential: false
+      multiline: true
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.
@@ -411,7 +443,7 @@ egress:
     # match silently denies the destination it was written for.
     - {host: tickets.example.com, port: 443}
     #
-    # `observer`'s destination classes (§6.4) — one exact host, one port,
+    # `observer-k8s`'s destination classes (§6.4) — one exact host, one port,
     # exactly like the rule above; a host with any port is a tunnel, not an
     # allowance. FOUR new rules, not five: the fifth class in §6.4's table is
     # Google's own API endpoints (container/logging/monitoring/auth), and
@@ -422,6 +454,15 @@ egress:
     - {host: ci-build.example.com, port: 443}     # image-build server, D4 — build-failure logs
     - {host: k8s-control.example.com, port: 443}  # a control-plane endpoint — kubectl, helm
     - {host: grafana.example.com, port: 443}      # dashboard + datasource checks
+    #
+    # `observer-docker`'s one destination (§5.5, §5.7) — the enrolled target's
+    # SSH port. Reaching it without the key buys a banner and nothing else;
+    # the credential is delivered only to `observer-docker`.
+    - {host: docker-host.example.com, port: 22}
+    #
+    # `observer-vm`'s one destination (§6.6) — the enrolled VM's SSH port,
+    # same as observer-docker's rule above.
+    - {host: vm-1.example.com, port: 22}
 
 # Which changed files count as the EXAM rather than the answer (§6.5, §8.2a). A
 # diff touching one caps the verdict at `unknown`: a worker that can rewrite the
@@ -476,18 +517,18 @@ defaults:
 roles:
   # ---- SRE / cloud-ops: the primary role set ----
   sre:                                    # diagnoses AND remediates
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: base                       # gcloud/kubectl/helm are in every image
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
     append_system_prompt_file: ./roles/sre.md
-  observer:                               # read-only diagnostic role — replaces
+  observer-k8s:                           # read-only diagnostic role — replaces
                                            # `investigator` in this same change (D2);
                                            # deploy watches AND ad-hoc service inquiries,
                                            # one skill bundle, `mode` picks the shape
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     thinking: high                        # reconciling four disagreeing channels is the job
     toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
     tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox artifact only
@@ -505,9 +546,55 @@ roles:
     pane_mode: rpc                        # tui allocates no epoch — a re-dispatched watch
                                            # pass would run twice; see the schema-level warning
                                            # this config would otherwise trip (SRD §6.2, §7.5)
-    append_system_prompt_file: ./roles/observer.md
+    append_system_prompt_file: ./roles/observer-k8s.md
+  observer-docker:                        # read-only diagnostic role for a Docker host —
+                                           # SRD-OBSERVER-ROLES §5; the read-only boundary lives
+                                           # in the target-side credential, not in this role, so
+                                           # there is no cloud_access, no kubectl and no verb gate
+                                           # to configure here — see roles/observer-docker.md
+    model: gemma-4-26b-a4b-it        # the same local model as observer-k8s — §5.5
+    thinking: high
+    toolchain: base                       # deliberately NO `docker` CLI in the image — a default
+                                           # `docker ps` would dial /var/run/docker.sock, the
+                                           # honeypot, and log an escape attempt; openssh-client
+                                           # and the observe-docker/observe-ssh shims live in the
+                                           # shared base layer instead (Phase 3), so this line adds
+                                           # nothing Docker-specific of its own
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox pair only
+    skills: [pifleet-worker, observer-docker-ops]
+    cloud_access: false                   # holds no Google identity — nothing here is a cluster
+    egress_access: true                   # a ROUTE to the CONNECT proxy; destinations are egress.allow
+    secrets:                              # an OpenSSH key, its target's host keys, its target
+                                           # inventory — §5.7; all three are multiline (below)
+      - OBSERVER_DOCKER_SSH_KEY
+      - OBSERVER_DOCKER_KNOWN_HOSTS
+      - OBSERVER_DOCKER_TARGETS
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    pane_mode: rpc                        # obs-d1 stays in no console — see Q10;
+                                           # obs-td1/obs-td2 (triage-only) also
+                                           # use this role and inherit rpc here
+    append_system_prompt_file: ./roles/observer-docker.md
+  observer-vm:                            # read-only diagnostic role for a VM — SRD-OBSERVER-ROLES
+                                           # §6; twin of observer-docker, reached via SSH only
+    model: gemma-4-26b-a4b-it        # same model as observer-docker
+    thinking: high
+    toolchain: base                       # observe-vm and observe-ssh live in the shared base layer
+    tools: [read, write, bash, grep, find, ls, submit_report]   # write is for the outbox pair only
+    skills: [pifleet-worker, observer-vm-ops]
+    cloud_access: false                   # true only if Q2 enables the cloud channel
+    egress_access: true                   # a ROUTE to the CONNECT proxy; destinations are egress.allow
+    secrets:                              # an OpenSSH key, its target's host keys, its target
+                                           # inventory — §6.6; all three are multiline (below)
+      - OBSERVER_VM_SSH_KEY
+      - OBSERVER_VM_KNOWN_HOSTS
+      - OBSERVER_VM_TARGETS
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    pane_mode: rpc                        # obs-v1 stays in no console — see Q10;
+                                           # obs-tv1 (triage-only) also uses this
+                                           # role and inherits rpc here
+    append_system_prompt_file: ./roles/observer-vm.md
   verifier:                               # confirms a remediation actually worked
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: base
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -517,13 +604,13 @@ roles:
 
   # ---- code roles: available, secondary ----
   engineer:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: node
     tools: [read, write, edit, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/engineer.md
   reviewer:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     thinking: high
     toolchain: base
     # READ PLUS `submit_report`, and NO write, NO bash, NO edit.
@@ -570,8 +657,8 @@ roles:
     # measured all three reviewer models passing 16 384 bytes byte-exact, and a
     # census of 56 harvested reviewer envelopes puts the real maximum at 13 965 —
     # inside, but by 15% rather than by half, which is the margin and not a
-    # comfort. `observer` is NOT cleared on the same evidence (n = 1) and keeps
-    # its `write`.
+    # comfort. `observer-k8s` is NOT cleared on the same evidence (n = 1) and
+    # keeps its `write`.
     #
     # NO `bash`, and this refusal is untouched by any of the above. §12.1's
     # argument was never about writing: a shell is what turns a "read-only"
@@ -602,7 +689,7 @@ roles:
     append_system_prompt_file: ./roles/reviewer.md
     isolation: shared-ro
   tester:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     toolchain: python
     tools: [read, bash, grep, find, ls, submit_report]
     skills: [pifleet-worker]
@@ -610,7 +697,7 @@ roles:
 
   # ---- ticketing: holds a write credential for a system OUTSIDE the fleet ----
   ticketing:
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     # `base` is deliberate and sufficient. The worker talks to the ticket API as
     # plain REST with `curl` and parses with `jq`, both of which are in every
     # image (`docker/Dockerfile:25`). There is NO vendor CLI and there is not
@@ -696,7 +783,7 @@ roles:
     # `ci.yml`'s `PIFLEET_OMLX_MODEL` and ISC-1116: a CI job that cold-loads a
     # model the fleet is NOT running adds a second resident model to a capped
     # oMLX and starves the live seats. This line is the anchor that guard reads.
-    model: gemma-4-26b-a4b-it-bf16
+    model: gemma-4-26b-a4b-it
     thinking: high                        # collating one observer's report into one document IS the job
     toolchain: base                       # it reads artifacts; there is nothing to build
     # `reviewer`'s grant above, copied deliberately — the same set the `review`
@@ -721,10 +808,11 @@ roles:
     # detect it. Passing the collation as an ARGUMENT is only safe if the model
     # carries it intact, so this role kept `write` while `reviewer` lost it. The
     # gate is now closed from the other side: `TRIAGE_DOCUMENT_MAX_BYTES` bounds
-    # the document at 4 096 bytes and REFUSES above it, and
-    # `MAX_SERVICES_PER_ENVIRONMENT` and `TRIAGE_NOTE_MAX_BYTES` came down to 8
-    # and 1 024 so that bound is reachable rather than nominal. An observed
-    # maximum is not a bound; that cap is.
+    # the document at 16 384 bytes (4 096 originally; 8 192 from 2026-09-12;
+    # this figure since 2026-09-15) and REFUSES above it, and
+    # `MAX_SERVICES_PER_ENVIRONMENT` came down to 8 and `TRIAGE_NOTE_MAX_BYTES`
+    # to 1 024 so that bound is reachable rather than nominal — services since
+    # raised to 16, 2026-09-12. An observed maximum is not a bound; that cap is.
     #
     # NO `bash`, and here that is the load-bearing omission rather than an
     # inherited habit. This role's entire output is a request for something ELSE
@@ -795,10 +883,10 @@ roles:
     #
     # THE TWO TRACKED FILES DISAGREE ABOUT THIS, and the disagreement is
     # RECORDED here rather than settled. THIS file declares `rpc` on both
-    # `triage` and `observer` and neither seat overrides it, so in the example
-    # the console is unattended. The tracked `triage/console.yaml` describes
-    # seats that are `pane_mode: tui` and pays the stated price for it —
-    # `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
+    # `triage` and `observer-k8s` and neither seat overrides it, so in the
+    # example the console is unattended. The tracked `triage/console.yaml`
+    # describes seats that are `pane_mode: tui` and pays the stated price for
+    # it — `recycle_after_sweeps: 0`, because §6.6's recycle is a headless `up`,
     # which takes a tui seat down and cannot bring it back. The operator's
     # `fleet.yaml` — TRACKED since 2026-09-12, so the split is three files wide
     # and diffable now rather than two files and one report of a third —
@@ -840,10 +928,16 @@ workers:
   # deliberate choice here, not an oversight: it tunes its ink for a light
   # background, and a Pi theme sets no background of its own, so it only reads
   # well in a pane whose terminal is light. Chosen anyway.
-  - {id: obs-1,  role: observer, pane_mode: tui, theme: catppuccin-mocha}
-  - {id: obs-2,  role: observer}
+  - {id: obs-1,  role: observer-k8s, pane_mode: tui, theme: catppuccin-mocha}
+  - {id: obs-2,  role: observer-k8s}
   # Two, not one: observer is read-only, so a watch on one target can proceed
   # while an inquiry about another is answered (§6.2).
+  # One seat, obs-d1, in no console (§5.5, Q10) — a Docker host, reached
+  # through the observer-docker credential rather than a cluster's RBAC.
+  - {id: obs-d1, role: observer-docker}
+  # One seat, obs-v1, in no console (§6.6, Q10) — a VM, reached through
+  # the observer-vm credential over SSH rather than a cluster's RBAC.
+  - {id: obs-v1, role: observer-vm}
   - {id: ver-1,  role: verifier}
   # ---- the `development` console's four seats ----
   #
@@ -914,8 +1008,8 @@ workers:
   # ---- the `triage` console's four seats — TWO PAIRS ----
   #
   # NO KEYBOARD IN THIS FILE, AND NO THEME EITHER. BOTH resolve to
-  # `pane_mode: rpc` from their roles — `triage` and `observer` both declare it
-  # — so no override belongs here, and a theme would be decoration on a pane
+  # `pane_mode: rpc` from their roles — `triage` and `observer-k8s` both declare
+  # it — so no override belongs here, and a theme would be decoration on a pane
   # nobody types at. Read the `triage` role's `pane_mode` note before relying on
   # that: the tracked `triage/console.yaml` describes `tui` seats instead, and
   # the two tracked files are an OPEN config decision, not one of them being
@@ -938,28 +1032,24 @@ workers:
   # retuning a console nobody asked about.
   #
   # ONE RUN, one run id, stable for the console's whole life:
-  #   pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3
-  # FOUR SEATS SPEND FOUR of `run.max_concurrent`, which is 4 (the key itself is
-  # at :93; find it by NAME if that number has drifted) — so this console now
-  # fits EXACTLY, with nothing spare.
+  #   pifleet up --workers tri-1,obs-t1,obs-t2,obs-t3,obs-td1,obs-td2,obs-tv1
+  # SEVEN SEATS, under a `run.max_concurrent` of 12 (find the key by NAME).
+  # SRD-TRIAGE-MIXED-OBSERVERS D16 set that value as an owner decision rather
+  # than by seat-count arithmetic, so neither "fits exactly" nor "slack" is a
+  # claim this paragraph makes any more.
   #
-  # **That is the size the key was raised for, not a size it has outgrown.** Its
-  # own comment says so in as many words — *"The triage console is the first run
-  # holding four seats, and three of them fan out at once"* — text written for
-  # this shape, which outlived the shrink to one pair and is correct again. The
-  # paragraph that used to sit here said two seats left SLACK; that was true of
-  # the shrunken console and contradicted `max_concurrent`'s own note in this
-  # same file. Corrected 2026-09-12 rather than deleted, because a reader who
-  # remembers the slack should find out where it went.
+  # HISTORY, kept because both earlier readings were written here: at two seats
+  # this paragraph said the key left SLACK, and at four it said four seats spent
+  # four "with nothing spare". Each was true of the console it described.
   #
   # A SECOND ENVIRONMENT IS STILL NEITHER A WORKER LINE NOR A `max_concurrent`
   # DECISION, and the second pair did NOT lift that refusal — it went around it.
-  # `soleEnvironment` (`src/cli/commands/triage.ts:915`) still refuses a targets
-  # file declaring other than exactly one environment, and still should: an
-  # environment token is a path segment under `~/.pifleet/triage/` and the scope
-  # every incident is reported against, so two tokens for one cluster would make
-  # the console report health for a fleet. What the pairs divide is the SERVICE
-  # LIST of the one environment, not the environments.
+  # `environmentsByKind` (in `src/cli/commands/triage.ts`) still refuses a
+  # targets file declaring other than exactly one k8s environment, and still
+  # should: an environment token is a path segment under `~/.pifleet/triage/`
+  # and the scope every incident is reported against, so two tokens for one
+  # cluster would make the console report health for a fleet. What the pairs
+  # divide is the SERVICE LIST of the one environment, not the environments.
   - {id: tri-1,  role: triage}
   # OBSERVERS ON THE ROLE THAT ALREADY EXISTS, doing the job it was written
   # for, at a cadence — no new role, no widened grant, and that is the strongest
@@ -968,8 +1058,8 @@ workers:
   #
   # ONE OBSERVER PER COLLATOR is the design as of 2026-09-12, and this paragraph
   # said ONE SEAT PER ENVIRONMENT until then. The old reasoning — that the
-  # fan-out is one observer wide because `soleEnvironment` admits one
-  # environment — confused a limit on ENVIRONMENTS with a limit on SEATS. One
+  # fan-out is one observer wide because the loader admitted one environment —
+  # confused a limit on ENVIRONMENTS with a limit on SEATS. One
   # environment can be divided among several observers; what it cannot be is
   # reported as several environments.
   #
@@ -999,12 +1089,12 @@ workers:
   # overrides, not to loosen the test" — and that is what happened: the guard
   # went red the moment the roles converged, and the file yielded to it rather
   # than the other way round.
-  - {id: obs-t1, role: observer}
+  - {id: obs-t1, role: observer-k8s}
   # ---- THE SECOND AND THIRD OBSERVERS ----
   #
   # Declared with no `model:`, no `pane_mode:` and no `theme:` for exactly the
   # reason `obs-t1` carries none: both resolve from their role, and this file's
-  # `observer` role already names the model the console runs. A worker-level
+  # `observer-k8s` role already names the model the console runs. A worker-level
   # override here would re-state a decision rather than make one.
   #
   # THIS WAS `tri-2` + `obs-t2`, A SECOND PAIR, FOR ONE DAY (2026-09-12). That
@@ -1024,5 +1114,12 @@ workers:
   # the three observers after it, and `triagePanes` splits DOWN off pane 1 then
   # RIGHT along that row — collator full width on top, observers beneath. This
   # file only declares that the seats exist.
-  - {id: obs-t2, role: observer}
-  - {id: obs-t3, role: observer}
+  - {id: obs-t2, role: observer-k8s}
+  - {id: obs-t3, role: observer-k8s}
+  # SRD-TRIAGE-MIXED-OBSERVERS' docker/vm triage seats — obs-td1/obs-td2 (role
+  # observer-docker) and obs-tv1 (role observer-vm) — join ONLY this console.
+  # No `model:`, `pane_mode:` or `theme:` here either: they inherit
+  # `pane_mode: rpc` from their roles for the same reason obs-t1..3 do, above.
+  - {id: obs-td1, role: observer-docker}
+  - {id: obs-td2, role: observer-docker}
+  - {id: obs-tv1, role: observer-vm}

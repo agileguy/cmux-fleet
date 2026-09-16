@@ -42,6 +42,9 @@ import {
   RESERVED_ENV_PREFIXES,
   effectiveToolGrant,
   kubeconfigScopeWarning,
+  OBSERVER_K8S_ROLE,
+  OBSERVER_DOCKER_ROLE,
+  OBSERVER_VM_ROLE,
   observerTuiEpochWarning,
   observerTuiWorkers,
   DEFAULT_GIT_IDENTITY,
@@ -78,27 +81,40 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
  * has to change.
  */
 /*
- * IN `fleet.example.yaml`'S DECLARATION ORDER, which as of 2026-09-13 happens to
- * EQUAL pane order — and the coincidence is worth naming so nobody builds on it.
+ * IN `fleet.example.yaml`'S DECLARATION ORDER — no longer the same list as
+ * `DEFAULT_TRIAGE_WORKERS`, and that divergence is the point of this note now.
  *
  * This comment used to record a real divergence: the file declared two pairs,
  * `tri-1, obs-t1, tri-2, obs-t2`, while `DEFAULT_TRIAGE_WORKERS` listed both
  * collators before both observers, because that is what put each observer under
  * its own collator in the 2x2. Two orders, two constants, neither wrong.
  *
- * The console is now ONE collator over THREE observers, and `obs-t3` was
- * APPENDED after `obs-t2` rather than dropped into `tri-2`'s old slot — so both
- * orders read `tri-1, obs-t1, obs-t2, obs-t3` and the two constants agree
- * element for element. **They are still two different facts.** This list is
- * whatever `resolveAllWorkers` yields from the file; `DEFAULT_TRIAGE_WORKERS` is
- * the order that puts the collator in the full-width pane. Re-ordering the YAML
- * would move this and not that, and an assertion that leaned on today's
- * agreement would fail somewhere unrelated to the edit that caused it.
+ * It then went briefly quiet: the console became ONE collator over THREE
+ * observers, `obs-t3` was APPENDED after `obs-t2`, and both orders read
+ * `tri-1, obs-t1, obs-t2, obs-t3` element for element — a coincidence, not a
+ * rule. SRD-TRIAGE-MIXED-OBSERVERS broke it: `obs-td1`, `obs-td2` and
+ * `obs-tv1` were APPENDED to the file after `obs-t3`, so this list now reads
+ * `tri-1, obs-t1, obs-t2, obs-t3, obs-td1, obs-td2, obs-tv1`.
+ * `DEFAULT_TRIAGE_WORKERS` is UNCHANGED at this commit — still the four ids it
+ * always named — and grows to seven, in pane CREATION order rather than this
+ * declaration order, in a later phase (SRD-TRIAGE-MIXED-OBSERVERS §4.2). **They
+ * are still two different facts, and they no longer even agree on length.**
+ * This list is whatever `resolveAllWorkers` yields from the file;
+ * `DEFAULT_TRIAGE_WORKERS` is the order that puts the collator in the
+ * full-width pane. Re-ordering the YAML would move this and not that.
  */
-const TRIAGE_SEATS = ["tri-1", "obs-t1", "obs-t2", "obs-t3"] as const;
+const TRIAGE_SEATS = [
+  "tri-1",
+  "obs-t1",
+  "obs-t2",
+  "obs-t3",
+  "obs-td1",
+  "obs-td2",
+  "obs-tv1",
+] as const;
 
 /**
- * D1, settled 2026-09-06 as arm 3: all four seats run the LOCAL 20b, in both
+ * D1, settled 2026-09-06 as arm 3: all seven seats run the LOCAL 20b, in both
  * config files. Not a performance choice — §0.2's argument is that an
  * observer's context (namespaces, pod names, restart counts, log excerpts,
  * cluster endpoints from a live environment, 288 sweeps a day) may not leave
@@ -112,8 +128,14 @@ const TRIAGE_SEATS = ["tri-1", "obs-t1", "obs-t2", "obs-t3"] as const;
  * oMLX worker to bf16 on 2026-09-07, SRD §11 Q8's tool-argument ceilings were
  * measured on this model, and CI now generates against it too — see ISC-1116 at
  * the foot of this file for why those three have to be the same string.
+ *
+ * [CHANGED 2026-09-15] `gemma-4-26b-a4b-it-bf16` -> `gemma-4-26b-a4b-it`. The
+ * live endpoint CI dials moved to the operator's other self-hosted server,
+ * which serves only the non-bf16 name — see ci.yml's `PIFLEET_OMLX_MODEL` and
+ * ISC-290. The privacy argument above is still why this is a LOCAL model;
+ * only the served name changed, not the reasoning for keeping it local.
  */
-const TRIAGE_MODEL = "gemma-4-26b-a4b-it-bf16";
+const TRIAGE_MODEL = "gemma-4-26b-a4b-it";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -184,16 +206,29 @@ function assertDistinctThemes(attended: readonly { id: string; theme?: string }[
 // ---------------------------------------------------------------------------
 
 describe("worked example", () => {
-  // ISC-67: all eight shipped roles load from the shipped default config.
+  // ISC-67: all ten shipped roles load from the shipped default config.
   // observer replaces investigator (SRD-OBSERVER-001 D2) — ISC-391.
   // `triage` is the eighth (SRD-TRIAGE-CONSOLE §6.1): the console with no
-  // keyboard. It is asserted as a NAME in the set rather than by a bumped
-  // count, for the same reason the worker list below is — a count says one
-  // changed and never which.
-  test("fleet.example.yaml loads with all eight shipped roles", async () => {
+  // keyboard. `observer-docker` is the ninth (SRD-OBSERVER-ROLES §5) and
+  // `observer-vm` the tenth (SRD-OBSERVER-ROLES §6): sibling roles, not a
+  // change to `observer-k8s`. Each is asserted as a NAME in the set rather
+  // than by a bumped count, for the same reason the worker list below is —
+  // a count says one changed and never which.
+  test("fleet.example.yaml loads with all ten shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "triage", "verifier"].sort(),
+      [
+        "engineer",
+        "observer-docker",
+        OBSERVER_K8S_ROLE,
+        "observer-vm",
+        "reviewer",
+        "sre",
+        "tester",
+        "ticketing",
+        "triage",
+        "verifier",
+      ].sort(),
     );
     // Every worker resolves without error, and the SET is asserted rather than
     // its size. A bare `toHaveLength` fails on a number when a worker is added
@@ -205,6 +240,8 @@ describe("worked example", () => {
       "sre-2",
       "obs-1",
       "obs-2",
+      "obs-d1",
+      "obs-v1",
       "ver-1",
       // The `development` console's four seats. eng-2 and tst-1 exist for it;
       // the `tester` role had no worker at all before it.
@@ -397,7 +434,7 @@ describe("worked example", () => {
  *
  * THE TRAP THIS BLOCK IS WRITTEN AGAINST, named because falling into it makes
  * the whole block worthless: a criterion that only asserts "the two seats
- * resolve to `gemma-4-26b-a4b-it-bf16`" passes just as happily if someone deletes
+ * resolve to `gemma-4-26b-a4b-it`" passes just as happily if someone deletes
  * the seats entirely, and an absence asserted over a filtered set is satisfied
  * by an empty set. So every assertion here is made against `TRIAGE_SEATS` —
  * a list this file NAMES — and the seats' presence is checked before their
@@ -422,7 +459,7 @@ describe("worked example", () => {
  * reviewable DIFF between two tracked files rather than an invisible drift —
  * which is precisely what tracking `fleet.yaml` was for.
  */
-describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
+describe("the triage console's seven seats (SRD-TRIAGE-CONSOLE §6.1, §12)", () => {
   /**
    * The example's two seats, resolved, in the order `TRIAGE_SEATS` names them.
    *
@@ -450,7 +487,7 @@ describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.
     // Anti-vacuity on the ENUMERATION itself. Every assertion in this block is
     // a walk over `TRIAGE_SEATS`, so a truncated or empty list would make all
     // of them pass while checking nothing.
-    expect(TRIAGE_SEATS).toHaveLength(4);
+    expect(TRIAGE_SEATS).toHaveLength(7);
 
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     // ONE set-shaped comparison rather than four independent expectations: a
@@ -537,7 +574,7 @@ describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.
     // different local model, and it does not any more. That deletion was this
     // test's own prescription — "the fix is to DELETE the three overrides, not
     // to loosen the test" — followed rather than argued with.
-    const observerRoleModel = loaded.config.roles["observer"]?.model;
+    const observerRoleModel = loaded.config.roles[OBSERVER_K8S_ROLE]?.model;
     expect(observerRoleModel).toBe(TRIAGE_MODEL);
     expect(loaded.config.roles["triage"]?.model).toBe(TRIAGE_MODEL);
 
@@ -695,7 +732,7 @@ describe("the triage console's four seats, in two pairs (SRD-TRIAGE-CONSOLE §6.
     // THE ANTI-VACUITY THAT MAKES THIS AN ABSENCE WORTH ASSERTING. An absence
     // over an empty set is free: `tuiWorkerIds` SKIPS an id the config does not
     // define, so a file whose triage seats had been deleted would answer "no
-    // tui seats" and pass. The four have to be present before their having no
+    // tui seats" and pass. The seven have to be present before their having no
     // keyboard means anything at all.
     expect(seats.map((w) => w.id)).toEqual([...TRIAGE_SEATS]);
     expect(seats.map((w) => `${w.id}=${w.paneMode}`)).toEqual(
@@ -2367,8 +2404,8 @@ describe("cloud_access without cloud.kubeconfig warns, never refuses (SRD-OBSERV
 describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER-001 §6.2, §7.5)", () => {
   test("an observer role resolving pane_mode: tui is named, and the mechanism is stated", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: { pane_mode: "tui" } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const loaded = await writeAndLoad(doc);
     const tuiWorkers = observerTuiWorkers(loaded.config);
     expect(tuiWorkers).toEqual(["obs-1"]);
@@ -2383,14 +2420,14 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
 
   test("the same document still loads — this is a warning, not a schema refusal", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: { pane_mode: "tui" } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     // Must not throw, unlike the tui+oneshot / tui+headless refusals above.
     await writeAndLoad(doc);
   });
 
   test("pane_mode: tui on a DIFFERENT role's name raises nothing", async () => {
-    // Keyed to the literal role name "observer" — the hazard is a property of
+    // Keyed to the role name OBSERVER_K8S_ROLE — the hazard is a property of
     // what the observer-ops skill does, not a generic fact this schema can
     // derive from any read-only role.
     const doc = baseDoc();
@@ -2401,10 +2438,57 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
 
   test("observer at pane_mode: rpc (the shipped default) raises nothing", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: {} };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: {} };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const loaded = await writeAndLoad(doc);
     expect(observerTuiWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * Generalized from `OBSERVER_K8S_ROLE` alone by SRD-TRIAGE-MIXED-OBSERVERS
+   * §7, D13: the hazard is a fact about how an observer is dispatched, not
+   * about which target kind it watches.
+   */
+  test("an observer-docker worker resolving pane_mode: tui is named", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { [OBSERVER_DOCKER_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-td1", role: OBSERVER_DOCKER_ROLE }];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-td1"]);
+  });
+
+  test("an observer-vm worker resolving pane_mode: tui is named", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { [OBSERVER_VM_ROLE]: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-tv1", role: OBSERVER_VM_ROLE }];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-tv1"]);
+  });
+
+  /**
+   * Declaration order deliberately does not follow role or alphabetical
+   * grouping, so a passing result cannot be an accident of sort order — and
+   * every rpc-mode observer (one per role) sits beside its tui sibling, so an
+   * implementation that returned every observer regardless of pane_mode would
+   * be caught here too.
+   */
+  test("a mixed fleet returns every tui observer of all three roles, in worker order, and no rpc observer", async () => {
+    const doc = baseDoc();
+    doc["roles"] = {
+      [OBSERVER_K8S_ROLE]: {},
+      [OBSERVER_DOCKER_ROLE]: {},
+      [OBSERVER_VM_ROLE]: {},
+    };
+    doc["workers"] = [
+      { id: "obs-tv1", role: OBSERVER_VM_ROLE, pane_mode: "tui" },
+      { id: "obs-2", role: OBSERVER_K8S_ROLE },
+      { id: "obs-td1", role: OBSERVER_DOCKER_ROLE, pane_mode: "tui" },
+      { id: "obs-v1", role: OBSERVER_VM_ROLE },
+      { id: "obs-t1", role: OBSERVER_K8S_ROLE, pane_mode: "tui" },
+      { id: "obs-d1", role: OBSERVER_DOCKER_ROLE },
+    ];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-tv1", "obs-td1", "obs-t1"]);
   });
 
   /**
@@ -2454,8 +2538,8 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
    */
   test("the observer's pairing warns, names the bash asymmetry, and still loads", async () => {
     const doc = baseDoc();
-    doc["roles"] = { observer: { tools: OBSERVER_TOOLS } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { tools: OBSERVER_TOOLS } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const loaded = await writeAndLoad(doc); // zero errors, or this throws
     const found = submitReportWriteWorkers(loaded.config);
     expect(found).toEqual([{ id: "obs-1", bash: true }]);
@@ -2504,11 +2588,11 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
   test("a bash holder and a bash-less seat land in different buckets, in one document", async () => {
     const doc = baseDoc();
     doc["roles"] = {
-      observer: { tools: OBSERVER_TOOLS },
+      [OBSERVER_K8S_ROLE]: { tools: OBSERVER_TOOLS },
       reviewer: { tools: BASH_LESS_TOOLS },
     };
     doc["workers"] = [
-      { id: "obs-1", role: "observer" },
+      { id: "obs-1", role: OBSERVER_K8S_ROLE },
       { id: "rev-1", role: "reviewer" },
     ];
     const loaded = await writeAndLoad(doc);
@@ -2620,7 +2704,7 @@ describe("submit_report beside write warns, never refuses (SRD-WORKER-DISPATCH-E
  * §6.8 is the reason the rule is conditioned on the shell instead of being
  * stated over every role. Removing `write` from a role that holds `bash` takes
  * away a tool and not a capability — `cat > /outbox/…` is still right there —
- * so asserting this of `sre`, `observer` or `ticketing` would be asserting
+ * so asserting this of `sre`, `observer-k8s` or `ticketing` would be asserting
  * something both false and undesirable.
  *
  * ## What this can reach, and what it provably cannot
@@ -3314,8 +3398,8 @@ describe("config validate CLI (ISC-58)", () => {
     await mkdir(join(dir, "repo"), { recursive: true });
     const doc = baseDoc();
     doc["run"] = { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } };
-    doc["roles"] = { observer: { tools: ["read", "write", "bash", "grep", "find", "ls", "submit_report"] } };
-    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    doc["roles"] = { [OBSERVER_K8S_ROLE]: { tools: ["read", "write", "bash", "grep", "find", "ls", "submit_report"] } };
+    doc["workers"] = [{ id: "obs-1", role: OBSERVER_K8S_ROLE }];
     const path = join(dir, "fleet.yaml");
     await writeFile(path, stringify(doc));
     const r = await runCli(["config", "validate", "--json", "--config", path]);
@@ -3699,9 +3783,29 @@ describe("CI generates against the model the fleet already runs (ISC-1116)", () 
 
     // Model-shaped: a vendor-ish name carrying a quantisation or size token.
     // Deliberately broad — this should trip on a name nobody anticipated.
+    //
+    // [2026-09-15] The gemma branch USED TO carry the expected model as a
+    // literal inside a negative lookahead (`(?!26b-a4b-it-bf16)`, later
+    // `(?!26b-a4b-it\b)`). Both versions were wrong the same way: `[\w.]`
+    // excludes `-`, so `gemma-[\w.]+-` can only ever anchor at `gemma-4-`,
+    // which means the lookahead is tested at exactly ONE position and a `\b`
+    // there holds for every suffix, not just the one named. The effect was
+    // silent — `gemma-4-26b-a4b-it-bf16`, gabe's `-nvfp4` alias, and any
+    // other `gemma-4-26b-a4b-it-*` variant all escaped the guard once the
+    // exact literal stopped matching what was active, and the suite stayed
+    // green because nothing in `ci.yml` named one of them at the time.
+    //
+    // The fix drops the literal entirely: the gemma branch now matches ANY
+    // `gemma-<token>(-<token>)+` shape, and `expected` — already read from
+    // `seatModels()` above — is what excludes the fleet's own model, by
+    // exact string equality, after matching rather than inside the pattern.
+    // No model name is compiled into this regex, so the next rename cannot
+    // reopen this hole the way the last two attempts did.
     const OTHERS =
-      /\b(?:GLM-[\w.]+-Air[\w-]*|Qwen[\w.]*-\d+B[\w-]*|gpt-oss-[\w-]+|Llama-[\w.]+-\d+B[\w-]*|gemma-[\w.]+-(?!26b-a4b-it-bf16)[\w-]+)\b/g;
-    const found = [...new Set([...active.matchAll(OTHERS)].map((m) => m[0]))];
+      /\b(?:GLM-[\w.]+-Air[\w-]*|Qwen[\w.]*-\d+B[\w-]*|gpt-oss-[\w-]+|Llama-[\w.]+-\d+B[\w-]*|gemma-[\w.]+(?:-[\w.]+)+)\b/g;
+    const found = [...new Set([...active.matchAll(OTHERS)].map((m) => m[0]))].filter(
+      (name) => name !== expected,
+    );
     expect(
       found,
       `ci.yml can load ${found.join(", ")} beside ${expected}. That server is shared with ` +

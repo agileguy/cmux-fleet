@@ -1,19 +1,19 @@
 /**
- * `roles/observer.md` says only things that are true about how it reports —
- * task 8.4 of Phase C prose.
+ * `roles/observer-k8s.md` says only things that are true about how it
+ * reports — task 8.4 of Phase C prose.
  *
  * ## Why this role's rewrite is not a copy of 8.1/8.2/8.3's
  *
- * `fleet.example.yaml`'s `observer` is `tools: [read, write, bash, grep, find,
- * ls, submit_report]` — the only role Phase 8 has touched so far that holds a
- * write-capable builtin AND `submit_report` at once. Reviewer and triage hold
- * `submit_report` with no write verb at all, so their prose could say "you
- * have no write tool, call it" and be unconditionally true; that argument does
- * not apply here, because observer's `write` is real and does report-related
- * work of its own: it is how the `observer-ops.json`/`.md` pair reaches the
- * outbox (`skills/observer-ops/SKILL.md`, `roles/observer.md:26-34`,
- * `:144-152`). `submit_report` is still the only route for the envelope
- * itself.
+ * `fleet.example.yaml`'s `observer-k8s` is `tools: [read, write, bash, grep,
+ * find, ls, submit_report]` — the only role Phase 8 has touched so far that
+ * holds a write-capable builtin AND `submit_report` at once. Reviewer and
+ * triage hold `submit_report` with no write verb at all, so their prose could
+ * say "you have no write tool, call it" and be unconditionally true; that
+ * argument does not apply here, because observer's `write` is real and does
+ * report-related work of its own: it is how the `observer-ops.json`/`.md`
+ * pair reaches the outbox (`skills/observer-ops/SKILL.md`,
+ * `roles/observer-k8s.md`). `submit_report` is still the only route for the
+ * envelope itself.
  *
  * `skills/pifleet-worker/SKILL.md`'s routing table settles the "both" case
  * explicitly: *"Call `submit_report`. The hand-written envelope stays
@@ -42,11 +42,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { loadConfig } from "../../src/config/load.ts";
-import { writeCapableIn } from "../../src/config/schema.ts";
+import { OBSERVER_K8S_ROLE, writeCapableIn } from "../../src/config/schema.ts";
 import { roleGrant } from "../support/role-docs.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
-const ROLE = readFileSync(`${ROOT}roles/observer.md`, "utf8");
+const ROLE = readFileSync(`${ROOT}roles/${OBSERVER_K8S_ROLE}.md`, "utf8");
 
 /**
  * Wrapped prose, flattened the way `role-docs.ts` and `triage-role.test.ts`
@@ -73,7 +73,7 @@ describe("observer's resolved grant is the one this file's routing argument assu
     // (`render.ts`'s real `--exclude-tools` subtraction), and throws loudly if
     // `fleet.example.yaml` no longer declares an observer role at all — this
     // probe cannot check a role that is gone.
-    const tools = roleGrant(config, "observer");
+    const tools = roleGrant(config, OBSERVER_K8S_ROLE);
     expect(tools).toContain("submit_report");
     expect(
       tools,

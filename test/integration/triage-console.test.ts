@@ -412,9 +412,9 @@ describe("no seat in this console has a keyboard — §2.3, §6.1", () => {
    * Probe: resolve all four workers through `resolveWorker` and assert `rpc`; a
    * `tui` seat fails."*
    *
-   * Against the TRACKED config, which declares both seats (`fleet.example.yaml`'s
-   * "TWO SEATS SPEND TWO" comment, beside the `tri-1` and `obs-t1` entries) and
-   * says in its own comment why neither carries an override.
+   * Against the TRACKED config, which declares all seven seats
+   * (`fleet.example.yaml`'s "SEVEN SEATS" comment, beside the triage `workers:`
+   * block) and says in its own comment why none of them carries an override.
    *
    * **The control is what makes this mean anything.** `obs-1` in the same file
    * IS `pane_mode: tui`, so a `resolveWorker` that answered `rpc` for everything
@@ -436,15 +436,18 @@ describe("no seat in this console has a keyboard — §2.3, §6.1", () => {
   /**
    * And the script's own half: no pane carries `--attach-here`.
    *
-   * The control is a `--workers` override naming four seats the same config
-   * declares as `tui`. Without it, an absence proves only that the script never
-   * attaches anything — which is exactly what a hard-coded `tuiWorkers = []`
-   * would look like, and `scripts/triage`'s own docblock says why it reads the
-   * config instead: *"a hard-coded `[]` here would be a decision in `scripts/`
-   * about a fact `fleet.yaml` owns."*
+   * The control is a `--workers` override naming seven seats — `triagePanes`
+   * refuses any other count now (SRD-TRIAGE-MIXED-OBSERVERS §4.2) — six of
+   * which the same config declares as `tui` and one (`ver-1`) which it does
+   * not, so the count asserted below is a real six-of-seven rather than "all
+   * of them" going one way. Without the control, an absence proves only that
+   * the script never attaches anything — which is exactly what a hard-coded
+   * `tuiWorkers = []` would look like, and `scripts/triage`'s own docblock
+   * says why it reads the config instead: *"a hard-coded `[]` here would be a
+   * decision in `scripts/` about a fact `fleet.yaml` owns."*
    */
   test.skipIf(!EXEC_TMP)(
-    "no pane attaches, and the same script attaches four when the config says tui",
+    "no pane attaches, and the same script attaches six of seven when the config says tui",
     async () => {
       const rig = await makeRig("attach");
       const mine = await triage(rig, ["--dry-run"]);
@@ -453,10 +456,10 @@ describe("no seat in this console has a keyboard — §2.3, §6.1", () => {
 
       const attended = await triage(rig, [
         "--workers",
-        "obs-1,tick-1,eng-1,eng-2",
+        "obs-1,tick-1,eng-1,eng-2,tst-1,tst-2,ver-1",
         "--dry-run",
       ]);
-      expect((attended.out.match(/'--attach-here'/g) ?? []).length).toBe(4);
+      expect((attended.out.match(/'--attach-here'/g) ?? []).length).toBe(6);
       expect(attended.out).toContain(`'--workspace-name' '${TRIAGE_WORKSPACE}'`);
     },
     cliBudget(2),

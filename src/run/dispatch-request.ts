@@ -434,15 +434,16 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
  * SET, so a seat renamed in one and not the other is a red test rather than a
  * console that starts four healthy panes and refuses every dispatch. This console
  * has no such export yet — its pane plan is SRD-TRIAGE-CONSOLE Phase 4 — so the
- * suite pins these four ids against the tracked `fleet.example.yaml` instead, by
+ * suite pins these seven ids against the tracked `fleet.example.yaml` instead, by
  * id AND by role. **When `DEFAULT_TRIAGE_WORKERS` lands, that probe should become
  * the same set equality the review console has**, because the config check
  * catches a rename and does not catch a fifth seat added to only one of them.
  */
 export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
   /*
-   * ONE COLLATOR OVER THREE OBSERVERS as of 2026-09-13, and this constant is
-   * EXACT again rather than the wide half of a pairing.
+   * ONE COLLATOR OVER SIX OBSERVERS as of 2026-09-14 (SRD-TRIAGE-MIXED-OBSERVERS
+   * §5), and this constant is EXACT again rather than the wide half of a
+   * pairing.
    *
    * It held `collators: ["tri-1", "tri-2"]` for one day. That shape needed this
    * comment to admit a gap: a flat roster would accept `tri-1` naming `obs-t2`,
@@ -453,14 +454,18 @@ export const TRIAGE_CONSOLE_ROSTER: ConsoleRoster = {
    * `worker_not_in_console` is now the whole of the check rather than its wide
    * half.
    *
-   * The fan-out is three because §6.5 puts the partition in the collator's hands
-   * — ⌈N/3⌉ is that rule's own arithmetic — and because nine services across two
-   * observers was measured too slow: on T-sweep-116 `obs-t2` spent its whole
-   * deadline on four services and wrote nothing. Three observers make it three
-   * each, which is the load this console sustained for 115 sweeps.
+   * The k8s fan-out is three because §6.5 puts the partition in the collator's
+   * hands — ⌈N/3⌉ is that rule's own arithmetic — and because nine services
+   * across two observers was measured too slow: on T-sweep-116 `obs-t2` spent
+   * its whole deadline on four services and wrote nothing. Three k8s observers
+   * make it three each, which is the load this console sustained for 115
+   * sweeps. Three more seats (two docker, one vm) joined on 2026-09-14; they
+   * have no service of their own kind to partition yet — that is
+   * SRD-TRIAGE-MIXED-OBSERVERS Phase 4 — so this paragraph's arithmetic still
+   * describes only the k8s three.
    */
   collators: ["tri-1"],
-  reviewers: ["obs-t1", "obs-t2", "obs-t3"],
+  reviewers: ["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"],
   /*
    * §7.3's triage row, and the half that makes the completeness check
    * REACHABLE. §6.5 puts the count on the host — *"a model that partitions can
@@ -954,7 +959,28 @@ export type DispatchRefusal =
   // write no list. A field merely optional everywhere would make that document
   // legal and the refusal unreachable.
   | "services_missing"
-  | "services_not_permitted";
+  | "services_not_permitted"
+  // ── SRD-TRIAGE-MIXED-OBSERVERS §5 — an observer's own reply-artifact pair ──
+  //
+  // **Spent by `checkObserverArtifacts` in THIS module**, gated the same way
+  // `services_missing`/`services_not_permitted` are and for the same reason:
+  // only a console whose requests carry `services` has seats with a KIND at
+  // all, and `kind` is what decides a seat's own artifact pair
+  // (`OBSERVER_ARTIFACT_FILE_BY_KIND`, `triage-envelope.ts`).
+  //
+  // Measured twice, on the same mistake. Sweep 146 sent every k8s brief
+  // `observer-k8s.json`/`observer-k8s.md`; sweep 147 sent
+  // `observer-k8s-ops.json`/`observer-k8s-ops.md` — neither pair is spelled
+  // anywhere in `skills/observer-ops/SKILL.md` or in this codebase. `obs-t2`
+  // obeyed the brief it was given both times, wrote the invented name, ran out
+  // of its deadline, and delivered nothing the host could read; the docker and
+  // vm briefs named their own pair correctly on both sweeps, so the fault was
+  // one collator's spelling for one kind, not a template problem. A model
+  // reading only its own brief cannot know it invented a filename — the host
+  // is the only party that can compare what a brief demands against what a
+  // seat is actually allowed to write, so the refusal belongs here rather
+  // than in a role file's prose.
+  | "observer_artifact_mismatch";
 
 /**
  * The three outcomes, shaped like `OutboxRead` and for its reasons.
@@ -1302,6 +1328,111 @@ function checkServices(
 }
 
 /**
+ * Each triage observer's own reply-artifact JSON name, keyed by worker id —
+ * SRD-TRIAGE-MIXED-OBSERVERS §5.
+ *
+ * **A duplicate of `OBSERVER_ARTIFACT_FILE_BY_KIND` (`triage-envelope.ts`),
+ * keyed by worker rather than by kind, and duplicated for the reason
+ * {@link TRIAGE_CONSOLE_ROSTER}'s `reviewers` list above already duplicates
+ * the same six ids: this module names no triage-specific module in its
+ * import list, so the pair is spelled here rather than reached for.
+ * `dispatch-request.test.ts` pins this table against `OBSERVER_ARTIFACT_FILE_BY_KIND`
+ * and `TRIAGE_SEAT_KINDS` directly, so the two cannot drift while that test is
+ * green — the same role it gives `SWEEP_FILES_DIR` against `OUTBOX_FILES_DIR`.
+ */
+export const OBSERVER_ARTIFACT_JSON_BY_WORKER: Readonly<Record<string, string>> = Object.freeze({
+  "obs-t1": "observer-ops.json",
+  "obs-t2": "observer-ops.json",
+  "obs-t3": "observer-ops.json",
+  "obs-td1": "observer-docker-ops.json",
+  "obs-td2": "observer-docker-ops.json",
+  "obs-tv1": "observer-vm-ops.json",
+});
+
+/**
+ * Every `observer-*.json` / `observer-*.md` spelling a brief can name,
+ * correct or invented — SRD-TRIAGE-MIXED-OBSERVERS §5, sweeps 146 and 147.
+ *
+ * Deliberately wider than any one seat's pair: {@link checkObserverArtifacts}
+ * finds whatever a brief actually names with this and compares the result
+ * against {@link OBSERVER_ARTIFACT_JSON_BY_WORKER}, rather than searching the
+ * text for one hardcoded wrong answer among infinitely many.
+ */
+const OBSERVER_ARTIFACT_TOKEN_RE = /\bobserver-[a-z0-9-]+\.(?:json|md)\b/g;
+
+/**
+ * §7.3's table again, one field over: a brief that names another seat's
+ * reply artifact — SRD-TRIAGE-MIXED-OBSERVERS §5.
+ *
+ * **Measured twice, on the same mistake.** Sweep 146's k8s briefs each named
+ * `observer-k8s.json`/`observer-k8s.md`; sweep 147's named
+ * `observer-k8s-ops.json`/`observer-k8s-ops.md` — neither pair is spelled
+ * anywhere in `skills/observer-ops/SKILL.md` or in this codebase. `obs-t2`
+ * obeyed the brief it was given both times, wrote the invented name, ran out
+ * of its deadline, and delivered nothing the host could read. The docker and
+ * vm briefs named their own pair correctly on both sweeps — the fault was one
+ * collator's spelling for one kind, not a template problem, which is why the
+ * check is per-WORKER rather than a single console-wide pattern.
+ *
+ * **Gated the same way {@link checkServices} is, and for the same reason.**
+ * Only a console whose requests carry `services` has seats with a kind at
+ * all — the review console's reviewers read no `triage/targets.yaml` and
+ * write no reply artifact, so a brief that happens to mention
+ * `observer-ops.json` there is just prose. Reusing `roster.services ===
+ * "required"` keeps this check off a console it has nothing to say about,
+ * without a second `"triage"` literal (see {@link ConsoleRoster.services}'s
+ * own argument against one).
+ *
+ * **Runs on `entry.brief` as the collator wrote it, and nothing else.** This
+ * is the one place in the pipeline that sees that string before
+ * `composeObserverBrief` (`triage-envelope.ts`) appends the host's own
+ * artifact-naming sentence — `freshnessEchoDemand` — on top of it, later, for
+ * the seat's actual dispatch (`dispatchObserver` re-reads this same file and
+ * composes at that point, from `item.brief` — this exact field). A check
+ * running downstream of that append would find the host's own always-correct
+ * sentence sitting beside whatever the collator wrote, and could not tell the
+ * two apart without also refusing the host's own words.
+ *
+ * Only entries this table names are checked. Every entry reaching this
+ * function has already passed {@link checkRoster}, so every `entry.worker` is
+ * one of the six ids the table carries; the guard exists so a future roster
+ * with a seat this table does not yet name fails a `bun run typecheck` — one
+ * error at the literal above — rather than throwing here at runtime.
+ */
+function checkObserverArtifacts(
+  request: DispatchRequest,
+  roster: ConsoleRoster,
+): DispatchRequestRead | null {
+  if (roster.services !== "required") return null;
+
+  for (const [index, entry] of request.requests.entries()) {
+    /** 1-based, as `checkRoster` and `checkServices` number them. */
+    const at = `request ${index + 1}`;
+    const correctJson = OBSERVER_ARTIFACT_JSON_BY_WORKER[entry.worker];
+    if (correctJson === undefined) continue;
+    const correctMd = `${correctJson.slice(0, -".json".length)}.md`;
+
+    const found = new Set<string>();
+    for (const match of entry.brief.matchAll(OBSERVER_ARTIFACT_TOKEN_RE)) found.add(match[0]);
+    const wrong = [...found].filter((name) => name !== correctJson && name !== correctMd);
+    if (wrong.length === 0) continue;
+
+    return {
+      kind: "refused",
+      code: "observer_artifact_mismatch",
+      reason:
+        `${at} briefs ${entry.worker} to write ${wrong.length} artifact ` +
+        `name${wrong.length === 1 ? "" : "s"} it does not own (${wrong.join(", ")}). ` +
+        `${entry.worker}'s own reply pair is ${correctJson} and ${correctMd} ` +
+        `(SRD-TRIAGE-MIXED-OBSERVERS §5) — write the brief naming exactly those two names and ` +
+        `nothing else. The whole file is refused and nothing was dispatched.`,
+    };
+  }
+
+  return null;
+}
+
+/**
  * Validate bytes already in hand. **Never throws**, for the reason
  * `harvest/outbox.ts` does not either: the caller is a polling loop that
  * performs every dispatch in the console, and a document written by a container
@@ -1330,10 +1461,15 @@ function checkServices(
  *      the same way and for the same reason: the directory was created by the
  *      host and the body is a claim.
  *   4. **Roster** — the rules that need to know who is asking and who exists.
- *   5. **The share** — §7.3's table, last, because a request that reaches
- *      outside its console must report the reach rather than a missing field.
- *      See `checkServices` for why that ordering is a decision and how it is
+ *   5. **The share** — §7.3's table, because a request that reaches outside
+ *      its console must report the reach rather than a missing field. See
+ *      `checkServices` for why that ordering is a decision and how it is
  *      pinned.
+ *   6. **The observer's own artifact pair** — SRD-TRIAGE-MIXED-OBSERVERS §5,
+ *      last of all, because a request naming the wrong console or the wrong
+ *      share is a more fundamental fault than one seat's brief naming the
+ *      wrong filename, and an operator chasing the first should not be sent
+ *      to the second. See `checkObserverArtifacts`.
  */
 export function parseDispatchRequest(body: string, ctx: DispatchRequestContext): DispatchRequestRead {
   const roster = resolveRoster(ctx);
@@ -1381,6 +1517,9 @@ export function parseDispatchRequest(body: string, ctx: DispatchRequestContext):
 
   const wrongShare = checkServices(request, roster);
   if (wrongShare !== null) return wrongShare;
+
+  const wrongArtifact = checkObserverArtifacts(request, roster);
+  if (wrongArtifact !== null) return wrongArtifact;
 
   return { kind: "ok", request };
 }

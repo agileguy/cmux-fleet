@@ -1,98 +1,76 @@
 /**
- * The `triage` console's plan — ONE collator over THREE observers, and NOT ONE
- * keyboard between them.
+ * The `triage` console's plan — ONE collator over SIX observers, in two rows
+ * of three, and NOT ONE keyboard between them.
  *
- * **THIS HEADER DESCRIBED A TWO-SEAT CONSOLE UNTIL 2026-09-13 and is corrected
- * here rather than quietly replaced**, because how it rotted is the more useful
- * half. It said "a reconciler and an observer", "the two seats are `tri-1`,
- * `obs-t1`", "all three square consoles share `agentSquarePanes`" and
- * "`TRIAGE_TOP_FRACTION` is `null`". Every one of those was true when written.
- * The console then grew to four seats, left the square, and took a fraction —
- * and the describe blocks below were all updated while this header was not,
- * because nothing a header says is executable. A file's prose is the part with
- * no test.
+ * **THIS HEADER DESCRIBED A TWO-SEAT CONSOLE UNTIL 2026-09-13, THEN A
+ * FOUR-SEAT ONE UNTIL 2026-09-15, and is corrected here rather than quietly
+ * replaced**, because how it rotted each time is the more useful half. It
+ * said "a reconciler and an observer", "the two seats are `tri-1`, `obs-t1`",
+ * "all three square consoles share `agentSquarePanes`", then "the four seats
+ * are `tri-1`, `obs-t1`, `obs-t2`, `obs-t3`" and "the two consoles share
+ * their pane builder outright". Every one of those was true when written.
+ * The console grew from a pair, to a square, to its own four-seat table, to
+ * SRD-TRIAGE-MIXED-OBSERVERS §4.2's seven-seat one — and the describe blocks
+ * below were all updated while this header was not, because nothing a header
+ * says is executable. A file's prose is the part with no test.
  *
- * ## What this file is for that `review-plan.test.ts` is not
+ * ## What this file is for
  *
- * The two consoles share their pane builder outright — `collatorOverRowPanes`,
- * since `review` took this shape on 2026-09-13 — so the one-over-N split table
- * is decided once, there. What is THIS console's alone is everything the shared
- * builder cannot see:
+ * `triagePanes` stopped sharing a builder with any sibling console on
+ * 2026-09-13 and has not gone back since: it took its own hardcoded table
+ * that day, at four seats, and kept one growing to seven
+ * (SRD-TRIAGE-MIXED-OBSERVERS §4.2). So a runtime comparison against
+ * `reviewPanes` can no longer do this file's job — see "the anti-vacuity pin"
+ * below for what replaced it. What is THIS console's alone:
  *
- *  - **The four seats are `tri-1`, `obs-t1`, `obs-t2`, `obs-t3`.** Asserted by
- *    NAME and in ORDER, never as a count. "Four panes" passes on the wrong four,
- *    and the wrong four here is not hypothetical — the consoles are one function
- *    call apart and differ only in the constant they name.
+ *  - **The seven seats are `tri-1`, `obs-t1`, `obs-td1`, `obs-t2`, `obs-t3`,
+ *    `obs-td2`, `obs-tv1`, in CREATION order** (§4.2's order, not the owner's
+ *    reading order — {@link triagePanes}' own docblock carries the reason).
+ *    Asserted by NAME and in ORDER, never as a count: "seven panes" passes on
+ *    the wrong seven, and the wrong seven here is not hypothetical — it is the
+ *    OLD four-seat default, which is exactly what this file's refusal test
+ *    below feeds back in.
  *  - **The plan defaults to NO KEYBOARD.** `development` and `review` are four
  *    attended panes and therefore four runs; this console is one run of `rpc`
  *    seats, because `tui` allocates no epoch and a console that dispatches
- *    288 times a day cannot afford a sweep that runs twice
+ *    many times a day cannot afford a sweep that runs twice
  *    (SRD-TRIAGE-CONSOLE §2.3). `tuiWorkers` is a CALLER's argument, so the plan
  *    cannot enforce that — what it owns, and what is pinned below, is the
  *    default with none named. This is the one item on this list that still
  *    separates it from `review`, which is four keyboards.
- *  - **A fourth distinct workspace name.** Adoption is an exact title match, so
- *    four consoles that shared a name would each adopt the others.
- *  - **`TRIAGE_TOP_FRACTION` is `1/3`**, and so is
- *    `TRIAGE_OBSERVER_WIDTH_FRACTION`. Both were `null` while the collator
- *    shared its row; a fraction moves the border between two ROWS, and there was
- *    no second row to move. There is now, and `review` carries the same pair for
- *    the same reason.
+ *  - **A fourth distinct workspace name**, one of the four CONSOLES this
+ *    repository builds. Adoption is an exact title match, so four consoles
+ *    that shared a name would each adopt the others.
+ *  - **`TRIAGE_TOP_FRACTION` is `1/3`**, and `TRIAGE_OBSERVER_ROW_FRACTION` is
+ *    `1/2`, splitting the two observer rows evenly beneath it. Both were
+ *    `null`/unset while the console had fewer rows than it does now; a
+ *    fraction moves the border between two ROWS, and this console has had a
+ *    second one to move only since 2026-09-13 and a third since 2026-09-15.
  *
- * ## The anti-vacuity pin, and why a cross-console comparison is not enough
+ * ## The anti-vacuity pin, now that there is no shared builder to lean on
  *
- * `triagePanes` is one line delegating to `collatorOverRowPanes`, and the value
- * of that — SRD-TRIAGE-CONSOLE D5's bet that a console is a DATA addition — is
- * entirely in the delegation. A hand-rolled copy of the split table here would
- * be INDISTINGUISHABLE from the delegation on the day it was written and would
- * pass every literal assertion in this file.
+ * `triagePanes` at seven workers is a HARDCODED table, transcribed from
+ * SRD-TRIAGE-MIXED-OBSERVERS §4.2 rather than computed or delegated. A
+ * faithful hand copy of that table would be INDISTINGUISHABLE from the real
+ * thing on the day it is written and would pass every literal assertion in
+ * this file; it only diverges the day the SRD's own shape moves and one copy
+ * follows it. So the seven-pane describe block below anchors the table as a
+ * LITERAL (`"matches SRD §4.2's split table literally"`) and separately
+ * replays it into rows, which is what catches the mutation that actually
+ * happens: an anchor copied off by one, silently yielding a wide row where
+ * two were meant (`"SRD §11 task 1.1's revert check"`, further down).
  *
- * So the shape is asserted BOTH ways: as a literal anchor table, and against a
- * sibling AT RUNTIME on one shared worker set. The runtime comparison is the one
- * a copy fails — not on the day it is made, but on the day the shared table
- * moves and only one console follows it.
- *
- * **WHICH sibling is the part that had to change, and the lesson is general.**
- * That comparison pointed at `reviewPanes` and asserted agreement; then, for one
- * day, disagreement; it now asserts agreement again, because `review` came back
- * to this shape through a different builder. A "does this match that console"
- * probe is a claim about a NEIGHBOUR and inverts whenever the neighbour moves,
- * while telling you nothing about whether this console is still right. So the
- * LITERAL table is the load-bearing assertion here, and the runtime comparison
- * that still detects a re-delegation to the square is aimed at `development` —
- * the one console that has not changed shape.
- *
- * **THAT LIMIT IS MEASURED, not assumed, and it is stated here so nobody reads
- * this block as stronger than it is.** Two mutations, 2026-09-06:
- *
- *  - `triagePanes` replaced by a FAITHFUL hand copy of the square — the split
- *    table transcribed correctly — **survives this whole file green**. Identical
- *    output is identical output, and no test can see the difference.
- *  - The same faithful copy, with `agentSquarePanes`' own table then edited
- *    underneath it, is **RED** on both probes below.
- *
- * So this is a time-delayed detector rather than an instantaneous one, and that
- * is the most any test can be here. The mutation it does catch outright is the
- * one that actually happens: a copy made with the anchor wrong — pane 4 split
- * off its predecessor rather than off pane 2, which silently yields a 3+1 column
- * — is red immediately.
- *
- * ## The asymmetric fixture, and why it is now the whole guarantee
- *
- * Every probe below that could be satisfied by `reviewPanes` is checked on a
- * fixture where the two consoles DISAGREE — the default worker sets, and the
- * console name inside the refusals. A file whose every fixture made the two
- * plans agree would survive a mutation that swapped one for the other, which is
- * the exact mutation this console's one-line plan invites.
- *
- * **This was belt-and-braces when it was written and is LOAD-BEARING now.** The
- * two consoles share a builder again, so on any shared worker set they produce
- * byte-identical panes: `triagePanes` replaced outright by `reviewPanes(opts)`
- * is invisible to every shape assertion in this file. The ONLY things that still
- * catch it are the default worker sets (`tri-1, obs-t*` versus `col-1, rev-*`,
- * with no seat in common) and the label inside the refusal. Both are asserted
- * explicitly below rather than left implicit in the seat names, precisely
- * because they are now the last line of defence rather than a second one.
+ * **A cross-console comparison against `reviewPanes` used to carry this job,
+ * for one day, and cannot any more.** While both consoles delegated to
+ * `collatorOverRowPanes`, agreement on a shared worker set was the
+ * load-bearing probe: a swap of one plan for the other was invisible to every
+ * shape assertion in this file. `triagePanes` took its own table the same day
+ * and never gave it back, and the two plans cannot be made to agree at ANY
+ * worker count any more — `triagePanes` now refuses anything other than
+ * exactly seven, and `collatorOverRowPanes` (`reviewPanes`'s builder) tops out
+ * at four. What replaced the comparison is the literal table above plus the
+ * asymmetric-defaults probe below, neither of which depends on a neighbour
+ * holding still.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -106,11 +84,11 @@ import {
   REVIEW_WORKSPACE,
   TRIAGE_TOP_FRACTION,
   TRIAGE_WORKSPACE,
-  developmentPanes,
   reviewPanes,
   triagePanes,
 } from "../../src/backends/cmux/operations-plan.ts";
 import { parseConfig } from "../../src/config/load.ts";
+import { OBSERVER_DOCKER_ROLE, OBSERVER_K8S_ROLE, OBSERVER_VM_ROLE } from "../../src/config/schema.ts";
 import { ROOT, exampleConfig } from "../support/role-docs.ts";
 
 const REPO = "/repo";
@@ -148,36 +126,66 @@ describe("the triage console is a collator across the top, its observers beneath
    * anything checks — which is the argument for naming seats rather than
    * counting them, made accidentally by the comment that was counting.
    */
-  it("names the collator first, then its three observers, in pane order", () => {
+  it("names the collator first, then its observers in CREATION order — SRD §4.2, D3", () => {
     /*
-     * THE ORDER IS THE LAYOUT, not a grouping preference. `triagePanes` splits
-     * `[null, down-from-0, right-from-1, right-from-2]`: pane 1 takes the
-     * initial surface, pane 2 splits DOWN to open the observer row, and the rest
-     * walk right along it. So the collator must come FIRST — put any observer
-     * there and it is the one that spans the width.
+     * THE ORDER IS THE LAYOUT, not a grouping preference, and — new as of
+     * seven seats — it is not READING order either. `triagePanes`' own table
+     * opens both observer rows (`down` off pane 0, then `down` off pane 1)
+     * before either row is split into columns, so this array reads `tri-1,
+     * obs-t1, obs-td1, obs-t2, obs-t3, obs-td2, obs-tv1` — row two's first
+     * seat created before row one's second and third — even though the
+     * console DISPLAYS row one (`obs-t1, obs-t2, obs-t3`) above row two
+     * (`obs-td1, obs-td2, obs-tv1`). {@link triagePanes}'s own docblock
+     * carries the full explanation; this test only has to agree with it.
      *
-     * The rule this replaces was the 2x2's, where the order carried the PAIRING:
-     * collators first so `obs-t1` fell under `tri-1`. Same constant, same kind of
-     * constraint, different table — which is why it is spelled out here rather
-     * than cross-referenced.
+     * The collator must still come FIRST — put any observer there and it is
+     * the one that spans the width.
      */
-    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
+    expect([...DEFAULT_TRIAGE_WORKERS]).toEqual([
+      "tri-1",
+      "obs-t1",
+      "obs-td1",
+      "obs-t2",
+      "obs-t3",
+      "obs-td2",
+      "obs-tv1",
+    ]);
   });
 
-  it("titles panes by WORKER ID — the four named seats, in order", () => {
-    // A role title would print `observer` on THREE of the four panes, which is
-    // worse than the two it would have printed on the 2x2: the whole point of
-    // the bottom row is that its seats hold different slices, and a title that
-    // cannot tell them apart is a pane an operator cannot map to a container.
-    // The id is also what `dispatch --worker` takes, so the title is the
-    // argument.
-    expect(unattended().map((p) => p.title)).toEqual(["tri-1", "obs-t1", "obs-t2", "obs-t3"]);
+  it("titles panes by WORKER ID — the seven named seats, in CREATION order", () => {
+    // A role title would print `observer` on SIX of the seven panes, which is
+    // worse than the three it would have printed at four seats: the whole
+    // point of the two observer rows is that each seat holds a different
+    // slice of a different kind of target, and a title that cannot tell them
+    // apart is a pane an operator cannot map to a container. The id is also
+    // what `dispatch --worker` takes, so the title is the argument.
+    expect(unattended().map((p) => p.title)).toEqual([
+      "tri-1",
+      "obs-t1",
+      "obs-td1",
+      "obs-t2",
+      "obs-t3",
+      "obs-td2",
+      "obs-tv1",
+    ]);
+  });
+
+  it("refuses the OLD four-seat default outright — the four-worker branch is gone", () => {
+    // If `triagePanes`' old `workers.length === 4` branch ever comes back,
+    // this exact array is what it used to accept and build via
+    // `collatorOverRowPanes`. Naming the OLD ids, not synthetic ones, is the
+    // point: a synthetic four-length array would pass just as well against a
+    // reintroduced branch, but only the real old default proves nobody
+    // quietly special-cased it back in by name.
+    expect(() =>
+      triagePanes({ ...BASE, workers: ["tri-1", "obs-t1", "obs-t2", "obs-t3"] }),
+    ).toThrow(/^triage: refusing 4 workers — the console holds exactly seven workers/);
   });
 
   /**
    * `tri-1` lands the operator, on the collator's precedent and for a weaker
    * reason: nobody DRIVES this console by typing, but somebody debugs it, and
-   * the reconciler is the seat holding what the other three feed.
+   * the reconciler is the seat holding what the other six feed.
    *
    * Both halves are asserted. `split: null` is the pane that consumes the
    * workspace's initial surface and the one `createWorkspace` focuses, so index
@@ -269,124 +277,44 @@ describe("the triage console is a collator across the top, its observers beneath
 });
 
 /**
- * THE ANTI-VACUITY BLOCK: does this plan build ITS OWN shape, or the square's?
+ * THE ANTI-VACUITY BLOCK: does this plan build ITS OWN shape, or a
+ * neighbour's?
  *
- * **RE-AIMED 2026-09-13, AND THE PREMISE IS NOW INVERTED.** This block used to
- * pin `triagePanes` BYTE-IDENTICAL to `reviewPanes` on a shared worker set,
- * because the two consoles genuinely shared `agentSquarePanes` and the risk
- * worth guarding was a hand copy that would drift the day the shared table
- * changed. `triagePanes` stopped delegating when this console became one
- * collator over three observers: the square's table makes pane 2 the top row's
- * second half, so pane 1 can never be full width, and no shorter or longer
- * worker list changes that. The shape differs, not merely the count.
+ * **RETIRED THE CROSS-CONSOLE COMPARISON ON 2026-09-15, AND THIS TIME FOR
+ * GOOD.** Earlier revisions of this block pinned `triagePanes` against
+ * `reviewPanes` on one SHARED worker set — first asserting agreement while
+ * both delegated to `agentSquarePanes`, then disagreement for one day once
+ * `triagePanes` took its own four-seat table, then agreement again once
+ * `review` was asked to share that table through `collatorOverRowPanes`.
+ * Every one of those was true when written; the file header carries the full
+ * sequence. That comparison is not merely stale now, it is UNRUNNABLE:
+ * `triagePanes` refuses anything other than exactly seven workers and
+ * `collatorOverRowPanes` (`reviewPanes`'s builder) tops out at four, so no
+ * worker set exists any more that both plans would even accept, let alone
+ * agree on.
  *
- * **THIS GUARD HAS NOW BEEN POINTED THREE WAYS IN ONE DAY, and the sequence is
- * the finding.** It asserted the two consoles AGREE, while both delegated to
- * `agentSquarePanes`. It was inverted to assert they DISAGREE, when
- * `triagePanes` took its own table on 2026-09-13. It is inverted BACK here,
- * because `review` was asked to take this console's shape later the same day and
- * both now delegate to `collatorOverRowPanes`.
- *
- * **Every one of the three was true when it was written.** None was a mistake,
- * and nothing reddened at either inversion until the assertion itself went red.
- * That is the defect worth naming: an assertion of the form *"this console does
- * / does not match that one"* is a claim about a NEIGHBOUR. It flips whenever
- * the neighbour moves, and in neither direction does it tell you whether THIS
- * console is still right — `tri-1` could stop spanning the width and a
- * disagreement probe would stay happily green.
- *
- * So the load-bearing assertion below is the ANCHOR TABLE, written as a literal:
- * the collator full width, its observers in one row beneath it. That is what an
- * operator would notice breaking, and it does not move when `review` changes its
- * mind. The cross-console comparisons are kept but demoted to what they can
- * honestly do — one documents that the sharing is real, and one is re-aimed at
- * `development`, which did NOT change shape and therefore still catches a
- * re-delegation to the square. Anti-vacuity is carried by the asymmetric-defaults
- * probe further down, which never depended on the two consoles differing at all.
+ * What replaces it is the lesson the earlier inversions already taught: a
+ * probe of the form *"this console does / does not match that one"* is a
+ * claim about a NEIGHBOUR, not about this console, and it is worth only what
+ * the neighbour's own shape happens to be worth on the day it runs. The
+ * LITERAL anchor table in the seven-pane describe block further down (§4.2's
+ * split table, transcribed) is what actually pins this console's shape now,
+ * and it does not move when any other console does. What is left here is the
+ * two probes that never depended on a neighbour holding still: the
+ * asymmetric defaults (this console and `review` share no default seat) and
+ * the label inside a refusal (this console never claims to be `review` when
+ * it fails).
  */
-describe("the triage plan anchors a full-width collator over one row of observers", () => {
+describe("the triage plan is not, and cannot be made to look like, the review plan", () => {
   /**
-   * ONE WORKER SET, BOTH CONSOLES — kept from the version this replaces, and
-   * for a reason that survived the inversion: with the defaults removed from the
-   * picture, everything left is the BUILDER's decision. It used to prove the two
-   * agree; it now proves they cannot be made to.
+   * THE ASYMMETRIC FIXTURE. If this console's defaults ever came to agree
+   * with `review`'s, a mutation that replaced `triagePanes`' body outright
+   * with `reviewPanes(opts)` would be invisible everywhere else in this file
+   * — the titles would be equal by construction. This is the probe that
+   * makes them disagree, stated as its own assertion rather than left
+   * implicit in the seat names above.
    */
-  const SHARED = ["w-1", "w-2", "w-3", "w-4"] as const;
-
-  it("produces the review console's panes on a shared set, because they share a builder", () => {
-    /*
-     * INVERTED BACK on 2026-09-13, hours after being inverted TO `not.toEqual`.
-     * For one day `triagePanes` carried its own copy of the table and the two
-     * consoles could not be made to match; `review` was then asked to take this
-     * shape, the table moved into `collatorOverRowPanes`, and they are equal
-     * again on any set where the defaults are out of the picture.
-     *
-     * **This assertion can no longer catch a re-delegation to
-     * `agentSquarePanes`, and it does not pretend to** — that job belongs to the
-     * literal table in the next test, and to the `development` comparison
-     * beside it. What this one still buys is that the sharing is REAL rather
-     * than incidental: give either console its own table again and this reddens.
-     */
-    expect(triagePanes({ ...BASE, workers: SHARED })).toEqual(
-      reviewPanes({ ...BASE, workers: SHARED }),
-    );
-  });
-
-  it("anchors a full-width collator over one row of observers", () => {
-    /*
-     * THE ANCHOR TABLE IS THE WHOLE TEST, exactly as it was before — only the
-     * table changed. Read against `triagePanes`' own diagram:
-     *
-     *   1: the initial surface
-     *   2: "down"  off 1  (splitFrom 0)   <- creates the observer row
-     *   3: "right" off 2  (splitFrom 1)   <- walks along it
-     *   4: "right" off 3  (splitFrom 2)
-     *
-     * The FIRST split is the load-bearing one: it must go `down` off pane 1, or
-     * the top row is divided and the collator never spans the width. Every
-     * count, title and command assertion in this file passes either way.
-     */
-    const shape = (panes: ReturnType<typeof triagePanes>) =>
-      panes.map((p) => [p.split, p.splitFrom ?? null]);
-
-    expect(shape(triagePanes({ ...BASE, workers: SHARED }))).toEqual([
-      [null, null],
-      ["down", 0],
-      ["right", 1],
-      ["right", 2],
-    ]);
-    /*
-     * …and the SQUARE's table, read at runtime, is still a different one.
-     *
-     * RE-AIMED 2026-09-13 from `reviewPanes` to `developmentPanes`. It pointed
-     * at `review` while that console was the square; `review` has since taken
-     * THIS console's shape, so the two now agree and the comparison could no
-     * longer detect anything. `development` did not move, and it is the only
-     * remaining console on `agentSquarePanes` — which makes it the right
-     * neighbour for this probe and, incidentally, the reason that builder still
-     * exists.
-     *
-     * This is what catches a re-delegation of `triagePanes` to the square: the
-     * literal table above and this line stop disagreeing together, and both
-     * reds point at the same edit.
-     */
-    expect(shape(triagePanes({ ...BASE, workers: SHARED }))).not.toEqual(
-      shape(developmentPanes({ ...BASE, workers: SHARED })),
-    );
-  });
-
-  /**
-   * THE ASYMMETRIC FIXTURE, and the reason the block above uses `SHARED` rather
-   * than the defaults.
-   *
-   * If every fixture in this file made the two consoles agree, a mutation that
-   * replaced `triagePanes`' body with `reviewPanes(opts)` would survive the
-   * whole battery — the plans would be equal by construction and every probe
-   * would be measuring nothing. This is the probe that makes them disagree, and
-   * it is stated as its own assertion rather than left implicit in the seat
-   * names above so that the guarantee is visible to the next reader.
-   */
-  it("does NOT agree with the review console on the defaults, which is what makes the rest mean anything", () => {
+  it("does NOT agree with the review console on the defaults, which is what makes the anchor table mean anything", () => {
     const triageTitles = triagePanes(BASE).map((p) => p.title);
     const reviewTitles = reviewPanes(BASE).map((p) => p.title);
 
@@ -401,10 +329,10 @@ describe("the triage plan anchors a full-width collator over one row of observer
   });
 
   it("names its own console, not the review console, in a refusal", () => {
-    // The other half of the asymmetry, and the shared builder makes it MORE
-    // valuable rather than less: `collatorOverRowPanes` takes the label as an
-    // argument and BOTH consoles now pass through it, so a swapped constant
-    // shows up here and nowhere in the layout — the layouts are identical.
+    // Even with no worker count left that both builders would accept, both
+    // refusals are still reachable on an empty set, and the label is still
+    // the only thing that tells an operator which `--workers` flag to go
+    // and fix.
     expect(() => triagePanes({ ...BASE, workers: [] })).toThrow(/^triage:/);
     expect(() => triagePanes({ ...BASE, workers: [] })).not.toThrow(/^review:/);
   });
@@ -423,16 +351,16 @@ describe("the triage plan anchors a full-width collator over one row of observer
  * retiring it belongs to that file, not to this one.
  *
  * **This console needs no gate at all, and for a reason that never depended on
- * the ignore**: all four triage seats ARE in `fleet.example.yaml`, so the pane
+ * the ignore**: all seven triage seats ARE in `fleet.example.yaml`, so the pane
  * plan can be checked against the shipped reference config itself — no skip, no
  * machine dependency, and nothing that has to be true of the operator's live
  * fleet for this file to mean what it says.
  *
  * Without this, `DEFAULT_TRIAGE_WORKERS` is a second spelling of the console's
- * membership and the two drift silently: the plan decides which two workers
- * `scripts/triage` STARTS, and the config decides which two exist. A seat
- * renamed in one and not the other is two panes whose `up` refuses on an
- * unknown worker — a failure that arrives twice over, in two panes nobody
+ * membership and the two drift silently: the plan decides which seven workers
+ * `scripts/triage` STARTS, and the config decides which seven exist. A seat
+ * renamed in one and not the other is a pane whose `up` refuses on an unknown
+ * worker — a failure that arrives twice over, once per side, in a pane nobody
  * is watching.
  */
 describe("the seats the plan names are the seats the tracked config declares", () => {
@@ -442,15 +370,196 @@ describe("the seats the plan names are the seats the tracked config declares", (
 
     /*
      * BY ID AND BY ROLE, in pane order. The id alone would pass on a `tri-1`
-     * demoted to `observer`, which is the more likely edit and the more
+     * demoted to `observer-k8s`, which is the more likely edit and the more
      * confusing outcome — the reconciler seat would still be found, still be
-     * pane 1, and would be briefed a reconciliation it has no prompt for.
+     * pane 1, and would be briefed a reconciliation it has no prompt for. The
+     * four roles (`triage`, `observer-k8s`, `observer-docker`, `observer-vm`)
+     * are what tells a k8s seat from a docker or vm one, since the ids alone
+     * (`obs-t1` vs `obs-td1` vs `obs-tv1`) are a naming convention, not a
+     * schema fact.
      */
     expect([...DEFAULT_TRIAGE_WORKERS].map((id) => [id, roles.get(id)])).toEqual([
       ["tri-1", "triage"],
-      ["obs-t1", "observer"],
-      ["obs-t2", "observer"],
-      ["obs-t3", "observer"],
+      ["obs-t1", OBSERVER_K8S_ROLE],
+      ["obs-td1", OBSERVER_DOCKER_ROLE],
+      ["obs-t2", OBSERVER_K8S_ROLE],
+      ["obs-t3", OBSERVER_K8S_ROLE],
+      ["obs-td2", OBSERVER_DOCKER_ROLE],
+      ["obs-tv1", OBSERVER_VM_ROLE],
     ]);
+  });
+});
+
+/**
+ * THE SEVEN-PANE SHAPE (SRD-TRIAGE-MIXED-OBSERVERS §4.2) — the ONLY geometry
+ * `triagePanes` builds now that the four-worker branch is gone (§11 task
+ * 2.1). This block still uses SYNTHETIC ids that name their own final cell
+ * rather than the real roster: the tests above already pin
+ * `DEFAULT_TRIAGE_WORKERS` by name, so repeating the same seven real ids here
+ * would test nothing new about the GEOMETRY — a synthetic id that names its
+ * own cell (`r1c2`, `r2c3`, …) makes a wrong anchor visible at the site of
+ * the mistake instead of requiring a cross-reference back to §4.2's table.
+ *
+ * Ids are given in CREATION order, which SRD §4.2 states is not reading
+ * order: both `down` splits that open the two observer rows happen before
+ * either row's own `right` splits, so a pane named for row two's first column
+ * (`r2c1`) is created (index 2) before row one's second and third columns
+ * (`r1c2`, `r1c3`, indices 3 and 4).
+ */
+const SEVEN = ["top", "r1c1", "r2c1", "r1c2", "r1c3", "r2c2", "r2c3"] as const;
+
+/** A pane, reduced to exactly what a layout replay needs. */
+type LaidOutPane = { readonly title: string; readonly split: string | null; readonly splitFrom?: number };
+
+type UnitCell = { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number };
+
+/**
+ * Replays `split`/`splitFrom` as a binary split tree over a unit square, the
+ * way `new-split` actually behaves: `down` halves the anchor's cell top over
+ * bottom (anchor keeps the top half, the new pane takes the bottom half);
+ * `right` halves it left over right (anchor keeps the left half, the new pane
+ * takes the right half). `splitFrom` undefined means "the previous pane",
+ * matching {@link OperationsPane.splitFrom}'s own contract. `up`/`left` are
+ * not a direction any builder in this file emits, so this throws on them
+ * rather than guessing a meaning.
+ */
+function computeCells(panes: readonly LaidOutPane[]): UnitCell[] {
+  const cells: UnitCell[] = [];
+  panes.forEach((p, i) => {
+    if (i === 0) {
+      cells[0] = { left: 0, right: 1, top: 0, bottom: 1 };
+      return;
+    }
+    const anchorIndex = p.splitFrom ?? i - 1;
+    const anchor = cells[anchorIndex]!;
+    if (p.split === "down") {
+      const mid = (anchor.top + anchor.bottom) / 2;
+      cells[i] = { ...anchor, top: mid };
+      cells[anchorIndex] = { ...anchor, bottom: mid };
+    } else if (p.split === "right") {
+      const mid = (anchor.left + anchor.right) / 2;
+      cells[i] = { ...anchor, left: mid };
+      cells[anchorIndex] = { ...anchor, right: mid };
+    } else {
+      throw new Error(`computeCells: unsupported split direction ${String(p.split)}`);
+    }
+  });
+  return cells;
+}
+
+/**
+ * Rows in READING order: cells grouped by top edge (a row), each row ordered
+ * by left edge, as arrays of titles. This is the probe that catches a single
+ * wide row where two were expected — see the revert check below.
+ */
+function rowsOf(panes: readonly LaidOutPane[]): string[][] {
+  const cells = computeCells(panes);
+  const rows = new Map<number, { left: number; title: string }[]>();
+  panes.forEach((p, i) => {
+    const cell = cells[i]!;
+    const key = Math.round(cell.top * 1e6);
+    const row = rows.get(key) ?? [];
+    row.push({ left: cell.left, title: p.title });
+    rows.set(key, row);
+  });
+  return [...rows.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, entries]) => entries.sort((a, b) => a.left - b.left).map((e) => e.title));
+}
+
+/** Each row's total width — 1 means the row is genuinely full width. */
+function rowWidthsOf(panes: readonly LaidOutPane[]): number[] {
+  const cells = computeCells(panes);
+  const rows = new Map<number, number>();
+  cells.forEach((cell) => {
+    const key = Math.round(cell.top * 1e6);
+    rows.set(key, (rows.get(key) ?? 0) + (cell.right - cell.left));
+  });
+  return [...rows.entries()].sort(([a], [b]) => a - b).map(([, width]) => width);
+}
+
+describe("triagePanes builds a second, hardcoded shape at exactly seven workers", () => {
+  it("returns seven panes named and ordered SEVEN, by title and by worker", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN });
+    expect(panes).toHaveLength(7);
+    expect(panes.map((p) => p.title)).toEqual([...SEVEN]);
+    expect(panes.map((p) => p.worker)).toEqual([...SEVEN]);
+  });
+
+  it("matches SRD §4.2's split table literally", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN });
+    expect(panes.map((p) => [p.split, p.splitFrom ?? null])).toEqual([
+      [null, null],
+      ["down", 0],
+      ["down", 1],
+      ["right", 1],
+      ["right", 3],
+      ["right", 2],
+      ["right", 5],
+    ]);
+  });
+
+  it("replays to one collator row and two full-width observer rows, in reading order", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN });
+    expect(rowsOf(panes)).toEqual([["top"], ["r1c1", "r1c2", "r1c3"], ["r2c1", "r2c2", "r2c3"]]);
+
+    // Full width means exactly that: every row's cells sum to 1, not merely a
+    // count of three.
+    for (const width of rowWidthsOf(panes)) expect(width).toBeCloseTo(1, 10);
+  });
+
+  it("SRD §11 task 1.1's revert check: the OLD flat-row table reads as ONE wide row, not two", () => {
+    /*
+     * The table `triagePanes` used to delegate to before this task —
+     * `collatorOverRowPanes`'s own shape, `[null, down·0, right·1, right·2,
+     * right·3, right·4, right·5]` — stretched over the same seven ids. This is
+     * exactly the mutation task 1.1 names: pass the old flat-row order and the
+     * two-row assertion above must be able to tell the difference.
+     */
+    const flat: LaidOutPane[] = [
+      { title: "top", split: null },
+      { title: "r1c1", split: "down", splitFrom: 0 },
+      { title: "r2c1", split: "right", splitFrom: 1 },
+      { title: "r1c2", split: "right", splitFrom: 2 },
+      { title: "r1c3", split: "right", splitFrom: 3 },
+      { title: "r2c2", split: "right", splitFrom: 4 },
+      { title: "r2c3", split: "right", splitFrom: 5 },
+    ];
+
+    const rows = rowsOf(flat);
+    expect(rows).not.toEqual([["top"], ["r1c1", "r1c2", "r1c3"], ["r2c1", "r2c2", "r2c3"]]);
+    expect(rows).toEqual([["top"], ["r1c1", "r2c1", "r1c2", "r1c3", "r2c2", "r2c3"]]);
+  });
+
+  it.each([3, 5, 6, 8])("refuses %d workers, naming the console and the count", (n) => {
+    const workers = Array.from({ length: n }, (_, i) => `w-${i}`);
+    expect(() => triagePanes({ ...BASE, workers })).toThrow(
+      new RegExp(`^triage: refusing ${n} workers`),
+    );
+  });
+
+  it("gives no seven-pane a keyboard when the caller names no tui workers", () => {
+    for (const p of triagePanes({ ...BASE, workers: SEVEN })) {
+      expect(p.command, `${p.title} was handed a keyboard`).not.toContain("'--attach-here'");
+    }
+  });
+
+  it("hands exactly the named seat a keyboard, and no other", () => {
+    const panes = triagePanes({ ...BASE, workers: SEVEN, tuiWorkers: ["r2c2"] });
+    for (const p of panes) {
+      if (p.title === "r2c2") {
+        expect(p.command).toContain("'--attach-here'");
+      } else {
+        expect(p.command, `${p.title} was handed a keyboard`).not.toContain("'--attach-here'");
+      }
+    }
+  });
+
+  it("refuses a worker id assertPlainValue refuses, on the seven-worker path too", () => {
+    // A space fails PLAIN_VALUE_RE the same way it would on the four-worker
+    // path — this branch has its own loop over `workers` and the same
+    // guard could in principle have been dropped when the table was added.
+    const workers = ["top", "r1c1", "r2c1", "not plain", "r1c3", "r2c2", "r2c3"];
+    expect(() => triagePanes({ ...BASE, workers })).toThrow(/not a plain identifier/);
   });
 });

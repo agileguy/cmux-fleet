@@ -29,14 +29,16 @@ export class CmuxParseError extends Error {
 /**
  * A pane in this backend is addressed by its pane id, the id of the terminal
  * surface inside it, AND the id of the workspace that owns it, because cmux
- * splits the verbs three ways: `focus-pane` wants a pane; `read-screen`,
- * `send` and `send-key` want a surface alone; `respawn-pane` and `rename-tab`
- * want a surface scoped to a workspace context — with neither `--workspace`
- * nor `$CMUX_WORKSPACE_ID` set, surface resolution for those two verbs fails
- * even on a surface id `new-split` just returned, probed live against 0.64.22
- * on 2026-08-18 (see `respawnPaneArgv`). The seam's `PaneRef` carries one
- * opaque string, so all three ids travel composed in it. A space is a safe
- * separator: no id cmux emits (UUID or `kind:N` ref) contains one.
+ * splits the verbs three ways: `focus-pane` wants a pane scoped to a workspace
+ * context; `read-screen`, `send` and `send-key` want a surface alone;
+ * `respawn-pane` and `rename-tab` want a surface scoped to a workspace
+ * context — with neither `--workspace` nor `$CMUX_WORKSPACE_ID` set, surface
+ * resolution for those two verbs fails even on a surface id `new-split` just
+ * returned, probed live against 0.64.22 on 2026-08-18 (see `respawnPaneArgv`),
+ * and `focus-pane` resolves against the CALLER'S workspace when the flag is
+ * omitted inside cmux (2026-09-13, see `focusPaneArgv`). The seam's `PaneRef`
+ * carries one opaque string, so all three ids travel composed in it. A space is
+ * a safe separator: no id cmux emits (UUID or `kind:N` ref) contains one.
  */
 export function composePaneId(paneId: string, surfaceId: string, workspaceId: string): string {
   for (const [what, v] of [
@@ -60,15 +62,15 @@ export function composePaneId(paneId: string, surfaceId: string, workspaceId: st
  * | fields | producer | reaches |
  * |---|---|---|
  * | `<pane> <surface> <workspace>` | `createPane` | every verb |
- * | `<pane> <surface>` | a pifleet build predating the `--workspace` fix, persisted in `presentation.json` | all but `respawn-pane`/`rename-tab` |
+ * | `<pane> <surface>` | a pifleet build predating the `--workspace` fix, persisted in `presentation.json` | `send`, `send-key`, `read-screen` — not `focus-pane`, `respawn-pane` or `rename-tab` |
  * | `<surface>` | `up --attach-here`, out of `CMUX_SURFACE_ENV` | `send`, `send-key`, `read-screen` |
  *
  * Missing fields are reported as `null` rather than fabricated, so the verb
  * that needs one can refuse BY NAME at its own call site — `attachViewer` for
- * a null workspace, `focus` for a null pane. That disposition is the point:
- * an opaque parse failure two layers down is what made the 1-field case
- * silently break every staged dispatch to a `tui` worker, since `sendText`
- * wanted only the surface the string already was.
+ * a null workspace, `focus` for a null pane or a null workspace. That
+ * disposition is the point: an opaque parse failure two layers down is what
+ * made the 1-field case silently break every staged dispatch to a `tui` worker,
+ * since `sendText` wanted only the surface the string already was.
  */
 export function splitPaneId(composed: string): {
   paneId: string | null;
@@ -100,7 +102,8 @@ export function splitPaneId(composed: string): {
    * refuse BY NAME at their own call site rather than here — the same
    * disposition the 2-field legacy case already gets. One field is enough for
    * `send`, `send-key` and `read-screen`; `focus-pane` additionally needs the
-   * pane, and `respawn-pane`/`rename-tab` additionally need the workspace.
+   * pane AND the workspace, and `respawn-pane`/`rename-tab` additionally need
+   * the workspace.
    */
   if (parts.length === 1) {
     return { paneId: null, surfaceId: parts[0]!, workspaceId: null };

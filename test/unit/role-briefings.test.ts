@@ -24,6 +24,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { loadConfig, resolveAllWorkers } from "../../src/config/load.ts";
+import { OBSERVER_K8S_ROLE } from "../../src/config/schema.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const EXAMPLE = join(REPO_ROOT, "fleet.example.yaml");
@@ -46,7 +47,9 @@ describe("the shipped example names only things that exist", () => {
     // removing every briefing path — or renaming the key — goes red here.
     expect(checked.sort()).toEqual([
       "engineer",
-      "observer",
+      "observer-docker",
+      OBSERVER_K8S_ROLE,
+      "observer-vm",
       "reviewer",
       "sre",
       "tester",

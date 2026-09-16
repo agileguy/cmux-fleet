@@ -12,7 +12,7 @@ you and the orchestrator that dispatched your task. It is the same for every rol
 
 | Path | What it is |
 |---|---|
-| `/workspace` | your checkout of the repo, on a branch created for you. **Whether it exists and whether it is writable depend on your role.** A `worktree` role gets its own writable checkout and may commit; a `shared-ro` role (the reviewer) gets the operator's checkout mounted **read-only**; a `none` role (observer, verifier, ticketing) gets **no `/workspace` at all** and works against live systems. An absent or read-only `/workspace` is your role, not a fault |
+| `/workspace` | your checkout of the repo, on a branch created for you. **Whether it exists and whether it is writable depend on your role.** A `worktree` role gets its own writable checkout and may commit; a `shared-ro` role (the reviewer) gets the operator's checkout mounted **read-only**; a `none` role (observer-k8s, verifier, ticketing) gets **no `/workspace` at all** and works against live systems. An absent or read-only `/workspace` is your role, not a fault |
 | `/outbox/<task-id>` | where you write your result; the orchestrator reads it — `<task-id>` is a literal string you were given, never a name you choose (next section) |
 | `/skills` | read-only skill bundle |
 | `/policy/dispatch` | read-only. Present and non-empty only when your task was **staged** — see the next section. Holds the same identity block your prompt carries, plus the brief |

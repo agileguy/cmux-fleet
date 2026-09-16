@@ -24,6 +24,7 @@ import {
   renderAllWorkers,
   renderWorker,
   BRIEFING_MOUNT,
+  OUTPUT_TOKEN_CAP_PATH,
   REPORT_TOOLS_PATH,
   TRUNCATION_RECOVERY_PATH,
 } from "../../src/config/render.ts";
@@ -1691,8 +1692,9 @@ describe("image tag", () => {
   /**
    * ISC-160, the other half — the Dockerfile is not the whole recipe.
    *
-   * The Dockerfile `COPY`s six files it does not contain, and hashing only its
-   * own text left every one of them outside the tag:
+   * The Dockerfile `COPY`s twelve files it does not contain, and hashing only
+   * its own text left every one of them outside the tag. This block moves the
+   * digest for seven of them:
    *
    *  - `docker/verbgate` IS the cloud-mutation gate (ISC-104/105/106/107). An
    *    image built before a gate fix carries the OLD gate, and reusing it
@@ -1706,12 +1708,15 @@ describe("image tag", () => {
    *    environment, so a stale copy reads a credential from the wrong variable
    *    or queries an unscoped workspace — and the second returns ROWS rather
    *    than an error.
-   *  - `docker/pi-extensions/dispatch-trigger.ts` and
-   *    `docker/pi-extensions/truncation-recovery.ts` are the two extensions Pi
-   *    executes IN-PROCESS, and both go stale by falling SILENT: the first
-   *    stops firing and the worker sits idle against a staged task, the second
-   *    stops matching Pi's `BashToolDetails` field names and finds no
-   *    truncation to report. Neither raises anything anywhere.
+   *  - `docker/pi-extensions/dispatch-trigger.ts`,
+   *    `docker/pi-extensions/truncation-recovery.ts` and
+   *    `docker/pi-extensions/output-token-cap.ts` are the three extensions Pi
+   *    executes IN-PROCESS, and all three go stale by falling SILENT: the
+   *    first stops firing and the worker sits idle against a staged task, the
+   *    second stops matching Pi's `BashToolDetails` field names and finds no
+   *    truncation to report, and the third stops recognising the provider
+   *    request shape and every seat goes back to sending no `max_tokens` at
+   *    all. None raises anything anywhere.
    *
    * THE LAST FOUR WERE ENROLLED WITH NOTHING BUT MEMBERSHIP BEHIND THEM. Each
    * of `ticket-cli.test.ts`, `auto-trigger.test.ts` and
@@ -1720,7 +1725,7 @@ describe("image tag", () => {
    * Membership is a claim about an ARRAY; ISC-160's claim is that the TAG
    * moves when the bytes move, and an array entry that `configHash` never
    * reads satisfies the first and not the second. These cases make the second
-   * claim for all six.
+   * claim for all seven.
    *
    * `pi-extensions/report-tools.ts` is deliberately NOT in this list.
    * `test/unit/dockerfile-build-assets.test.ts` pins it end to end — real
@@ -1739,6 +1744,7 @@ describe("image tag", () => {
     "ticket-cli",
     "pi-extensions/dispatch-trigger.ts",
     "pi-extensions/truncation-recovery.ts",
+    "pi-extensions/output-token-cap.ts",
   ] as const)(
     "editing docker/%s busts the tag even though the Dockerfile is untouched (ISC-160)",
     async (asset) => {
@@ -2091,6 +2097,13 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // one reader that has never asked which pane mode wrote it.
       "--extension",
       "/opt/pifleet/report-tools.ts",
+      // Output-token cap, also unconditional and in both modes (the
+      // 2026-09-15 stall measurement). It no-ops when
+      // PIFLEET_PI_MAX_OUTPUT_TOKENS is empty, so loading it is not itself a
+      // behaviour change — the alternative would be gating on a launch-time
+      // render function guessing what the container's own environment holds.
+      "--extension",
+      "/opt/pifleet/output-token-cap.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2135,6 +2148,13 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // one reader that has never asked which pane mode wrote it.
       "--extension",
       "/opt/pifleet/report-tools.ts",
+      // Output-token cap, also unconditional and in both modes (the
+      // 2026-09-15 stall measurement). It no-ops when
+      // PIFLEET_PI_MAX_OUTPUT_TOKENS is empty, so loading it is not itself a
+      // behaviour change — the alternative would be gating on a launch-time
+      // render function guessing what the container's own environment holds.
+      "--extension",
+      "/opt/pifleet/output-token-cap.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2184,15 +2204,18 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // extension — pifleet's, root-owned 0444 in the image — loads.
       "--extension",
       "/opt/pifleet/dispatch-trigger.ts",
-      // And truncation recovery after it, then report tools, both on every
-      // worker in both modes. THREE `--extension` flags is the expected shape
-      // here, not a duplication: `--no-extensions` still denies DISCOVERY, so
-      // these three paths are the complete set of what executes in-process,
-      // and this is the only argv in the file that carries all three.
+      // And truncation recovery after it, then report tools, then the
+      // output-token cap, all three unconditional in both modes. FOUR
+      // `--extension` flags is the expected shape here, not a duplication:
+      // `--no-extensions` still denies DISCOVERY, so these four paths are the
+      // complete set of what executes in-process, and this is the only argv
+      // in the file that carries all four.
       "--extension",
       "/opt/pifleet/truncation-recovery.ts",
       "--extension",
       "/opt/pifleet/report-tools.ts",
+      "--extension",
+      "/opt/pifleet/output-token-cap.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2418,11 +2441,16 @@ describe("report tools load on every worker (SRD-WORKER-DISPATCH-EXTENSION 2.4)"
   test("both pane modes carry it, and the extension set is exactly right in each", async () => {
     const { rpc, tui } = await workers();
 
-    expect(valuesOf(rpc.pi, "--extension")).toEqual([TRUNCATION_RECOVERY_PATH, REPORT_TOOLS_PATH]);
+    expect(valuesOf(rpc.pi, "--extension")).toEqual([
+      TRUNCATION_RECOVERY_PATH,
+      REPORT_TOOLS_PATH,
+      OUTPUT_TOKEN_CAP_PATH,
+    ]);
     expect(valuesOf(tui.pi, "--extension")).toEqual([
       DISPATCH_TRIGGER_PATH,
       TRUNCATION_RECOVERY_PATH,
       REPORT_TOOLS_PATH,
+      OUTPUT_TOKEN_CAP_PATH,
     ]);
     // Once, not twice: `--extension` is repeatable, so a second push would be
     // accepted by Pi and by every `toContain` ever written about this flag.
@@ -2444,10 +2472,11 @@ describe("report tools load on every worker (SRD-WORKER-DISPATCH-EXTENSION 2.4)"
 
     // The premise: this worker really has lost the auto-trigger…
     expect(manual.pi).not.toContain(DISPATCH_TRIGGER_PATH);
-    // …and kept the other two, which is the claim.
+    // …and kept the other three, which is the claim.
     expect(valuesOf(manual.pi, "--extension")).toEqual([
       TRUNCATION_RECOVERY_PATH,
       REPORT_TOOLS_PATH,
+      OUTPUT_TOKEN_CAP_PATH,
     ]);
   });
 
@@ -2487,5 +2516,107 @@ describe("report tools load on every worker (SRD-WORKER-DISPATCH-EXTENSION 2.4)"
     expect(dockerfile).toContain(`docker/pi-extensions/report-tools.ts ${REPORT_TOOLS_PATH}`);
     // …and it is the root-owned read-only layer the paragraph above relies on.
     expect(dockerfile).toContain("--chmod=0444 docker/pi-extensions/report-tools.ts");
+  });
+});
+
+/**
+ * The output-token cap loads on every worker, unconditionally — the same
+ * shape §2.4's block above pins for report tools, applied to the extension
+ * that closes the 2026-09-15 stall measurement (`config/schema.ts`'s
+ * `max_output_tokens` docblock and `docker/pi-extensions/output-token-cap.ts`'s
+ * own header carry the numbers).
+ *
+ * Unconditional for the same reason report tools is and not for the same
+ * reason as truncation recovery: it is not that a cap is pane-mode-agnostic
+ * (it is), it is that WHETHER a cap applies is an answer only
+ * `PIFLEET_PI_MAX_OUTPUT_TOKENS` — read inside the container — can give.
+ * Gating the flag here on "does this worker resolve a cap" would require
+ * `buildPiArgv` to take the resolved config, which it deliberately does not
+ * (`RenderedWorker`'s docblock, ISC-60): the renderer says exactly what `up`
+ * would run without being able to run it, and the extension itself already
+ * no-ops on an empty variable, so nothing is gained by duplicating that
+ * decision at render time.
+ */
+describe("output-token cap loads on every worker (2026-09-15 stall measurement)", () => {
+  async function workers() {
+    const f = await fixture((doc) => {
+      (doc["workers"] as unknown[]).push(
+        { id: "eng-tui", role: "eng", pane_mode: "tui" },
+        { id: "eng-manual", role: "eng", pane_mode: "tui", auto_trigger: false },
+      );
+    });
+    return {
+      ...f,
+      rpc: await renderWorker(f.loaded, "eng-1"),
+      tui: await renderWorker(f.loaded, "eng-tui"),
+      manual: await renderWorker(f.loaded, "eng-manual"),
+    };
+  }
+
+  test("every pane mode and every auto_trigger setting carries it", async () => {
+    const { rpc, tui, manual } = await workers();
+
+    expect(rpc.pi).toContain(OUTPUT_TOKEN_CAP_PATH);
+    expect(tui.pi).toContain(OUTPUT_TOKEN_CAP_PATH);
+    expect(manual.pi).toContain(OUTPUT_TOKEN_CAP_PATH);
+    // Once, not twice — the same repeatable-flag hazard §2.4's block guards.
+    expect(countOf(rpc.pi, OUTPUT_TOKEN_CAP_PATH)).toBe(1);
+  });
+
+  /**
+   * The whole set, not a `toContain` — the same reason §2.4's block states at
+   * length: `--no-extensions` denies discovery, so this list is the complete
+   * inventory of what Pi executes in-process, and a FIFTH extension arriving
+   * unannounced is a failure here rather than a discovery made in a running
+   * container.
+   */
+  test("it does not displace any of the other three — four total, in the fixed order", async () => {
+    const { rpc, tui } = await workers();
+
+    expect(valuesOf(rpc.pi, "--extension")).toEqual([
+      TRUNCATION_RECOVERY_PATH,
+      REPORT_TOOLS_PATH,
+      OUTPUT_TOKEN_CAP_PATH,
+    ]);
+    expect(valuesOf(tui.pi, "--extension")).toEqual([
+      DISPATCH_TRIGGER_PATH,
+      TRUNCATION_RECOVERY_PATH,
+      REPORT_TOOLS_PATH,
+      OUTPUT_TOKEN_CAP_PATH,
+    ]);
+  });
+
+  /**
+   * Baked, not mounted — the same control every other extension has, for the
+   * same reason: Pi executes it IN-PROCESS with the full extension API, so a
+   * worker able to write this file would be a worker able to remove its own
+   * output cap from every request it sends.
+   */
+  test("nothing mounts it: the docker argv names the path once and no -v carries it", async () => {
+    const { rpc } = await workers();
+
+    expect(countOf(rpc.docker, OUTPUT_TOKEN_CAP_PATH)).toBe(1);
+    expect(rpc.docker.filter((a) => a.includes("output-token-cap"))).toEqual([
+      OUTPUT_TOKEN_CAP_PATH,
+    ]);
+  });
+
+  /**
+   * The constant and the image agree about the path — the same failure mode
+   * §2.4's block guards against: a well-formed flag pointing at a path no
+   * image has stops Pi from starting entirely, taking out every worker in the
+   * fleet at once, not just this extension's own coverage.
+   */
+  test("the emitted path is the path docker/Dockerfile COPYs the extension to", async () => {
+    const dockerfile = await readFile(join(REPO_ROOT, "docker", "Dockerfile"), "utf8");
+
+    expect(dockerfile).toContain(
+      `docker/pi-extensions/output-token-cap.ts ${OUTPUT_TOKEN_CAP_PATH}`,
+    );
+    expect(dockerfile).toContain("--chmod=0444 docker/pi-extensions/output-token-cap.ts");
+  });
+
+  test("the extension is a build-context asset, so the image tag moves when it does", async () => {
+    expect(BUILD_CONTEXT_ASSETS).toContain("pi-extensions/output-token-cap.ts");
   });
 });

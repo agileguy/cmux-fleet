@@ -101,13 +101,18 @@
 import { writeFile, chmod, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
-import { nonCredentialSecretNames, secretGrantNames } from "../config/schema.ts";
+import {
+  multilineSecretNames,
+  nonCredentialSecretNames,
+  secretGrantNames,
+} from "../config/schema.ts";
 import {
   ConfigError,
   providerApiKeyEnv,
   providerBaseUrl,
   providerContextWindow,
   providerIsHosted,
+  providerMaxOutputTokens,
 } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
@@ -627,6 +632,32 @@ export function buildWorkerEnv(
       providerContextWindow(loaded.config, w.provider, w.model) ?? "",
     ),
     /*
+     * The model's per-request output-token cap, or "" for "send no cap".
+     *
+     * Empty rather than absent for the same reason `PIFLEET_LLM_CONTEXT_WINDOW`
+     * is: every value in this record is a string, and
+     * `docker/pi-extensions/output-token-cap.ts` treats an empty or invalid
+     * value as unset and returns every payload untouched — exactly the
+     * behaviour every worker had before this variable existed.
+     *
+     * `PIFLEET_LLM_CONTEXT_WINDOW` reaches Pi via `models.json`, read by every
+     * provider; this one cannot, because the OpenAI-compatible path never reads
+     * `model.maxTokens` back out of that file (`config/schema.ts`'s
+     * `max_output_tokens` docblock has the source lines). So the value has to
+     * travel as an environment variable an in-process extension reads, rather
+     * than as another key in the entrypoint's `jq` filter.
+     *
+     * Measured 2026-09-15: seats with no cap sent averaged a server-side
+     * `max_tokens` near 213k and stalled mid-turn for 16 minutes with tokens
+     * still flowing, past Pi's own 5-minute idle timeout. Completed turns from
+     * the same seats ran p50 99 / p90 800 / p99 3118 / max 7395 output tokens —
+     * the cap exists to turn the runaway case into an ordinary `length` finish
+     * at a budget the measured distribution says no real turn needs.
+     */
+    PIFLEET_PI_MAX_OUTPUT_TOKENS: String(
+      providerMaxOutputTokens(loaded.config, w.provider, w.model) ?? "",
+    ),
+    /*
      * Arms the escape-attempt honeypot (ISC-125). Unconditional: every worker
      * is watched, and there is no config switch to turn it off, because an
      * operator-visible "this run was not watched" state that an operator can
@@ -1070,6 +1101,7 @@ export function buildWorkerEnv(
   ]);
   const allowlist = secretGrantNames(loaded.config.secrets.env_allowlist);
   const notCredentials = new Set(nonCredentialSecretNames(loaded.config.secrets.env_allowlist));
+  const multiline = new Set(multilineSecretNames(loaded.config.secrets.env_allowlist));
   const secretNames: string[] = [];
   // `secretFiles` is declared at the top of this function and may ALREADY hold
   // the Class 1 key — see the D8 block above. The grants below append to it.
@@ -1111,12 +1143,35 @@ export function buildWorkerEnv(
      * on: `skills/ticket-ops/SKILL.md` concatenates this file's bytes into a
      * `header = "..."` line, and a newline in the middle of it would end the
      * header and start a curl config directive from a credential store.
+     *
+     * ## The opt-in, and why it is per name
+     *
+     * A name the operator marked `multiline: true` may carry LF, because some
+     * grants are files rather than tokens: the observer roles' SSH key,
+     * known_hosts and targets list are one entry per line by nature
+     * (SRD-OBSERVER-ROLES §5.5). The mark is read per NAME and nothing else is
+     * loosened, so the ticket token stays refused on a fleet that marked the
+     * key. The refusal message names the mark AND its limit, so the fix can be
+     * found without it reading as an invitation to mark a header token.
+     *
+     * A CR is refused for every name, marked or not. `NEWLINE` catches it for
+     * an unmarked name; the second check catches it for a marked one, because
+     * a CRLF key or line list is malformed to the tools that read it.
      */
-    if (NEWLINE.test(value)) {
+    if (NEWLINE.test(value) && !multiline.has(requested)) {
       throw new ConfigError(
-        `the value of ${requested} contains a newline — it is delivered as a file whose bytes ` +
-          `are concatenated into a request header, so the remainder would become a separate ` +
-          `directive`,
+        `the value of ${requested} contains a newline, and a granted secret may carry one only ` +
+          `when its secrets.env_allowlist entry says multiline: true — that mark is for a ` +
+          `file-shaped value no consumer splices into a single line (an SSH key, a ` +
+          `one-entry-per-line list); a token concatenated into a request header or a command ` +
+          `must stay on a single line, so for one of those remove the newline from the value`,
+      );
+    }
+    if (value.includes("\r")) {
+      throw new ConfigError(
+        `the value of ${requested} contains a carriage return — multiline: true permits LF line ` +
+          `endings only, because a CRLF key or line list is malformed to the tools that read ` +
+          `it; convert the value to LF line endings`,
       );
     }
     secretNames.push(requested);
@@ -1159,8 +1214,42 @@ export function buildWorkerEnv(
    * the store under exactly this name. It used to be resolvable only through
    * that fallback, which is the path kept for run directories written by older
    * versions of this CLI.
+   *
+   * A `credential: false` NAME IS EXCLUDED HERE, and that exclusion is this
+   * list's whole point rather than an afterthought bolted on beside it.
+   * `config/schema.ts`'s contract for the flag is exact: "`credential: false`
+   * says one thing and only one thing: do not use this value as a needle."
+   * This list, once written to `PIFLEET_SECRET_NAMES`, IS the redactor's
+   * needle list (`security/redact.ts:redactorForWorkerEnv` arms itself with
+   * exactly the names found here) — so a name the operator declared not a
+   * secret must never reach it, on the same reasoning `SECRET_NAMES_VAR`'s own
+   * docstring already states for the opposite mistake: arming against a name
+   * whose value the redactor cannot see "reports itself as armed while
+   * scrubbing nothing". Arming against a name that is NOT a secret is the
+   * mirror failure — it reports itself protecting something while destroying
+   * something else. SRD-OBSERVER-ROLES §5.5 grants
+   * `OBSERVER_DOCKER_KNOWN_HOSTS` and `OBSERVER_DOCKER_TARGETS` exactly this
+   * way, both `multiline: true` and `credential: false`, and measuring
+   * against that grant is what caught this: every known_hosts host key and
+   * every "token host port user" targets line was being scrubbed like a key,
+   * so `ssh: connect to host [redacted:OBSERVER_DOCKER_KNOWN_HOSTS] port 22:
+   * refused` named the wrong thing to rotate on every call, and an
+   * `observe-ssh docker <token> ps` invocation lost the token it was
+   * diagnosing.
+   *
+   * `notCredentials`, already in scope from the intersection above, is the
+   * SAME set the `nonCredentialSecretNames` field a few lines down is built
+   * from — read here rather than recomputed, so the two cannot drift onto
+   * different answers for the same worker. Nothing else moves: `secretNames`
+   * itself, what `up` reports and what the launch record carries, is
+   * UNCHANGED — a `credential: false` grant is still delivered, still a 0444
+   * file, still on every reserved-name and allowlist check. Only this
+   * module's own needle list narrows.
    */
-  const redactable = [...(deliversApiKey ? [apiKeyEnvName] : []), ...secretNames];
+  const redactable = [
+    ...(deliversApiKey ? [apiKeyEnvName] : []),
+    ...secretNames.filter((n) => !notCredentials.has(n)),
+  ];
   vars[SECRET_NAMES_VAR] = redactable.join(",");
 
   return {
@@ -1309,6 +1398,11 @@ export async function writeWorkerSecretFiles(
      * newline would terminate the header mid-quote. It is also what makes the
      * file's byte length equal to the value's, which is what the size check
      * below is able to assert.
+     *
+     * A `multiline: true` value's own final newline is PART of the value and
+     * is written like any other byte. Nothing is added and nothing is trimmed,
+     * so an OpenSSH key arrives with the trailing newline it was generated
+     * with.
      *
      * Raw rather than a pre-formed curl config fragment: `secrets:` is a list
      * of NAMES with no schema, so the fleet does not know whether a given one

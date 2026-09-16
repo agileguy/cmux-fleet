@@ -1,0 +1,492 @@
+#!/bin/sh
+# docker-forced-command — the whole of what the observer-docker credential can
+# do (SRD-OBSERVER-ROLES §5.2, §5.4; Phase 4 tasks 4.1 and 4.3).
+#
+# Installed root-owned, mode 0755, at a path the enrolled account cannot write,
+# and named as the `command=` in that account's one `authorized_keys` line
+# (§5.7): `restrict,command="<installed path>" ssh-ed25519 <key> pifleet-observer-docker`.
+# sshd then runs THIS SCRIPT for every session that key opens, with NO
+# arguments of its own — whatever the client asked for arrives only in
+# SSH_ORIGINAL_COMMAND, which OpenSSH sets to the client's argv joined with a
+# single ASCII space between each element (`docker/observe-ssh` sends
+# `-- "<verb>" "$@"`, so the string here is `<verb> [argument ...]`).
+#
+# ## Who owns what
+#
+# `docker/observe-ssh` owns ARGV SAFETY on the WORKER side and is a courtesy:
+# a worker that skips it and drives ssh directly can put anything at all into
+# SSH_ORIGINAL_COMMAND, including bytes no shell word ever holds (an embedded
+# newline, a leading '-', a NUL is impossible over the wire but nothing else
+# is). THIS script is the credential's only enforcement, on the target, of a
+# rule the worker cannot step around, and it is written to that threat model:
+# every character class below is spelled out, nothing is ever `eval`ed, and no
+# refusal message repeats back an attacker-controlled byte that has not first
+# passed one of those classes (an unvalidated verb or argument might carry a
+# newline that would forge a second, fake log line).
+#
+# ## Verbs (SRD §5.4 — this is the final grammar; every verb the role is
+# granted is enabled)
+#
+#   ps       [all] [name=<n> | label=<k>=<v>] ...
+#              -> docker ps --no-trunc --format <FIXED PS TEMPLATE> [--all] [--filter ...]
+#   inspect  <container>
+#              -> docker inspect --type container --format <FIXED INSPECT TEMPLATE> <container>
+#   logs     <container> since=<N>s tail=<M>   (both keys REQUIRED, M <= 500)
+#              -> docker logs --timestamps --since <N>s --tail <M> <container>
+#   stats    <container>
+#              -> docker stats --no-stream --no-trunc --format '{{json .}}' <container>
+#   top      <container>
+#              -> docker top <container>
+#   events   since=<N>s [container=<c>]
+#              -> docker events --since <N>s --until 0s --format '{{json .}}' <EVENTS_FILTERS> [--filter container=<c>]
+#   info     (no arguments)
+#              -> docker info --format <FIXED INFO TEMPLATE>
+#   version  (no arguments)
+#              -> docker version --format '{{json .}}'
+#
+# Every other verb — every mutating or disclosure-shaped verb SRD §5.4 lists
+# as illustrative (`run`, `exec`, `cp`, `system dial-stdio`, ...), plus a bare
+# `stats` (no container — streams every container) and `logs`/`--follow` in
+# any shape — exits 77 naming the verb and runs no `docker` at all. The
+# grammar below is an ALLOWLIST: that list is illustrative, not the
+# mechanism, exactly as SRD §5.4 says of its own table.
+#
+# ## The disclosure boundary (SRD §0.3, §5.4)
+#
+# The `inspect`, `info` and `ps` formats are all fixed HERE, not left to the
+# worker.
+#
+# `docker inspect` includes a container's full environment (`.Config.Env`)
+# and bind mounts (`.Mounts`). Neither is ever selected below. `inspect`
+# selects id, name, image, created time, restart count, restart policy,
+# labels, published ports, and a `state` object built field by field:
+# `status, running, paused, restarting, oom_killed, dead, exit_code, error,
+# started_at, finished_at` and `health`. The whole of `.State` is not
+# returned, because `.State.Health.Log[].Output` holds the stdout of every
+# healthcheck run, which is whatever text an operator's probe prints.
+# `health` is `null` when the container has no healthcheck, and otherwise
+# `{"status": ..., "failing_streak": ...}`.
+#
+# `health` reads `{{with index .State "Health"}}`, never `{{if .State.Health}}`.
+# `.Id` is a raw inspect JSON key, so the docker CLI renders this template
+# against the raw JSON map, where a missing key is an error: the `if` form
+# fails with `map has no entry for key "Health"` on a container without a
+# healthcheck, and `index` returns nil for a missing key instead (MEASURED on
+# docker 29.7.2 and 28.5.2: .inspect_health_forms in
+# test/fixtures/observe/docker-forced-command-rendered.json).
+#
+# `docker info` can include a configured proxy URL WITH CREDENTIALS in it
+# (`.HttpProxy`, `.HttpsProxy`, `.NoProxy`), plus `.RegistryConfig`, `.Labels`
+# and swarm cluster details. `info` selects only version, OS, kernel,
+# architecture, CPU count, total memory, container and image counts, storage
+# driver and cgroup driver.
+#
+# `docker ps --format '{{json .}}'` (Docker's own default full-JSON row) also
+# carries `Mounts` (a bind mount's HOST SOURCE PATH — the same disclosure
+# `inspect` excludes above) and `LocalVolumes`; it additionally carries `Size`
+# and `Platform`, which this role has no use for. `ps` selects `ID, Names,
+# Image, Command, CreatedAt, RunningFor, State, Status, Ports, Labels,
+# Networks` and never `Mounts`, `LocalVolumes`, `Size` or `Platform`.
+# `Command` is each container's full command line, returned by design.
+#
+# `ps` does not select `HealthStatus`. Docker CLIs before 29.5.0 lack the
+# field, and a template naming it exits 1 there (`can't evaluate field
+# HealthStatus in type *formatter.ContainerContext`). Health still shows in
+# `Status`, e.g. `Up 2 seconds (healthy)`. MEASURED on docker 29.7.2 and
+# 28.5.2: .ps_healthstatus_template and .ps_health_status in
+# test/fixtures/observe/docker-forced-command-rendered.json.
+#
+# All three are built with Docker's own `json` template function, one field
+# at a time, so the result is valid JSON without a `range`.
+#
+# `stats`, `top` and `events` are left at Docker's own shapes (`stats` and
+# `events` already go through `{{json .}}`; `top` has no `--format` at all).
+# None of the three returns a container's environment or mounts. `events` is
+# narrowed further: every `exec_*` action names the exec'd command line, so
+# EVENTS_FILTERS lets through only container lifecycle and health events (both
+# measured against a real daemon). A label still arrives as an event's actor
+# attribute, as `inspect` returns it. `top` lists every process's command
+# line, a running `docker exec` included: dropping `exec_*` events keeps an
+# exec's command line out of the event history, not out of `top` while that
+# exec is still running.
+#
+# ## Argument grammar (conservative on purpose)
+#
+#   verb       [a-z][a-z0-9-]{0,31}
+#   container  Docker's own name grammar, ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$,
+#              capped at 128 bytes to match MAX_DOCKER_NAME
+#              (src/security/docker-names.ts) — restated here because a POSIX
+#              sh script cannot import a TypeScript constant, and the SRD
+#              itself points at that file as the grammar's source.
+#   name=<n>   `n` uses the same grammar as `container` above. That limits the
+#              bytes that reach docker's argv, and nothing holding a `/` or a
+#              space ever does. It does not make the filter exact: Docker
+#              matches `--filter name=` as an unanchored regular expression,
+#              so `name=web` also lists `myweb`, `name=w.b` lists all four
+#              measured names (`web`, `web-2`, `webhook`, `myweb`), and this
+#              grammar cannot express `^` or `$` (MEASURED on docker 29.7.2
+#              and 28.5.2: .matching.ps_name_filter in
+#              test/fixtures/observe/docker-forced-command-rendered.json).
+#   label=<k>=<v>
+#              `k` and `v` each use the SAME grammar as `container` above
+#              (so, in particular, neither may itself contain `=`; a label
+#              value that needs one is refused, not truncated or re-split).
+#              Real Docker label values allow a wider character set — this is
+#              deliberately narrower, for one grammar to read and audit
+#              everywhere a value reaches `docker`'s argv, at the cost of
+#              refusing a few label values a real deployment might use.
+#   all        the literal word, nothing else, toggles `docker ps --all`.
+#   since=<N>s (logs, events)
+#              `N` is 1 to DIGITS_MAX ASCII digits, immediately followed by
+#              the literal letter `s` — nothing else. Three choices are made
+#              here, because the SRD leaves them to the implementation (§12
+#              task 4.3):
+#                1. For `logs`, `since=` and `tail=` may appear in EITHER
+#                   order; the script always emits `--since` before `--tail`
+#                   to docker regardless of the order the caller used, so
+#                   docker's argv is deterministic either way.
+#                2. Leading zeros are accepted in both `since=<N>s` and
+#                   `tail=<M>` (`tail=007` means 7, same as `tail=7`) — POSIX
+#                   `test`'s numeric comparison reads a leading-zero digit
+#                   string as decimal, not octal, so this needs no extra
+#                   normalisation. `tail=0` is a legitimate value (zero
+#                   trailing lines) and is accepted.
+#                3. `N` (and, defensively, the raw digit string of `M`, even
+#                   though `M`'s numeric ceiling is enforced separately
+#                   below) is capped at DIGITS_MAX=9 digits. The SRD sets no
+#                   ceiling on `N` and this script is the only enforcement
+#                   point, so an unbounded digit string is refused rather
+#                   than passed through. Nine, because Go's `time.Duration`
+#                   tops out near 9,223,372,036 seconds and a 10-digit value
+#                   can overflow it; 999,999,999 seconds is about 31.7 years.
+#              `N` must also be at least 1, for `logs` and `events` alike. A
+#              zero-second lookback returns nothing, and an empty result reads
+#              like "nothing happened" when nothing was looked at. `tail=0`
+#              stays accepted.
+#   tail=<M>   (logs) `M` uses the digit grammar above, and its numeric value
+#              must additionally be <= 500 (SRD §5.4: an unbounded log pull
+#              hits the 50KB tool-output wall and is clipped from the front —
+#              `skills/observer-ops/SKILL.md:195-232`).
+#   container=<c> (events, optional)
+#              `c` uses the same grammar as `container` above.
+#
+# A repeated `since=` or `tail=` in `logs` is refused with "may be given only
+# once", as `events` refuses a repeated `since=` or `container=`. That check
+# does not rely on the three-argument count: `logs web-1 tail=5 tail=6` has
+# three arguments and is refused by the once-check.
+#
+# Whitespace (an embedded newline included), every shell metacharacter and a
+# leading `-` are refused by construction, because none of them is in any
+# character class above — not by a denylist someone has to keep complete.
+#
+# ## Exit codes
+#
+#   77  refused: an unrecognised verb, a missing or malformed
+#       SSH_ORIGINAL_COMMAND, or an argument that fails its grammar. Matches
+#       the verb gate's convention (`docker/verbgate:9`), so an operator
+#       reads one code for "not authorised" across the fleet.
+#   127 `docker` is not on PATH: the shell's own status when the final `exec`
+#       finds nothing to run (checked under /bin/sh and dash: "exec: docker:
+#       not found").
+#   otherwise  `docker`'s own exit status, via `exec`: this script never
+#       inspects or reinterprets it, and `docker`'s stdout/stderr are never
+#       touched either.
+#
+# Nothing here is ever `eval`ed, and no message interpolates a value that has
+# not already passed one of the character classes above.
+
+set -u
+# Globbing off for the whole script. Both `set --` calls below split an
+# unquoted value on purpose (the SSH_ORIGINAL_COMMAND re-split, and the
+# `--filter` words for `ps` and `events`); `set -f` is what keeps a value of
+# `*` from expanding against this process's working directory instead of
+# staying the one word it is (the lesson `docker/verbgate` and
+# `docker/observe-ssh` both carry).
+set -f
+
+# IFS is pinned to the POSIX default (space, tab, newline) as defence in depth.
+# Nothing depends on it: the re-split below sets its own IFS, and the later
+# unquoted `${filters}` and `${EVENTS_FILTERS}` hold only grammar-checked words
+# and spaces. The `IFS=:` cases in test/unit/observe-docker-forced-command.test.ts
+# (sh, dash) and docker-forced-command-rendered.json (busybox sh) show these
+# shells ignore an inherited IFS; they cannot show the pin matters. The newline
+# is written literally, because command substitution strips trailing newlines
+# and `$(printf '\n')` would lose it.
+POSIX_IFS="$(printf ' \t')
+"
+IFS="${POSIX_IFS}"
+
+LOWER=abcdefghijklmnopqrstuvwxyz
+UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+DIGIT=0123456789
+ALNUM="${LOWER}${UPPER}${DIGIT}"
+
+# The bound on the digit string of `since=<N>s` (both `logs` and `events`)
+# and, defensively, on the raw digit string of `tail=<M>` (`logs`) — see the
+# header's argument-grammar section, choice 3.
+DIGITS_MAX=9
+
+# `{{json X}}` is Docker's own template function: it marshals X as JSON, so
+# assembling several of them with literal commas and braces produces one
+# valid JSON object without ever pulling in a field this script did not name.
+# See the header for which fields, and why, for each format below.
+INSPECT_FORMAT='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"created":{{json .Created}},"state":{"status":{{json .State.Status}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"oom_killed":{{json .State.OOMKilled}},"dead":{{json .State.Dead}},"exit_code":{{json .State.ExitCode}},"error":{{json .State.Error}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"health":{{with index .State "Health"}}{"status":{{json .Status}},"failing_streak":{{json .FailingStreak}}}{{else}}null{{end}}},"restart_count":{{json .RestartCount}},"restart_policy":{{json .HostConfig.RestartPolicy}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}'
+INFO_FORMAT='{"version":{{json .ServerVersion}},"os":{{json .OperatingSystem}},"kernel":{{json .KernelVersion}},"architecture":{{json .Architecture}},"cpus":{{json .NCPU}},"mem_total":{{json .MemTotal}},"containers":{{json .Containers}},"images":{{json .Images}},"storage_driver":{{json .Driver}},"cgroup_driver":{{json .CgroupDriver}}}'
+# The fixed `ps` template — see the header's disclosure-boundary section for
+# why the default `{{json .}}` row is not used here.
+PS_FORMAT='{"ID":{{json .ID}},"Names":{{json .Names}},"Image":{{json .Image}},"Command":{{json .Command}},"CreatedAt":{{json .CreatedAt}},"RunningFor":{{json .RunningFor}},"State":{{json .State}},"Status":{{json .Status}},"Ports":{{json .Ports}},"Labels":{{json .Labels}},"Networks":{{json .Networks}}}'
+# `stats` and `version` both just want the object docker already builds, in
+# full — see the header for why that is safe for these two verbs.
+JSON_FORMAT='{{json .}}'
+
+# The terminating bound for `events` (SRD §5.4; MEASURED, not chosen here:
+# test/fixtures/observe/docker-cli-shapes.json -> .events.terminating_bound).
+# A re-measurement that changes this value is a deliberate edit to this
+# constant, not a guess. A query under this bound does not return events from
+# the current second (MEASURED: .events.until_current_second).
+EVENTS_UNTIL_BOUND=0s
+
+# The events `events` lets through: container lifecycle and health, nothing
+# else (MEASURED: test/fixtures/observe/docker-cli-shapes.json ->
+# .events.action_allowlist.filters). Every exec_* action names the exec'd
+# command line, a healthcheck's included, and an operator's `docker exec` can
+# carry a secret there, so no exec_* action is in the list. With
+# `event=health_status` in the list the daemon matches `event=` values as
+# prefixes: `event=exec` alone matched nothing, and beside it matched
+# exec_create, exec_start and exec_die (MEASURED: .events_prefix_match in
+# docker-forced-command-rendered.json). So no value may be a prefix of an
+# exec_* action either. Every word is a whitespace-free literal; the events
+# case splits this on purpose.
+EVENTS_FILTERS='--filter type=container --filter event=create --filter event=start --filter event=restart --filter event=stop --filter event=die --filter event=kill --filter event=oom --filter event=pause --filter event=unpause --filter event=destroy --filter event=health_status'
+
+# $1 names the verb this refusal is about, or one of the two fixed
+# placeholders below when there is none yet — never a raw, unvalidated byte
+# string (see the header). $2 is the reason, also never interpolating an
+# unvalidated value.
+refuse() {
+  printf 'docker-forced-command: refused "%s": %s\n' "$1" "$2" >&2
+  exit 77
+}
+
+# True when $1 is non-empty and every character of it is in the set $2.
+# A `-` in a set must come last, where a bracket expression reads it literally.
+only_chars() {
+  [ -n "$1" ] || return 1
+  case $1 in
+    *[!$2]*) return 1 ;;
+  esac
+  return 0
+}
+
+# True when the first character of $1 is in the set $2.
+first_in() {
+  case $1 in
+    [$2]*) return 0 ;;
+  esac
+  return 1
+}
+
+is_verb() {
+  only_chars "$1" "${LOWER}${DIGIT}-" && first_in "$1" "${LOWER}" && [ "${#1}" -le 32 ]
+}
+
+# The one grammar the header promises for a container name, a `name=` value,
+# each half of a `label=<k>=<v>` pair, and a `container=` value.
+is_docker_name() {
+  only_chars "$1" "${ALNUM}._-" && first_in "$1" "${ALNUM}" && [ "${#1}" -le 128 ]
+}
+
+# True when $1 is 1 to $2 ASCII digits, nothing else (used for `since=<N>s`
+# and `tail=<M>`; see the header's argument-grammar section).
+is_digit_string() {
+  only_chars "$1" "${DIGIT}" && [ "${#1}" -le "$2" ]
+}
+
+# --- read SSH_ORIGINAL_COMMAND ------------------------------------------------
+
+original=${SSH_ORIGINAL_COMMAND:-}
+[ -n "${original}" ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND is not set or is empty"
+
+# Re-split on whitespace, globbing off. `docker/observe-ssh`'s header explains
+# why this is necessary at all: ssh joins the client's argv with spaces on the
+# way over, so word boundaries are lost and must be rebuilt here. Splitting on
+# tab as well as space is defence in depth for a caller that skipped that shim.
+# Deliberately excludes newline, even though IFS is pinned to include one
+# above: an embedded newline inside one token must stay inside that token, so
+# the grammar below refuses it, rather than silently becoming a token
+# boundary that could split one hostile token into two grammar-passing ones.
+tab=$(printf '\t')
+IFS=" ${tab}"
+# shellcheck disable=SC2086 # unquoted on purpose: this is the re-split.
+set -- ${original}
+# Back to the pinned constant, not an inherited value (defence in depth, as
+# above).
+IFS="${POSIX_IFS}"
+
+[ "$#" -ge 1 ] || refuse "(no verb)" "SSH_ORIGINAL_COMMAND held only whitespace"
+
+verb=$1
+shift
+
+# Checked before the verb is ever echoed anywhere: only a value that has
+# passed this class is safe to put in a message (the header explains why).
+is_verb "${verb}" || refuse "(unrecognised)" "the verb is not [a-z][a-z0-9-]{0,31}"
+
+case ${verb} in
+  ps)
+    all=0
+    filters=
+    for arg in "$@"; do
+      case ${arg} in
+        all)
+          all=1
+          ;;
+        name=*)
+          value=${arg#name=}
+          is_docker_name "${value}" ||
+            refuse "${verb}" "a name= value must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+          filters="${filters} --filter ${arg}"
+          ;;
+        label=*)
+          rest=${arg#label=}
+          case ${rest} in
+            *=*) ;;
+            *) refuse "${verb}" "a label= argument must be label=<key>=<value>" ;;
+          esac
+          key=${rest%%=*}
+          value=${rest#*=}
+          is_docker_name "${key}" ||
+            refuse "${verb}" "a label= key must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+          is_docker_name "${value}" ||
+            refuse "${verb}" "a label= value must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes, and may not itself contain '='"
+          filters="${filters} --filter ${arg}"
+          ;;
+        *)
+          refuse "${verb}" "arguments must be 'all', name=<n> or label=<k>=<v>"
+          ;;
+      esac
+    done
+    set -- docker ps --no-trunc --format "${PS_FORMAT}"
+    [ "${all}" = 1 ] && set -- "$@" --all
+    # shellcheck disable=SC2086 # unquoted on purpose: every word in $filters
+    # is whitespace-free by construction (is_docker_name and the literal
+    # `--filter` both exclude it), and set -f keeps this from globbing.
+    set -- "$@" ${filters}
+    exec "$@"
+    ;;
+  inspect)
+    [ "$#" -eq 1 ] || refuse "${verb}" "inspect takes exactly one argument, a container name; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    exec docker inspect --type container --format "${INSPECT_FORMAT}" "${container}"
+    ;;
+  logs)
+    [ "$#" -eq 3 ] ||
+      refuse "${verb}" "logs takes exactly three arguments: a container, since=<N>s and tail=<M>; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    shift
+    since_val=
+    since_set=0
+    tail_val=
+    tail_set=0
+    for arg in "$@"; do
+      case ${arg} in
+        since=*s)
+          value=${arg#since=}
+          value=${value%s}
+          is_digit_string "${value}" "${DIGITS_MAX}" ||
+            refuse "${verb}" "a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'"
+          [ "${value}" -ge 1 ] ||
+            refuse "${verb}" "a since= value must be at least 1 second"
+          [ "${since_set}" -eq 0 ] ||
+            refuse "${verb}" "since=<N>s may be given only once"
+          since_val=${value}
+          since_set=1
+          ;;
+        tail=*)
+          value=${arg#tail=}
+          is_digit_string "${value}" "${DIGITS_MAX}" ||
+            refuse "${verb}" "a tail= value must be [0-9]{1,${DIGITS_MAX}} digits"
+          [ "${value}" -le 500 ] ||
+            refuse "${verb}" "tail must be <= 500"
+          [ "${tail_set}" -eq 0 ] ||
+            refuse "${verb}" "tail=<M> may be given only once"
+          tail_val=${value}
+          tail_set=1
+          ;;
+        *)
+          refuse "${verb}" "arguments after the container must be since=<N>s or tail=<M>"
+          ;;
+      esac
+    done
+    [ "${since_set}" -eq 1 ] || refuse "${verb}" "since=<N>s is required"
+    [ "${tail_set}" -eq 1 ] || refuse "${verb}" "tail=<M> is required"
+    exec docker logs --timestamps --since "${since_val}s" --tail "${tail_val}" "${container}"
+    ;;
+  stats)
+    [ "$#" -eq 1 ] || refuse "${verb}" "stats takes exactly one argument, a container name; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    exec docker stats --no-stream --no-trunc --format "${JSON_FORMAT}" "${container}"
+    ;;
+  top)
+    [ "$#" -eq 1 ] || refuse "${verb}" "top takes exactly one argument, a container name; got $#"
+    container=$1
+    is_docker_name "${container}" ||
+      refuse "${verb}" "the container argument must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+    exec docker top "${container}"
+    ;;
+  events)
+    since_val=
+    since_set=0
+    container_val=
+    container_set=0
+    for arg in "$@"; do
+      case ${arg} in
+        since=*s)
+          value=${arg#since=}
+          value=${value%s}
+          is_digit_string "${value}" "${DIGITS_MAX}" ||
+            refuse "${verb}" "a since= value must be [0-9]{1,${DIGITS_MAX}} digits followed by 's'"
+          [ "${value}" -ge 1 ] ||
+            refuse "${verb}" "a since= value must be at least 1 second"
+          [ "${since_set}" -eq 0 ] || refuse "${verb}" "since=<N>s may be given only once"
+          since_val=${value}
+          since_set=1
+          ;;
+        container=*)
+          value=${arg#container=}
+          is_docker_name "${value}" ||
+            refuse "${verb}" "a container= value must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$, max 128 bytes"
+          [ "${container_set}" -eq 0 ] || refuse "${verb}" "container=<c> may be given only once"
+          container_val=${value}
+          container_set=1
+          ;;
+        *)
+          refuse "${verb}" "arguments must be since=<N>s or container=<c>"
+          ;;
+      esac
+    done
+    [ "${since_set}" -eq 1 ] || refuse "${verb}" "since=<N>s is required"
+    set -- docker events --since "${since_val}s" --until "${EVENTS_UNTIL_BOUND}" --format "${JSON_FORMAT}"
+    # shellcheck disable=SC2086 # unquoted on purpose: whitespace-free literal words, and set -f is on.
+    set -- "$@" ${EVENTS_FILTERS}
+    [ "${container_set}" -eq 1 ] && set -- "$@" --filter "container=${container_val}"
+    exec "$@"
+    ;;
+  info)
+    [ "$#" -eq 0 ] || refuse "${verb}" "info takes no arguments; got $#"
+    exec docker info --format "${INFO_FORMAT}"
+    ;;
+  version)
+    [ "$#" -eq 0 ] || refuse "${verb}" "version takes no arguments; got $#"
+    exec docker version --format "${JSON_FORMAT}"
+    ;;
+  *)
+    refuse "${verb}" "not a recognised verb; recognised verbs are ps, inspect, logs, stats, top, events, info and version"
+    ;;
+esac

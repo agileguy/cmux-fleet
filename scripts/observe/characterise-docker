@@ -1,0 +1,992 @@
+#!/usr/bin/env bun
+/**
+ * `scripts/observe/characterise-docker` — SRD-OBSERVER-ROLES task 4.0.
+ *
+ * Measures, rather than assumes, the Docker CLI facts §5.4's forced command is
+ * built on, and writes them to two fixtures. The forced command's tests wire
+ * those fixtures; they do not re-derive them.
+ *
+ *  - `test/fixtures/observe/docker-cli-shapes.json`: the key set of
+ *    `docker ps --format '{{json .}}'` and of
+ *    `docker stats --no-stream --format '{{json .}}'`; the shape of
+ *    `.State.Health` with and without a healthcheck; which bound flag makes
+ *    `docker events` terminate; which event actions carry command text, and
+ *    an action allowlist that keeps it out; and the key names the fixed `info` template
+ *    and the `version` verb read from.
+ *  - `test/fixtures/observe/docker-forbidden-verbs.json`: every command the
+ *    CLI lists, top-level and one level down, minus §5.4's allowlist, plus the
+ *    forms §5.4's forbidden list names that no help page prints. The list is
+ *    read against the daemon and again with no daemon reachable, because the
+ *    connected CLI leaves some commands out (`service` among them).
+ *  - `test/fixtures/observe/docker-forced-command-rendered.json`: the forced
+ *    command itself, run under the dind image's `/bin/sh` for every verb, one
+ *    entry per docker CLI version. Its templates are strings docker parses only
+ *    at run time, so a test that reads them cannot see one that fails to
+ *    render. Each entry records the sha256 of the file it ran, so an edit to
+ *    the forced command is not covered until it is measured again. Each entry
+ *    also records, for that CLI: docker's own `ps` key set, how a healthcheck
+ *    reads in `ps`'s `Status`, both ways of reading an absent healthcheck next
+ *    to `.Id`, and whether an `event=` filter matches a prefix of an action.
+ *
+ * ## The daemon is a throwaway, and nothing else is touched
+ *
+ * Every probe runs against a `docker:dind` container this script starts
+ * `--privileged` with no network, using the `docker` CLI that ships inside it.
+ * The daemon the script is launched against is asked only to save the probe
+ * image, start that one container, load the image into it, and remove it: its
+ * own containers are never listed, inspected or touched. The dind daemon never
+ * pulls. The container and its anonymous `/var/lib/docker` volume are removed
+ * on exit, on success, on failure, or on SIGINT, SIGTERM or SIGHUP. A signal
+ * also stops every other command this script has in flight — the whole of what
+ * a Ctrl-C looks like from here is "wait for the create, stop everything else,
+ * remove the container, exit" — and says so on stderr; a second signal only
+ * warns, it never escalates to a SIGKILL this script sends itself.
+ *
+ * ## Usage
+ *
+ *   scripts/observe/characterise-docker                     # measure and print
+ *   scripts/observe/characterise-docker --write             # also write the shapes and forbidden-verbs fixtures
+ *   scripts/observe/characterise-docker --write-rendered    # also write this CLI version's rendered entry
+ *   scripts/observe/characterise-docker --dind-image <tag> --probe-image <tag>
+ *
+ * Both images must already be local. The defaults are `docker:dind` and
+ * `alpine:3`. The rendered fixture wants one run per docker version worth
+ * covering, and `--write-rendered` replaces only its own version's entry.
+ */
+
+import { randomBytes } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+
+const REPO = resolve(import.meta.dir, "../..");
+const SCRIPT = "scripts/observe/characterise-docker";
+/** The forced command whose constants these fixtures justify, so a dirty copy is recorded too. */
+const FORCED_COMMAND = "scripts/observe/docker-forced-command";
+const SHAPES_FIXTURE = join(REPO, "test/fixtures/observe/docker-cli-shapes.json");
+const FORBIDDEN_FIXTURE = join(REPO, "test/fixtures/observe/docker-forbidden-verbs.json");
+const RENDERED_FIXTURE = join(REPO, "test/fixtures/observe/docker-forced-command-rendered.json");
+const RUN_TIMEOUT_MS = 180_000;
+/** How long an events probe may run before `timeout` inside the dind container ends it. */
+const EVENTS_TIMEOUT_S = 8;
+
+/**
+ * The container events the forced command lets through: lifecycle and health, nothing else. Every
+ * `exec_*` action names the exec'd command line, a healthcheck's included, and an operator's
+ * `docker exec` can put a secret there, so no `exec_*` action is in the list. This script measures
+ * that the list keeps command text out and still returns `start` and `health_status`.
+ */
+export const EVENTS_ACTION_ALLOWLIST = [
+  "create", "start", "restart", "stop", "die", "kill", "oom", "pause", "unpause", "destroy", "health_status",
+];
+/** Command-line text for the allowlist probe. Neither is a secret; each only has to be findable. */
+const EXEC_CANARY = "canary-exec-text";
+const HEALTHCHECK_CANARY = "canary-healthcheck-text";
+const UNTIL_CANARY = "canary-until-text";
+/** An environment value and a bind-mount target on char-plain: the forced command must return neither. */
+const ENV_CANARY = "canary-env-text";
+const BIND_TARGET = "/char-bind";
+/** Exec events enough to overrun the daemon's buffer of past events (three events per exec). */
+const EXEC_FLOOD = 120;
+
+/** §5.4's verbs: the whole grammar. */
+export const ALLOWLIST = ["ps", "inspect", "logs", "stats", "top", "events", "info", "version"];
+
+/**
+ * The top-level verbs §5.4's forbidden list names. The list is illustrative in
+ * the SRD, since the grammar is an allowlist, but each one has to be a command
+ * the CLI actually has, or the SRD is describing a different Docker.
+ */
+const SRD_FORBIDDEN_TOP_LEVEL = [
+  "run", "create", "start", "stop", "restart", "kill", "pause", "unpause", "rm", "rmi", "exec",
+  "attach", "cp", "export", "save", "commit", "update", "rename", "pull", "push", "build", "compose",
+  "network", "volume", "system", "context", "plugin", "swarm", "service",
+];
+
+/**
+ * Forms §5.4's forbidden list names that no help page prints as a command of
+ * its own. `system dial-stdio` is hidden from `docker system --help`, so its
+ * presence is measured separately. The others are the streaming forms of two
+ * allowed verbs, written as a worker would send them.
+ */
+const SRD_NAMED_FORMS = [
+  { command: "system dial-stdio", why: "how `docker -H ssh://` gets the full Engine API over SSH" },
+  { command: "logs --follow", why: "an unbounded log stream" },
+  { command: "logs web since=60s tail=10 --follow", why: "a bounded log request with a follow flag appended" },
+  { command: "stats", why: "`docker stats` without a container and without `--no-stream` streams every container" },
+];
+
+type Run = { code: number; stdout: string; stderr: string; ms: number; timedOut: boolean };
+type Row = Record<string, unknown>;
+
+/** How long a timed-out process gets after SIGTERM before SIGKILL, and the grace `stopTrackedChildren` gives a stopped child before escalating. */
+const KILL_GRACE_MS = 2_000;
+
+/**
+ * True from the instant a signal handler runs, sampled by `run()` before it spawns anything. Once set,
+ * every ordinary call refuses instead of starting a fresh child, so main()'s sequential flow cannot spawn
+ * a new process into a stop that has already been decided — the only children left to deal with are the
+ * ones already in `trackedChildren` when the signal arrived. The dind create and cleanup's own commands
+ * pass `{ exempt: true }` to run regardless, because they must.
+ */
+let stopping = false;
+
+/**
+ * Sets `stopping`. The first signal's `onFirst` calls it before `cleanup()`; it is exported so
+ * `characterise-signal.test.ts` can prove `run()` refuses a new ordinary child once it has run.
+ */
+export function markStopping(): void {
+  stopping = true;
+}
+
+/** One `run()` child that is in flight and not `exempt`. */
+type TrackedChild = { argv: string[]; exited: Promise<void> };
+/**
+ * Every non-`exempt` child `run()` has spawned and not yet settled, keyed by pid — which `detached` also
+ * makes that child's own process group id, so the key doubles as the group to signal. Populated and
+ * emptied by `run()` itself; read by `stopTrackedChildren()`.
+ */
+const trackedChildren = new Map<number, TrackedChild>();
+
+/** Options for one `run()` call. */
+type RunOpts = { exempt?: boolean };
+
+/**
+ * Signal a detached child's whole process group — its own pid, since `detached` makes it the leader —
+ * rather than only the child. Two refusals are not failures, and neither is read as "stopped": every
+ * caller still waits on the child's own exit, and every such wait is bounded.
+ *
+ *  - ESRCH: the group is already gone.
+ *  - EPERM: on macOS, what `kill(-pgid)` answers for a group whose leader has exited but has not yet been
+ *    reaped (measured 2026-09-14, Darwin 25.6.0, three runs of three). Thrown, it rejected
+ *    `stopTrackedChildren()`, and `runCleanup()` with it, before the container was removed.
+ *
+ * Anything else still throws.
+ */
+function signalGroup(pid: number, sig: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, sig);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EPERM") throw err;
+  }
+}
+
+/**
+ * Stops every child `run()` currently has in flight — SIGTERM to its process group, SIGKILL to whichever
+ * haven't exited within `KILL_GRACE_MS` — and waits for each to be gone before returning, for at most
+ * another `KILL_GRACE_MS` after a SIGKILL: a child that outlasts even that is left behind rather than
+ * holding up the container's removal. The
+ * dind create's own child is never in `trackedChildren` (it runs with `exempt: true`), so this never
+ * touches it; `cleanup()` awaits `starting` separately, in parallel with this. Safe to call with nothing
+ * in flight. Exported so `characterise-signal.test.ts` can drive it directly against real children.
+ */
+export async function stopTrackedChildren(): Promise<void> {
+  const targets = [...trackedChildren.entries()];
+  if (targets.length === 0) return;
+  for (const [pid] of targets) signalGroup(pid, "SIGTERM");
+  await Promise.all(
+    targets.map(async ([pid, child]) => {
+      const exitedInTime = await Promise.race([
+        child.exited.then(() => true),
+        Bun.sleep(KILL_GRACE_MS).then(() => false),
+      ]);
+      if (!exitedInTime) {
+        signalGroup(pid, "SIGKILL");
+        await Promise.race([child.exited, Bun.sleep(KILL_GRACE_MS)]);
+      }
+    }),
+  );
+}
+
+/**
+ * The shape `cleanup()` runs, factored out so a test can prove the stop step is actually part of it —
+ * not just that `stopTrackedChildren()` works in isolation. Calls `stopTrackedChildren()` directly
+ * (not handed in as a callback) so that claim is airtight: there is no wiring layer left for a test to
+ * miss between this function and the real, module-singleton child registry. Waits for the create to
+ * settle (if one was started) and stops every other in-flight child IN PARALLEL — `removeContainer` must
+ * never race a child still writing to disk, and neither the create's own child nor an unrelated in-flight
+ * one should have to wait on the other — then, only once both are done, runs `removeContainer`.
+ */
+export async function runCleanup(awaitCreate: () => Promise<unknown>, removeContainer: () => Promise<void>): Promise<void> {
+  // allSettled, not all: a leg that rejects must still leave the container removed, and removal still waits
+  // for BOTH legs, so it never starts while a tracked child is being stopped. The rejection is rethrown after.
+  const settled = await Promise.allSettled([awaitCreate(), stopTrackedChildren()]);
+  await removeContainer();
+  const failure = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+  if (failure) throw failure.reason;
+}
+
+/** How many signals this run has been told about so far. */
+type SignalState = { count: number };
+
+/**
+ * One signal's handling, factored out of the `process.on` callbacks in `main()` so a test can drive it
+ * directly — without starting docker. Bumps `state.count` and writes exactly one line: on the FIRST
+ * signal, what this run is about to stop and remove, and how long it may still wait on a create in
+ * flight, then calls `onFirst` (in production: `markStopping()` and start `cleanup()`, see the create's docblock
+ * above `run()`); on every LATER signal, a warning that a SIGKILL right now can leave that container
+ * behind, with the line to find it. `onFirst` never runs a second time.
+ */
+export function handleSignal(
+  state: SignalState,
+  write: (text: string) => void,
+  containerName: string,
+  id: string,
+  createBoundS: number,
+  createLabel: string,
+  onFirst: () => void,
+): void {
+  state.count += 1;
+  if (state.count === 1) {
+    write(`stopping every in-flight command and removing ${containerName}; a ${createLabel} still in flight is waited on first, up to ${createBoundS}s\n`);
+    onFirst();
+  } else {
+    write(`a SIGKILL now can leave ${containerName} running; find it with: docker ps -a --filter label=pifleet-char=${id}\n`);
+  }
+}
+
+/**
+ * Run a command as an argv array, optionally with a file on stdin. Never through a shell. A process
+ * this ends is reported `timedOut`, because its exit status alone (143) looks like a real one. The call
+ * still waits for the pipes to close — but the timeout now ends the child's whole process group rather
+ * than only its pid (see below), which is what keeps a descendant holding stdout open from holding this
+ * function past the timeout too.
+ *
+ * Spawned `detached`: on POSIX this calls `setsid()`, so the child leads its own
+ * process group instead of sitting in the terminal's. A Ctrl-C at the terminal
+ * sends SIGINT to the whole foreground process group at once — a `docker`
+ * child left in that group would be killed there directly, the same instant
+ * this script's own `process.on("SIGINT", …)` handler runs, and `run()`'s
+ * promise would then settle because the LOCAL client died, not because the
+ * DAEMON's own work on the command it carried (for example `docker run -d`)
+ * ever finished. `cleanup` trusts that settling as "the create is done, one
+ * way or the other" (see `starting` below); a child still reachable by the
+ * terminal's signal could falsify that on the exact command that matters
+ * most. Detached, this process is the only thing that decides when to stop
+ * waiting on a running child — a signal we handle stops us, not it.
+ *
+ * That detachment cuts both ways: nothing external stops these children either, so the signal handler
+ * does it explicitly. Every non-`exempt` call registers itself in `trackedChildren` for as long as it
+ * runs; `stopTrackedChildren()` (called once, from the first signal) SIGTERMs each one's whole process
+ * group and waits for it to exit. `run()` also refuses to start a NEW non-`exempt` child once `stopping`
+ * is set, so nothing spawned after that point is left for a second pass to find.
+ */
+export async function run(argv: string[], timeoutMs = RUN_TIMEOUT_MS, stdinPath?: string, opts: RunOpts = {}): Promise<Run> {
+  if (stopping && !opts.exempt) throw new Error(`stopped by a signal before running: ${argv.join(" ")}`);
+  const started = Date.now();
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", stdin: stdinPath ? Bun.file(stdinPath) : "ignore", detached: true });
+  if (!opts.exempt) trackedChildren.set(proc.pid, { argv, exited: proc.exited.then(() => undefined) });
+  let timedOut = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    signalGroup(proc.pid, "SIGTERM");
+    killTimer = setTimeout(() => signalGroup(proc.pid, "SIGKILL"), KILL_GRACE_MS);
+  }, timeoutMs);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr, ms: Date.now() - started, timedOut };
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(killTimer);
+    trackedChildren.delete(proc.pid);
+  }
+}
+
+async function must(argv: string[], what: string, opts?: RunOpts): Promise<Run> {
+  const r = await run(argv, undefined, undefined, opts);
+  if (r.timedOut) throw new Error(`${what} timed out after ${RUN_TIMEOUT_MS}ms`);
+  if (r.code !== 0) throw new Error(`${what} failed (exit ${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
+  return r;
+}
+
+function parseArgs(argv: string[]): { write: boolean; writeRendered: boolean; dindImage: string; probeImage: string } {
+  let write = false;
+  let writeRendered = false;
+  let dindImage = "docker:dind";
+  let probeImage = "alpine:3";
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--write") write = true;
+    else if (argv[i] === "--write-rendered") writeRendered = true;
+    else if (argv[i] === "--dind-image") dindImage = argv[++i] ?? "";
+    else if (argv[i] === "--probe-image") probeImage = argv[++i] ?? "";
+    else throw new Error(`unknown argument: ${argv[i]}`);
+  }
+  if (!dindImage || !probeImage) throw new Error("--dind-image and --probe-image each take a tag");
+  return { write, writeRendered, dindImage, probeImage };
+}
+
+function jsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/** One JSON object per non-empty line, as `--format '{{json .}}'` prints them. */
+export function jsonRows(stdout: string, what: string): Row[] {
+  return stdout
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line, i) => {
+      const value: unknown = JSON.parse(line);
+      if (jsonType(value) !== "object") throw new Error(`${what}: line ${i + 1} is not a JSON object`);
+      return value as Row;
+    });
+}
+
+/**
+ * The one key set every row shares, with the JSON type of each key's values.
+ * Refuses rows that disagree, and refuses no rows at all, because either would
+ * make a single "key set" a claim nothing measured.
+ */
+export function sharedKeyShape(rows: Row[], what: string): { key_set: string[]; value_types: Record<string, string> } {
+  if (rows.length === 0) throw new Error(`${what} printed no rows`);
+  const sets = distinctKeySets(rows);
+  if (sets.length !== 1) throw new Error(`${what}: rows disagree on their key set: ${JSON.stringify(sets)}`);
+  const keySet = sets[0]!;
+  const valueTypes: Record<string, string> = {};
+  for (const key of keySet) valueTypes[key] = [...new Set(rows.map((r) => jsonType(r[key])))].sort().join("|");
+  return { key_set: keySet, value_types: valueTypes };
+}
+
+/** Each distinct sorted key set among `rows`. */
+function distinctKeySets(rows: Row[]): string[][] {
+  const seen = new Map<string, string[]>();
+  for (const row of rows) {
+    const keys = Object.keys(row).sort();
+    seen.set(keys.join("\u0000"), keys);
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Every command a `docker ... --help` page lists, from each section whose
+ * heading ends `Commands:`. A `*` after a name marks a CLI plugin. A section
+ * ends at a blank line or an unindented line; wrapped descriptions are
+ * indented deeper than a name, so they never read as one.
+ */
+export function parseHelpCommands(help: string): { name: string; plugin: boolean; section: string }[] {
+  const commands: { name: string; plugin: boolean; section: string }[] = [];
+  let section: string | null = null;
+  for (const line of help.split("\n")) {
+    // `Common Commands:`, `Swarm Commands:`, and the bare `Commands:` that lists attach, logs, top and the rest.
+    const heading = /^((?:\S.* )?Commands):\s*$/.exec(line);
+    if (heading) {
+      section = heading[1]!;
+      continue;
+    }
+    if (line.trim() === "" || /^\S/.test(line)) {
+      section = null;
+      continue;
+    }
+    const entry = /^ {2}([a-z][a-z0-9-]*)(\*?)(?: {2,}\S|\s*$)/.exec(line);
+    if (section && entry) commands.push({ name: entry[1]!, plugin: entry[2] === "*", section });
+  }
+  return commands;
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const id = randomBytes(4).toString("hex");
+  // Under $HOME, for the same reason as characterise-ssh-transport: Colima shares the home directory.
+  const work = join(homedir(), ".pifleet", "characterise", `docker-${id}`);
+  const dindName = `pifleet-char-dind-${id}`;
+  // The `docker run -d` that creates the dind container, while it is in flight. A signal landing then
+  // must not remove the container before it exists, or the create completes after the cleanup.
+  let starting: Promise<unknown> | undefined;
+  // `stopping` (module-level) is set in the same synchronous turn that would start the container: a
+  // signal before the start stops it happening, and one after it finds `starting` set.
+  // One cleanup, shared: a signal and the `finally` below both await the same run of it, so neither
+  // returns while the other's stop-other-children pass, `docker rm`, or `rm` is still going. Stopping
+  // every other in-flight child happens BEFORE `rm(work, …)`: `docker image save -o <work>/…` is one of
+  // those children, and removing `work` while it is still writing there is exactly the race this
+  // ordering avoids.
+  let cleaning: Promise<void> | undefined;
+  const cleanup = (): Promise<void> =>
+    (cleaning ??= runCleanup(
+      () => starting?.catch(() => undefined) ?? Promise.resolve(),
+      async () => {
+        // -v: the dind image declares /var/lib/docker a volume, and it would otherwise outlive the container.
+        const removed = await run(["docker", "rm", "-f", "-v", dindName], undefined, undefined, { exempt: true });
+        // A container that was never created is already gone. Anything else leaves a privileged container running.
+        if (removed.code !== 0 && !removed.stderr.includes("No such container")) {
+          process.stderr.write(
+            `could not remove ${dindName} (exit ${removed.code}): ${removed.stderr.trim()}\n` +
+              `find it with: docker ps -a --filter label=pifleet-char=${id}\n`,
+          );
+          process.exitCode = 1;
+        }
+        await rm(work, { recursive: true, force: true });
+      },
+    ));
+  // How long an operator may have to wait for the create alone, worst case: run()'s own timeout plus the
+  // grace it gives the group before SIGKILL. Named in the first-signal message below so silence during
+  // that wait reads as "still waiting", not "hung".
+  const CREATE_BOUND_S = Math.round((RUN_TIMEOUT_MS + KILL_GRACE_MS) / 1000);
+  const signalState: SignalState = { count: 0 };
+  // An EPIPE on the first-signal line must not be what ends the run: `2>&1 | tee` loses its reader to the
+  // same Ctrl-C, and Bun exits on an unhandled stderr error before cleanup removes the container.
+  process.stderr.on("error", () => {});
+  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
+    process.on(signal, () => {
+      handleSignal(signalState, (text) => process.stderr.write(text), dindName, id, CREATE_BOUND_S, "dind container create", () => {
+        markStopping();
+        void cleanup().then(() => process.exit(code));
+      });
+    });
+  }
+
+  /** The dind container's own `docker` CLI, against the dind daemon. */
+  const dind = (argv: string[], timeoutMs?: number): Promise<Run> =>
+    run(["docker", "exec", dindName, "docker", ...argv], timeoutMs);
+  const mustDind = async (argv: string[]): Promise<Run> => {
+    const r = await dind(argv);
+    if (r.code !== 0) throw new Error(`docker ${argv.join(" ")} failed in dind (exit ${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
+    return r;
+  };
+
+  try {
+    await mkdir(work, { recursive: true });
+    const head = (await must(["git", "-C", REPO, "rev-parse", "--short", "HEAD"], "git rev-parse")).stdout.trim();
+    const dirty = await run(["git", "-C", REPO, "status", "--porcelain", "--", SCRIPT, FORCED_COMMAND]);
+    // Read once, next to the dirty check, and installed from this copy: the checkout can change under a long run.
+    const forcedCommandText = await Bun.file(join(REPO, FORCED_COMMAND)).text();
+    const forcedCommandSha256 = new Bun.CryptoHasher("sha256").update(forcedCommandText).digest("hex");
+    const forcedCommandCopy = join(work, "forced-command");
+    await writeFile(forcedCommandCopy, forcedCommandText);
+    const imageId = async (tag: string): Promise<string> =>
+      (await must(["docker", "image", "inspect", "--format", "{{.Id}}", tag], `inspect local image ${tag}`)).stdout.trim();
+    const dindImageId = await imageId(args.dindImage);
+    const probeImageId = await imageId(args.probeImage);
+    const tar = join(work, "probe-image.tar");
+    await must(["docker", "image", "save", "-o", tar, args.probeImage], "save probe image");
+
+    // No TLS certificates and no TCP listener: the CLI inside the container is the only client. The
+    // label lets an operator find a container a SIGKILL left behind: `docker ps -a --filter label=pifleet-char`.
+    if (stopping) throw new Error("stopped by a signal before the dind container was started");
+    starting = must(
+      [
+        "docker", "run", "-d", "--name", dindName, "--label", `pifleet-char=${id}`, "--privileged", "--network", "none",
+        "-e", "DOCKER_TLS_CERTDIR=", args.dindImage, "dockerd", "--host=unix:///var/run/docker.sock",
+      ],
+      "start dind",
+      { exempt: true },
+    );
+    await starting;
+    let ready = false;
+    for (let i = 0; i < 120 && !ready; i++) {
+      ready = (await dind(["version", "--format", "{{.Server.Version}}"])).code === 0;
+      if (!ready) await Bun.sleep(500);
+    }
+    if (!ready) throw new Error(`the dind daemon in ${dindName} never answered \`docker version\``);
+    // On stdin rather than `docker cp`: dind mounts a tmpfs over /tmp, and a copied file lands beneath it.
+    const load = await run(["docker", "exec", "-i", dindName, "docker", "load"], RUN_TIMEOUT_MS, tar);
+    if (load.code !== 0) throw new Error(`docker load in dind failed (exit ${load.code}): ${load.stderr.trim()}`);
+
+    const version = JSON.parse((await mustDind(["version", "--format", "{{json .}}"])).stdout) as {
+      Client: Row;
+      Server: Row;
+    };
+
+    // The probe containers. Their names are fixed: the daemon holds nothing else.
+    const probe = args.probeImage;
+    await mustDind(["run", "-d", "--name", "char-plain", "--label", "char.label=one", "-e", `CHAR_ENV=${ENV_CANARY}`, "-v", `/tmp:${BIND_TARGET}`, probe, "sleep", "600"]);
+    await mustDind(["run", "-d", "--name", "char-logs", probe, "sh", "-c", 'i=0; while [ "$i" -lt 20 ]; do echo "char-log-line-$i"; i=$((i + 1)); done; exec sleep 600']);
+    await mustDind(["run", "-d", "--name", "char-healthy", "--health-cmd", "true", "--health-interval", "1s", "--health-retries", "1", probe, "sleep", "600"]);
+    await mustDind(["run", "-d", "--name", "char-unhealthy", "--health-cmd", "false", "--health-interval", "1s", "--health-retries", "1", probe, "sleep", "600"]);
+    await mustDind(["run", "--name", "char-exited", probe, "true"]);
+
+    /** Poll a container's health status until it reads `want`, recording each distinct status seen on the way. */
+    const waitHealth = async (container: string, want: string): Promise<string[]> => {
+      const seen: string[] = [];
+      for (let i = 0; i < 120; i++) {
+        const status = (await mustDind(["inspect", "--type", "container", "--format", "{{.State.Health.Status}}", container])).stdout.trim();
+        if (seen.at(-1) !== status) seen.push(status);
+        if (status === want) return seen;
+        await Bun.sleep(500);
+      }
+      throw new Error(`${container} never reported health ${want}; saw ${seen.join(" -> ")}`);
+    };
+    const healthySeen = await waitHealth("char-healthy", "healthy");
+    const unhealthySeen = await waitHealth("char-unhealthy", "unhealthy");
+
+    // ps, exactly as §5.4 runs it, with and without --all.
+    const psArgv = ["ps", "--no-trunc", "--format", "{{json .}}"];
+    const psAllArgv = ["ps", "--all", "--no-trunc", "--format", "{{json .}}"];
+    const psRunning = jsonRows((await mustDind(psArgv)).stdout, "docker ps");
+    const psAll = jsonRows((await mustDind(psAllArgv)).stdout, "docker ps --all");
+    const plainRow = psAll.find((r) => r.Names === "char-plain");
+    if (!plainRow) throw new Error("docker ps --all has no char-plain row");
+    const filterRows = async (filter: string): Promise<number> =>
+      jsonRows((await mustDind([...psAllArgv, "--filter", filter])).stdout, `docker ps --filter ${filter}`).length;
+    // A ps template naming HealthStatus, the field the forced command's template leaves out.
+    const psHealthStatusRun = await dind(["ps", "--all", "--format", "{{json .HealthStatus}}"]);
+    const psHealthStatusTemplate = {
+      template: "{{json .HealthStatus}}",
+      exit: psHealthStatusRun.code,
+      stderr_first_line: psHealthStatusRun.stderr.trim().split("\n")[0] ?? "",
+    };
+
+    // stats, exactly as §5.4 runs it.
+    const statsArgv = ["stats", "--no-stream", "--no-trunc", "--format", "{{json .}}", "char-plain"];
+    const stats = jsonRows((await mustDind(statsArgv)).stdout, "docker stats");
+
+    // .State.Health, with and without a healthcheck.
+    const inspectJson = async (template: string, container: string): Promise<unknown> =>
+      JSON.parse((await mustDind(["inspect", "--type", "container", "--format", template, container])).stdout);
+    const healthShape = async (container: string, seen: string[]) => {
+      const health = (await inspectJson("{{json .State.Health}}", container)) as Row;
+      const log = health.Log as Row[];
+      return {
+        statuses_seen_while_polling: seen,
+        state_key_set: Object.keys((await inspectJson("{{json .State}}", container)) as Row).sort(),
+        health: sharedKeyShape([health], `${container} .State.Health`),
+        status: health.Status,
+        log_entry: sharedKeyShape(log, `${container} .State.Health.Log`),
+      };
+    };
+    const nilField = await dind(["inspect", "--type", "container", "--format", "{{.State.Health.Status}}", "char-plain"]);
+    const nilSafeTemplate = "{{if .State.Health}}{{.State.Health.Status}}{{end}}";
+    const nilSafe = await mustDind(["inspect", "--type", "container", "--format", nilSafeTemplate, "char-plain"]);
+    // The forced command's inspect template reads `.Id`. Both ways of reading a healthcheck that may be
+    // absent, each next to `.Id`, on a container without one.
+    const withId = async (health: string) => {
+      const template = `{{json .Id}} ${health}`;
+      const r = await dind(["inspect", "--type", "container", "--format", template, "char-plain"]);
+      return { template, exit: r.code, stderr_first_line: r.stderr.trim().split("\n")[0] ?? "" };
+    };
+    const inspectHealthForms = {
+      if_form: await withId("{{if .State.Health}}x{{end}}"),
+      index_form: await withId('{{with index .State "Health"}}x{{end}}'),
+    };
+
+    // events: generate a known container's events, then try each bound.
+    await mustDind(["run", "--rm", "--name", "char-events", probe, "true"]);
+    await Bun.sleep(1100);
+    const dindNow = (await must(["docker", "exec", dindName, "date", "+%s"], "read the dind clock")).stdout.trim();
+    const eventCandidates = [["--until", "0s"], ["--until", dindNow], []];
+    const eventProbes = [];
+    for (const bound of eventCandidates) {
+      const argv = ["events", "--since", "60s", ...bound, "--format", "{{json .}}"];
+      const r = await run(["docker", "exec", dindName, "timeout", String(EVENTS_TIMEOUT_S), "docker", ...argv]);
+      // `timeout` can end a probe that never returns mid-line; that half line is dropped and recorded, not parsed.
+      let text = r.stdout;
+      let droppedPartialLastLine = false;
+      const lastNewline = text.lastIndexOf("\n");
+      if (text.trim() !== "" && lastNewline !== text.length - 1) {
+        text = text.slice(0, lastNewline + 1);
+        droppedPartialLastLine = true;
+      }
+      const rows = text.trim() === "" ? [] : jsonRows(text, `docker ${argv.join(" ")}`);
+      const actions = rows
+        .filter((e) => (e.Actor as { Attributes?: Row } | undefined)?.Attributes?.name === "char-events")
+        .map((e) => e.Action);
+      eventProbes.push({
+        argv,
+        exit: r.code,
+        // `timeout` ends a probe that never returns; a bound that works exits 0 long before it.
+        terminated_on_its_own: r.code === 0 && r.ms < EVENTS_TIMEOUT_S * 1000,
+        dropped_partial_last_line: droppedPartialLastLine,
+        ms: r.ms,
+        events: rows.length,
+        char_events_actions: actions,
+        rows,
+      });
+    }
+    const chosen = eventProbes.find((p) => p.terminated_on_its_own && p.char_events_actions.includes("start"));
+    if (!chosen) throw new Error(`no events bound terminated with char-events' start in its output: ${JSON.stringify(eventProbes.map(({ rows, ...p }) => p))}`);
+    const allEventRows = eventProbes.flatMap((p) => p.rows);
+    const bound = chosen.argv.slice(chosen.argv.indexOf("60s") + 1, chosen.argv.indexOf("--format"));
+
+    // Does the terminating bound return an event from the current second? Measured because the allowlist
+    // probe below, querying straight after its own events, intermittently saw none of them: the newest event
+    // returned predated them by under a second.
+    await mustDind(["exec", "char-plain", "sh", "-c", `echo ${UNTIL_CANARY}`]);
+    const untilProbe = async (): Promise<Row[]> =>
+      jsonRows(
+        (await mustDind(["events", "--since", "30s", ...bound, "--format", "{{json .}}", "--filter", "container=char-plain", "--filter", "event=exec_create"])).stdout,
+        "docker events exec_create",
+      ).filter((e) => String(e.Action).includes(UNTIL_CANARY));
+    const untilImmediate = await untilProbe();
+    await Bun.sleep(1100);
+    const untilLater = await untilProbe();
+    if (untilLater.length !== 1) throw new Error(`an exec_create 1.1s old came back ${untilLater.length} times, not once`);
+    const untilCurrentSecond = {
+      seen_by_an_immediate_query: untilImmediate.length === 1,
+      seen_after_1100ms: true,
+      event_ms_into_its_second: Math.round((Number(untilLater[0]!.timeNano) % 1e9) / 1e6),
+    };
+
+    // Which events carry command text, and whether the action allowlist keeps it out.
+    await mustDind(["run", "-d", "--name", "char-hc", "--health-cmd", `echo ${HEALTHCHECK_CANARY}`, "--health-interval", "1s", "--health-retries", "1", probe, "sleep", "600"]);
+    await waitHealth("char-hc", "healthy");
+    await mustDind(["exec", "char-plain", "sh", "-c", `echo ${EXEC_CANARY}`]);
+    // Past the current second, for the reason untilCurrentSecond records.
+    await Bun.sleep(1100);
+    const filteredEvents = async (filters: string[]): Promise<Row[]> => {
+      const r = await mustDind(["events", "--since", "120s", ...bound, "--format", "{{json .}}", ...filters]);
+      return r.stdout.trim() === "" ? [] : jsonRows(r.stdout, `docker events ${filters.join(" ")}`);
+    };
+    const commandTextSeen = (rows: Row[]): boolean =>
+      rows.some((e) => JSON.stringify(e).includes(EXEC_CANARY) || JSON.stringify(e).includes(HEALTHCHECK_CANARY));
+    const baseActions = (rows: Row[]): string[] => [...new Set(rows.map((e) => String(e.Action).split(":")[0]!))].sort();
+    const allowFilters = ["--filter", "type=container", ...EVENTS_ACTION_ALLOWLIST.flatMap((a) => ["--filter", `event=${a}`])];
+    const unfilteredEvents = await filteredEvents([]);
+    const allowedEvents = await filteredEvents(allowFilters);
+    const oneContainerEvents = await filteredEvents([...allowFilters, "--filter", "container=char-hc"]);
+    const actionAllowlist = {
+      filters: allowFilters,
+      unfiltered: { actions: baseActions(unfilteredEvents), command_text_seen: commandTextSeen(unfilteredEvents) },
+      allowlisted: { actions: baseActions(allowedEvents), command_text_seen: commandTextSeen(allowedEvents) },
+      allowlisted_with_container_filter: {
+        filter: "container=char-hc",
+        containers_seen: [...new Set(oneContainerEvents.map((e) => String((e.Actor as { Attributes?: Row } | undefined)?.Attributes?.name)))].sort(),
+        actions: baseActions(oneContainerEvents),
+      },
+    };
+    if (!actionAllowlist.unfiltered.command_text_seen) {
+      const tail = unfilteredEvents.slice(-12).map((e) => `${e.timeNano} ${e.Action} ${(e.Actor as { Attributes?: Row } | undefined)?.Attributes?.name}`);
+      throw new Error(`no unfiltered event carried a canary command line, so the allowlist probe proves nothing (${unfilteredEvents.length} events; last: ${tail.join(" | ")})`);
+    }
+    if (actionAllowlist.allowlisted.command_text_seen) throw new Error(`the events action allowlist let command text through: ${actionAllowlist.allowlisted.actions.join(", ")}`);
+    for (const [what, actions] of [
+      ["allowlisted", actionAllowlist.allowlisted.actions],
+      ["allowlisted_with_container_filter", actionAllowlist.allowlisted_with_container_filter.actions],
+    ] as const) {
+      if (!actions.includes("start") || !actions.includes("health_status")) throw new Error(`${what} events lost start or health_status: ${actions.join(", ")}`);
+    }
+    if (actionAllowlist.allowlisted_with_container_filter.containers_seen.join(",") !== "char-hc") {
+      throw new Error(`container=char-hc with the allowlist listed: ${actionAllowlist.allowlisted_with_container_filter.containers_seen.join(", ")}`);
+    }
+    // Whether an `event=` word matches only a whole action. A `health_status` action carries a suffix
+    // (`health_status: healthy`), so the word is tried alone and next to `event=health_status`. An allowlist
+    // word that is a prefix of an `exec_*` action would let that action's command line through.
+    const execWord = ["--filter", "type=container", "--filter", "event=exec"];
+    const eventsPrefixMatch = {
+      "event=exec": baseActions(await filteredEvents(execWord)),
+      "event=exec event=health_status": baseActions(await filteredEvents([...execWord, "--filter", "event=health_status"])),
+    };
+
+    // The forced command itself, run as sshd would run it, under this image's /bin/sh, against this daemon.
+    const installed = await run(["docker", "exec", "-i", dindName, "sh", "-c", "cat > /forced-command"], RUN_TIMEOUT_MS, forcedCommandCopy);
+    if (installed.code !== 0) throw new Error(`installing the forced command in dind failed (exit ${installed.code}): ${installed.stderr.trim()}`);
+    const dindShell = (await must(["docker", "exec", dindName, "readlink", "-f", "/bin/sh"], "resolve the dind /bin/sh")).stdout.trim();
+    const forced = (command: string, env: string[] = [], user?: string): Promise<Run> =>
+      run([
+        "docker", "exec", ...(user ? ["-u", user] : []), "-e", `SSH_ORIGINAL_COMMAND=${command}`, ...env.flatMap((e) => ["-e", e]),
+        dindName, "timeout", "20", "sh", "/forced-command",
+      ]);
+    const forcedCanaries = [ENV_CANARY, EXEC_CANARY, HEALTHCHECK_CANARY, BIND_TARGET];
+    const actorName = (e: Row): string => String((e.Actor as { Attributes?: Row } | undefined)?.Attributes?.name);
+    /** Every line as a JSON object, or null when any line is not one (`top` and `logs` print text). */
+    const objectLines = (stdout: string): Row[] | null => {
+      try {
+        return jsonRows(stdout, "forced command output");
+      } catch {
+        return null;
+      }
+    };
+    const plainState = async (): Promise<string> =>
+      (await mustDind(["inspect", "--type", "container", "--format", "{{.State.Running}} {{.RestartCount}} {{.State.StartedAt}}", "char-plain"])).stdout.trim();
+    const plainBefore = await plainState();
+    const forcedCases: { command: string; env?: string[]; exit: number }[] = [
+      { command: "ps", exit: 0 },
+      { command: "ps all name=char-plain label=char.label=one", exit: 0 },
+      // The same request with the caller's IFS set to ':'. The result must not change.
+      { command: "ps all name=char-plain label=char.label=one", env: ["IFS=:"], exit: 0 },
+      { command: "inspect char-plain", exit: 0 },
+      { command: "inspect char-hc", exit: 0 },
+      { command: "inspect char-exited", exit: 0 },
+      { command: "logs char-logs since=600s tail=5", exit: 0 },
+      // Read as decimal under this shell too: eight lines, not an octal refusal.
+      { command: "logs char-logs since=600s tail=08", exit: 0 },
+      { command: "stats char-plain", exit: 0 },
+      { command: "top char-plain", exit: 0 },
+      { command: "events since=120s", exit: 0 },
+      { command: "events since=120s container=char-hc", exit: 0 },
+      { command: "info", exit: 0 },
+      { command: "version", exit: 0 },
+      { command: "restart char-plain", exit: 77 },
+    ];
+    const rendered: Row[] = [];
+    /** The `Status` the forced command's `ps` gives the healthchecked container. */
+    let psHealthStatus = "";
+    for (const c of forcedCases) {
+      const r = await forced(c.command, c.env);
+      const rows = objectLines(r.stdout);
+      const lines = r.stdout.split("\n").filter((line) => line.trim() !== "");
+      const canariesSeen = forcedCanaries.filter((canary) => r.stdout.includes(canary) || r.stderr.includes(canary));
+      const entry: Row = {
+        command: c.command,
+        ...(c.env ? { env: c.env } : {}),
+        exit: r.code,
+        timed_out: r.timedOut,
+        stderr_first_line: r.stderr.trim().split("\n")[0] ?? "",
+        lines: lines.length,
+        key_sets: rows ? distinctKeySets(rows) : null,
+        canaries_seen: canariesSeen,
+      };
+      if (c.command.startsWith("inspect") && rows?.length === 1) {
+        const state = rows[0]!.state as Row | undefined;
+        entry.state_keys = state ? Object.keys(state).sort() : null;
+        entry.health = state && "health" in state ? state.health : "missing";
+      }
+      if (c.command.startsWith("logs")) entry.timestamp_prefix_bytes = (lines[0]?.indexOf(" ") ?? -1) + 1;
+      if (c.command === "ps" && rows) psHealthStatus = String(rows.find((row) => row.Names === "char-hc")?.Status ?? "");
+      if (c.command.startsWith("events") && rows) {
+        entry.actions = baseActions(rows);
+        entry.actions_raw = [...new Set(rows.map((e) => String(e.Action)))].sort();
+        entry.containers_seen = [...new Set(rows.map(actorName))].sort();
+      }
+      rendered.push(entry);
+      if (r.timedOut || r.code !== c.exit) {
+        throw new Error(`forced command "${c.command}" exited ${r.code}${r.timedOut ? " (timed out)" : ""}, not ${c.exit}: ${r.stderr.trim()}`);
+      }
+      if (canariesSeen.length) throw new Error(`forced command "${c.command}" returned ${canariesSeen.join(", ")}`);
+      const tail = c.command.match(/ tail=(\d+)$/)?.[1];
+      if (tail !== undefined && lines.length !== Number(tail)) {
+        throw new Error(`forced command "${c.command}" returned ${lines.length} lines, not ${Number(tail)}`);
+      }
+    }
+    if (!psHealthStatus.includes("(healthy)")) throw new Error(`the forced command's ps gave char-hc the Status "${psHealthStatus}", with no (healthy)`);
+    const [plainPs, ifsPs] = rendered.filter((e) => e.command === "ps all name=char-plain label=char.label=one");
+    if (!plainPs || !ifsPs || plainPs.lines !== ifsPs.lines || JSON.stringify(plainPs.key_sets) !== JSON.stringify(ifsPs.key_sets)) {
+      throw new Error(`the caller's IFS changed the forced command's ps result: ${JSON.stringify({ plainPs, ifsPs })}`);
+    }
+    // Failures docker itself reports through the forced command: no daemon at DOCKER_HOST, a caller without
+    // access to the socket, and a container that does not exist. Only the last is an answer about the target.
+    const dockerError = async (command: string, env: string[] = [], user?: string) => {
+      const r = await forced(command, env, user);
+      return {
+        command,
+        ...(env.length ? { env } : {}),
+        ...(user ? { user } : {}),
+        exit: r.code,
+        timed_out: r.timedOut,
+        stderr_first_line: r.stderr.trim().split("\n")[0] ?? "",
+      };
+    };
+    const dockerErrors = {
+      daemon_unreachable: await dockerError("ps", ["DOCKER_HOST=unix:///nonexistent.sock"]),
+      socket_permission_denied: await dockerError("ps", [], "nobody"),
+      no_such_container: await dockerError("inspect char-nosuch"),
+    };
+    for (const [what, e] of Object.entries(dockerErrors)) {
+      if (e.timed_out || e.exit === 0 || e.exit === 77) {
+        throw new Error(`the ${what} probe exited ${e.exit}${e.timed_out ? " (timed out)" : ""}, so it shows nothing: ${e.stderr_first_line}`);
+      }
+    }
+    if ((await plainState()) !== plainBefore) throw new Error("char-plain changed state across the forced command cases, the refused restart included");
+
+    // How `container=` (events) and `name=` (ps) match, through the forced command. Neither is exact.
+    const lookalikes = ["web", "web-2", "webhook", "myweb"];
+    for (const name of lookalikes) await mustDind(["run", "-d", "--name", name, probe, "sleep", "600"]);
+    // Past the current second, for the reason untilCurrentSecond records.
+    await Bun.sleep(1100);
+    const forcedRows = async (command: string): Promise<Row[]> => {
+      const r = await forced(command);
+      if (r.timedOut || r.code !== 0) throw new Error(`forced command "${command}" exited ${r.code}: ${r.stderr.trim()}`);
+      return r.stdout.trim() === "" ? [] : jsonRows(r.stdout, command);
+    };
+    const eventContainers = async (filter: string): Promise<string[]> =>
+      [...new Set((await forcedRows(`events since=60s ${filter}`)).map(actorName))].sort();
+    const psNames = async (filter: string): Promise<string[]> => (await forcedRows(`ps all ${filter}`)).map((r) => String(r.Names)).sort();
+    // A container's id changes every run, so the fixture key names the prefix rather than holding it.
+    const webIdPrefix = (await mustDind(["inspect", "--type", "container", "--format", "{{.Id}}", "web"])).stdout.trim().slice(0, 12);
+    const matching = {
+      containers: lookalikes,
+      events_container_filter: {
+        "container=web": await eventContainers("container=web"),
+        // `h` is not hex, so this can never match a container id the way `eb` could.
+        "container=ebh": await eventContainers("container=ebh"),
+        "container=w.b": await eventContainers("container=w.b"),
+        "container=<first 12 characters of web's id>": await eventContainers(`container=${webIdPrefix}`),
+      },
+      ps_name_filter: {
+        "name=web": await psNames("name=web"),
+        "name=w.b": await psNames("name=w.b"),
+        "name=eb": await psNames("name=eb"),
+        "name=<first 12 characters of web's id>": await psNames(`name=${webIdPrefix}`),
+      },
+    };
+
+    // The daemon returns only its most recent events. Flood it with exec events, then read back. Last of the
+    // events probes, because it pushes every earlier event out.
+    const flood = await run([
+      "docker", "exec", dindName, "sh", "-c",
+      `i=0; while [ "$i" -lt ${EXEC_FLOOD} ]; do docker exec char-plain true || exit 1; i=$((i + 1)); done`,
+    ]);
+    if (flood.timedOut || flood.code !== 0) throw new Error(`the exec flood failed (exit ${flood.code}): ${flood.stderr.trim()}`);
+    await Bun.sleep(1100);
+    const eventsSinceStart = async (filters: string[]): Promise<Row[]> => {
+      const r = await mustDind(["events", "--since", "3600s", ...bound, "--format", "{{json .}}", ...filters]);
+      return r.stdout.trim() === "" ? [] : jsonRows(r.stdout, `docker events after the flood ${filters.join(" ")}`);
+    };
+    const afterFlood = await eventsSinceStart([]);
+    const afterFloodAllowed = await eventsSinceStart(allowFilters);
+    const plainStart = (e: Row): boolean => actorName(e) === "char-plain" && e.Action === "start";
+    const buffer = {
+      exec_flood: EXEC_FLOOD,
+      events_returned: afterFlood.length,
+      allowlisted_events_returned: afterFloodAllowed.length,
+      char_plain_start_returned: afterFlood.some(plainStart),
+      char_plain_start_returned_allowlisted: afterFloodAllowed.some(plainStart),
+    };
+    if (buffer.char_plain_start_returned || buffer.char_plain_start_returned_allowlisted) {
+      throw new Error(`after ${EXEC_FLOOD} execs, char-plain's start is still returned (${afterFlood.length} events), so the flood proves nothing`);
+    }
+
+    const info = JSON.parse((await mustDind(["info", "--format", "{{json .}}"])).stdout) as Row;
+    const topHeader = (await mustDind(["top", "char-plain"])).stdout.split("\n")[0]!.trim().split(/\s+/);
+
+    // The forbidden verbs: every command the CLI lists, one level down, minus the allowlist.
+    // The CLI lists fewer commands while a daemon answers (against this daemon it left out
+    // `service`), so the list is read connected and with no daemon reachable, and the fixture
+    // takes the union. The allowed verbs must be listed connected, where the forced command runs them.
+    const noDaemonHelp = (argv: string[]): Promise<Run> =>
+      run(["docker", "exec", "-e", "DOCKER_HOST=unix:///nonexistent.sock", dindName, "docker", ...argv, "--help"]);
+    const connectedTop = parseHelpCommands((await mustDind(["--help"])).stdout);
+    const noDaemonTopRun = await noDaemonHelp([]);
+    if (noDaemonTopRun.code !== 0) throw new Error(`docker --help with no daemon failed (exit ${noDaemonTopRun.code}): ${noDaemonTopRun.stderr.trim()}`);
+    const noDaemonTop = parseHelpCommands(noDaemonTopRun.stdout);
+    if (connectedTop.length === 0 || noDaemonTop.length === 0) throw new Error("parsed no commands out of `docker --help`; did its layout change?");
+    const connectedNames = new Set(connectedTop.map((c) => c.name));
+    const listedOnlyWithoutDaemon = noDaemonTop.filter((c) => !connectedNames.has(c.name));
+    const topLevel = [...connectedTop, ...listedOnlyWithoutDaemon];
+    const topNames = new Set(topLevel.map((c) => c.name));
+    const missingAllowed = ALLOWLIST.filter((v) => !connectedNames.has(v));
+    if (missingAllowed.length) throw new Error(`§5.4 allows verbs this CLI does not list against a daemon: ${missingAllowed.join(", ")}`);
+    const missingForbidden = SRD_FORBIDDEN_TOP_LEVEL.filter((v) => !topNames.has(v));
+    if (missingForbidden.length) throw new Error(`§5.4 forbids verbs this CLI does not have: ${missingForbidden.join(", ")}`);
+    const entries = new Map<string, { command: string; source: string }>();
+    for (const c of topLevel) {
+      const view = connectedNames.has(c.name) ? "" : ", listed only with no daemon reachable";
+      if (!ALLOWLIST.includes(c.name)) entries.set(c.name, { command: c.name, source: `docker --help, ${c.section}${c.plugin ? " (plugin)" : ""}${view}` });
+    }
+    for (const c of topLevel) {
+      const help = await noDaemonHelp([c.name]);
+      if (help.code !== 0) throw new Error(`docker ${c.name} --help with no daemon failed (exit ${help.code}): ${help.stderr.trim()}`);
+      for (const sub of parseHelpCommands(help.stdout)) {
+        const command = `${c.name} ${sub.name}`;
+        if (!entries.has(command)) entries.set(command, { command, source: `docker ${c.name} --help, ${sub.section}` });
+      }
+    }
+    const dialStdio = await dind(["system", "dial-stdio", "--help"]);
+    if (dialStdio.code !== 0) throw new Error(`docker system dial-stdio --help failed (exit ${dialStdio.code}); §5.4 names a command this CLI does not have`);
+    for (const form of SRD_NAMED_FORMS) {
+      if (!entries.has(form.command)) entries.set(form.command, { command: form.command, source: `SRD-OBSERVER-ROLES §5.4: ${form.why}` });
+    }
+
+    const measuredWith = {
+      script: SCRIPT,
+      git_head: head,
+      uncommitted_changes_to_measured_files: dirty.code === 0 ? dirty.stdout.split("\n").filter((l) => l.trim() !== "") : null,
+      dind_image: args.dindImage,
+      dind_image_id: dindImageId,
+      probe_image: args.probeImage,
+      probe_image_id: probeImageId,
+      client_version: version.Client.Version,
+      server_version: version.Server.Version,
+      server_api_version: version.Server.ApiVersion,
+      measured_at: new Date().toISOString(),
+    };
+
+    const shapes = {
+      measured_with: measuredWith,
+      ps: {
+        argv: psArgv,
+        all_argv: psAllArgv,
+        rows_measured: { running: psRunning.length, all: psAll.length },
+        ...sharedKeyShape([...psRunning, ...psAll], "docker ps"),
+        // ps's JSON carries Mounts and Labels: a bind mount's source path and every label reach the worker.
+        bind_mount_row: { Mounts: plainRow.Mounts, Labels: plainRow.Labels },
+        name_filter_matches: { "name=char-plain": await filterRows("name=char-plain"), "name=char": await filterRows("name=char") },
+        label_filter_matches: { "label=char.label=one": await filterRows("label=char.label=one") },
+      },
+      stats: { argv: statsArgv, ...sharedKeyShape(stats, "docker stats") },
+      state_health: {
+        without_healthcheck: {
+          state_key_set: Object.keys((await inspectJson("{{json .State}}", "char-plain")) as Row).sort(),
+          json_template: { template: "{{json .State.Health}}", value: await inspectJson("{{json .State.Health}}", "char-plain") },
+          field_template: {
+            template: "{{.State.Health.Status}}",
+            exit: nilField.code,
+            stdout: nilField.stdout.trim(),
+            stderr: nilField.stderr.trim(),
+          },
+          nil_safe_template: { template: nilSafeTemplate, exit: nilSafe.code, stdout: nilSafe.stdout.trim() },
+        },
+        healthy: await healthShape("char-healthy", healthySeen),
+        unhealthy: await healthShape("char-unhealthy", unhealthySeen),
+      },
+      events: {
+        terminating_bound: bound,
+        probes: eventProbes.map(({ rows, ...p }) => p),
+        until_current_second: untilCurrentSecond,
+        action_allowlist: actionAllowlist,
+        buffer,
+        key_sets: distinctKeySets(allEventRows),
+      },
+      top: { header: topHeader },
+      info: { argv: ["info", "--format", "{{json .}}"], key_set: Object.keys(info).sort() },
+      version: {
+        argv: ["version", "--format", "{{json .}}"],
+        key_set: Object.keys(version).sort(),
+        client_key_set: Object.keys(version.Client).sort(),
+        server_key_set: Object.keys(version.Server).sort(),
+      },
+    };
+    const forbidden = {
+      measured_with: measuredWith,
+      allowlist: ALLOWLIST,
+      entries: [...entries.values()].sort((a, b) => a.command.localeCompare(b.command)),
+    };
+
+    const renderedEntry = {
+      measured_with: measuredWith,
+      forced_command: FORCED_COMMAND,
+      forced_command_sha256: forcedCommandSha256,
+      shell: dindShell,
+      default_ps_key_set: sharedKeyShape([...psRunning, ...psAll], "docker ps").key_set,
+      ps_health_status: psHealthStatus,
+      ps_healthstatus_template: psHealthStatusTemplate,
+      inspect_health_forms: inspectHealthForms,
+      docker_errors: dockerErrors,
+      events_prefix_match: eventsPrefixMatch,
+      cases: rendered,
+      matching,
+    };
+
+    const shapesText = `${JSON.stringify(shapes, null, 2)}\n`;
+    const forbiddenText = `${JSON.stringify(forbidden, null, 2)}\n`;
+    process.stdout.write(shapesText);
+    process.stdout.write(forbiddenText);
+    process.stdout.write(`${JSON.stringify(renderedEntry, null, 2)}\n`);
+    await mkdir(join(REPO, "test/fixtures/observe"), { recursive: true });
+    if (args.write) {
+      await writeFile(SHAPES_FIXTURE, shapesText);
+      await writeFile(FORBIDDEN_FIXTURE, forbiddenText);
+      process.stderr.write(`wrote ${SHAPES_FIXTURE}\nwrote ${FORBIDDEN_FIXTURE}\n`);
+    }
+    if (args.writeRendered) {
+      const file = Bun.file(RENDERED_FIXTURE);
+      const existing = (await file.exists()) ? (JSON.parse(await file.text()) as { runs?: Record<string, unknown> }) : {};
+      const runs = { ...(existing.runs ?? {}), [String(version.Client.Version)]: renderedEntry };
+      const fixture = {
+        description: "The forced command run for every verb against a throwaway daemon, one entry per docker CLI version. Written by scripts/observe/characterise-docker --write-rendered.",
+        runs: Object.fromEntries(Object.entries(runs).sort(([a], [b]) => a.localeCompare(b))),
+      };
+      await writeFile(RENDERED_FIXTURE, `${JSON.stringify(fixture, null, 2)}\n`);
+      process.stderr.write(`wrote ${RENDERED_FIXTURE} (docker ${String(version.Client.Version)})\n`);
+    }
+  } finally {
+    await cleanup();
+  }
+}
+
+if (import.meta.main) await main();

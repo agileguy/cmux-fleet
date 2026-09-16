@@ -4,6 +4,700 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-15
+
+This release covers ten commits since 1.1.0: three cap and threshold
+raises that keep the triage console from timing out or overflowing its
+report cap, a resize-pane fix that lets console layouts apply, an image
+toolchain pin, a collation-vocabulary fix, and a per-request output-token
+cap applied to every worker and separately to gabe.
+
+### Added
+
+- **A per-request output-token cap on every worker.** Seats sent no
+  `max_tokens`, so the endpoint budgeted about 213k output tokens a
+  request, and a runaway generation once stalled a seat for 16 minutes
+  past Pi's idle timeout, while completed turns ran p50 99, p90 800, p99
+  3118, max 7395. A `models.json` `maxTokens` never reaches an
+  OpenAI-compatible request, so the cap now travels as a per-model
+  `max_output_tokens` map on each provider, resolves into
+  `PIFLEET_PI_MAX_OUTPUT_TOKENS`, and is applied by
+  `docker/pi-extensions/output-token-cap.ts` on `before_provider_request`.
+  It sets `max_tokens` only when the request carries no cap of its own, so
+  compaction's smaller budget is left alone; an empty or invalid value is
+  a no-op. The extension is loaded on every worker, baked 0444 in the
+  image, and enrolled as a build-context asset.
+- **A refusal for briefs that name another seat's artifact files.** In
+  sweeps 146 and 147 the collator briefed every k8s observer to write
+  `observer-k8s(-ops).json/.md`, names that exist nowhere; one seat obeyed
+  and delivered nothing. `dispatch_request` now refuses, before writing
+  anything, a brief whose `observer-*.json/.md` tokens are not that seat's
+  own pair, so the collator reads the reason and retries. The host
+  refuses the same file with a new `observer_artifact_mismatch` code as a
+  backstop, and one fixture set proves both sides agree.
+
+### Changed
+
+- **The observer deadline is 1200s** (cadence 1020 -> 1620), up from 600s.
+  `childDeadlineS` is derived, not a field: it subtracts the shared 300s
+  margin from `cadence_s - reserve_s`, so cadence is the lever local to
+  this console. T-sweep-146 split its services evenly and every observer
+  still timed out at 600s, and so did the collation; each transcript ended
+  on a tool result with no next turn, at about 10 tok/s decode on the
+  shared model, with docker seats at 48k-112k input tokens. T-sweep-145
+  lost the same way. The cost is a 27-minute tick.
+- **The report byte cap is 16384 for a single collator.** The console
+  went back to one collator on 2026-09-14, so one `triage.json` holds a
+  row for every declared service. T-sweep-148 wrote 15 rows in 9277 bytes
+  and the old 8192 cap refused it whole, recording every service
+  unobserved. `TRIAGE_DOCUMENT_MAX_BYTES` is now 16384;
+  `MAX_SERVICES_PER_ENVIRONMENT` stays 16. A new test parses 16 synthetic
+  rows sized to T-sweep-148's largest row (768 bytes) and fails if they no
+  longer fit.
+- **Gabe's per-request output tokens are capped at 8192.** The endpoint
+  had been budgeting about 98k output tokens a request, measured as a
+  mean over 2116 requests; completed turns measured p50 99, p90 800, p99
+  3118, max 7395 over 363 turns, so 8192 is about 1.1x that max.
+
+### Fixed
+
+- **`resize-pane` is scoped to its workspace**, so console layouts apply.
+  It was sent a pane UUID with no `--workspace` and cmux answered
+  `not_found`, so every sizing pass fell back to the default split and
+  the triage console came up with its observer rows at 50/25/25 instead
+  of thirds. Reproduced live with the same UUID. `resizePaneArgv` now
+  requires and validates the workspace id, and all five call sites pass
+  the workspace being built.
+- **The image pins fd 10.5.0** so Pi's find tool works. Pi 0.79.6's find
+  tool always passes `--no-require-git`, which Debian bookworm's fd-find
+  8.6.0 rejects, so every find call in a seat failed (sweeps 145-147).
+  Installs the upstream musl build, checksum-pinned per arch, keeps the
+  `fdfind` name, and smoke-tests Pi's exact flags at build time and in
+  the image probe.
+- **Docker and VM check names are host vocabulary.** T-sweep-151 was
+  refused before dispatch with `worker_prose [resources]`: the previous
+  collation used "resources" as a coverage channel on a VM row, a
+  `TRIAGE_VM_CHECKS` member, while `HOST_VOCABULARY` held only the k8s
+  `TRIAGE_CHECKS`. `HOST_VOCABULARY` now includes `TRIAGE_DOCKER_CHECKS`
+  and `TRIAGE_VM_CHECKS`. A regression test reproduces the refusal with a
+  same-length control that still refuses, and a coverage test discovers
+  every exported `*_CHECKS` list and fails if a member is missing, so a
+  new environment kind cannot fall behind silently.
+- **All four Pi extensions are named in comments that still counted
+  three.** Comment-only, five places.
+- **CI now collects 173 container probes**, and two stale asset counts
+  are corrected. `TOTAL_EXPECTED` 172 was arithmetic nobody had run.
+  Running the job's 19 files with every gate unset on a clean checkout
+  gives "Ran 173 tests across 19 files", and the same method at the
+  pushed tip gives 160 over 18, matching that run's own log line. The
+  missed test is in image.test.ts: the fd-flags entry added to the
+  toolchain probe loop.
+
+### Verified live
+
+`[1.1.0]`'s claim that nothing in that release had run live no longer
+holds for what it shipped. Measured on the live seven-pane console,
+2026-09-15:
+
+- The console was recreated at 21:07Z with all seven seats on one image,
+  each carrying `PIFLEET_PI_MAX_OUTPUT_TOKENS=8192`, and PID 1's argv
+  including the extension.
+- Sweep 150 collated 15 rows in 6717 bytes; sweep 151 collated 15 rows in
+  6985 bytes; sweep 152 collated 15 rows in **9048 bytes** and was
+  accepted, which is over the old 8192 cap and is the report-cap raise
+  proved live.
+- The output cap, read from the endpoint's own `max_tokens` histogram
+  between two snapshots after the restart: 162 requests, every one of
+  them in (5000, 10000], against a mean of about 97.7k before.
+- The vocabulary fix cleared a real refusal: sweep 151's document again
+  carried `resources` and `reachability`, the exact shape that refused
+  sweep 151 before the fix, and sweep 152 rendered and passed.
+- Sweep 149's lost collation was traced: the collator read all six
+  replies, then spent 6m19s drafting the whole document inside its
+  thinking before writing any argument, and the request ended with zero
+  output and no collation. That was before the cap; both capped sweeps
+  collated.
+
+### Not yet verified live
+
+- The container probe count of 173 is measured locally with every gate
+  off and cross-checked against one real run's log line, but no real run
+  of that job has collected 173 yet.
+- The integration and end-to-end suites have not run on this branch.
+
+## [1.1.0] — 2026-09-15
+
+This release covers Phases 1-5 of `Docs/SRD-TRIAGE-MIXED-OBSERVERS.md`.
+The triage console grows from four panes to seven: `tri-1` on top, the
+three k8s observers in one row, and two docker observers and one vm
+observer in the row below. One sweep covers a k8s environment, a docker
+host and a vm under the one collator.
+
+### Added
+
+- **Seven-pane triage console.** `DEFAULT_TRIAGE_WORKERS` names `tri-1`,
+  `obs-t1`, `obs-td1`, `obs-t2`, `obs-t3`, `obs-td2` and `obs-tv1`, and the
+  plan lays them out as `tri-1` over two full-width rows of three.
+  Multi-pane rows get correct widths at every level, not only the lowest.
+- **Three new triage seats.** `obs-td1` and `obs-td2` run `observer-docker`
+  and `obs-tv1` runs `observer-vm`, declared in both fleet configs and in
+  the console roster.
+- **Environments carry a kind.** `triage/targets.yaml` environments are
+  `k8s`, `docker` or `vm`. `environmentsByKind` replaces
+  `soleEnvironment`: exactly one k8s environment, at most one docker and
+  one vm, and one shared `default_window`. The tracked targets file
+  declares the docker host and the vm.
+- **Seat-to-kind lookup** (`src/run/triage-seat-kinds.ts`) maps each
+  observer seat to its kind.
+
+### Changed
+
+- The sweep envelope takes a list of environments, and a sweep names only
+  the seats of the kinds it declares.
+- The partition check runs once per kind, so a docker service claimed by a
+  k8s seat is refused.
+- Rows, carried state and the sweep assessment key on (environment,
+  service). `do-cluster`'s `grafana` and `docker-host`'s `grafana` are two
+  services, not a duplicate. A document row may name its environment, and
+  the collator is told to when a sweep covers more than one.
+- Settlement reports each swept environment on its own. A blocked docker
+  seat opens `observer_blocked` on the docker environment only.
+- `triagePass` takes one declared list of environments and their services.
+- Each observer's reply is read from its own kind's file:
+  `observer-ops.json`, `observer-docker-ops.json` or
+  `observer-vm-ops.json`. Before this, a docker or vm reply was never
+  found.
+- Docker and vm replies go through the same `sweep_id` and
+  `window_opened_at` freshness gates as k8s.
+- The tui-mode warning covers all three observer roles.
+- `roles/triage.md` tells the collator to split each kind across its own
+  seats.
+- A duplicate service name refusal says the key is (environment, service).
+- The production triage pass sweeps every environment kind present in the
+  targets file. Before this it swept only the k8s environment, and the
+  docker host and vm were declared but never observed.
+
+### Fixed during review
+
+- Docker and vm observers were told to write `observer-ops.json` and to
+  bound kubectl calls. Each observer's brief now names its own kind's
+  reply file and states its own credential's read bounds.
+- The collation brief never asked for `environment`, so with more than one
+  environment every row was left unplaced. It now asks for the field and
+  labels each reply path with its environment. The host also places a row
+  that names no environment when exactly one environment declares its
+  service, and carries that row into the next sweep's brief by the same
+  rule.
+- The collation brief told the collator to declare its two documents in
+  `artifacts`, which it cannot do without `write`. It now says to pass both
+  as entries of one `submit_report` call, as the role does.
+- A targets file could declare more services than one collation document
+  can hold. The total across environments is now capped at 16.
+- A request entry for a seat outside the sweep, even one claiming nothing,
+  could dispatch its siblings and then fail. It is now refused before any
+  dispatch.
+- `seatKind` could return `Object.prototype` members for ids like
+  `toString`.
+- The vm observer skill named rows by hostname, which the targets file
+  never declares. The k8s observer skill asked for a row per component,
+  which grades the declared service unreported; it now asks for one row
+  under the brief's service name. The fleet operator skill described four
+  panes.
+
+### Not yet verified live
+
+Nothing in this release has run on the live console. It was checked
+locally: typecheck, the full unit suite, and two review iterations with no
+correctness findings. A 15-row collation's size is projected, not measured:
+about 6.2 KB at the average row cost seen so far and 9.3 KB at the worst,
+against the 8192-byte document cap.
+
+## [1.0.6] — 2026-09-15
+
+This release is Phase 6 of `Docs/SRD-OBSERVER-ROLES.md`
+(observer-operator-enrolment), the last phase of that SRD.
+
+An operator can now find, enrol and dispatch the Docker and VM observer
+seats from the fleet skill. One enrolled Docker host and one enrolled VM
+were probed live. Each answered a read-only inquiry, and each refused a
+mutation with nothing on the target changed.
+
+### Added
+
+- **The fleet operator skill** lists `obs-2`, `obs-d1` and `obs-v1`, with
+  trigger phrases for Docker and VM inquiries and for enrolling a target.
+  `Workflows/DispatchTask.md` says how a Docker or VM brief carries its
+  target, containers or units, checks and window, still verbatim from the
+  user, and how a seat in no console is reached.
+- **`Workflows/EnrolTarget.md`** is the operator runbook from an unenrolled
+  host to the before-and-after negative probe.
+- **`fleet.yaml`** allows the two enrolled targets, each through an
+  `/etc/hosts` alias on the fleet host, so a machine without the alias fails
+  closed.
+
+### Verified live
+
+- Positive probe: `obs-v1` reported its VM healthy, with an uptime matching a
+  direct reading, and `obs-d1` reported five monitoring containers healthy.
+  Both artifacts parse under the harvest schema.
+- Negative probe: asked to restart a container, `obs-d1` came back `blocked`
+  with `state` `forbidden`. The forced command logged the session, and the
+  container's `StartedAt` and restart count were unchanged. Asked to reboot
+  the VM, `obs-v1` came back `blocked` with `system` `forbidden`, and the
+  machine's boot time was unchanged.
+
+### Changed
+
+- Both observer skills record a refused action on the channel it concerns:
+  `state` for any container change, `system` for a reboot or shutdown,
+  `units` for starting, stopping or restarting a unit.
+- The Docker skill surveys containers once when a brief names none, keeping
+  only `Names`, `State` and `Status`, then queries the chosen containers by
+  name.
+- Both skills say where the enrolled target tokens live and how to list them,
+  so a worker reads the file instead of guessing names.
+- Both skills say an unanswered optional artifact field is omitted, never
+  `null`, which harvest refuses.
+- **The egress relay** keeps its short idle timeout
+  (`PIFLEET_RELAY_IDLE_TIMEOUT_MS`, 120000) only until a connection's first
+  byte. After that both legs use `PIFLEET_RELAY_ACTIVE_IDLE_TIMEOUT_MS`
+  (900000), so a long model prefill is no longer cut at 120 seconds.
+
+### Fixed during review
+
+- An action brief to the VM observer uses the action word as the verb
+  (`observe-vm <target> restart <unit>`). Passing it as a second argument to
+  `unit` was refused on argument count, and that refusal read as a malformed
+  call.
+- The Docker survey captures `observe-docker`'s exit status before filtering
+  and prints it as `observe-docker exit: <n>`. Under `pipefail` an ssh drop
+  mid-stream reported `jq`'s 5, not 255, and a bare `$rc` does not survive
+  to be read, because each worker call starts a new shell.
+- A refusal naming `<targets_var> line <n>` is a fleet configuration fault:
+  `blocked`, `indeterminate`, not retried. Both skills give it its own
+  exit-table row above the generic "fix the call and retry it once" row.
+  `observe-ssh` prefixes every refusal the same way, and the first matching
+  row wins.
+- The relay refuses a bad timeout or connection-cap override at startup,
+  naming the variable. An override must be plain digits with no leading zero:
+  at most 2147483647 for either timeout and 65536 for the cap. Before, a bad
+  idle timeout crashed the relay on connect, a bad active timeout crashed it
+  on the first byte, and `"1e3"`, `"0x10"` or `" 5"` were quietly accepted.
+  An idle timeout above 2147483647 was cut down to about 24 days with only a
+  warning.
+- EnrolTarget: the inventory host, the `egress.allow` host and the
+  `known_hosts` name must be the same string. Enrolment proves the forced
+  command with a nonsense verb before any refused-action probe. Secrets go
+  through a one-command prefix, never an interactive export.
+- EnrolTarget's VM no-reboot check times each reading by its task's dispatch
+  and completion. It passes only when the first uptime covers the whole probe
+  window and the second has grown by at least the gap between the tasks. A
+  short first uptime is inconclusive, never a pass.
+- EnrolTarget says, from source, that re-running `up` for a seat makes a new
+  run and a second container holding the same key, so tear the old run down
+  first. It also says the key sits on the fleet host under the run for the
+  run's life. `Workflows/DispatchTask.md` now says the same, where it used
+  to call that behaviour unknown.
+- The no-reboot check states its preconditions: record each dispatch time
+  before sending the task, and send the second read only after the first
+  completes. An inconclusive result means rerun with a longer baseline, not
+  stop.
+- `skill-frontmatter.test.ts` also parses the fleet operator skill.
+- Tests execute the token-listing commands, pin the survey projection
+  exactly, select optional keys by what the schema accepts, and replace
+  revert checks that could not fail.
+- Tests pin each exit table's row order and what the targets-file row tells
+  the worker. They run the survey command under dash where one exists,
+  because macOS `sh` is bash and accepts bash-only syntax. They also pin the
+  relay's limits at their boundaries.
+
+### Upgrading
+
+- The relay script is bind-mounted and is not a drift input, so a running
+  relay keeps the old code. Restart each `pifleet-egress-relay-*` container
+  after pulling this release.
+
+### Known residual
+
+- A client that sends one byte and goes silent now holds a relay slot for
+  900 s instead of 120 s. No per-source connection cap bounds it yet.
+
+## [1.0.5] — 2026-09-14
+
+This release is Phase 5 of `Docs/SRD-OBSERVER-ROLES.md` (observer-vm-role).
+
+The fleet can now describe a VM observer: a role, its skill, and the forced
+command an operator installs on a systemd Linux target. The live `fleet.yaml`
+carries both the `observer-docker` and `observer-vm` roles, with seats `obs-d1`
+and `obs-v1` in no console.
+
+### Added
+
+- **`scripts/observe/vm-forced-command`** is the whole of what the observer-vm
+  key can do on a target. sshd runs it for every session, and it reads the
+  request from `SSH_ORIGINAL_COMMAND`.
+  - Verbs: `uptime`, `os`, `system`, `failed`, `unit`, `journal`, `kernel`,
+    `disk` and `memory`. Everything else exits 77 and runs nothing.
+  - `unit` takes one name of at most 255 bytes from a fixed character class.
+  - `journal` and `kernel` require `since=<N>s` (1 to 9 digits, at least one
+    second) and `lines=` (at most 500). `journal` also takes `unit=` and
+    `priority=` (one digit, 0 to 7). Each key may appear once.
+  - `disk` runs `timeout 20 df -P -k`, so a hung network mount cannot block it.
+- **`docker/observe-vm <target> <verb> [key=value ...]`** is the role's alias
+  for `observe-ssh vm`, copied onto the worker image's PATH.
+- **`skills/observer-vm-ops`** tells the worker how to call a target, read each
+  exit, and write its artifact pair.
+- **The `observer-vm` role** in `fleet.example.yaml`, with seat `obs-v1`, one
+  egress rule and three multiline secrets.
+- **`scripts/observe/characterise-vm`** measures the systemd facts the forced
+  command relies on, against systemd 239 (RHEL/Rocky 8, the oldest in scope)
+  and 255. Its fixtures back the tests.
+
+### Fixed during review
+
+- `since=0s` is refused, as `logs` refuses it on the Docker role. Both
+  `since=` refusals now describe the same no-leading-zero grammar; one still
+  described the old one.
+- Every refusal test pins the whole reason the forced command prints, and
+  the accepted boundaries (`since=1s`, `since=999999999s`, each `priority`
+  from 0 to 7) are pinned with their exact argv.
+- The SRD's unit-name class, `since=` rule and `disk` timeout wording match
+  the forced command and the skill.
+- `priority=` accepts exactly one digit from 0 to 7.
+- `disk` runs under `timeout 20`. The skill reads exit 124 as a timeout and
+  125 as `timeout` failing, never as free space.
+- The skill reads an unreadable journal as `forbidden` and a `nologin` shell
+  as a blocked task, from the text each one actually prints.
+- The skill's exit table is read top to bottom, first match wins, so a
+  journal-permission Hint at exit 0 is never `answered`. A non-zero exit from
+  any verb but `system` is `unreachable`, and a non-zero exit with nothing on
+  either stream reads as a mis-enrolled account.
+- A target command killed by a signal reaches the worker as ssh's exit 255,
+  so the skill reads it as `unreachable`. The old "128 or above from `disk`"
+  row could never fire, and it hid the 255 row.
+- A `disk` timeout is `resources` coverage `unreachable`, never the
+  `indeterminate` token the coverage enum does not have.
+- The VM enrolment steps name the same four sshd environment settings as the
+  Docker role, where `PATH` must come from, and how `IFS`, `ENV` and
+  `BASH_ENV` are kept out.
+- A Ctrl-C during `characterise-vm` or `characterise-docker`'s container create
+  no longer leaves the container running. A signal also stops every other
+  command either script has in flight, and says what it is waiting on. With
+  stderr piped through `tee`, a Ctrl-C no longer exits before the container
+  is removed. On macOS, a child that exits just as the signal arrives no
+  longer makes cleanup fail before the container is removed.
+- `characterise-signal.test.ts` runs no longer end each other's processes
+  when two run at once.
+- Tests check every coverage, assessment, channel and task-status token in the
+  VM skill's exit table against the real schemas, and pin the table's
+  first-match order.
+- Tests pin the argument grammar's edges, a forged newline in a refused
+  argument, and the forced command's independence from the caller's `IFS`.
+- Tests keep the skill's verbs, caps and quoted refusal line, the role's verb
+  list and `observe-vm`'s usage line in step with the forced command. They
+  also check that "not a recognised verb" appears only in the catch-all's
+  refusal.
+- `characterise-vm`'s two help-page parsers, which produce 196 of the 207
+  forbidden-command fixture entries, now have unit tests against systemd 239-
+  and 255-shaped help text.
+
+## [1.0.4] — 2026-09-14
+
+This release is Phase 4 of `Docs/SRD-OBSERVER-ROLES.md` (observer-docker-role).
+
+The fleet can now describe a Docker host observer: a role, its skill, and the
+forced command an operator installs on the target. The live `fleet.yaml` does
+not carry the role yet (task 4.8 waits on a triage actor restart), and the
+worker image needs a rebuild before `observe-docker` is on any seat's PATH.
+
+### Added
+
+- **`scripts/observe/docker-forced-command`** is the whole of what the
+  observer-docker key can do on a target. sshd runs it for every session, and it
+  reads the request from `SSH_ORIGINAL_COMMAND`.
+  - Verbs: `ps`, `inspect`, `logs`, `stats`, `top`, `events`, `info` and
+    `version`. Everything else exits 77 and runs no `docker`.
+  - Arguments are `key=value` tokens checked against fixed character classes, so
+    no worker token can become a docker flag.
+  - `ps`, `inspect` and `info` use fixed templates. None returns a container's
+    environment, bind mounts or healthcheck output, or the daemon's proxy
+    settings.
+  - `logs` requires `since=` and `tail=` (at most 500). `events` is a bounded
+    window of container lifecycle and health events only, because every `exec_*`
+    event names the exec'd command line.
+- **`docker/observe-docker <target> <verb> [key=value ...]`** is the role's alias
+  for `observe-ssh docker`. `--help` alone prints usage and the exit contract.
+- **`skills/observer-docker-ops`** tells the worker how to call a target, read
+  each exit, and write the `observer-docker-ops.json`/`.md` artifact pair.
+- **The `observer-docker` role** in `fleet.example.yaml`, with seat `obs-d1`, one
+  egress rule and three multiline secrets.
+- **`scripts/observe/characterise-docker`** measures, against a throwaway dind
+  daemon, the Docker facts the forced command relies on. It also runs the forced
+  command itself for every verb, once per docker CLI version. Its fixtures back
+  the tests, and a test fails when the forced command changes without being
+  measured again on every version.
+
+### Fixed during review
+
+- `ps` no longer names `HealthStatus`, which docker CLIs before 29.5.0 lack; every
+  `ps` failed there. Health still shows in `Status`.
+- `inspect` narrows `state`, so a healthcheck's printed output no longer reaches
+  the worker. Its template reads `Health` through `index`, because a container
+  without a healthcheck otherwise fails to render.
+- `since=` takes 1 to 9 digits and at least one second.
+- The forced command no longer depends on the caller's `IFS`.
+- The skill routes a target's exit 77 by its refusal text. Only "not a recognised
+  verb" makes a channel `forbidden`; any other refusal is an argument to fix.
+- `characterise-docker` no longer leaves its dind container running when a signal
+  arrives just before the container starts.
+- An exit 1 because docker could not reach its daemon or socket now blocks the
+  task, rather than counting as an answer. The error text is measured on both
+  docker versions.
+- `events container=` matches a prefix of the container's id as well as its name,
+  so the skill tells the worker to keep only events for the name it asked about.
+- `characterise-docker` reports a dind container it could not remove, with the
+  label filter to find it.
+- `observe-docker --help` names every exit a call can return, including the verb
+  refusal and docker's own daemon errors.
+- Tests cover the argument grammar's edges (a newline between tokens, every
+  character outside a name's class, an octal-looking `tail=`), check that no
+  `events` filter prefix-matches an `exec_*` action, and keep the skill's verbs,
+  actions, limits, quoted refusal lines and exit-1 stderr text in step with the
+  scripts and the measured fixture.
+
+## [1.0.3] — 2026-09-14
+
+This release is Phase 3 of `Docs/SRD-OBSERVER-ROLES.md` (observe-ssh-transport).
+
+The worker image now carries the SSH path that the `observer-docker` and
+`observer-vm` roles will use to reach a Docker host or a VM through the fleet's
+CONNECT proxy. No role calls it yet, so nothing changes in production until
+Phases 4 and 5 add those roles.
+
+### Added
+
+- **`docker/observe-ssh <docker|vm> <target> <verb> [argument ...]`** turns an
+  enrolled target token into the fixed §5.2 `ssh` command, built from the
+  worker's delivered `OBSERVER_<KIND>_*` secret files.
+  - Anything it cannot validate is refused with exit 77, and the message says
+    the shim refused before ssh ran. Missing configuration exits 78.
+  - It hands ssh a 0600 key copy in `/tmp` that always ends in a newline, and
+    refuses (78) when something other than a regular file is already there.
+  - The argv carries `-n`, `ConnectTimeout=10`, `ServerAliveInterval=15` and
+    `ServerAliveCountMax=3`, so a quiet command survives and a silent path ends.
+  - It `exec`s ssh, so ssh's own exit status reaches the caller unchanged.
+- **`docker/ssh-connect.cjs`** is the ProxyCommand. It sends one CONNECT to
+  `HTTPS_PROXY`, joins stdin and stdout to the tunnel on a `200`, and on any
+  other status prints the proxy's status line and body to stderr. OpenSSH
+  itself reports only `kex_exchange_identification`, so this is where an
+  operator sees the rule name.
+  - It exits when the far side closes the tunnel, even while ssh holds its
+    stdin open.
+  - A refusal reaches stderr however its connection ends: a close, a reset, a
+    satisfied `Content-Length`, or a 30 s response deadline that also bounds a
+    proxy that never answers.
+  - An EPIPE on stdout exits 1 with one line.
+  - `HTTPS_PROXY` must be a bare `http://host:port` URL: no userinfo, path,
+    query or fragment. Another scheme, any `@`, or a value that does not parse
+    is refused, and the refusal never repeats the value. A port-less URL means
+    port 80. IPv6 literals work.
+  - Only an `HTTP/1.0` or `HTTP/1.1` `200` status line opens the tunnel.
+    Control characters and every byte above 0x7e in the proxy's reply are
+    escaped, so what reaches stderr is ASCII.
+- **`multiline: true`** on a `secrets.env_allowlist` entry lets that secret's
+  value span lines. Only marked names may carry a newline; a carriage return is
+  refused for every name. The value is delivered byte for byte. The harvest
+  credential sweep and the event-log redactor both match each secret line of
+  such a value, and neither matches PEM armor.
+- **`scripts/observe/characterise-ssh-transport`** measures the transport in
+  the real worker posture: secrets delivered through `buildWorkerEnv`, the shim
+  and ProxyCommand installed by the Dockerfile's own COPY lines, the real
+  CONNECT proxy and the production run flags, on an internal Docker network. It
+  writes `test/fixtures/observe/ssh-transport-facts.json`, stamped with the
+  sha256 of the shim, ProxyCommand, proxy and egress policy it measured, and
+  refuses to measure while any file it depends on has uncommitted changes. A
+  unit test fails when any of the four has changed since. The script also
+  refuses to run unless the shim's `exec ssh` sets exactly its nine `-o`
+  options, once each.
+  - OpenSSH refuses the key at its delivered mode 0444, and refuses a key with
+    no trailing newline; the shim's copy fixes both.
+  - A remote exit 77 comes back as 77. A host-key mismatch and a proxy refusal
+    both exit 255, and the refusal's rule name reaches stderr.
+  - A 130 s silent command completes through the shim; raw ssh without
+    keepalives is cut at 120 s by the proxy's idle timeout. A paused target
+    ends the session about 51 s after the pause.
+- **The worker image** installs `openssh-client`, puts `observe-ssh` on PATH and
+  `ssh-connect.cjs` at `/opt/pifleet`, and runs `ssh -V` and
+  `observe-ssh --help` in the build smoke block. Both files are in the image
+  hash, so editing either one changes the image tag.
+
+### Fixed
+
+- **The event-log redactor** scrubbed a multi-line value only whole or by its
+  first 12 characters. A single leaked line of a key went through, and honest
+  text naming a key's armor line was redacted. It now works line by line.
+- **The event-log redactor** could leave the tail of a value holding `"` or `\`
+  past its first 12 characters in the log. It now replaces the longest match at
+  each position, and a replacement never starts or ends inside a JSON escape or
+  a surrogate pair, so the line still parses and holds no replacement character.
+- **The event-log redactor** could cut a secret inside a JSON document carried
+  in an event as a string, halfway through one of that document's escapes. The
+  event line still parsed, but the document inside it did not. A cut there now
+  ends where one of the document's characters ends.
+- **The event-log redactor** scrubbed `credential: false` secrets such as a
+  targets list, so host names and target tokens vanished from the log.
+  `PIFLEET_SECRET_NAMES` now leaves out every `credential: false` name. That
+  includes grants that already shipped, such as `TICKET_BASE_URL`,
+  `TICKET_WORKSPACE`, `TICKET_PROJECT`, `CI_CD_BASE_URL`, `CI_BUILD_BASE_URL`
+  and `GRAFANA_BASE_URL` in `fleet.example.yaml`, whose values now appear in
+  `events.jsonl` unredacted. Delivery is unchanged.
+
+### Testing
+
+- 6284 pass, 0 fail across 227 files (`bun test test/unit`); `bun run typecheck`
+  clean.
+- `observe-ssh` runs under both `/bin/sh` and `dash`, with a recording fake
+  `ssh`, against a table of hostile arguments. The tests run a per-run copy of
+  the shim, so they never write `/tmp`.
+- `ssh-connect.cjs` lifecycle tests hold stdin open the way ssh does.
+  A Docker-gated test (`PIFLEET_DOCKER=1`) also runs it under real Node 24 in
+  the digest-pinned relay image, which sees TCP resets that Bun does not; CI's
+  container job lists it. Its IPv6 scenario enables loopback IPv6 in the
+  container, so it no longer depends on the host's default.
+- Each behaviour was checked by mutation: disabling it turned its tests red.
+- Three review iterations, each followed by a fix round.
+
+### Known gaps
+
+- The images have not been rebuilt; that is host task 3.H1.
+- Key ownership was measured on macOS (Colima) only, not on a Linux host.
+- A bare IPv6 target produces an unbracketed CONNECT authority. How the egress
+  policy should name IPv6 hosts is still open.
+- The redactor cannot be built for a single-line secret of about 30,000
+  characters or more: its truncation pattern is too deeply nested, and
+  `buildRedactor` throws a `RangeError`. This predates 1.0.3.
+- When an event carries a JSON document as a string, redacting a secret inside
+  it can leave that inner document unparseable in two cases: a match that
+  starts inside one of the document's escapes, or a value holding a quote that
+  lines up with the document's closing quote. The event line itself always
+  parses, and no leading run of the secret survives.
+
+## [1.0.2] — 2026-09-13
+
+This release is Phase 2 of `Docs/SRD-OBSERVER-ROLES.md` (observer-target-artifacts).
+
+The harvest now checks the two report files that the `observer-docker` and
+`observer-vm` roles will write, the way it already checks `ticket-ops.json`. Nothing
+writes these files yet, so the change has no effect in production until Phases 4
+and 5 add the roles.
+
+### Added
+
+- **`src/harvest/observer-target-artifacts.ts`** holds the schemas for
+  `observer-docker-ops.json` (`pifleet.observer-docker-ops/v1`) and
+  `observer-vm-ops.json` (`pifleet.observer-vm-ops/v1`).
+  - They use the same document and row fields as `observer-ops.json`, with the
+    coverage channels closed per SRD §5.6 and §6.7.
+  - Each parse checks the raw document for the worker's granted credentials, in
+    values and in keys, before the schema runs.
+  - The check is bounded. It names at most five paths, caps each path's length,
+    and refuses a document nested more than 32,768 levels deep, so a hostile
+    document cannot drive the harvester's memory up.
+- **Harvest selects both files by name.** A file that fails validation, carries a
+  credential, cannot be read, or sits past the per-task byte budget clamps the task
+  to `failed`, with a reason naming the file and its target.
+- **A credential is caught wherever the file holds it.** Beyond the parsed value,
+  the harvest searches the file's bytes (a duplicate key's dropped value, a numeric
+  grant, a body that is not JSON) and decodes escaped string literals (a JSON
+  unicode escape standing in for a character of the secret, or `\/` for `/`). The
+  finding says which check found it.
+- **No part of a granted secret reaches an observer finding.** The not-JSON finding
+  no longer quotes the parser's message, and every observer finding line is
+  redacted before and after escaping, and before truncation.
+- **An orphaned `.md` clamps to `failed`.** An `observer-docker-ops.md` or
+  `observer-vm-ops.md` with no matching `.json` in the same directory now fails the
+  task, as `ticket-ops.md` already did. Each pair is matched only against its own
+  `.json`.
+
+### Testing
+
+- 5882 pass, 0 fail across 224 files (`bun test test/unit`); `bun run typecheck`
+  clean.
+- A `harvestTask`-level test proves the credential supplier reaches the docker
+  parse in production.
+- Each behaviour was checked by mutation: disabling it turned its tests red.
+- Three review iterations, each followed by a fix round.
+
+### Known gaps
+
+- `ticket-ops.json` still checks only the parsed document, so a credential used as a
+  key, and its parser message on a body that is not JSON, are not covered there.
+- A `ticket-ops.json` or `collation.json` past the per-task byte budget is still not
+  validated.
+- Lines the harvest writes for any artifact (unclaimed, empty, too large,
+  unreadable) still print the raw path of an observer file.
+
+## [1.0.1] — 2026-09-13
+
+This release is Phase 1 of `Docs/SRD-OBSERVER-ROLES.md` (rename-observer-k8s), plus
+every change that was listed as unreleased since 1.0.0.
+
+The fleet's read-only diagnostic role is now `observer-k8s`. It is named for what it
+looks at, ahead of the `observer-docker` and `observer-vm` siblings that later phases
+add. The role grants the same access as before; only its name changes.
+
+### Changed
+
+- **The `observer` role is `observer-k8s`.** `OBSERVER_K8S_ROLE` in
+  `src/config/schema.ts` holds the one literal, and code and tests read it rather
+  than spelling the name.
+  - In `fleet.yaml` and `fleet.example.yaml`, the role key, every seat's `role:` and
+    the prompt path change together in one commit.
+  - `roles/observer.md` is renamed to `roles/observer-k8s.md`.
+  - The worker and operator documents name the new role: `skills/observer-ops`,
+    `skills/pifleet-worker` and the fleet skill.
+- **What deliberately keeps the word** (SRD §4.2):
+  - English prose about "the observer"
+  - the operations console's `observer` pane title
+  - the `observer` row field in `triage.json`, which holds a seat id
+  - the `pifleet/observer` ServiceAccount
+  - past-tense history and verbatim quotes
+- **Operators:** a running seat keeps the old role until it is restarted. A config
+  outside the repo that declares its own `roles:` block needs four edits, not two:
+  the role key, the prompt path, and each seat's `role:`.
+
+### Added
+
+- **`test/unit/observer-rename.test.ts`**, a guard that fails on any spelling of the
+  old name that means the role.
+  - **Where it reads:** `src/`, `test/`, `scripts/`, `roles/`, `skills/`, the fleet
+    skill and both configs.
+  - **What it reads:** role keys, including flow maps and typed openers; role values;
+    `roles` index and dot access; `roleGrant` arguments; the prompt path and its
+    opening line; quoted literals in code; and the role name in docs tables and
+    parenthesised role lists.
+  - **Pane titles:** exempted by named per-file line shapes, checked both ways, so a
+    stale exemption and an unexempted literal both fail.
+  - **Known limits:** listed in its header.
+
+### Fixed
+
+- **Comments that no longer matched the code:**
+  - `fleet.yaml`'s triage console block now opens with what is true today and keeps
+    its older account under a dated `[SUPERSEDED]` marker.
+  - Rotted `file:line` citations now name their targets.
+  - The egress scope note names every role that holds `egress_access`.
+
+### Testing
+
+- 5729 pass, 0 fail across 223 files (`bun test test/unit`); `bun run typecheck`
+  clean; `config validate` clean on both configs.
+- Three review iterations, each with a fix loop. Every guard fix was checked with
+  mutations: a stale spelling went red, and a §4.2 keep stayed green.
+
+The entries below were already queued under `[Unreleased]` before Phase 1 began, and
+predate `Docs/SRD-OBSERVER-ROLES.md`.
+
 ### Added
 
 - **A staged task now starts its own turn — no keystroke at all (ISC-460..ISC-466,

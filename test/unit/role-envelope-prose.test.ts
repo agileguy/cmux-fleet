@@ -16,8 +16,8 @@
  * The task that opened this file asserted `observer`, `sre`, `verifier` and
  * `collator` have no block in `fleet.example.yaml`. Verified directly by
  * parsing both files with `loadConfig` and diffing `Object.keys(config.roles)`:
- * that is true of `collator` alone. `observer`, `sre` and `verifier` all have
- * full blocks in the example and resolve identical grants from both files.
+ * that is true of `collator` alone. `observer-k8s`, `sre` and `verifier` all
+ * have full blocks in the example and resolve identical grants from both files.
  *
  * That correction does not change which file this probe should read, but the
  * REASON has changed and the old one is recorded because it was load-bearing.
@@ -56,7 +56,7 @@
  * ## The anchor phrase, and what it would miss
  *
  * The four carrying role files word the sentence differently enough that no
- * exact substring spans all of it: the verb varies (`observer.md` reads
+ * exact substring spans all of it: the verb varies (`observer-k8s.md` reads
  * "an envelope you never **submitted**" as of commit 8d58068 — Phase 8.4
  * routed its report through `submit_report` and the prose was updated to
  * match; `ticketing.md`, `tester.md` and `verifier.md` still read "you never
@@ -90,7 +90,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
 import { loadConfig } from "../../src/config/load.ts";
-import { writeCapableIn, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
+import { OBSERVER_K8S_ROLE, writeCapableIn, type FleetConfig, type ToolName } from "../../src/config/schema.ts";
 import { ROOT, roleGrant } from "../support/role-docs.ts";
 
 /** See the file header for why this substring and not the full sentence. */
@@ -250,7 +250,7 @@ describe(
 
 describe("the checker is reddenable, driven through resolution rather than through editing roles/*.md", () => {
   /**
-   * Neither `roles/observer.md` nor `roles/reviewer.md` is owned by this
+   * Neither `roles/observer-k8s.md` nor `roles/reviewer.md` is owned by this
    * round, and neither is touched here — both are read exactly as committed.
    * The mutation is entirely in which GRANT is paired with which document:
    * `reviewer`'s real, resolved, write-less grant stands in for a future
@@ -264,8 +264,8 @@ describe("the checker is reddenable, driven through resolution rather than throu
     const reviewerTools = roleGrant(config, "reviewer");
     expect(canWriteEnvelope(reviewerTools), "reviewer is expected to hold no write-capable verb").toBe(false);
 
-    const observerProse = readFileSync(`${ROOT}roles/observer.md`, "utf8");
-    expect(carriesParaphrase(observerProse), "observer.md is expected to carry the paraphrase").toBe(true);
+    const observerProse = readFileSync(`${ROOT}roles/${OBSERVER_K8S_ROLE}.md`, "utf8");
+    expect(carriesParaphrase(observerProse), "observer-k8s.md is expected to carry the paraphrase").toBe(true);
 
     // THE RED CASE: reviewer's real grant, observer's real prose.
     expect(pairingIsConsistent(observerProse, reviewerTools)).toBe(false);
@@ -273,8 +273,8 @@ describe("the checker is reddenable, driven through resolution rather than throu
 
   test("the same prose paired back with its own role's real grant passes", async () => {
     const { config } = await loadConfig(`${ROOT}fleet.example.yaml`);
-    const observerTools = roleGrant(config, "observer");
-    const observerProse = readFileSync(`${ROOT}roles/observer.md`, "utf8");
+    const observerTools = roleGrant(config, OBSERVER_K8S_ROLE);
+    const observerProse = readFileSync(`${ROOT}roles/${OBSERVER_K8S_ROLE}.md`, "utf8");
 
     // THE GREEN CASE: the pairing corrected back to the real grant.
     expect(pairingIsConsistent(observerProse, observerTools)).toBe(true);

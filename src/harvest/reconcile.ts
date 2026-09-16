@@ -84,6 +84,13 @@ import {
 } from "../run/collation.ts";
 import { censusFromRead } from "./collation-census.ts";
 import {
+  OBSERVER_DOCKER_OPS_ARTIFACT_NAME,
+  OBSERVER_VM_OPS_ARTIFACT_NAME,
+  parseObserverDockerOpsArtifact,
+  parseObserverVmOpsArtifact,
+  redactSecrets,
+} from "./observer-target-artifacts.ts";
+import {
   OUTBOX_FILES_DIR,
   artifactClaimToHost,
   resolvedWithin,
@@ -209,6 +216,104 @@ export const TICKET_OPS_DOCUMENT_NAME = `${basename(TICKET_OPS_ARTIFACT_NAME, ".
  * people share, and `partial` would assert more than the harvest can support.
  */
 const TICKET_OPS_FAILURE_CEILING: Verdict = "failed";
+
+/**
+ * The observer TARGET artifacts, selected by name exactly as
+ * `TICKET_OPS_ARTIFACT_NAME` is (SRD-OBSERVER-ROLES §5.6, §6.7).
+ *
+ * A table rather than one boolean per name, so each row keeps four things in one
+ * place: the name that selects, the human `.md` document that must sit beside
+ * it, the one entry point that sweeps and parses, and the words the findings
+ * use for the target.
+ *
+ * WHAT THE SHAPE GUARANTEES, AND WHAT IT DOES NOT. `document` cannot drift from
+ * `name`: `observerTarget` is the only place a row is built, and it derives one
+ * from the other. Nothing else is enforced by the type. `name`, `parse` and
+ * `target` are three independent arguments, so a row pairing the docker name
+ * with the VM parse, or with the VM's words, typechecks. The tests catch it.
+ * In `harvest-reconcile.test.ts`, "a well-formed observer-docker-ops.json
+ * passes cleanly" goes red on a swapped parse, because the docker document
+ * fails the VM schema. `expectOrphaned` asserts each reason names its own
+ * target, so a swapped `target` goes red there.
+ *
+ * KEPT APART FROM THE TICKET-OPS ARM rather than folded into one list with it.
+ * The ticket-ops text is pinned unevenly, and a shared renderer would have to
+ * keep every pin below while changing the lines around them.
+ *
+ * - The orphan finding and reason are pinned byte for byte by "the ticket-ops
+ *   orphan finding and reason are byte-identical" in `harvest-reconcile.test.ts`,
+ *   and ISC-348's registered claim pins a substring of that finding.
+ * - `harvest-ticket-ops-wiring.test.ts` requires exactly one finding containing
+ *   `ticket-ops artifact`. For a malformed document that finding must contain
+ *   `ticket-ops.json` and `validation`, and `reasons` must contain `ISC-332`. For
+ *   a body that is not JSON it must contain `not parseable JSON`.
+ * - `harvest-credential-sweep-wiring.test.ts` filters the findings on
+ *   `ticket-ops`, requires one, and requires it to contain `contains a
+ *   credential` and the path `notes`.
+ *
+ * Outside those substrings nothing is pinned. No test pins the cap-arm finding
+ * at all, so a renderer could reword it, and the rest of the validation-arm
+ * finding and the ISC-332 reason, without any of these tests noticing. The
+ * observer arms also redact every line, where the ticket-ops arm does not. Two
+ * short arms side by side cost less than that.
+ *
+ * `observer-ops.json` is deliberately absent. SRD §3.3 keeps the k8s observer's
+ * document out of harvest validation.
+ */
+interface ObserverTargetArtifact {
+  name: string;
+  /**
+   * The `.md` half, DERIVED from `name` exactly as `TICKET_OPS_DOCUMENT_NAME`
+   * is derived from its artifact name, so the pair cannot drift.
+   */
+  document: string;
+  parse: (raw: unknown, secrets: readonly string[]) => unknown;
+  target: string;
+}
+
+/** One table row. The only place a row is built, so `document` is always derived. */
+function observerTarget(
+  name: string,
+  parse: ObserverTargetArtifact["parse"],
+  target: string,
+): ObserverTargetArtifact {
+  return { name, document: `${basename(name, ".json")}.md`, parse, target };
+}
+
+const OBSERVER_TARGET_ARTIFACTS: ReadonlyArray<ObserverTargetArtifact> = [
+  observerTarget(OBSERVER_DOCKER_OPS_ARTIFACT_NAME, parseObserverDockerOpsArtifact, "docker host"),
+  observerTarget(OBSERVER_VM_OPS_ARTIFACT_NAME, parseObserverVmOpsArtifact, "VM"),
+];
+
+/**
+ * The observer target row a file is selected by, or `null`.
+ *
+ * On the RAW host path's basename, for the reason `TICKET_OPS_ARTIFACT_NAME`
+ * gives: an escaped copy is a rendering, and a name must not opt itself in or
+ * out by how it prints.
+ */
+function observerTargetFor(path: string): ObserverTargetArtifact | null {
+  return OBSERVER_TARGET_ARTIFACTS.find((a) => a.name === basename(path)) ?? null;
+}
+
+/**
+ * The verdict a failed observer target validation clamps the task to.
+ *
+ * `failed`, on the argument `TICKET_OPS_FAILURE_CEILING` makes. The artifact is
+ * the observer's entire output. When it cannot be read, nothing is known about
+ * what the observer saw on its target, and `partial` would claim more than the
+ * harvest can support.
+ *
+ * THE SKILL AND THE HARVEST ARE DIFFERENT CLAIMS. `skills/observer-ops/SKILL.md`
+ * tells the k8s observer that a run writing only `observer-ops.md` clamps to
+ * `failed`, "the same rule `ticketing` runs under". That is the skill's rule,
+ * and the harvest does not enforce it for that role. SRD §3.3 defers harvest
+ * validation of `observer-ops.json`, so neither `observer-ops.json` nor
+ * `observer-ops.md` is selected here or in the orphaned-document pass. This
+ * ceiling is the harvest's own. It applies only to the two target artifacts in
+ * `OBSERVER_TARGET_ARTIFACTS` and their `.md` halves.
+ */
+const OBSERVER_TARGET_FAILURE_CEILING: Verdict = "failed";
 
 /** Schema issues named in one finding before it is truncated. */
 const MAX_REPORTED_ISSUES = 6;
@@ -480,6 +585,261 @@ function validateTicketOps(body: Buffer, secrets: readonly string[]): string | n
   }
 }
 
+/**
+ * A JSON string literal's value, or `null` when the span does not decode.
+ *
+ * `JSON.parse` on the literal's own span, so the escapes are decoded exactly as
+ * the document's parse decodes them and there is no second decoder to drift.
+ */
+function decodeJsonLiteral(span: string): string | null {
+  try {
+    const v: unknown = JSON.parse(span);
+    return typeof v === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Which of `credentialInBody`'s two checks found a known secret. */
+type BodyCredential = "bytes" | "decoded";
+
+/** The characters JSON accepts after a backslash, besides `u` and four hex digits. */
+const SHORT_ESCAPES: ReadonlySet<number> = new Set(
+  ['"', "\\", "/", "b", "f", "n", "r", "t"].map((c) => c.charCodeAt(0)),
+);
+
+function isHexDigit(c: number): boolean {
+  return (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66);
+}
+
+/**
+ * What the backslash at `text[i]` begins: an escape JSON decodes, one JSON
+ * refuses, or one the end of `text` cut short. Only a final lone backslash, or a
+ * final `\u` followed by fewer than four characters that are all hex digits, is
+ * cut short.
+ */
+function escapeAt(text: string, i: number): "decodes" | "refused" | "cut" {
+  if (i + 1 >= text.length) return "cut";
+  const e = text.charCodeAt(i + 1);
+  if (SHORT_ESCAPES.has(e)) return "decodes";
+  if (e !== 0x75) return "refused"; // Not `u`.
+  for (let j = i + 2; j < i + 6; j++) {
+    if (j >= text.length) return "cut";
+    if (!isHexDigit(text.charCodeAt(j))) return "refused";
+  }
+  return "decodes";
+}
+
+/**
+ * Which of the two checks `validateObserverTarget` describes finds a known
+ * secret in an observer target document's body, or `null` when neither does.
+ *
+ * Needles are filtered as `findCredentialLeaks` filters them: a blank one
+ * matches everything.
+ *
+ * THE DECODED-LITERAL CHECK IS ONE LINEAR PASS over `text`, at most
+ * `MAX_ARTIFACT_BYTES` of it. The loop tracks whether it is inside a literal,
+ * whether that literal holds an escape, and whether JSON would decode it. A
+ * literal is decoded once, when it closes, and only when it holds an escape and
+ * every character in it is one JSON accepts: no raw character below U+0020, and
+ * no backslash followed by anything but `" \ / b f n r t`, or `u` and four hex
+ * digits. Bun's `JSON.parse` was measured to draw the same line, over every
+ * UTF-16 code unit inside a literal and after a backslash, and over every
+ * four-character `\u` tail drawn from the hex digits, `g`, `G`, `x`, `X` and a
+ * space. So a literal JSON would refuse is never handed to it. A refused decode
+ * costs a throw, and the throws were the slow shapes.
+ *
+ * MEASURED on this machine over 8 MiB bodies, with one needle, as the time the
+ * scan adds to `reconcileArtifactClaims`: about 100 ms at the worst shape tried,
+ * two million tiny decodable literals (`"\n"` repeated), and about 10 ms for a
+ * body with no escapes. Each needle is searched for in each decoded literal, so
+ * sixteen needles took that worst shape to about 270 ms. Before literals JSON
+ * refuses were skipped, 8 MiB of `"\q"` literals took about 1100 ms, of
+ * `"\u00zz"` literals about 540 ms, and of `"\n"` literals that also held a raw
+ * newline about 830 ms. Each of those now takes about 10 ms.
+ *
+ * A regular expression for literals is not used: on an unterminated literal an
+ * engine retries from every later quote, which is quadratic in the body.
+ *
+ * Literal boundaries are found the way JSON finds them, so in a body that
+ * parses every span is a real string literal and decodes. In a body that does
+ * not parse, the boundaries are a best effort, and a literal JSON would refuse,
+ * such as one that also holds a raw newline or a `\q`, is skipped. One not-JSON
+ * shape is handled on purpose: a body that ends inside a literal holding an
+ * escape, which is what a crash mid-write leaves. What was written of that
+ * literal is decoded as if it closed there, less an escape the end cut short. A
+ * body that does not parse clamps as not-JSON whatever this returns; only the
+ * credential label on its finding depends on it.
+ */
+function credentialInBody(
+  body: Buffer,
+  text: string,
+  secrets: readonly string[],
+): BodyCredential | null {
+  const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
+  if (needles.length === 0) return null;
+  if (needles.some((n) => body.includes(n))) return "bytes";
+
+  const holdsNeedle = (span: string): boolean => {
+    const decoded = decodeJsonLiteral(span);
+    return decoded !== null && needles.some((n) => decoded.includes(n));
+  };
+  const QUOTE = 0x22;
+  const BACKSLASH = 0x5c;
+  let start = -1;
+  let hasEscape = false;
+  let decodable = true;
+  /** Where the literal still open at the end stops: before an escape the end cut short. */
+  let end = text.length;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (start === -1) {
+      if (c === QUOTE) {
+        start = i;
+        hasEscape = false;
+        decodable = true;
+      }
+    } else if (c === BACKSLASH) {
+      const escape = escapeAt(text, i);
+      if (escape === "cut") {
+        end = i;
+        break;
+      }
+      hasEscape = true;
+      if (escape === "refused") decodable = false;
+      i++; // The escaped character cannot close the literal.
+    } else if (c === QUOTE) {
+      if (hasEscape && decodable && holdsNeedle(text.slice(start, i + 1))) return "decoded";
+      start = -1;
+    } else if (c < 0x20) {
+      decodable = false;
+    }
+  }
+  // The body ended inside an escaped literal, as a crash mid-write leaves it.
+  if (start !== -1 && hasEscape && decodable && holdsNeedle(`${text.slice(start, end)}"`)) {
+    return "decoded";
+  }
+  return null;
+}
+
+/**
+ * Where a known secret was found, in words that do not overstate it.
+ *
+ * "In its bytes" sends an operator to search the file for the token. When only
+ * the decoded-literal check found it, that search finds nothing, so the words
+ * say the bytes spell it only once a literal's escapes are decoded.
+ */
+function bodyCredentialWords(found: BodyCredential): string {
+  return found === "bytes"
+    ? "a credential in its bytes"
+    : "a credential that its bytes spell only once a string literal's JSON escapes are decoded";
+}
+
+/**
+ * Validate one observer target document, returning a finding or `null`.
+ *
+ * The sibling of `validateTicketOps`, with the same catch-and-report stance.
+ * Three things differ, and each closes a way a granted secret got past the
+ * check or into the report.
+ *
+ * ## The body is searched, as well as the parsed value
+ *
+ * The parse's own sweep walks what `JSON.parse` produced. The harvest
+ * inventories the file whatever the parse kept, and some bodies hold a secret
+ * the parsed value does not show. `credentialInBody` runs two checks on the
+ * body before the parse.
+ *
+ * The BYTES check is a literal search of the body as written. It finds a secret
+ * spelled out anywhere in the file: in a duplicate key's dropped value
+ * (`"sweep_id":"<secret>","sweep_id":null` parses to `null`), in a grant written
+ * as a plain integer such as `"restart_count": 918273645501`, which a sweep of
+ * strings never visits, and in a body that is not JSON at all, such as a leading
+ * BOM in front of a leaky document.
+ *
+ * The DECODED-LITERAL check decodes the string literals in the body that hold
+ * an escape, and searches the decoded values. It finds a secret the bytes do
+ * not spell because an escape stands in for one of its characters: `\u0067hp_…`
+ * for `ghp_…`, or `\/` for `/`, which PHP's encoder writes. That matters where
+ * the parse drops the literal, as a duplicate key's value or as a key inside a
+ * dropped duplicate object, and where the body ends inside the literal, as a
+ * crash mid-write leaves it. Where the parse keeps the literal, the parsed sweep
+ * sees the decoded string too.
+ *
+ * WHAT NEITHER REACHES. A grant written as a number in another form, such as
+ * `9.18273645501e11`, parses to the same integer and is spelled nowhere in the
+ * body. A secret in base64 or any other encoding is not the needle in any form
+ * either. Both can sit in a document that passes. In a body that is not JSON, an
+ * escaped secret in a literal JSON would refuse, one that also holds a raw
+ * newline or a `\q`, is not decoded, so that finding carries no credential
+ * label. A body in UTF-16 does not decode as UTF-8 JSON, so it clamps as
+ * not-JSON, and its finding carries no credential label, because neither check
+ * reads UTF-16.
+ *
+ * ## A credential in the body always gets the credential label
+ *
+ * When the parse throws and the body holds a credential, the finding says so,
+ * whatever the throw was. The one throw kept as it is, is the sweep's own
+ * refusal: it already says the document contains a credential, and it names the
+ * path, which is more useful than "somewhere in the body". A `ZodError`, or any
+ * other throw, such as the `RangeError` the sweep throws for a document nested
+ * past its depth limit, gives way to the body finding.
+ *
+ * The label says which check found the secret, because the two send an operator
+ * to different places. "In its bytes" means a search of the file finds the
+ * token. A hit only the decoded-literal check made is worded as one the bytes
+ * spell only once a literal's escapes are decoded, because that search finds
+ * nothing.
+ *
+ * ## The not-JSON finding quotes nothing from the document
+ *
+ * Bun's parser quotes the token it choked on, and cuts it at the first
+ * character that is not a letter, a digit, `$` or `_`, or after 200 characters.
+ * Measured for `/ + - . = : % , } @ # ~ ! *`: each cut a bare
+ * `SynthKeyAlpha9Q<c>zzTail` to `Unexpected identifier "SynthKeyAlpha9Q"`,
+ * while `$`, `_` and a digit kept the whole token. A cut token is a PREFIX of
+ * the secret, and exact-match redaction cannot find a prefix, so no redaction
+ * makes that message safe. The message is dropped instead.
+ *
+ * ## The returned text is NOT yet safe to print
+ *
+ * A schema message can quote a worker-authored value, and the sweep's path is
+ * built from worker-authored keys. This function neither redacts nor escapes.
+ * Redaction happens in more than one place: the parse redacts the sweep's path
+ * list before it throws, and the caller redacts again, in the order its
+ * `observerShown` and `observerLine` docblock gives.
+ */
+function validateObserverTarget(
+  body: Buffer,
+  artifact: ObserverTargetArtifact,
+  secrets: readonly string[],
+): string | null {
+  const text = body.toString("utf8");
+  const found = credentialInBody(body, text, secrets);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return (
+      `is not parseable JSON (the parser's message is withheld, because it quotes the document)` +
+      (found === null ? "" : `, and it contains ${bodyCredentialWords(found)}`)
+    );
+  }
+  const inBody = found === null ? null : `the document contains ${bodyCredentialWords(found)}`;
+  try {
+    artifact.parse(raw, secrets);
+  } catch (e) {
+    // The sweep's own refusal: not a schema failure, and already a credential finding.
+    const sweepRefusal =
+      !(e instanceof ZodError) && e instanceof Error && e.message.includes("contains a credential");
+    const why = inBody !== null && !sweepRefusal ? inBody : describeSchemaFailure(e);
+    return `fails ${artifact.name} validation (${why})`;
+  }
+  // The parse passed, sweep included, so the sweep of the parsed value did not find it.
+  return inBody === null
+    ? null
+    : `fails ${artifact.name} validation (${inBody}, which the sweep of its parsed value did not find)`;
+}
+
 /** The errno name, never the whole error: `String(err)` carries host paths. */
 function errnoOf(e: unknown): string {
   return (e as NodeJS.ErrnoException).code ?? "unknown";
@@ -584,6 +944,81 @@ export async function reconcileArtifactClaims(
   const clampTo = (v: Verdict, why: string): void => {
     verdictCeiling = v;
     verdictCeilingReason ??= why;
+  };
+
+  /**
+   * AN OBSERVER LINE, REDACTED IN LAYERS, path included, because a path is
+   * worker-authored and a directory can be named after a granted secret.
+   *
+   * WHICH LINES. The lines this function writes specifically about an observer
+   * target artifact go through these: the validation finding, the not-read
+   * finding, the orphaned-document finding, and the clamp reason each raises.
+   * The generic lines written for ANY artifact do not, and they name an observer
+   * file unredacted: an unclaimed artifact, a claimed artifact that is present
+   * but empty, a per-artifact cap refusal (`too_large`), an `unreadable`
+   * descriptor, and the envelope-claim lines, which render the claimed path.
+   * This change leaves those unredacted. They are written for every artifact,
+   * ticket-ops and collation artifacts included, so redacting them would change
+   * lines those arms produce, and this phase keeps their text unchanged.
+   *
+   * THE LAYERS, in order, for one worker-authored span:
+   *
+   * 1. The parse's own refusal redacts its path list before it throws
+   *    (`sweepThenParse` in `observer-target-artifacts.ts`). Only the sweep's
+   *    message passes through that layer.
+   * 2. `observerShown` redacts the raw span.
+   * 3. It escapes the span with `safeForReport`, uncut.
+   * 4. It redacts the escaped span. Escaping turns a real newline into the two
+   *    characters `\n`, so an escaped span can spell a secret the raw one did
+   *    not.
+   * 5. It truncates, with `safeForReport`'s own cut and `…[truncated]` suffix.
+   *    Cutting before step 4 could leave a rebuilt secret's head behind, and a
+   *    head is a prefix that exact-match redaction cannot find.
+   * 6. `observerLine` redacts the finished line, once the spans and the
+   *    harvester's own words are joined.
+   *
+   * Step 6 catches only a secret that crosses a join, and every join has
+   * harvester text on one side: the artifact's name ends a path, and fixed
+   * words surround each span. So the secrets it alone catches contain words the
+   * harvester wrote, which a real token is unlikely to. It stays because the
+   * worker-authored part of such a secret is still a leak, and because nothing
+   * is appended or cut after it, so "no needle in the finished line" holds of
+   * the string itself. "a secret that runs from a directory name into the
+   * harvester's words is redacted from the finished line" goes red without it.
+   *
+   * The ticket-ops lines do not go through these, so their text stays as it
+   * was (see `OBSERVER_TARGET_ARTIFACTS`). Nor does `artifacts[].path`, for the
+   * reason given where it is pushed.
+   */
+  const observerShown = (s: string, maxLen?: number): string => {
+    // An infinite cap escapes without cutting. The second call escapes nothing,
+    // because the first left no control character, so all it does is cut.
+    const escaped = safeForReport(redactSecrets(s, secrets), Number.POSITIVE_INFINITY);
+    return safeForReport(redactSecrets(escaped, secrets), maxLen);
+  };
+  const observerLine = (s: string): string => redactSecrets(s, secrets);
+
+  /**
+   * Report an observer target artifact the harvester did not read, and clamp.
+   *
+   * `why` is the digest outcome: `too_large` or `unreadable` from the
+   * artifact's own read, or `over_budget` from the per-task budget, whether this
+   * artifact tipped it or came after the one that did.
+   */
+  const observerNotRead = (f: OutboxFile, a: ObserverTargetArtifact, why: string): void => {
+    discrepancies.push(
+      observerLine(
+        `${a.name} artifact ${observerShown(f.path)} could not be validated: ` +
+          `the harvester declined to read it (${why})`,
+      ),
+    );
+    clampTo(
+      OBSERVER_TARGET_FAILURE_CEILING,
+      observerLine(
+        `a ${a.name} artifact in the outbox could not be validated, so what the ` +
+          `observer saw on that ${a.target} cannot be read from its own report`,
+      ),
+    );
   };
 
   // The only region a claim may name. Deliberately `files/` and not the task
@@ -692,7 +1127,18 @@ export async function reconcileArtifactClaims(
 
   /**
    * A `ticket-ops.md` WITH NO `ticket-ops.json` BESIDE IT — the half of the
-   * document that opts nothing in, arriving alone.
+   * document that opts nothing in, arriving alone. The same holds for
+   * `observer-docker-ops.md` and `observer-vm-ops.md`, each beside its own
+   * `.json` (SRD-OBSERVER-ROLES Phase 2 task 2.3).
+   *
+   * ## THREE PAIRS, and no pair vouches for another
+   *
+   * Each `.md` name is derived from its `.json` name, so no pair can drift.
+   * Each pair collects its OWN directories, so a valid `ticket-ops.json` beside
+   * an `observer-docker-ops.md` examines nothing about the docker document, and
+   * the docker and VM halves say nothing about each other. Each orphan reports
+   * in its own words: the ticket-ops text below is pinned, and an observer's
+   * finding and reason name its document and its target, never tickets.
    *
    * ## The defect, measured
    *
@@ -741,25 +1187,71 @@ export async function reconcileArtifactClaims(
    * because a refused entry never enters the digest loop at all.
    */
   {
-    const jsonDirs = new Set<string>();
-    const orphanedDocs: string[] = [];
-    for (const f of ordered) {
-      const name = basename(f.path);
-      if (name === TICKET_OPS_ARTIFACT_NAME) jsonDirs.add(dirname(f.path));
-    }
-    for (const f of ordered) {
-      if (basename(f.path) !== TICKET_OPS_DOCUMENT_NAME) continue;
-      if (jsonDirs.has(dirname(f.path))) continue;
-      orphanedDocs.push(f.path);
-    }
-    for (const path of orphanedDocs) {
-      discrepancies.push(
-        `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} at ${safeForReport(path)} with no ` +
+    /**
+     * One row per pair, each carrying its own words and rendering its own path.
+     *
+     * The ticket-ops row's finding and reason are pinned byte for byte by "the
+     * ticket-ops orphan finding and reason are byte-identical", and ISC-348's
+     * registered claim pins a substring of the finding. The observer rows say
+     * what did not run and what cannot be known about THAT target, and never
+     * mention tickets: an operator told a docker host's document skipped "the
+     * ticket-ops schema" would be told something false about which check was
+     * missed. They are also redacted whole, which the ticket-ops row is not.
+     */
+    const pairs: ReadonlyArray<{
+      artifact: string;
+      document: string;
+      ceiling: Verdict;
+      /** Takes the RAW host path, so each row decides how its path is shown. */
+      finding: (path: string) => string;
+      reason: string;
+    }> = [
+      {
+        artifact: TICKET_OPS_ARTIFACT_NAME,
+        document: TICKET_OPS_DOCUMENT_NAME,
+        ceiling: TICKET_OPS_FAILURE_CEILING,
+        finding: (path) =>
+          `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} at ${safeForReport(path)} with no ` +
           `${TICKET_OPS_ARTIFACT_NAME} beside it, so the ticket-ops schema validation and the ` +
           `credential sweep DID NOT RUN on it; this document is unchecked, not clean`,
-      );
-    }
-    if (orphanedDocs.length > 0) {
+        reason:
+          `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} with no ${TICKET_OPS_ARTIFACT_NAME} ` +
+          `beside it, so neither the schema validation nor the credential sweep ran on the ` +
+          `worker's account of what it did to the ticket system`,
+      },
+      ...OBSERVER_TARGET_ARTIFACTS.map((a) => ({
+        artifact: a.name,
+        document: a.document,
+        ceiling: OBSERVER_TARGET_FAILURE_CEILING,
+        finding: (path: string) =>
+          observerLine(
+            `the outbox holds ${a.document} at ${observerShown(path)} with no ${a.name} beside ` +
+              `it, so neither its schema validation nor the credential sweep ran on it; this ` +
+              `document is unchecked, not clean`,
+          ),
+        reason: observerLine(
+          `the outbox holds ${a.document} with no ${a.name} beside it, so neither the schema ` +
+            `validation nor the credential sweep ran on it, and what the observer saw on that ` +
+            `${a.target} cannot be read from a checked report`,
+        ),
+      })),
+    ];
+    for (const pair of pairs) {
+      // Per pair, so a `.json` of one kind can never vouch for a `.md` of another.
+      const jsonDirs = new Set<string>();
+      for (const f of ordered) {
+        if (basename(f.path) === pair.artifact) jsonDirs.add(dirname(f.path));
+      }
+      const orphanedDocs: string[] = [];
+      for (const f of ordered) {
+        if (basename(f.path) !== pair.document) continue;
+        if (jsonDirs.has(dirname(f.path))) continue;
+        orphanedDocs.push(f.path);
+      }
+      for (const path of orphanedDocs) {
+        discrepancies.push(pair.finding(path));
+      }
+      if (orphanedDocs.length === 0) continue;
       /**
        * IT CLAMPS, and the argument is the one `TICKET_OPS_FAILURE_CEILING`
        * already makes rather than a new one.
@@ -791,19 +1283,19 @@ export async function reconcileArtifactClaims(
        * It is still a CEILING and the `rank` guard at the call site still
        * applies, so `unknown` (rank -1) is untouched. Nothing is weighed on top
        * of evidence the harvest already refused to certify.
+       *
+       * The observer pairs clamp on the same argument, which
+       * `OBSERVER_TARGET_FAILURE_CEILING` makes for their targets: the document
+       * is the observer's entire output, and prose alone was neither validated
+       * nor swept.
        */
-      clampTo(
-        TICKET_OPS_FAILURE_CEILING,
-        `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} with no ${TICKET_OPS_ARTIFACT_NAME} ` +
-          `beside it, so neither the schema validation nor the credential sweep ran on the ` +
-          `worker's account of what it did to the ticket system`,
-      );
+      clampTo(pair.ceiling, pair.reason);
     }
   }
 
   let spent = 0;
 
-  for (const f of ordered) {
+  for (const [index, f] of ordered.entries()) {
     /**
      * Selection happens on the NAME, before a byte is read — see
      * `TICKET_OPS_ARTIFACT_NAME`. `basename` on the raw host path, not on the
@@ -818,11 +1310,28 @@ export async function reconcileArtifactClaims(
      * only place §6.8's three rules can be checked.
      */
     const isCollation = basename(f.path) === COLLATION_ARTIFACT_NAME;
+    /**
+     * An observer target artifact, selected on the raw basename for the same
+     * reason, and retained because its content is what gets validated.
+     */
+    const observerTarget = observerTargetFor(f.path);
     const outcome = await digestHeldArtifact(
       f,
       Math.min(MAX_ARTIFACT_BYTES, MAX_RECONCILED_BYTES - spent),
-      isTicketOps || isCollation,
+      isTicketOps || isCollation || observerTarget !== null,
     );
+    /**
+     * An observer target artifact the caps refused is a REPORTED gap and clamps,
+     * exactly as the ticket-ops arm below does and for its reason. A worker must
+     * not be able to switch validation off by choosing a file size.
+     *
+     * That includes the per-task budget. This arm reports the artifact that
+     * tips it, and the `over_budget` case below reports every observer target
+     * artifact the loop never reaches.
+     */
+    if (observerTarget !== null && outcome.kind !== "ok") {
+      observerNotRead(f, observerTarget, outcome.kind);
+    }
     /**
      * A collation the caps refused is a REPORTED gap, not a pass — the same
      * suppression the ticket-ops arm below closes, and closed the same way. "Too
@@ -923,9 +1432,33 @@ export async function reconcileArtifactClaims(
             );
           }
         }
+        if (observerTarget !== null && outcome.retained !== null) {
+          const problem = validateObserverTarget(outcome.retained, observerTarget, secrets);
+          if (problem !== null) {
+            discrepancies.push(
+              observerLine(
+                `${observerTarget.name} artifact ${observerShown(f.path)} ` +
+                  `${observerShown(problem, 512)}`,
+              ),
+            );
+            clampTo(
+              OBSERVER_TARGET_FAILURE_CEILING,
+              observerLine(
+                `a ${observerTarget.name} artifact in the outbox failed validation, so what the ` +
+                  `observer saw on that ${observerTarget.target} cannot be read from its own report`,
+              ),
+            );
+          }
+        }
         // The raw path stays the matching key above; only the PUBLISHED copy
         // is escaped, so a hostile filename cannot both evade the comparison
         // and reach the report intact.
+        //
+        // NOT REDACTED, even for an observer target artifact under a directory
+        // named after a granted secret. `src/run/relay.ts` reads
+        // `derived.artifacts[].path` as the artifact's host path, and changing
+        // what this field holds is outside the observer fix's scope. The
+        // observer findings and clamp reasons are redacted; this field is not.
         artifacts.push({ path: safeForReport(f.path), bytes: outcome.bytes, sha256: outcome.sha256 });
         if (outcome.bytes === 0 && matched.has(resolve(f.path))) {
           // A claim is the worker offering this file as evidence. Offering an
@@ -952,14 +1485,37 @@ export async function reconcileArtifactClaims(
         discrepancies.push(
           `artifact reconciliation stopped after ${spent} bytes; the per-task cap is ${MAX_RECONCILED_BYTES} — remaining artifacts were not digested`,
         );
+        /**
+         * THE BUDGET MUST NOT SWITCH OBSERVER VALIDATION OFF.
+         *
+         * Stopping here skips every artifact after this one, and before this
+         * backstop that included any observer target artifact: eight full-size
+         * files and one byte in front of a leaky `observer-docker-ops.json`
+         * gave `verdictCeiling: null`, while the same document alone clamped.
+         * So the exception to "one finding names the cause" is made on
+         * purpose. Each observer target artifact the loop never reached is named
+         * and clamps, exactly as a cap refusal does. The current artifact, if it
+         * is one, was already reported by the arm above.
+         *
+         * A LIMIT, stated rather than left to be discovered: a `ticket-ops.json`
+         * or `collation.json` past the budget still gets no finding naming it
+         * and raises no ceiling in this function, and a collation past the
+         * budget is never read into `collationRead`. That hole predates the
+         * observer roles, and closing it changes grading for ticketing and
+         * collation tasks, which is the operator's decision to make.
+         */
+        for (const rest of ordered.slice(index + 1)) {
+          const unreached = observerTargetFor(rest.path);
+          if (unreached !== null) observerNotRead(rest, unreached, outcome.kind);
+        }
         return {
-    discrepancies,
-    artifacts,
-    verdictCeiling,
-    verdictCeilingReason,
-    collation: censusFromRead(collationRead, loc.containerWorkdir),
-    collationRead,
-  };
+          discrepancies,
+          artifacts,
+          verdictCeiling,
+          verdictCeilingReason,
+          collation: censusFromRead(collationRead, loc.containerWorkdir),
+          collationRead,
+        };
       case "unreadable":
         /**
          * THE DEFECT THIS CATCHES REACHED `main` ONCE ALREADY.

@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review/triage workspace, run or check the triage console ("start triaging", "is the triage console running", "what is triage saying", "sweep now"), or names any fleet worker or console by name.
+description: Send tasks to the cmux-fleet of containerised Pi agents (obs-1, obs-2, obs-d1, obs-v1, tick-1, eng-1, eng-2, tst-1, tst-2, col-1, rev-arch-1, rev-ctx-1, rev-lang-1) via pifleet. USE WHEN the user says use tick-1, use eng-1, use the fleet, ask the observer, dispatch to a worker, send this to a worker, get the fleet to do it, run an SRD through the fleet, project-manage an SRD, recreate or restart a worker or container, change a worker's toolchain or platform (node/python/go), launch a worker against a particular repo, recreate the operations/development/review/triage workspace, run or check the triage console ("start triaging", "is the triage console running", "what is triage saying", "sweep now"), ask what containers are running or how they look on a Docker host, ask whether a VM is up or check its units, logs or journal, enrol a Docker host or a VM as a target, or names any fleet worker or console by name.
 ---
 
 # fleet
@@ -87,7 +87,8 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 | Workflow | Trigger | File |
 |----------|---------|------|
 | **ProjectManager** | "run ProjectManager on <repo> against <SRD>", "implement this SRD with the fleet", "run the SRD through the fleet", "have the fleet build <SRD path>", "project-manage this SRD" | `Workflows/ProjectManager.md` |
-| **DispatchTask** | "use tick-1", "send this to eng-1", "get the fleet to…", "ask the observer" | `Workflows/DispatchTask.md` |
+| **DispatchTask** | "use tick-1", "send this to eng-1", "get the fleet to…", "ask the observer", "use obs-d1", "ask obs-v1", "check the containers on <docker host>", "check on <vm>" | `Workflows/DispatchTask.md` |
+| **EnrolTarget** | "enrol a Docker host", "enrol a VM for obs-v1", "add a target for obs-d1", "set up a new observer-docker target" | `Workflows/EnrolTarget.md` |
 | **Consoles** | "recreate the operations workspace", "rebuild the development console", "open the review console", "open the triage console", "open the consoles", "restart tst-1", "make it a python worker", "launch it from <repo>" | `Workflows/Consoles.md` |
 | **Observe** | "what is the fleet doing", "is eng-1 still working", "show me the transcript" | `Workflows/Observe.md` |
 | **Intervene** | "steer eng-1", "abort that task", "unstage it", "take the terminal" | `Workflows/Intervene.md` |
@@ -99,14 +100,19 @@ either.** Relay it. Add your own analysis only if asked, and mark it as yours.
 
 | Worker | Role | Console | Toolchain | Notes |
 |--------|------|---------|-----------|-------|
-| `obs-1` | observer | operations | `base` | read-only cluster/log questions; has cloud access |
+| `obs-1` | observer-k8s | operations | `base` | read-only cluster/log questions; has cloud access |
+| `obs-2` | observer-k8s | none | `base` | second `observer-k8s` seat, same grant as `obs-1`; `rpc` rather than `obs-1`'s attended `tui`, so a dispatched watch does not sit in the operator's pane — obs-1 is the one a human watches, obs-2 takes the dispatched passes |
+| `obs-d1` | observer-docker | none | `base` | read-only inquiry about containers on one enrolled Docker host. The worker calls its `observe-docker` shim, which runs SSH to the target, and the target's forced command decides what runs; no `docker` CLI in the worker; `cloud_access: false` |
+| `obs-v1` | observer-vm | none | `base` | read-only inquiry about one enrolled VM's reachability, system state, units, logs and resources. The worker calls its `observe-vm` shim, which runs SSH to the target, and the target's forced command decides what runs; `cloud_access: false` (Q2: the cloud channel is off) |
 | `tick-1` | ticketing | operations | `base` | Rally via `TICKET_*` secrets; egress to `rally1.rallydev.com` |
 | `eng-1`, `eng-2` | engineer | development | `node` | hosted model, own git checkout, no egress |
 | `tst-1`, `tst-2` | tester | development | `python` | hosted model, own git checkout, egress to the registries |
 | `col-1` | collator | review | `base` | writes the fan-out request; does not review |
 | `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` | reviewer | review | `base` | three vendors, read-only, `shared-ro` |
-| `tri-1` | triage | triage | `base` | THE collator, and there is exactly one. Its envelope names every declared service and all three observer seats; it DIVIDES the environment between them (§6.5's ⌈N/3⌉ — the partition is the worker's judgement, not the host's arithmetic), then collates all three replies into ONE document. **`gabe/gemma-4-26b-a4b-it`** (LAN, `hosted: false`); `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
-| `obs-t1`, `obs-t2`, `obs-t3` | **observer** | triage | `base` | three seats under the one collator, each handed a share of the environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `tri-1` | triage | triage | `base` | THE collator, and there is exactly one. Its envelope names every declared service and all SIX observer seats, across three kinds — k8s, docker, vm. It DIVIDES the environment BY KIND, and within each kind, between that kind's own seats (SRD-TRIAGE-MIXED-OBSERVERS §5: k8s's ⌈N/3⌉ across `obs-t1..3`, docker split evenly across `obs-td1`/`obs-td2`, vm's whole share to `obs-tv1` alone — every split is the worker's judgement, not the host's arithmetic), then collates all six replies into ONE document. **`gabe/gemma-4-26b-a4b-it`** (LAN, `hosted: false`); `tools: [read, grep, find, ls, submit_report, dispatch_request]` — no `bash`, no `write` |
+| `obs-t1`, `obs-t2`, `obs-t3` | **observer-k8s** | triage | `base` | three seats under the one collator, each handed a share of the k8s environment and never the whole list. They run CONCURRENTLY against one deadline, so the sweep costs the largest share rather than the sum. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `obs-td1`, `obs-td2` | **observer-docker** | triage | `base` | two seats under the one collator, splitting the environment's docker containers evenly between them; never a k8s or vm service. `cloud_access: false`. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
+| `obs-tv1` | **observer-vm** | triage | `base` | the sole vm seat under the one collator; the whole of the environment's vm share is its own, since this console holds at most one vm environment (SRD-TRIAGE-MIXED-OBSERVERS §6.1) and there is no vm-kind seat to split it with. `cloud_access: false`. Same model; `tools: [read, write, bash, grep, find, ls, submit_report]` |
 
 **This table describes the operator's own `~/repos/cmux-fleet/fleet.yaml`**, which
 is **TRACKED** — since 2026-09-12, by operator decision recorded in `.gitignore`
@@ -120,18 +126,21 @@ knowing before it is used to reason about this one: its `tester` role declares n
 `egress_access` and its `egress.allow` names no package registry, so **"egress to
 the registries" is false there**; its development seats run local oMLX models
 rather than hosted ones; and the `review` console's four seats are not declared in
-it at all. **The `triage` console's FOUR ARE** — `tri-1`, `obs-t1`, `obs-t2` and
-`obs-t3` appear in both files, so the example can stand that console up where it
-cannot stand up `review`.
+it at all. **The `triage` console's SEVEN ARE** — `tri-1`, `obs-t1`, `obs-t2`,
+`obs-t3`, `obs-td1`, `obs-td2` and `obs-tv1` appear in both files, so the example
+can stand that console up where it cannot stand up `review`.
 
-**THIS ROW HAS NOW BEEN WRONG IN BOTH DIRECTIONS, AND THAT IS THE REASON TO
+**THIS ROW HAS NOW BEEN WRONG IN MULTIPLE DIRECTIONS, AND THAT IS THE REASON TO
 DISTRUST THIS TABLE RATHER THAN READ IT.** It said FOUR until 2026-09-11 while
 only two seats existed — claiming *"the three `obs-t*` seats … on the local
 `gpt-oss-20b-MXFP4-Q8` the role pins"*, carrying the words *"Checked 2026-09-07
 rather than assumed"*, and carrying a warning about how it had nearly grown a
 fourth false clause. It grew one anyway, by rotting. It was corrected to two, and
-on 2026-09-12 the console genuinely grew a second pair, so it is four again — by
-an edit this time, not by drift.
+on 2026-09-12 the console genuinely grew a second pair, so it was four again — by
+an edit this time, not by drift. On 2026-09-14 three more seats joined —
+`obs-td1`, `obs-td2` (docker) and `obs-tv1` (vm), SRD-TRIAGE-MIXED-OBSERVERS §5 —
+so the count is SEVEN now, again by an edit rather than by drift; this paragraph
+sat at "four" for a day after the code it describes had already moved to seven.
 
 **A claim that says when it was checked is a claim nobody re-checks**; the date
 reads as a guarantee and is only a timestamp. That lesson is the durable part of
@@ -301,6 +310,42 @@ tests can run at all.
   the agents are already gone. Recovery is
   `cmux workspace-action --action unpin --workspace <id>` and a retry. Known
   defect, unfixed; one more reason to prefer `--restart`.
+- **A console script run from inside ANOTHER cmux workspace inherits that
+  workspace's `$CMUX_WORKSPACE_ID`, and cmux resolves context-scoped verbs
+  against it.** Measured 2026-09-13: `--recreate` on triage, review and
+  operations, launched from a shell sitting in the `driver` workspace,
+  stopped every old run, built each new workspace, then died on
+
+  ```
+  cmux focus-pane --pane <uuid> exited 1: Error: not_found: Pane not found
+  ```
+
+  — BEFORE closing the old console, adding the new one to `pi-fleet`, or giving
+  it its colour back. Every console then existed twice, the new copies ungrouped
+  and uncoloured, each script exit 2. The pane existed; `focus-pane` had looked
+  for it in `driver`. The same call resolved the moment the variable was unset,
+  and resolves with `--workspace` passed while it is still set.
+
+  **Fixed in code 2026-09-13:** `focusPaneArgv` now takes the workspace and
+  emits `--workspace` — the fix `rename-tab` and `respawn-pane` got for the same
+  class of failure on 2026-08-18. Its comment and the ones in `client.ts` and
+  `parse.ts` that called `focus-pane` "not workspace-scoped" are corrected.
+  **On a checkout without that fix**, launch from outside the foreign context:
+
+  ```bash
+  env -u CMUX_WORKSPACE_ID -u CMUX_TAB_ID ./scripts/<console> --recreate
+  ```
+
+  **Recovering the half-done state:** close the new, ungrouped duplicates and
+  run `--recreate` again the same way. The OLD workspace still holds the group
+  membership and `custom_color`, and `--recreate` reads both from it before it
+  builds — which is exactly why closing the old copy first would lose them.
+
+  **The general lesson:** a cmux verb that passed a probe from a plain terminal
+  proves nothing about the same verb run from inside cmux, where the context
+  variable is set to somebody else's workspace. `read-screen` was re-probed the
+  same day and genuinely is unscoped; `focus-pane` only looked it. Probe a new
+  verb from inside a DIFFERENT workspace before trusting its argv.
 - **A changed toolchain needs its image built.** The tag is a hash over the
   build context, so editing `fleet.yaml` or the Dockerfile alone leaves `up`
   refusing a stale tag rather than running one. Build it:

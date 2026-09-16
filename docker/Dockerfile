@@ -32,11 +32,17 @@ ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 # byte-identical. Shipping both tools makes the download UNREACHED rather than
 # merely blocked.
 #
-# The symlink is load-bearing, not tidiness. Debian ships the binary as
-# `fdfind` (the name `fd` belongs to fdclone), and Pi 0.79.6 happens to accept
-# either — `systemBinaryNames: ["fd", "fdfind"]`. Providing BOTH names means
-# the fix does not depend on Pi continuing to know Debian's rename, and a
-# worker's own `fd ...` command line works the way its muscle memory expects.
+# fd is NOT Debian's `fd-find`, and that is a measured fix rather than taste.
+# Pi 0.79.6's `find` tool passes `--no-require-git` on every call, and Debian
+# bookworm's fd 8.6.0 rejects that flag ("Found argument '--no-require-git'
+# which wasn't expected"), so every `find` a worker made failed. That was
+# measured in the triage collator's transcripts on 2026-09-15 (T-sweep-145 and
+# T-sweep-147). The upstream musl build is pinned by version AND sha256 per
+# architecture, so two workers on one role stay byte-identical and a swapped
+# tarball fails the build. Both names are still provided: Pi accepts either
+# (`systemBinaryNames: ["fd", "fdfind"]`), and a worker's own `fd ...` command
+# line works the way its muscle memory expects. The tool check at the end of
+# this file runs the exact flags Pi uses.
 # `procps` is pifleet's OWN dependency, not a convenience for the agent.
 # `safety/procstart.ts` and `safety/procgroup.ts` both shell out to `ps` — it is
 # how a run decides whether a pid is alive before it stops, reaps or prunes
@@ -46,9 +52,26 @@ ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 # `IdentityReadError`, which wears `EXIT.BACKEND_UNAVAILABLE` — so the failure
 # arrives as exit 3 from an unrelated command rather than as a missing binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg procps \
- && rm -rf /var/lib/apt/lists/* \
- && ln -s /usr/bin/fdfind /usr/local/bin/fd
+      bash ca-certificates git ripgrep jq curl less tini gnupg procps openssh-client \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG FD_VERSION=10.5.0
+ARG FD_SHA256_ARM64=d76c4317f7d5dba69f8a2a15856c90c777e7f0dd4e85f0de8c76de6992c374d4
+ARG FD_SHA256_AMD64=761c72dc8e120d85b22292063be8a796e2eeb20eb3e4f38b8fa2343ccf3514a7
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      arm64) fd_arch=aarch64; fd_sha="${FD_SHA256_ARM64}" ;; \
+      amd64) fd_arch=x86_64; fd_sha="${FD_SHA256_AMD64}" ;; \
+      *) echo "fd: no pinned build for TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    fd_tgz="fd-v${FD_VERSION}-${fd_arch}-unknown-linux-musl.tar.gz"; \
+    curl -fsSL -o "/tmp/${fd_tgz}" "https://github.com/sharkdp/fd/releases/download/v${FD_VERSION}/${fd_tgz}"; \
+    echo "${fd_sha}  /tmp/${fd_tgz}" | sha256sum -c -; \
+    mkdir -p /tmp/fd; \
+    tar -xzf "/tmp/${fd_tgz}" -C /tmp/fd --strip-components=1; \
+    install -m 0755 /tmp/fd/fd /usr/local/bin/fd; \
+    ln -s /usr/local/bin/fd /usr/local/bin/fdfind; \
+    rm -rf "/tmp/${fd_tgz}" /tmp/fd
 
 # --- cloud CLI baseline: present in EVERY worker image (SRD §5.3) ---
 # SRE-shaped tasks are a primary use case; a role that discovers mid-task that
@@ -347,6 +370,26 @@ RUN set -eux; \
 # paragraph in the skill.
 COPY --chmod=0755 docker/ticket-cli /usr/local/bin/rally-cli
 
+# The SSH transport shim (SRD-OBSERVER-ROLES §12 Phase 3, task 3.3). Turns
+# one enrolled target token into a fixed `ssh` argv. Per the file's own "Who
+# owns what": it owns ARGV SAFETY, refusing every argument it cannot validate
+# before `ssh` ever runs; the target's own forced command owns the verb
+# allowlist, because only the target can enforce a rule the worker cannot
+# step around. On PATH as `observe-ssh`, and called by `observe-docker` below.
+COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh
+
+# The Docker role's entry-point alias (SRD-OBSERVER-ROLES §12 Phase 4, task
+# 4.2), called by the `observer-docker` role. It answers `--help`/`-h` when that
+# is the sole argument and passes every other argv to `observe-ssh docker`
+# unchanged. On PATH as `observe-docker`.
+COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker
+
+# The VM role's entry-point alias (SRD-OBSERVER-ROLES §12 Phase 5, task 5.2),
+# called by the `observer-vm` role. Same shape as observe-docker above: it
+# answers `--help`/`-h` when that is the sole argument and passes every other
+# argv to `observe-ssh vm` unchanged. On PATH as `observe-vm`.
+COPY --chmod=0755 docker/observe-vm /usr/local/bin/observe-vm
+
 # Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
 # (§5.3). Executing each one at build time is the difference between an image
 # that *contains* the tools and an image where they *run*: the relocation above
@@ -362,7 +405,14 @@ RUN set -eux; \
     rg --version >/dev/null; \
     fd --version >/dev/null; \
     fdfind --version >/dev/null; \
+    fd --glob --color=never --hidden --no-require-git --max-results 1 -- fd /usr/local/bin >/dev/null; \
     /opt/pifleet/rally-cli/bin/rally-cli --version >/dev/null; \
+    ssh -V; \
+    observe-ssh --help >/dev/null; \
+    observe-docker --help >/dev/null; \
+    observe-docker --help extra 2>&1 | grep -qF 'observe-ssh: refused before ssh ran'; \
+    observe-vm --help >/dev/null; \
+    observe-vm --help extra 2>&1 | grep -qF 'observe-ssh: refused before ssh ran'; \
     pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.
@@ -461,6 +511,40 @@ COPY --chmod=0444 docker/pi-extensions/truncation-recovery.ts /opt/pifleet/trunc
 # stop producing envelopes and does not produce malformed ones. It produces
 # well-formed envelopes checked against a rule set that has since moved.
 COPY --chmod=0444 docker/pi-extensions/report-tools.ts /opt/pifleet/report-tools.ts
+
+# The output-token-cap extension (2026-09-15 stall measurement — see
+# src/config/schema.ts's max_output_tokens docblock and the extension's own
+# header). It registers `before_provider_request`, the one hook Pi exposes
+# over the fully-built request, and sets `max_tokens` from
+# PIFLEET_PI_MAX_OUTPUT_TOKENS when the request carries no cap of its own.
+# Same reasoning as the three files above on every count: in-process,
+# root-owned, 0444, denied to the worker — a writable copy would be a worker
+# able to strip its own output cap off every request it sends.
+#
+# ADDING THIS COPY MEANT ADDING "pi-extensions/output-token-cap.ts" TO
+# `BUILD_CONTEXT_ASSETS` in src/container/image.ts. Stale here is silent in
+# the same direction as the auto-trigger and truncation-recovery above: the
+# extension finds nothing it recognises and returns every payload untouched,
+# so every worker quietly goes back to sending no `max_tokens` at all — the
+# runaway-generation stall this file exists to close.
+COPY --chmod=0444 docker/pi-extensions/output-token-cap.ts /opt/pifleet/output-token-cap.ts
+
+# The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2 task 3.1). `observe-ssh`
+# (task 3.2, shipped and on PATH via task 3.3 above; no role calls it yet)
+# runs every observer SSH call as
+# `-o ProxyCommand="node /opt/pifleet/ssh-connect.cjs %h %p"`, because OpenSSH
+# has no native CONNECT support and this image carries no `nc`/`socat`
+# (`:48-49` above) — `node` is the one thing guaranteed present, since the
+# base image itself is `node:*-bookworm-slim` (`:20`). Read by `node`, never
+# executed directly, so 0444 — same reasoning as the four extensions above.
+#
+# ADDING THIS COPY MEANT ADDING "ssh-connect.cjs" TO `BUILD_CONTEXT_ASSETS` in
+# src/container/image.ts. A stale copy here is dangerous in the same shape the
+# honeypot's staleness is: it is the ONLY thing standing between an operator
+# and the proxy's `403` rule name (`docker/connect-proxy.cjs:257-265`), so a
+# copy that regresses the refusal path hides WHY egress was denied behind
+# OpenSSH's own opaque `kex_exchange_identification` failure instead.
+COPY --chmod=0444 docker/ssh-connect.cjs /opt/pifleet/ssh-connect.cjs
 
 USER 10001:10001
 WORKDIR /workspace

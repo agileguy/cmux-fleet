@@ -3,11 +3,13 @@
  * (ISC-270).
  *
  * WHAT IS BROKEN TODAY: NOTHING, and that is the point. `BUILD_CONTEXT_ASSETS`
- * carries eight names; the Dockerfile reads seven distinct files out of the
- * build context — `docker/verbgate` (COPYed five times, once per gated cloud
- * binary), `docker/ticket-cli`, `docker/entrypoint.sh`, `docker/honeypot.cjs`,
- * and the three `docker/pi-extensions/*.ts` — and `Dockerfile` itself is the
- * eighth enrolled name, the one nothing COPYs because it IS the recipe. So the
+ * carries thirteen names; the Dockerfile reads twelve distinct files out of
+ * the build context — `docker/verbgate` (COPYed five times, once per gated
+ * cloud binary), `docker/ticket-cli`, `docker/entrypoint.sh`,
+ * `docker/honeypot.cjs`, `docker/ssh-connect.cjs`, `docker/observe-ssh`,
+ * `docker/observe-docker`, `docker/observe-vm`, and the four
+ * `docker/pi-extensions/*.ts` — and `Dockerfile` itself is the thirteenth
+ * enrolled name, the one nothing COPYs because it IS the recipe. So the
  * array covers the build context exactly. This file is not a repair. It is the
  * thing that keeps the array correct once nobody remembers that it has to be.
  *
@@ -20,7 +22,7 @@
  * arrived after it, and both line numbers had moved by hundreds. A header that
  * enumerates is a header that rots, and a rotted header that still SOUNDS
  * authoritative is worse than none — it tells the next reader the array is
- * three names long while they are looking at eight. The enumerations that are
+ * three names long while they are looking at thirteen. The enumerations that are
  * load-bearing are therefore the assertions below, which fail when they are
  * wrong; the count above is prose and no line number appears in it deliberately.
  *
@@ -108,7 +110,7 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
     // the Dockerfile is clean and when the parse silently matched nothing, and
     // only one of those two is evidence.
     const sources = buildContextSources(DOCKERFILE);
-    expect(sources.length).toBeGreaterThanOrEqual(7);
+    expect(sources.length).toBeGreaterThanOrEqual(9);
 
     const names = new Set(sources.map((s) => assetNameOf(s.source)));
     expect(names).toEqual(
@@ -120,6 +122,11 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
         "pi-extensions/dispatch-trigger.ts",
         "pi-extensions/truncation-recovery.ts",
         "pi-extensions/report-tools.ts",
+        "pi-extensions/output-token-cap.ts",
+        "ssh-connect.cjs",
+        "observe-ssh",
+        "observe-docker",
+        "observe-vm",
       ]),
     );
   });
@@ -154,6 +161,43 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // moved, and reading `task_id`/`epoch` out of `/policy/task` by a recipe
       // that has moved. The harvester cannot tell the two apart.
       "pi-extensions/report-tools.ts",
+      // Added 2026-09-15. The output-token-cap extension, closing the stall
+      // measured that day: seats sent no output cap, the endpoint's own
+      // `max_tokens` averaged ~213k per request, and a seat could sit silent
+      // for 16 minutes with tokens still flowing — past Pi's own idle timeout,
+      // because idle is not what a runaway generation is. Stale in the same
+      // silent direction as the auto-trigger and truncation-recovery above: it
+      // finds nothing it recognises and returns every payload untouched, so a
+      // stale copy under an unmoved tag goes back to sending no cap at all.
+      "pi-extensions/output-token-cap.ts",
+      // Added 2026-09-14 (SRD-OBSERVER-ROLES task 3.1). The SSH ProxyCommand
+      // every observer SSH call runs; a stale copy is dangerous in the same
+      // shape as the honeypot's staleness — it is the ONLY thing that carries
+      // the proxy's `403` rule name past OpenSSH's own opaque
+      // `kex_exchange_identification` failure, so a copy that mishandles a
+      // refusal hides the proxy's rule name from the operator reading it.
+      "ssh-connect.cjs",
+      // Added 2026-09-14 (SRD-OBSERVER-ROLES task 3.3). The argv-safety shim
+      // on PATH as `observe-ssh` — it refuses every malformed or hostile
+      // argument BEFORE `ssh` ever runs. A stale copy under an unmoved tag is
+      // a silent regression of that refusal: the binary a worker actually
+      // calls would validate against an older, possibly weaker rule set
+      // while build success and an unchanged tag say nothing moved.
+      "observe-ssh",
+      // The Docker role's entry-point alias (SRD-OBSERVER-ROLES task 4.2) — a
+      // thin `exec observe-ssh docker "$@"` that owns no validation of its
+      // own. A stale copy is the same silent-regression
+      // shape as `observe-ssh` above: the binary `obs-d1` actually calls could
+      // point at a different kind, drop an argument, or otherwise diverge from
+      // what this repository ships, while build success and an unchanged tag
+      // say nothing moved.
+      "observe-docker",
+      // The VM role's entry-point alias (SRD-OBSERVER-ROLES task 5.2) — the
+      // same shape as `observe-docker` above, with `vm` in place of `docker`.
+      // A stale copy is the same silent-regression risk: the binary `obs-v1`
+      // actually calls could diverge from what this repository ships while
+      // build success and an unchanged tag say nothing moved.
+      "observe-vm",
     ]);
   });
 
@@ -349,5 +393,107 @@ describe("the tag moves when an enrolled file's bytes move (ISC-270 acceptance)"
       .update(readFileSync(buildContextPath(ASSET), "utf8").replace(/\r\n/g, "\n"))
       .digest("hex");
     expect(buildContextDigests()[ASSET]).toBe(onDisk);
+  });
+});
+
+/**
+ * The Dockerfile's `COPY docker/ssh-connect.cjs` destination is the same path
+ * `observe-ssh`'s `PROXY_COMMAND` invokes (SRD-OBSERVER-ROLES task 3.3).
+ *
+ * NEITHER HALF ABOVE CATCHES THIS. Enrolment (this file's earlier blocks)
+ * proves the SOURCE `docker/ssh-connect.cjs` is hashed; it says nothing about
+ * where the Dockerfile puts it. `observe-ssh.test.ts` proves the shim builds
+ * the right `ssh` argv; it does not read the Dockerfile at all. The two files
+ * only agree by convention — `observe-ssh` hard-codes
+ * `node /opt/pifleet/ssh-connect.cjs %h %p` and the Dockerfile separately
+ * hard-codes the `COPY` destination — and nothing before this test compared
+ * them. MEASURED: renaming the `COPY` destination alone to
+ * `/opt/pifleet/ssh-connect.js` left every existing build-assets,
+ * runtime-deps and observe-ssh test at 158 pass / 0 fail. The renamed proxy
+ * script would be unreachable — `observe-ssh` would `exec ssh` with a
+ * `ProxyCommand` pointing at a file the image never puts there — and every
+ * SSH call would fail with OpenSSH's opaque `kex_exchange_identification`,
+ * silently, at runtime, on the very path this whole transport exists for.
+ *
+ * BOTH SIDES ARE DERIVED FROM THE REAL FILES, not retyped as literals: a copy
+ * of the path pasted into this test would drift from the real files exactly
+ * the way the two real files drifted from each other.
+ */
+describe("docker/ssh-connect.cjs's COPY destination agrees with observe-ssh's PROXY_COMMAND", () => {
+  test("the Dockerfile COPY destination is the exact path observe-ssh's PROXY_COMMAND invokes", () => {
+    const copyMatch = /COPY\s+(?:--\S+\s+)*docker\/ssh-connect\.cjs\s+(\S+)/.exec(DOCKERFILE);
+    expect(copyMatch, "expected a COPY of docker/ssh-connect.cjs in docker/Dockerfile").not.toBeNull();
+    const dockerfileDest = copyMatch![1] ?? "";
+    expect(dockerfileDest.length).toBeGreaterThan(0);
+
+    const observeSsh = readFileSync(buildContextPath("observe-ssh"), "utf8");
+    const proxyMatch = /PROXY_COMMAND=(['"])node (\S+) %h %p\1/.exec(observeSsh);
+    expect(
+      proxyMatch,
+      "expected observe-ssh's PROXY_COMMAND to read 'node <path> %h %p'",
+    ).not.toBeNull();
+    const proxyPath = proxyMatch![2] ?? "";
+    expect(proxyPath.length).toBeGreaterThan(0);
+
+    expect(dockerfileDest).toBe(proxyPath);
+  });
+});
+
+/**
+ * `observe-ssh`'s `COPY` is pinned exactly — mode and destination together —
+ * mirroring the precedent at `test/unit/ticket-cli.test.ts:99`, which pins
+ * `docker/ticket-cli`'s `COPY` line the same way (SRD-OBSERVER-ROLES task
+ * 3.3, round-2 follow-up).
+ *
+ * TWO FAILURE MODES, both silent otherwise. `--chmod=0644` instead of
+ * `0755` leaves the binary present but not executable — the smoke block
+ * would still run `observe-ssh --help` (task 3.3's own build-time check),
+ * so this is really the second half of that guard: without it, ONLY a real
+ * `docker build` catches the permission error, and it catches it as an
+ * opaque "permission denied" rather than as a change to this line. A
+ * destination outside `/usr/local/bin` (`/opt/pifleet/observe-ssh`, say)
+ * leaves the file on disk, correctly hashed, and unreachable by name to
+ * `observe-docker`/`observe-vm` — nothing about the image tag or the build
+ * succeeding says so.
+ */
+describe("observe-ssh is installed executable and on PATH (SRD-OBSERVER-ROLES task 3.3)", () => {
+  test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-ssh", () => {
+    expect(DOCKERFILE).toContain(
+      "COPY --chmod=0755 docker/observe-ssh /usr/local/bin/observe-ssh",
+    );
+  });
+});
+
+/**
+ * `observe-docker`'s `COPY` is pinned exactly — mode and destination together
+ * — the same shape as `observe-ssh`'s pin above (SRD-OBSERVER-ROLES task 4.2).
+ *
+ * SAME TWO FAILURE MODES. `--chmod=0644` instead of `0755` leaves the alias
+ * present but not executable — the smoke block's `observe-docker --help`
+ * pipe (`test/unit/dockerfile-runtime-deps.test.ts`) would still catch it,
+ * so this is the second half of that guard, the way the observe-ssh pin
+ * above is the second half of its own smoke check. A destination outside
+ * `/usr/local/bin` leaves the file on disk, correctly hashed, and
+ * unreachable by name to `obs-d1` — nothing about the image tag or the
+ * build succeeding says so.
+ */
+describe("observe-docker is installed executable and on PATH (SRD-OBSERVER-ROLES task 4.2)", () => {
+  test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-docker", () => {
+    expect(DOCKERFILE).toContain(
+      "COPY --chmod=0755 docker/observe-docker /usr/local/bin/observe-docker",
+    );
+  });
+});
+
+/**
+ * `observe-vm`'s `COPY` is pinned exactly, mode and destination together, for
+ * the two reasons `observe-docker`'s pin above gives (SRD-OBSERVER-ROLES task
+ * 5.2).
+ */
+describe("observe-vm is installed executable and on PATH (SRD-OBSERVER-ROLES task 5.2)", () => {
+  test("the COPY line is exactly --chmod=0755 onto /usr/local/bin/observe-vm", () => {
+    expect(DOCKERFILE).toContain(
+      "COPY --chmod=0755 docker/observe-vm /usr/local/bin/observe-vm",
+    );
   });
 });

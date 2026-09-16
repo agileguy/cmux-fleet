@@ -1,0 +1,531 @@
+{
+  "measured_with": {
+    "script": "scripts/observe/characterise-vm",
+    "git_head": "fa276f5",
+    "uncommitted_changes_to_measured_files": [],
+    "target": "operator-supplied; address and account not recorded",
+    "target_os": "Ubuntu 24.04.5 LTS",
+    "target_systemd": "systemd 255 (255.4-1ubuntu8.17)",
+    "oldest_image": "rockylinux:8",
+    "oldest_image_id": "sha256:9794037624aaa6212aeada1d28861ef5e0a935adaf93e4ef79837119f2a2d04c",
+    "oldest_systemd": "systemd 239 (239-78.el8)",
+    "measured_at": "2026-09-14T22:11:02.353Z"
+  },
+  "since": {
+    "candidates": [
+      {
+        "spelling": "--since=-{N}s",
+        "parses_everywhere": true,
+        "results": [
+          {
+            "where": "target",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          }
+        ]
+      },
+      {
+        "spelling": "--since=-{N}sec",
+        "parses_everywhere": true,
+        "results": [
+          {
+            "where": "target",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          }
+        ]
+      },
+      {
+        "spelling": "--since=-{N}seconds",
+        "parses_everywhere": true,
+        "results": [
+          {
+            "where": "target",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          }
+        ]
+      },
+      {
+        "spelling": "--since={N}s ago",
+        "parses_everywhere": true,
+        "results": [
+          {
+            "where": "target",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 0,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 1,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 300,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "target",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          },
+          {
+            "where": "oldest",
+            "seconds": 86400,
+            "exit": 0,
+            "parse_error": false
+          }
+        ]
+      }
+    ],
+    "controls": [
+      {
+        "where": "target",
+        "argument": "--since=garbage-time",
+        "exit": 1,
+        "parse_error": true
+      },
+      {
+        "where": "oldest",
+        "argument": "--since=garbage-time",
+        "exit": 1,
+        "parse_error": true
+      },
+      {
+        "where": "target",
+        "argument": "--since=-5 bogus",
+        "exit": 1,
+        "parse_error": true
+      },
+      {
+        "where": "oldest",
+        "argument": "--since=-5 bogus",
+        "exit": 1,
+        "parse_error": true
+      }
+    ],
+    "chosen": "--since=-{N}s",
+    "bound": {
+      "marker_age_at_least_s": 4,
+      "within_1s": 0,
+      "within_60s": 1
+    }
+  },
+  "journal": {
+    "argv": [
+      "journalctl",
+      "--no-pager",
+      "--output=short-iso",
+      "--lines=5",
+      "--since=-300s"
+    ],
+    "oldest": {
+      "exit": 0,
+      "lines": 6,
+      "marker_lines": [
+        "-- Logs begin at Mon 9999-99-99 99:99:99 UTC, end at Mon 9999-99-99 99:99:99 UTC. --"
+      ],
+      "entry_lines": 5,
+      "entry_first_word_shapes": [
+        "9999-99-99T99:99:99+9999"
+      ],
+      "stderr_first_line": ""
+    },
+    "oldest_empty_window": {
+      "exit": 0,
+      "lines": 2,
+      "marker_lines": [
+        "-- Logs begin at Mon 9999-99-99 99:99:99 UTC, end at Mon 9999-99-99 99:99:99 UTC. --",
+        "-- No entries --"
+      ],
+      "entry_lines": 0,
+      "entry_first_word_shapes": [],
+      "stderr_first_line": ""
+    },
+    "target": {
+      "exit": 0,
+      "lines": 5,
+      "marker_lines": [],
+      "entry_lines": 5,
+      "entry_first_word_shapes": [
+        "9999-99-99T99:99:99-99:99"
+      ],
+      "stderr_first_line": ""
+    },
+    "unit_filter": {
+      "argv": [
+        "journalctl",
+        "--no-pager",
+        "--output=short-iso",
+        "--lines=5",
+        "--since=-300s",
+        "--unit=char-fail-af310aa9.service"
+      ],
+      "oldest_exit": 0
+    },
+    "priority_filter": {
+      "argv": [
+        "journalctl",
+        "--no-pager",
+        "--output=short-iso",
+        "--lines=5",
+        "--since=-300s",
+        "--priority=3"
+      ],
+      "oldest_exit": 0,
+      "target_exit": 0
+    }
+  },
+  "kernel": {
+    "argv": [
+      "journalctl",
+      "--no-pager",
+      "--dmesg",
+      "--output=short-iso",
+      "--lines=5",
+      "--since=-300s"
+    ],
+    "oldest": {
+      "exit": 0,
+      "lines": 6,
+      "marker_lines": [
+        "-- Logs begin at Mon 9999-99-99 99:99:99 UTC, end at Mon 9999-99-99 99:99:99 UTC. --"
+      ],
+      "entry_lines": 5,
+      "entry_first_word_shapes": [
+        "9999-99-99T99:99:99+9999"
+      ],
+      "stderr_first_line": ""
+    },
+    "target": {
+      "exit": 0,
+      "lines": 5,
+      "marker_lines": [],
+      "entry_lines": 5,
+      "entry_first_word_shapes": [
+        "9999-99-99T99:99:99-99:99"
+      ],
+      "stderr_first_line": ""
+    }
+  },
+  "show": {
+    "argv": [
+      "systemctl",
+      "show",
+      "<unit>",
+      "--no-pager",
+      "--property=Id,LoadState,ActiveState,SubState,Result,NRestarts,ActiveEnterTimestamp,ExecMainStatus"
+    ],
+    "oldest": {
+      "failed": {
+        "exit": 0,
+        "property_order": [
+          "Result",
+          "NRestarts",
+          "ExecMainStatus",
+          "Id",
+          "LoadState",
+          "ActiveState",
+          "SubState",
+          "ActiveEnterTimestamp"
+        ],
+        "values": {
+          "Result": "exit-code",
+          "NRestarts": "9",
+          "ExecMainStatus": "9",
+          "Id": "char-fail-<id>.service",
+          "LoadState": "loaded",
+          "ActiveState": "failed",
+          "SubState": "failed",
+          "ActiveEnterTimestamp": "Mon 9999-99-99 99:99:99 UTC"
+        }
+      },
+      "active": {
+        "exit": 0,
+        "property_order": [
+          "Result",
+          "NRestarts",
+          "ExecMainStatus",
+          "Id",
+          "LoadState",
+          "ActiveState",
+          "SubState",
+          "ActiveEnterTimestamp"
+        ],
+        "values": {
+          "Result": "success",
+          "NRestarts": "9",
+          "ExecMainStatus": "9",
+          "Id": "systemd-journald.service",
+          "LoadState": "loaded",
+          "ActiveState": "active",
+          "SubState": "running",
+          "ActiveEnterTimestamp": "Mon 9999-99-99 99:99:99 UTC"
+        }
+      },
+      "missing": {
+        "exit": 0,
+        "property_order": [
+          "Result",
+          "NRestarts",
+          "ExecMainStatus",
+          "Id",
+          "LoadState",
+          "ActiveState",
+          "SubState",
+          "ActiveEnterTimestamp"
+        ],
+        "values": {
+          "Result": "success",
+          "NRestarts": "9",
+          "ExecMainStatus": "9",
+          "Id": "char-nosuch-<id>.service",
+          "LoadState": "not-found",
+          "ActiveState": "inactive",
+          "SubState": "dead",
+          "ActiveEnterTimestamp": ""
+        }
+      }
+    },
+    "target": {
+      "active": {
+        "exit": 0,
+        "property_order": [
+          "Result",
+          "NRestarts",
+          "ExecMainStatus",
+          "Id",
+          "LoadState",
+          "ActiveState",
+          "SubState",
+          "ActiveEnterTimestamp"
+        ],
+        "values": {
+          "Result": "success",
+          "NRestarts": "9",
+          "ExecMainStatus": "9",
+          "Id": "systemd-journald.service",
+          "LoadState": "loaded",
+          "ActiveState": "active",
+          "SubState": "running",
+          "ActiveEnterTimestamp": "Sun 9999-99-99 99:99:99 MDT"
+        }
+      },
+      "missing": {
+        "exit": 0,
+        "property_order": [
+          "Result",
+          "NRestarts",
+          "ExecMainStatus",
+          "Id",
+          "LoadState",
+          "ActiveState",
+          "SubState",
+          "ActiveEnterTimestamp"
+        ],
+        "values": {
+          "Result": "success",
+          "NRestarts": "9",
+          "ExecMainStatus": "9",
+          "Id": "char-nosuch-<id>.service",
+          "LoadState": "not-found",
+          "ActiveState": "inactive",
+          "SubState": "dead",
+          "ActiveEnterTimestamp": ""
+        }
+      }
+    }
+  },
+  "failed": {
+    "argv": [
+      "systemctl",
+      "list-units",
+      "--state=failed",
+      "--no-legend",
+      "--plain",
+      "--no-pager"
+    ],
+    "oldest": {
+      "exit": 0,
+      "failed_unit_row_first_four": [
+        "char-fail-<id>.service",
+        "loaded",
+        "failed",
+        "failed"
+      ],
+      "failed_unit_row_columns": 5,
+      "every_row_has_four_columns": true
+    },
+    "target": {
+      "exit": 0,
+      "rows": 0,
+      "every_row_has_four_columns": true
+    }
+  },
+  "system": {
+    "argv": [
+      "systemctl",
+      "is-system-running"
+    ],
+    "oldest": {
+      "stdout": "degraded",
+      "exit": 1
+    },
+    "target": {
+      "stdout": "running",
+      "exit": 0
+    }
+  }
+}

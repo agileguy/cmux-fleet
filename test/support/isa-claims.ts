@@ -1010,9 +1010,11 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     claim:
       "`ci.yml` carries exactly TWO `PIFLEET_OMLX_MODEL:` assignments — one for `omlx-live`'s " +
       "single-call probe, one at `container-live`'s JOB level for the whole chain (both " +
-      "gemma-4-26b-a4b-it-bf16 since 2026-09-09, the model the live triage seats run and the " +
-      "one SRD §11 Q8 measured) — with the warmup step inheriting the job value rather than " +
-      "repeating it. A THIRD assignment means a step-level pin has been reintroduced and the " +
+      "gemma-4-26b-a4b-it since 2026-09-15, when the live endpoint CI dials moved to the " +
+      "operator's other self-hosted server — that server serves only this name, without the " +
+      "`-bf16` suffix the live triage seats still run) — with the warmup step inheriting the " +
+      "job value rather than repeating it. A THIRD assignment means a step-level pin has been " +
+      "reintroduced and the " +
       "model that gets loaded can drift from the model that gets graded. That drift is the " +
       "defect this criterion's 2026-08-26 note exists for: the chain failed intermittently for " +
       "two days against a model that answers the single-call probe 3/3 and cannot complete a " +

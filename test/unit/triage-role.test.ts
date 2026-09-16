@@ -40,6 +40,7 @@ import {
   parseDispatchRequest,
 } from "../../src/run/dispatch-request.ts";
 import {
+  TRIAGE_DOCUMENT_MAX_BYTES,
   TRIAGE_DOCUMENT_SCHEMA,
   parseTriageDocument,
 } from "../../src/run/triage-document.ts";
@@ -356,6 +357,48 @@ describe("the document teaches `note`, and teaches it the way the host enforces 
 });
 
 /**
+ * The whole-document byte cap, taught the same way `note`'s is — ISC-1109's
+ * pattern applied to the figure the 2026-09-15 raise moved.
+ *
+ * A document naming `8192` against a schema enforcing `16384` teaches a
+ * worker to trim a document the host would in fact have accepted; one naming
+ * a much larger figure teaches it that a document the host will refuse whole
+ * is safe to send. Either way the number in the prose is a claim about this
+ * host, so it is compared to this host — the same discipline the `note` bound
+ * above is held to, applied to the bound around the whole document it sits in.
+ */
+describe("the document teaches its own whole-document cap, and teaches the true one", () => {
+  /**
+   * Sliced with `between()` rather than matched on `ROLE` directly: this
+   * paragraph wraps across several source lines, and a raw `toContain` over a
+   * phrase that crosses a wrap is really an assertion about where the line
+   * happens to break — §7.3's hazard this file's own helper exists to avoid.
+   */
+  const wholeDocumentCap = (): string =>
+    between("**The whole document is bounded too", "**Three shapes worth reading twice");
+
+  test("the enforced whole-document byte bound in the prose is the one the schema enforces", () => {
+    const section = wholeDocumentCap();
+    expect(section).toContain(String(TRIAGE_DOCUMENT_MAX_BYTES));
+    // In BYTES, said in the document rather than left for a worker to assume —
+    // `note`'s bound draws the same distinction, for the same reason.
+    expect(section).toContain("Counted from the bytes it crosses as, not characters.");
+  });
+
+  /**
+   * The claim a worker acts on differently from a per-field refusal: a
+   * document over this cap loses every row in the sweep, not only the one
+   * that happened to push it over — so trimming one oversized field is not
+   * always enough, and the prose says so rather than leaving it implied.
+   */
+  test("the prose says the whole document is refused, not just the offending row", () => {
+    expect(wholeDocumentCap()).toContain(
+      "the host refuses the whole document before reading a single row",
+    );
+  });
+});
+
+/**
  * The turn-one brief section, after ISC-1136 moved the invariant half of the
  * observer contract from the collator's prose into `composeObserverBrief`.
  *
@@ -519,19 +562,18 @@ describe("the document no longer contradicts itself about how many observers exi
    * The premise every assertion below rests on, asserted first so that none of
    * them can pass vacuously over an empty or unexpected roster.
    */
-  test("the console this document describes has THREE observers under ONE collator", () => {
+  test("the console this document describes has SIX observers under ONE collator", () => {
     /*
      * THREE observers as of 2026-09-13, and this claim has now changed shape
      * twice in two days — which is the reason it is asserted against the roster
      * rather than spelled as prose. It said *"this console has exactly one
      * observer"*, then *"each COLLATOR has exactly one"* while there were two
-     * pairs, and now says one collator fans out to three. Every version was
-     * about the same underlying thing: the fan-out a single collator may write.
-     *
-     * This is §6.5's ⌈N/3⌉ shape restored — the ORIGINAL design, which the
-     * console shrank away from and has now come back to.
+     * pairs, then one collator fanning out to three. SRD-TRIAGE-MIXED-OBSERVERS
+     * grew it to six on 2026-09-14 — three k8s (the original ⌈N/3⌉ shape),
+     * two docker, one vm — and every version was about the same underlying
+     * thing: the fan-out a single collator may write.
      */
-    expect(ROSTER).toEqual(["obs-t1", "obs-t2", "obs-t3"]);
+    expect(ROSTER).toEqual(["obs-t1", "obs-t2", "obs-t3", "obs-td1", "obs-td2", "obs-tv1"]);
   });
 
   /**

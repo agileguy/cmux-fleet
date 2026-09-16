@@ -103,8 +103,20 @@ if (DOCKER && !OMLX_LIVE) {
  *
  * Being served by BOTH is why this entry in particular is here: it keeps the
  * probe working whichever upstream the relay ends up dialing (ISC-259).
+ *
+ * Measured 2026-09-15, the CI upstream (a second self-hosted endpoint),
+ * `What is 2+2?` at `max_tokens: 8`, `temperature: 0`:
+ *
+ *   CI upstream : HTTP 200, "4", finish_reason stop, 2 completion tokens, 0.63s
+ *
+ * `/v1/models` on that endpoint lists exactly one id, `gemma-4-26b-a4b-it` —
+ * no `-4bit` suffix. That is why BOTH names are on this list now: the
+ * laptop's own oMLX still serves the `-4bit` name, and this endpoint serves
+ * the unsuffixed one, so `SAFE_CHAT_MODELS.find` below picks whichever one
+ * the server actually serves. Dropping either name would re-break the probe
+ * against the host that only answers to the other.
  */
-const SAFE_CHAT_MODELS = ["gemma-4-26b-a4b-it-4bit"] as const;
+const SAFE_CHAT_MODELS = ["gemma-4-26b-a4b-it-4bit", "gemma-4-26b-a4b-it"] as const;
 
 /**
  * Models this probe must NEVER send a completion to. Read before editing.

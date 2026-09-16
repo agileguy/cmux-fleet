@@ -1,0 +1,58 @@
+#!/bin/sh
+# observe-docker — the observer-docker role's only road to a Docker host
+# (SRD-OBSERVER-ROLES §5.2, §12 Phase 4 task 4.2).
+#
+#   observe-docker <target> <verb> [key=value ...]
+#   observe-docker --help | -h
+#
+# This file owns two things: the usage text below, and being on PATH under the
+# name the observer-docker role calls. Every other argv passes through
+# unchanged as `exec observe-ssh docker "$@"`. observe-ssh validates it (see
+# its own header), and the target's forced command decides which verbs exist.
+#
+# `--help` and `-h` are answered here only when they are the SOLE argument.
+# Passed on, `observe-ssh docker --help` puts `--help` where observe-ssh expects
+# a target token, so it would be refused with exit 77. `observe-docker --help
+# extra` still reaches observe-ssh unchanged.
+usage() {
+  cat <<'EOF'
+usage: observe-docker <target> <verb> [key=value ...]
+
+A thin alias for `observe-ssh docker <target> <verb> [key=value ...]`: runs
+one Docker verb against one enrolled target. The target-side forced command,
+not this shim, enforces the full argument grammar and decides which verbs
+exist.
+
+  verb   ps | inspect | logs | stats | top | events | info | version
+
+Exit 77 with "observe-ssh: refused before ssh ran" on stderr: the call was
+malformed, and no ssh connection was attempted.
+
+Exit 77 with "not a recognised verb" on stderr: the target does not offer
+that verb. Any other exit 77: the target refused an argument.
+
+Exit 78: the fleet did not deliver this worker's configuration.
+
+Exit 126 or 127: docker did not run on the target at all.
+
+Exit 1 with one of these on stderr: docker could not reach its own daemon.
+  "failed to connect to the docker API"
+  "Cannot connect to the Docker daemon"
+  "permission denied while trying to connect to the"
+
+Exit 255: ssh's own failure (a host-key mismatch or a proxy refusal).
+
+Any other exit status is docker's own, returned from the target.
+EOF
+}
+
+if [ "$#" -eq 1 ]; then
+  case $1 in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+  esac
+fi
+
+exec observe-ssh docker "$@"

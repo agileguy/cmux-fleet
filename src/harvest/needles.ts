@@ -81,6 +81,7 @@
  */
 
 import { readWorkerLaunch } from "../run/state.ts";
+import { secretLines } from "../security/secret-lines.ts";
 import { resolveGrantedSecretValues } from "../security/secret-values.ts";
 import type { WorkerPaths } from "../run/paths.ts";
 import { safeForReport } from "./outbox.ts";
@@ -104,6 +105,45 @@ import { safeForReport } from "./outbox.ts";
  * could not have graded it either way — it would have reported every harvest.
  */
 export const MIN_NEEDLE_BYTES = 8;
+
+/** Whether a string may be a literal needle at all: not blank, and over the floor. */
+function usableNeedle(s: string): boolean {
+  return s.trim() !== "" && s.length >= MIN_NEEDLE_BYTES;
+}
+
+/**
+ * The needles ONE value contributes: the whole value, and for a value that
+ * spans lines, each line that is secret material.
+ *
+ * ## Why a multi-line value needs more than one needle
+ *
+ * `findCredentialLeaks` matches with `String.includes`, so the whole value only
+ * catches an artifact that quotes ALL of it. A multi-line credential, such as
+ * the observer roles' OpenSSH key (`multiline: true` in `config/schema.ts`),
+ * leaks just as badly one line at a time, and a worker pasting "the first few
+ * lines of the key" is the realistic shape of that leak. So each line is a
+ * needle too, under the same floor.
+ *
+ * ## Which lines are NOT needles, and why that matters as much
+ *
+ * Blank lines, and PEM armor lines. Armor is public text that appears in every
+ * key of a type and in honest prose about keys. Making it a needle would refuse
+ * every artifact that says "the host rejected a BEGIN OPENSSH PRIVATE KEY
+ * block", which is the false positive `credential: false` was written to end.
+ *
+ * ## Where the line rules live
+ *
+ * In `security/secret-lines.ts`, shared with the event-log redactor, which
+ * needs the same answer for the same values. That module trims each line, and
+ * it documents the one non-secret line it keeps on purpose (an OpenSSH key's
+ * first body line). The floor passed in is THIS module's `MIN_NEEDLE_BYTES`,
+ * never the redactor's. A value with no LF yields no lines, so a single-line
+ * value is exactly the one needle it always was.
+ */
+function needlesFor(value: string): string[] {
+  if (!usableNeedle(value)) return [];
+  return [value, ...secretLines(value, MIN_NEEDLE_BYTES)];
+}
 
 /** What one worker's grant resolved to. */
 export interface NeedleSupply {
@@ -150,6 +190,14 @@ export interface NeedleSupply {
    * the run, and has exactly one kind of consumer — a diagnostic printing what
    * was swept. The dataflow is one-way and dies with the report, so a reader
    * who confuses the two has to ignore both names and both docblocks to do it.
+   *
+   * ## INDEX-ALIGNED with `needles`, so a name may repeat
+   *
+   * `names[i]` is the variable that produced `needles[i]`. A multi-line
+   * credential contributes its whole value AND each secret line (see
+   * `needlesFor`), so its name appears once per needle. That keeps the one
+   * question this list answers honest for every needle: which grant does a hit
+   * on this string belong to.
    */
   names: string[];
   /**
@@ -280,10 +328,12 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
     // failure would put a permanent note on every run that grants a region
     // name. This floor is the SWEEP's, deliberately kept here rather than
     // pushed into the shared resolver — the redactor's floor is a different
-    // number chosen against a different failure.
-    if (value.trim() === "" || value.length < MIN_NEEDLE_BYTES) continue;
-    needles.push(value);
-    names.push(name);
+    // number chosen against a different failure. `needlesFor` applies it, to
+    // the whole value and to each line of a multi-line one.
+    for (const needle of needlesFor(value)) {
+      needles.push(needle);
+      names.push(name);
+    }
   }
 
   /**
@@ -341,13 +391,17 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
           `(${safeForReport(providerKeyName)}) that neither its secret store nor its env file ` +
           `carries; its value was not swept for`,
       );
-    } else if (value.trim() !== "" && value.length >= MIN_NEEDLE_BYTES) {
+    } else {
       // The same floor the grants get, applied for the same reason and not
       // reported for the same reason: a value below it is delivered, simply not
       // usable as a literal needle. A provider key short enough to trip this is
-      // not a credential any vendor issues.
-      needles.push(value);
-      names.push(providerKeyName);
+      // not a credential any vendor issues. Through `needlesFor` like the
+      // grants, so the two arms cannot drift; a single-line key yields exactly
+      // the one needle it always did.
+      for (const needle of needlesFor(value)) {
+        needles.push(needle);
+        names.push(providerKeyName);
+      }
     }
   }
   if (resolved.unresolved.length > 0) {

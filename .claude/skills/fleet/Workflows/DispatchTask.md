@@ -51,7 +51,10 @@ about; run it from `~/repos/cmux-fleet` and the worker gets cmux-fleet. See
 **Choosing a worker's platform** in `SKILL.md`.
 
 *Dispatching into a worker's existing session instead* — only when the user
-asks for it, or when the worker has never been dispatched to since it came up:
+asks for it, or when the worker has never been dispatched to since it came up
+(for `obs-d1` and `obs-v1` that condition is not something to check: this is
+the only path there is for either seat, dispatched-before or not — see
+"Reaching a seat that no console plans" below):
 
 ```bash
 cd ~/repos/cmux-fleet && bun run src/cli/index.ts status --all --json   # run id
@@ -118,6 +121,96 @@ under `~/repos` produces an empty diff and is failed under ISC-93 — a genuine
 result reported as a fabrication. `wait` is the less reliable of the two: it has
 reported `success` on tasks that never started. When they disagree, check the
 transcript.
+
+## Docker and VM inquiries (`obs-d1`, `obs-v1`)
+
+A brief for `obs-d1` (`observer-docker`) or `obs-v1` (`observer-vm`) still fits the
+same four-field envelope from step 1. `inputs[]` reaches no prompt
+(`Docs/SRD-OBSERVER-ROLES.md` §5.3, §6.3), so everything the worker acts on — the
+target, what to check on it, and how far back to look — travels as prose inside
+`brief`, exactly as it does for any other worker. **The CARDINAL RULE governs this
+brief the same as any other:** it is the user's words verbatim, and writing the
+envelope is CONFIGURING the dispatch, not only sending it (`SKILL.md`'s "This
+applies to CONFIGURING a console, not only to dispatching one"). Resolving a
+target token, a container name, a systemd unit or a `checks` list on the user's
+behalf before you write the brief is the same violation as resolving a namespace
+before briefing an observer — do not do it, even to make the brief look complete.
+
+What belongs in a Docker inquiry brief, in prose (`Docs/SRD-OBSERVER-ROLES.md` §5.3):
+
+- the **target** — a token from the operator's enrolled inventory
+- the **containers** to look at, or a **selector** (`label=<key>=<value>` or
+  `name=<pattern>`) in their place
+- the **checks** to run — some of `state`, `health`, `logs`, `stats`, `events`
+- the **window** to look back over, e.g. `300s`
+
+What belongs in a VM inquiry brief (`Docs/SRD-OBSERVER-ROLES.md` §6.3):
+
+- the **target**
+- the **units** to look at — zero or more systemd unit names
+- the **checks** to run — some of `reachability`, `system`, `units`, `logs`,
+  `resources`, `cloud`
+- the **window**
+
+`cloud` is listed for completeness, not because `obs-v1` can act on it:
+`roles/observer-vm.md` gives this role `cloud_access: false`, so `cloud` is
+always recorded `not_attempted` by this role regardless of what the brief
+asks — not a channel its worker will ever actually call.
+
+**None of these is yours to supply.** If the user's instruction leaves one out,
+leave it out of the brief too — `obs-d1` and `obs-v1` hold the defaults (a lone
+enrolled target, `state, health, logs` or `reachability, system, units, logs`,
+`300s`) and name, in the artifact, which default they applied. That is the
+worker's job, and it is the whole reason the role exists: filling a field in "to
+be helpful" hides that the worker never got to say so, and a target or container
+you guessed at becomes a wrong name the worker will trust.
+
+### Reaching a seat that no console plans
+
+`obs-d1` and `obs-v1` are `pane_mode: rpc` and in no console (`SKILL.md`'s fleet
+table). Step 2's default — `./scripts/<console> --restart <id> --task <file>` —
+does not reach either: `--restart` is a verb `scripts/operations`,
+`scripts/development`, `scripts/review` and `scripts/triage` each implement for
+their own panes, and none of the four plans a pane for these two seats. Use step
+2's other path instead:
+
+```bash
+cd ~/repos/cmux-fleet && bun run src/cli/index.ts status --all --json   # run id, if it is already up
+cd ~/repos/cmux-fleet && bun run src/cli/index.ts dispatch \
+  --worker <obs-d1|obs-v1> --run <run-id> --task <path> --json
+```
+
+This is not the "only when…" alternative step 2 describes for a console
+worker — for `obs-d1` and `obs-v1` it is unconditional. Neither seat has a
+`--restart` path to prefer over it, whether or not the seat has been
+dispatched to before.
+
+If `status --all --json` shows no run holding the seat yet, bring it up first.
+`up --workers <ids>` takes a comma-separated subset of `workers:`
+(`src/cli/commands/up.ts`):
+
+```bash
+cd ~/repos/cmux-fleet && bun run src/cli/index.ts up --workers obs-d1
+```
+
+Both roles carry `isolation: none` (`Docs/SRD-OBSERVER-ROLES.md` §5.5, §6.6), and
+a `none` role gets no `/workspace` at all (`skills/pifleet-worker/SKILL.md`). `up`
+still takes the run's repository from the launch directory
+(`src/cli/commands/up.ts`), but neither seat has a checkout to put it in, so where
+you run `up --workers` from does not change what these two can see.
+
+**From source, not a guess:** a bare `up --workers <id>` against a seat that
+already has a run neither recreates it fresh nor collides with it. `up` calls
+`newRunId()` unconditionally on every invocation, and each worker's container
+is named from that run id (`src/config/render.ts`) — so the seat gets a
+second container holding the same delivered key, while the earlier run is
+left running under the same worker id. The console scripts' idle-wait-then-
+teardown behaviour (`SKILL.md`'s "A worker that has run before is not a clean
+worker") is implemented in each console script, not in `up` itself, and
+`obs-d1`/`obs-v1` have no console to give them the equivalent. Check
+`status --all --json` for an existing run against the seat first, and tear it
+down (`down --run <run-id>`) before bringing it up again — see
+`Workflows/EnrolTarget.md` step 6 for the full reasoning.
 
 ## Dispatching to several workers
 

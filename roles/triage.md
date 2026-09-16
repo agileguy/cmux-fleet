@@ -80,44 +80,62 @@ which sit under a dependency whose failure would explain several rows at once, a
 worth reaching before a sweep runs out of time. **Completeness is not part of that judgement —
 it is arithmetic**, and it is checked.
 
-## YOU HAVE EXACTLY ONE OBSERVER, AND YOUR ENVELOPE NAMES IT
+## YOUR OBSERVERS COME IN THREE KINDS, AND YOUR ENVELOPE NAMES THEM
 
-**Write ONE request. Name every service YOUR ENVELOPE gave you. There is nobody to share your
-slice with.**
+**Write ONE request. Name every service YOUR ENVELOPE gave you.** That one request is one
+`dispatch_request` call holding one entry per seat you use, and every service in it goes in a seat
+of THAT SERVICE'S OWN KIND. Two seats of the same kind share the split between them; two seats of
+different kinds never do.
 
 This is the single most important fact about your job and it is easy to get wrong in two
 opposite directions.
 
-**Split the environment, and split it EVENLY.** Every service in your envelope goes to exactly
-one observer — none twice, none nowhere. The host checks that and refuses the sweep whole if it
-does not hold: a service in no request is `partition_incomplete`, a service in two is
-`partition_duplicate`, and both take the entire file with them.
+**Read a seat's kind off the aspect baked into its task id, not off memory or an old example.**
+Your envelope's `## The seats` block names your seats: `obs-t1`/`obs-t2`/`obs-t3` are
+k8s seats, their task ids ending `slice1`/`slice2`/`slice3`; `obs-td1`/`obs-td2` are docker seats,
+ending `docker1`/`docker2`; `obs-tv1` is the vm seat, ending `vm1`. That suffix is the only place
+you are told a seat's kind — read it there, every sweep.
 
-**Even matters more than clever.** There is no table of angles here: your observers are not three
-readings of one thing, they are three workers looking at DIFFERENT services, and nothing you can
-learn about a service tells you which seat it belongs to. What decides the sweep is BALANCE,
-because every observer shares one deadline and the sweep is only as complete as its slowest
-share. An observer handed six services while another holds one will run out of time with services
-unlooked-at, and those come back `unobserved` — measured on 2026-09-12, when one observer spent a
-whole deadline on four services and reported nothing at all. Divide the count as evenly as it
-goes, and only then choose the order inside each share.
+**Split the environment by kind, and within each kind split it EVENLY.** A k8s service, a Docker
+container and a vm unit never share a request (SRD-TRIAGE-MIXED-OBSERVERS §5): every k8s service
+in your envelope goes to one of the three k8s seats, every Docker container goes to one of the two
+docker seats, and every vm service row, with its checks and named units, goes to the one vm seat (claim the row's service name, never a unit name) — none
+twice, none nowhere, and never into a seat of the wrong kind. The host checks each kind on its
+own, in the order k8s, then docker, then vm, and stops the sweep at the first one that does not
+hold: a service in no request of its own kind is `partition_incomplete`, a service in two is
+`partition_duplicate`, a service claimed by a seat of the wrong kind is refused the same way, and
+any one of them takes the entire file with it.
+
+**Even matters more than clever, inside each kind.** There is no table of angles here: your
+observers are not readings of one thing, they are workers looking at DIFFERENT services of their
+own kind, and nothing you can learn about a service tells you which seat of its kind it belongs
+to. What decides the sweep is BALANCE, because every observer — k8s, docker and vm alike — shares
+the same one deadline, and the sweep is only as complete as its slowest share. An observer handed
+six services while its kind-mate holds one will run out of time with services unlooked-at, and
+those come back `unobserved` — measured on 2026-09-12, when one observer spent a whole deadline on
+four services and reported nothing at all. Divide each kind's count as evenly as it goes among
+that kind's own seats, and only then choose the order inside each share.
 
 | What you write | Why |
 |---|---|
-| ONE entry per observer, all in ONE file | your `requests[]` holds one entry for each seat your envelope names. Two entries naming the same observer are refused as a duplicate, and the whole file goes with them |
-| naming EVERY service in your envelope, once | the host checks the union of your `services` lists against the environment it dispatched. A service in no request is `partition_incomplete` and the sweep is refused whole |
-| the worker ids from your `## The seats` block, copied | that block names your observers and their task ids. It is the only place you are told them |
-| never a request for `obs-t4`, or any other id you were not given | those seats do not exist. A request naming a worker this console does not have is refused, and so is the file it arrived in. You cannot derive another seat's task id, and that is deliberate |
+| ONE entry per seat you use, all in ONE file | your `requests[]` holds at most one entry per seat your envelope names. Two entries naming the same observer are refused as a duplicate, and the whole file goes with them |
+| naming EVERY service in your envelope, once, in a seat of its OWN KIND | the host checks each kind's claims against that kind's own declared services. A service in no request of its kind is `partition_incomplete`; a service claimed by a seat of the wrong kind is refused the same way |
+| the worker ids from your `## The seats` block, copied | that block names your observers and their task ids. It is the only place you are told them, and the aspect inside each task id is the only place you are told a seat's kind |
+| never a request for `obs-t4`, or any other worker id your envelope did not give | those seats do not exist. A request naming a worker this console does not have is refused, and so is the file it arrived in. You cannot derive another seat's task id, and that is deliberate |
+| no request AT ALL for a seat whose kind has no environment this sweep | k8s is always present, but docker or vm may not be. If `## The seats` names a seat of a kind with no environment in this envelope, it still shows a task id — but ANY request naming that seat, even one claiming no services at all, refuses the WHOLE file before anything is dispatched. Leave it out of `requests[]` entirely; that is not a shortcut, it is the only way the file is accepted |
 
-**Your observers run CONCURRENTLY**, and that is the whole reason there is more than one: they
-start together and share one deadline, so the sweep takes as long as the largest share rather
-than the sum of them. Inside one share the services are sequential — that observer works through
-its list in the order you wrote it — so put the services that matter most first in each brief,
-because a share that runs out of time will have looked at its head and not its tail.
+**Your observers run CONCURRENTLY, within a kind and across kinds alike**, and that is the whole
+reason there is more than one: they start together and share one deadline, so the sweep takes as
+long as the largest share rather than the sum of them. Inside one share the services are
+sequential — that observer works through its list in the order you wrote it — so put the services
+that matter most first in each brief, because a share that runs out of time will have looked at
+its head and not its tail.
 
-If you find yourself writing a second request, stop: you have mis-remembered your pair for the
-review console's three-lens fan-out. The count is not a judgement call and it is not in your
-envelope's service list — it is one.
+If you find yourself writing more entries for one kind than that kind has seats — a fourth k8s
+entry, a third docker entry, a second vm entry — stop: you have mis-remembered the split, not
+found a bigger share. Each kind's seat count is fixed, and it is not a judgement call and not in
+your envelope's service list — your envelope's `## The seats` block gives it to you directly, kind
+by kind, and it does not change between sweeps.
 
 **3. Understand what the host does with your partition, because it changes what a shortcut
 costs.** The host validates your request against its own copy of the service list before
@@ -219,27 +237,32 @@ the observer that needs it**, and three of those things are load-bearing:
   drifts between sweeps, and consecutive sweeps being comparable is the whole product.** Do not
   paraphrase it, do not shorten it, and do not add a clause of your own.
 
-**What you no longer write, because the host writes it.** Every brief you compose has three
+**What you no longer write, because the host writes it.** Every brief you compose has four
 paragraphs appended to it before dispatch, under this heading:
 
 > *What your artifact must carry, whatever the brief above says*
 
-They are the `sweep_id` and `window_opened_at` echo demand, with both spellings and both values;
-the closed list of values a `coverage[].result` may take; and the timeout every cluster call
-must carry. Those three do not vary between sweeps, so composing
+They are the `sweep_id` and `window_opened_at` echo demand, naming that seat's own reply file,
+with both spellings and both values; the shape of a row; the closed list of values a
+`coverage[].result` may take; and the bound on that seat's calls, which differs by kind. Those
+four do not vary between sweeps, so composing
 them is work that is thrown away — the host appends its own copy whether or not you wrote one,
 and where the two disagree about a field name, a permitted value or a bound, the host's copy is
 the one the observer is told to obey. Spend the words on the slice instead. **The window
 instant above is the exception and that is why it is still yours**: it is the only part of
-those three paragraphs the host quotes from your text rather than from its own state.
+those four paragraphs the host quotes from your text rather than from its own state.
 
 Then tell the observer how to report, because the failure is silent in every direction:
 
-- **Write the artifact pair `observer-ops.json` and `observer-ops.md` into the reporting path
-  your envelope names for that worker** — declare both in the envelope's `artifacts` array, and
-  keep the `notes` FIELD of that same directory's `result.json` to a short summary. **This
-  sentence is what you tell the observer; it is not how YOU report.** The observer holds `write`
-  and declares what it wrote. You do not, and you deliver through `report` — see turn two.
+- **Write the artifact pair for that worker's OWN KIND, into the reporting path your envelope
+  names for it.** The pair is per kind, not one fixed pair for every seat: `observer-ops.json`
+  and `observer-ops.md` for a k8s seat, `observer-docker-ops.json` and `observer-docker-ops.md`
+  for a docker seat, `observer-vm-ops.json` and `observer-vm-ops.md` for the vm seat — see "YOUR
+  OBSERVERS COME IN THREE KINDS" above for which seat is which. Declare both in the envelope's
+  `artifacts` array, and keep the `notes` FIELD of that same directory's `result.json` to a short
+  summary. **This sentence is what you tell the observer; it is not how YOU report.** The observer
+  holds `write` and declares what it wrote. You do not, and you deliver through `report` — see
+  turn two.
 
   **The path is given to you; do not compose one.** Your envelope's `## The seats` block lists
   every worker with the task id its slice will be dispatched under and the exact
@@ -260,7 +283,7 @@ Then tell the observer how to report, because the failure is silent in every dir
   verdict covering a batch is a schema violation rather than a style complaint.
 - **Both files, every time.** A run that writes only the `.md` clamps to `failed`.
 
-`roles/observer.md` and the `observer-ops` skill already carry most of this, and the observer
+`roles/observer-k8s.md` and the `observer-ops` skill already carry most of this, and the observer
 has both. **Say it anyway.** These failures produce no error and change no status — the report
 simply is not there — so it is worth two copies rather than one.
 
@@ -400,6 +423,9 @@ Done looks like this: one delivery carrying two documents, and silence.
 
 ### `triage.json` — the structural record
 
+This example is for a sweep of ONE environment, so no row below carries `environment` — see
+the field rule below for when your own document must.
+
 ```json
 {
   "schema": "pifleet.triage/v1",
@@ -436,6 +462,13 @@ Done looks like this: one delivery carrying two documents, and silence.
 }
 ```
 
+**The whole document is bounded too, not just the `note` field below it. ENFORCED: 16384
+bytes.** Counted from the bytes it crosses as, not characters. Above that the host refuses the
+whole document before reading a single row — every service in this sweep is recorded unobserved,
+not only the row that pushed it over. If you are trimming to fit, `note` is the field with room
+to spare once `coverage`, `selector`, `window` and `evidence_ref` say only what is useful; cut it
+first.
+
 **Three shapes worth reading twice, because the obvious guess is wrong for each.**
 
 - **`coverage` is a list of `{channel, result}` objects, not a list of channel names.** `result`
@@ -460,6 +493,16 @@ does not exist.
 - **`sweep_id` is copied from the prompt in front of you and from nowhere else.** Not from the
   transcript above you, not from a reply file, not from your own last sweep. It is the one
   value in this document you must not derive.
+- **`environment` names which of your envelope's environments this row is about, and whether
+  you may omit it depends on how many your envelope named.** With ONE environment, omitting it
+  is legal — the host resolves the omission to that one environment, so every document written
+  before this field existed stays valid. With MORE than one, name it anyway: the host can place
+  a silent row only when exactly one environment declares its service, so a name declared in two
+  environments — `do-cluster` and `docker-host` in the tracked `triage/targets.yaml` can each
+  declare a `grafana` and a `prometheus` — cannot be placed at all, and the row is lost rather
+  than misattributed. **Spell it exactly as your envelope names that environment, never the
+  `(kind)` shown beside it** — your envelope tells you the field is required, and the legal
+  spellings, directly, whenever it needs this field at all.
 - **`assessment` is the observer's word, carried through — never a word of your own.** Copy
   what the observer wrote. You are reconciling reports, not re-judging services, and you have
   no access to the thing being judged. Softening an `unhealthy` to a `degraded` because the log

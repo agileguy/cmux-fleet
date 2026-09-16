@@ -88,6 +88,18 @@ export const TRUNCATION_RECOVERY_PATH = "/opt/pifleet/truncation-recovery.ts";
  */
 export const REPORT_TOOLS_PATH = "/opt/pifleet/report-tools.ts";
 
+/**
+ * Container path of the output-token-cap extension (the 2026-09-15 stall
+ * measurement — see `config/schema.ts`'s `max_output_tokens` docblock and the
+ * extension's own header).
+ *
+ * Baked root-owned 0444 for the same reason the three paths above are: Pi
+ * executes it IN-PROCESS, this time over `before_provider_request`, so a
+ * worker able to write it would be a worker able to remove its own output cap
+ * from every request it sends.
+ */
+export const OUTPUT_TOKEN_CAP_PATH = "/opt/pifleet/output-token-cap.ts";
+
 /** Everything `render` prints and `up` will later execute. */
 export interface RenderedWorker {
   workerId: string;
@@ -301,6 +313,18 @@ export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
    * sequenced behind the bake rather than beside it.
    */
   argv.push("--extension", REPORT_TOOLS_PATH);
+  /*
+   * Output-token cap — UNCONDITIONAL, and loaded regardless of whether this
+   * worker actually has a cap configured, for the same reason report tools is:
+   * the alternative predicate is "does `worker-env.ts` resolve a cap for this
+   * worker", and that is a launch-time render function computing an answer
+   * only the container's own environment can give. The extension itself is a
+   * no-op when `PIFLEET_PI_MAX_OUTPUT_TOKENS` is empty — the measured stall
+   * this closes (`OUTPUT_TOKEN_CAP_PATH`'s docblock) is silent by default, and
+   * making the flag conditional here would just move that silence one layer
+   * up, from "no cap sent" to "not even loaded".
+   */
+  argv.push("--extension", OUTPUT_TOKEN_CAP_PATH);
   argv.push("--provider", w.provider);
   argv.push("--model", w.model);
   if (w.thinking !== undefined) argv.push("--thinking", w.thinking);

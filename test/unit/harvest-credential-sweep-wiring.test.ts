@@ -12,7 +12,8 @@
  * nothing, because nothing had given it anything to look for.
  *
  * So these probes never import `findCredentialLeaks`, `resolveWorkerNeedles`,
- * or `reconcileArtifactClaims`. They build a run directory, put a synthetic
+ * `reconcileArtifactClaims`, or the observer target parse functions, and they
+ * spell every artifact name as a string. They build a run directory, put a synthetic
  * secret in a worker's grant and in its output, and drive `harvestTask` — the
  * function `pifleet artifacts` and `pifleet report` call. Deleting the supplier
  * leaves every direct test of the sweep green and turns this file red, which is
@@ -159,6 +160,12 @@ async function scaffold(opts: {
   notes: string;
   granted: Record<string, string> | null;
   /**
+   * The outbox artifact to write and claim, defaulting to the ticket-ops
+   * document built from `notes`. The name is spelled by the caller as a string,
+   * never imported from the selector it exercises.
+   */
+  artifact?: { name: string; body: string };
+  /**
    * How the run directory DELIVERED the grant, defaulting to what `up` writes
    * today.
    *
@@ -282,7 +289,8 @@ async function scaffold(opts: {
   const taskOutbox = join(workerOutboxDir(run.root, WORKER), TASK);
   const files = join(taskOutbox, "files");
   await mkdir(files, { recursive: true });
-  await writeFile(join(files, "ticket-ops.json"), ticketOps(opts.notes));
+  const artifact = opts.artifact ?? { name: "ticket-ops.json", body: ticketOps(opts.notes) };
+  await writeFile(join(files, artifact.name), artifact.body);
   await writeFile(
     join(taskOutbox, "result.json"),
     JSON.stringify({
@@ -293,7 +301,7 @@ async function scaffold(opts: {
       status: "success",
       branch: "main",
       files_changed: [{ path: "note.txt", change: "added" }],
-      artifacts: [{ kind: "file", path: `/outbox/${TASK}/files/ticket-ops.json` }],
+      artifacts: [{ kind: "file", path: `/outbox/${TASK}/files/${artifact.name}` }],
     }),
   );
   return { run, cleanup: () => rm(root, { recursive: true, force: true }) };
@@ -557,6 +565,111 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
         const { harvest } = await harvestTask(f.run, TASK);
         expect(ticketFindings(harvest.discrepancies)).toEqual([]);
         expect(harvest.verdict).toBe("success");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
+  );
+});
+
+/**
+ * SRD-OBSERVER-ROLES Phase 2 task 2.4: the same supplier reaches the observer
+ * target artifacts.
+ *
+ * `observer-docker-ops.json` is swept inside its own parse. A direct test of
+ * that parse hands it needles, and so stays green if the harvest never passes
+ * any. These probes drive `harvestTask` over a run directory whose grant is
+ * written by the production writer, so the needles can only arrive the way
+ * they arrive in production.
+ */
+const DOCKER_OPS = "observer-docker-ops.json";
+
+/** §5.6's document, well formed, with one evidence line the caller chooses. */
+function observerDockerOps(evidence: string): string {
+  return JSON.stringify({
+    schema: "pifleet.observer-docker-ops/v1",
+    worker: WORKER,
+    sweep_id: null,
+    window_opened_at: null,
+    services: [
+      {
+        name: "web-1",
+        namespace: "docker-host-a",
+        assessment: "healthy",
+        coverage: [
+          { channel: "state", result: "answered" },
+          { channel: "logs", result: "answered" },
+        ],
+        selector: "name=web-1",
+        window: "300s",
+        evidence_ref: [evidence],
+        container_id: "4f1c2b9d8e7a",
+        image: "nginx:1.27",
+        restart_count: 0,
+      },
+    ],
+  });
+}
+
+/** Findings about the docker document only. */
+function observerFindings(discrepancies: readonly string[]): string[] {
+  return discrepancies.filter((d) => d.includes("observer-docker-ops"));
+}
+
+const CLEAN_EVIDENCE = "observe-docker docker-host-a inspect web-1: State.Status=running";
+
+describe("the harvest sweeps an observer-docker-ops.json for the credentials the worker was granted", () => {
+  /**
+   * THE CONTROL, FIRST. A clean document from a worker that HOLDS the secret
+   * reaches `success` with no observer finding, so `failed` below is a movement.
+   */
+  test(
+    "a clean observer-docker-ops.json from a worker holding the secret harvests success",
+    async () => {
+      const f = await scaffold({
+        notes: CLEAN_NOTES,
+        granted: { [SECRET_NAME]: SECRET },
+        artifact: { name: DOCKER_OPS, body: observerDockerOps(CLEAN_EVIDENCE) },
+      });
+      try {
+        const { harvest } = await harvestTask(f.run, TASK);
+        expect(harvest.claimed, "the envelope must parse").not.toBeNull();
+        expect(harvest.reasons.join("\n")).not.toContain("outbox file refused");
+        expect(harvest.derived.artifacts.map((a) => a.path).join(" ")).toContain(DOCKER_OPS);
+        expect(observerFindings(harvest.discrepancies)).toEqual([]);
+        expect(harvest.verdict).toBe("success");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
+  );
+
+  /**
+   * THE PROBE. The granted credential, echoed into the observer's evidence, is
+   * reported and clamps the task, and neither the value nor its head reaches
+   * anything the harvest renders.
+   */
+  test(
+    "a granted credential in observer-docker-ops.json is reported, fails the task, and is never repeated",
+    async () => {
+      const f = await scaffold({
+        notes: CLEAN_NOTES,
+        granted: { [SECRET_NAME]: SECRET },
+        artifact: { name: DOCKER_OPS, body: observerDockerOps(`docker login used ${SECRET}`) },
+      });
+      try {
+        const { harvest, facts } = await harvestTask(f.run, TASK);
+        const found = observerFindings(harvest.discrepancies);
+        expect(found).toHaveLength(1);
+        expect(found[0]).toContain("contains a credential");
+        expect(found[0]).toContain("evidence_ref");
+        expect(harvest.verdict).toBe(CEILING);
+
+        const rendered = `${JSON.stringify(harvest)}\n${JSON.stringify(facts)}`;
+        expect(rendered).not.toContain(SECRET);
+        expect(rendered).not.toContain(SECRET.slice(0, 12));
       } finally {
         await f.cleanup();
       }

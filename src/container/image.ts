@@ -143,6 +143,45 @@ export const BUILD_CONTEXT_ASSETS = [
   // stale validator from one written by the current one. The two extensions
   // above at least fall silent; this one keeps answering.
   "pi-extensions/report-tools.ts",
+  // The output-token-cap extension (2026-09-15 stall measurement). The fourth
+  // in-process asset, and stale in the same silent direction as the auto-trigger
+  // and truncation-recovery above: it reads `PIFLEET_PI_MAX_OUTPUT_TOKENS` and
+  // returns every payload untouched on anything it does not recognise, so a
+  // copy that no longer matches the provider request shape simply stops
+  // capping and every worker goes back to sending no `max_tokens` at all —
+  // the exact runaway-generation stall this file exists to close.
+  "pi-extensions/output-token-cap.ts",
+  // The SSH ProxyCommand (SRD-OBSERVER-ROLES §5.2; written and enrolled here
+  // by §12 Phase 3 task 3.1). It is the only
+  // thing that carries the proxy's `403` rule name past OpenSSH — OpenSSH
+  // itself turns any non-zero ProxyCommand exit into one opaque
+  // `kex_exchange_identification` failure — so a stale copy that mishandles a
+  // refusal (swallows the body, or exits 0 on a non-200) hides the rule name
+  // an operator needs, and does so silently: the dispatch just fails, with
+  // nothing in reach explaining why.
+  "ssh-connect.cjs",
+  // The argv-safety shim (SRD-OBSERVER-ROLES §5.2; written by §12 Phase 3
+  // task 3.2, and installed on PATH as `observe-ssh` and enrolled here by
+  // task 3.3). It is what refuses every malformed or hostile
+  // argument BEFORE `ssh` ever runs (task 3.4's injection table). A stale
+  // copy under an unmoved tag is a silent regression of that refusal: the
+  // binary a worker actually calls would validate against an older, possibly
+  // weaker rule set while every other signal — the build succeeds, the tag
+  // is unchanged — says nothing moved.
+  "observe-ssh",
+  // The Docker role's entry-point alias (SRD-OBSERVER-ROLES §5.2; written and
+  // enrolled here by §12 Phase 4 task 4.2). A thin `exec observe-ssh docker
+  // "$@"` — it owns no validation of its own, only being on PATH under the
+  // name `obs-d1` actually calls. A stale copy is the same silent-regression
+  // shape as `observe-ssh` above: the binary a worker calls could point at a
+  // different kind, drop an argument on the way through, or otherwise diverge
+  // from what this repository ships, while the build still succeeds and the
+  // tag stays put.
+  "observe-docker",
+  // The VM role's entry-point alias (SRD-OBSERVER-ROLES §6.2; written and
+  // enrolled here by §12 Phase 5 task 5.2). Same shape and same staleness
+  // risk as `observe-docker` above, with `vm` in place of `docker`.
+  "observe-vm",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 
