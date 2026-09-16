@@ -544,17 +544,17 @@ describe("config validate — the triage pair", () => {
     // The file now holds one environment per kind (SRD-TRIAGE-MIXED-OBSERVERS
     // §6.1, `environmentsByKind`): the k8s environment, retargeted 2026-09-10
     // off a control plane that needs the corporate VPN, plus the docker and vm
-    // environments task 3.4 added. Asserted by value, like the 1620/120 below
+    // environments task 3.4 added. Asserted by value, like the 1800/300 below
     // and for the same recorded reason: this test states what the tracked file
     // says, and a test is not a reason to give the file back.
     expect(d.triage.environments).toEqual(["do-cluster", "docker-host", "vm-host"]);
     expect(d.triage.services).toBe(15);
     // The tracked file's own values, and the derivation between them:
     // `sweep_deadline_s` is `cadence_s - reserve_s` (§7.8 property 1) and is
-    // not a field, so 1620 - 120 = 1500 is the arithmetic being checked here as
+    // not a field, so 1800 - 300 = 1500 is the arithmetic being checked here as
     // much as the two numbers are.
     //
-    // **1620 SINCE 2026-09-15, AND THE CADENCE IS THE KNOB FOR A REASON.** The
+    // **1800 SINCE 2026-09-16, AND THE CADENCE IS THE KNOB FOR A REASON.** The
     // observer deadline is what actually moved: `childDeadlineS` is
     // `sweep_deadline_s - RELAY_CHILD_DEADLINE_MARGIN_MS`, so this cadence puts
     // it at 1500 - 300 = 1200s. The 300s margin is SHARED with the review console
@@ -563,7 +563,17 @@ describe("config validate — the triage pair", () => {
     // 2026-09-13 after T-sweep-116 lost every service an observer held when 480s
     // expired mid-`kubectl logs`, then to 1620 after T-sweep-146's six observers
     // all timed out at 600s. The cost is a 27-minute tick.
-    expect(d.triage.cadence_s).toBe(1620);
+    //
+    // RAISED AGAIN 2026-09-16 by operator instruction ("run a triage sweep every
+    // 30 minutes"): 1620 -> 1800, with `reserve_s` moving 120 -> 300 in the SAME
+    // edit — the pair is the whole point. The observer's bound is
+    // `(cadence_s - reserve_s) - 300`, so raising the cadence alone would have
+    // carried it from 1200s to 1380s, silently retuning the number the entries
+    // above measured their way to over two instructions and three lost sweeps.
+    // With 300 the arithmetic lands back on the same value: 1800 - 300 = 1500
+    // settle, and 1500 - 300 = 1200 for the observer, unchanged. The tick is now
+    // 30 minutes, not 27.
+    expect(d.triage.cadence_s).toBe(1800);
     expect(d.triage.sweep_deadline_s).toBe(1500);
     // Not fenced, and never silently so.
     expect(d.triage.fenced).toBe(false);
@@ -653,7 +663,7 @@ describe("config validate — the triage pair", () => {
       // no `kube_context` to check, so they pass through untouched.
       expect(d.triage.environments).toEqual(["do-cluster", "docker-host", "vm-host"]);
       expect(d.triage.services).toBe(15);
-      // 1620 - 120, off the tracked console.yaml copied in above — see the
+      // 1800 - 300, off the tracked console.yaml copied in above — see the
       // previous test for why this is no longer §7.8's default of 240, and for
       // why the cadence rather than the shared margin is what was moved.
       expect(d.triage.sweep_deadline_s).toBe(1500);
