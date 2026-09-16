@@ -841,20 +841,25 @@ roles:
     egress_access: true
     append_system_prompt_file: ./roles/engineer.md
   ticketing:
-    model: gemma-4-26b-a4b-it-bf16    # ALL omlx workers on bf16, 2026-09-07 by operator
-                                          # operator decision. Probed before wiring: it answers
-                                          # a `tools` request with a real tool_calls payload
-                                          # (finish_reason: tool_calls). gpt-oss-20b does too —
-                                          # what this buys is a 35B/A3B over a 20B on the
-                                          # reasoning the roles actually do.
-                                          # STILL LOCAL in the sense D1 cares about: the fleet's
-                                          # base_url is the operator's own tunnel either way, so
-                                          # no third party is added by this change.
-                                          # Supersedes the 2026-09-03 note, whose reason has not
-                                          # held since: it moved off the 35B because that was
-                                          # "only reachable through the tunnel" — but llm.base_url
-                                          # IS the tunnel, so gpt-oss-20b was reached that way
-                                          # too. The distinction it drew did not exist.
+    model: gabe/gemma-4-26b-a4b-it        # MOVED TO gabe 2026-09-16 by operator instruction
+                                          # ("make obs1 and tick-1 use same model as the others"),
+                                          # superseding the 2026-09-07 bf16-on-omlx entry AND the
+                                          # whole argument that used to sit here.
+                                          # WHY THAT ARGUMENT NO LONGER HOLDS, rather than a quiet
+                                          # deletion: it turned on "the fleet's base_url IS the
+                                          # tunnel" — the endpoint key named at the top of this file.
+                                          # The tunnel is inference.agileguy.ca, and on 2026-09-16
+                                          # it answered HTTP 502 — Cloudflare's own error page, not
+                                          # a model response — so §5.9's mandatory native-tool-call
+                                          # probe could not settle and `up` REFUSED tick-1 outright,
+                                          # cloning nothing and launching no supervisor. A premise
+                                          # that has stopped being true takes its conclusion with it.
+                                          # gabe is the same weights on the operator's own GX10 over
+                                          # the LAN: `hosted: false`, no third party, and already the
+                                          # model every observer seat and the triage collator run.
+                                          # tick-1 is the ONLY `ticketing` worker, so this role-level
+                                          # change reaches exactly one seat — checked in the workers
+                                          # block rather than assumed.
     thinking: medium
     toolchain: base                       # curl and ca-certificates are already in it
     tools: [read, write, bash, grep, find, ls, submit_report]
@@ -1185,9 +1190,17 @@ workers:
   # Different palettes so the two attended panes are tellable apart at a
   # glance (src/config/themes.ts). Pi ships only dark/light, and light paints
   # light-mode ink onto a dark terminal — it sets no page background.
-  # obs-1 ON omlx bf16, 2026-09-13 by operator. A per-seat override: the observer
-  # role (and so obs-2) stays on gabe.
-  - {id: obs-1,  role: observer-k8s, model: omlx/gemma-4-26b-a4b-it-bf16, pane_mode: tui, theme: catppuccin-mocha}
+  # obs-1 BACK ON THE ROLE'S MODEL, 2026-09-16 by operator instruction ("make obs1
+  # and tick-1 use same model as the others"). The 2026-09-13 per-seat override onto
+  # omlx bf16 is DELETED rather than repointed: inference.agileguy.ca answered HTTP
+  # 502 to §5.9's mandatory native-tool-call probe, so `up` refused the seat having
+  # cloned nothing and launched no supervisor. That override was also the only thing
+  # separating obs-1 from obs-2 and the three triage k8s seats, which never left gabe.
+  # Absence of a `model:` key here is the mechanism: obs-1 inherits observer-k8s's
+  # gabe/gemma-4-26b-a4b-it, so there is no second spelling of the model to drift.
+  # pane_mode and theme STAY — the comment above records why those belong on the
+  # WORKER (tui on the role would put every observer on tui and allocate no epoch).
+  - {id: obs-1,  role: observer-k8s, pane_mode: tui, theme: catppuccin-mocha}
   - {id: obs-2,  role: observer-k8s}
   # One seat, in no console (SRD-OBSERVER-ROLES §5.5, Q10).
   - {id: obs-d1, role: observer-docker}
